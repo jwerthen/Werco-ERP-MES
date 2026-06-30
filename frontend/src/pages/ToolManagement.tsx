@@ -19,6 +19,7 @@ import {
   DataTableColumn,
   MobileDataCard,
   Button,
+  FormField,
 } from '../components/ui';
 
 interface Tool {
@@ -466,56 +467,65 @@ export default function ToolManagement() {
             </div>
             <div className="p-4 space-y-3">
               <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-1">Tool Number *</label>
-                  <input type="text" value={createForm.tool_number} onChange={e => setCreateForm(f => ({ ...f, tool_number: e.target.value }))}
-                    className="w-full px-3 py-2 border rounded-lg" />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-1">Name *</label>
-                  <input type="text" value={createForm.name} onChange={e => setCreateForm(f => ({ ...f, name: e.target.value }))}
-                    className="w-full px-3 py-2 border rounded-lg" />
-                </div>
+                <FormField label="Tool Number" required labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                  {(field) => (
+                    <input {...field} type="text" value={createForm.tool_number} onChange={e => setCreateForm(f => ({ ...f, tool_number: e.target.value }))}
+                      className="w-full px-3 py-2 border rounded-lg" />
+                  )}
+                </FormField>
+                <FormField label="Name" required labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                  {(field) => (
+                    <input {...field} type="text" value={createForm.name} onChange={e => setCreateForm(f => ({ ...f, name: e.target.value }))}
+                      className="w-full px-3 py-2 border rounded-lg" />
+                  )}
+                </FormField>
               </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Type</label>
-                <select value={createForm.tool_type} onChange={e => setCreateForm(f => ({ ...f, tool_type: e.target.value }))} className="w-full px-3 py-2 border rounded-lg">
-                  <option value="cutting_tool">Cutting Tool</option>
-                  <option value="fixture">Fixture</option>
-                  <option value="jig">Jig</option>
-                  <option value="gauge">Gauge</option>
-                  <option value="die">Die</option>
-                  <option value="mold">Mold</option>
-                  <option value="other">Other</option>
-                </select>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Description</label>
-                <textarea value={createForm.description} onChange={e => setCreateForm(f => ({ ...f, description: e.target.value }))} rows={2} className="w-full px-3 py-2 border rounded-lg" />
-              </div>
+              <FormField label="Type" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                {(field) => (
+                  <select {...field} value={createForm.tool_type} onChange={e => setCreateForm(f => ({ ...f, tool_type: e.target.value }))} className="w-full px-3 py-2 border rounded-lg">
+                    <option value="cutting_tool">Cutting Tool</option>
+                    <option value="fixture">Fixture</option>
+                    <option value="jig">Jig</option>
+                    <option value="gauge">Gauge</option>
+                    <option value="die">Die</option>
+                    <option value="mold">Mold</option>
+                    <option value="other">Other</option>
+                  </select>
+                )}
+              </FormField>
+              <FormField label="Description" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                {(field) => (
+                  <textarea {...field} value={createForm.description} onChange={e => setCreateForm(f => ({ ...f, description: e.target.value }))} rows={2} className="w-full px-3 py-2 border rounded-lg" />
+                )}
+              </FormField>
               <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-1">Location</label>
-                  <input type="text" value={createForm.location} onChange={e => setCreateForm(f => ({ ...f, location: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-1">Manufacturer</label>
-                  <input type="text" value={createForm.manufacturer} onChange={e => setCreateForm(f => ({ ...f, manufacturer: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
-                </div>
+                <FormField label="Location" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                  {(field) => (
+                    <input {...field} type="text" value={createForm.location} onChange={e => setCreateForm(f => ({ ...f, location: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
+                  )}
+                </FormField>
+                <FormField label="Manufacturer" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                  {(field) => (
+                    <input {...field} type="text" value={createForm.manufacturer} onChange={e => setCreateForm(f => ({ ...f, manufacturer: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
+                  )}
+                </FormField>
               </div>
               <div className="grid grid-cols-3 gap-3">
-                <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-1">Purchase Cost</label>
-                  <input type="number" value={createForm.purchase_cost} onChange={e => setCreateForm(f => ({ ...f, purchase_cost: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-1">Max Uses</label>
-                  <input type="number" value={createForm.max_uses} onChange={e => setCreateForm(f => ({ ...f, max_uses: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-1">Max Life (hrs)</label>
-                  <input type="number" value={createForm.max_life_hours} onChange={e => setCreateForm(f => ({ ...f, max_life_hours: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
-                </div>
+                <FormField label="Purchase Cost" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                  {(field) => (
+                    <input {...field} type="number" value={createForm.purchase_cost} onChange={e => setCreateForm(f => ({ ...f, purchase_cost: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
+                  )}
+                </FormField>
+                <FormField label="Max Uses" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                  {(field) => (
+                    <input {...field} type="number" value={createForm.max_uses} onChange={e => setCreateForm(f => ({ ...f, max_uses: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
+                  )}
+                </FormField>
+                <FormField label="Max Life (hrs)" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                  {(field) => (
+                    <input {...field} type="number" value={createForm.max_life_hours} onChange={e => setCreateForm(f => ({ ...f, max_life_hours: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
+                  )}
+                </FormField>
               </div>
             </div>
             <div className="flex justify-end gap-2 p-4 border-t">
@@ -539,18 +549,21 @@ export default function ToolManagement() {
               <button onClick={() => setShowCheckoutModal(false)} aria-label="Close"><XMarkIcon className="w-5 h-5" aria-hidden="true" /></button>
             </div>
             <div className="p-4 space-y-3">
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Checked Out To *</label>
-                <input type="text" value={checkoutForm.checked_out_to} onChange={e => setCheckoutForm(f => ({ ...f, checked_out_to: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" placeholder="Operator name or ID" />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Work Order ID</label>
-                <input type="number" value={checkoutForm.work_order_id} onChange={e => setCheckoutForm(f => ({ ...f, work_order_id: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Notes</label>
-                <textarea value={checkoutForm.notes} onChange={e => setCheckoutForm(f => ({ ...f, notes: e.target.value }))} rows={2} className="w-full px-3 py-2 border rounded-lg" />
-              </div>
+              <FormField label="Checked Out To" required labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                {(field) => (
+                  <input {...field} type="text" value={checkoutForm.checked_out_to} onChange={e => setCheckoutForm(f => ({ ...f, checked_out_to: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" placeholder="Operator name or ID" />
+                )}
+              </FormField>
+              <FormField label="Work Order ID" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                {(field) => (
+                  <input {...field} type="number" value={checkoutForm.work_order_id} onChange={e => setCheckoutForm(f => ({ ...f, work_order_id: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
+                )}
+              </FormField>
+              <FormField label="Notes" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                {(field) => (
+                  <textarea {...field} value={checkoutForm.notes} onChange={e => setCheckoutForm(f => ({ ...f, notes: e.target.value }))} rows={2} className="w-full px-3 py-2 border rounded-lg" />
+                )}
+              </FormField>
             </div>
             <div className="flex justify-end gap-2 p-4 border-t">
               <Button variant="secondary" onClick={() => setShowCheckoutModal(false)}>Cancel</Button>
@@ -575,23 +588,26 @@ export default function ToolManagement() {
               <button onClick={() => setShowCheckinModal(false)} aria-label="Close"><XMarkIcon className="w-5 h-5" aria-hidden="true" /></button>
             </div>
             <div className="p-4 space-y-3">
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Condition</label>
-                <select value={checkinForm.condition} onChange={e => setCheckinForm(f => ({ ...f, condition: e.target.value }))} className="w-full px-3 py-2 border rounded-lg">
-                  <option value="good">Good</option>
-                  <option value="worn">Worn</option>
-                  <option value="damaged">Damaged</option>
-                  <option value="needs_repair">Needs Repair</option>
-                </select>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Uses This Session</label>
-                <input type="number" value={checkinForm.uses_this_session} onChange={e => setCheckinForm(f => ({ ...f, uses_this_session: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Notes</label>
-                <textarea value={checkinForm.notes} onChange={e => setCheckinForm(f => ({ ...f, notes: e.target.value }))} rows={2} className="w-full px-3 py-2 border rounded-lg" />
-              </div>
+              <FormField label="Condition" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                {(field) => (
+                  <select {...field} value={checkinForm.condition} onChange={e => setCheckinForm(f => ({ ...f, condition: e.target.value }))} className="w-full px-3 py-2 border rounded-lg">
+                    <option value="good">Good</option>
+                    <option value="worn">Worn</option>
+                    <option value="damaged">Damaged</option>
+                    <option value="needs_repair">Needs Repair</option>
+                  </select>
+                )}
+              </FormField>
+              <FormField label="Uses This Session" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                {(field) => (
+                  <input {...field} type="number" value={checkinForm.uses_this_session} onChange={e => setCheckinForm(f => ({ ...f, uses_this_session: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
+                )}
+              </FormField>
+              <FormField label="Notes" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                {(field) => (
+                  <textarea {...field} value={checkinForm.notes} onChange={e => setCheckinForm(f => ({ ...f, notes: e.target.value }))} rows={2} className="w-full px-3 py-2 border rounded-lg" />
+                )}
+              </FormField>
             </div>
             <div className="flex justify-end gap-2 p-4 border-t">
               <Button variant="secondary" onClick={() => setShowCheckinModal(false)}>Cancel</Button>

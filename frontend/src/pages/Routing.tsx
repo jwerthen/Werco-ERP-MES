@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState, useRef } from 'react';
 import api from '../services/api';
 import { Modal } from '../components/ui/Modal';
 import { EmptyState, ErrorState, useToast } from '../components/ui';
+import { FormField } from '../components/ui/FormField';
 import { RoutingImportWizard } from '../components/routing/RoutingImportWizard';
 import { useAuth } from '../context/AuthContext';
 import { hasPermission } from '../utils/permissions';
@@ -912,9 +913,10 @@ export default function RoutingPage() {
             <h3 className="text-lg font-semibold mb-4">Create New Routing</h3>
             <form onSubmit={handleCreateRouting} className="space-y-4">
               <div>
-                <label className="label">Part</label>
+                <label htmlFor="routing-part-search" className="label">Part</label>
                 <div className="relative">
                   <input
+                    id="routing-part-search"
                     type="text"
                     value={routingPartSearch}
                     onChange={(e) => {
@@ -982,25 +984,29 @@ export default function RoutingPage() {
                   Type to search. Select a result to continue.
                 </div>
               </div>
-              <div>
-                <label className="label">Revision</label>
-                <input
-                  type="text"
-                  value={newRouting.revision}
-                  onChange={(e) => setNewRouting({ ...newRouting, revision: e.target.value })}
-                  className="input"
-                  required
-                />
-              </div>
-              <div>
-                <label className="label">Description</label>
-                <textarea
-                  value={newRouting.description}
-                  onChange={(e) => setNewRouting({ ...newRouting, description: e.target.value })}
-                  className="input"
-                  rows={2}
-                />
-              </div>
+              <FormField label="Revision" required>
+                {(field) => (
+                  <input
+                    {...field}
+                    type="text"
+                    value={newRouting.revision}
+                    onChange={(e) => setNewRouting({ ...newRouting, revision: e.target.value })}
+                    className="input"
+                    required
+                  />
+                )}
+              </FormField>
+              <FormField label="Description">
+                {(field) => (
+                  <textarea
+                    {...field}
+                    value={newRouting.description}
+                    onChange={(e) => setNewRouting({ ...newRouting, description: e.target.value })}
+                    className="input"
+                    rows={2}
+                  />
+                )}
+              </FormField>
               <div className="flex justify-end gap-3">
                 <button
                   type="button"
@@ -1042,9 +1048,10 @@ export default function RoutingPage() {
 
                 {/* Part selector */}
                 <div>
-                  <label className="label">Part</label>
+                  <label htmlFor="generate-part-search" className="label">Part</label>
                   <div className="relative">
                     <input
+                      id="generate-part-search"
                       type="text"
                       value={generatePartSearch}
                       onChange={(e) => {
@@ -1085,7 +1092,7 @@ export default function RoutingPage() {
 
                 {/* File upload */}
                 <div>
-                  <label className="label">Drawing File</label>
+                  <label htmlFor="generate-drawing-file" className="label">Drawing File</label>
                   <div
                     role="button"
                     tabIndex={0}
@@ -1100,6 +1107,7 @@ export default function RoutingPage() {
                     }}
                   >
                     <input
+                      id="generate-drawing-file"
                       ref={fileInputRef}
                       type="file"
                       accept=".pdf,.dxf,.step,.stp"
@@ -1315,24 +1323,28 @@ export default function RoutingPage() {
                               <td className="px-3 pb-3"></td>
                               <td className="px-3 pb-3" colSpan={6}>
                                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-                                  <div>
-                                    <label className="label text-xs">Description</label>
-                                    <textarea
-                                      value={op.description || ''}
-                                      onChange={(e) => updateEditedOp(idx, 'description', e.target.value)}
-                                      className="input py-2 text-sm w-full"
-                                      rows={2}
-                                    />
-                                  </div>
-                                  <div>
-                                    <label className="label text-xs">Work Instructions</label>
-                                    <textarea
-                                      value={op.work_instructions || ''}
-                                      onChange={(e) => updateEditedOp(idx, 'work_instructions', e.target.value)}
-                                      className="input py-2 text-sm w-full"
-                                      rows={2}
-                                    />
-                                  </div>
+                                  <FormField label="Description" labelClassName="text-xs">
+                                    {(field) => (
+                                      <textarea
+                                        {...field}
+                                        value={op.description || ''}
+                                        onChange={(e) => updateEditedOp(idx, 'description', e.target.value)}
+                                        className="input py-2 text-sm w-full"
+                                        rows={2}
+                                      />
+                                    )}
+                                  </FormField>
+                                  <FormField label="Work Instructions" labelClassName="text-xs">
+                                    {(field) => (
+                                      <textarea
+                                        {...field}
+                                        value={op.work_instructions || ''}
+                                        onChange={(e) => updateEditedOp(idx, 'work_instructions', e.target.value)}
+                                        className="input py-2 text-sm w-full"
+                                        rows={2}
+                                      />
+                                    )}
+                                  </FormField>
                                 </div>
                                 <div className="mt-2 flex flex-wrap gap-4 text-xs text-slate-300">
                                   <label className="inline-flex items-center gap-2">
@@ -1452,61 +1464,70 @@ export default function RoutingPage() {
               {!isReleasedEdit && (
                 <>
                   <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="label">Sequence #</label>
+                    <FormField label="Sequence #" required>
+                      {(field) => (
+                        <input
+                          {...field}
+                          type="number"
+                          value={newOperation.sequence}
+                          onChange={(e) => setNewOperation({ ...newOperation, sequence: parseInt(e.target.value) })}
+                          className="input"
+                          step={10}
+                          required
+                        />
+                      )}
+                    </FormField>
+                    <FormField label="Work Center" required>
+                      {(field) => (
+                        <select
+                          {...field}
+                          value={newOperation.work_center_id}
+                          onChange={(e) => setNewOperation({ ...newOperation, work_center_id: parseInt(e.target.value) })}
+                          className="input"
+                          required
+                        >
+                          <option value={0}>Select...</option>
+                          {workCenters.map(wc => (
+                            <option key={wc.id} value={wc.id}>
+                              {wc.code} - {wc.name}
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                    </FormField>
+                  </div>
+                  <FormField label="Operation Name" required>
+                    {(field) => (
                       <input
-                        type="number"
-                        value={newOperation.sequence}
-                        onChange={(e) => setNewOperation({ ...newOperation, sequence: parseInt(e.target.value) })}
+                        {...field}
+                        type="text"
+                        value={newOperation.name}
+                        onChange={(e) => setNewOperation({ ...newOperation, name: e.target.value })}
                         className="input"
-                        step={10}
+                        placeholder="e.g., Cut to size, Weld assembly, Paint"
                         required
                       />
-                    </div>
-                    <div>
-                      <label className="label">Work Center</label>
-                      <select
-                        value={newOperation.work_center_id}
-                        onChange={(e) => setNewOperation({ ...newOperation, work_center_id: parseInt(e.target.value) })}
+                    )}
+                  </FormField>
+                  <FormField label="Description">
+                    {(field) => (
+                      <textarea
+                        {...field}
+                        value={newOperation.description}
+                        onChange={(e) => setNewOperation({ ...newOperation, description: e.target.value })}
                         className="input"
-                        required
-                      >
-                        <option value={0}>Select...</option>
-                        {workCenters.map(wc => (
-                          <option key={wc.id} value={wc.id}>
-                            {wc.code} - {wc.name}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-                  <div>
-                    <label className="label">Operation Name</label>
-                    <input
-                      type="text"
-                      value={newOperation.name}
-                      onChange={(e) => setNewOperation({ ...newOperation, name: e.target.value })}
-                      className="input"
-                      placeholder="e.g., Cut to size, Weld assembly, Paint"
-                      required
-                    />
-                  </div>
-                  <div>
-                    <label className="label">Description</label>
-                    <textarea
-                      value={newOperation.description}
-                      onChange={(e) => setNewOperation({ ...newOperation, description: e.target.value })}
-                      className="input"
-                      rows={2}
-                    />
-                  </div>
+                        rows={2}
+                      />
+                    )}
+                  </FormField>
                 </>
               )}
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="label">Setup Time</label>
+                  <label htmlFor="operation-setup-time" className="label">Setup Time</label>
                   <div className="flex gap-2">
                     <input
+                      id="operation-setup-time"
                       type="number"
                       value={timeUnits.setup === 'min' ? Math.round(newOperation.setup_hours * 60 * 100) / 100 : newOperation.setup_hours}
                       onChange={(e) => {
@@ -1528,9 +1549,10 @@ export default function RoutingPage() {
                   </div>
                 </div>
                 <div>
-                  <label className="label">Run Time/Unit</label>
+                  <label htmlFor="operation-run-time" className="label">Run Time/Unit</label>
                   <div className="flex gap-2">
                     <input
+                      id="operation-run-time"
                       type="number"
                       value={timeUnits.run === 'min' ? Math.round(newOperation.run_hours_per_unit * 60 * 100) / 100 : newOperation.run_hours_per_unit}
                       onChange={(e) => {
@@ -1554,9 +1576,10 @@ export default function RoutingPage() {
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="label">Move Time</label>
+                  <label htmlFor="operation-move-time" className="label">Move Time</label>
                   <div className="flex gap-2">
                     <input
+                      id="operation-move-time"
                       type="number"
                       value={timeUnits.move === 'min' ? Math.round(newOperation.move_hours * 60 * 100) / 100 : newOperation.move_hours}
                       onChange={(e) => {
@@ -1578,9 +1601,10 @@ export default function RoutingPage() {
                   </div>
                 </div>
                 <div>
-                  <label className="label">Queue Time</label>
+                  <label htmlFor="operation-queue-time" className="label">Queue Time</label>
                   <div className="flex gap-2">
                     <input
+                      id="operation-queue-time"
                       type="number"
                       value={timeUnits.queue === 'min' ? Math.round(newOperation.queue_hours * 60 * 100) / 100 : newOperation.queue_hours}
                       onChange={(e) => {
@@ -1605,9 +1629,10 @@ export default function RoutingPage() {
               {/* Machine cycle fields — time standards, editable on released routings too. */}
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="label">Cycle Time</label>
+                  <label htmlFor="operation-cycle-time" className="label">Cycle Time</label>
                   <div className="flex gap-2">
                     <input
+                      id="operation-cycle-time"
                       type="number"
                       value={newOperation.cycle_time_seconds}
                       onChange={(e) =>
@@ -1622,19 +1647,21 @@ export default function RoutingPage() {
                     </span>
                   </div>
                 </div>
-                <div>
-                  <label className="label">Pieces / Cycle</label>
-                  <input
-                    type="number"
-                    value={newOperation.pieces_per_cycle}
-                    onChange={(e) =>
-                      setNewOperation({ ...newOperation, pieces_per_cycle: parseInt(e.target.value) || 1 })
-                    }
-                    className="input"
-                    step={1}
-                    min={1}
-                  />
-                </div>
+                <FormField label="Pieces / Cycle">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="number"
+                      value={newOperation.pieces_per_cycle}
+                      onChange={(e) =>
+                        setNewOperation({ ...newOperation, pieces_per_cycle: parseInt(e.target.value) || 1 })
+                      }
+                      className="input"
+                      step={1}
+                      min={1}
+                    />
+                  )}
+                </FormField>
               </div>
               {!isReleasedEdit && (
                 <div className="flex gap-6">

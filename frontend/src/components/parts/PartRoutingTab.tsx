@@ -8,6 +8,7 @@ import { useToast } from '../ui/Toast';
 import { StatusBadge } from '../ui/StatusBadge';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { Modal } from '../ui/Modal';
+import { FormField } from '../ui/FormField';
 import {
   PlusIcon,
   PencilIcon,
@@ -335,54 +336,62 @@ export function PartRoutingTab({ part, routing, onRoutingChanged }: Props) {
             </h3>
             <form onSubmit={handleSubmitOp} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Sequence #</label>
+                <FormField label="Sequence #" required>
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="number"
+                      value={opForm.sequence}
+                      onChange={e => setOpForm(p => ({ ...p, sequence: parseInt(e.target.value) || 0 }))}
+                      className="input"
+                      step={10}
+                      required
+                    />
+                  )}
+                </FormField>
+                <FormField label="Work Center" required>
+                  {(field) => (
+                    <select
+                      {...field}
+                      value={opForm.work_center_id}
+                      onChange={e => setOpForm(p => ({ ...p, work_center_id: parseInt(e.target.value) }))}
+                      className="input"
+                      required
+                    >
+                      <option value={0}>Select...</option>
+                      {workCenters.map(wc => (
+                        <option key={wc.id} value={wc.id}>{wc.code} - {wc.name}</option>
+                      ))}
+                    </select>
+                  )}
+                </FormField>
+              </div>
+
+              <FormField label="Operation Name" required>
+                {(field) => (
                   <input
-                    type="number"
-                    value={opForm.sequence}
-                    onChange={e => setOpForm(p => ({ ...p, sequence: parseInt(e.target.value) || 0 }))}
+                    {...field}
+                    type="text"
+                    value={opForm.name}
+                    onChange={e => setOpForm(p => ({ ...p, name: e.target.value }))}
                     className="input"
-                    step={10}
+                    placeholder="e.g., Cut to size, Weld assembly, Paint"
                     required
                   />
-                </div>
-                <div>
-                  <label className="label">Work Center</label>
-                  <select
-                    value={opForm.work_center_id}
-                    onChange={e => setOpForm(p => ({ ...p, work_center_id: parseInt(e.target.value) }))}
+                )}
+              </FormField>
+
+              <FormField label="Description">
+                {(field) => (
+                  <textarea
+                    {...field}
+                    value={opForm.description}
+                    onChange={e => setOpForm(p => ({ ...p, description: e.target.value }))}
                     className="input"
-                    required
-                  >
-                    <option value={0}>Select...</option>
-                    {workCenters.map(wc => (
-                      <option key={wc.id} value={wc.id}>{wc.code} - {wc.name}</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div>
-                <label className="label">Operation Name</label>
-                <input
-                  type="text"
-                  value={opForm.name}
-                  onChange={e => setOpForm(p => ({ ...p, name: e.target.value }))}
-                  className="input"
-                  placeholder="e.g., Cut to size, Weld assembly, Paint"
-                  required
-                />
-              </div>
-
-              <div>
-                <label className="label">Description</label>
-                <textarea
-                  value={opForm.description}
-                  onChange={e => setOpForm(p => ({ ...p, description: e.target.value }))}
-                  className="input"
-                  rows={2}
-                />
-              </div>
+                    rows={2}
+                  />
+                )}
+              </FormField>
 
               {/* Time Fields */}
               <div className="grid grid-cols-2 gap-4">

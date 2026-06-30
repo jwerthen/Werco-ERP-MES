@@ -41,10 +41,13 @@ module.exports = [
 
       // Known pre-existing debt — OFF until burned down (can't be `warn`:
       // CI's --max-warnings=0 would treat warnings as failures).
-      // ~480 sites; close via FormField/htmlFor label association.
-      "jsx-a11y/label-has-associated-control": "off",
       // ~630 sites; icon-only controls needing an accessible name.
       "jsx-a11y/control-has-associated-label": "off",
+
+      // Form <label>s associated with their control — burned down to zero; now
+      // ENFORCED. Use the <FormField> primitive (label↔control id wiring) for
+      // create/edit form fields, or htmlFor+id for inline/filter controls.
+      "jsx-a11y/label-has-associated-control": "error",
 
       // Clickable non-interactive elements needing keyboard handlers —
       // burned down to zero; now ENFORCED (clickable <div>/<span>/<li> must be a

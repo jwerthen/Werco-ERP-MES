@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import api from '../services/api';
 import { Modal } from '../components/ui/Modal';
+import { FormField } from '../components/ui/FormField';
 import { EmptyState, ErrorState, useToast } from '../components/ui';
 import {
   PlusIcon,
@@ -341,127 +342,147 @@ export default function CustomFieldsPage() {
 
               <form onSubmit={handleSubmit} className="space-y-4">
                 <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="label">Field Key (unique identifier)</label>
-                    <input
-                      type="text"
-                      value={formData.field_key}
-                      onChange={(e) => setFormData({ ...formData, field_key: e.target.value.toLowerCase().replace(/\s+/g, '_') })}
-                      className="input"
-                      placeholder="customer_po_number"
-                      required
-                      disabled={!!editingField}
-                    />
-                  </div>
-                  <div>
-                    <label className="label">Display Name</label>
-                    <input
-                      type="text"
-                      value={formData.display_name}
-                      onChange={(e) => setFormData({ ...formData, display_name: e.target.value })}
-                      className="input"
-                      placeholder="Customer PO Number"
-                      required
-                    />
-                  </div>
+                  <FormField label="Field Key (unique identifier)" required>
+                    {(field) => (
+                      <input
+                        {...field}
+                        type="text"
+                        value={formData.field_key}
+                        onChange={(e) => setFormData({ ...formData, field_key: e.target.value.toLowerCase().replace(/\s+/g, '_') })}
+                        className="input"
+                        placeholder="customer_po_number"
+                        required
+                        disabled={!!editingField}
+                      />
+                    )}
+                  </FormField>
+                  <FormField label="Display Name" required>
+                    {(field) => (
+                      <input
+                        {...field}
+                        type="text"
+                        value={formData.display_name}
+                        onChange={(e) => setFormData({ ...formData, display_name: e.target.value })}
+                        className="input"
+                        placeholder="Customer PO Number"
+                        required
+                      />
+                    )}
+                  </FormField>
                 </div>
 
-                <div>
-                  <label className="label">Description</label>
-                  <input
-                    type="text"
-                    value={formData.description}
-                    onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-                    className="input"
-                    placeholder="Optional description"
-                  />
-                </div>
+                <FormField label="Description">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={formData.description}
+                      onChange={(e) => setFormData({ ...formData, description: e.target.value })}
+                      className="input"
+                      placeholder="Optional description"
+                    />
+                  )}
+                </FormField>
 
                 <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="label">Entity Type</label>
-                    <select
-                      value={formData.entity_type}
-                      onChange={(e) => setFormData({ ...formData, entity_type: e.target.value as EntityType })}
-                      className="input"
-                      disabled={!!editingField}
-                    >
-                      {entityTypes.map((et) => (
-                        <option key={et.value} value={et.value}>{et.label}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="label">Field Type</label>
-                    <select
-                      value={formData.field_type}
-                      onChange={(e) => setFormData({ ...formData, field_type: e.target.value as FieldType })}
-                      className="input"
-                    >
-                      {fieldTypes.map((ft) => (
-                        <option key={ft.value} value={ft.value}>{ft.label}</option>
-                      ))}
-                    </select>
-                  </div>
+                  <FormField label="Entity Type">
+                    {(field) => (
+                      <select
+                        {...field}
+                        value={formData.entity_type}
+                        onChange={(e) => setFormData({ ...formData, entity_type: e.target.value as EntityType })}
+                        className="input"
+                        disabled={!!editingField}
+                      >
+                        {entityTypes.map((et) => (
+                          <option key={et.value} value={et.value}>{et.label}</option>
+                        ))}
+                      </select>
+                    )}
+                  </FormField>
+                  <FormField label="Field Type">
+                    {(field) => (
+                      <select
+                        {...field}
+                        value={formData.field_type}
+                        onChange={(e) => setFormData({ ...formData, field_type: e.target.value as FieldType })}
+                        className="input"
+                      >
+                        {fieldTypes.map((ft) => (
+                          <option key={ft.value} value={ft.value}>{ft.label}</option>
+                        ))}
+                      </select>
+                    )}
+                  </FormField>
                 </div>
 
                 {(formData.field_type === 'select' || formData.field_type === 'multiselect') && (
-                  <div>
-                    <label className="label">Options (one per line)</label>
-                    <textarea
-                      value={formData.options}
-                      onChange={(e) => setFormData({ ...formData, options: e.target.value })}
-                      className="input"
-                      rows={4}
-                      placeholder="Option 1&#10;Option 2&#10;Option 3"
-                    />
-                  </div>
+                  <FormField label="Options (one per line)">
+                    {(field) => (
+                      <textarea
+                        {...field}
+                        value={formData.options}
+                        onChange={(e) => setFormData({ ...formData, options: e.target.value })}
+                        className="input"
+                        rows={4}
+                        placeholder="Option 1&#10;Option 2&#10;Option 3"
+                      />
+                    )}
+                  </FormField>
                 )}
 
                 <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="label">Placeholder</label>
-                    <input
-                      type="text"
-                      value={formData.placeholder}
-                      onChange={(e) => setFormData({ ...formData, placeholder: e.target.value })}
-                      className="input"
-                      placeholder="Enter value..."
-                    />
-                  </div>
-                  <div>
-                    <label className="label">Field Group</label>
-                    <input
-                      type="text"
-                      value={formData.field_group}
-                      onChange={(e) => setFormData({ ...formData, field_group: e.target.value })}
-                      className="input"
-                      placeholder="General"
-                    />
-                  </div>
+                  <FormField label="Placeholder">
+                    {(field) => (
+                      <input
+                        {...field}
+                        type="text"
+                        value={formData.placeholder}
+                        onChange={(e) => setFormData({ ...formData, placeholder: e.target.value })}
+                        className="input"
+                        placeholder="Enter value..."
+                      />
+                    )}
+                  </FormField>
+                  <FormField label="Field Group">
+                    {(field) => (
+                      <input
+                        {...field}
+                        type="text"
+                        value={formData.field_group}
+                        onChange={(e) => setFormData({ ...formData, field_group: e.target.value })}
+                        className="input"
+                        placeholder="General"
+                      />
+                    )}
+                  </FormField>
                 </div>
 
-                <div>
-                  <label className="label">Help Text</label>
-                  <input
-                    type="text"
-                    value={formData.help_text}
-                    onChange={(e) => setFormData({ ...formData, help_text: e.target.value })}
-                    className="input"
-                    placeholder="Additional instructions for users"
-                  />
-                </div>
+                <FormField label="Help Text">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={formData.help_text}
+                      onChange={(e) => setFormData({ ...formData, help_text: e.target.value })}
+                      className="input"
+                      placeholder="Additional instructions for users"
+                    />
+                  )}
+                </FormField>
 
                 <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="label">Sort Order</label>
-                    <input
-                      type="number"
-                      value={formData.sort_order}
-                      onChange={(e) => setFormData({ ...formData, sort_order: parseInt(e.target.value) })}
-                      className="input"
-                    />
-                  </div>
+                  <FormField label="Sort Order">
+                    {(field) => (
+                      <input
+                        {...field}
+                        type="number"
+                        value={formData.sort_order}
+                        onChange={(e) => setFormData({ ...formData, sort_order: parseInt(e.target.value) })}
+                        className="input"
+                      />
+                    )}
+                  </FormField>
                 </div>
 
                 <div className="flex flex-wrap gap-6">

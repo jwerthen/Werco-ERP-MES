@@ -17,6 +17,7 @@ import {
   DataTable,
   DataTableColumn,
   MobileDataCard,
+  FormField,
 } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
@@ -733,42 +734,48 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
               <button onClick={() => setShowReceiveModal(false)} aria-label="Close"><XMarkIcon className="h-6 w-6" aria-hidden="true" /></button>
             </div>
             <form onSubmit={handleReceive} className="space-y-4">
-              <div>
-                <label className="label">Part</label>
-                <select value={receiveForm.part_id} onChange={(e) => setReceiveForm({...receiveForm, part_id: parseInt(e.target.value)})} className="input" required>
-                  <option value={0}>Select part...</option>
-                  {filteredPartsForReceive.map(p => (
-                    <option key={p.id} value={p.id}>{p.part_number} - {p.name}</option>
-                  ))}
-                </select>
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Quantity</label>
-                  <input type="number" value={receiveForm.quantity} onChange={(e) => setReceiveForm({...receiveForm, quantity: parseFloat(e.target.value)})} className="input" min={0.01} step={0.01} required />
-                </div>
-                <div>
-                  <label className="label">Location</label>
-                  <select value={receiveForm.location_code} onChange={(e) => setReceiveForm({...receiveForm, location_code: e.target.value})} className="input" required>
-                    <option value="">Select location...</option>
-                    {locations.map(l => <option key={l.id} value={l.code}>{l.code} - {l.name || l.warehouse}</option>)}
+              <FormField label="Part">
+                {(field) => (
+                  <select {...field} value={receiveForm.part_id} onChange={(e) => setReceiveForm({...receiveForm, part_id: parseInt(e.target.value)})} className="input" required>
+                    <option value={0}>Select part...</option>
+                    {filteredPartsForReceive.map(p => (
+                      <option key={p.id} value={p.id}>{p.part_number} - {p.name}</option>
+                    ))}
                   </select>
-                </div>
+                )}
+              </FormField>
+              <div className="grid grid-cols-2 gap-4">
+                <FormField label="Quantity">
+                  {(field) => (
+                    <input {...field} type="number" value={receiveForm.quantity} onChange={(e) => setReceiveForm({...receiveForm, quantity: parseFloat(e.target.value)})} className="input" min={0.01} step={0.01} required />
+                  )}
+                </FormField>
+                <FormField label="Location">
+                  {(field) => (
+                    <select {...field} value={receiveForm.location_code} onChange={(e) => setReceiveForm({...receiveForm, location_code: e.target.value})} className="input" required>
+                      <option value="">Select location...</option>
+                      {locations.map(l => <option key={l.id} value={l.code}>{l.code} - {l.name || l.warehouse}</option>)}
+                    </select>
+                  )}
+                </FormField>
               </div>
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Lot Number</label>
-                  <input type="text" value={receiveForm.lot_number} onChange={(e) => setReceiveForm({...receiveForm, lot_number: e.target.value})} className="input" />
-                </div>
-                <div>
-                  <label className="label">PO Number</label>
-                  <input type="text" value={receiveForm.po_number} onChange={(e) => setReceiveForm({...receiveForm, po_number: e.target.value})} className="input" />
-                </div>
+                <FormField label="Lot Number">
+                  {(field) => (
+                    <input {...field} type="text" value={receiveForm.lot_number} onChange={(e) => setReceiveForm({...receiveForm, lot_number: e.target.value})} className="input" />
+                  )}
+                </FormField>
+                <FormField label="PO Number">
+                  {(field) => (
+                    <input {...field} type="text" value={receiveForm.po_number} onChange={(e) => setReceiveForm({...receiveForm, po_number: e.target.value})} className="input" />
+                  )}
+                </FormField>
               </div>
-              <div>
-                <label className="label">Unit Cost</label>
-                <input type="number" value={receiveForm.unit_cost} onChange={(e) => setReceiveForm({...receiveForm, unit_cost: parseFloat(e.target.value)})} className="input" min={0} step={0.01} />
-              </div>
+              <FormField label="Unit Cost">
+                {(field) => (
+                  <input {...field} type="number" value={receiveForm.unit_cost} onChange={(e) => setReceiveForm({...receiveForm, unit_cost: parseFloat(e.target.value)})} className="input" min={0} step={0.01} />
+                )}
+              </FormField>
               <div className="flex justify-end gap-3">
                 <button type="button" onClick={() => setShowReceiveModal(false)} className="btn-secondary">Cancel</button>
                 <button type="submit" className="btn-primary">Receive</button>
@@ -795,21 +802,24 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
               <div className="text-sm text-slate-400">Available: {selectedItem.quantity_available}</div>
             </div>
             <form onSubmit={handleTransfer} className="space-y-4">
-              <div>
-                <label className="label">Quantity to Transfer</label>
-                <input type="number" value={transferForm.quantity} onChange={(e) => setTransferForm({...transferForm, quantity: parseFloat(e.target.value)})} className="input" min={0.01} max={selectedItem.quantity_available} step={0.01} required />
-              </div>
-              <div>
-                <label className="label">To Location</label>
-                <select value={transferForm.to_location_code} onChange={(e) => setTransferForm({...transferForm, to_location_code: e.target.value})} className="input" required>
-                  <option value="">Select destination...</option>
-                  {locations.filter(l => l.code !== selectedItem.location).map(l => <option key={l.id} value={l.code}>{l.code}</option>)}
-                </select>
-              </div>
-              <div>
-                <label className="label">Notes</label>
-                <input type="text" value={transferForm.notes} onChange={(e) => setTransferForm({...transferForm, notes: e.target.value})} className="input" />
-              </div>
+              <FormField label="Quantity to Transfer">
+                {(field) => (
+                  <input {...field} type="number" value={transferForm.quantity} onChange={(e) => setTransferForm({...transferForm, quantity: parseFloat(e.target.value)})} className="input" min={0.01} max={selectedItem.quantity_available} step={0.01} required />
+                )}
+              </FormField>
+              <FormField label="To Location">
+                {(field) => (
+                  <select {...field} value={transferForm.to_location_code} onChange={(e) => setTransferForm({...transferForm, to_location_code: e.target.value})} className="input" required>
+                    <option value="">Select destination...</option>
+                    {locations.filter(l => l.code !== selectedItem.location).map(l => <option key={l.id} value={l.code}>{l.code}</option>)}
+                  </select>
+                )}
+              </FormField>
+              <FormField label="Notes">
+                {(field) => (
+                  <input {...field} type="text" value={transferForm.notes} onChange={(e) => setTransferForm({...transferForm, notes: e.target.value})} className="input" />
+                )}
+              </FormField>
               <div className="flex justify-end gap-3">
                 <button type="button" onClick={() => setShowTransferModal(false)} className="btn-secondary">Cancel</button>
                 <button type="submit" className="btn-primary">Transfer</button>

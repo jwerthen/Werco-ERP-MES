@@ -152,27 +152,29 @@ export default function AIEgressTab() {
 
         {/* Egress kill switch */}
         <div className={`rounded border px-4 py-4 ${enabled ? 'border-red-500/40 bg-red-500/5' : 'border-surface-200'}`}>
-          <label className={`flex items-start gap-3 ${canEdit ? 'cursor-pointer' : 'cursor-not-allowed opacity-80'}`}>
+          <label
+            htmlFor="ai-egress-toggle"
+            className={`grid grid-cols-[auto_1fr] items-start gap-x-3 ${canEdit ? 'cursor-pointer' : 'cursor-not-allowed opacity-80'}`}
+          >
             <input
+              id="ai-egress-toggle"
               type="checkbox"
-              className="checkbox mt-0.5"
+              className="checkbox mt-0.5 row-span-2"
               checked={enabled}
               disabled={!canEdit || saving}
               onChange={(e) => handleToggle(e.target.checked)}
             />
-            <span>
-              <span className="flex items-center gap-2 text-sm font-semibold text-surface-800">
-                <ExclamationTriangleIcon className="h-4 w-4 text-amber-500" />
-                Allow AI egress
-              </span>
-              <span className="block text-xs text-surface-500 mt-1">
-                Enabling this transmits uploaded document content to the Anthropic AI provider for PO/quote, BOM,
-                QMS-clause, routing-generation, and laser-nest extraction, and powers the AI copilot and
-                natural-language search. This content may be CUI under some DoD contracts — obtain CUI /
-                data-egress sign-off before enabling. When OFF, no document content leaves the system boundary
-                and AI features degrade gracefully (e.g. laser-nest extraction falls back to filename-only).
-                Off by default for new companies; toggling it is recorded on the tamper-evident audit trail.
-              </span>
+            <span className="flex items-center gap-2 text-sm font-semibold text-surface-800">
+              <ExclamationTriangleIcon className="h-4 w-4 text-amber-500" />
+              Allow AI egress
+            </span>
+            <span className="block text-xs text-surface-500 mt-1">
+              Enabling this transmits uploaded document content to the Anthropic AI provider for PO/quote, BOM,
+              QMS-clause, routing-generation, and laser-nest extraction, and powers the AI copilot and
+              natural-language search. This content may be CUI under some DoD contracts — obtain CUI /
+              data-egress sign-off before enabling. When OFF, no document content leaves the system boundary
+              and AI features degrade gracefully (e.g. laser-nest extraction falls back to filename-only).
+              Off by default for new companies; toggling it is recorded on the tamper-evident audit trail.
             </span>
           </label>
         </div>

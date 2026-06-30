@@ -1213,16 +1213,18 @@ export default function WorkOrderNew() {
                           <td colSpan={5} className="pb-3">
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                               <div>
-                                <label className="label text-xs">Setup Instructions</label>
+                                <label htmlFor={`routing-op-${index}-setup-instructions`} className="label text-xs">Setup Instructions</label>
                                 <textarea
+                                  id={`routing-op-${index}-setup-instructions`}
                                   value={op.setup_instructions || ''}
                                   onChange={(e) => updateOperation(index, 'setup_instructions', e.target.value)}
                                   className="input input-sm min-h-16"
                                 />
                               </div>
                               <div>
-                                <label className="label text-xs">Run Instructions</label>
+                                <label htmlFor={`routing-op-${index}-run-instructions`} className="label text-xs">Run Instructions</label>
                                 <textarea
+                                  id={`routing-op-${index}-run-instructions`}
                                   value={op.run_instructions || ''}
                                   onChange={(e) => updateOperation(index, 'run_instructions', e.target.value)}
                                   className="input input-sm min-h-16"
@@ -1354,16 +1356,18 @@ export default function WorkOrderNew() {
                             <td colSpan={5} className="pb-3">
                               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                                 <div>
-                                  <label className="label text-xs">Setup Instructions</label>
+                                  <label htmlFor={`manual-op-${index}-setup-instructions`} className="label text-xs">Setup Instructions</label>
                                   <textarea
+                                    id={`manual-op-${index}-setup-instructions`}
                                     value={op.setup_instructions || ''}
                                     onChange={(e) => updateOperation(index, 'setup_instructions', e.target.value)}
                                     className="input input-sm min-h-16"
                                   />
                                 </div>
                                 <div>
-                                  <label className="label text-xs">Run Instructions</label>
+                                  <label htmlFor={`manual-op-${index}-run-instructions`} className="label text-xs">Run Instructions</label>
                                   <textarea
+                                    id={`manual-op-${index}-run-instructions`}
                                     value={op.run_instructions || ''}
                                     onChange={(e) => updateOperation(index, 'run_instructions', e.target.value)}
                                     className="input input-sm min-h-16"

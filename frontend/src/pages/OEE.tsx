@@ -23,7 +23,7 @@ import {
   ReferenceLine,
 } from 'recharts';
 import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
-import { EmptyState, ErrorState, useToast } from '../components/ui';
+import { EmptyState, ErrorState, FormField, useToast } from '../components/ui';
 
 // ============== Types ==============
 
@@ -293,8 +293,9 @@ export default function OEE() {
       <div className="card card-compact !p-2.5">
         <div className="flex flex-wrap gap-3 items-end">
           <div>
-            <label className="label !py-0"><span className="label-text text-[10px] uppercase tracking-wide text-fd-mute">Work Center</span></label>
+            <label htmlFor="oee-filter-work-center" className="label !py-0"><span className="label-text text-[10px] uppercase tracking-wide text-fd-mute">Work Center</span></label>
             <select
+              id="oee-filter-work-center"
               className="select select-bordered select-sm rounded-sm"
               value={selectedWorkCenter}
               onChange={(e) => setSelectedWorkCenter(e.target.value)}
@@ -308,8 +309,9 @@ export default function OEE() {
             </select>
           </div>
           <div>
-            <label className="label !py-0"><span className="label-text text-[10px] uppercase tracking-wide text-fd-mute">From</span></label>
+            <label htmlFor="oee-filter-from" className="label !py-0"><span className="label-text text-[10px] uppercase tracking-wide text-fd-mute">From</span></label>
             <input
+              id="oee-filter-from"
               type="date"
               className="input input-bordered input-sm rounded-sm"
               value={dateFrom}
@@ -317,8 +319,9 @@ export default function OEE() {
             />
           </div>
           <div>
-            <label className="label !py-0"><span className="label-text text-[10px] uppercase tracking-wide text-fd-mute">To</span></label>
+            <label htmlFor="oee-filter-to" className="label !py-0"><span className="label-text text-[10px] uppercase tracking-wide text-fd-mute">To</span></label>
             <input
+              id="oee-filter-to"
               type="date"
               className="input input-bordered input-sm rounded-sm"
               value={dateTo}
@@ -585,129 +588,149 @@ export default function OEE() {
             </div>
             <form onSubmit={handleAddRecord} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label"><span className="label-text font-medium">Work Center *</span></label>
-                  <select
-                    className="select select-bordered w-full"
-                    value={addForm.work_center_id}
-                    onChange={(e) => setAddForm({ ...addForm, work_center_id: parseInt(e.target.value) })}
-                    required
-                  >
-                    <option value={0} disabled>Select work center...</option>
-                    {workCenters.map((wc) => (
-                      <option key={wc.id} value={wc.id}>
-                        {wc.code} - {wc.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="label"><span className="label-text font-medium">Date *</span></label>
-                  <input
-                    type="date"
-                    className="input input-bordered w-full"
-                    value={addForm.record_date}
-                    onChange={(e) => setAddForm({ ...addForm, record_date: e.target.value })}
-                    required
-                  />
-                </div>
+                <FormField label="Work Center" required labelClassName="font-medium">
+                  {(field) => (
+                    <select
+                      {...field}
+                      className="select select-bordered w-full"
+                      value={addForm.work_center_id}
+                      onChange={(e) => setAddForm({ ...addForm, work_center_id: parseInt(e.target.value) })}
+                      required
+                    >
+                      <option value={0} disabled>Select work center...</option>
+                      {workCenters.map((wc) => (
+                        <option key={wc.id} value={wc.id}>
+                          {wc.code} - {wc.name}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </FormField>
+                <FormField label="Date" required labelClassName="font-medium">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="date"
+                      className="input input-bordered w-full"
+                      value={addForm.record_date}
+                      onChange={(e) => setAddForm({ ...addForm, record_date: e.target.value })}
+                      required
+                    />
+                  )}
+                </FormField>
               </div>
 
               <div className="grid grid-cols-3 gap-4">
-                <div>
-                  <label className="label"><span className="label-text font-medium">Shift</span></label>
-                  <select
-                    className="select select-bordered w-full"
-                    value={addForm.shift}
-                    onChange={(e) => setAddForm({ ...addForm, shift: e.target.value })}
-                  >
-                    <option value="">N/A</option>
-                    <option value="1st">1st Shift</option>
-                    <option value="2nd">2nd Shift</option>
-                    <option value="3rd">3rd Shift</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="label"><span className="label-text font-medium">Planned Time (min) *</span></label>
-                  <input
-                    type="number"
-                    className="input input-bordered w-full"
-                    value={addForm.planned_production_time}
-                    onChange={(e) => setAddForm({ ...addForm, planned_production_time: parseFloat(e.target.value) || 0 })}
-                    min={0}
-                    required
-                  />
-                </div>
-                <div>
-                  <label className="label"><span className="label-text font-medium">Actual Run Time (min) *</span></label>
-                  <input
-                    type="number"
-                    className="input input-bordered w-full"
-                    value={addForm.actual_run_time}
-                    onChange={(e) => setAddForm({ ...addForm, actual_run_time: parseFloat(e.target.value) || 0 })}
-                    min={0}
-                    required
-                  />
-                </div>
+                <FormField label="Shift" labelClassName="font-medium">
+                  {(field) => (
+                    <select
+                      {...field}
+                      className="select select-bordered w-full"
+                      value={addForm.shift}
+                      onChange={(e) => setAddForm({ ...addForm, shift: e.target.value })}
+                    >
+                      <option value="">N/A</option>
+                      <option value="1st">1st Shift</option>
+                      <option value="2nd">2nd Shift</option>
+                      <option value="3rd">3rd Shift</option>
+                    </select>
+                  )}
+                </FormField>
+                <FormField label="Planned Time (min)" required labelClassName="font-medium">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="number"
+                      className="input input-bordered w-full"
+                      value={addForm.planned_production_time}
+                      onChange={(e) => setAddForm({ ...addForm, planned_production_time: parseFloat(e.target.value) || 0 })}
+                      min={0}
+                      required
+                    />
+                  )}
+                </FormField>
+                <FormField label="Actual Run Time (min)" required labelClassName="font-medium">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="number"
+                      className="input input-bordered w-full"
+                      value={addForm.actual_run_time}
+                      onChange={(e) => setAddForm({ ...addForm, actual_run_time: parseFloat(e.target.value) || 0 })}
+                      min={0}
+                      required
+                    />
+                  )}
+                </FormField>
               </div>
 
               <div className="grid grid-cols-3 gap-4">
-                <div>
-                  <label className="label"><span className="label-text font-medium">Ideal Cycle Time (sec)</span></label>
-                  <input
-                    type="number"
-                    className="input input-bordered w-full"
-                    value={addForm.ideal_cycle_time}
-                    onChange={(e) => setAddForm({ ...addForm, ideal_cycle_time: parseFloat(e.target.value) || 0 })}
-                    min={0}
-                    step="0.01"
-                  />
-                </div>
-                <div>
-                  <label className="label"><span className="label-text font-medium">Total Pieces *</span></label>
-                  <input
-                    type="number"
-                    className="input input-bordered w-full"
-                    value={addForm.total_pieces}
-                    onChange={(e) => setAddForm({ ...addForm, total_pieces: parseInt(e.target.value) || 0 })}
-                    min={0}
-                    required
-                  />
-                </div>
-                <div>
-                  <label className="label"><span className="label-text font-medium">Good Pieces *</span></label>
-                  <input
-                    type="number"
-                    className="input input-bordered w-full"
-                    value={addForm.good_pieces}
-                    onChange={(e) => setAddForm({ ...addForm, good_pieces: parseInt(e.target.value) || 0 })}
-                    min={0}
-                    required
-                  />
-                </div>
+                <FormField label="Ideal Cycle Time (sec)" labelClassName="font-medium">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="number"
+                      className="input input-bordered w-full"
+                      value={addForm.ideal_cycle_time}
+                      onChange={(e) => setAddForm({ ...addForm, ideal_cycle_time: parseFloat(e.target.value) || 0 })}
+                      min={0}
+                      step="0.01"
+                    />
+                  )}
+                </FormField>
+                <FormField label="Total Pieces" required labelClassName="font-medium">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="number"
+                      className="input input-bordered w-full"
+                      value={addForm.total_pieces}
+                      onChange={(e) => setAddForm({ ...addForm, total_pieces: parseInt(e.target.value) || 0 })}
+                      min={0}
+                      required
+                    />
+                  )}
+                </FormField>
+                <FormField label="Good Pieces" required labelClassName="font-medium">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="number"
+                      className="input input-bordered w-full"
+                      value={addForm.good_pieces}
+                      onChange={(e) => setAddForm({ ...addForm, good_pieces: parseInt(e.target.value) || 0 })}
+                      min={0}
+                      required
+                    />
+                  )}
+                </FormField>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label"><span className="label-text font-medium">Rejected Pieces</span></label>
-                  <input
-                    type="number"
-                    className="input input-bordered w-full"
-                    value={addForm.rejected_pieces}
-                    onChange={(e) => setAddForm({ ...addForm, rejected_pieces: parseInt(e.target.value) || 0 })}
-                    min={0}
-                  />
-                </div>
-                <div>
-                  <label className="label"><span className="label-text font-medium">Notes</span></label>
-                  <input
-                    type="text"
-                    className="input input-bordered w-full"
-                    value={addForm.notes}
-                    onChange={(e) => setAddForm({ ...addForm, notes: e.target.value })}
-                    placeholder="Optional notes..."
-                  />
-                </div>
+                <FormField label="Rejected Pieces" labelClassName="font-medium">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="number"
+                      className="input input-bordered w-full"
+                      value={addForm.rejected_pieces}
+                      onChange={(e) => setAddForm({ ...addForm, rejected_pieces: parseInt(e.target.value) || 0 })}
+                      min={0}
+                    />
+                  )}
+                </FormField>
+                <FormField label="Notes" labelClassName="font-medium">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="text"
+                      className="input input-bordered w-full"
+                      value={addForm.notes}
+                      onChange={(e) => setAddForm({ ...addForm, notes: e.target.value })}
+                      placeholder="Optional notes..."
+                    />
+                  )}
+                </FormField>
               </div>
 
               {/* Live OEE Preview */}

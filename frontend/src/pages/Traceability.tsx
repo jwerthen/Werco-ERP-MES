@@ -221,31 +221,31 @@ export default function Traceability() {
 
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-3 pt-3 border-t border-fd-line">
               <div className="min-w-0">
-                <label className="text-[10px] uppercase tracking-wide text-slate-500">Current Quantity</label>
+                <span className="block text-[10px] uppercase tracking-wide text-slate-500">Current Quantity</span>
                 <p className="font-bold text-base tabular-nums">{lotTrace.current_quantity}</p>
               </div>
               <div className="min-w-0">
-                <label className="text-[10px] uppercase tracking-wide text-slate-500">Location</label>
+                <span className="block text-[10px] uppercase tracking-wide text-slate-500">Location</span>
                 <p className="font-medium text-sm truncate">{lotTrace.current_location || '-'}</p>
               </div>
               <div className="min-w-0">
-                <label className="text-[10px] uppercase tracking-wide text-slate-500">Supplier</label>
+                <span className="block text-[10px] uppercase tracking-wide text-slate-500">Supplier</span>
                 <p className="font-medium text-sm truncate">{lotTrace.supplier_name || '-'}</p>
               </div>
               <div className="min-w-0">
-                <label className="text-[10px] uppercase tracking-wide text-slate-500">PO Number</label>
+                <span className="block text-[10px] uppercase tracking-wide text-slate-500">PO Number</span>
                 <p className="font-medium text-sm tabular-nums truncate">{lotTrace.po_number || '-'}</p>
               </div>
               <div className="min-w-0">
-                <label className="text-[10px] uppercase tracking-wide text-slate-500">Cert Number</label>
+                <span className="block text-[10px] uppercase tracking-wide text-slate-500">Cert Number</span>
                 <p className="font-mono text-sm tabular-nums truncate">{lotTrace.cert_number || '-'}</p>
               </div>
               <div className="min-w-0">
-                <label className="text-[10px] uppercase tracking-wide text-slate-500">Heat Lot</label>
+                <span className="block text-[10px] uppercase tracking-wide text-slate-500">Heat Lot</span>
                 <p className="font-mono text-sm tabular-nums truncate">{lotTrace.heat_lot || '-'}</p>
               </div>
               <div className="min-w-0">
-                <label className="text-[10px] uppercase tracking-wide text-slate-500">Received Date</label>
+                <span className="block text-[10px] uppercase tracking-wide text-slate-500">Received Date</span>
                 <p className="font-medium text-sm tabular-nums">
                   {lotTrace.received_date
                     ? formatCentralDate(lotTrace.received_date, { month: '2-digit', day: '2-digit', year: 'numeric' })

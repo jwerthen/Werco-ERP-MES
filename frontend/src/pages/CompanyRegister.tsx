@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import api from '../services/api';
+import { FormField } from '../components/ui/FormField';
 import {
   ShieldCheckIcon,
   BuildingOffice2Icon,
@@ -94,80 +95,116 @@ export default function CompanyRegister() {
               </div>
             )}
 
-            <div className="space-y-2">
-              <label className="block text-sm font-medium text-slate-300">Company Name</label>
-              <input
-                type="text"
-                required
-                value={form.company_name}
-                onChange={(e) => setForm({ ...form, company_name: e.target.value })}
-                className="du-input du-input-bordered w-full h-12 bg-fd-panel"
-                placeholder="Your Company LLC"
-              />
-            </div>
+            <FormField
+              label="Company Name"
+              className="space-y-2"
+              labelClassName="block text-sm font-medium text-slate-300"
+            >
+              {(field) => (
+                <input
+                  {...field}
+                  type="text"
+                  required
+                  value={form.company_name}
+                  onChange={(e) => setForm({ ...form, company_name: e.target.value })}
+                  className="du-input du-input-bordered w-full h-12 bg-fd-panel"
+                  placeholder="Your Company LLC"
+                />
+              )}
+            </FormField>
 
             <div className="border-t border-slate-700/30 pt-4">
               <p className="text-xs text-slate-400 uppercase tracking-wider mb-3">Admin Account</p>
             </div>
 
             <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <label className="block text-sm font-medium text-slate-300">First Name</label>
+              <FormField
+                label="First Name"
+                className="space-y-2"
+                labelClassName="block text-sm font-medium text-slate-300"
+              >
+                {(field) => (
+                  <input
+                    {...field}
+                    type="text"
+                    required
+                    value={form.admin_first_name}
+                    onChange={(e) => setForm({ ...form, admin_first_name: e.target.value })}
+                    className="du-input du-input-bordered w-full h-12 bg-fd-panel"
+                  />
+                )}
+              </FormField>
+              <FormField
+                label="Last Name"
+                className="space-y-2"
+                labelClassName="block text-sm font-medium text-slate-300"
+              >
+                {(field) => (
+                  <input
+                    {...field}
+                    type="text"
+                    required
+                    value={form.admin_last_name}
+                    onChange={(e) => setForm({ ...form, admin_last_name: e.target.value })}
+                    className="du-input du-input-bordered w-full h-12 bg-fd-panel"
+                  />
+                )}
+              </FormField>
+            </div>
+
+            <FormField
+              label="Email"
+              className="space-y-2"
+              labelClassName="block text-sm font-medium text-slate-300"
+            >
+              {(field) => (
                 <input
-                  type="text"
+                  {...field}
+                  type="email"
                   required
-                  value={form.admin_first_name}
-                  onChange={(e) => setForm({ ...form, admin_first_name: e.target.value })}
+                  value={form.admin_email}
+                  onChange={(e) => setForm({ ...form, admin_email: e.target.value })}
+                  className="du-input du-input-bordered w-full h-12 bg-fd-panel"
+                  placeholder="admin@yourcompany.com"
+                />
+              )}
+            </FormField>
+
+            <FormField
+              label="Password"
+              className="space-y-2"
+              labelClassName="block text-sm font-medium text-slate-300"
+              help="Min 12 chars, uppercase, lowercase, number, special char"
+            >
+              {(field) => (
+                <input
+                  {...field}
+                  type="password"
+                  required
+                  minLength={12}
+                  value={form.admin_password}
+                  onChange={(e) => setForm({ ...form, admin_password: e.target.value })}
                   className="du-input du-input-bordered w-full h-12 bg-fd-panel"
                 />
-              </div>
-              <div className="space-y-2">
-                <label className="block text-sm font-medium text-slate-300">Last Name</label>
+              )}
+            </FormField>
+
+            <FormField
+              label="Confirm Password"
+              className="space-y-2"
+              labelClassName="block text-sm font-medium text-slate-300"
+            >
+              {(field) => (
                 <input
-                  type="text"
+                  {...field}
+                  type="password"
                   required
-                  value={form.admin_last_name}
-                  onChange={(e) => setForm({ ...form, admin_last_name: e.target.value })}
+                  value={form.confirm_password}
+                  onChange={(e) => setForm({ ...form, confirm_password: e.target.value })}
                   className="du-input du-input-bordered w-full h-12 bg-fd-panel"
                 />
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              <label className="block text-sm font-medium text-slate-300">Email</label>
-              <input
-                type="email"
-                required
-                value={form.admin_email}
-                onChange={(e) => setForm({ ...form, admin_email: e.target.value })}
-                className="du-input du-input-bordered w-full h-12 bg-fd-panel"
-                placeholder="admin@yourcompany.com"
-              />
-            </div>
-
-            <div className="space-y-2">
-              <label className="block text-sm font-medium text-slate-300">Password</label>
-              <input
-                type="password"
-                required
-                minLength={12}
-                value={form.admin_password}
-                onChange={(e) => setForm({ ...form, admin_password: e.target.value })}
-                className="du-input du-input-bordered w-full h-12 bg-fd-panel"
-              />
-              <p className="text-xs text-slate-400">Min 12 chars, uppercase, lowercase, number, special char</p>
-            </div>
-
-            <div className="space-y-2">
-              <label className="block text-sm font-medium text-slate-300">Confirm Password</label>
-              <input
-                type="password"
-                required
-                value={form.confirm_password}
-                onChange={(e) => setForm({ ...form, confirm_password: e.target.value })}
-                className="du-input du-input-bordered w-full h-12 bg-fd-panel"
-              />
-            </div>
+              )}
+            </FormField>
 
             <button
               type="submit"

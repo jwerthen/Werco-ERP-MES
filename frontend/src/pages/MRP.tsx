@@ -252,8 +252,11 @@ export default function MRPPage() {
         <h1 className="text-2xl font-bold text-white">Material Requirements Planning</h1>
         <div className="flex flex-wrap items-end gap-3">
           <div>
-            <label className="label !text-[10px] uppercase tracking-wide">Horizon (days)</label>
+            <label htmlFor="mrp-horizon-days" className="label !text-[10px] uppercase tracking-wide">
+              Horizon (days)
+            </label>
             <input
+              id="mrp-horizon-days"
               type="number"
               value={horizonDays}
               onChange={(e) => setHorizonDays(parseInt(e.target.value))}

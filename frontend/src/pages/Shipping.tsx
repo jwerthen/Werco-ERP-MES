@@ -6,6 +6,7 @@ import {
   Button,
   EmptyState,
   ErrorState,
+  FormField,
   DataTable,
   DataTableColumn,
   MobileDataCard,
@@ -536,64 +537,74 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
               <p className="text-sm text-slate-400">{selectedWO.part_number} - {selectedWO.part_name}</p>
             </div>
             <form onSubmit={handleCreate} className="space-y-4">
-              <div>
-                <label className="label">Ship To</label>
-                <input
-                  type="text"
-                  value={shipForm.ship_to_name}
-                  onChange={(e) => setShipForm({ ...shipForm, ship_to_name: e.target.value })}
-                  className="input"
-                />
+              <FormField label="Ship To">
+                {(field) => (
+                  <input
+                    {...field}
+                    type="text"
+                    value={shipForm.ship_to_name}
+                    onChange={(e) => setShipForm({ ...shipForm, ship_to_name: e.target.value })}
+                    className="input"
+                  />
+                )}
+              </FormField>
+              <div className="grid grid-cols-2 gap-4">
+                <FormField label="Carrier">
+                  {(field) => (
+                    <select
+                      {...field}
+                      value={shipForm.carrier}
+                      onChange={(e) => setShipForm({ ...shipForm, carrier: e.target.value })}
+                      className="input"
+                    >
+                      <option value="">Select...</option>
+                      <option value="UPS">UPS</option>
+                      <option value="FedEx">FedEx</option>
+                      <option value="USPS">USPS</option>
+                      <option value="Freight">Freight</option>
+                      <option value="Customer Pickup">Customer Pickup</option>
+                    </select>
+                  )}
+                </FormField>
+                <FormField label="Qty to Ship">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="number"
+                      value={shipForm.quantity_shipped}
+                      onChange={(e) => setShipForm({ ...shipForm, quantity_shipped: parseFloat(e.target.value) })}
+                      className="input"
+                      min={1}
+                      max={selectedWO.quantity_complete}
+                    />
+                  )}
+                </FormField>
               </div>
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Carrier</label>
-                  <select
-                    value={shipForm.carrier}
-                    onChange={(e) => setShipForm({ ...shipForm, carrier: e.target.value })}
-                    className="input"
-                  >
-                    <option value="">Select...</option>
-                    <option value="UPS">UPS</option>
-                    <option value="FedEx">FedEx</option>
-                    <option value="USPS">USPS</option>
-                    <option value="Freight">Freight</option>
-                    <option value="Customer Pickup">Customer Pickup</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="label">Qty to Ship</label>
-                  <input
-                    type="number"
-                    value={shipForm.quantity_shipped}
-                    onChange={(e) => setShipForm({ ...shipForm, quantity_shipped: parseFloat(e.target.value) })}
-                    className="input"
-                    min={1}
-                    max={selectedWO.quantity_complete}
-                  />
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Weight (lbs)</label>
-                  <input
-                    type="number"
-                    value={shipForm.weight_lbs}
-                    onChange={(e) => setShipForm({ ...shipForm, weight_lbs: parseFloat(e.target.value) })}
-                    className="input"
-                    step={0.1}
-                  />
-                </div>
-                <div>
-                  <label className="label"># Packages</label>
-                  <input
-                    type="number"
-                    value={shipForm.num_packages}
-                    onChange={(e) => setShipForm({ ...shipForm, num_packages: parseInt(e.target.value) })}
-                    className="input"
-                    min={1}
-                  />
-                </div>
+                <FormField label="Weight (lbs)">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="number"
+                      value={shipForm.weight_lbs}
+                      onChange={(e) => setShipForm({ ...shipForm, weight_lbs: parseFloat(e.target.value) })}
+                      className="input"
+                      step={0.1}
+                    />
+                  )}
+                </FormField>
+                <FormField label="# Packages">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="number"
+                      value={shipForm.num_packages}
+                      onChange={(e) => setShipForm({ ...shipForm, num_packages: parseInt(e.target.value) })}
+                      className="input"
+                      min={1}
+                    />
+                  )}
+                </FormField>
               </div>
               <div>
                 <label className="flex items-center">
@@ -606,15 +617,17 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
                   Include Certificate of Conformance
                 </label>
               </div>
-              <div>
-                <label className="label">Packing Notes</label>
-                <textarea
-                  value={shipForm.packing_notes}
-                  onChange={(e) => setShipForm({ ...shipForm, packing_notes: e.target.value })}
-                  className="input"
-                  rows={2}
-                />
-              </div>
+              <FormField label="Packing Notes">
+                {(field) => (
+                  <textarea
+                    {...field}
+                    value={shipForm.packing_notes}
+                    onChange={(e) => setShipForm({ ...shipForm, packing_notes: e.target.value })}
+                    className="input"
+                    rows={2}
+                  />
+                )}
+              </FormField>
               <div className="flex justify-end gap-3 pt-4 border-t">
                 <Button variant="secondary" onClick={() => setShowCreateModal(false)}>
                   Cancel
