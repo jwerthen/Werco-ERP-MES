@@ -7,7 +7,7 @@ from datetime import date, datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import and_, func, or_
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, joinedload, selectinload
@@ -130,6 +130,17 @@ class ProductionReportRequest(BaseModel):
         description="Adoption-telemetry channel of this production report (kiosk | desktop | scanner | "
         "import | backfill). Omit to keep the active entry's existing channel.",
     )
+
+    @model_validator(mode="after")
+    def _require_scrap_reason(self) -> "ProductionReportRequest":
+        # AS9100D defect-traceability invariant (same rule as ClockOut): a scrap delta MUST
+        # carry a reason. Enforced at the data boundary so a scripted/API client can't post
+        # reasonless scrap that the UIs already block. Blank/whitespace counts as missing;
+        # raised as a Pydantic ValueError -> 422. A zero scrap delta with no reason stays
+        # valid; negatives/NaN fall through to the handler's existing numeric guards.
+        if (self.quantity_scrapped_delta or 0) > 0 and not (self.scrap_reason and self.scrap_reason.strip()):
+            raise ValueError("scrap_reason is required when quantity_scrapped_delta is greater than 0")
+        return self
 
 
 class OperationHoldRequest(BaseModel):

@@ -49,6 +49,7 @@ class WorkOrder(Base, SoftDeleteMixin, TenantMixin):
     quantity_ordered = Column(Float, nullable=False)
     quantity_complete = Column(Float, default=0.0)
     quantity_scrapped = Column(Float, default=0.0)
+    scrap_reason = Column(String(255), nullable=True)
 
     # Status tracking
     status = Column(SQLEnum(WorkOrderStatus), default=WorkOrderStatus.DRAFT, index=True)
@@ -157,6 +158,7 @@ class WorkOrderOperation(Base, TenantMixin):
     status = Column(SQLEnum(OperationStatus), default=OperationStatus.PENDING)
     quantity_complete = Column(Float, default=0.0)
     quantity_scrapped = Column(Float, default=0.0)
+    scrap_reason = Column(String(255), nullable=True)
 
     # Scheduling
     scheduled_start = Column(DateTime, nullable=True)

@@ -207,7 +207,10 @@ def test_office_complete_updates_scrap_when_explicitly_provided(client: TestClie
     db_session.commit()
 
     resp = client.post(
-        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5&quantity_scrapped=1",
+        # scrap_reason is now required when quantity_scrapped > 0 (AS9100D
+        # defect-traceability enforcement); supply one so this scrap-update case
+        # exercises the success path rather than the 422 guard.
+        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5&quantity_scrapped=1&scrap_reason=Burr",
         headers=headers_for(admin),
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text

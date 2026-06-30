@@ -10,6 +10,7 @@ import { hasPermission } from '../utils/permissions';
 import LaserNestManualModal from '../components/laser/LaserNestManualModal';
 import LaserNestImportWizard from '../components/laser/LaserNestImportWizard';
 import LaserNestPdfPreview from '../components/laser/LaserNestPdfPreview';
+import { CompleteWorkModal, CompleteWorkSubmit } from '../components/workorders/CompleteWorkModal';
 import { Breadcrumbs } from '../components/ui/Breadcrumbs';
 import { getBreadcrumbParent } from '../utils/routeMeta';
 import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
@@ -236,6 +237,12 @@ export default function WorkOrderDetail() {
   const [deleting, setDeleting] = useState(false);
   const [completing, setCompleting] = useState(false);
   const [completingOpId, setCompletingOpId] = useState<number | null>(null);
+  // Drives the CompleteWorkModal: either the work-order-level completion or a
+  // specific operation. `null` = closed. The modal collects qty complete + qty
+  // scrapped + a scrap reason (required when scrap > 0) before we call the API.
+  const [completeTarget, setCompleteTarget] = useState<
+    { kind: 'work_order' } | { kind: 'operation'; operation: WorkOrderOperation } | null
+  >(null);
   const [materialReqs, setMaterialReqs] = useState<MaterialRequirementsResponse | null>(null);
   const [blockers, setBlockers] = useState<WorkOrderBlocker[]>([]);
   const [blockerForm, setBlockerForm] = useState<{
@@ -577,75 +584,49 @@ export default function WorkOrderDetail() {
     }
   };
 
-  /**
-   * Parse a string from prompt() as a non-negative quantity. Returns null
-   * (with a user-facing alert) if the input isn't a finite number or
-   * exceeds `max`. Keeps garbage out of the completion API — the server
-   * validates too, but surfacing the error client-side avoids a round-trip
-   * for something that should obviously be rejected.
-   */
-  const parseQty = (raw: string | null, label: string, max?: number): number | null => {
-    if (raw === null) return null; // user cancelled
-    const trimmed = raw.trim();
-    if (trimmed === '') return null;
-    const n = Number(trimmed);
-    if (!Number.isFinite(n) || n < 0) {
-      showToast('error', `${label} must be a non-negative number`);
-      return null;
-    }
-    if (max !== undefined && n > max) {
-      showToast('error', `${label} cannot exceed ${max}`);
-      return null;
-    }
-    return n;
-  };
-
-  const handleComplete = async () => {
+  // Opening the modal is decoupled from the API call. The header / per-row
+  // "Complete" buttons just set the target; the CompleteWorkModal collects the
+  // quantities + scrap reason and calls handleCompleteSubmit on confirm. The
+  // in-flight guards (`completing` / `completingOpId`) wrap only the API call,
+  // not the dialog, so a server-gated completion reflects only what the server
+  // returns (non-optimistic).
+  const handleComplete = () => {
     if (completing) return;
-    const ordered = workOrder!.quantity_ordered;
-    const qtyCompleteRaw = prompt(`Enter quantity completed (ordered: ${ordered}):`, ordered.toString());
-    const qtyComplete = parseQty(qtyCompleteRaw, 'Quantity completed', ordered);
-    if (qtyComplete === null) return;
-
-    const qtyScrappedRaw = prompt('Enter quantity scrapped (if any):', '0');
-    const qtyScrapped = parseQty(qtyScrappedRaw ?? '0', 'Quantity scrapped');
-    if (qtyScrapped === null) return;
-
-    // Only guard the API call itself — not the blocking prompt() dialogs above.
-    setCompleting(true);
-    try {
-      await api.completeWorkOrder(workOrder!.id, qtyComplete, qtyScrapped);
-      loadWorkOrder();
-    } catch (err: any) {
-      showToast('error', err.response?.data?.detail || 'Failed to complete work order');
-    } finally {
-      setCompleting(false);
-    }
+    setCompleteTarget({ kind: 'work_order' });
   };
 
-  const handleCompleteOperation = async (operation: WorkOrderOperation) => {
+  const handleCompleteOperation = (operation: WorkOrderOperation) => {
     if (completingOpId === operation.id) return;
-    const targetQty = Number(operation.component_quantity || workOrder!.quantity_ordered || 0);
-    const qtyCompleteRaw = prompt(
-      `Complete operation "${operation.name}"\nEnter quantity completed (target: ${targetQty}):`,
-      targetQty.toString()
-    );
-    const qtyComplete = parseQty(qtyCompleteRaw, 'Quantity completed', targetQty);
-    if (qtyComplete === null) return;
+    setCompleteTarget({ kind: 'operation', operation });
+  };
 
-    const qtyScrappedRaw = prompt('Enter quantity scrapped (if any):', '0');
-    const qtyScrapped = parseQty(qtyScrappedRaw ?? '0', 'Quantity scrapped');
-    if (qtyScrapped === null) return;
-
-    // Only guard the API call itself — not the blocking prompt() dialogs above.
-    setCompletingOpId(operation.id);
-    try {
-      await api.completeWOOperation(operation.id, qtyComplete, qtyScrapped);
-      loadWorkOrder();
-    } catch (err: any) {
-      showToast('error', err.response?.data?.detail || 'Failed to complete operation');
-    } finally {
-      setCompletingOpId(null);
+  const handleCompleteSubmit = async (values: CompleteWorkSubmit) => {
+    if (!completeTarget) return;
+    const { quantityComplete, quantityScrapped, scrapReason } = values;
+    if (completeTarget.kind === 'work_order') {
+      setCompleting(true);
+      try {
+        await api.completeWorkOrder(workOrder!.id, quantityComplete, quantityScrapped, scrapReason);
+        setCompleteTarget(null);
+        loadWorkOrder();
+      } catch (err: any) {
+        // Server-gated: surface the server's verbatim refusal, never a success.
+        showToast('error', err.response?.data?.detail || 'Failed to complete work order');
+      } finally {
+        setCompleting(false);
+      }
+    } else {
+      const operationId = completeTarget.operation.id;
+      setCompletingOpId(operationId);
+      try {
+        await api.completeWOOperation(operationId, quantityComplete, quantityScrapped, scrapReason);
+        setCompleteTarget(null);
+        loadWorkOrder();
+      } catch (err: any) {
+        showToast('error', err.response?.data?.detail || 'Failed to complete operation');
+      } finally {
+        setCompletingOpId(null);
+      }
     }
   };
 
@@ -1867,6 +1848,34 @@ export default function WorkOrderDetail() {
           />
         </>
       )}
+
+      <CompleteWorkModal
+        open={completeTarget !== null}
+        onClose={() => {
+          // Don't let the user dismiss mid-request; reflect only server state.
+          if (completing || completingOpId !== null) return;
+          setCompleteTarget(null);
+        }}
+        submitting={
+          completeTarget?.kind === 'operation' ? completingOpId === completeTarget.operation.id : completing
+        }
+        onSubmit={handleCompleteSubmit}
+        title={
+          completeTarget?.kind === 'operation'
+            ? `Complete operation "${completeTarget.operation.name}"`
+            : `Complete work order ${workOrder.work_order_number}`
+        }
+        subtitle={
+          completeTarget?.kind === 'operation'
+            ? `Target: ${Number(completeTarget.operation.component_quantity || workOrder.quantity_ordered || 0)}`
+            : `Ordered: ${workOrder.quantity_ordered}`
+        }
+        defaultQuantityComplete={
+          completeTarget?.kind === 'operation'
+            ? Number(completeTarget.operation.component_quantity || workOrder.quantity_ordered || 0)
+            : workOrder.quantity_ordered
+        }
+      />
     </div>
   );
 }

@@ -63,11 +63,13 @@ URL is all the station setup there is.
    - **REPORT PRODUCTION** — `POST /shop-floor/operations/{id}/production` with good/scrap
      deltas. Any scrap quantity **requires** a structured reason picked from the shop-standard
      grid (no default, no free text); the reason is sent as the endpoint's `scrap_reason`
-     field and stored on the operator's time entry.
-   - **COMPLETE** — clock-out first (`POST /shop-floor/clock-out/{id}` with final counts and
-     any scrap reason), then `POST /shop-floor/operations/{id}/complete` at the target
-     quantity. If the clock-out lands but the completion is refused, the kiosk says so —
-     labor is closed either way.
+     field and stored on the operator's time entry. This is no longer a kiosk-only guardrail:
+     the server now rejects a positive scrap delta with no reason (and the same rule on
+     clock-out) with **422**, so reasonless scrap can't be posted around the UI.
+   - **COMPLETE** — clock-out first (`POST /shop-floor/clock-out/{id}` with final counts and,
+     when any scrap is entered, the same structured-grid scrap reason), then
+     `POST /shop-floor/operations/{id}/complete` at the target quantity. If the clock-out
+     lands but the completion is refused, the kiosk says so — labor is closed either way.
    - **HOLD** — a required blocker-category grid (material missing, machine down, tooling
      missing, quality hold, …), then `PUT /shop-floor/operations/{id}/hold` at `medium`
      severity. A kiosk hold files the same structured `WorkOrderBlocker` a supervisor would.

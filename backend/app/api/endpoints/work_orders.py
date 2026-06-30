@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import math
 import os
 import shutil
 import tempfile
@@ -2566,6 +2567,7 @@ def complete_work_order(
     request: Request,
     quantity_complete: float,
     quantity_scrapped: Optional[float] = None,
+    scrap_reason: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(
         require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR, UserRole.QUALITY])
@@ -2631,11 +2633,28 @@ def complete_work_order(
     # quantity ordered. quantity_ordered is the natural cap for a finished WO.
     # quantity_complete is required; quantity_scrapped is optional (DUP-3) and only
     # bounded when explicitly provided.
+    # Reject non-finite quantities (NaN/Inf) up front: a plain float query param accepts
+    # "nan"/"inf", and NaN slips past every `> 0`/`< 0` guard below (including the scrap-
+    # reason guard), which would persist a reasonless NaN scrap on Postgres (compliance
+    # auditor). Mirrors the shop-floor /production isnan/isinf guard.
+    if (quantity_complete is not None and not math.isfinite(quantity_complete)) or (
+        quantity_scrapped is not None and not math.isfinite(quantity_scrapped)
+    ):
+        raise HTTPException(status_code=400, detail="Quantity must be a valid number")
     ordered_qty = float(work_order.quantity_ordered or 0)
     if quantity_complete is None or quantity_complete < 0:
         raise HTTPException(status_code=400, detail="quantity_complete cannot be negative")
     if quantity_scrapped is not None and quantity_scrapped < 0:
         raise HTTPException(status_code=400, detail="quantity_scrapped cannot be negative")
+    # AS9100D defect-traceability invariant (same rule as ClockOut/ProductionReportRequest):
+    # any positive scrap MUST carry a non-blank reason. Query-param path, so the guard lives
+    # in the handler (no Pydantic body validator). 422 matches the scrap-reason enforcement
+    # semantics established this session; blank/whitespace counts as missing.
+    if quantity_scrapped is not None and quantity_scrapped > 0 and not (scrap_reason and scrap_reason.strip()):
+        raise HTTPException(
+            status_code=422,
+            detail="scrap_reason is required when quantity_scrapped is greater than 0",
+        )
     if ordered_qty > 0 and quantity_complete > ordered_qty:
         raise HTTPException(
             status_code=400,
@@ -2672,6 +2691,7 @@ def complete_work_order(
     old_status = work_order.status.value if work_order.status else None
     old_quantity_complete = float(work_order.quantity_complete or 0)
     old_quantity_scrapped = float(work_order.quantity_scrapped or 0)
+    old_scrap_reason = work_order.scrap_reason
 
     db.flush()
     audit = AuditService(db, current_user, request)
@@ -2734,9 +2754,12 @@ def complete_work_order(
     # top of what the rollup computed -- never regress finished quantity (RUP-6).
     work_order.quantity_complete = max(float(work_order.quantity_complete or 0), float(quantity_complete))
     # DUP-3: only overwrite recorded WO scrap when an explicit value was supplied;
-    # a defaulted (omitted) call must not zero previously-booked scrap.
+    # a defaulted (omitted) call must not zero previously-booked scrap. The
+    # scrap-reason guard above (422) has already ensured a positive scrap carries a
+    # non-blank reason, so persist it alongside the quantity.
     if quantity_scrapped is not None:
         work_order.quantity_scrapped = quantity_scrapped
+        work_order.scrap_reason = scrap_reason
     work_order.updated_at = now
     # The effective scrap actually persisted (the existing value when omitted), used
     # in the event + audit payloads so they reflect what was stored, not the raw arg.
@@ -2794,10 +2817,15 @@ def complete_work_order(
         resource_type="work_order",
         resource_id=work_order.id,
         resource_identifier=work_order.work_order_number,
-        old_values={"quantity_complete": old_quantity_complete, "quantity_scrapped": old_quantity_scrapped},
+        old_values={
+            "quantity_complete": old_quantity_complete,
+            "quantity_scrapped": old_quantity_scrapped,
+            "scrap_reason": old_scrap_reason,
+        },
         new_values={
             "quantity_complete": work_order.quantity_complete,
             "quantity_scrapped": effective_quantity_scrapped,
+            "scrap_reason": work_order.scrap_reason,
         },
         description=f"Recorded completion quantities for work order {work_order.work_order_number}",
     )
@@ -2912,8 +2940,13 @@ def add_operation(
 def update_operation(
     operation_id: int,
     operation_in: WorkOrderOperationUpdate,
+    request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    # RBAC matrix (docs/RBAC_PERMISSIONS.md): Work Orders Edit = Admin/Manager/Supervisor.
+    # This path edits operation fields incl. quantity_scrapped, so it must match the
+    # sibling update_work_order's gate -- previously it was get_current_user only, letting
+    # any authenticated user (incl. Operator/Viewer) edit/scrap an operation (compliance auditor).
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
 ):
     """Update an operation"""
@@ -2925,10 +2958,29 @@ def update_operation(
     if not operation:
         raise HTTPException(status_code=404, detail="Operation not found")
 
+    # Capture old values for audit. This generic update writes domain data (including
+    # quantity_scrapped/scrap_reason) via a blind setattr loop; previously it committed
+    # with NO audit row at all (the compliance auditor flagged the gap). Snapshot the
+    # full row up front, mirroring update_work_order, so log_update records old->new.
+    audit = AuditService(db, current_user, request)
+    old_values = {c.key: getattr(operation, c.key) for c in operation.__table__.columns}
+
     update_data = operation_in.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         setattr(operation, field, value)
     sync_laser_nest_from_operation(operation)
+
+    # Audit log for update. Logged BEFORE the terminal commit so the audit row commits
+    # atomically with the change (AuditService.log() only flushes; the request session
+    # never commits on teardown).
+    db.flush()
+    audit.log_update(
+        resource_type="work_order_operation",
+        resource_id=operation.id,
+        resource_identifier=operation.operation_number,
+        old_values=old_values,
+        new_values=operation,
+    )
 
     db.commit()
     db.refresh(operation)
@@ -3051,6 +3103,7 @@ def complete_operation(
     request: Request,
     quantity_complete: float,
     quantity_scrapped: Optional[float] = None,
+    scrap_reason: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
@@ -3068,6 +3121,14 @@ def complete_operation(
     enforcement that decides what may complete is Batch 4 (rank 7); here the two
     endpoints are only made consistent.
     """
+    # Reject non-finite quantities (NaN/Inf) up front: a plain float query param accepts
+    # "nan"/"inf", and NaN slips past every `> 0`/`< 0` guard below (including the scrap-
+    # reason guard), which would persist a reasonless NaN scrap on Postgres (compliance
+    # auditor). Mirrors the shop-floor /production isnan/isinf guard.
+    if (quantity_complete is not None and not math.isfinite(quantity_complete)) or (
+        quantity_scrapped is not None and not math.isfinite(quantity_scrapped)
+    ):
+        raise HTTPException(status_code=400, detail="Quantity must be a valid number")
     operation = (
         db.query(WorkOrderOperation)
         .options(joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part))
@@ -3173,7 +3234,21 @@ def complete_operation(
     operation.quantity_complete = resolved_quantity
     # DUP-3 scrap: only overwrite when an explicit value was provided.
     if quantity_scrapped is not None:
+        # Small correctness fix (compliance auditor): this office path had no non-negative
+        # guard on scrap (unlike complete_work_order). Reject a negative scrap with a 400.
+        if quantity_scrapped < 0:
+            raise HTTPException(status_code=400, detail="quantity_scrapped cannot be negative")
+        # AS9100D defect-traceability invariant (same rule as ClockOut/ProductionReportRequest):
+        # any positive scrap MUST carry a non-blank reason. Query-param path, so the guard lives
+        # in the handler (no Pydantic body validator). 422 matches the scrap-reason enforcement
+        # semantics established this session; blank/whitespace counts as missing.
+        if quantity_scrapped > 0 and not (scrap_reason and scrap_reason.strip()):
+            raise HTTPException(
+                status_code=422,
+                detail="scrap_reason is required when quantity_scrapped is greater than 0",
+            )
         operation.quantity_scrapped = quantity_scrapped
+        operation.scrap_reason = scrap_reason
     operation.updated_at = datetime.utcnow()
     sync_laser_nest_from_operation(operation)
 
@@ -3244,6 +3319,7 @@ def complete_operation(
         new_values: dict = {"quantity_complete": resolved_quantity}
         if quantity_scrapped is not None:
             new_values["quantity_scrapped"] = quantity_scrapped
+            new_values["scrap_reason"] = scrap_reason
         audit.log_update(
             resource_type="work_order_operation",
             resource_id=operation.id,

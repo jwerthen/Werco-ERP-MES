@@ -172,7 +172,12 @@ Findings: DUP-2, DUP-3, DUP-4, DUP-5, SFI-4, SFI-5, RUP-1, RUP-4, RUP-6, QG-5, B
 > - **Scrap (DUP-3).** The office `complete_operation` `quantity_scrapped` param and the
 >   `complete_work_order` `quantity_scrapped` param are now **optional** — an omitted value is left
 >   untouched, so a defaulted call can no longer zero previously-accumulated operation / WO scrap.
->   Pass an explicit value (including `0`) to overwrite.
+>   Pass an explicit value (including `0`) to overwrite. When the value written is **> 0**, a non-blank
+>   `scrap_reason` is now **required** (else **422**, `"scrap_reason is required when quantity_scrapped
+>   is greater than 0"`) — the AS9100D defect-traceability rule, enforced on all four office/admin
+>   scrap-writing endpoints (`PUT /work-orders/{id}`, `PUT /work-orders/operations/{id}`, and both
+>   `complete` verbs) to match the shop floor. `complete_operation` also now rejects a negative
+>   `quantity_scrapped` with **400**. See `docs/API.md` → Work Orders.
 > - **ON_HOLD (QG-5 / BLK-1).** Completing an ON_HOLD operation is **refused with 409** on BOTH
 >   `/operations/{id}/complete` endpoints ("Operation is on hold and cannot be completed"), and
 >   `/work-orders/{id}/complete` returns **409** up front if any open operation is on hold ("…is on

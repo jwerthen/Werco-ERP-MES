@@ -107,7 +107,9 @@ long-lived JWT with `type="display"` that authenticates **only** `GET /shop-floo
 > exceeds the operation target. The work order's `quantity_complete` only ever moves forward. Scrap
 > is **opt-in on update**: `quantity_scrapped` is optional on both `/work-orders/{id}/complete` and
 > `/work-orders/operations/{id}/complete` — omit it to leave previously-recorded scrap untouched;
-> send an explicit value (including `0`) to overwrite it. Completing an **on-hold** operation is
+> send an explicit value (including `0`) to overwrite it. When the value written is **> 0** a
+> `scrap_reason` is **required** (else **422**) — see "Scrap reason is required when scrap is reported"
+> below. Completing an **on-hold** operation is
 > rejected with **409 Conflict** (`{"detail": "Operation is on hold and cannot be completed"}`);
 > `/work-orders/{id}/complete` likewise returns **409** if any open operation is on hold
 > (`"…is on hold; resolve the hold first"`) — resolve the hold before completing. A work order that
@@ -191,6 +193,31 @@ long-lived JWT with `type="display"` that authenticates **only** `GET /shop-floo
 > **not** auto-populate `actual_cost` / `actual_hours` and touches no `JobCost`; the on-demand
 > `POST /job-costs/{id}/calculate` is then the only way to materialize cost actuals. The
 > `no_labor_recorded` quality exception (above) fires regardless of this flag.
+>
+> **Scrap reason is required when scrap is reported (AS9100D defect traceability).** The same rule
+> the shop floor enforces (see "Scrap reason is required when scrap is reported" under Shop Floor) now
+> guards the four office/admin work-order endpoints that can write scrap. On each, `scrap_reason` is
+> **required whenever the request writes a positive scrap quantity** (`quantity_scrapped > 0`); a
+> missing, `null`, or blank/whitespace-only reason in that case is rejected with
+> **422 Unprocessable Entity** (`"scrap_reason is required when quantity_scrapped is greater than 0"`).
+> When the scrap quantity is **0** (or scrap is left untouched), `scrap_reason` stays **optional**.
+> The four endpoints:
+> - **`PUT /work-orders/{id}`** (`WorkOrderUpdate`) — body gained an optional `scrap_reason` (max 255).
+>   `quantity_scrapped` is optional on this partial update, so an update that doesn't touch scrap is
+>   never forced to supply a reason.
+> - **`PUT /work-orders/operations/{id}`** (`WorkOrderOperationUpdate`) — body gained an optional
+>   `scrap_reason` (max 255), same partial-update semantics. This endpoint **now also writes a
+>   tamper-evident `audit_log` row** (`log_update`, resource type `work_order_operation`) on every
+>   update — previously it committed with no audit row at all (`GET /audit/`).
+> - **`POST /work-orders/{id}/complete`** — gained a `scrap_reason` **query parameter** (alongside
+>   `quantity_complete` / `quantity_scrapped`).
+> - **`POST /work-orders/operations/{id}/complete`** — gained a `scrap_reason` **query parameter**;
+>   this path also now rejects a **negative** `quantity_scrapped` with **400 Bad Request**
+>   (`"quantity_scrapped cannot be negative"`), matching `/work-orders/{id}/complete`.
+>
+> The `422` is enforced at the data boundary (Pydantic body validator on the two `PUT` bodies; an
+> in-handler guard on the two query-param `complete` verbs), so a scripted/API client can no longer
+> record reasonless scrap that the office/admin UIs already block.
 
 #### Work Order Schema
 
@@ -662,12 +689,24 @@ uploads go through text extraction + LLM. See
 > blocker data) and `work_order_blocker_created` (emitted when the hold files a structured blocker).
 >
 > **Structured scrap reason on in-shift production reports (A0.3).**
-> `POST /shop-floor/operations/{id}/production` accepts an **optional** `scrap_reason` string — the
-> same shape and destination as the existing clock-out field (the `TimeEntry.scrap_reason` column,
+> `POST /shop-floor/operations/{id}/production` accepts a `scrap_reason` string — the
+> same shape and destination as the clock-out field (the `TimeEntry.scrap_reason` column,
 > 255 max), persisted onto the caller's **active** time entry. It is stored only when the report
 > actually carries scrap (`quantity_scrapped_delta > 0`); an omitted/`null` reason never clobbers a
 > reason recorded by an earlier in-shift report. When stored, the reason is also appended to the
 > tamper-evident `REPORT_OPERATION_PRODUCTION` audit description.
+>
+> **Scrap reason is required when scrap is reported (AS9100D defect traceability).**
+> On both `POST /shop-floor/clock-out/{id}` (`ClockOut`) and
+> `POST /shop-floor/operations/{id}/production` (`ProductionReportRequest`), `scrap_reason` is
+> **required whenever the request reports a positive scrap quantity** — `quantity_scrapped > 0` on
+> clock-out, `quantity_scrapped_delta > 0` on the production report. A missing, `null`, or
+> blank/whitespace-only reason in that case is rejected with **422 Unprocessable Entity**
+> (`"scrap_reason is required when quantity_scrapped is greater than 0"` / `"… quantity_scrapped_delta
+> is greater than 0"`). When the scrap quantity is **0**, `scrap_reason` stays **optional** and may
+> be omitted (e.g. the kiosk COMPLETE flow clocks out with zero scrap and no reason). This invariant
+> is now enforced at the data boundary, so a scripted/API client can no longer record reasonless
+> scrap that the kiosk/desktop UIs already block.
 >
 > **Completion contract.** The shop-floor `/operations/{id}/complete` shares the same finalizer as
 > the office endpoint (see "Completion contract" under Work Orders): the absolute verb stores
@@ -817,6 +856,10 @@ let a supervisor sign off on shop-floor labor (G5-A). Approve sets `approved` (t
   "notes": "Replaced drill bit, resumed operation"
 }
 ```
+
+> `scrap_reason` is **required when `quantity_scrapped` > 0** (a missing/blank reason then returns
+> **422**); it stays optional when no scrap is reported. See "Scrap reason is required when scrap is
+> reported" under the shop-floor notes above.
 
 ### Scanner (QR / barcode)
 
