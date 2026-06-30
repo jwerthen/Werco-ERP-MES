@@ -473,8 +473,12 @@ export default function AdminSettings() {
 
       {/* Delete Confirmation */}
       {deleteConfirm && (
-        <div className="modal-overlay" onClick={() => setDeleteConfirm(null)}>
-          <div className="modal max-w-md" onClick={e => e.stopPropagation()}>
+        <div
+          className="modal-overlay"
+          role="presentation"
+          onClick={(e) => { if (e.target === e.currentTarget) setDeleteConfirm(null); }}
+        >
+          <div className="modal max-w-md">
             <div className="modal-header">
               <h3 className="text-lg font-semibold">Confirm Deactivation</h3>
               <button onClick={() => setDeleteConfirm(null)} className="p-2 rounded-lg hover:bg-surface-100">
@@ -1043,8 +1047,12 @@ function EmployeeModal({
   };
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal max-w-md" onClick={(e) => e.stopPropagation()}>
+    <div
+      className="modal-overlay"
+      role="presentation"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div className="modal max-w-md">
         <div className="modal-header">
           <h3 className="text-lg font-semibold">
             {employee ? 'Edit Employee' : 'Add Employee'}
@@ -1340,8 +1348,12 @@ function EditModal({ type, item, onSave, onClose }: { type: string; item: any; o
   };
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal max-w-lg" onClick={e => e.stopPropagation()}>
+    <div
+      className="modal-overlay"
+      role="presentation"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div className="modal max-w-lg">
         <div className="modal-header">
           <h3 className="text-lg font-semibold">{item ? 'Edit' : 'Add'} {type.charAt(0).toUpperCase() + type.slice(1)}</h3>
           <button onClick={onClose} className="p-2 rounded-lg hover:bg-surface-100">

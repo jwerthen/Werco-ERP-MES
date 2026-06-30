@@ -175,10 +175,15 @@ export function Modal({
     .join(' ');
 
   const overlay = (
+    // The backdrop is purely presentational — keyboard users dismiss via Escape
+    // (wired in the effect above) and the in-panel close control. Restricting the
+    // close to clicks that land directly on the backdrop (target === currentTarget)
+    // replaces the panel-level stopPropagation handler.
     <div
       className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4"
-      onClick={() => {
-        if (closeOnBackdrop) onClose();
+      role="presentation"
+      onClick={(e) => {
+        if (closeOnBackdrop && e.target === e.currentTarget) onClose();
       }}
     >
       <div
@@ -188,7 +193,6 @@ export function Modal({
         aria-modal="true"
         aria-labelledby={ariaLabelledBy}
         tabIndex={-1}
-        onClick={(e) => e.stopPropagation()}
       >
         {children}
       </div>

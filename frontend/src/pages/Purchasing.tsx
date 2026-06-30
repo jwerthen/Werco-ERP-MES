@@ -514,7 +514,7 @@ export default function Purchasing() {
       header: 'Actions',
       align: 'center',
       render: (po) => (
-        <div className="flex items-center justify-center gap-3" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-center gap-3" role="presentation" onClick={(e) => e.stopPropagation()}>
           <button
             onClick={() => handlePrintPO(po.id)}
             className="text-surface-600 hover:text-werco-primary text-sm"
@@ -550,7 +550,7 @@ export default function Purchasing() {
         { label: 'Lines', value: <span className="tabular-nums">{po.line_count}</span> },
       ]}
       actions={
-        <div className="flex flex-wrap gap-3 justify-end" onClick={(e) => e.stopPropagation()}>
+        <div className="flex flex-wrap gap-3 justify-end" role="presentation" onClick={(e) => e.stopPropagation()}>
           <button
             onClick={() => handlePrintPO(po.id)}
             className="text-surface-600 hover:text-werco-primary text-sm"

@@ -269,8 +269,12 @@ export default function CarrierIntegrationsTab() {
       )}
 
       {deletingAccount && (
-        <div className="modal-overlay" onClick={() => setDeletingAccount(null)}>
-          <div className="modal max-w-md" onClick={(e) => e.stopPropagation()}>
+        <div
+          className="modal-overlay"
+          role="presentation"
+          onClick={(e) => { if (e.target === e.currentTarget) setDeletingAccount(null); }}
+        >
+          <div className="modal max-w-md">
             <div className="modal-header">
               <h3 className="text-lg font-semibold">Delete carrier account</h3>
               <button onClick={() => setDeletingAccount(null)} className="p-2 rounded-lg hover:bg-surface-100">
@@ -435,8 +439,12 @@ function CarrierAccountModal({
   };
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal max-w-2xl" onClick={(e) => e.stopPropagation()}>
+    <div
+      className="modal-overlay"
+      role="presentation"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div className="modal max-w-2xl">
         <div className="modal-header">
           <h3 className="text-lg font-semibold">{isEdit ? 'Edit Carrier Account' : 'Add Carrier Account'}</h3>
           <button onClick={onClose} className="p-2 rounded-lg hover:bg-surface-100">

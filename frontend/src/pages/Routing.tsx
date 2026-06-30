@@ -674,7 +674,16 @@ export default function RoutingPage() {
             {routings.map((routing) => (
               <div
                 key={routing.id}
+                role="button"
+                tabIndex={0}
                 onClick={() => loadRouting(routing.id)}
+                onKeyDown={(e) => {
+                  if (e.target !== e.currentTarget) return;
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    loadRouting(routing.id);
+                  }
+                }}
                 className={`p-3 rounded-lg border cursor-pointer transition-colors ${
                   selectedRouting?.id === routing.id
                     ? 'border-werco-primary bg-blue-500/10'
@@ -1078,8 +1087,17 @@ export default function RoutingPage() {
                 <div>
                   <label className="label">Drawing File</label>
                   <div
+                    role="button"
+                    tabIndex={0}
                     className="border-2 border-dashed border-slate-600 rounded-lg p-6 text-center cursor-pointer hover:border-werco-primary transition-colors"
                     onClick={() => fileInputRef.current?.click()}
+                    onKeyDown={(e) => {
+                      if (e.target !== e.currentTarget) return;
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        fileInputRef.current?.click();
+                      }
+                    }}
                   >
                     <input
                       ref={fileInputRef}

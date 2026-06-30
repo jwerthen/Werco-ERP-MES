@@ -45,10 +45,14 @@ module.exports = [
       "jsx-a11y/label-has-associated-control": "off",
       // ~630 sites; icon-only controls needing an accessible name.
       "jsx-a11y/control-has-associated-label": "off",
-      // Clickable non-interactive elements needing keyboard handlers.
-      "jsx-a11y/click-events-have-key-events": "off",
-      "jsx-a11y/no-static-element-interactions": "off",
-      "jsx-a11y/no-noninteractive-element-interactions": "off",
+
+      // Clickable non-interactive elements needing keyboard handlers —
+      // burned down to zero; now ENFORCED (clickable <div>/<span>/<li> must be a
+      // native <button>, carry a literal interactive role + tabIndex + onKeyDown,
+      // or be a presentational role="presentation" backdrop).
+      "jsx-a11y/click-events-have-key-events": "error",
+      "jsx-a11y/no-static-element-interactions": "error",
+      "jsx-a11y/no-noninteractive-element-interactions": "error",
 
       // Autofocus on the first field of create/edit forms is intentional
       // (Batch 6) — not an accessibility defect for this app.

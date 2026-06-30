@@ -591,11 +591,16 @@ export default function Layout({ children }: LayoutProps) {
       {/* Skip to main content link for accessibility */}
       <SkipLink />
 
-      {/* Mobile sidebar backdrop */}
+      {/* Mobile sidebar backdrop — purely presentational; the sidebar's Close
+          button dismisses it for keyboard users. Only direct backdrop clicks
+          close (target === currentTarget). */}
       {sidebarOpen && (
         <div
           className="fixed inset-0 z-40 bg-slate-900/60 backdrop-blur-sm lg:hidden"
-          onClick={() => setSidebarOpen(false)}
+          role="presentation"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setSidebarOpen(false);
+          }}
         />
       )}
 
@@ -897,8 +902,14 @@ export default function Layout({ children }: LayoutProps) {
 
       {/* Employee ID Logout Modal */}
       {logoutModalOpen && isShopFloorKiosk && (
-        <div className="du-modal du-modal-open" onClick={() => setLogoutModalOpen(false)}>
-          <div className="du-modal-box max-w-sm p-0 overflow-hidden" onClick={e => e.stopPropagation()}>
+        <div
+          className="du-modal du-modal-open"
+          role="presentation"
+          onClick={e => {
+            if (e.target === e.currentTarget) setLogoutModalOpen(false);
+          }}
+        >
+          <div className="du-modal-box max-w-sm p-0 overflow-hidden">
             <div className="flex items-center justify-between px-6 py-4 border-b border-base-300">
               <h3 className="text-lg font-semibold text-base-content">Sign out</h3>
               <button

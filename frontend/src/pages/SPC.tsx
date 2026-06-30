@@ -507,14 +507,15 @@ const SPC = () => {
         >
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
             {outOfControl.map((alert: any, idx: number) => (
-              <div
+              <button
+                type="button"
                 key={idx}
                 onClick={() => alert.characteristic_id && setSelectedId(alert.characteristic_id)}
-                className="p-3 bg-fd-red/10 rounded-sm border border-fd-red/30 cursor-pointer hover:bg-fd-red/20 transition-colors min-w-0"
+                className="text-left w-full p-3 bg-fd-red/10 rounded-sm border border-fd-red/30 cursor-pointer hover:bg-fd-red/20 transition-colors min-w-0"
               >
                 <p className="text-sm font-medium text-red-300 truncate">{alert.characteristic_name || `Characteristic #${alert.characteristic_id}`}</p>
                 <p className="text-xs text-fd-red mt-1 truncate">{alert.reason || alert.description || 'Out of control'}</p>
-              </div>
+              </button>
             ))}
           </div>
         </CockpitPanel>

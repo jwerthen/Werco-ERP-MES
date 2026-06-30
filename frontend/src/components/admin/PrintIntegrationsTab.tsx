@@ -287,8 +287,14 @@ export default function PrintIntegrationsTab() {
 
       {/* Explicit confirmation before enabling print egress (CUI control). */}
       {confirmEgress && (
-        <div className="modal-overlay" onClick={() => setConfirmEgress(false)}>
-          <div className="modal max-w-md" onClick={(e) => e.stopPropagation()}>
+        <div
+          className="modal-overlay"
+          role="presentation"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setConfirmEgress(false);
+          }}
+        >
+          <div className="modal max-w-md">
             <div className="modal-header">
               <h3 className="text-lg font-semibold flex items-center gap-2">
                 <ExclamationTriangleIcon className="h-5 w-5 text-amber-500" />

@@ -31,19 +31,16 @@ export function MobileDataCard({
 }: MobileDataCardProps) {
   const isClickable = !!onClick;
 
-  return (
-    <div
-      className={`
+  const wrapperClass = `
         bg-fd-panel rounded-xl border border-slate-700 overflow-hidden
         ${highlight ? 'ring-2 ring-werco-navy-600 ring-offset-2 ring-offset-[#0d1117]' : ''}
         ${isClickable ? 'cursor-pointer active:bg-slate-800 active:scale-[0.99]' : ''}
         transition-all duration-200
         ${className}
-      `}
-      onClick={onClick}
-      role={isClickable ? 'button' : undefined}
-      tabIndex={isClickable ? 0 : undefined}
-    >
+      `;
+
+  const cardBody = (
+    <>
       {/* Header */}
       <div className="px-4 py-3 border-b border-slate-700/30 flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
@@ -83,8 +80,35 @@ export function MobileDataCard({
           {actions}
         </div>
       )}
-    </div>
+    </>
   );
+
+  // A literal role="button" (not a dynamic ternary) is required for the keyboard
+  // contract to be statically verifiable; the card holds interactive children
+  // (actions), so it can't be a native <button>.
+  if (isClickable) {
+    return (
+      <div
+        className={wrapperClass}
+        role="button"
+        tabIndex={0}
+        onClick={onClick}
+        onKeyDown={(e) => {
+          // Only activate when the card itself is focused — keystrokes bubbling up
+          // from focusable children (action buttons) must reach those controls.
+          if (e.target !== e.currentTarget) return;
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            onClick?.();
+          }
+        }}
+      >
+        {cardBody}
+      </div>
+    );
+  }
+
+  return <div className={wrapperClass}>{cardBody}</div>;
 }
 
 interface MobileDataListProps {

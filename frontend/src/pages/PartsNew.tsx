@@ -874,7 +874,16 @@ export default function PartsPage() {
           {filteredParts.map(part => (
             <div
               key={part.id}
+              role="button"
+              tabIndex={0}
               onClick={() => navigate(`/parts/${part.id}`)}
+              onKeyDown={(e) => {
+                if (e.target !== e.currentTarget) return;
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  navigate(`/parts/${part.id}`);
+                }
+              }}
               className="card cursor-pointer hover:shadow-md hover:border-werco-navy-200 transition-all border border-slate-700 p-4"
             >
               <div className="flex items-start justify-between mb-2">

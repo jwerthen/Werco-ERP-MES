@@ -762,7 +762,13 @@ export default function OEE() {
               </div>
             </form>
           </div>
-          <div className="modal-backdrop" onClick={() => setShowAddModal(false)}></div>
+          <div
+            className="modal-backdrop"
+            role="presentation"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setShowAddModal(false);
+            }}
+          ></div>
         </div>
       )}
     </div>

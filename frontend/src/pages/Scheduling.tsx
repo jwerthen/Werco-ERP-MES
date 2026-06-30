@@ -1157,9 +1157,17 @@ export default function Scheduling() {
                                 <div
                                   key={job.work_order_id}
                                   draggable
+                                  role="button"
+                                  tabIndex={0}
                                   onDragStart={(e) => handleDragStart(e, job)}
                                   onDragEnd={handleDragEnd}
                                   onClick={() => openScheduleModal(job)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter' || e.key === ' ') {
+                                      e.preventDefault();
+                                      openScheduleModal(job);
+                                    }
+                                  }}
                                   className={`text-xs p-1.5 rounded cursor-move hover:opacity-90 border-l-4 shadow-sm ${
                                     priorityColors[job.priority] || 'border-l-gray-400'
                                   } ${statusBarFill(job.operation_status || job.status)} text-white ${
@@ -1442,12 +1450,23 @@ export default function Scheduling() {
                       </div>
                     ) : (
                       <span
+                        role="button"
+                        tabIndex={0}
                         className={`cursor-pointer hover:underline ${job.scheduled_start ? 'text-white' : 'text-orange-600 italic'}`}
                         onClick={() => {
                           setInlineEditJobId(job.work_order_id);
                           setInlineEditDate(
                             job.scheduled_start ? getCentralDateStamp(job.scheduled_start) : getCentralTodayISODate()
                           );
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            setInlineEditJobId(job.work_order_id);
+                            setInlineEditDate(
+                              job.scheduled_start ? getCentralDateStamp(job.scheduled_start) : getCentralTodayISODate()
+                            );
+                          }
                         }}
                         title="Click to edit date"
                       >
