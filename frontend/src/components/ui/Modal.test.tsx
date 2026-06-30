@@ -83,6 +83,38 @@ describe('Modal', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('marks the backdrop overlay role="presentation"', () => {
+    // The overlay is purely presentational — keyboard users dismiss via Escape /
+    // the in-panel close control, so it must not be exposed as an interactive role.
+    render(
+      <Modal open onClose={jest.fn()}>
+        <p>Body</p>
+      </Modal>,
+    );
+    const overlay = screen.getByRole('dialog').parentElement!;
+    expect(overlay).toHaveAttribute('role', 'presentation');
+  });
+
+  it('does not close when the click bubbles up from the panel itself (regression: target===currentTarget gate)', () => {
+    // The panel's stopPropagation onClick was removed; the overlay now only
+    // closes for clicks landing directly on it (e.target === e.currentTarget).
+    // A click on the dialog panel bubbles to the overlay's handler, but with the
+    // panel as e.target (not e.currentTarget), so it must NOT close. This locks
+    // in the gate that replaced the removed stopPropagation.
+    const onClose = jest.fn();
+    render(
+      <Modal open onClose={onClose}>
+        <button type="button">Inside</button>
+      </Modal>,
+    );
+    // Clicking the panel element itself.
+    fireEvent.click(screen.getByRole('dialog'));
+    expect(onClose).not.toHaveBeenCalled();
+    // Clicking a nested child element also bubbles through the panel — still no close.
+    fireEvent.click(screen.getByRole('button', { name: 'Inside' }));
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
   it('does not close on backdrop click when closeOnBackdrop is false', () => {
     const onClose = jest.fn();
     render(

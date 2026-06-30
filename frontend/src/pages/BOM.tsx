@@ -694,12 +694,13 @@ export default function BOMPage() {
           <h2 className="text-lg font-semibold mb-4">BOMs</h2>
           <div className="space-y-2 max-h-96 overflow-y-auto">
             {boms.map(bom => (
-              <div
+              <button
+                type="button"
                 key={bom.id}
                 onClick={() => { setSelectedBOM(bom); setViewMode('single'); }}
-                className={`p-3 rounded-lg cursor-pointer border transition-colors ${
-                  selectedBOM?.id === bom.id 
-                    ? 'border-werco-primary bg-blue-500/10' 
+                className={`w-full text-left p-3 rounded-lg cursor-pointer border transition-colors ${
+                  selectedBOM?.id === bom.id
+                    ? 'border-werco-primary bg-blue-500/10'
                     : 'border-slate-700 hover:border-slate-600'
                 }`}
               >
@@ -719,7 +720,7 @@ export default function BOMPage() {
                 <div className="text-xs text-slate-500 mt-1">
                   Rev {bom.revision} | {bom.items.length} items
                 </div>
-              </div>
+              </button>
             ))}
             {boms.length === 0 && (
               <EmptyState

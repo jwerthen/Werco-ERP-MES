@@ -858,10 +858,11 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                     />
                   ) : (
                     openPOs.map((po) => (
-                      <div
+                      <button
+                        type="button"
                         key={po.po_id}
                         onClick={() => handleSelectPO(po)}
-                        className={`p-3 rounded-xl border-2 cursor-pointer transition-all ${
+                        className={`w-full text-left p-3 rounded-xl border-2 cursor-pointer transition-all ${
                           selectedPO?.po_id === po.po_id
                             ? 'border-werco-primary bg-werco-500/10'
                             : 'border-slate-700 hover:border-slate-600 hover:bg-slate-800'
@@ -881,7 +882,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                             Required: {formatCentralDate(po.required_date)}
                           </p>
                         )}
-                      </div>
+                      </button>
                     ))
                   )}
                 </div>

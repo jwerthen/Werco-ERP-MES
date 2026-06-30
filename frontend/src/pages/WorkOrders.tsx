@@ -125,7 +125,12 @@ function RowActionsCell({
 }) {
   // Stop propagation so action clicks don't trigger the row click-through.
   return (
-    <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+    <div
+      className="flex items-center gap-1"
+      role="presentation"
+      onClick={(e) => e.stopPropagation()}
+      onKeyDown={(e) => e.stopPropagation()}
+    >
       {onRelease && wo.status === 'draft' && (
         <button
           onClick={() => onRelease(wo)}

@@ -83,9 +83,12 @@ export default function DXFViewer({ file, analysis }: DXFViewerProps) {
         </button>
       </div>
       {expanded && (
-        <div 
-          className="fixed inset-0 bg-black/50 -z-10" 
-          onClick={() => setExpanded(false)}
+        <div
+          role="presentation"
+          className="fixed inset-0 bg-black/50 -z-10"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setExpanded(false);
+          }}
         />
       )}
       <canvas

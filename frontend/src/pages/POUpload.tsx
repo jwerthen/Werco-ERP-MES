@@ -430,6 +430,9 @@ export default function POUpload() {
               Vendor Quote
             </button>
           </div>
+          {/* Drag-and-drop is a pointer-only enhancement: keyboard/AT users use
+              the "Browse Files" file input inside this zone, so the dropzone
+              itself is presentational rather than a focusable interactive element. */}
           <div
             className={`border-2 border-dashed rounded-xl p-12 text-center transition-colors ${
               dragActive
@@ -438,6 +441,7 @@ export default function POUpload() {
                   ? 'border-green-500/50 bg-green-500/10'
                   : 'border-slate-600 hover:border-gray-400'
             }`}
+            role="presentation"
             onDragEnter={handleDrag}
             onDragLeave={handleDrag}
             onDragOver={handleDrag}

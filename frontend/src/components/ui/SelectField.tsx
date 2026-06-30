@@ -161,11 +161,12 @@ export function SelectField<TValue extends string | number = string | number>({
   };
 
   return (
-    <div ref={containerRef} className={`relative ${className}`} onKeyDown={handleKeyDown}>
+    <div ref={containerRef} className={`relative ${className}`}>
       <button
         ref={buttonRef}
         type="button"
         disabled={disabled}
+        onKeyDown={handleKeyDown}
         onClick={() => {
           if (!disabled) setOpen((current) => !current);
         }}
@@ -193,6 +194,9 @@ export function SelectField<TValue extends string | number = string | number>({
                 ref={searchRef}
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
+                // The popup is portaled to document.body, so keystrokes here do not
+                // bubble to the trigger button; handle arrow/enter/escape nav here too.
+                onKeyDown={handleKeyDown}
                 className="w-full bg-slate-950/40 py-2.5 pl-9 pr-3 text-sm text-slate-100 outline-none placeholder:text-slate-500"
                 placeholder="Search..."
               />

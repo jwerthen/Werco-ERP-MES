@@ -837,7 +837,13 @@ export default function DowntimeTracking() {
               </div>
             </form>
           </div>
-          <div className="modal-backdrop" onClick={() => setShowNewModal(false)}></div>
+          <div
+            className="modal-backdrop"
+            role="presentation"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setShowNewModal(false);
+            }}
+          ></div>
         </div>
       )}
 
@@ -879,7 +885,13 @@ export default function DowntimeTracking() {
               </div>
             </form>
           </div>
-          <div className="modal-backdrop" onClick={() => setShowResolveModal(false)}></div>
+          <div
+            className="modal-backdrop"
+            role="presentation"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setShowResolveModal(false);
+            }}
+          ></div>
         </div>
       )}
     </div>

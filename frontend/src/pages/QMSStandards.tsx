@@ -434,10 +434,11 @@ export default function QMSStandards() {
           ) : (
             <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
               {standards.map(std => (
-                <div
+                <button
+                  type="button"
                   key={std.id}
                   onClick={() => loadStandardDetail(std.id)}
-                  className="card card-compact !p-3 min-w-0 cursor-pointer hover:border-fd-line-bright transition-colors"
+                  className="card card-compact !p-3 min-w-0 cursor-pointer hover:border-fd-line-bright transition-colors text-left w-full block"
                 >
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
@@ -471,7 +472,7 @@ export default function QMSStandards() {
                       <p className="text-xs text-slate-400 mt-1 tabular-nums">{std.total_clauses} clauses</p>
                     </div>
                   )}
-                </div>
+                </button>
               ))}
             </div>
           )}
@@ -793,7 +794,11 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
         </div>
         {children}
       </div>
-      <div className="modal-backdrop" onClick={onClose}></div>
+      <div
+        className="modal-backdrop"
+        role="presentation"
+        onClick={e => { if (e.target === e.currentTarget) onClose(); }}
+      ></div>
     </div>
   );
 }
@@ -835,7 +840,10 @@ function ClauseRow({
       {/* Clause Header */}
       <div
         className="flex items-center gap-3 p-3 cursor-pointer hover:bg-fd-raised"
+        role="button"
+        tabIndex={0}
         onClick={() => setExpanded(!expanded)}
+        onKeyDown={e => { if (e.target !== e.currentTarget) return; if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded(!expanded); } }}
       >
         <span className="text-xs font-mono font-bold text-slate-400 w-16 shrink-0">
           {clause.clause_number}

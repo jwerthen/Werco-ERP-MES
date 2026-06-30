@@ -182,7 +182,7 @@ interface RowActionHandlers {
 function EcoRowActions({ eco, h }: { eco: ECO; h: RowActionHandlers }) {
   const busy = h.actionLoading === eco.id;
   return (
-    <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+    <div className="flex items-center gap-1" role="presentation" onClick={(e) => e.stopPropagation()}>
       {eco.status === 'draft' && (
         <button
           onClick={() => h.onSubmit(eco.id)}

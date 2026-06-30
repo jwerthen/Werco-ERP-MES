@@ -122,7 +122,10 @@ export default function TourMenu() {
           {/* Backdrop */}
           <div
             className="fixed inset-0 z-40"
-            onClick={() => setIsOpen(false)}
+            role="presentation"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setIsOpen(false);
+            }}
           />
 
           {/* Menu */}

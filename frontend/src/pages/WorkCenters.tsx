@@ -197,10 +197,13 @@ export default function WorkCenters() {
     {} as Record<string, number>
   );
 
-  // Inline status-change control — preserved from the cockpit layout. Stops row
-  // click-through so changing status never navigates / triggers an edit.
+  // Inline status-change control — preserved from the cockpit layout. The wrapper
+  // is purely presentational: its only job is to stop row click-through so changing
+  // status never navigates / triggers an edit. Keyboard users operate the <select>
+  // inside it directly, so role="presentation" (no focus/keyboard handler of its own)
+  // is the accurate a11y shape here.
   const renderStatusCell = (wc: WorkCenter) => (
-    <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+    <div className="flex items-center gap-2" role="presentation" onClick={(e) => e.stopPropagation()}>
       <span
         className={`h-2 w-2 flex-shrink-0 rounded-full ${statusDotColor[statusVariant(wc.current_status)]}`}
         aria-hidden="true"

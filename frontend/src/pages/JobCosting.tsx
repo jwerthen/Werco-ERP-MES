@@ -885,7 +885,13 @@ export default function JobCosting() {
               </div>
             </form>
           </div>
-          <div className="du-modal-backdrop" onClick={() => setShowCreateModal(false)} />
+          <div
+            className="du-modal-backdrop"
+            role="presentation"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setShowCreateModal(false);
+            }}
+          />
         </div>
       )}
 
@@ -1032,7 +1038,13 @@ export default function JobCosting() {
               </div>
             </form>
           </div>
-          <div className="du-modal-backdrop" onClick={() => setShowEntryModal(false)} />
+          <div
+            className="du-modal-backdrop"
+            role="presentation"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setShowEntryModal(false);
+            }}
+          />
         </div>
       )}
     </div>
