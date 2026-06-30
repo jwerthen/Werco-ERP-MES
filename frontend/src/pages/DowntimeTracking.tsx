@@ -31,6 +31,7 @@ import {
   DataTable,
   DataTableColumn,
   MobileDataCard,
+  FormField,
 } from '../components/ui';
 
 // ============== Types ==============
@@ -760,72 +761,82 @@ export default function DowntimeTracking() {
               </button>
             </div>
             <form onSubmit={handleCreateDowntime} className="space-y-4">
-              <div>
-                <label className="label"><span className="label-text font-medium">Work Center *</span></label>
-                <select
-                  className="select select-bordered w-full"
-                  value={newForm.work_center_id}
-                  onChange={(e) => setNewForm({ ...newForm, work_center_id: parseInt(e.target.value) })}
-                  required
-                >
-                  <option value={0} disabled>Select work center...</option>
-                  {workCenters.map((wc) => (
-                    <option key={wc.id} value={wc.id}>
-                      {wc.code} - {wc.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="label"><span className="label-text font-medium">Category</span></label>
+              <FormField label={<span className="label-text font-medium">Work Center</span>} required>
+                {(field) => (
                   <select
+                    {...field}
                     className="select select-bordered w-full"
-                    value={newForm.category}
-                    onChange={(e) => setNewForm({ ...newForm, category: e.target.value, reason_code: '' })}
+                    value={newForm.work_center_id}
+                    onChange={(e) => setNewForm({ ...newForm, work_center_id: parseInt(e.target.value) })}
+                    required
                   >
-                    {CATEGORIES.map((cat) => (
-                      <option key={cat.value} value={cat.value}>{cat.label}</option>
+                    <option value={0} disabled>Select work center...</option>
+                    {workCenters.map((wc) => (
+                      <option key={wc.id} value={wc.id}>
+                        {wc.code} - {wc.name}
+                      </option>
                     ))}
                   </select>
-                </div>
-                <div>
-                  <label className="label"><span className="label-text font-medium">Type</span></label>
+                )}
+              </FormField>
+              <div className="grid grid-cols-2 gap-3">
+                <FormField label={<span className="label-text font-medium">Category</span>}>
+                  {(field) => (
+                    <select
+                      {...field}
+                      className="select select-bordered w-full"
+                      value={newForm.category}
+                      onChange={(e) => setNewForm({ ...newForm, category: e.target.value, reason_code: '' })}
+                    >
+                      {CATEGORIES.map((cat) => (
+                        <option key={cat.value} value={cat.value}>{cat.label}</option>
+                      ))}
+                    </select>
+                  )}
+                </FormField>
+                <FormField label={<span className="label-text font-medium">Type</span>}>
+                  {(field) => (
+                    <select
+                      {...field}
+                      className="select select-bordered w-full"
+                      value={newForm.planned_type}
+                      onChange={(e) => setNewForm({ ...newForm, planned_type: e.target.value })}
+                    >
+                      <option value="unplanned">Unplanned</option>
+                      <option value="planned">Planned</option>
+                    </select>
+                  )}
+                </FormField>
+              </div>
+              <FormField label={<span className="label-text font-medium">Reason Code</span>}>
+                {(field) => (
                   <select
+                    {...field}
                     className="select select-bordered w-full"
-                    value={newForm.planned_type}
-                    onChange={(e) => setNewForm({ ...newForm, planned_type: e.target.value })}
+                    value={newForm.reason_code}
+                    onChange={(e) => setNewForm({ ...newForm, reason_code: e.target.value })}
                   >
-                    <option value="unplanned">Unplanned</option>
-                    <option value="planned">Planned</option>
+                    <option value="">None</option>
+                    {filteredReasonCodes.map((rc) => (
+                      <option key={rc.id} value={rc.code}>
+                        {rc.code} - {rc.name}
+                      </option>
+                    ))}
                   </select>
-                </div>
-              </div>
-              <div>
-                <label className="label"><span className="label-text font-medium">Reason Code</span></label>
-                <select
-                  className="select select-bordered w-full"
-                  value={newForm.reason_code}
-                  onChange={(e) => setNewForm({ ...newForm, reason_code: e.target.value })}
-                >
-                  <option value="">None</option>
-                  {filteredReasonCodes.map((rc) => (
-                    <option key={rc.id} value={rc.code}>
-                      {rc.code} - {rc.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="label"><span className="label-text font-medium">Description</span></label>
-                <textarea
-                  className="textarea textarea-bordered w-full"
-                  rows={3}
-                  value={newForm.description}
-                  onChange={(e) => setNewForm({ ...newForm, description: e.target.value })}
-                  placeholder="Describe the downtime reason..."
-                />
-              </div>
+                )}
+              </FormField>
+              <FormField label={<span className="label-text font-medium">Description</span>}>
+                {(field) => (
+                  <textarea
+                    {...field}
+                    className="textarea textarea-bordered w-full"
+                    rows={3}
+                    value={newForm.description}
+                    onChange={(e) => setNewForm({ ...newForm, description: e.target.value })}
+                    placeholder="Describe the downtime reason..."
+                  />
+                )}
+              </FormField>
               <div className="modal-action">
                 <button type="button" onClick={() => setShowNewModal(false)} className="btn btn-ghost">
                   Cancel
@@ -864,16 +875,18 @@ export default function DowntimeTracking() {
               <div><strong>Elapsed:</strong> {formatDuration(getElapsedMinutes(resolvingEvent.start_time))}</div>
             </div>
             <form onSubmit={handleResolve} className="space-y-4">
-              <div>
-                <label className="label"><span className="label-text font-medium">Resolution Notes</span></label>
-                <textarea
-                  className="textarea textarea-bordered w-full"
-                  rows={3}
-                  value={resolveForm.resolution}
-                  onChange={(e) => setResolveForm({ ...resolveForm, resolution: e.target.value })}
-                  placeholder="Describe what was done to resolve..."
-                />
-              </div>
+              <FormField label={<span className="label-text font-medium">Resolution Notes</span>}>
+                {(field) => (
+                  <textarea
+                    {...field}
+                    className="textarea textarea-bordered w-full"
+                    rows={3}
+                    value={resolveForm.resolution}
+                    onChange={(e) => setResolveForm({ ...resolveForm, resolution: e.target.value })}
+                    placeholder="Describe what was done to resolve..."
+                  />
+                )}
+              </FormField>
               <div className="modal-action">
                 <button type="button" onClick={() => setShowResolveModal(false)} className="btn btn-ghost">
                   Cancel

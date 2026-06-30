@@ -19,6 +19,7 @@ import {
   MobileDataCard,
   StatusBadge,
   Button,
+  FormField,
 } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
@@ -726,103 +727,123 @@ export default function EngineeringChanges() {
               </button>
             </div>
             <form onSubmit={handleCreate} className="space-y-4 px-6 py-4 max-h-[70vh] overflow-y-auto">
-              <div>
-                <label className="block text-sm font-medium text-slate-300">Title *</label>
-                <input
-                  type="text"
-                  required
-                  value={createForm.title}
-                  onChange={(e) => setCreateForm((f) => ({ ...f, title: e.target.value }))}
-                  className="mt-1 block w-full rounded-md border border-slate-600 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
-                />
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-slate-300">Type *</label>
-                  <select
-                    value={createForm.eco_type}
-                    onChange={(e) => setCreateForm((f) => ({ ...f, eco_type: e.target.value as ECOType }))}
-                    className="mt-1 block w-full rounded-md border border-slate-600 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
-                  >
-                    {Object.entries(typeLabel).map(([k, v]) => (
-                      <option key={k} value={k}>{v}</option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-300">Priority</label>
-                  <select
-                    value={createForm.priority}
-                    onChange={(e) => setCreateForm((f) => ({ ...f, priority: e.target.value as ECOPriority }))}
-                    className="mt-1 block w-full rounded-md border border-slate-600 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
-                  >
-                    {Object.entries(priorityLabel).map(([k, v]) => (
-                      <option key={k} value={k}>{v}</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-300">Description *</label>
-                <textarea
-                  required
-                  rows={3}
-                  value={createForm.description}
-                  onChange={(e) => setCreateForm((f) => ({ ...f, description: e.target.value }))}
-                  className="mt-1 block w-full rounded-md border border-slate-600 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-300">Reason for Change *</label>
-                <textarea
-                  required
-                  rows={2}
-                  value={createForm.reason_for_change}
-                  onChange={(e) => setCreateForm((f) => ({ ...f, reason_for_change: e.target.value }))}
-                  className="mt-1 block w-full rounded-md border border-slate-600 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-300">Proposed Solution</label>
-                <textarea
-                  rows={2}
-                  value={createForm.proposed_solution}
-                  onChange={(e) => setCreateForm((f) => ({ ...f, proposed_solution: e.target.value }))}
-                  className="mt-1 block w-full rounded-md border border-slate-600 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-300">Affected Part IDs</label>
-                <input
-                  type="text"
-                  placeholder="e.g. 1, 2, 3"
-                  value={createForm.affected_parts}
-                  onChange={(e) => setCreateForm((f) => ({ ...f, affected_parts: e.target.value }))}
-                  className="mt-1 block w-full rounded-md border border-slate-600 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
-                />
-                <p className="mt-1 text-xs text-slate-500">Comma-separated part IDs</p>
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-slate-300">Estimated Cost</label>
+              <FormField label="Title" required labelClassName="block text-sm font-medium text-slate-300">
+                {(field) => (
                   <input
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    value={createForm.estimated_cost}
-                    onChange={(e) => setCreateForm((f) => ({ ...f, estimated_cost: parseFloat(e.target.value) || 0 }))}
+                    {...field}
+                    type="text"
+                    required
+                    value={createForm.title}
+                    onChange={(e) => setCreateForm((f) => ({ ...f, title: e.target.value }))}
                     className="mt-1 block w-full rounded-md border border-slate-600 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
                   />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-300">Target Date</label>
-                  <input
-                    type="date"
-                    value={createForm.target_date}
-                    onChange={(e) => setCreateForm((f) => ({ ...f, target_date: e.target.value }))}
+                )}
+              </FormField>
+              <div className="grid grid-cols-2 gap-4">
+                <FormField label="Type" required labelClassName="block text-sm font-medium text-slate-300">
+                  {(field) => (
+                    <select
+                      {...field}
+                      value={createForm.eco_type}
+                      onChange={(e) => setCreateForm((f) => ({ ...f, eco_type: e.target.value as ECOType }))}
+                      className="mt-1 block w-full rounded-md border border-slate-600 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
+                    >
+                      {Object.entries(typeLabel).map(([k, v]) => (
+                        <option key={k} value={k}>{v}</option>
+                      ))}
+                    </select>
+                  )}
+                </FormField>
+                <FormField label="Priority" labelClassName="block text-sm font-medium text-slate-300">
+                  {(field) => (
+                    <select
+                      {...field}
+                      value={createForm.priority}
+                      onChange={(e) => setCreateForm((f) => ({ ...f, priority: e.target.value as ECOPriority }))}
+                      className="mt-1 block w-full rounded-md border border-slate-600 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
+                    >
+                      {Object.entries(priorityLabel).map(([k, v]) => (
+                        <option key={k} value={k}>{v}</option>
+                      ))}
+                    </select>
+                  )}
+                </FormField>
+              </div>
+              <FormField label="Description" required labelClassName="block text-sm font-medium text-slate-300">
+                {(field) => (
+                  <textarea
+                    {...field}
+                    required
+                    rows={3}
+                    value={createForm.description}
+                    onChange={(e) => setCreateForm((f) => ({ ...f, description: e.target.value }))}
                     className="mt-1 block w-full rounded-md border border-slate-600 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
                   />
-                </div>
+                )}
+              </FormField>
+              <FormField label="Reason for Change" required labelClassName="block text-sm font-medium text-slate-300">
+                {(field) => (
+                  <textarea
+                    {...field}
+                    required
+                    rows={2}
+                    value={createForm.reason_for_change}
+                    onChange={(e) => setCreateForm((f) => ({ ...f, reason_for_change: e.target.value }))}
+                    className="mt-1 block w-full rounded-md border border-slate-600 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
+                  />
+                )}
+              </FormField>
+              <FormField label="Proposed Solution" labelClassName="block text-sm font-medium text-slate-300">
+                {(field) => (
+                  <textarea
+                    {...field}
+                    rows={2}
+                    value={createForm.proposed_solution}
+                    onChange={(e) => setCreateForm((f) => ({ ...f, proposed_solution: e.target.value }))}
+                    className="mt-1 block w-full rounded-md border border-slate-600 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
+                  />
+                )}
+              </FormField>
+              <FormField label="Affected Part IDs" labelClassName="block text-sm font-medium text-slate-300">
+                {(field) => (
+                  <>
+                    <input
+                      {...field}
+                      type="text"
+                      placeholder="e.g. 1, 2, 3"
+                      value={createForm.affected_parts}
+                      onChange={(e) => setCreateForm((f) => ({ ...f, affected_parts: e.target.value }))}
+                      className="mt-1 block w-full rounded-md border border-slate-600 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
+                    />
+                    <p className="mt-1 text-xs text-slate-500">Comma-separated part IDs</p>
+                  </>
+                )}
+              </FormField>
+              <div className="grid grid-cols-2 gap-4">
+                <FormField label="Estimated Cost" labelClassName="block text-sm font-medium text-slate-300">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      value={createForm.estimated_cost}
+                      onChange={(e) => setCreateForm((f) => ({ ...f, estimated_cost: parseFloat(e.target.value) || 0 }))}
+                      className="mt-1 block w-full rounded-md border border-slate-600 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
+                    />
+                  )}
+                </FormField>
+                <FormField label="Target Date" labelClassName="block text-sm font-medium text-slate-300">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="date"
+                      value={createForm.target_date}
+                      onChange={(e) => setCreateForm((f) => ({ ...f, target_date: e.target.value }))}
+                      className="mt-1 block w-full rounded-md border border-slate-600 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
+                    />
+                  )}
+                </FormField>
               </div>
               <div className="flex justify-end gap-3 border-t pt-4">
                 <Button variant="secondary" onClick={() => setShowCreateModal(false)}>
@@ -952,16 +973,18 @@ export default function EngineeringChanges() {
               </button>
             </div>
             <div className="space-y-4 px-6 py-4">
-              <div>
-                <label className="block text-sm font-medium text-slate-300">Rejection Comments</label>
-                <textarea
-                  rows={3}
-                  value={rejectComments}
-                  onChange={(e) => setRejectComments(e.target.value)}
-                  placeholder="Reason for rejection..."
-                  className="mt-1 block w-full rounded-md border border-slate-600 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
-                />
-              </div>
+              <FormField label="Rejection Comments" labelClassName="block text-sm font-medium text-slate-300">
+                {(field) => (
+                  <textarea
+                    {...field}
+                    rows={3}
+                    value={rejectComments}
+                    onChange={(e) => setRejectComments(e.target.value)}
+                    placeholder="Reason for rejection..."
+                    className="mt-1 block w-full rounded-md border border-slate-600 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
+                  />
+                )}
+              </FormField>
               <div className="flex justify-end gap-3">
                 <Button variant="secondary" onClick={() => setShowRejectModal(false)}>
                   Cancel

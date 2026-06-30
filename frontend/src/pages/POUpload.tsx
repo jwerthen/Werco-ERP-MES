@@ -1,6 +1,7 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../services/api';
+import { FormField } from '../components/ui/FormField';
 import {
   CloudArrowUpIcon,
   DocumentIcon,
@@ -616,50 +617,58 @@ export default function POUpload() {
           <div className="card">
             <h3 className="font-semibold mb-4">PO Information</h3>
             <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">
-                  PO Number <span className="text-red-500">*</span>
-                </label>
-                <input
-                  type="text"
-                  value={formData.po_number}
-                  onChange={(e) => setFormData({ ...formData, po_number: e.target.value })}
-                  className={`input w-full ${extractionResult?.po_number_exists ? 'border-red-500/40' : ''}`}
-                />
-                {extractionResult?.po_number_exists && (
-                  <p className="text-xs text-red-600 mt-1">This PO number already exists</p>
+              <FormField label="PO Number" required labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                {(field) => (
+                  <>
+                    <input
+                      {...field}
+                      type="text"
+                      value={formData.po_number}
+                      onChange={(e) => setFormData({ ...formData, po_number: e.target.value })}
+                      className={`input w-full ${extractionResult?.po_number_exists ? 'border-red-500/40' : ''}`}
+                    />
+                    {extractionResult?.po_number_exists && (
+                      <p className="text-xs text-red-600 mt-1">This PO number already exists</p>
+                    )}
+                    {extractionResult?.document_type === 'quote' && extractionResult?.quote_number && (
+                      <p className="text-xs text-slate-400 mt-1">Quote #: {extractionResult.quote_number}</p>
+                    )}
+                  </>
                 )}
-                {extractionResult?.document_type === 'quote' && extractionResult?.quote_number && (
-                  <p className="text-xs text-slate-400 mt-1">Quote #: {extractionResult.quote_number}</p>
+              </FormField>
+              <FormField label="Order Date" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                {(field) => (
+                  <input
+                    {...field}
+                    type="date"
+                    value={formData.order_date}
+                    onChange={(e) => setFormData({ ...formData, order_date: e.target.value })}
+                    className="input w-full"
+                  />
                 )}
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Order Date</label>
-                <input
-                  type="date"
-                  value={formData.order_date}
-                  onChange={(e) => setFormData({ ...formData, order_date: e.target.value })}
-                  className="input w-full"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Required Date</label>
-                <input
-                  type="date"
-                  value={formData.required_date}
-                  onChange={(e) => setFormData({ ...formData, required_date: e.target.value })}
-                  className="input w-full"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Expected Delivery</label>
-                <input
-                  type="date"
-                  value={formData.expected_date}
-                  onChange={(e) => setFormData({ ...formData, expected_date: e.target.value })}
-                  className="input w-full"
-                />
-              </div>
+              </FormField>
+              <FormField label="Required Date" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                {(field) => (
+                  <input
+                    {...field}
+                    type="date"
+                    value={formData.required_date}
+                    onChange={(e) => setFormData({ ...formData, required_date: e.target.value })}
+                    className="input w-full"
+                  />
+                )}
+              </FormField>
+              <FormField label="Expected Delivery" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                {(field) => (
+                  <input
+                    {...field}
+                    type="date"
+                    value={formData.expected_date}
+                    onChange={(e) => setFormData({ ...formData, expected_date: e.target.value })}
+                    className="input w-full"
+                  />
+                )}
+              </FormField>
             </div>
           </div>
 
@@ -757,35 +766,41 @@ export default function POUpload() {
                   </button>
                 </div>
                 <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-sm font-medium text-slate-300 mb-1">Name *</label>
+                  <FormField label="Name" required labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                    {(field) => (
+                      <input
+                        {...field}
+                        type="text"
+                        value={formData.new_vendor_name}
+                        onChange={(e) => setFormData({ ...formData, new_vendor_name: e.target.value })}
+                        className="input w-full"
+                      />
+                    )}
+                  </FormField>
+                  <FormField label="Code" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                    {(field) => (
+                      <input
+                        {...field}
+                        type="text"
+                        value={formData.new_vendor_code}
+                        onChange={(e) => setFormData({ ...formData, new_vendor_code: e.target.value })}
+                        className="input w-full"
+                        placeholder="Auto-generated if blank"
+                      />
+                    )}
+                  </FormField>
+                </div>
+                <FormField label="Address" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                  {(field) => (
                     <input
+                      {...field}
                       type="text"
-                      value={formData.new_vendor_name}
-                      onChange={(e) => setFormData({ ...formData, new_vendor_name: e.target.value })}
+                      value={formData.new_vendor_address}
+                      onChange={(e) => setFormData({ ...formData, new_vendor_address: e.target.value })}
                       className="input w-full"
                     />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-slate-300 mb-1">Code</label>
-                    <input
-                      type="text"
-                      value={formData.new_vendor_code}
-                      onChange={(e) => setFormData({ ...formData, new_vendor_code: e.target.value })}
-                      className="input w-full"
-                      placeholder="Auto-generated if blank"
-                    />
-                  </div>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-1">Address</label>
-                  <input
-                    type="text"
-                    value={formData.new_vendor_address}
-                    onChange={(e) => setFormData({ ...formData, new_vendor_address: e.target.value })}
-                    className="input w-full"
-                  />
-                </div>
+                  )}
+                </FormField>
               </div>
             )}
 
@@ -823,52 +838,62 @@ export default function POUpload() {
                   </div>
 
                   <div className="grid grid-cols-3 gap-4 mb-3">
-                    <div>
-                      <label className="block text-xs text-slate-400 mb-1">Part Number</label>
-                      <input
-                        type="text"
-                        value={item.part_number}
-                        onChange={(e) => setLineItems(prev => prev.map((it, i) =>
-                          i === idx ? { ...it, part_number: e.target.value } : it
-                        ))}
-                        className="input w-full text-sm"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs text-slate-400 mb-1">Quantity</label>
-                      <input
-                        type="number"
-                        value={item.qty_ordered}
-                        onChange={(e) => setLineItems(prev => prev.map((it, i) =>
-                          i === idx ? { ...it, qty_ordered: parseFloat(e.target.value) || 0 } : it
-                        ))}
-                        className="input w-full text-sm"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs text-slate-400 mb-1">Unit Price</label>
-                      <input
-                        type="number"
-                        step="0.01"
-                        value={item.unit_price}
-                        onChange={(e) => setLineItems(prev => prev.map((it, i) =>
-                          i === idx ? { ...it, unit_price: parseFloat(e.target.value) || 0 } : it
-                        ))}
-                        className="input w-full text-sm"
-                      />
-                    </div>
+                    <FormField label="Part Number" labelClassName="block text-xs text-slate-400 mb-1">
+                      {(field) => (
+                        <input
+                          {...field}
+                          type="text"
+                          value={item.part_number}
+                          onChange={(e) => setLineItems(prev => prev.map((it, i) =>
+                            i === idx ? { ...it, part_number: e.target.value } : it
+                          ))}
+                          className="input w-full text-sm"
+                        />
+                      )}
+                    </FormField>
+                    <FormField label="Quantity" labelClassName="block text-xs text-slate-400 mb-1">
+                      {(field) => (
+                        <input
+                          {...field}
+                          type="number"
+                          value={item.qty_ordered}
+                          onChange={(e) => setLineItems(prev => prev.map((it, i) =>
+                            i === idx ? { ...it, qty_ordered: parseFloat(e.target.value) || 0 } : it
+                          ))}
+                          className="input w-full text-sm"
+                        />
+                      )}
+                    </FormField>
+                    <FormField label="Unit Price" labelClassName="block text-xs text-slate-400 mb-1">
+                      {(field) => (
+                        <input
+                          {...field}
+                          type="number"
+                          step="0.01"
+                          value={item.unit_price}
+                          onChange={(e) => setLineItems(prev => prev.map((it, i) =>
+                            i === idx ? { ...it, unit_price: parseFloat(e.target.value) || 0 } : it
+                          ))}
+                          className="input w-full text-sm"
+                        />
+                      )}
+                    </FormField>
                   </div>
 
                   <div className="mb-3">
-                    <label className="block text-xs text-slate-400 mb-1">Description</label>
-                    <input
-                      type="text"
-                      value={item.description}
-                      onChange={(e) => setLineItems(prev => prev.map((it, i) =>
-                        i === idx ? { ...it, description: e.target.value } : it
-                      ))}
-                      className="input w-full text-sm"
-                    />
+                    <FormField label="Description" labelClassName="block text-xs text-slate-400 mb-1">
+                      {(field) => (
+                        <input
+                          {...field}
+                          type="text"
+                          value={item.description}
+                          onChange={(e) => setLineItems(prev => prev.map((it, i) =>
+                            i === idx ? { ...it, description: e.target.value } : it
+                          ))}
+                          className="input w-full text-sm"
+                        />
+                      )}
+                    </FormField>
                   </div>
 
                   {/* Part Matching */}

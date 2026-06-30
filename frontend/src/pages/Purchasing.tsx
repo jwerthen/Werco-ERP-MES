@@ -15,6 +15,7 @@ import {
   Button,
   EmptyState,
   ErrorState,
+  FormField,
   StatusBadge,
   useToast,
   DataTable,
@@ -760,9 +761,10 @@ export default function Purchasing() {
             <h3 className="text-lg font-semibold mb-4">Create Purchase Order</h3>
             <form onSubmit={handleCreatePO} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Vendor *</label>
+                <FormField label="Vendor" required>
+                  {(field) => (
                   <select
+                    {...field}
                     value={newPO.vendor_id}
                     onChange={(e) => setNewPO({ ...newPO, vendor_id: parseInt(e.target.value) })}
                     className="input"
@@ -773,21 +775,24 @@ export default function Purchasing() {
                       <option key={v.id} value={v.id}>{v.code} - {v.name}</option>
                     ))}
                   </select>
-                </div>
-                <div>
-                  <label className="label">Required Date</label>
+                  )}
+                </FormField>
+                <FormField label="Required Date">
+                  {(field) => (
                   <input
+                    {...field}
                     type="date"
                     value={newPO.required_date}
                     onChange={(e) => setNewPO({ ...newPO, required_date: e.target.value })}
                     className="input"
                   />
-                </div>
+                  )}
+                </FormField>
               </div>
 
               <div>
                 <div className="flex justify-between items-center mb-2">
-                  <label className="label">Line Items</label>
+                  <span className="label">Line Items</span>
                   <button type="button" onClick={addPOLine} className="text-werco-primary text-sm hover:underline">
                     + Add Line
                   </button>
@@ -853,15 +858,17 @@ export default function Purchasing() {
                 )}
               </div>
 
-              <div>
-                <label className="label">Notes</label>
+              <FormField label="Notes">
+                {(field) => (
                 <textarea
+                  {...field}
                   value={newPO.notes}
                   onChange={(e) => setNewPO({ ...newPO, notes: e.target.value })}
                   className="input"
                   rows={2}
                 />
-              </div>
+                )}
+              </FormField>
 
               <div className="flex justify-end gap-3 pt-4 border-t">
                 <Button variant="secondary" onClick={() => setShowPOModal(false)}>Cancel</Button>
@@ -875,9 +882,10 @@ export default function Purchasing() {
             <h3 className="text-lg font-semibold mb-4">Create Vendor</h3>
             <form onSubmit={handleCreateVendor} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Code *</label>
+                <FormField label="Code" required>
+                  {(field) => (
                   <input
+                    {...field}
                     type="text"
                     value={newVendor.code}
                     onChange={(e) => setNewVendor({ ...newVendor, code: e.target.value })}
@@ -885,56 +893,67 @@ export default function Purchasing() {
                     placeholder="VND-001"
                     required
                   />
-                </div>
-                <div>
-                  <label className="label">Payment Terms</label>
+                  )}
+                </FormField>
+                <FormField label="Payment Terms">
+                  {(field) => (
                   <input
+                    {...field}
                     type="text"
                     value={newVendor.payment_terms}
                     onChange={(e) => setNewVendor({ ...newVendor, payment_terms: e.target.value })}
                     className="input"
                     placeholder="e.g., NET 30"
                   />
-                </div>
+                  )}
+                </FormField>
               </div>
-              <div>
-                <label className="label">Name *</label>
+              <FormField label="Name" required>
+                {(field) => (
                 <input
+                  {...field}
                   type="text"
                   value={newVendor.name}
                   onChange={(e) => setNewVendor({ ...newVendor, name: e.target.value })}
                   className="input"
                   required
                 />
-              </div>
-              <div>
-                <label className="label">Contact Name</label>
+                )}
+              </FormField>
+              <FormField label="Contact Name">
+                {(field) => (
                 <input
+                  {...field}
                   type="text"
                   value={newVendor.contact_name}
                   onChange={(e) => setNewVendor({ ...newVendor, contact_name: e.target.value })}
                   className="input"
                 />
-              </div>
+                )}
+              </FormField>
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Email</label>
+                <FormField label="Email">
+                  {(field) => (
                   <input
+                    {...field}
                     type="email"
                     value={newVendor.email}
                     onChange={(e) => setNewVendor({ ...newVendor, email: e.target.value })}
                     className="input"
                   />
-                </div>
-                <div>
-                  <label className="label">Phone</label>
+                  )}
+                </FormField>
+                <FormField label="Phone">
+                  {(field) => (
                   <input
+                    {...field}
                     type="text"
                     value={newVendor.phone}
                     onChange={(e) => setNewVendor({ ...newVendor, phone: e.target.value })}
                     className="input"
                   />
-                </div>
+                  )}
+                </FormField>
               </div>
               <div>
                 <label className="flex items-center">
@@ -975,118 +994,140 @@ export default function Purchasing() {
 
             <form onSubmit={handleUpdateVendor} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Vendor Name *</label>
+                <FormField label="Vendor Name" required>
+                  {(field) => (
                   <input
+                    {...field}
                     type="text"
                     value={editVendorForm.name}
                     onChange={(e) => setEditVendorForm({ ...editVendorForm, name: e.target.value })}
                     className="input"
                     required
                   />
-                </div>
-                <div>
-                  <label className="label">Payment Terms</label>
+                  )}
+                </FormField>
+                <FormField label="Payment Terms">
+                  {(field) => (
                   <input
+                    {...field}
                     type="text"
                     value={editVendorForm.payment_terms}
                     onChange={(e) => setEditVendorForm({ ...editVendorForm, payment_terms: e.target.value })}
                     className="input"
                     placeholder="e.g., NET 30"
                   />
-                </div>
+                  )}
+                </FormField>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Contact Name</label>
+                <FormField label="Contact Name">
+                  {(field) => (
                   <input
+                    {...field}
                     type="text"
                     value={editVendorForm.contact_name}
                     onChange={(e) => setEditVendorForm({ ...editVendorForm, contact_name: e.target.value })}
                     className="input"
                   />
-                </div>
-                <div>
-                  <label className="label">Email</label>
+                  )}
+                </FormField>
+                <FormField label="Email">
+                  {(field) => (
                   <input
+                    {...field}
                     type="email"
                     value={editVendorForm.email}
                     onChange={(e) => setEditVendorForm({ ...editVendorForm, email: e.target.value })}
                     className="input"
                   />
-                </div>
+                  )}
+                </FormField>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Phone</label>
+                <FormField label="Phone">
+                  {(field) => (
                   <input
+                    {...field}
                     type="text"
                     value={editVendorForm.phone}
                     onChange={(e) => setEditVendorForm({ ...editVendorForm, phone: e.target.value })}
                     className="input"
                   />
-                </div>
-                <div>
-                  <label className="label">Country</label>
+                  )}
+                </FormField>
+                <FormField label="Country">
+                  {(field) => (
                   <input
+                    {...field}
                     type="text"
                     value={editVendorForm.country}
                     onChange={(e) => setEditVendorForm({ ...editVendorForm, country: e.target.value.toUpperCase() })}
                     className="input"
                     maxLength={3}
                   />
-                </div>
+                  )}
+                </FormField>
               </div>
 
-              <div>
-                <label className="label">Address Line 1</label>
+              <FormField label="Address Line 1">
+                {(field) => (
                 <input
+                  {...field}
                   type="text"
                   value={editVendorForm.address_line1}
                   onChange={(e) => setEditVendorForm({ ...editVendorForm, address_line1: e.target.value })}
                   className="input"
                 />
-              </div>
-              <div>
-                <label className="label">Address Line 2</label>
+                )}
+              </FormField>
+              <FormField label="Address Line 2">
+                {(field) => (
                 <input
+                  {...field}
                   type="text"
                   value={editVendorForm.address_line2}
                   onChange={(e) => setEditVendorForm({ ...editVendorForm, address_line2: e.target.value })}
                   className="input"
                 />
-              </div>
+                )}
+              </FormField>
               <div className="grid grid-cols-3 gap-4">
-                <div>
-                  <label className="label">City</label>
+                <FormField label="City">
+                  {(field) => (
                   <input
+                    {...field}
                     type="text"
                     value={editVendorForm.city}
                     onChange={(e) => setEditVendorForm({ ...editVendorForm, city: e.target.value })}
                     className="input"
                   />
-                </div>
-                <div>
-                  <label className="label">State</label>
+                  )}
+                </FormField>
+                <FormField label="State">
+                  {(field) => (
                   <input
+                    {...field}
                     type="text"
                     value={editVendorForm.state}
                     onChange={(e) => setEditVendorForm({ ...editVendorForm, state: e.target.value.toUpperCase() })}
                     className="input"
                     maxLength={2}
                   />
-                </div>
-                <div>
-                  <label className="label">Postal Code</label>
+                  )}
+                </FormField>
+                <FormField label="Postal Code">
+                  {(field) => (
                   <input
+                    {...field}
                     type="text"
                     value={editVendorForm.postal_code}
                     onChange={(e) => setEditVendorForm({ ...editVendorForm, postal_code: e.target.value })}
                     className="input"
                   />
-                </div>
+                  )}
+                </FormField>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
@@ -1131,15 +1172,17 @@ export default function Purchasing() {
                 </label>
               </div>
 
-              <div>
-                <label className="label">Notes</label>
+              <FormField label="Notes">
+                {(field) => (
                 <textarea
+                  {...field}
                   value={editVendorForm.notes}
                   onChange={(e) => setEditVendorForm({ ...editVendorForm, notes: e.target.value })}
                   className="input"
                   rows={3}
                 />
-              </div>
+                )}
+              </FormField>
 
               <div className="flex justify-end gap-3 pt-4 border-t">
                 <Button variant="secondary" onClick={() => setShowEditVendorModal(false)}>
@@ -1269,9 +1312,10 @@ export default function Purchasing() {
             <h3 className="text-lg font-semibold mb-4">Add New Part</h3>
             <form onSubmit={handleCreatePart} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Part Number *</label>
+                <FormField label="Part Number" required>
+                  {(field) => (
                   <input
+                    {...field}
                     type="text"
                     value={newPart.part_number}
                     onChange={(e) => setNewPart({ ...newPart, part_number: e.target.value })}
@@ -1279,10 +1323,12 @@ export default function Purchasing() {
                     placeholder="e.g., RAW-001"
                     required
                   />
-                </div>
-                <div>
-                  <label className="label">Type</label>
+                  )}
+                </FormField>
+                <FormField label="Type">
+                  {(field) => (
                   <select
+                    {...field}
                     value={newPart.part_type}
                     onChange={(e) => setNewPart({ ...newPart, part_type: e.target.value })}
                     className="input"
@@ -1291,11 +1337,13 @@ export default function Purchasing() {
                     <option value="raw_material">Raw Material</option>
                     <option value="manufactured">Manufactured</option>
                   </select>
-                </div>
+                  )}
+                </FormField>
               </div>
-              <div>
-                <label className="label">Name *</label>
+              <FormField label="Name" required>
+                {(field) => (
                 <input
+                  {...field}
                   type="text"
                   value={newPart.name}
                   onChange={(e) => setNewPart({ ...newPart, name: e.target.value })}
@@ -1303,11 +1351,13 @@ export default function Purchasing() {
                   placeholder="Part description"
                   required
                 />
-              </div>
+                )}
+              </FormField>
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Unit of Measure</label>
+                <FormField label="Unit of Measure">
+                  {(field) => (
                   <select
+                    {...field}
                     value={newPart.unit_of_measure}
                     onChange={(e) => setNewPart({ ...newPart, unit_of_measure: e.target.value })}
                     className="input"
@@ -1321,10 +1371,12 @@ export default function Purchasing() {
                     <option value="SHT">Sheets (SHT)</option>
                     <option value="BOX">Box (BOX)</option>
                   </select>
-                </div>
-                <div>
-                  <label className="label">Unit Cost ($)</label>
+                  )}
+                </FormField>
+                <FormField label="Unit Cost ($)">
+                  {(field) => (
                   <input
+                    {...field}
                     type="number"
                     value={newPart.unit_cost}
                     onChange={(e) => setNewPart({ ...newPart, unit_cost: parseFloat(e.target.value) || 0 })}
@@ -1332,18 +1384,21 @@ export default function Purchasing() {
                     step={0.01}
                     min={0}
                   />
-                </div>
+                  )}
+                </FormField>
               </div>
-              <div>
-                <label className="label">Description</label>
+              <FormField label="Description">
+                {(field) => (
                 <textarea
+                  {...field}
                   value={newPart.description}
                   onChange={(e) => setNewPart({ ...newPart, description: e.target.value })}
                   className="input"
                   rows={2}
                   placeholder="Optional details"
                 />
-              </div>
+                )}
+              </FormField>
               <div className="flex justify-end gap-3 pt-4 border-t">
                 <Button variant="secondary" onClick={() => setShowAddPartModal(false)}>Cancel</Button>
                 <Button type="submit">Create Part</Button>

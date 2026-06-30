@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import api from '../services/api';
 import { Modal } from '../components/ui/Modal';
+import { FormField } from '../components/ui/FormField';
 import {
   useToast,
   Button,
@@ -518,108 +519,126 @@ export default function Calibration() {
             </h3>
             <form onSubmit={handleSubmit} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Equipment ID *</label>
-                  <input
-                    type="text"
-                    value={formData.equipment_id}
-                    onChange={(e) => setFormData({ ...formData, equipment_id: e.target.value })}
-                    className="input"
-                    required
-                    disabled={!!editingEquipment}
-                    placeholder="e.g., CAL-001"
-                  />
-                </div>
-                <div>
-                  <label className="label">Name *</label>
-                  <input
-                    type="text"
-                    value={formData.name}
-                    onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                    className="input"
-                    required
-                    placeholder="e.g., 6in Digital Caliper"
-                  />
-                </div>
+                <FormField label="Equipment ID" required>
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={formData.equipment_id}
+                      onChange={(e) => setFormData({ ...formData, equipment_id: e.target.value })}
+                      className="input"
+                      required
+                      disabled={!!editingEquipment}
+                      placeholder="e.g., CAL-001"
+                    />
+                  )}
+                </FormField>
+                <FormField label="Name" required>
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={formData.name}
+                      onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                      className="input"
+                      required
+                      placeholder="e.g., 6in Digital Caliper"
+                    />
+                  )}
+                </FormField>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Equipment Type</label>
-                  <select
-                    value={formData.equipment_type}
-                    onChange={(e) => setFormData({ ...formData, equipment_type: e.target.value })}
-                    className="input"
-                  >
-                    <option value="">Select type...</option>
-                    {equipmentTypes.map(t => (
-                      <option key={t} value={t}>{t}</option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="label">Calibration Interval (days)</label>
-                  <input
-                    type="number"
-                    value={formData.calibration_interval_days}
-                    onChange={(e) => setFormData({ ...formData, calibration_interval_days: parseInt(e.target.value) })}
-                    className="input"
-                    min={1}
-                  />
-                </div>
+                <FormField label="Equipment Type">
+                  {(field) => (
+                    <select
+                      {...field}
+                      value={formData.equipment_type}
+                      onChange={(e) => setFormData({ ...formData, equipment_type: e.target.value })}
+                      className="input"
+                    >
+                      <option value="">Select type...</option>
+                      {equipmentTypes.map(t => (
+                        <option key={t} value={t}>{t}</option>
+                      ))}
+                    </select>
+                  )}
+                </FormField>
+                <FormField label="Calibration Interval (days)">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="number"
+                      value={formData.calibration_interval_days}
+                      onChange={(e) => setFormData({ ...formData, calibration_interval_days: parseInt(e.target.value) })}
+                      className="input"
+                      min={1}
+                    />
+                  )}
+                </FormField>
               </div>
 
               <div className="grid grid-cols-3 gap-4">
-                <div>
-                  <label className="label">Manufacturer</label>
-                  <input
-                    type="text"
-                    value={formData.manufacturer}
-                    onChange={(e) => setFormData({ ...formData, manufacturer: e.target.value })}
-                    className="input"
-                  />
-                </div>
-                <div>
-                  <label className="label">Model</label>
-                  <input
-                    type="text"
-                    value={formData.model}
-                    onChange={(e) => setFormData({ ...formData, model: e.target.value })}
-                    className="input"
-                  />
-                </div>
-                <div>
-                  <label className="label">Serial Number</label>
-                  <input
-                    type="text"
-                    value={formData.serial_number}
-                    onChange={(e) => setFormData({ ...formData, serial_number: e.target.value })}
-                    className="input"
-                  />
-                </div>
+                <FormField label="Manufacturer">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={formData.manufacturer}
+                      onChange={(e) => setFormData({ ...formData, manufacturer: e.target.value })}
+                      className="input"
+                    />
+                  )}
+                </FormField>
+                <FormField label="Model">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={formData.model}
+                      onChange={(e) => setFormData({ ...formData, model: e.target.value })}
+                      className="input"
+                    />
+                  )}
+                </FormField>
+                <FormField label="Serial Number">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={formData.serial_number}
+                      onChange={(e) => setFormData({ ...formData, serial_number: e.target.value })}
+                      className="input"
+                    />
+                  )}
+                </FormField>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Location</label>
-                  <input
-                    type="text"
-                    value={formData.location}
-                    onChange={(e) => setFormData({ ...formData, location: e.target.value })}
-                    className="input"
-                    placeholder="e.g., QC Lab, Machine Shop"
-                  />
-                </div>
-                <div>
-                  <label className="label">Calibration Provider</label>
-                  <input
-                    type="text"
-                    value={formData.calibration_provider}
-                    onChange={(e) => setFormData({ ...formData, calibration_provider: e.target.value })}
-                    className="input"
-                    placeholder="e.g., Precision Calibration Inc."
-                  />
-                </div>
+                <FormField label="Location">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={formData.location}
+                      onChange={(e) => setFormData({ ...formData, location: e.target.value })}
+                      className="input"
+                      placeholder="e.g., QC Lab, Machine Shop"
+                    />
+                  )}
+                </FormField>
+                <FormField label="Calibration Provider">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={formData.calibration_provider}
+                      onChange={(e) => setFormData({ ...formData, calibration_provider: e.target.value })}
+                      className="input"
+                      placeholder="e.g., Precision Calibration Inc."
+                    />
+                  )}
+                </FormField>
               </div>
 
               <div className="flex justify-end gap-3 mt-6 pt-4 border-t">
@@ -638,106 +657,124 @@ export default function Calibration() {
             <h3 className="text-lg font-semibold mb-4">Record Calibration</h3>
             <form onSubmit={handleCalibration} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Calibration Date *</label>
-                  <input
-                    type="date"
-                    value={calibrationData.calibration_date}
-                    onChange={(e) => setCalibrationData({ ...calibrationData, calibration_date: e.target.value })}
-                    className="input"
-                    required
-                  />
-                </div>
-                <div>
-                  <label className="label">Result *</label>
-                  <select
-                    value={calibrationData.result}
-                    onChange={(e) => setCalibrationData({ ...calibrationData, result: e.target.value })}
-                    className="input"
-                    required
-                  >
-                    <option value="pass">Pass</option>
-                    <option value="fail">Fail</option>
-                    <option value="adjusted">Adjusted</option>
-                  </select>
-                </div>
+                <FormField label="Calibration Date" required>
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="date"
+                      value={calibrationData.calibration_date}
+                      onChange={(e) => setCalibrationData({ ...calibrationData, calibration_date: e.target.value })}
+                      className="input"
+                      required
+                    />
+                  )}
+                </FormField>
+                <FormField label="Result" required>
+                  {(field) => (
+                    <select
+                      {...field}
+                      value={calibrationData.result}
+                      onChange={(e) => setCalibrationData({ ...calibrationData, result: e.target.value })}
+                      className="input"
+                      required
+                    >
+                      <option value="pass">Pass</option>
+                      <option value="fail">Fail</option>
+                      <option value="adjusted">Adjusted</option>
+                    </select>
+                  )}
+                </FormField>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Performed By</label>
-                  <input
-                    type="text"
-                    value={calibrationData.performed_by}
-                    onChange={(e) => setCalibrationData({ ...calibrationData, performed_by: e.target.value })}
-                    className="input"
-                  />
-                </div>
-                <div>
-                  <label className="label">Certificate #</label>
-                  <input
-                    type="text"
-                    value={calibrationData.certificate_number}
-                    onChange={(e) => setCalibrationData({ ...calibrationData, certificate_number: e.target.value })}
-                    className="input"
-                  />
-                </div>
+                <FormField label="Performed By">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={calibrationData.performed_by}
+                      onChange={(e) => setCalibrationData({ ...calibrationData, performed_by: e.target.value })}
+                      className="input"
+                    />
+                  )}
+                </FormField>
+                <FormField label="Certificate #">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={calibrationData.certificate_number}
+                      onChange={(e) => setCalibrationData({ ...calibrationData, certificate_number: e.target.value })}
+                      className="input"
+                    />
+                  )}
+                </FormField>
               </div>
 
-              <div>
-                <label className="label">Calibration Provider</label>
-                <input
-                  type="text"
-                  value={calibrationData.calibration_provider}
-                  onChange={(e) => setCalibrationData({ ...calibrationData, calibration_provider: e.target.value })}
-                  className="input"
-                />
-              </div>
+              <FormField label="Calibration Provider">
+                {(field) => (
+                  <input
+                    {...field}
+                    type="text"
+                    value={calibrationData.calibration_provider}
+                    onChange={(e) => setCalibrationData({ ...calibrationData, calibration_provider: e.target.value })}
+                    className="input"
+                  />
+                )}
+              </FormField>
 
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">As Found</label>
-                  <input
-                    type="text"
-                    value={calibrationData.as_found}
-                    onChange={(e) => setCalibrationData({ ...calibrationData, as_found: e.target.value })}
-                    className="input"
-                    placeholder="Condition before cal"
-                  />
-                </div>
-                <div>
-                  <label className="label">As Left</label>
-                  <input
-                    type="text"
-                    value={calibrationData.as_left}
-                    onChange={(e) => setCalibrationData({ ...calibrationData, as_left: e.target.value })}
-                    className="input"
-                    placeholder="Condition after cal"
-                  />
-                </div>
+                <FormField label="As Found">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={calibrationData.as_found}
+                      onChange={(e) => setCalibrationData({ ...calibrationData, as_found: e.target.value })}
+                      className="input"
+                      placeholder="Condition before cal"
+                    />
+                  )}
+                </FormField>
+                <FormField label="As Left">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={calibrationData.as_left}
+                      onChange={(e) => setCalibrationData({ ...calibrationData, as_left: e.target.value })}
+                      className="input"
+                      placeholder="Condition after cal"
+                    />
+                  )}
+                </FormField>
               </div>
 
-              <div>
-                <label className="label">Cost ($)</label>
-                <input
-                  type="number"
-                  value={calibrationData.cost}
-                  onChange={(e) => setCalibrationData({ ...calibrationData, cost: parseFloat(e.target.value) || 0 })}
-                  className="input"
-                  step="0.01"
-                  min="0"
-                />
-              </div>
+              <FormField label="Cost ($)">
+                {(field) => (
+                  <input
+                    {...field}
+                    type="number"
+                    value={calibrationData.cost}
+                    onChange={(e) => setCalibrationData({ ...calibrationData, cost: parseFloat(e.target.value) || 0 })}
+                    className="input"
+                    step="0.01"
+                    min="0"
+                  />
+                )}
+              </FormField>
 
-              <div>
-                <label className="label">Notes</label>
-                <textarea
-                  value={calibrationData.notes}
-                  onChange={(e) => setCalibrationData({ ...calibrationData, notes: e.target.value })}
-                  className="input"
-                  rows={2}
-                />
-              </div>
+              <FormField label="Notes">
+                {(field) => (
+                  <textarea
+                    {...field}
+                    value={calibrationData.notes}
+                    onChange={(e) => setCalibrationData({ ...calibrationData, notes: e.target.value })}
+                    className="input"
+                    rows={2}
+                  />
+                )}
+              </FormField>
 
               <div className="flex justify-end gap-3 mt-6 pt-4 border-t">
                 <Button type="button" variant="secondary" onClick={() => setShowCalibrationModal(false)}>

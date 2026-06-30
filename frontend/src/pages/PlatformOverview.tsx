@@ -6,6 +6,7 @@ import { useCompany } from '../context/CompanyContext';
 import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
 import { Modal } from '../components/ui/Modal';
 import { EmptyState, ErrorState, useToast } from '../components/ui';
+import { FormField } from '../components/ui/FormField';
 
 interface CompanyOverview {
   id: number;
@@ -222,60 +223,72 @@ function CreateCompanyModal({
     <Modal open={open} onClose={onClose} size="md" ariaLabelledBy="create-company-title">
       <h3 id="create-company-title" className="font-bold text-lg mb-4">Add New Company</h3>
       <form onSubmit={handleSubmit} className="space-y-3">
-          <div>
-            <label className="label text-sm">Company Name</label>
-            <input
-              type="text"
-              className="input input-bordered input-sm w-full"
-              value={form.name}
-              onChange={(e) => setForm({ ...form, name: e.target.value })}
-              required
-            />
-          </div>
+          <FormField label="Company Name" required labelClassName="text-sm">
+            {(field) => (
+              <input
+                {...field}
+                type="text"
+                className="input input-bordered input-sm w-full"
+                value={form.name}
+                onChange={(e) => setForm({ ...form, name: e.target.value })}
+                required
+              />
+            )}
+          </FormField>
           <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="label text-sm">Admin First Name</label>
+            <FormField label="Admin First Name" required labelClassName="text-sm">
+              {(field) => (
+                <input
+                  {...field}
+                  type="text"
+                  className="input input-bordered input-sm w-full"
+                  value={form.admin_first_name}
+                  onChange={(e) => setForm({ ...form, admin_first_name: e.target.value })}
+                  required
+                />
+              )}
+            </FormField>
+            <FormField label="Admin Last Name" required labelClassName="text-sm">
+              {(field) => (
+                <input
+                  {...field}
+                  type="text"
+                  className="input input-bordered input-sm w-full"
+                  value={form.admin_last_name}
+                  onChange={(e) => setForm({ ...form, admin_last_name: e.target.value })}
+                  required
+                />
+              )}
+            </FormField>
+          </div>
+          <FormField label="Admin Email" required labelClassName="text-sm">
+            {(field) => (
               <input
-                type="text"
+                {...field}
+                type="email"
                 className="input input-bordered input-sm w-full"
-                value={form.admin_first_name}
-                onChange={(e) => setForm({ ...form, admin_first_name: e.target.value })}
+                value={form.admin_email}
+                onChange={(e) => setForm({ ...form, admin_email: e.target.value })}
                 required
               />
-            </div>
-            <div>
-              <label className="label text-sm">Admin Last Name</label>
-              <input
-                type="text"
-                className="input input-bordered input-sm w-full"
-                value={form.admin_last_name}
-                onChange={(e) => setForm({ ...form, admin_last_name: e.target.value })}
-                required
-              />
-            </div>
-          </div>
-          <div>
-            <label className="label text-sm">Admin Email</label>
-            <input
-              type="email"
-              className="input input-bordered input-sm w-full"
-              value={form.admin_email}
-              onChange={(e) => setForm({ ...form, admin_email: e.target.value })}
-              required
-            />
-          </div>
-          <div>
-            <label className="label text-sm">Admin Password</label>
-            <input
-              type="password"
-              className="input input-bordered input-sm w-full"
-              value={form.admin_password}
-              onChange={(e) => setForm({ ...form, admin_password: e.target.value })}
-              required
-              minLength={12}
-            />
-            <p className="text-xs text-base-content/50 mt-1">Min 12 chars, uppercase, lowercase, number, special char</p>
-          </div>
+            )}
+          </FormField>
+          <FormField label="Admin Password" required labelClassName="text-sm">
+            {(field) => (
+              <>
+                <input
+                  {...field}
+                  type="password"
+                  className="input input-bordered input-sm w-full"
+                  value={form.admin_password}
+                  onChange={(e) => setForm({ ...form, admin_password: e.target.value })}
+                  required
+                  minLength={12}
+                />
+                <p className="text-xs text-base-content/50 mt-1">Min 12 chars, uppercase, lowercase, number, special char</p>
+              </>
+            )}
+          </FormField>
 
           {error && <div className="text-error text-sm">{error}</div>}
 

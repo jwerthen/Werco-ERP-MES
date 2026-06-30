@@ -31,7 +31,7 @@ import PrintIntegrationsTab from '../components/admin/PrintIntegrationsTab';
 import AIUsageTab from '../components/admin/AIUsageTab';
 import AIEgressTab from '../components/admin/AIEgressTab';
 import DisplayTokensTab from '../components/admin/DisplayTokensTab';
-import { EmptyState, ErrorState, useToast } from '../components/ui';
+import { EmptyState, ErrorState, FormField, useToast } from '../components/ui';
 
 type TabKey = 'materials' | 'machines' | 'finishes' | 'labor' | 'workcenters' | 'workcentertypes' | 'services' | 'overhead' | 'employees' | 'roles' | 'carriers' | 'printing' | 'aiusage' | 'aiprivacy' | 'displays' | 'audit';
 
@@ -723,8 +723,9 @@ function WorkCenterTypesPanel({
 
       <div className="flex flex-col sm:flex-row gap-3">
         <div className="flex-1">
-          <label className="label">Add type</label>
+          <label htmlFor="wct-add-type" className="label">Add type</label>
           <input
+            id="wct-add-type"
             type="text"
             value={inputValue}
             onChange={(e) => onInputChange(e.target.value)}
@@ -1064,47 +1065,55 @@ function EmployeeModal({
         <form onSubmit={handleSubmit}>
           <div className="modal-body space-y-4">
             <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="label">First Name</label>
+              <FormField label="First Name">
+                {(field) => (
+                  <input
+                    {...field}
+                    className="input"
+                    value={form.first_name}
+                    onChange={(e) => setForm({ ...form, first_name: e.target.value })}
+                    required
+                  />
+                )}
+              </FormField>
+              <FormField label="Last Name">
+                {(field) => (
+                  <input
+                    {...field}
+                    className="input"
+                    value={form.last_name}
+                    onChange={(e) => setForm({ ...form, last_name: e.target.value })}
+                    required
+                  />
+                )}
+              </FormField>
+            </div>
+            <FormField label="Employee ID (4 digits)">
+              {(field) => (
                 <input
-                  className="input"
-                  value={form.first_name}
-                  onChange={(e) => setForm({ ...form, first_name: e.target.value })}
+                  {...field}
+                  className="input font-mono tracking-widest text-center"
+                  value={form.employee_id}
+                  onChange={(e) => setForm({ ...form, employee_id: normalizeEmployeeId(e.target.value) })}
+                  onBlur={() => setForm({ ...form, employee_id: padEmployeeId(form.employee_id) })}
+                  placeholder="0000"
+                  maxLength={4}
+                  inputMode="numeric"
+                  disabled={!!employee}
                   required
                 />
-              </div>
-              <div>
-                <label className="label">Last Name</label>
+              )}
+            </FormField>
+            <FormField label="Department (optional)">
+              {(field) => (
                 <input
+                  {...field}
                   className="input"
-                  value={form.last_name}
-                  onChange={(e) => setForm({ ...form, last_name: e.target.value })}
-                  required
+                  value={form.department || ''}
+                  onChange={(e) => setForm({ ...form, department: e.target.value })}
                 />
-              </div>
-            </div>
-            <div>
-              <label className="label">Employee ID (4 digits)</label>
-              <input
-                className="input font-mono tracking-widest text-center"
-                value={form.employee_id}
-                onChange={(e) => setForm({ ...form, employee_id: normalizeEmployeeId(e.target.value) })}
-                onBlur={() => setForm({ ...form, employee_id: padEmployeeId(form.employee_id) })}
-                placeholder="0000"
-                maxLength={4}
-                inputMode="numeric"
-                disabled={!!employee}
-                required
-              />
-            </div>
-            <div>
-              <label className="label">Department (optional)</label>
-              <input
-                className="input"
-                value={form.department || ''}
-                onChange={(e) => setForm({ ...form, department: e.target.value })}
-              />
-            </div>
+              )}
+            </FormField>
             {!employee && (
               <div className="rounded-lg border border-surface-200 bg-surface-50 p-3 text-xs text-surface-600">
                 This creates an operator account tied to the 4-digit ID. Kiosk sign-ins will use this ID and show the
@@ -1203,8 +1212,9 @@ function RolePermissionsManager({ data, onUpdate }: { data: RolePermissionsData;
       {/* Role selector and actions */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-4">
-          <label className="text-sm font-medium text-surface-700">Select Role:</label>
+          <label htmlFor="role-perm-select" className="text-sm font-medium text-surface-700">Select Role:</label>
           <select
+            id="role-perm-select"
             value={selectedRole}
             onChange={(e) => setSelectedRole(e.target.value)}
             className="input w-48"
@@ -1394,40 +1404,47 @@ function getDefaultForm(type: string): any {
 function MaterialForm({ form, update }: { form: any; update: (f: string, v: any) => void }) {
   return (
     <>
-      <div>
-        <label className="label">Name</label>
-        <input className="input" value={form.name} onChange={e => update('name', e.target.value)} required />
-      </div>
-      <div>
-        <label className="label">Category</label>
-        <select className="input" value={form.category} onChange={e => update('category', e.target.value)}>
-          {MATERIAL_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
-        </select>
+      <FormField label="Name">
+        {(field) => (
+          <input {...field} className="input" value={form.name} onChange={e => update('name', e.target.value)} required />
+        )}
+      </FormField>
+      <FormField label="Category">
+        {(field) => (
+          <select {...field} className="input" value={form.category} onChange={e => update('category', e.target.value)}>
+            {MATERIAL_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+        )}
+      </FormField>
+      <div className="grid grid-cols-2 gap-4">
+        <FormField label="Price per cu.in ($)">
+          {(field) => (
+            <input {...field} type="number" step="0.01" className="input" value={form.stock_price_per_cubic_inch} onChange={e => update('stock_price_per_cubic_inch', parseFloat(e.target.value) || 0)} />
+          )}
+        </FormField>
+        <FormField label="Price per lb ($)">
+          {(field) => (
+            <input {...field} type="number" step="0.01" className="input" value={form.stock_price_per_pound} onChange={e => update('stock_price_per_pound', parseFloat(e.target.value) || 0)} />
+          )}
+        </FormField>
       </div>
       <div className="grid grid-cols-2 gap-4">
-        <div>
-          <label className="label">Price per cu.in ($)</label>
-          <input type="number" step="0.01" className="input" value={form.stock_price_per_cubic_inch} onChange={e => update('stock_price_per_cubic_inch', parseFloat(e.target.value) || 0)} />
-        </div>
-        <div>
-          <label className="label">Price per lb ($)</label>
-          <input type="number" step="0.01" className="input" value={form.stock_price_per_pound} onChange={e => update('stock_price_per_pound', parseFloat(e.target.value) || 0)} />
-        </div>
+        <FormField label="Density (lb/cu.in)">
+          {(field) => (
+            <input {...field} type="number" step="0.001" className="input" value={form.density_lb_per_cubic_inch} onChange={e => update('density_lb_per_cubic_inch', parseFloat(e.target.value) || 0)} />
+          )}
+        </FormField>
+        <FormField label="Machinability Factor">
+          {(field) => (
+            <input {...field} type="number" step="0.1" className="input" value={form.machinability_factor} onChange={e => update('machinability_factor', parseFloat(e.target.value) || 1)} />
+          )}
+        </FormField>
       </div>
-      <div className="grid grid-cols-2 gap-4">
-        <div>
-          <label className="label">Density (lb/cu.in)</label>
-          <input type="number" step="0.001" className="input" value={form.density_lb_per_cubic_inch} onChange={e => update('density_lb_per_cubic_inch', parseFloat(e.target.value) || 0)} />
-        </div>
-        <div>
-          <label className="label">Machinability Factor</label>
-          <input type="number" step="0.1" className="input" value={form.machinability_factor} onChange={e => update('machinability_factor', parseFloat(e.target.value) || 1)} />
-        </div>
-      </div>
-      <div>
-        <label className="label">Markup %</label>
-        <input type="number" step="1" className="input" value={form.material_markup_pct} onChange={e => update('material_markup_pct', parseFloat(e.target.value) || 0)} />
-      </div>
+      <FormField label="Markup %">
+        {(field) => (
+          <input {...field} type="number" step="1" className="input" value={form.material_markup_pct} onChange={e => update('material_markup_pct', parseFloat(e.target.value) || 0)} />
+        )}
+      </FormField>
     </>
   );
 }
@@ -1435,30 +1452,35 @@ function MaterialForm({ form, update }: { form: any; update: (f: string, v: any)
 function MachineForm({ form, update }: { form: any; update: (f: string, v: any) => void }) {
   return (
     <>
-      <div>
-        <label className="label">Name</label>
-        <input className="input" value={form.name} onChange={e => update('name', e.target.value)} required />
-      </div>
-      <div>
-        <label className="label">Machine Type</label>
-        <select className="input" value={form.machine_type} onChange={e => update('machine_type', e.target.value)}>
-          {MACHINE_TYPES.map(t => <option key={t} value={t}>{t.replace(/_/g, ' ')}</option>)}
-        </select>
-      </div>
+      <FormField label="Name">
+        {(field) => (
+          <input {...field} className="input" value={form.name} onChange={e => update('name', e.target.value)} required />
+        )}
+      </FormField>
+      <FormField label="Machine Type">
+        {(field) => (
+          <select {...field} className="input" value={form.machine_type} onChange={e => update('machine_type', e.target.value)}>
+            {MACHINE_TYPES.map(t => <option key={t} value={t}>{t.replace(/_/g, ' ')}</option>)}
+          </select>
+        )}
+      </FormField>
       <div className="grid grid-cols-2 gap-4">
-        <div>
-          <label className="label">Rate per Hour ($)</label>
-          <input type="number" step="0.01" className="input" value={form.rate_per_hour} onChange={e => update('rate_per_hour', parseFloat(e.target.value) || 0)} required />
-        </div>
-        <div>
-          <label className="label">Setup Rate/hr ($)</label>
-          <input type="number" step="0.01" className="input" value={form.setup_rate_per_hour || ''} onChange={e => update('setup_rate_per_hour', parseFloat(e.target.value) || null)} />
-        </div>
+        <FormField label="Rate per Hour ($)">
+          {(field) => (
+            <input {...field} type="number" step="0.01" className="input" value={form.rate_per_hour} onChange={e => update('rate_per_hour', parseFloat(e.target.value) || 0)} required />
+          )}
+        </FormField>
+        <FormField label="Setup Rate/hr ($)">
+          {(field) => (
+            <input {...field} type="number" step="0.01" className="input" value={form.setup_rate_per_hour || ''} onChange={e => update('setup_rate_per_hour', parseFloat(e.target.value) || null)} />
+          )}
+        </FormField>
       </div>
-      <div>
-        <label className="label">Typical Setup Hours</label>
-        <input type="number" step="0.25" className="input" value={form.typical_setup_hours} onChange={e => update('typical_setup_hours', parseFloat(e.target.value) || 0)} />
-      </div>
+      <FormField label="Typical Setup Hours">
+        {(field) => (
+          <input {...field} type="number" step="0.25" className="input" value={form.typical_setup_hours} onChange={e => update('typical_setup_hours', parseFloat(e.target.value) || 0)} />
+        )}
+      </FormField>
     </>
   );
 }
@@ -1466,33 +1488,39 @@ function MachineForm({ form, update }: { form: any; update: (f: string, v: any) 
 function FinishForm({ form, update }: { form: any; update: (f: string, v: any) => void }) {
   return (
     <>
-      <div>
-        <label className="label">Name</label>
-        <input className="input" value={form.name} onChange={e => update('name', e.target.value)} required />
-      </div>
-      <div>
-        <label className="label">Category</label>
-        <input className="input" value={form.category} onChange={e => update('category', e.target.value)} placeholder="coating, plating, treatment, etc." />
+      <FormField label="Name">
+        {(field) => (
+          <input {...field} className="input" value={form.name} onChange={e => update('name', e.target.value)} required />
+        )}
+      </FormField>
+      <FormField label="Category">
+        {(field) => (
+          <input {...field} className="input" value={form.category} onChange={e => update('category', e.target.value)} placeholder="coating, plating, treatment, etc." />
+        )}
+      </FormField>
+      <div className="grid grid-cols-2 gap-4">
+        <FormField label="Price per Part ($)">
+          {(field) => (
+            <input {...field} type="number" step="0.01" className="input" value={form.price_per_part} onChange={e => update('price_per_part', parseFloat(e.target.value) || 0)} />
+          )}
+        </FormField>
+        <FormField label="Price per sq.ft ($)">
+          {(field) => (
+            <input {...field} type="number" step="0.01" className="input" value={form.price_per_sqft} onChange={e => update('price_per_sqft', parseFloat(e.target.value) || 0)} />
+          )}
+        </FormField>
       </div>
       <div className="grid grid-cols-2 gap-4">
-        <div>
-          <label className="label">Price per Part ($)</label>
-          <input type="number" step="0.01" className="input" value={form.price_per_part} onChange={e => update('price_per_part', parseFloat(e.target.value) || 0)} />
-        </div>
-        <div>
-          <label className="label">Price per sq.ft ($)</label>
-          <input type="number" step="0.01" className="input" value={form.price_per_sqft} onChange={e => update('price_per_sqft', parseFloat(e.target.value) || 0)} />
-        </div>
-      </div>
-      <div className="grid grid-cols-2 gap-4">
-        <div>
-          <label className="label">Minimum Charge ($)</label>
-          <input type="number" step="0.01" className="input" value={form.minimum_charge} onChange={e => update('minimum_charge', parseFloat(e.target.value) || 0)} />
-        </div>
-        <div>
-          <label className="label">Additional Lead Days</label>
-          <input type="number" step="1" className="input" value={form.additional_days} onChange={e => update('additional_days', parseInt(e.target.value) || 0)} />
-        </div>
+        <FormField label="Minimum Charge ($)">
+          {(field) => (
+            <input {...field} type="number" step="0.01" className="input" value={form.minimum_charge} onChange={e => update('minimum_charge', parseFloat(e.target.value) || 0)} />
+          )}
+        </FormField>
+        <FormField label="Additional Lead Days">
+          {(field) => (
+            <input {...field} type="number" step="1" className="input" value={form.additional_days} onChange={e => update('additional_days', parseInt(e.target.value) || 0)} />
+          )}
+        </FormField>
       </div>
     </>
   );
@@ -1501,69 +1529,80 @@ function FinishForm({ form, update }: { form: any; update: (f: string, v: any) =
 function LaborForm({ form, update }: { form: any; update: (f: string, v: any) => void }) {
   return (
     <>
-      <div>
-        <label className="label">Name / Role</label>
-        <input className="input" value={form.name} onChange={e => update('name', e.target.value)} required placeholder="e.g., Welder, Machinist, Assembler" />
-      </div>
-      <div>
-        <label className="label">Rate per Hour ($)</label>
-        <input type="number" step="0.01" className="input" value={form.rate_per_hour} onChange={e => update('rate_per_hour', parseFloat(e.target.value) || 0)} required />
-      </div>
-      <div>
-        <label className="label">Description</label>
-        <textarea className="input" rows={2} value={form.description || ''} onChange={e => update('description', e.target.value)} />
-      </div>
+      <FormField label="Name / Role">
+        {(field) => (
+          <input {...field} className="input" value={form.name} onChange={e => update('name', e.target.value)} required placeholder="e.g., Welder, Machinist, Assembler" />
+        )}
+      </FormField>
+      <FormField label="Rate per Hour ($)">
+        {(field) => (
+          <input {...field} type="number" step="0.01" className="input" value={form.rate_per_hour} onChange={e => update('rate_per_hour', parseFloat(e.target.value) || 0)} required />
+        )}
+      </FormField>
+      <FormField label="Description">
+        {(field) => (
+          <textarea {...field} className="input" rows={2} value={form.description || ''} onChange={e => update('description', e.target.value)} />
+        )}
+      </FormField>
     </>
   );
 }
 
 function WorkCenterForm({ form, update }: { form: any; update: (f: string, v: any) => void }) {
   return (
-    <div>
-      <label className="label">Hourly Rate ($)</label>
-      <input type="number" step="0.01" className="input" value={form.hourly_rate} onChange={e => update('hourly_rate', parseFloat(e.target.value) || 0)} required />
-    </div>
+    <FormField label="Hourly Rate ($)">
+      {(field) => (
+        <input {...field} type="number" step="0.01" className="input" value={form.hourly_rate} onChange={e => update('hourly_rate', parseFloat(e.target.value) || 0)} required />
+      )}
+    </FormField>
   );
 }
 
 function ServiceForm({ form, update }: { form: any; update: (f: string, v: any) => void }) {
   return (
     <>
-      <div>
-        <label className="label">Service Name</label>
-        <input className="input" value={form.name} onChange={e => update('name', e.target.value)} required placeholder="e.g., Anodize Type II - ABC Plating" />
-      </div>
-      <div>
-        <label className="label">Vendor Name (optional)</label>
-        <input className="input" value={form.vendor_name || ''} onChange={e => update('vendor_name', e.target.value)} placeholder="e.g., ABC Plating Co" />
-      </div>
-      <div>
-        <label className="label">Process Type</label>
-        <select className="input" value={form.process_type} onChange={e => update('process_type', e.target.value)}>
-          {PROCESS_TYPES.map(t => <option key={t} value={t}>{t.replace(/_/g, ' ')}</option>)}
-        </select>
-      </div>
-      <div className="grid grid-cols-2 gap-4">
-        <div>
-          <label className="label">Default Cost ($)</label>
-          <input type="number" step="0.01" className="input" value={form.default_cost} onChange={e => update('default_cost', parseFloat(e.target.value) || 0)} />
-        </div>
-        <div>
-          <label className="label">Cost Unit</label>
-          <select className="input" value={form.cost_unit} onChange={e => update('cost_unit', e.target.value)}>
-            {COST_UNITS.map(u => <option key={u} value={u}>{u.replace('per_', 'per ')}</option>)}
+      <FormField label="Service Name">
+        {(field) => (
+          <input {...field} className="input" value={form.name} onChange={e => update('name', e.target.value)} required placeholder="e.g., Anodize Type II - ABC Plating" />
+        )}
+      </FormField>
+      <FormField label="Vendor Name (optional)">
+        {(field) => (
+          <input {...field} className="input" value={form.vendor_name || ''} onChange={e => update('vendor_name', e.target.value)} placeholder="e.g., ABC Plating Co" />
+        )}
+      </FormField>
+      <FormField label="Process Type">
+        {(field) => (
+          <select {...field} className="input" value={form.process_type} onChange={e => update('process_type', e.target.value)}>
+            {PROCESS_TYPES.map(t => <option key={t} value={t}>{t.replace(/_/g, ' ')}</option>)}
           </select>
-        </div>
+        )}
+      </FormField>
+      <div className="grid grid-cols-2 gap-4">
+        <FormField label="Default Cost ($)">
+          {(field) => (
+            <input {...field} type="number" step="0.01" className="input" value={form.default_cost} onChange={e => update('default_cost', parseFloat(e.target.value) || 0)} />
+          )}
+        </FormField>
+        <FormField label="Cost Unit">
+          {(field) => (
+            <select {...field} className="input" value={form.cost_unit} onChange={e => update('cost_unit', e.target.value)}>
+              {COST_UNITS.map(u => <option key={u} value={u}>{u.replace('per_', 'per ')}</option>)}
+            </select>
+          )}
+        </FormField>
       </div>
       <div className="grid grid-cols-2 gap-4">
-        <div>
-          <label className="label">Minimum Charge ($)</label>
-          <input type="number" step="0.01" className="input" value={form.minimum_charge} onChange={e => update('minimum_charge', parseFloat(e.target.value) || 0)} />
-        </div>
-        <div>
-          <label className="label">Typical Lead Days</label>
-          <input type="number" step="1" className="input" value={form.typical_lead_days} onChange={e => update('typical_lead_days', parseInt(e.target.value) || 0)} />
-        </div>
+        <FormField label="Minimum Charge ($)">
+          {(field) => (
+            <input {...field} type="number" step="0.01" className="input" value={form.minimum_charge} onChange={e => update('minimum_charge', parseFloat(e.target.value) || 0)} />
+          )}
+        </FormField>
+        <FormField label="Typical Lead Days">
+          {(field) => (
+            <input {...field} type="number" step="1" className="input" value={form.typical_lead_days} onChange={e => update('typical_lead_days', parseInt(e.target.value) || 0)} />
+          )}
+        </FormField>
       </div>
     </>
   );

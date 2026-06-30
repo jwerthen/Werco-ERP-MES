@@ -17,6 +17,7 @@ import {
   BoltIcon,
 } from '@heroicons/react/24/outline';
 import { EmptyState, ErrorState } from '../components/ui';
+import { FormField } from '../components/ui/FormField';
 
 interface Material {
   id: number;
@@ -344,7 +345,7 @@ export default function QuoteCalculator() {
             <div className="space-y-5">
               {/* Part Dimensions */}
               <div>
-                <label className="label">Part Dimensions (inches)</label>
+                <span className="label">Part Dimensions (inches)</span>
                 <div className="grid grid-cols-3 gap-3">
                   <div>
                     <input
@@ -380,50 +381,56 @@ export default function QuoteCalculator() {
               </div>
 
               {/* Material */}
-              <div>
-                <label className="label">Material</label>
-                <select
-                  value={cncForm.material_id}
-                  onChange={(e) => setCncForm({ ...cncForm, material_id: parseInt(e.target.value) })}
-                  className="input"
-                >
-                  {materials.filter(m => !m.sheet_pricing || Object.keys(m.sheet_pricing).length === 0 || m.category !== 'steel').map(m => (
-                    <option key={m.id} value={m.id}>{m.name}</option>
-                  ))}
-                </select>
-              </div>
+              <FormField label="Material">
+                {(field) => (
+                  <select
+                    {...field}
+                    value={cncForm.material_id}
+                    onChange={(e) => setCncForm({ ...cncForm, material_id: parseInt(e.target.value) })}
+                    className="input"
+                  >
+                    {materials.filter(m => !m.sheet_pricing || Object.keys(m.sheet_pricing).length === 0 || m.category !== 'steel').map(m => (
+                      <option key={m.id} value={m.id}>{m.name}</option>
+                    ))}
+                  </select>
+                )}
+              </FormField>
 
               {/* Complexity */}
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Complexity</label>
-                  <select
-                    value={cncForm.complexity}
-                    onChange={(e) => setCncForm({ ...cncForm, complexity: e.target.value })}
-                    className="input"
-                  >
-                    <option value="simple">Simple (basic shapes)</option>
-                    <option value="medium">Medium (typical part)</option>
-                    <option value="complex">Complex (many features)</option>
-                    <option value="very_complex">Very Complex (5-axis)</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="label"># of Setups</label>
-                  <input
-                    type="number"
-                    value={cncForm.num_setups}
-                    onChange={(e) => setCncForm({ ...cncForm, num_setups: parseInt(e.target.value) || 1 })}
-                    className="input"
-                    min={1}
-                    max={6}
-                  />
-                </div>
+                <FormField label="Complexity">
+                  {(field) => (
+                    <select
+                      {...field}
+                      value={cncForm.complexity}
+                      onChange={(e) => setCncForm({ ...cncForm, complexity: e.target.value })}
+                      className="input"
+                    >
+                      <option value="simple">Simple (basic shapes)</option>
+                      <option value="medium">Medium (typical part)</option>
+                      <option value="complex">Complex (many features)</option>
+                      <option value="very_complex">Very Complex (5-axis)</option>
+                    </select>
+                  )}
+                </FormField>
+                <FormField label="# of Setups">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="number"
+                      value={cncForm.num_setups}
+                      onChange={(e) => setCncForm({ ...cncForm, num_setups: parseInt(e.target.value) || 1 })}
+                      className="input"
+                      min={1}
+                      max={6}
+                    />
+                  )}
+                </FormField>
               </div>
 
               {/* Features */}
               <div>
-                <label className="label">Features</label>
+                <span className="label">Features</span>
                 <div className="grid grid-cols-4 gap-3">
                   <div>
                     <input
@@ -470,46 +477,52 @@ export default function QuoteCalculator() {
 
               {/* Tolerance & Surface */}
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Tightest Tolerance</label>
-                  <select
-                    value={cncForm.tightest_tolerance}
-                    onChange={(e) => setCncForm({ ...cncForm, tightest_tolerance: e.target.value })}
-                    className="input"
-                  >
-                    <option value="standard">Standard (+/-.005)</option>
-                    <option value="tight">Tight (+/-.002)</option>
-                    <option value="precision">Precision (+/-.001)</option>
-                    <option value="ultra">Ultra (+/-.0005)</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="label">Surface Finish</label>
-                  <select
-                    value={cncForm.surface_finish}
-                    onChange={(e) => setCncForm({ ...cncForm, surface_finish: e.target.value })}
-                    className="input"
-                  >
-                    <option value="as_machined">As Machined</option>
-                    <option value="light_deburr">Light Deburr</option>
-                    <option value="smooth">Smooth (125 Ra)</option>
-                    <option value="mirror">Mirror (32 Ra)</option>
-                  </select>
-                </div>
+                <FormField label="Tightest Tolerance">
+                  {(field) => (
+                    <select
+                      {...field}
+                      value={cncForm.tightest_tolerance}
+                      onChange={(e) => setCncForm({ ...cncForm, tightest_tolerance: e.target.value })}
+                      className="input"
+                    >
+                      <option value="standard">Standard (+/-.005)</option>
+                      <option value="tight">Tight (+/-.002)</option>
+                      <option value="precision">Precision (+/-.001)</option>
+                      <option value="ultra">Ultra (+/-.0005)</option>
+                    </select>
+                  )}
+                </FormField>
+                <FormField label="Surface Finish">
+                  {(field) => (
+                    <select
+                      {...field}
+                      value={cncForm.surface_finish}
+                      onChange={(e) => setCncForm({ ...cncForm, surface_finish: e.target.value })}
+                      className="input"
+                    >
+                      <option value="as_machined">As Machined</option>
+                      <option value="light_deburr">Light Deburr</option>
+                      <option value="smooth">Smooth (125 Ra)</option>
+                      <option value="mirror">Mirror (32 Ra)</option>
+                    </select>
+                  )}
+                </FormField>
               </div>
 
               {/* Quantity & Rush */}
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Quantity</label>
-                  <input
-                    type="number"
-                    value={cncForm.quantity}
-                    onChange={(e) => setCncForm({ ...cncForm, quantity: parseInt(e.target.value) || 1 })}
-                    className="input"
-                    min={1}
-                  />
-                </div>
+                <FormField label="Quantity">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="number"
+                      value={cncForm.quantity}
+                      onChange={(e) => setCncForm({ ...cncForm, quantity: parseInt(e.target.value) || 1 })}
+                      className="input"
+                      min={1}
+                    />
+                  )}
+                </FormField>
                 <div className="flex items-end pb-1">
                   <label className="relative flex items-center cursor-pointer group">
                     <input
@@ -629,30 +642,34 @@ export default function QuoteCalculator() {
 
               {/* Material & Thickness */}
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Material</label>
-                  <select
-                    value={sheetForm.material_id}
-                    onChange={(e) => setSheetForm({ ...sheetForm, material_id: parseInt(e.target.value) })}
-                    className="input"
-                  >
-                    {materials.map(m => (
-                      <option key={m.id} value={m.id}>{m.name}</option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="label">Thickness</label>
-                  <select
-                    value={sheetForm.gauge}
-                    onChange={(e) => setSheetForm({ ...sheetForm, gauge: e.target.value })}
-                    className="input"
-                  >
-                    {thicknessOptions.map(t => (
-                      <option key={t.value} value={t.value}>{t.label}</option>
-                    ))}
-                  </select>
-                </div>
+                <FormField label="Material">
+                  {(field) => (
+                    <select
+                      {...field}
+                      value={sheetForm.material_id}
+                      onChange={(e) => setSheetForm({ ...sheetForm, material_id: parseInt(e.target.value) })}
+                      className="input"
+                    >
+                      {materials.map(m => (
+                        <option key={m.id} value={m.id}>{m.name}</option>
+                      ))}
+                    </select>
+                  )}
+                </FormField>
+                <FormField label="Thickness">
+                  {(field) => (
+                    <select
+                      {...field}
+                      value={sheetForm.gauge}
+                      onChange={(e) => setSheetForm({ ...sheetForm, gauge: e.target.value })}
+                      className="input"
+                    >
+                      {thicknessOptions.map(t => (
+                        <option key={t.value} value={t.value}>{t.label}</option>
+                      ))}
+                    </select>
+                  )}
+                </FormField>
               </div>
 
               {/* Cutting */}
@@ -727,7 +744,7 @@ export default function QuoteCalculator() {
 
               {/* Hardware */}
               <div>
-                <label className="label">Hardware Insertion</label>
+                <span className="label">Hardware Insertion</span>
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <input
@@ -754,16 +771,18 @@ export default function QuoteCalculator() {
 
               {/* Quantity & Rush */}
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Quantity</label>
-                  <input
-                    type="number"
-                    value={sheetForm.quantity}
-                    onChange={(e) => setSheetForm({ ...sheetForm, quantity: parseInt(e.target.value) || 1 })}
-                    className="input"
-                    min={1}
-                  />
-                </div>
+                <FormField label="Quantity">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="number"
+                      value={sheetForm.quantity}
+                      onChange={(e) => setSheetForm({ ...sheetForm, quantity: parseInt(e.target.value) || 1 })}
+                      className="input"
+                      min={1}
+                    />
+                  )}
+                </FormField>
                 <div className="flex items-end pb-1">
                   <label className="relative flex items-center cursor-pointer group">
                     <input
@@ -785,7 +804,7 @@ export default function QuoteCalculator() {
 
           {/* Finishes */}
           <div className="mt-5 pt-5 border-t border-fd-line">
-            <label className="label">Finishing (optional)</label>
+            <span className="label">Finishing (optional)</span>
             <div className="flex flex-wrap gap-2">
               {finishes.map(f => {
                 const isSelected = (calcType === 'cnc' ? cncForm.finish_ids : sheetForm.finish_ids).includes(f.id);

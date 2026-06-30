@@ -26,6 +26,7 @@ import {
 import api from '../../services/api';
 import { useToast } from '../ui/Toast';
 import { LoadingButton } from '../ui/LoadingButton';
+import { FormField } from '../ui/FormField';
 import type { PrintProfile, PrintProfileUpdate } from '../../types/print';
 
 const errorDetail = (err: any, fallback: string): string =>
@@ -166,80 +167,98 @@ export default function PrintIntegrationsTab() {
 
         <form onSubmit={handleSubmit} className="space-y-5">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label className="label">ProxyBox base URL</label>
-              <input
-                className="input font-mono"
-                value={form.proxybox_base_url}
-                onChange={(e) => update('proxybox_base_url', e.target.value)}
-                placeholder="https://pbx-xxxx.pbxz.cloud/api/v1"
-              />
-            </div>
-            <div>
-              <label className="label">Device target</label>
-              <input
-                className="input font-mono"
-                value={form.proxybox_target}
-                onChange={(e) => update('proxybox_target', e.target.value)}
-                placeholder="Target printer id on the ProxyBox device"
-              />
-            </div>
-            <div>
-              <label className="label">
-                API Key{' '}
-                {profile?.has_api_key && (
-                  <span className="text-surface-500 font-normal">(leave blank to keep)</span>
-                )}
-              </label>
-              <input
-                type="password"
-                autoComplete="new-password"
-                className="input font-mono"
-                value={form.api_key}
-                onChange={(e) => update('api_key', e.target.value)}
-                placeholder={
-                  profile?.has_api_key && profile?.api_key_last4
-                    ? `••••${profile.api_key_last4}`
-                    : 'Write-only; encrypted at rest'
-                }
-              />
-            </div>
+            <FormField label="ProxyBox base URL">
+              {(field) => (
+                <input
+                  {...field}
+                  className="input font-mono"
+                  value={form.proxybox_base_url}
+                  onChange={(e) => update('proxybox_base_url', e.target.value)}
+                  placeholder="https://pbx-xxxx.pbxz.cloud/api/v1"
+                />
+              )}
+            </FormField>
+            <FormField label="Device target">
+              {(field) => (
+                <input
+                  {...field}
+                  className="input font-mono"
+                  value={form.proxybox_target}
+                  onChange={(e) => update('proxybox_target', e.target.value)}
+                  placeholder="Target printer id on the ProxyBox device"
+                />
+              )}
+            </FormField>
+            <FormField
+              label={
+                <>
+                  API Key{' '}
+                  {profile?.has_api_key && (
+                    <span className="text-surface-500 font-normal">(leave blank to keep)</span>
+                  )}
+                </>
+              }
+            >
+              {(field) => (
+                <input
+                  {...field}
+                  type="password"
+                  autoComplete="new-password"
+                  className="input font-mono"
+                  value={form.api_key}
+                  onChange={(e) => update('api_key', e.target.value)}
+                  placeholder={
+                    profile?.has_api_key && profile?.api_key_last4
+                      ? `••••${profile.api_key_last4}`
+                      : 'Write-only; encrypted at rest'
+                  }
+                />
+              )}
+            </FormField>
             <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="label">Default copies</label>
-                <input
-                  type="number"
-                  min={1}
-                  max={20}
-                  step={1}
-                  className="input"
-                  value={form.default_copies}
-                  onChange={(e) => update('default_copies', parseInt(e.target.value, 10) || 1)}
-                />
-              </div>
-              <div>
-                <label className="label">Paper size</label>
-                <input
-                  className="input"
-                  list="print-paper-sizes"
-                  value={form.default_paper_size}
-                  onChange={(e) => update('default_paper_size', e.target.value)}
-                  placeholder="4x6"
-                />
-                <datalist id="print-paper-sizes">
-                  {PAPER_SIZE_OPTIONS.map((size) => (
-                    <option key={size} value={size} />
-                  ))}
-                </datalist>
-              </div>
+              <FormField label="Default copies">
+                {(field) => (
+                  <input
+                    {...field}
+                    type="number"
+                    min={1}
+                    max={20}
+                    step={1}
+                    className="input"
+                    value={form.default_copies}
+                    onChange={(e) => update('default_copies', parseInt(e.target.value, 10) || 1)}
+                  />
+                )}
+              </FormField>
+              <FormField label="Paper size">
+                {(field) => (
+                  <>
+                    <input
+                      {...field}
+                      className="input"
+                      list="print-paper-sizes"
+                      value={form.default_paper_size}
+                      onChange={(e) => update('default_paper_size', e.target.value)}
+                      placeholder="4x6"
+                    />
+                    <datalist id="print-paper-sizes">
+                      {PAPER_SIZE_OPTIONS.map((size) => (
+                        <option key={size} value={size} />
+                      ))}
+                    </datalist>
+                  </>
+                )}
+              </FormField>
             </div>
           </div>
 
           {/* Auto-print toggle */}
           <div className="rounded border border-surface-200 px-4 py-4">
-            <label className="flex items-start gap-3 cursor-pointer">
+            <label htmlFor="print-auto-print-on-receipt" className="flex items-start gap-3 cursor-pointer">
               <input
+                id="print-auto-print-on-receipt"
                 type="checkbox"
+                aria-label="Auto-print on receipt"
                 className="checkbox mt-0.5"
                 checked={form.auto_print_on_receipt}
                 onChange={(e) => update('auto_print_on_receipt', e.target.checked)}
@@ -256,9 +275,11 @@ export default function PrintIntegrationsTab() {
 
           {/* Egress kill switch */}
           <div className={`rounded border px-4 py-4 ${egressOn ? 'border-red-500/40 bg-red-500/5' : 'border-surface-200'}`}>
-            <label className="flex items-start gap-3 cursor-pointer">
+            <label htmlFor="print-allow-egress" className="flex items-start gap-3 cursor-pointer">
               <input
+                id="print-allow-egress"
                 type="checkbox"
+                aria-label="Allow print egress"
                 className="checkbox mt-0.5"
                 checked={egressOn}
                 onChange={(e) => handleEgressToggle(e.target.checked)}

@@ -962,11 +962,12 @@ export default function ShopFloorSimple() {
         )}
         {showScanner && (
           <form onSubmit={handleScannerSubmit} className="card-compact space-y-3">
-            <label className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+            <label htmlFor="shopfloor-scan-traveler" className="text-xs font-semibold uppercase tracking-wider text-slate-400">
               Scan Traveler
             </label>
             <div className="flex gap-2">
               <input
+                id="shopfloor-scan-traveler"
                 type="text"
                 value={scannerCode}
                 onChange={(e) => setScannerCode(e.target.value)}
@@ -1031,10 +1032,11 @@ export default function ShopFloorSimple() {
             </div>
             {canEditPriority && (
               <div>
-                <label className="text-xs font-medium text-slate-400 block mb-1">
+                <label htmlFor="shopfloor-priority-reason-mobile" className="text-xs font-medium text-slate-400 block mb-1">
                   Optional Priority Reason
                 </label>
                 <input
+                  id="shopfloor-priority-reason-mobile"
                   type="text"
                   value={priorityReason}
                   onChange={(e) => setPriorityReason(e.target.value)}
@@ -1194,10 +1196,11 @@ export default function ShopFloorSimple() {
         </div>
         {canEditPriority && (
           <div className="mt-3">
-            <label className="text-xs font-medium text-slate-400 block mb-1">
+            <label htmlFor="shopfloor-priority-reason-desktop" className="text-xs font-medium text-slate-400 block mb-1">
               Optional Priority Reason
             </label>
             <input
+              id="shopfloor-priority-reason-desktop"
               type="text"
               value={priorityReason}
               onChange={(e) => setPriorityReason(e.target.value)}
@@ -1769,8 +1772,9 @@ export default function ShopFloorSimple() {
               </div>
 
               <div>
-                <label className="label">Good parts to add</label>
+                <label htmlFor="shopfloor-prod-good-parts" className="label">Good parts to add</label>
                 <input
+                  id="shopfloor-prod-good-parts"
                   type="number"
                   inputMode="decimal"
                   min={0}
@@ -1807,8 +1811,9 @@ export default function ShopFloorSimple() {
               </div>
 
               <div>
-                <label className="label">Scrap to add</label>
+                <label htmlFor="shopfloor-prod-scrap" className="label">Scrap to add</label>
                 <input
+                  id="shopfloor-prod-scrap"
                   type="number"
                   inputMode="decimal"
                   min={0}
@@ -1822,9 +1827,9 @@ export default function ShopFloorSimple() {
                   the shared SCRAP_REASONS — same column the kiosk writes). */}
               {Number(productionData.quantity_scrapped_delta || 0) > 0 && (
                 <div>
-                  <label className="label">
+                  <span className="label">
                     Scrap reason <span className="text-red-400">*</span>
-                  </label>
+                  </span>
                   <SelectField
                     value={productionData.scrap_reason}
                     onChange={(value) => setProductionData({ ...productionData, scrap_reason: String(value) })}
@@ -1839,8 +1844,9 @@ export default function ShopFloorSimple() {
               )}
 
               <div>
-                <label className="label">Notes (optional)</label>
+                <label htmlFor="shopfloor-prod-notes" className="label">Notes (optional)</label>
                 <textarea
+                  id="shopfloor-prod-notes"
                   value={productionData.notes}
                   onChange={(e) => setProductionData({ ...productionData, notes: e.target.value })}
                   className="input"
@@ -1910,9 +1916,10 @@ export default function ShopFloorSimple() {
               </div>
               
               <div>
-                <label className="label">Additional good parts at checkout</label>
+                <label htmlFor="shopfloor-checkout-good-parts" className="label">Additional good parts at checkout</label>
                 <div className="flex items-center gap-2">
                   <input
+                    id="shopfloor-checkout-good-parts"
                     type="number"
                     inputMode="decimal"
                     min={0}
@@ -1950,8 +1957,9 @@ export default function ShopFloorSimple() {
               </div>
 
               <div>
-                <label className="label">Scrap</label>
+                <label htmlFor="shopfloor-checkout-scrap" className="label">Scrap</label>
                 <input
+                  id="shopfloor-checkout-scrap"
                   type="number"
                   inputMode="decimal"
                   min={0}
@@ -1965,9 +1973,9 @@ export default function ShopFloorSimple() {
                   the shared SCRAP_REASONS — same column the kiosk writes). */}
               {Number(checkOutData.quantity_scrapped || 0) > 0 && (
                 <div>
-                  <label className="label">
+                  <span className="label">
                     Scrap reason <span className="text-red-400">*</span>
-                  </label>
+                  </span>
                   <SelectField
                     value={checkOutData.scrap_reason}
                     onChange={(value) => setCheckOutData({ ...checkOutData, scrap_reason: String(value) })}
@@ -1982,8 +1990,9 @@ export default function ShopFloorSimple() {
               )}
 
               <div>
-                <label className="label">Notes (optional)</label>
+                <label htmlFor="shopfloor-checkout-notes" className="label">Notes (optional)</label>
                 <textarea
+                  id="shopfloor-checkout-notes"
                   value={checkOutData.notes}
                   onChange={(e) => setCheckOutData({ ...checkOutData, notes: e.target.value })}
                   className="input"
@@ -2052,9 +2061,9 @@ export default function ShopFloorSimple() {
               </div>
 
               <div>
-                <label className="label">
+                <span className="label">
                   Hold reason <span className="text-red-400">*</span>
-                </label>
+                </span>
                 <SelectField
                   value={holdData.category}
                   onChange={(value) => setHoldData({ ...holdData, category: String(value) })}
@@ -2068,8 +2077,9 @@ export default function ShopFloorSimple() {
               </div>
 
               <div>
-                <label className="label">Note (optional)</label>
+                <label htmlFor="shopfloor-hold-note" className="label">Note (optional)</label>
                 <textarea
+                  id="shopfloor-hold-note"
                   value={holdData.note}
                   onChange={(e) => setHoldData({ ...holdData, note: e.target.value })}
                   className="input"
