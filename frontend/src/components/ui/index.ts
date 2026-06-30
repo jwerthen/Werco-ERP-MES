@@ -27,14 +27,15 @@ export { ConfirmDialog } from './ConfirmDialog';
 export { Breadcrumbs } from './Breadcrumbs';
 export type { Crumb } from './Breadcrumbs';
 
-// Generic data table (sort / paginate / select / CSV / responsive)
-export { DataTable, buildCsv } from './DataTable';
+// Generic data table (sort / paginate / select / CSV / responsive / grouped)
+export { DataTable, buildCsv, partitionGroups } from './DataTable';
 export type {
   DataTableProps,
   DataTableColumn,
   DataTableEmpty,
   DataTableSelection,
   DataTableServerPagination,
+  DataTableGroupBy,
   SortDir,
   ColumnAlign,
 } from './DataTable';

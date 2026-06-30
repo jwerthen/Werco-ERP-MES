@@ -1,9 +1,17 @@
 import React, { useEffect, useState } from 'react';
 import api from '../services/api';
 import { Modal } from '../components/ui/Modal';
-import { Button, EmptyState, ErrorState, statusVariant, useToast } from '../components/ui';
+import {
+  Button,
+  DataTable,
+  DataTableColumn,
+  MobileDataCard,
+  StatusBadge,
+  statusVariant,
+  useToast,
+} from '../components/ui';
 import { WorkCenter, WorkCenterType } from '../types';
-import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
+import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import {
   PlusIcon,
   PencilIcon,
@@ -181,18 +189,6 @@ export default function WorkCenters() {
       .replace(/_/g, ' ')
       .replace(/\b\w/g, (char) => char.toUpperCase());
 
-  const groupedWorkCenters = workCenterTypeOrder
-    .map((type) => ({
-      type,
-      items: workCenters.filter((wc) => wc.work_center_type === type)
-    }))
-    .filter((group) => group.items.length > 0);
-
-  const ungrouped = workCenters.filter((wc) => !workCenterTypeOrder.includes(wc.work_center_type));
-  if (ungrouped.length) {
-    groupedWorkCenters.push({ type: 'other', items: ungrouped });
-  }
-
   const statusCounts = workCenters.reduce(
     (acc, wc) => {
       acc[wc.current_status] = (acc[wc.current_status] || 0) + 1;
@@ -201,13 +197,144 @@ export default function WorkCenters() {
     {} as Record<string, number>
   );
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-werco-primary"></div>
-      </div>
-    );
-  }
+  // Inline status-change control — preserved from the cockpit layout. Stops row
+  // click-through so changing status never navigates / triggers an edit.
+  const renderStatusCell = (wc: WorkCenter) => (
+    <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+      <span
+        className={`h-2 w-2 flex-shrink-0 rounded-full ${statusDotColor[statusVariant(wc.current_status)]}`}
+        aria-hidden="true"
+      />
+      <StatusBadge status={wc.current_status} className="hidden xl:inline-flex" />
+      <select
+        value={wc.current_status}
+        onChange={(e) => handleStatusChange(wc.id, e.target.value)}
+        aria-label={`Status for ${wc.code}`}
+        className="input !py-0.5 !px-1.5 !text-xs !min-h-0 h-7"
+      >
+        <option value="available">Available</option>
+        <option value="in_use">In Use</option>
+        <option value="maintenance">Maintenance</option>
+        <option value="offline">Offline</option>
+      </select>
+    </div>
+  );
+
+  const columns: Array<DataTableColumn<WorkCenter>> = [
+    {
+      key: 'code',
+      header: 'Code',
+      sortable: true,
+      accessor: (wc) => wc.code,
+      render: (wc) => <span className="font-semibold text-white">{wc.code}</span>,
+    },
+    {
+      key: 'name',
+      header: 'Name',
+      sortable: true,
+      accessor: (wc) => wc.name,
+      render: (wc) => {
+        const detail = [
+          wc.description,
+          wc.building && `Building: ${wc.building}`,
+          wc.area && `Area: ${wc.area}`,
+        ]
+          .filter(Boolean)
+          .join(' • ');
+        return (
+          <span className="text-slate-300" title={detail || undefined}>
+            {wc.name}
+          </span>
+        );
+      },
+    },
+    {
+      key: 'status',
+      header: 'Status',
+      sortable: true,
+      accessor: (wc) => wc.current_status,
+      render: renderStatusCell,
+    },
+    {
+      key: 'hourly_rate',
+      header: 'Rate/hr',
+      sortable: true,
+      align: 'right',
+      accessor: (wc) => wc.hourly_rate,
+      render: (wc) => <span className="tabular-nums">${wc.hourly_rate}</span>,
+      csv: (wc) => wc.hourly_rate,
+    },
+    {
+      key: 'capacity_hours_per_day',
+      header: 'Capacity',
+      sortable: true,
+      align: 'right',
+      accessor: (wc) => wc.capacity_hours_per_day,
+      render: (wc) => <span className="tabular-nums">{wc.capacity_hours_per_day}h</span>,
+      csv: (wc) => wc.capacity_hours_per_day,
+    },
+    {
+      key: 'efficiency_factor',
+      header: 'Efficiency',
+      sortable: true,
+      align: 'right',
+      accessor: (wc) => wc.efficiency_factor ?? null,
+      render: (wc) => (
+        <span className="tabular-nums">
+          {wc.efficiency_factor != null ? wc.efficiency_factor.toFixed(2) : '—'}
+        </span>
+      ),
+    },
+    {
+      key: 'type',
+      header: 'Type',
+      // Group key is exported in CSV so the flat export keeps the grouping.
+      accessor: (wc) => formatTypeLabel(wc.work_center_type),
+      // Header is hidden visually (the group rows carry the type label) but the
+      // column still feeds CSV export — render nothing in the body.
+      headerClassName: 'sr-only',
+      render: () => null,
+    },
+    {
+      key: 'actions',
+      header: '',
+      align: 'right',
+      render: (wc) => (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            handleEdit(wc);
+          }}
+          aria-label={`Edit ${wc.code}`}
+          className="text-slate-400 hover:text-white"
+        >
+          <PencilIcon className="h-4 w-4" />
+        </button>
+      ),
+    },
+  ];
+
+  const renderMobileCard = (wc: WorkCenter) => (
+    <MobileDataCard
+      key={wc.id}
+      className={wc.is_active === false ? 'opacity-60' : ''}
+      title={wc.code}
+      subtitle={wc.name}
+      badge={<StatusBadge status={wc.current_status} />}
+      fields={[
+        { label: 'Rate/hr', value: `$${wc.hourly_rate}` },
+        { label: 'Capacity', value: `${wc.capacity_hours_per_day}h` },
+        { label: 'Status', fullWidth: true, value: renderStatusCell(wc) },
+      ]}
+      actions={
+        <Button variant="secondary" size="sm" onClick={() => handleEdit(wc)}>
+          <PencilIcon className="h-4 w-4 mr-1.5" />
+          Edit
+        </Button>
+      }
+    />
+  );
 
   return (
     <div className="space-y-4">
@@ -265,95 +392,45 @@ export default function WorkCenters() {
         />
       </MiniStatStrip>
 
-      {/* Load error / empty state */}
-      {loadError ? (
-        <ErrorState
-          message="Could not load work centers."
-          onRetry={loadWorkCenters}
-        />
-      ) : workCenters.length === 0 ? (
-        <EmptyState
-          icon={Cog6ToothIcon}
-          title="No work centers"
-          description="Add a work center to start tracking shop-floor capacity and status."
-          action={{ label: 'Add Work Center', onClick: () => { resetForm(); setShowModal(true); } }}
-        />
-      ) : (
-      /* Per-type panels, side-by-side */
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start">
-        {groupedWorkCenters.map((group) => (
-          <CockpitPanel
-            key={group.type}
-            title={formatTypeLabel(group.type)}
-            className="min-w-0"
-            footer={`${group.items.length} center${group.items.length !== 1 ? 's' : ''}`}
-          >
-            <div className="overflow-x-auto">
-            <table className="w-full text-sm tabular-nums">
-              <thead>
-                <tr className="text-[10px] uppercase tracking-wide text-slate-500 border-b border-fd-line">
-                  <th className="text-left font-medium py-1.5 pr-2">Code / Name</th>
-                  <th className="text-right font-medium py-1.5 px-1.5">Rate</th>
-                  <th className="text-right font-medium py-1.5 px-1.5">Cap</th>
-                  <th className="text-right font-medium py-1.5 px-1.5">Eff</th>
-                  <th className="text-left font-medium py-1.5 px-1.5">Status</th>
-                  <th className="py-1.5 pl-1.5" />
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-fd-line">
-                {group.items.map((wc) => {
-                  const detail = [
-                    wc.description,
-                    wc.building && `Building: ${wc.building}`,
-                    wc.area && `Area: ${wc.area}`,
-                  ]
-                    .filter(Boolean)
-                    .join(' • ');
-                  return (
-                    <tr key={wc.id} className={`align-middle ${!wc.is_active ? 'opacity-50' : ''}`}>
-                      <td className="py-1.5 pr-2 min-w-0" title={detail || undefined}>
-                        <div className="flex items-center gap-2 min-w-0">
-                          <span
-                            className={`h-2 w-2 flex-shrink-0 rounded-full ${statusDotColor[statusVariant(wc.current_status)]}`}
-                          />
-                          <span className="font-semibold text-white flex-shrink-0">{wc.code}</span>
-                          <span className="text-slate-400 truncate">{wc.name}</span>
-                        </div>
-                      </td>
-                      <td className="py-1.5 px-1.5 text-right whitespace-nowrap">${wc.hourly_rate}</td>
-                      <td className="py-1.5 px-1.5 text-right whitespace-nowrap">{wc.capacity_hours_per_day}h</td>
-                      <td className="py-1.5 px-1.5 text-right whitespace-nowrap">{wc.efficiency_factor}</td>
-                      <td className="py-1.5 px-1.5">
-                        <select
-                          value={wc.current_status}
-                          onChange={(e) => handleStatusChange(wc.id, e.target.value)}
-                          className="input !py-0.5 !px-1.5 !text-xs !min-h-0 h-7"
-                        >
-                          <option value="available">Available</option>
-                          <option value="in_use">In Use</option>
-                          <option value="maintenance">Maintenance</option>
-                          <option value="offline">Offline</option>
-                        </select>
-                      </td>
-                      <td className="py-1.5 pl-1.5 text-right">
-                        <button
-                          onClick={() => handleEdit(wc)}
-                          className="text-slate-400 hover:text-white"
-                          title="Edit work center"
-                        >
-                          <PencilIcon className="h-4 w-4" />
-                        </button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-            </div>
-          </CockpitPanel>
-        ))}
-      </div>
-      )}
+      {/* Grouped-by-type, sortable table. Group order is the curated
+          workCenterTypeOrder; sorting reorders within each type group. */}
+      <DataTable
+        columns={columns}
+        data={workCenters}
+        rowKey={(wc) => wc.id}
+        loading={loading}
+        error={loadError}
+        onRetry={loadWorkCenters}
+        defaultSort={{ key: 'code', dir: 'asc' }}
+        groupBy={{
+          key: (wc) => wc.work_center_type,
+          order: workCenterTypeOrder,
+          header: (type, rows) => (
+            <span className="inline-flex items-center gap-2">
+              <span className="text-slate-200">{formatTypeLabel(type)}</span>
+              <span className="text-fd-mute tabular-nums">
+                {rows.length} center{rows.length !== 1 ? 's' : ''}
+              </span>
+            </span>
+          ),
+        }}
+        csvExport={{ filename: 'work-centers' }}
+        mobileCards={renderMobileCard}
+        rowClassName={(wc) => (wc.is_active === false ? 'opacity-60' : '')}
+        empty={{
+          icon: Cog6ToothIcon,
+          title: 'No work centers',
+          description:
+            'Add a work center to start tracking shop-floor capacity and status.',
+          action: {
+            label: 'Add Work Center',
+            onClick: () => {
+              resetForm();
+              setShowModal(true);
+            },
+          },
+        }}
+      />
 
       {/* Add/Edit Modal */}
       <Modal
