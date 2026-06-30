@@ -23,7 +23,7 @@ import {
   ResponsiveContainer,
 } from 'recharts';
 import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
-import { EmptyState, ErrorState, useToast } from '../components/ui';
+import { EmptyState, ErrorState, FormField, useToast } from '../components/ui';
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -764,116 +764,140 @@ export default function JobCosting() {
             </div>
 
             <form onSubmit={handleCreate} className="space-y-4">
-              <div className="du-form-control">
-                <label className="du-label">
-                  <span className="du-label-text">Work Order</span>
-                </label>
-                <select
-                  className="du-select du-select-bordered w-full"
-                  value={createForm.work_order_id}
-                  onChange={(e) =>
-                    setCreateForm({ ...createForm, work_order_id: parseInt(e.target.value) })
-                  }
-                  required
-                >
-                  <option value={0} disabled>
-                    Select a work order...
-                  </option>
-                  {workOrders.map((wo) => (
-                    <option key={wo.id} value={wo.id}>
-                      {wo.work_order_number}
-                      {wo.customer_name ? ` - ${wo.customer_name}` : ''}
+              <FormField
+                label={<span className="du-label-text">Work Order</span>}
+                className="du-form-control"
+                labelClassName="du-label"
+              >
+                {(field) => (
+                  <select
+                    {...field}
+                    className="du-select du-select-bordered w-full"
+                    value={createForm.work_order_id}
+                    onChange={(e) =>
+                      setCreateForm({ ...createForm, work_order_id: parseInt(e.target.value) })
+                    }
+                    required
+                  >
+                    <option value={0} disabled>
+                      Select a work order...
                     </option>
-                  ))}
-                </select>
-              </div>
+                    {workOrders.map((wo) => (
+                      <option key={wo.id} value={wo.id}>
+                        {wo.work_order_number}
+                        {wo.customer_name ? ` - ${wo.customer_name}` : ''}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </FormField>
 
               <div className="grid grid-cols-2 gap-3">
-                <div className="du-form-control">
-                  <label className="du-label">
-                    <span className="du-label-text">Est. Material Cost</span>
-                  </label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    className="du-input du-input-bordered w-full"
-                    value={createForm.estimated_material_cost}
-                    onChange={(e) =>
-                      setCreateForm({
-                        ...createForm,
-                        estimated_material_cost: parseFloat(e.target.value) || 0,
-                      })
-                    }
-                  />
-                </div>
-                <div className="du-form-control">
-                  <label className="du-label">
-                    <span className="du-label-text">Est. Labor Cost</span>
-                  </label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    className="du-input du-input-bordered w-full"
-                    value={createForm.estimated_labor_cost}
-                    onChange={(e) =>
-                      setCreateForm({
-                        ...createForm,
-                        estimated_labor_cost: parseFloat(e.target.value) || 0,
-                      })
-                    }
-                  />
-                </div>
-                <div className="du-form-control">
-                  <label className="du-label">
-                    <span className="du-label-text">Est. Overhead Cost</span>
-                  </label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    className="du-input du-input-bordered w-full"
-                    value={createForm.estimated_overhead_cost}
-                    onChange={(e) =>
-                      setCreateForm({
-                        ...createForm,
-                        estimated_overhead_cost: parseFloat(e.target.value) || 0,
-                      })
-                    }
-                  />
-                </div>
-                <div className="du-form-control">
-                  <label className="du-label">
-                    <span className="du-label-text">Revenue / Sell Price</span>
-                  </label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    className="du-input du-input-bordered w-full"
-                    value={createForm.revenue}
-                    onChange={(e) =>
-                      setCreateForm({
-                        ...createForm,
-                        revenue: parseFloat(e.target.value) || 0,
-                      })
-                    }
-                  />
-                </div>
+                <FormField
+                  label={<span className="du-label-text">Est. Material Cost</span>}
+                  className="du-form-control"
+                  labelClassName="du-label"
+                >
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      className="du-input du-input-bordered w-full"
+                      value={createForm.estimated_material_cost}
+                      onChange={(e) =>
+                        setCreateForm({
+                          ...createForm,
+                          estimated_material_cost: parseFloat(e.target.value) || 0,
+                        })
+                      }
+                    />
+                  )}
+                </FormField>
+                <FormField
+                  label={<span className="du-label-text">Est. Labor Cost</span>}
+                  className="du-form-control"
+                  labelClassName="du-label"
+                >
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      className="du-input du-input-bordered w-full"
+                      value={createForm.estimated_labor_cost}
+                      onChange={(e) =>
+                        setCreateForm({
+                          ...createForm,
+                          estimated_labor_cost: parseFloat(e.target.value) || 0,
+                        })
+                      }
+                    />
+                  )}
+                </FormField>
+                <FormField
+                  label={<span className="du-label-text">Est. Overhead Cost</span>}
+                  className="du-form-control"
+                  labelClassName="du-label"
+                >
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      className="du-input du-input-bordered w-full"
+                      value={createForm.estimated_overhead_cost}
+                      onChange={(e) =>
+                        setCreateForm({
+                          ...createForm,
+                          estimated_overhead_cost: parseFloat(e.target.value) || 0,
+                        })
+                      }
+                    />
+                  )}
+                </FormField>
+                <FormField
+                  label={<span className="du-label-text">Revenue / Sell Price</span>}
+                  className="du-form-control"
+                  labelClassName="du-label"
+                >
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      className="du-input du-input-bordered w-full"
+                      value={createForm.revenue}
+                      onChange={(e) =>
+                        setCreateForm({
+                          ...createForm,
+                          revenue: parseFloat(e.target.value) || 0,
+                        })
+                      }
+                    />
+                  )}
+                </FormField>
               </div>
 
-              <div className="du-form-control">
-                <label className="du-label">
-                  <span className="du-label-text">Notes</span>
-                </label>
-                <textarea
-                  className="du-textarea du-textarea-bordered w-full"
-                  rows={2}
-                  value={createForm.notes}
-                  onChange={(e) => setCreateForm({ ...createForm, notes: e.target.value })}
-                />
-              </div>
+              <FormField
+                label={<span className="du-label-text">Notes</span>}
+                className="du-form-control"
+                labelClassName="du-label"
+              >
+                {(field) => (
+                  <textarea
+                    {...field}
+                    className="du-textarea du-textarea-bordered w-full"
+                    rows={2}
+                    value={createForm.notes}
+                    onChange={(e) => setCreateForm({ ...createForm, notes: e.target.value })}
+                  />
+                )}
+              </FormField>
 
               <div className="du-modal-action">
                 <button type="button" onClick={() => setShowCreateModal(false)} className="du-btn">
@@ -911,121 +935,153 @@ export default function JobCosting() {
 
             <form onSubmit={handleAddEntry} className="space-y-4">
               <div className="grid grid-cols-2 gap-3">
-                <div className="du-form-control">
-                  <label className="du-label">
-                    <span className="du-label-text">Type</span>
-                  </label>
-                  <select
-                    className="du-select du-select-bordered w-full"
-                    value={entryForm.entry_type}
-                    onChange={(e) => setEntryForm({ ...entryForm, entry_type: e.target.value })}
-                  >
-                    <option value="material">Material</option>
-                    <option value="labor">Labor</option>
-                    <option value="overhead">Overhead</option>
-                    <option value="other">Other</option>
-                  </select>
-                </div>
-                <div className="du-form-control">
-                  <label className="du-label">
-                    <span className="du-label-text">Source</span>
-                  </label>
-                  <select
-                    className="du-select du-select-bordered w-full"
-                    value={entryForm.source}
-                    onChange={(e) => setEntryForm({ ...entryForm, source: e.target.value })}
-                  >
-                    <option value="manual">Manual</option>
-                    <option value="time_entry">Time Entry</option>
-                    <option value="material_issue">Material Issue</option>
-                    <option value="purchase">Purchase</option>
-                  </select>
-                </div>
+                <FormField
+                  label={<span className="du-label-text">Type</span>}
+                  className="du-form-control"
+                  labelClassName="du-label"
+                >
+                  {(field) => (
+                    <select
+                      {...field}
+                      className="du-select du-select-bordered w-full"
+                      value={entryForm.entry_type}
+                      onChange={(e) => setEntryForm({ ...entryForm, entry_type: e.target.value })}
+                    >
+                      <option value="material">Material</option>
+                      <option value="labor">Labor</option>
+                      <option value="overhead">Overhead</option>
+                      <option value="other">Other</option>
+                    </select>
+                  )}
+                </FormField>
+                <FormField
+                  label={<span className="du-label-text">Source</span>}
+                  className="du-form-control"
+                  labelClassName="du-label"
+                >
+                  {(field) => (
+                    <select
+                      {...field}
+                      className="du-select du-select-bordered w-full"
+                      value={entryForm.source}
+                      onChange={(e) => setEntryForm({ ...entryForm, source: e.target.value })}
+                    >
+                      <option value="manual">Manual</option>
+                      <option value="time_entry">Time Entry</option>
+                      <option value="material_issue">Material Issue</option>
+                      <option value="purchase">Purchase</option>
+                    </select>
+                  )}
+                </FormField>
               </div>
 
-              <div className="du-form-control">
-                <label className="du-label">
-                  <span className="du-label-text">Description</span>
-                </label>
-                <input
-                  type="text"
-                  className="du-input du-input-bordered w-full"
-                  value={entryForm.description}
-                  onChange={(e) => setEntryForm({ ...entryForm, description: e.target.value })}
-                  placeholder="e.g., Aluminum 6061 bar stock"
-                  required
-                />
-              </div>
+              <FormField
+                label={<span className="du-label-text">Description</span>}
+                className="du-form-control"
+                labelClassName="du-label"
+              >
+                {(field) => (
+                  <input
+                    {...field}
+                    type="text"
+                    className="du-input du-input-bordered w-full"
+                    value={entryForm.description}
+                    onChange={(e) => setEntryForm({ ...entryForm, description: e.target.value })}
+                    placeholder="e.g., Aluminum 6061 bar stock"
+                    required
+                  />
+                )}
+              </FormField>
 
               <div className="grid grid-cols-3 gap-3">
-                <div className="du-form-control">
-                  <label className="du-label">
-                    <span className="du-label-text">Quantity</span>
-                  </label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    className="du-input du-input-bordered w-full"
-                    value={entryForm.quantity}
-                    onChange={(e) =>
-                      setEntryForm({ ...entryForm, quantity: parseFloat(e.target.value) || 0 })
-                    }
-                  />
-                </div>
-                <div className="du-form-control">
-                  <label className="du-label">
-                    <span className="du-label-text">Unit Cost</span>
-                  </label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    className="du-input du-input-bordered w-full"
-                    value={entryForm.unit_cost}
-                    onChange={(e) =>
-                      setEntryForm({ ...entryForm, unit_cost: parseFloat(e.target.value) || 0 })
-                    }
-                  />
-                </div>
-                <div className="du-form-control">
-                  <label className="du-label">
-                    <span className="du-label-text">Total</span>
-                  </label>
-                  <input
-                    type="text"
-                    className="du-input du-input-bordered w-full bg-slate-800"
-                    value={fmt(entryForm.quantity * entryForm.unit_cost)}
-                    disabled
-                  />
-                </div>
+                <FormField
+                  label={<span className="du-label-text">Quantity</span>}
+                  className="du-form-control"
+                  labelClassName="du-label"
+                >
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      className="du-input du-input-bordered w-full"
+                      value={entryForm.quantity}
+                      onChange={(e) =>
+                        setEntryForm({ ...entryForm, quantity: parseFloat(e.target.value) || 0 })
+                      }
+                    />
+                  )}
+                </FormField>
+                <FormField
+                  label={<span className="du-label-text">Unit Cost</span>}
+                  className="du-form-control"
+                  labelClassName="du-label"
+                >
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      className="du-input du-input-bordered w-full"
+                      value={entryForm.unit_cost}
+                      onChange={(e) =>
+                        setEntryForm({ ...entryForm, unit_cost: parseFloat(e.target.value) || 0 })
+                      }
+                    />
+                  )}
+                </FormField>
+                <FormField
+                  label={<span className="du-label-text">Total</span>}
+                  className="du-form-control"
+                  labelClassName="du-label"
+                >
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="text"
+                      className="du-input du-input-bordered w-full bg-slate-800"
+                      value={fmt(entryForm.quantity * entryForm.unit_cost)}
+                      disabled
+                    />
+                  )}
+                </FormField>
               </div>
 
               <div className="grid grid-cols-2 gap-3">
-                <div className="du-form-control">
-                  <label className="du-label">
-                    <span className="du-label-text">Entry Date</span>
-                  </label>
-                  <input
-                    type="date"
-                    className="du-input du-input-bordered w-full"
-                    value={entryForm.entry_date}
-                    onChange={(e) => setEntryForm({ ...entryForm, entry_date: e.target.value })}
-                    required
-                  />
-                </div>
-                <div className="du-form-control">
-                  <label className="du-label">
-                    <span className="du-label-text">Reference (PO#, etc.)</span>
-                  </label>
-                  <input
-                    type="text"
-                    className="du-input du-input-bordered w-full"
-                    value={entryForm.reference}
-                    onChange={(e) => setEntryForm({ ...entryForm, reference: e.target.value })}
-                    placeholder="Optional"
-                  />
-                </div>
+                <FormField
+                  label={<span className="du-label-text">Entry Date</span>}
+                  className="du-form-control"
+                  labelClassName="du-label"
+                >
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="date"
+                      className="du-input du-input-bordered w-full"
+                      value={entryForm.entry_date}
+                      onChange={(e) => setEntryForm({ ...entryForm, entry_date: e.target.value })}
+                      required
+                    />
+                  )}
+                </FormField>
+                <FormField
+                  label={<span className="du-label-text">Reference (PO#, etc.)</span>}
+                  className="du-form-control"
+                  labelClassName="du-label"
+                >
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="text"
+                      className="du-input du-input-bordered w-full"
+                      value={entryForm.reference}
+                      onChange={(e) => setEntryForm({ ...entryForm, reference: e.target.value })}
+                      placeholder="Optional"
+                    />
+                  )}
+                </FormField>
               </div>
 
               <div className="du-modal-action">

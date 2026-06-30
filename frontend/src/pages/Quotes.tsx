@@ -10,6 +10,7 @@ import {
   DocumentTextIcon,
 } from '@heroicons/react/24/outline';
 import { Modal } from '../components/ui/Modal';
+import { FormField } from '../components/ui/FormField';
 import {
   useToast,
   DataTable,
@@ -400,61 +401,71 @@ export default function Quotes() {
             <form onSubmit={handleCreate} className="space-y-4">
               {/* Customer Info */}
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Customer Name *</label>
-                  <input
-                    type="text"
-                    value={newQuote.customer_name}
-                    onChange={(e) => setNewQuote({ ...newQuote, customer_name: e.target.value })}
-                    className="input"
-                    required
-                  />
-                </div>
-                <div>
-                  <label className="label">Contact</label>
-                  <input
-                    type="text"
-                    value={newQuote.customer_contact}
-                    onChange={(e) => setNewQuote({ ...newQuote, customer_contact: e.target.value })}
-                    className="input"
-                  />
-                </div>
+                <FormField label="Customer Name" required>
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={newQuote.customer_name}
+                      onChange={(e) => setNewQuote({ ...newQuote, customer_name: e.target.value })}
+                      className="input"
+                      required
+                    />
+                  )}
+                </FormField>
+                <FormField label="Contact">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={newQuote.customer_contact}
+                      onChange={(e) => setNewQuote({ ...newQuote, customer_contact: e.target.value })}
+                      className="input"
+                    />
+                  )}
+                </FormField>
               </div>
               <div className="grid grid-cols-3 gap-4">
-                <div>
-                  <label className="label">Email</label>
-                  <input
-                    type="email"
-                    value={newQuote.customer_email}
-                    onChange={(e) => setNewQuote({ ...newQuote, customer_email: e.target.value })}
-                    className="input"
-                  />
-                </div>
-                <div>
-                  <label className="label">Valid Days</label>
-                  <input
-                    type="number"
-                    value={newQuote.valid_days}
-                    onChange={(e) => setNewQuote({ ...newQuote, valid_days: parseInt(e.target.value) })}
-                    className="input"
-                    min={1}
-                  />
-                </div>
-                <div>
-                  <label className="label">Lead Time (days)</label>
-                  <input
-                    type="number"
-                    value={newQuote.lead_time_days}
-                    onChange={(e) => setNewQuote({ ...newQuote, lead_time_days: parseInt(e.target.value) })}
-                    className="input"
-                  />
-                </div>
+                <FormField label="Email">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="email"
+                      value={newQuote.customer_email}
+                      onChange={(e) => setNewQuote({ ...newQuote, customer_email: e.target.value })}
+                      className="input"
+                    />
+                  )}
+                </FormField>
+                <FormField label="Valid Days">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="number"
+                      value={newQuote.valid_days}
+                      onChange={(e) => setNewQuote({ ...newQuote, valid_days: parseInt(e.target.value) })}
+                      className="input"
+                      min={1}
+                    />
+                  )}
+                </FormField>
+                <FormField label="Lead Time (days)">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="number"
+                      value={newQuote.lead_time_days}
+                      onChange={(e) => setNewQuote({ ...newQuote, lead_time_days: parseInt(e.target.value) })}
+                      className="input"
+                    />
+                  )}
+                </FormField>
               </div>
 
               {/* Line Items */}
               <div>
                 <div className="flex justify-between items-center mb-2">
-                  <label className="label">Line Items</label>
+                  <span className="label">Line Items</span>
                   <button type="button" onClick={addLine} className="text-werco-primary text-sm hover:underline">
                     + Add Line
                   </button>
@@ -532,15 +543,17 @@ export default function Quotes() {
                 )}
               </div>
 
-              <div>
-                <label className="label">Notes</label>
-                <textarea
-                  value={newQuote.notes}
-                  onChange={(e) => setNewQuote({ ...newQuote, notes: e.target.value })}
-                  className="input"
-                  rows={2}
-                />
-              </div>
+              <FormField label="Notes">
+                {(field) => (
+                  <textarea
+                    {...field}
+                    value={newQuote.notes}
+                    onChange={(e) => setNewQuote({ ...newQuote, notes: e.target.value })}
+                    className="input"
+                    rows={2}
+                  />
+                )}
+              </FormField>
 
               <div className="flex justify-end gap-3 pt-4 border-t">
                 <Button type="button" variant="secondary" onClick={() => setShowCreateModal(false)}>

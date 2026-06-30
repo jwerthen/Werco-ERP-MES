@@ -29,7 +29,7 @@ import {
   Squares2X2Icon,
 } from '@heroicons/react/24/outline';
 import { Modal } from '../components/ui/Modal';
-import { Button, EmptyState, ErrorState, statusVariant, useToast } from '../components/ui';
+import { Button, EmptyState, ErrorState, FormField, statusVariant, useToast } from '../components/ui';
 import type { StatusVariant } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 
@@ -1601,28 +1601,32 @@ export default function Scheduling() {
             </div>
             <form onSubmit={handleSchedule} className="space-y-4">
               <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="label">Start Date *</label>
-                  <input
-                    type="date"
-                    value={scheduleForm.scheduled_start}
-                    onChange={(e) => setScheduleForm({ ...scheduleForm, scheduled_start: e.target.value })}
-                    className="input"
-                    required
-                  />
-                </div>
-                <div>
-                  <label className="label">Work Center</label>
-                  <select
-                    value={scheduleForm.work_center_id}
-                    onChange={(e) => setScheduleForm({ ...scheduleForm, work_center_id: parseInt(e.target.value, 10) })}
-                    className="input"
-                  >
-                    {workCenters.map((wc) => (
-                      <option key={wc.id} value={wc.id}>{wc.code} - {wc.name}</option>
-                    ))}
-                  </select>
-                </div>
+                <FormField label="Start Date" required>
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="date"
+                      value={scheduleForm.scheduled_start}
+                      onChange={(e) => setScheduleForm({ ...scheduleForm, scheduled_start: e.target.value })}
+                      className="input"
+                      required
+                    />
+                  )}
+                </FormField>
+                <FormField label="Work Center">
+                  {(field) => (
+                    <select
+                      {...field}
+                      value={scheduleForm.work_center_id}
+                      onChange={(e) => setScheduleForm({ ...scheduleForm, work_center_id: parseInt(e.target.value, 10) })}
+                      className="input"
+                    >
+                      {workCenters.map((wc) => (
+                        <option key={wc.id} value={wc.id}>{wc.code} - {wc.name}</option>
+                      ))}
+                    </select>
+                  )}
+                </FormField>
               </div>
 
               {/* Capacity Preview */}

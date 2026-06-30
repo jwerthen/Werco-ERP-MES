@@ -299,10 +299,11 @@ export default function AuditLog() {
       <div className="rounded-sm border border-fd-line bg-fd-panel p-3">
         <div className="flex flex-wrap gap-3 items-end">
           <div className="flex-1 min-w-[200px]">
-            <label className="label">Search</label>
+            <label htmlFor="audit-search" className="label">Search</label>
             <div className="relative">
               <MagnifyingGlassIcon className="h-5 w-5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
               <input
+                id="audit-search"
                 type="text"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
@@ -313,8 +314,9 @@ export default function AuditLog() {
             </div>
           </div>
           <div>
-            <label className="label">Action</label>
+            <label htmlFor="audit-action" className="label">Action</label>
             <select
+              id="audit-action"
               value={actionFilter}
               onChange={(e) => setActionFilter(e.target.value)}
               className="input"
@@ -326,8 +328,9 @@ export default function AuditLog() {
             </select>
           </div>
           <div>
-            <label className="label">Resource Type</label>
+            <label htmlFor="audit-resource-type" className="label">Resource Type</label>
             <select
+              id="audit-resource-type"
               value={resourceFilter}
               onChange={(e) => setResourceFilter(e.target.value)}
               className="input"
@@ -388,15 +391,15 @@ export default function AuditLog() {
             <div className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="text-sm text-slate-400">Timestamp</label>
+                  <span className="block text-sm text-slate-400">Timestamp</span>
                   <p className="font-medium">{formatTimestamp(selectedLog.timestamp)}</p>
                 </div>
                 <div>
-                  <label className="text-sm text-slate-400">User</label>
+                  <span className="block text-sm text-slate-400">User</span>
                   <p className="font-medium">{selectedLog.user_name || selectedLog.user_email || 'System'}</p>
                 </div>
                 <div>
-                  <label className="text-sm text-slate-400">Action</label>
+                  <span className="block text-sm text-slate-400">Action</span>
                   <p>
                     <span className={`px-2 py-1 rounded-full text-xs font-medium ${actionColors[selectedLog.action] || 'bg-slate-800/50'}`}>
                       {selectedLog.action}
@@ -404,7 +407,7 @@ export default function AuditLog() {
                   </p>
                 </div>
                 <div>
-                  <label className="text-sm text-slate-400">Resource</label>
+                  <span className="block text-sm text-slate-400">Resource</span>
                   <p className="font-medium">{selectedLog.resource_type}</p>
                   {selectedLog.resource_identifier && (
                     <p className="text-sm font-mono text-slate-400">{selectedLog.resource_identifier}</p>
@@ -414,39 +417,39 @@ export default function AuditLog() {
               
               {selectedLog.description && (
                 <div>
-                  <label className="text-sm text-slate-400">Description</label>
+                  <span className="block text-sm text-slate-400">Description</span>
                   <p>{selectedLog.description}</p>
                 </div>
               )}
-              
+
               {selectedLog.ip_address && (
                 <div>
-                  <label className="text-sm text-slate-400">IP Address</label>
+                  <span className="block text-sm text-slate-400">IP Address</span>
                   <p className="font-mono">{selectedLog.ip_address}</p>
                 </div>
               )}
-              
+
               {selectedLog.old_values && Object.keys(selectedLog.old_values).length > 0 && (
                 <div>
-                  <label className="text-sm text-slate-400">Previous Values</label>
+                  <span className="block text-sm text-slate-400">Previous Values</span>
                   <pre className="bg-slate-800/50 p-2 rounded text-sm overflow-x-auto">
                     {JSON.stringify(selectedLog.old_values, null, 2)}
                   </pre>
                 </div>
               )}
-              
+
               {selectedLog.new_values && Object.keys(selectedLog.new_values).length > 0 && (
                 <div>
-                  <label className="text-sm text-slate-400">New Values</label>
+                  <span className="block text-sm text-slate-400">New Values</span>
                   <pre className="bg-slate-800/50 p-2 rounded text-sm overflow-x-auto">
                     {JSON.stringify(selectedLog.new_values, null, 2)}
                   </pre>
                 </div>
               )}
-              
+
               {selectedLog.success === 'false' && selectedLog.error_message && (
                 <div className="bg-red-500/10 border border-red-500/30 p-3 rounded">
-                  <label className="text-sm text-red-600 font-medium">Error</label>
+                  <span className="block text-sm text-red-600 font-medium">Error</span>
                   <p className="text-red-300">{selectedLog.error_message}</p>
                 </div>
               )}

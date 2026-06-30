@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import api from '../../services/api';
 import { ImportPreview, ImportItem, ImportAssembly } from '../../types/engineering';
 import { useToast } from '../ui/Toast';
+import { FormField } from '../ui/FormField';
 import { ArrowUturnLeftIcon, TrashIcon, XMarkIcon } from '@heroicons/react/24/outline';
 
 interface Props {
@@ -216,16 +217,18 @@ export function BOMImportWizard({ onComplete, onClose }: Props) {
         <div className="flex-1 overflow-y-auto px-6 py-4">
           {step === 'upload' && (
             <form onSubmit={handlePreview} id="upload-form" className="space-y-4">
-              <div>
-                <label className="label">PDF, Word, or Excel Document</label>
-                <input
-                  type="file"
-                  accept=".pdf,.doc,.docx,.xlsx,.xls"
-                  onChange={e => setFile(e.target.files?.[0] || null)}
-                  className="input"
-                  required
-                />
-              </div>
+              <FormField label="PDF, Word, or Excel Document">
+                {(field) => (
+                  <input
+                    {...field}
+                    type="file"
+                    accept=".pdf,.doc,.docx,.xlsx,.xls"
+                    onChange={e => setFile(e.target.files?.[0] || null)}
+                    className="input"
+                    required
+                  />
+                )}
+              </FormField>
               <label className="flex items-center gap-2">
                 <input
                   type="checkbox"
@@ -248,33 +251,38 @@ export function BOMImportWizard({ onComplete, onClose }: Props) {
 
               {/* Assembly Info */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                <div>
-                  <label className="label">Part Number</label>
-                  <input className="input" value={preview.assembly.part_number || ''} onChange={e => updateAssembly('part_number', e.target.value)} />
-                </div>
-                <div>
-                  <label className="label">Revision</label>
-                  <input className="input" value={preview.assembly.revision || ''} onChange={e => updateAssembly('revision', e.target.value)} />
-                </div>
-                <div>
-                  <label className="label">Part Type</label>
-                  <select className="input" value={preview.assembly.part_type || 'assembly'} onChange={e => updateAssembly('part_type', e.target.value)}>
-                    <option value="manufactured">Manufactured</option>
-                    <option value="assembly">Assembly</option>
-                    <option value="purchased">Purchased</option>
-                    <option value="raw_material">Raw Material</option>
-                    <option value="hardware">Hardware</option>
-                    <option value="consumable">Consumable</option>
-                  </select>
-                </div>
-                <div className="md:col-span-2">
-                  <label className="label">Name</label>
-                  <input className="input" value={preview.assembly.name || ''} onChange={e => updateAssembly('name', e.target.value)} />
-                </div>
-                <div>
-                  <label className="label">Drawing #</label>
-                  <input className="input" value={preview.assembly.drawing_number || ''} onChange={e => updateAssembly('drawing_number', e.target.value)} />
-                </div>
+                <FormField label="Part Number">
+                  {(field) => (
+                    <input {...field} className="input" value={preview.assembly.part_number || ''} onChange={e => updateAssembly('part_number', e.target.value)} />
+                  )}
+                </FormField>
+                <FormField label="Revision">
+                  {(field) => (
+                    <input {...field} className="input" value={preview.assembly.revision || ''} onChange={e => updateAssembly('revision', e.target.value)} />
+                  )}
+                </FormField>
+                <FormField label="Part Type">
+                  {(field) => (
+                    <select {...field} className="input" value={preview.assembly.part_type || 'assembly'} onChange={e => updateAssembly('part_type', e.target.value)}>
+                      <option value="manufactured">Manufactured</option>
+                      <option value="assembly">Assembly</option>
+                      <option value="purchased">Purchased</option>
+                      <option value="raw_material">Raw Material</option>
+                      <option value="hardware">Hardware</option>
+                      <option value="consumable">Consumable</option>
+                    </select>
+                  )}
+                </FormField>
+                <FormField label="Name" className="md:col-span-2">
+                  {(field) => (
+                    <input {...field} className="input" value={preview.assembly.name || ''} onChange={e => updateAssembly('name', e.target.value)} />
+                  )}
+                </FormField>
+                <FormField label="Drawing #">
+                  {(field) => (
+                    <input {...field} className="input" value={preview.assembly.drawing_number || ''} onChange={e => updateAssembly('drawing_number', e.target.value)} />
+                  )}
+                </FormField>
               </div>
 
               {/* Column Mapping */}

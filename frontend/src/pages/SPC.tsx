@@ -21,7 +21,7 @@ import {
   ReferenceLine,
 } from 'recharts';
 import { Modal } from '../components/ui/Modal';
-import { EmptyState, ErrorState, useToast } from '../components/ui';
+import { EmptyState, ErrorState, FormField, useToast } from '../components/ui';
 import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
 
 interface DashboardStats {
@@ -535,37 +535,43 @@ const SPC = () => {
               </button>
             </div>
             <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Value *</label>
-                <input
-                  type="number"
-                  step="any"
-                  value={measurementForm.value}
-                  onChange={(e) => setMeasurementForm({ ...measurementForm, value: e.target.value })}
-                  className="w-full border border-slate-600 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500"
-                  placeholder="Enter measured value"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Measured By</label>
-                <input
-                  type="text"
-                  value={measurementForm.measured_by}
-                  onChange={(e) => setMeasurementForm({ ...measurementForm, measured_by: e.target.value })}
-                  className="w-full border border-slate-600 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500"
-                  placeholder="Operator name"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Notes</label>
-                <textarea
-                  value={measurementForm.notes}
-                  onChange={(e) => setMeasurementForm({ ...measurementForm, notes: e.target.value })}
-                  className="w-full border border-slate-600 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500"
-                  rows={2}
-                  placeholder="Optional notes"
-                />
-              </div>
+              <FormField label="Value" required labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                {(field) => (
+                  <input
+                    {...field}
+                    type="number"
+                    step="any"
+                    value={measurementForm.value}
+                    onChange={(e) => setMeasurementForm({ ...measurementForm, value: e.target.value })}
+                    className="w-full border border-slate-600 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500"
+                    placeholder="Enter measured value"
+                  />
+                )}
+              </FormField>
+              <FormField label="Measured By" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                {(field) => (
+                  <input
+                    {...field}
+                    type="text"
+                    value={measurementForm.measured_by}
+                    onChange={(e) => setMeasurementForm({ ...measurementForm, measured_by: e.target.value })}
+                    className="w-full border border-slate-600 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500"
+                    placeholder="Operator name"
+                  />
+                )}
+              </FormField>
+              <FormField label="Notes" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                {(field) => (
+                  <textarea
+                    {...field}
+                    value={measurementForm.notes}
+                    onChange={(e) => setMeasurementForm({ ...measurementForm, notes: e.target.value })}
+                    className="w-full border border-slate-600 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500"
+                    rows={2}
+                    placeholder="Optional notes"
+                  />
+                )}
+              </FormField>
               <div className="flex justify-end gap-3 pt-2">
                 <button
                   onClick={() => setShowAddMeasurement(false)}
@@ -597,73 +603,85 @@ const SPC = () => {
               </button>
             </div>
             <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Name *</label>
-                <input
-                  type="text"
-                  value={charForm.name}
-                  onChange={(e) => setCharForm({ ...charForm, name: e.target.value })}
-                  className="w-full border border-slate-600 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500"
-                  placeholder="e.g., Bore Diameter"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Part ID</label>
-                <input
-                  type="number"
-                  value={charForm.part_id}
-                  onChange={(e) => setCharForm({ ...charForm, part_id: e.target.value })}
-                  className="w-full border border-slate-600 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500"
-                />
-              </div>
+              <FormField label="Name" required labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                {(field) => (
+                  <input
+                    {...field}
+                    type="text"
+                    value={charForm.name}
+                    onChange={(e) => setCharForm({ ...charForm, name: e.target.value })}
+                    className="w-full border border-slate-600 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500"
+                    placeholder="e.g., Bore Diameter"
+                  />
+                )}
+              </FormField>
+              <FormField label="Part ID" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                {(field) => (
+                  <input
+                    {...field}
+                    type="number"
+                    value={charForm.part_id}
+                    onChange={(e) => setCharForm({ ...charForm, part_id: e.target.value })}
+                    className="w-full border border-slate-600 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500"
+                  />
+                )}
+              </FormField>
               <div className="grid grid-cols-3 gap-3">
-                <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-1">Nominal</label>
-                  <input
-                    type="number"
-                    step="any"
-                    value={charForm.nominal}
-                    onChange={(e) => setCharForm({ ...charForm, nominal: e.target.value })}
-                    className="w-full border border-slate-600 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-1">USL</label>
-                  <input
-                    type="number"
-                    step="any"
-                    value={charForm.usl}
-                    onChange={(e) => setCharForm({ ...charForm, usl: e.target.value })}
-                    className="w-full border border-slate-600 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-1">LSL</label>
-                  <input
-                    type="number"
-                    step="any"
-                    value={charForm.lsl}
-                    onChange={(e) => setCharForm({ ...charForm, lsl: e.target.value })}
-                    className="w-full border border-slate-600 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500"
-                  />
-                </div>
+                <FormField label="Nominal" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="number"
+                      step="any"
+                      value={charForm.nominal}
+                      onChange={(e) => setCharForm({ ...charForm, nominal: e.target.value })}
+                      className="w-full border border-slate-600 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500"
+                    />
+                  )}
+                </FormField>
+                <FormField label="USL" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="number"
+                      step="any"
+                      value={charForm.usl}
+                      onChange={(e) => setCharForm({ ...charForm, usl: e.target.value })}
+                      className="w-full border border-slate-600 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500"
+                    />
+                  )}
+                </FormField>
+                <FormField label="LSL" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="number"
+                      step="any"
+                      value={charForm.lsl}
+                      onChange={(e) => setCharForm({ ...charForm, lsl: e.target.value })}
+                      className="w-full border border-slate-600 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500"
+                    />
+                  )}
+                </FormField>
               </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Chart Type</label>
-                <select
-                  value={charForm.chart_type}
-                  onChange={(e) => setCharForm({ ...charForm, chart_type: e.target.value })}
-                  className="w-full border border-slate-600 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500"
-                >
-                  <option value="xbar_r">X-bar & R</option>
-                  <option value="xbar_s">X-bar & S</option>
-                  <option value="individual_mr">Individual & MR</option>
-                  <option value="p_chart">P Chart</option>
-                  <option value="np_chart">NP Chart</option>
-                  <option value="c_chart">C Chart</option>
-                  <option value="u_chart">U Chart</option>
-                </select>
-              </div>
+              <FormField label="Chart Type" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                {(field) => (
+                  <select
+                    {...field}
+                    value={charForm.chart_type}
+                    onChange={(e) => setCharForm({ ...charForm, chart_type: e.target.value })}
+                    className="w-full border border-slate-600 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500"
+                  >
+                    <option value="xbar_r">X-bar & R</option>
+                    <option value="xbar_s">X-bar & S</option>
+                    <option value="individual_mr">Individual & MR</option>
+                    <option value="p_chart">P Chart</option>
+                    <option value="np_chart">NP Chart</option>
+                    <option value="c_chart">C Chart</option>
+                    <option value="u_chart">U Chart</option>
+                  </select>
+                )}
+              </FormField>
               <div className="flex justify-end gap-3 pt-2">
                 <button
                   onClick={() => setShowCreateChar(false)}

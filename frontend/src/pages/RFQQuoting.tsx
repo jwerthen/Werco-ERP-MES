@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import { ArrowDownTrayIcon, CheckCircleIcon, DocumentArrowUpIcon, SparklesIcon } from '@heroicons/react/24/outline';
-import { ErrorState, useToast } from '../components/ui';
+import { ErrorState, FormField, useToast } from '../components/ui';
 
 interface CustomerOption {
   id: number;
@@ -257,8 +257,9 @@ export default function RFQQuoting() {
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <div>
-            <label className="label">Customer</label>
+            <label htmlFor="rfq-customer" className="label">Customer</label>
             <select
+              id="rfq-customer"
               value={selectedCustomerId}
               onChange={(e) => setSelectedCustomerId(e.target.value ? parseInt(e.target.value, 10) : '')}
               className="input"
@@ -278,64 +279,75 @@ export default function RFQQuoting() {
               />
             )}
           </div>
-          <div>
-            <label className="label">Customer Name Override</label>
-            <input
-              className="input"
-              value={customerName}
-              onChange={(e) => setCustomerName(e.target.value)}
-              placeholder="Optional"
-            />
-          </div>
-          <div>
-            <label className="label">RFQ Reference</label>
-            <input
-              className="input"
-              value={rfqReference}
-              onChange={(e) => setRfqReference(e.target.value)}
-              placeholder="RFQ-12345"
-            />
-          </div>
+          <FormField label="Customer Name Override">
+            {(field) => (
+              <input
+                {...field}
+                className="input"
+                value={customerName}
+                onChange={(e) => setCustomerName(e.target.value)}
+                placeholder="Optional"
+              />
+            )}
+          </FormField>
+          <FormField label="RFQ Reference">
+            {(field) => (
+              <input
+                {...field}
+                className="input"
+                value={rfqReference}
+                onChange={(e) => setRfqReference(e.target.value)}
+                placeholder="RFQ-12345"
+              />
+            )}
+          </FormField>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <div>
-            <label className="label">Target Margin (%)</label>
-            <input
-              className="input"
-              type="number"
-              value={targetMargin}
-              min={0}
-              step={0.5}
-              onChange={(e) => setTargetMargin(parseFloat(e.target.value) || 0)}
-            />
-          </div>
-          <div>
-            <label className="label">Quote Valid Days</label>
-            <input
-              className="input"
-              type="number"
-              value={validDays}
-              min={1}
-              onChange={(e) => setValidDays(parseInt(e.target.value, 10) || 30)}
-            />
-          </div>
-          <div>
-            <label className="label">Files</label>
-            <input
-              className="input"
-              type="file"
-              multiple
-              accept=".pdf,.xlsx,.xls,.dxf,.step,.stp"
-              onChange={(e) => setFiles(Array.from(e.target.files || []))}
-            />
-          </div>
+          <FormField label="Target Margin (%)">
+            {(field) => (
+              <input
+                {...field}
+                className="input"
+                type="number"
+                value={targetMargin}
+                min={0}
+                step={0.5}
+                onChange={(e) => setTargetMargin(parseFloat(e.target.value) || 0)}
+              />
+            )}
+          </FormField>
+          <FormField label="Quote Valid Days">
+            {(field) => (
+              <input
+                {...field}
+                className="input"
+                type="number"
+                value={validDays}
+                min={1}
+                onChange={(e) => setValidDays(parseInt(e.target.value, 10) || 30)}
+              />
+            )}
+          </FormField>
+          <FormField label="Files">
+            {(field) => (
+              <input
+                {...field}
+                className="input"
+                type="file"
+                multiple
+                accept=".pdf,.xlsx,.xls,.dxf,.step,.stp"
+                onChange={(e) => setFiles(Array.from(e.target.files || []))}
+              />
+            )}
+          </FormField>
         </div>
 
-        <div>
-          <label className="label">Notes</label>
-          <textarea className="input" rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} />
-        </div>
+        <FormField label="Notes">
+          {(field) => (
+            <textarea {...field} className="input" rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} />
+          )}
+        </FormField>
 
         <div className="flex flex-wrap gap-3">
           <button onClick={uploadPackage} className="btn-primary" disabled={loading}>

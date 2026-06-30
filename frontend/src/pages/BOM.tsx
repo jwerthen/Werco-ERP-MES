@@ -982,16 +982,18 @@ export default function BOMPage() {
               </button>
             </div>
             <form onSubmit={handleImport} className="space-y-4">
-              <div>
-                <label className="label">PDF, Word, or Excel Document</label>
-                <input
-                  type="file"
-                  accept=".pdf,.doc,.docx,.xlsx,.xls"
-                  onChange={(e) => setImportFile(e.target.files?.[0] || null)}
-                  className="input"
-                  required
-                />
-              </div>
+              <FormField label="PDF, Word, or Excel Document">
+                {(field) => (
+                  <input
+                    {...field}
+                    type="file"
+                    accept=".pdf,.doc,.docx,.xlsx,.xls"
+                    onChange={(e) => setImportFile(e.target.files?.[0] || null)}
+                    className="input"
+                    required
+                  />
+                )}
+              </FormField>
               <label className="flex items-center gap-2">
                 <input
                   type="checkbox"
@@ -1044,62 +1046,74 @@ export default function BOMPage() {
             )}
 
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
-              <div>
-                <label className="label">Part Number</label>
-                <input
-                  className="input"
-                  value={importPreview.assembly.part_number || ''}
-                  onChange={(e) => updatePreviewAssembly('part_number', e.target.value)}
-                />
-              </div>
-              <div>
-                <label className="label">Revision</label>
-                <input
-                  className="input"
-                  value={importPreview.assembly.revision || ''}
-                  onChange={(e) => updatePreviewAssembly('revision', e.target.value)}
-                />
-              </div>
-              <div>
-                <label className="label">Part Type</label>
-                <select
-                  className="input"
-                  value={importPreview.assembly.part_type || (importPreview.document_type === 'bom' ? 'assembly' : 'manufactured')}
-                  onChange={(e) => updatePreviewAssembly('part_type', e.target.value)}
-                >
-                  <option value="manufactured">Manufactured</option>
-                  <option value="assembly">Assembly</option>
-                  <option value="purchased">Purchased</option>
-                  <option value="raw_material">Raw Material</option>
-                  <option value="hardware">Hardware</option>
-                  <option value="consumable">Consumable</option>
-                </select>
-              </div>
-              <div className="lg:col-span-2">
-                <label className="label">Name</label>
-                <input
-                  className="input"
-                  value={importPreview.assembly.name || ''}
-                  onChange={(e) => updatePreviewAssembly('name', e.target.value)}
-                />
-              </div>
-              <div>
-                <label className="label">Drawing #</label>
-                <input
-                  className="input"
-                  value={importPreview.assembly.drawing_number || ''}
-                  onChange={(e) => updatePreviewAssembly('drawing_number', e.target.value)}
-                />
-              </div>
-              <div className="lg:col-span-3">
-                <label className="label">Description</label>
-                <textarea
-                  className="input"
-                  rows={2}
-                  value={importPreview.assembly.description || ''}
-                  onChange={(e) => updatePreviewAssembly('description', e.target.value)}
-                />
-              </div>
+              <FormField label="Part Number">
+                {(field) => (
+                  <input
+                    {...field}
+                    className="input"
+                    value={importPreview.assembly.part_number || ''}
+                    onChange={(e) => updatePreviewAssembly('part_number', e.target.value)}
+                  />
+                )}
+              </FormField>
+              <FormField label="Revision">
+                {(field) => (
+                  <input
+                    {...field}
+                    className="input"
+                    value={importPreview.assembly.revision || ''}
+                    onChange={(e) => updatePreviewAssembly('revision', e.target.value)}
+                  />
+                )}
+              </FormField>
+              <FormField label="Part Type">
+                {(field) => (
+                  <select
+                    {...field}
+                    className="input"
+                    value={importPreview.assembly.part_type || (importPreview.document_type === 'bom' ? 'assembly' : 'manufactured')}
+                    onChange={(e) => updatePreviewAssembly('part_type', e.target.value)}
+                  >
+                    <option value="manufactured">Manufactured</option>
+                    <option value="assembly">Assembly</option>
+                    <option value="purchased">Purchased</option>
+                    <option value="raw_material">Raw Material</option>
+                    <option value="hardware">Hardware</option>
+                    <option value="consumable">Consumable</option>
+                  </select>
+                )}
+              </FormField>
+              <FormField label="Name" className="lg:col-span-2">
+                {(field) => (
+                  <input
+                    {...field}
+                    className="input"
+                    value={importPreview.assembly.name || ''}
+                    onChange={(e) => updatePreviewAssembly('name', e.target.value)}
+                  />
+                )}
+              </FormField>
+              <FormField label="Drawing #">
+                {(field) => (
+                  <input
+                    {...field}
+                    className="input"
+                    value={importPreview.assembly.drawing_number || ''}
+                    onChange={(e) => updatePreviewAssembly('drawing_number', e.target.value)}
+                  />
+                )}
+              </FormField>
+              <FormField label="Description" className="lg:col-span-3">
+                {(field) => (
+                  <textarea
+                    {...field}
+                    className="input"
+                    rows={2}
+                    value={importPreview.assembly.description || ''}
+                    onChange={(e) => updatePreviewAssembly('description', e.target.value)}
+                  />
+                )}
+              </FormField>
             </div>
 
             {importPreview.document_type === 'bom' && (
@@ -1424,65 +1438,75 @@ export default function BOMPage() {
                     )}
                   </div>
                   <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="label">Line Type</label>
-                      <select
-                        value={newItem.line_type}
-                        onChange={(e) => setNewItem({ ...newItem, line_type: e.target.value as LineType })}
-                        className="input"
-                      >
-                        <option value="component">Component (Made Part)</option>
-                        <option value="hardware">Hardware (Bolts, Nuts, etc.)</option>
-                        <option value="consumable">Consumable (Adhesive, etc.)</option>
-                        <option value="reference">Reference Only</option>
-                      </select>
-                    </div>
-                    <div>
-                      <label className="label">Make/Buy</label>
-                      <select
-                        value={newItem.item_type}
-                        onChange={(e) => setNewItem({ ...newItem, item_type: e.target.value as any })}
-                        className="input"
-                      >
-                        <option value="make">Make</option>
-                        <option value="buy">Buy</option>
-                        <option value="phantom">Phantom</option>
-                      </select>
-                    </div>
+                    <FormField label="Line Type">
+                      {(field) => (
+                        <select
+                          {...field}
+                          value={newItem.line_type}
+                          onChange={(e) => setNewItem({ ...newItem, line_type: e.target.value as LineType })}
+                          className="input"
+                        >
+                          <option value="component">Component (Made Part)</option>
+                          <option value="hardware">Hardware (Bolts, Nuts, etc.)</option>
+                          <option value="consumable">Consumable (Adhesive, etc.)</option>
+                          <option value="reference">Reference Only</option>
+                        </select>
+                      )}
+                    </FormField>
+                    <FormField label="Make/Buy">
+                      {(field) => (
+                        <select
+                          {...field}
+                          value={newItem.item_type}
+                          onChange={(e) => setNewItem({ ...newItem, item_type: e.target.value as any })}
+                          className="input"
+                        >
+                          <option value="make">Make</option>
+                          <option value="buy">Buy</option>
+                          <option value="phantom">Phantom</option>
+                        </select>
+                      )}
+                    </FormField>
                   </div>
                   <div className="grid grid-cols-3 gap-4">
-                    <div>
-                      <label className="label">Item #</label>
-                      <input
-                        type="number"
-                        value={newItem.item_number}
-                        onChange={(e) => setNewItem({ ...newItem, item_number: parseInt(e.target.value) })}
-                        className="input"
-                        required
-                      />
-                    </div>
-                    <div>
-                      <label className="label">Quantity</label>
-                      <input
-                        type="number"
-                        step="1"
-                        min="0"
-                        value={newItem.quantity}
-                        onChange={(e) => setNewItem({ ...newItem, quantity: parseFloat(e.target.value) })}
-                        className="input"
-                        required
-                      />
-                    </div>
-                    <div>
-                      <label className="label">Find Number</label>
-                      <input
-                        type="text"
-                        value={newItem.find_number}
-                        onChange={(e) => setNewItem({ ...newItem, find_number: e.target.value })}
-                        className="input"
-                        placeholder="e.g., 1, 2, 3"
-                      />
-                    </div>
+                    <FormField label="Item #">
+                      {(field) => (
+                        <input
+                          {...field}
+                          type="number"
+                          value={newItem.item_number}
+                          onChange={(e) => setNewItem({ ...newItem, item_number: parseInt(e.target.value) })}
+                          className="input"
+                          required
+                        />
+                      )}
+                    </FormField>
+                    <FormField label="Quantity">
+                      {(field) => (
+                        <input
+                          {...field}
+                          type="number"
+                          step="1"
+                          min="0"
+                          value={newItem.quantity}
+                          onChange={(e) => setNewItem({ ...newItem, quantity: parseFloat(e.target.value) })}
+                          className="input"
+                          required
+                        />
+                      )}
+                    </FormField>
+                    <FormField label="Find Number">
+                      {(field) => (
+                        <input
+                          {...field}
+                          type="text"
+                          value={newItem.find_number}
+                          onChange={(e) => setNewItem({ ...newItem, find_number: e.target.value })}
+                          className="input"
+                          placeholder="e.g., 1, 2, 3"
+                        />
+                      )}
+                    </FormField>
                   </div>
                 </div>
                 </div>
@@ -1492,57 +1516,65 @@ export default function BOMPage() {
                 <div className="p-3 bg-amber-500/10 rounded-lg space-y-3">
                   <div className="text-sm font-medium text-amber-300">Hardware Details</div>
                   <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="label">Torque Spec</label>
-                      <input
-                        type="text"
-                        value={newItem.torque_spec}
-                        onChange={(e) => setNewItem({ ...newItem, torque_spec: e.target.value })}
-                        className="input"
-                        placeholder="e.g., 25 ft-lbs"
-                      />
-                    </div>
-                    <div>
-                      <label className="label">Scrap %</label>
-                      <input
-                        type="number"
-                        step="0.01"
-                        min="0"
-                        max="1"
-                        value={newItem.scrap_factor}
-                        onChange={(e) => setNewItem({ ...newItem, scrap_factor: parseFloat(e.target.value) })}
-                        className="input"
-                        placeholder="0.05 = 5%"
-                      />
-                    </div>
+                    <FormField label="Torque Spec">
+                      {(field) => (
+                        <input
+                          {...field}
+                          type="text"
+                          value={newItem.torque_spec}
+                          onChange={(e) => setNewItem({ ...newItem, torque_spec: e.target.value })}
+                          className="input"
+                          placeholder="e.g., 25 ft-lbs"
+                        />
+                      )}
+                    </FormField>
+                    <FormField label="Scrap %">
+                      {(field) => (
+                        <input
+                          {...field}
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          max="1"
+                          value={newItem.scrap_factor}
+                          onChange={(e) => setNewItem({ ...newItem, scrap_factor: parseFloat(e.target.value) })}
+                          className="input"
+                          placeholder="0.05 = 5%"
+                        />
+                      )}
+                    </FormField>
                   </div>
-                  <div>
-                    <label className="label">Installation Notes</label>
-                    <textarea
-                      value={newItem.installation_notes}
-                      onChange={(e) => setNewItem({ ...newItem, installation_notes: e.target.value })}
-                      className="input"
-                      rows={2}
-                      placeholder="Assembly instructions, loctite requirements, etc."
-                    />
-                  </div>
+                  <FormField label="Installation Notes">
+                    {(field) => (
+                      <textarea
+                        {...field}
+                        value={newItem.installation_notes}
+                        onChange={(e) => setNewItem({ ...newItem, installation_notes: e.target.value })}
+                        className="input"
+                        rows={2}
+                        placeholder="Assembly instructions, loctite requirements, etc."
+                      />
+                    )}
+                  </FormField>
                 </div>
               )}
               
               {newItem.line_type !== 'hardware' && (
-                <div>
-                  <label className="label">Scrap %</label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    max="1"
-                    value={newItem.scrap_factor}
-                    onChange={(e) => setNewItem({ ...newItem, scrap_factor: parseFloat(e.target.value) })}
-                    className="input"
-                    placeholder="0.05 = 5%"
-                  />
-                </div>
+                <FormField label="Scrap %">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      max="1"
+                      value={newItem.scrap_factor}
+                      onChange={(e) => setNewItem({ ...newItem, scrap_factor: parseFloat(e.target.value) })}
+                      className="input"
+                      placeholder="0.05 = 5%"
+                    />
+                  )}
+                </FormField>
               )}
               
               <div>
