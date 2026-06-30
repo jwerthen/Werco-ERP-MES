@@ -10,6 +10,7 @@ import {
   CalendarDaysIcon,
 } from '@heroicons/react/24/outline';
 import { Modal } from '../components/ui/Modal';
+import { FormField } from '../components/ui/FormField';
 import {
   EmptyState,
   ErrorState,
@@ -626,6 +627,7 @@ export default function OperatorCertifications() {
             <MagnifyingGlassIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
             <input
               type="text"
+              aria-label={activeTab === 'certifications' ? 'Search by operator, certification, type' : 'Search by operator, training, trainer'}
               placeholder={activeTab === 'certifications' ? 'Search by operator, certification, type...' : 'Search by operator, training, trainer...'}
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
@@ -745,7 +747,7 @@ export default function OperatorCertifications() {
                         const entry = matrixMap.get(`${op.id}-${wc.id}`);
                         const level = entry?.skill_level ?? 0;
                         return (
-                          <td key={wc.id} className="px-4 py-3 text-center">
+                          <td key={wc.id} className="px-4 py-3 text-center" aria-label={`${wc.name}: ${skillLabel(level)} (Level ${level})`}>
                             <div className="flex flex-col items-center gap-0.5" title={`${skillLabel(level)} (Level ${level})`}>
                               <span className={`inline-block h-4 w-4 rounded-full ${skillColor(level)}`} />
                               <span className="text-[10px] text-slate-400 tabular-nums">{level}</span>
@@ -772,69 +774,79 @@ export default function OperatorCertifications() {
             </div>
             <form onSubmit={handleCreateCert} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1">User ID *</label>
-                  <input type="number" required value={certForm.user_id} onChange={(e) => setCertForm({ ...certForm, user_id: e.target.value })}
-                    className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1">Status</label>
-                  <select value={certForm.status} onChange={(e) => setCertForm({ ...certForm, status: e.target.value as CertStatus })}
-                    className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500">
-                    <option value="active">Active</option>
-                    <option value="pending">Pending</option>
-                    <option value="suspended">Suspended</option>
-                  </select>
-                </div>
+                <FormField label="User ID" required labelClassName="block text-xs font-medium text-slate-400 mb-1">
+                  {(field) => (
+                    <input {...field} type="number" required value={certForm.user_id} onChange={(e) => setCertForm({ ...certForm, user_id: e.target.value })}
+                      className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                  )}
+                </FormField>
+                <FormField label="Status" labelClassName="block text-xs font-medium text-slate-400 mb-1">
+                  {(field) => (
+                    <select {...field} value={certForm.status} onChange={(e) => setCertForm({ ...certForm, status: e.target.value as CertStatus })}
+                      className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500">
+                      <option value="active">Active</option>
+                      <option value="pending">Pending</option>
+                      <option value="suspended">Suspended</option>
+                    </select>
+                  )}
+                </FormField>
               </div>
-              <div>
-                <label className="block text-xs font-medium text-slate-400 mb-1">Certification Name *</label>
-                <input type="text" required value={certForm.certification_name} onChange={(e) => setCertForm({ ...certForm, certification_name: e.target.value })}
-                  className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+              <FormField label="Certification Name" required labelClassName="block text-xs font-medium text-slate-400 mb-1">
+                {(field) => (
+                  <input {...field} type="text" required value={certForm.certification_name} onChange={(e) => setCertForm({ ...certForm, certification_name: e.target.value })}
+                    className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                )}
+              </FormField>
+              <div className="grid grid-cols-2 gap-4">
+                <FormField label="Type" labelClassName="block text-xs font-medium text-slate-400 mb-1">
+                  {(field) => (
+                    <input {...field} type="text" value={certForm.certification_type} onChange={(e) => setCertForm({ ...certForm, certification_type: e.target.value })}
+                      placeholder="e.g. welding, safety"
+                      className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                  )}
+                </FormField>
+                <FormField label="Level" labelClassName="block text-xs font-medium text-slate-400 mb-1">
+                  {(field) => (
+                    <input {...field} type="text" value={certForm.level} onChange={(e) => setCertForm({ ...certForm, level: e.target.value })}
+                      placeholder="e.g. Level 1, Advanced"
+                      className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                  )}
+                </FormField>
               </div>
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1">Type</label>
-                  <input type="text" value={certForm.certification_type} onChange={(e) => setCertForm({ ...certForm, certification_type: e.target.value })}
-                    placeholder="e.g. welding, safety"
-                    className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1">Level</label>
-                  <input type="text" value={certForm.level} onChange={(e) => setCertForm({ ...certForm, level: e.target.value })}
-                    placeholder="e.g. Level 1, Advanced"
-                    className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                </div>
+                <FormField label="Issuing Authority" labelClassName="block text-xs font-medium text-slate-400 mb-1">
+                  {(field) => (
+                    <input {...field} type="text" value={certForm.issuing_authority} onChange={(e) => setCertForm({ ...certForm, issuing_authority: e.target.value })}
+                      className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                  )}
+                </FormField>
+                <FormField label="Certificate Number" labelClassName="block text-xs font-medium text-slate-400 mb-1">
+                  {(field) => (
+                    <input {...field} type="text" value={certForm.certificate_number} onChange={(e) => setCertForm({ ...certForm, certificate_number: e.target.value })}
+                      className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                  )}
+                </FormField>
               </div>
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1">Issuing Authority</label>
-                  <input type="text" value={certForm.issuing_authority} onChange={(e) => setCertForm({ ...certForm, issuing_authority: e.target.value })}
-                    className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1">Certificate Number</label>
-                  <input type="text" value={certForm.certificate_number} onChange={(e) => setCertForm({ ...certForm, certificate_number: e.target.value })}
-                    className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                </div>
+                <FormField label="Issue Date" labelClassName="block text-xs font-medium text-slate-400 mb-1">
+                  {(field) => (
+                    <input {...field} type="date" value={certForm.issue_date} onChange={(e) => setCertForm({ ...certForm, issue_date: e.target.value })}
+                      className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                  )}
+                </FormField>
+                <FormField label="Expiration Date" labelClassName="block text-xs font-medium text-slate-400 mb-1">
+                  {(field) => (
+                    <input {...field} type="date" value={certForm.expiration_date} onChange={(e) => setCertForm({ ...certForm, expiration_date: e.target.value })}
+                      className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                  )}
+                </FormField>
               </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1">Issue Date</label>
-                  <input type="date" value={certForm.issue_date} onChange={(e) => setCertForm({ ...certForm, issue_date: e.target.value })}
+              <FormField label="Notes" labelClassName="block text-xs font-medium text-slate-400 mb-1">
+                {(field) => (
+                  <textarea {...field} rows={2} value={certForm.notes} onChange={(e) => setCertForm({ ...certForm, notes: e.target.value })}
                     className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1">Expiration Date</label>
-                  <input type="date" value={certForm.expiration_date} onChange={(e) => setCertForm({ ...certForm, expiration_date: e.target.value })}
-                    className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                </div>
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-slate-400 mb-1">Notes</label>
-                <textarea rows={2} value={certForm.notes} onChange={(e) => setCertForm({ ...certForm, notes: e.target.value })}
-                  className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-              </div>
+                )}
+              </FormField>
               <div className="flex justify-end gap-2 pt-2">
                 <button type="button" onClick={() => setShowCertModal(false)} className="rounded-lg border border-slate-600 px-4 py-2 text-sm font-medium text-slate-300 hover:bg-slate-800">Cancel</button>
                 <button type="submit" disabled={certCreateLoading} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50">
@@ -854,74 +866,85 @@ export default function OperatorCertifications() {
             </div>
             <form onSubmit={handleCreateTraining} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1">User ID *</label>
-                  <input type="number" required value={trainingForm.user_id} onChange={(e) => setTrainingForm({ ...trainingForm, user_id: e.target.value })}
+                <FormField label="User ID" required labelClassName="block text-xs font-medium text-slate-400 mb-1">
+                  {(field) => (
+                    <input {...field} type="number" required value={trainingForm.user_id} onChange={(e) => setTrainingForm({ ...trainingForm, user_id: e.target.value })}
+                      className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                  )}
+                </FormField>
+                <FormField label="Training Type" labelClassName="block text-xs font-medium text-slate-400 mb-1">
+                  {(field) => (
+                    <input {...field} type="text" value={trainingForm.training_type} onChange={(e) => setTrainingForm({ ...trainingForm, training_type: e.target.value })}
+                      placeholder="e.g. safety, technical"
+                      className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                  )}
+                </FormField>
+              </div>
+              <FormField label="Training Name" required labelClassName="block text-xs font-medium text-slate-400 mb-1">
+                {(field) => (
+                  <input {...field} type="text" required value={trainingForm.training_name} onChange={(e) => setTrainingForm({ ...trainingForm, training_name: e.target.value })}
                     className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1">Training Type</label>
-                  <input type="text" value={trainingForm.training_type} onChange={(e) => setTrainingForm({ ...trainingForm, training_type: e.target.value })}
-                    placeholder="e.g. safety, technical"
+                )}
+              </FormField>
+              <FormField label="Description" labelClassName="block text-xs font-medium text-slate-400 mb-1">
+                {(field) => (
+                  <textarea {...field} rows={2} value={trainingForm.description} onChange={(e) => setTrainingForm({ ...trainingForm, description: e.target.value })}
                     className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                </div>
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-slate-400 mb-1">Training Name *</label>
-                <input type="text" required value={trainingForm.training_name} onChange={(e) => setTrainingForm({ ...trainingForm, training_name: e.target.value })}
-                  className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-slate-400 mb-1">Description</label>
-                <textarea rows={2} value={trainingForm.description} onChange={(e) => setTrainingForm({ ...trainingForm, description: e.target.value })}
-                  className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-              </div>
+                )}
+              </FormField>
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1">Trainer</label>
-                  <input type="text" value={trainingForm.trainer} onChange={(e) => setTrainingForm({ ...trainingForm, trainer: e.target.value })}
-                    className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1">Work Center ID</label>
-                  <input type="number" value={trainingForm.work_center_id} onChange={(e) => setTrainingForm({ ...trainingForm, work_center_id: e.target.value })}
-                    className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                </div>
+                <FormField label="Trainer" labelClassName="block text-xs font-medium text-slate-400 mb-1">
+                  {(field) => (
+                    <input {...field} type="text" value={trainingForm.trainer} onChange={(e) => setTrainingForm({ ...trainingForm, trainer: e.target.value })}
+                      className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                  )}
+                </FormField>
+                <FormField label="Work Center ID" labelClassName="block text-xs font-medium text-slate-400 mb-1">
+                  {(field) => (
+                    <input {...field} type="number" value={trainingForm.work_center_id} onChange={(e) => setTrainingForm({ ...trainingForm, work_center_id: e.target.value })}
+                      className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                  )}
+                </FormField>
               </div>
               <div className="grid grid-cols-3 gap-4">
-                <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1">Training Date *</label>
-                  <input type="date" required value={trainingForm.training_date} onChange={(e) => setTrainingForm({ ...trainingForm, training_date: e.target.value })}
-                    className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1">Completion Date</label>
-                  <input type="date" value={trainingForm.completion_date} onChange={(e) => setTrainingForm({ ...trainingForm, completion_date: e.target.value })}
-                    className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1">Hours</label>
-                  <input type="number" step="0.5" value={trainingForm.hours} onChange={(e) => setTrainingForm({ ...trainingForm, hours: e.target.value })}
-                    className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                </div>
+                <FormField label="Training Date" required labelClassName="block text-xs font-medium text-slate-400 mb-1">
+                  {(field) => (
+                    <input {...field} type="date" required value={trainingForm.training_date} onChange={(e) => setTrainingForm({ ...trainingForm, training_date: e.target.value })}
+                      className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                  )}
+                </FormField>
+                <FormField label="Completion Date" labelClassName="block text-xs font-medium text-slate-400 mb-1">
+                  {(field) => (
+                    <input {...field} type="date" value={trainingForm.completion_date} onChange={(e) => setTrainingForm({ ...trainingForm, completion_date: e.target.value })}
+                      className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                  )}
+                </FormField>
+                <FormField label="Hours" labelClassName="block text-xs font-medium text-slate-400 mb-1">
+                  {(field) => (
+                    <input {...field} type="number" step="0.5" value={trainingForm.hours} onChange={(e) => setTrainingForm({ ...trainingForm, hours: e.target.value })}
+                      className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                  )}
+                </FormField>
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div className="flex items-center gap-2">
-                  <input type="checkbox" id="passed" checked={trainingForm.passed} onChange={(e) => setTrainingForm({ ...trainingForm, passed: e.target.checked })}
+                  <input type="checkbox" id="passed" aria-label="Passed" checked={trainingForm.passed} onChange={(e) => setTrainingForm({ ...trainingForm, passed: e.target.checked })}
                     className="h-4 w-4 rounded border-slate-600 text-blue-600 focus:ring-blue-500" />
                   <label htmlFor="passed" className="text-sm text-slate-300">Passed</label>
                 </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1">Score (%)</label>
-                  <input type="number" min="0" max="100" value={trainingForm.score} onChange={(e) => setTrainingForm({ ...trainingForm, score: e.target.value })}
+                <FormField label="Score (%)" labelClassName="block text-xs font-medium text-slate-400 mb-1">
+                  {(field) => (
+                    <input {...field} type="number" min="0" max="100" value={trainingForm.score} onChange={(e) => setTrainingForm({ ...trainingForm, score: e.target.value })}
+                      className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                  )}
+                </FormField>
+              </div>
+              <FormField label="Notes" labelClassName="block text-xs font-medium text-slate-400 mb-1">
+                {(field) => (
+                  <textarea {...field} rows={2} value={trainingForm.notes} onChange={(e) => setTrainingForm({ ...trainingForm, notes: e.target.value })}
                     className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                </div>
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-slate-400 mb-1">Notes</label>
-                <textarea rows={2} value={trainingForm.notes} onChange={(e) => setTrainingForm({ ...trainingForm, notes: e.target.value })}
-                  className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-              </div>
+                )}
+              </FormField>
               <div className="flex justify-end gap-2 pt-2">
                 <button type="button" onClick={() => setShowTrainingModal(false)} className="rounded-lg border border-slate-600 px-4 py-2 text-sm font-medium text-slate-300 hover:bg-slate-800">Cancel</button>
                 <button type="submit" disabled={trainingCreateLoading} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50">

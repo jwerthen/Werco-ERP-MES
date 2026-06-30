@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import api from '../../services/api';
 import { ImportPreview, ImportItem, ImportAssembly } from '../../types/engineering';
 import { useToast } from '../ui/Toast';
+import { FormField } from '../ui/FormField';
 import { ArrowUturnLeftIcon, TrashIcon, XMarkIcon } from '@heroicons/react/24/outline';
 
 interface Props {
@@ -181,11 +182,18 @@ export function BOMImportWizard({ onComplete, onClose }: Props) {
   // the modal's left edge. z-[60] matches the other BOM/parts modals that sit
   // above the sidebar.
   const overlay = (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[60]" onClick={onClose}>
+    // The backdrop is purely presentational — keyboard users dismiss via the
+    // in-panel close button (the X / Cancel controls). Restricting the close to
+    // clicks that land directly on the backdrop (target === currentTarget)
+    // replaces the panel-level stopPropagation handler.
+    <div
+      className="fixed inset-0 bg-black/50 flex items-center justify-center z-[60]"
+      role="presentation"
+      onClick={e => { if (e.target === e.currentTarget) onClose(); }}
+    >
       <div
         className="bg-fd-panel rounded-xl shadow-xl mx-4 animate-scale-in flex flex-col"
         style={{ maxWidth: step === 'preview' ? '72rem' : '32rem', maxHeight: '90vh', width: '100%' }}
-        onClick={e => e.stopPropagation()}
       >
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b">
@@ -209,22 +217,25 @@ export function BOMImportWizard({ onComplete, onClose }: Props) {
         <div className="flex-1 overflow-y-auto px-6 py-4">
           {step === 'upload' && (
             <form onSubmit={handlePreview} id="upload-form" className="space-y-4">
-              <div>
-                <label className="label">PDF, Word, or Excel Document</label>
-                <input
-                  type="file"
-                  accept=".pdf,.doc,.docx,.xlsx,.xls"
-                  onChange={e => setFile(e.target.files?.[0] || null)}
-                  className="input"
-                  required
-                />
-              </div>
+              <FormField label="PDF, Word, or Excel Document">
+                {(field) => (
+                  <input
+                    {...field}
+                    type="file"
+                    accept=".pdf,.doc,.docx,.xlsx,.xls"
+                    onChange={e => setFile(e.target.files?.[0] || null)}
+                    className="input"
+                    required
+                  />
+                )}
+              </FormField>
               <label className="flex items-center gap-2">
                 <input
                   type="checkbox"
                   checked={createMissingParts}
                   onChange={e => setCreateMissingParts(e.target.checked)}
                   className="rounded border-slate-600 text-werco-navy-400"
+                  aria-label="Create missing parts automatically"
                 />
                 <span className="text-sm">Create missing parts automatically</span>
               </label>
@@ -241,33 +252,38 @@ export function BOMImportWizard({ onComplete, onClose }: Props) {
 
               {/* Assembly Info */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                <div>
-                  <label className="label">Part Number</label>
-                  <input className="input" value={preview.assembly.part_number || ''} onChange={e => updateAssembly('part_number', e.target.value)} />
-                </div>
-                <div>
-                  <label className="label">Revision</label>
-                  <input className="input" value={preview.assembly.revision || ''} onChange={e => updateAssembly('revision', e.target.value)} />
-                </div>
-                <div>
-                  <label className="label">Part Type</label>
-                  <select className="input" value={preview.assembly.part_type || 'assembly'} onChange={e => updateAssembly('part_type', e.target.value)}>
-                    <option value="manufactured">Manufactured</option>
-                    <option value="assembly">Assembly</option>
-                    <option value="purchased">Purchased</option>
-                    <option value="raw_material">Raw Material</option>
-                    <option value="hardware">Hardware</option>
-                    <option value="consumable">Consumable</option>
-                  </select>
-                </div>
-                <div className="md:col-span-2">
-                  <label className="label">Name</label>
-                  <input className="input" value={preview.assembly.name || ''} onChange={e => updateAssembly('name', e.target.value)} />
-                </div>
-                <div>
-                  <label className="label">Drawing #</label>
-                  <input className="input" value={preview.assembly.drawing_number || ''} onChange={e => updateAssembly('drawing_number', e.target.value)} />
-                </div>
+                <FormField label="Part Number">
+                  {(field) => (
+                    <input {...field} className="input" value={preview.assembly.part_number || ''} onChange={e => updateAssembly('part_number', e.target.value)} />
+                  )}
+                </FormField>
+                <FormField label="Revision">
+                  {(field) => (
+                    <input {...field} className="input" value={preview.assembly.revision || ''} onChange={e => updateAssembly('revision', e.target.value)} />
+                  )}
+                </FormField>
+                <FormField label="Part Type">
+                  {(field) => (
+                    <select {...field} className="input" value={preview.assembly.part_type || 'assembly'} onChange={e => updateAssembly('part_type', e.target.value)}>
+                      <option value="manufactured">Manufactured</option>
+                      <option value="assembly">Assembly</option>
+                      <option value="purchased">Purchased</option>
+                      <option value="raw_material">Raw Material</option>
+                      <option value="hardware">Hardware</option>
+                      <option value="consumable">Consumable</option>
+                    </select>
+                  )}
+                </FormField>
+                <FormField label="Name" className="md:col-span-2">
+                  {(field) => (
+                    <input {...field} className="input" value={preview.assembly.name || ''} onChange={e => updateAssembly('name', e.target.value)} />
+                  )}
+                </FormField>
+                <FormField label="Drawing #">
+                  {(field) => (
+                    <input {...field} className="input" value={preview.assembly.drawing_number || ''} onChange={e => updateAssembly('drawing_number', e.target.value)} />
+                  )}
+                </FormField>
               </div>
 
               {/* Column Mapping */}
@@ -334,6 +350,7 @@ export function BOMImportWizard({ onComplete, onClose }: Props) {
                                   type="number"
                                   value={lineNumber}
                                   onChange={e => updateDerivedItem(idx, { line_number: parseInt(e.target.value) })}
+                                  aria-label={`Line number for line ${lineNumber}`}
                                 />
                               </td>
                               <td className="px-3 py-2">
@@ -341,6 +358,7 @@ export function BOMImportWizard({ onComplete, onClose }: Props) {
                                   className="input py-1 text-sm w-32"
                                   value={item.part_number || ''}
                                   onChange={e => updateDerivedItem(idx, { part_number: e.target.value })}
+                                  aria-label={`Part number for line ${lineNumber}`}
                                 />
                               </td>
                               <td className="px-3 py-2">
@@ -348,6 +366,7 @@ export function BOMImportWizard({ onComplete, onClose }: Props) {
                                   className="input py-1 text-sm"
                                   value={item.description || ''}
                                   onChange={e => updateDerivedItem(idx, { description: e.target.value })}
+                                  aria-label={`Description for line ${lineNumber}`}
                                 />
                               </td>
                               <td className="px-3 py-2">
@@ -357,6 +376,7 @@ export function BOMImportWizard({ onComplete, onClose }: Props) {
                                   step="1"
                                   value={item.quantity ?? 1}
                                   onChange={e => updateDerivedItem(idx, { quantity: parseFloat(e.target.value) })}
+                                  aria-label={`Quantity for line ${lineNumber}`}
                                 />
                               </td>
                               <td className="px-3 py-2">
@@ -364,6 +384,7 @@ export function BOMImportWizard({ onComplete, onClose }: Props) {
                                   className="input w-16 py-1 text-sm"
                                   value={item.unit_of_measure || ''}
                                   onChange={e => updateDerivedItem(idx, { unit_of_measure: e.target.value })}
+                                  aria-label={`Unit of measure for line ${lineNumber}`}
                                 />
                               </td>
                               <td className="px-3 py-2">
@@ -371,6 +392,7 @@ export function BOMImportWizard({ onComplete, onClose }: Props) {
                                   className="input py-1 text-sm"
                                   value={item.item_type || 'buy'}
                                   onChange={e => updateDerivedItem(idx, { item_type: e.target.value })}
+                                  aria-label={`Item type for line ${lineNumber}`}
                                 >
                                   <option value="make">Make</option>
                                   <option value="buy">Buy</option>
@@ -382,6 +404,7 @@ export function BOMImportWizard({ onComplete, onClose }: Props) {
                                   className="input py-1 text-sm"
                                   value={item.line_type || 'component'}
                                   onChange={e => updateDerivedItem(idx, { line_type: e.target.value as any })}
+                                  aria-label={`Line type for line ${lineNumber}`}
                                 >
                                   <option value="component">Component</option>
                                   <option value="hardware">Hardware</option>

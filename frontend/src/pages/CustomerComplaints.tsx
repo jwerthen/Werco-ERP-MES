@@ -22,6 +22,7 @@ import {
   DataTableColumn,
   StatusBadge,
   MobileDataCard,
+  FormField,
 } from '../components/ui';
 
 // ── Types ────────────────────────────────────────────────────────
@@ -629,6 +630,7 @@ export default function CustomerComplaints() {
           <input
             type="text"
             placeholder="Search complaints..."
+            aria-label="Search complaints"
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
             className="du-input du-input-bordered du-input-sm w-full pl-9"
@@ -899,191 +901,224 @@ export default function CustomerComplaints() {
 
         <form onSubmit={handleCreate} className="space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                  <label className="du-label">
-                    <span className="du-label-text">
-                      Customer Name <span className="text-red-500">*</span>
-                    </span>
-                  </label>
+                <FormField
+                  label={<span className="du-label-text">Customer Name</span>}
+                  required
+                  labelClassName="du-label"
+                >
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={createForm.customer_name}
+                      onChange={(e) =>
+                        setCreateForm((f) => ({ ...f, customer_name: e.target.value }))
+                      }
+                      className="du-input du-input-bordered w-full"
+                      required
+                    />
+                  )}
+                </FormField>
+                <FormField
+                  label={<span className="du-label-text">Customer PO Number</span>}
+                  labelClassName="du-label"
+                >
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={createForm.customer_po_number}
+                      onChange={(e) =>
+                        setCreateForm((f) => ({ ...f, customer_po_number: e.target.value }))
+                      }
+                      className="du-input du-input-bordered w-full"
+                    />
+                  )}
+                </FormField>
+                <FormField
+                  label={<span className="du-label-text">Customer Contact</span>}
+                  labelClassName="du-label"
+                >
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={createForm.customer_contact}
+                      onChange={(e) =>
+                        setCreateForm((f) => ({ ...f, customer_contact: e.target.value }))
+                      }
+                      className="du-input du-input-bordered w-full"
+                    />
+                  )}
+                </FormField>
+                <FormField
+                  label={<span className="du-label-text">Severity</span>}
+                  labelClassName="du-label"
+                >
+                  {(field) => (
+                    <select
+                      {...field}
+                      value={createForm.severity}
+                      onChange={(e) =>
+                        setCreateForm((f) => ({
+                          ...f,
+                          severity: e.target.value as ComplaintSeverity,
+                        }))
+                      }
+                      className="du-select du-select-bordered w-full"
+                    >
+                      <option value="minor">Minor</option>
+                      <option value="major">Major</option>
+                      <option value="critical">Critical</option>
+                    </select>
+                  )}
+                </FormField>
+                <FormField
+                  label={<span className="du-label-text">Lot Number</span>}
+                  labelClassName="du-label"
+                >
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={createForm.lot_number}
+                      onChange={(e) =>
+                        setCreateForm((f) => ({ ...f, lot_number: e.target.value }))
+                      }
+                      className="du-input du-input-bordered w-full"
+                    />
+                  )}
+                </FormField>
+                <FormField
+                  label={<span className="du-label-text">Serial Number</span>}
+                  labelClassName="du-label"
+                >
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={createForm.serial_number}
+                      onChange={(e) =>
+                        setCreateForm((f) => ({ ...f, serial_number: e.target.value }))
+                      }
+                      className="du-input du-input-bordered w-full"
+                    />
+                  )}
+                </FormField>
+                <FormField
+                  label={<span className="du-label-text">Quantity Affected</span>}
+                  labelClassName="du-label"
+                >
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="number"
+                      min={1}
+                      step="any"
+                      value={createForm.quantity_affected}
+                      onChange={(e) =>
+                        setCreateForm((f) => ({
+                          ...f,
+                          quantity_affected: parseFloat(e.target.value) || 1,
+                        }))
+                      }
+                      className="du-input du-input-bordered w-full"
+                    />
+                  )}
+                </FormField>
+                <FormField
+                  label={<span className="du-label-text">Estimated Cost ($)</span>}
+                  labelClassName="du-label"
+                >
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="number"
+                      min={0}
+                      step="0.01"
+                      value={createForm.estimated_cost}
+                      onChange={(e) =>
+                        setCreateForm((f) => ({
+                          ...f,
+                          estimated_cost: parseFloat(e.target.value) || 0,
+                        }))
+                      }
+                      className="du-input du-input-bordered w-full"
+                    />
+                  )}
+                </FormField>
+                <FormField
+                  label={<span className="du-label-text">Date Received</span>}
+                  labelClassName="du-label"
+                >
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="date"
+                      value={createForm.date_received}
+                      onChange={(e) =>
+                        setCreateForm((f) => ({ ...f, date_received: e.target.value }))
+                      }
+                      className="du-input du-input-bordered w-full"
+                    />
+                  )}
+                </FormField>
+                <FormField
+                  label={<span className="du-label-text">Date of Occurrence</span>}
+                  labelClassName="du-label"
+                >
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="date"
+                      value={createForm.date_of_occurrence}
+                      onChange={(e) =>
+                        setCreateForm((f) => ({ ...f, date_of_occurrence: e.target.value }))
+                      }
+                      className="du-input du-input-bordered w-full"
+                    />
+                  )}
+                </FormField>
+              </div>
+
+              <FormField
+                label={<span className="du-label-text">Title</span>}
+                required
+                labelClassName="du-label"
+              >
+                {(field) => (
                   <input
+                    {...field}
                     type="text"
-                    value={createForm.customer_name}
+                    value={createForm.title}
                     onChange={(e) =>
-                      setCreateForm((f) => ({ ...f, customer_name: e.target.value }))
+                      setCreateForm((f) => ({ ...f, title: e.target.value }))
                     }
                     className="du-input du-input-bordered w-full"
                     required
+                    minLength={3}
                   />
-                </div>
-                <div>
-                  <label className="du-label">
-                    <span className="du-label-text">Customer PO Number</span>
-                  </label>
-                  <input
-                    type="text"
-                    value={createForm.customer_po_number}
-                    onChange={(e) =>
-                      setCreateForm((f) => ({ ...f, customer_po_number: e.target.value }))
-                    }
-                    className="du-input du-input-bordered w-full"
-                  />
-                </div>
-                <div>
-                  <label className="du-label">
-                    <span className="du-label-text">Customer Contact</span>
-                  </label>
-                  <input
-                    type="text"
-                    value={createForm.customer_contact}
-                    onChange={(e) =>
-                      setCreateForm((f) => ({ ...f, customer_contact: e.target.value }))
-                    }
-                    className="du-input du-input-bordered w-full"
-                  />
-                </div>
-                <div>
-                  <label className="du-label">
-                    <span className="du-label-text">Severity</span>
-                  </label>
-                  <select
-                    value={createForm.severity}
-                    onChange={(e) =>
-                      setCreateForm((f) => ({
-                        ...f,
-                        severity: e.target.value as ComplaintSeverity,
-                      }))
-                    }
-                    className="du-select du-select-bordered w-full"
-                  >
-                    <option value="minor">Minor</option>
-                    <option value="major">Major</option>
-                    <option value="critical">Critical</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="du-label">
-                    <span className="du-label-text">Lot Number</span>
-                  </label>
-                  <input
-                    type="text"
-                    value={createForm.lot_number}
-                    onChange={(e) =>
-                      setCreateForm((f) => ({ ...f, lot_number: e.target.value }))
-                    }
-                    className="du-input du-input-bordered w-full"
-                  />
-                </div>
-                <div>
-                  <label className="du-label">
-                    <span className="du-label-text">Serial Number</span>
-                  </label>
-                  <input
-                    type="text"
-                    value={createForm.serial_number}
-                    onChange={(e) =>
-                      setCreateForm((f) => ({ ...f, serial_number: e.target.value }))
-                    }
-                    className="du-input du-input-bordered w-full"
-                  />
-                </div>
-                <div>
-                  <label className="du-label">
-                    <span className="du-label-text">Quantity Affected</span>
-                  </label>
-                  <input
-                    type="number"
-                    min={1}
-                    step="any"
-                    value={createForm.quantity_affected}
-                    onChange={(e) =>
-                      setCreateForm((f) => ({
-                        ...f,
-                        quantity_affected: parseFloat(e.target.value) || 1,
-                      }))
-                    }
-                    className="du-input du-input-bordered w-full"
-                  />
-                </div>
-                <div>
-                  <label className="du-label">
-                    <span className="du-label-text">Estimated Cost ($)</span>
-                  </label>
-                  <input
-                    type="number"
-                    min={0}
-                    step="0.01"
-                    value={createForm.estimated_cost}
-                    onChange={(e) =>
-                      setCreateForm((f) => ({
-                        ...f,
-                        estimated_cost: parseFloat(e.target.value) || 0,
-                      }))
-                    }
-                    className="du-input du-input-bordered w-full"
-                  />
-                </div>
-                <div>
-                  <label className="du-label">
-                    <span className="du-label-text">Date Received</span>
-                  </label>
-                  <input
-                    type="date"
-                    value={createForm.date_received}
-                    onChange={(e) =>
-                      setCreateForm((f) => ({ ...f, date_received: e.target.value }))
-                    }
-                    className="du-input du-input-bordered w-full"
-                  />
-                </div>
-                <div>
-                  <label className="du-label">
-                    <span className="du-label-text">Date of Occurrence</span>
-                  </label>
-                  <input
-                    type="date"
-                    value={createForm.date_of_occurrence}
-                    onChange={(e) =>
-                      setCreateForm((f) => ({ ...f, date_of_occurrence: e.target.value }))
-                    }
-                    className="du-input du-input-bordered w-full"
-                  />
-                </div>
-              </div>
+                )}
+              </FormField>
 
-              <div>
-                <label className="du-label">
-                  <span className="du-label-text">
-                    Title <span className="text-red-500">*</span>
-                  </span>
-                </label>
-                <input
-                  type="text"
-                  value={createForm.title}
-                  onChange={(e) =>
-                    setCreateForm((f) => ({ ...f, title: e.target.value }))
-                  }
-                  className="du-input du-input-bordered w-full"
-                  required
-                  minLength={3}
-                />
-              </div>
-
-              <div>
-                <label className="du-label">
-                  <span className="du-label-text">
-                    Description <span className="text-red-500">*</span>
-                  </span>
-                </label>
-                <textarea
-                  value={createForm.description}
-                  onChange={(e) =>
-                    setCreateForm((f) => ({ ...f, description: e.target.value }))
-                  }
-                  className="du-textarea du-textarea-bordered w-full h-24"
-                  required
-                  minLength={5}
-                />
-              </div>
+              <FormField
+                label={<span className="du-label-text">Description</span>}
+                required
+                labelClassName="du-label"
+              >
+                {(field) => (
+                  <textarea
+                    {...field}
+                    value={createForm.description}
+                    onChange={(e) =>
+                      setCreateForm((f) => ({ ...f, description: e.target.value }))
+                    }
+                    className="du-textarea du-textarea-bordered w-full h-24"
+                    required
+                    minLength={5}
+                  />
+                )}
+              </FormField>
 
               <div className="du-modal-action">
                 <button
@@ -1124,85 +1159,99 @@ export default function CustomerComplaints() {
           </div>
 
           <form onSubmit={handleCreateRMA} className="space-y-4">
-              <div>
-                <label className="du-label">
-                  <span className="du-label-text">Customer Name</span>
-                </label>
-                <input
-                  type="text"
-                  value={rmaForm.customer_name}
-                  onChange={(e) =>
-                    setRmaForm((f) => ({ ...f, customer_name: e.target.value }))
-                  }
-                  className="du-input du-input-bordered w-full"
-                  required
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="du-label">
-                    <span className="du-label-text">Quantity</span>
-                  </label>
+              <FormField
+                label={<span className="du-label-text">Customer Name</span>}
+                labelClassName="du-label"
+              >
+                {(field) => (
                   <input
-                    type="number"
-                    min={1}
-                    step="any"
-                    value={rmaForm.quantity}
+                    {...field}
+                    type="text"
+                    value={rmaForm.customer_name}
                     onChange={(e) =>
-                      setRmaForm((f) => ({
-                        ...f,
-                        quantity: parseFloat(e.target.value) || 1,
-                      }))
+                      setRmaForm((f) => ({ ...f, customer_name: e.target.value }))
                     }
                     className="du-input du-input-bordered w-full"
                     required
                   />
-                </div>
-                <div>
-                  <label className="du-label">
-                    <span className="du-label-text">Lot Number</span>
-                  </label>
-                  <input
-                    type="text"
-                    value={rmaForm.lot_number}
+                )}
+              </FormField>
+
+              <div className="grid grid-cols-2 gap-4">
+                <FormField
+                  label={<span className="du-label-text">Quantity</span>}
+                  labelClassName="du-label"
+                >
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="number"
+                      min={1}
+                      step="any"
+                      value={rmaForm.quantity}
+                      onChange={(e) =>
+                        setRmaForm((f) => ({
+                          ...f,
+                          quantity: parseFloat(e.target.value) || 1,
+                        }))
+                      }
+                      className="du-input du-input-bordered w-full"
+                      required
+                    />
+                  )}
+                </FormField>
+                <FormField
+                  label={<span className="du-label-text">Lot Number</span>}
+                  labelClassName="du-label"
+                >
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={rmaForm.lot_number}
+                      onChange={(e) =>
+                        setRmaForm((f) => ({ ...f, lot_number: e.target.value }))
+                      }
+                      className="du-input du-input-bordered w-full"
+                    />
+                  )}
+                </FormField>
+              </div>
+
+              <FormField
+                label={<span className="du-label-text">Reason</span>}
+                required
+                labelClassName="du-label"
+              >
+                {(field) => (
+                  <textarea
+                    {...field}
+                    value={rmaForm.reason}
                     onChange={(e) =>
-                      setRmaForm((f) => ({ ...f, lot_number: e.target.value }))
+                      setRmaForm((f) => ({ ...f, reason: e.target.value }))
                     }
-                    className="du-input du-input-bordered w-full"
+                    className="du-textarea du-textarea-bordered w-full h-20"
+                    required
+                    minLength={5}
                   />
-                </div>
-              </div>
+                )}
+              </FormField>
 
-              <div>
-                <label className="du-label">
-                  <span className="du-label-text">
-                    Reason <span className="text-red-500">*</span>
-                  </span>
-                </label>
-                <textarea
-                  value={rmaForm.reason}
-                  onChange={(e) =>
-                    setRmaForm((f) => ({ ...f, reason: e.target.value }))
-                  }
-                  className="du-textarea du-textarea-bordered w-full h-20"
-                  required
-                  minLength={5}
-                />
-              </div>
-
-              <div>
-                <label className="du-label">
-                  <span className="du-label-text">Notes</span>
-                </label>
-                <textarea
-                  value={rmaForm.notes}
-                  onChange={(e) =>
-                    setRmaForm((f) => ({ ...f, notes: e.target.value }))
-                  }
-                  className="du-textarea du-textarea-bordered w-full h-16"
-                />
-              </div>
+              <FormField
+                label={<span className="du-label-text">Notes</span>}
+                labelClassName="du-label"
+              >
+                {(field) => (
+                  <textarea
+                    {...field}
+                    value={rmaForm.notes}
+                    onChange={(e) =>
+                      setRmaForm((f) => ({ ...f, notes: e.target.value }))
+                    }
+                    className="du-textarea du-textarea-bordered w-full h-16"
+                  />
+                )}
+              </FormField>
 
               <div className="du-modal-action">
                 <button

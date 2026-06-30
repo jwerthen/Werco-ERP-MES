@@ -13,7 +13,7 @@ import {
   isDateBeforeTodayInCentral,
 } from '../utils/centralTime';
 import { useToast } from '../components/ui/Toast';
-import { Button, EmptyState, ErrorState, StatusBadge, statusColor, statusVariant } from '../components/ui';
+import { Button, EmptyState, ErrorState, FormField, StatusBadge, statusColor, statusVariant } from '../components/ui';
 import {
   PlayIcon,
   StopIcon,
@@ -625,19 +625,23 @@ export default function ShopFloor() {
             </p>
           </div>
           {canEditPriority && (
-            <div className="w-80 hidden lg:block">
-              <label className="text-xs font-medium text-surface-600 block mb-1">
-                Optional Priority Reason
-              </label>
-              <input
-                type="text"
-                value={priorityReason}
-                onChange={(e) => setPriorityReason(e.target.value)}
-                className="input text-sm"
-                maxLength={500}
-                placeholder="Applied to your next priority change"
-              />
-            </div>
+            <FormField
+              label="Optional Priority Reason"
+              className="w-80 hidden lg:block"
+              labelClassName="text-xs font-medium text-surface-600 block mb-1"
+            >
+              {(field) => (
+                <input
+                  {...field}
+                  type="text"
+                  value={priorityReason}
+                  onChange={(e) => setPriorityReason(e.target.value)}
+                  className="input text-sm"
+                  maxLength={500}
+                  placeholder="Applied to your next priority change"
+                />
+              )}
+            </FormField>
           )}
         </div>
 
@@ -661,7 +665,7 @@ export default function ShopFloor() {
             <table className="table">
               <thead>
                 <tr>
-                  <th className="w-10"></th>
+                  <th className="w-10" aria-label="Expand row"></th>
                   <th>Priority</th>
                   <th>Work Order</th>
                   <th>Part</th>
@@ -719,19 +723,19 @@ export default function ShopFloor() {
                         <td>
                           <span className="font-semibold text-werco-600">{item.work_order_number}</span>
                         </td>
-                        <td>
+                        <td aria-label="Part">
                           <div>
                             <p className="font-medium text-surface-900">{item.part_number}</p>
                             <p className="text-sm text-surface-500 line-clamp-1">{item.part_name}</p>
                           </div>
                         </td>
-                        <td>
+                        <td aria-label="Operation">
                           <div>
                             <p className="font-medium text-surface-900">Op {item.operation_number}</p>
                             <p className="text-sm text-surface-500">{item.operation_name}</p>
                           </div>
                         </td>
-                        <td>
+                        <td aria-label="Progress">
                           <div className="w-32">
                             <div className="flex items-center justify-between text-sm mb-1">
                               <span className="font-medium text-surface-700 tabular-nums">
@@ -950,17 +954,19 @@ export default function ShopFloor() {
             ) : null}
           </div>
 
-          <div>
-            <label className="label">Quantity Produced</label>
-            <input
-              type="number"
-              min="0"
-              value={clockOutData.quantity_produced}
-              onChange={(e) => setClockOutData({ ...clockOutData, quantity_produced: parseFloat(e.target.value) || 0 })}
-              className="input text-center text-2xl font-semibold h-14 tabular-nums"
-              autoFocus
-            />
-          </div>
+          <FormField label="Quantity Produced">
+            {(field) => (
+              <input
+                {...field}
+                type="number"
+                min="0"
+                value={clockOutData.quantity_produced}
+                onChange={(e) => setClockOutData({ ...clockOutData, quantity_produced: parseFloat(e.target.value) || 0 })}
+                className="input text-center text-2xl font-semibold h-14 tabular-nums"
+                autoFocus
+              />
+            )}
+          </FormField>
 
           {!clockOutShowMore ? (
             <button
@@ -972,26 +978,30 @@ export default function ShopFloor() {
             </button>
           ) : (
             <>
-              <div>
-                <label className="label">Quantity Scrapped</label>
-                <input
-                  type="number"
-                  min="0"
-                  value={clockOutData.quantity_scrapped}
-                  onChange={(e) => setClockOutData({ ...clockOutData, quantity_scrapped: parseFloat(e.target.value) || 0 })}
-                  className="input text-center text-lg font-semibold tabular-nums"
-                />
-              </div>
-              <div>
-                <label className="label">Notes</label>
-                <textarea
-                  value={clockOutData.notes}
-                  onChange={(e) => setClockOutData({ ...clockOutData, notes: e.target.value })}
-                  className="input"
-                  rows={2}
-                  placeholder="Any issues, observations, or notes..."
-                />
-              </div>
+              <FormField label="Quantity Scrapped">
+                {(field) => (
+                  <input
+                    {...field}
+                    type="number"
+                    min="0"
+                    value={clockOutData.quantity_scrapped}
+                    onChange={(e) => setClockOutData({ ...clockOutData, quantity_scrapped: parseFloat(e.target.value) || 0 })}
+                    className="input text-center text-lg font-semibold tabular-nums"
+                  />
+                )}
+              </FormField>
+              <FormField label="Notes">
+                {(field) => (
+                  <textarea
+                    {...field}
+                    value={clockOutData.notes}
+                    onChange={(e) => setClockOutData({ ...clockOutData, notes: e.target.value })}
+                    className="input"
+                    rows={2}
+                    placeholder="Any issues, observations, or notes..."
+                  />
+                )}
+              </FormField>
             </>
           )}
         </div>

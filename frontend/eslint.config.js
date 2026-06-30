@@ -39,16 +39,43 @@ module.exports = [
       // extending the FormField label-association pattern across the forms.
       ...jsxA11yPlugin.configs.recommended.rules,
 
-      // Known pre-existing debt — OFF until burned down (can't be `warn`:
-      // CI's --max-warnings=0 would treat warnings as failures).
-      // ~480 sites; close via FormField/htmlFor label association.
-      "jsx-a11y/label-has-associated-control": "off",
-      // ~630 sites; icon-only controls needing an accessible name.
-      "jsx-a11y/control-has-associated-label": "off",
-      // Clickable non-interactive elements needing keyboard handlers.
-      "jsx-a11y/click-events-have-key-events": "off",
-      "jsx-a11y/no-static-element-interactions": "off",
-      "jsx-a11y/no-noninteractive-element-interactions": "off",
+      // Icon-only / unnamed controls must carry an accessible name — burned
+      // down to zero; now ENFORCED. Enforced with the plugin's RECOMMENDED
+      // options (the bare rule's empty `ignoreElements` spuriously flags inputs,
+      // textareas, and table rows that already get a name elsewhere). Genuine
+      // controls (icon buttons, selects) get an `aria-label`.
+      "jsx-a11y/control-has-associated-label": [
+        "error",
+        {
+          ignoreElements: ["audio", "canvas", "embed", "input", "textarea", "tr", "video"],
+          ignoreRoles: [
+            "grid",
+            "listbox",
+            "menu",
+            "menubar",
+            "radiogroup",
+            "row",
+            "tablist",
+            "toolbar",
+            "tree",
+            "treegrid",
+          ],
+          includeRoles: ["alert", "dialog"],
+        },
+      ],
+
+      // Form <label>s associated with their control — burned down to zero; now
+      // ENFORCED. Use the <FormField> primitive (label↔control id wiring) for
+      // create/edit form fields, or htmlFor+id for inline/filter controls.
+      "jsx-a11y/label-has-associated-control": "error",
+
+      // Clickable non-interactive elements needing keyboard handlers —
+      // burned down to zero; now ENFORCED (clickable <div>/<span>/<li> must be a
+      // native <button>, carry a literal interactive role + tabIndex + onKeyDown,
+      // or be a presentational role="presentation" backdrop).
+      "jsx-a11y/click-events-have-key-events": "error",
+      "jsx-a11y/no-static-element-interactions": "error",
+      "jsx-a11y/no-noninteractive-element-interactions": "error",
 
       // Autofocus on the first field of create/edit forms is intentional
       // (Batch 6) — not an accessibility defect for this app.

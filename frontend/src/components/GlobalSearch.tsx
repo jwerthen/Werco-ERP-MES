@@ -312,6 +312,7 @@ export default function GlobalSearch({ isOpen, onClose }: GlobalSearchProps) {
                   type="text"
                   className="w-full h-14 bg-transparent pl-12 pr-12 text-lg text-fd-ink placeholder:text-fd-faint focus:outline-none"
                   placeholder="Search across your workspace..."
+                  aria-label="Search across your workspace"
                   value={query}
                   onChange={e => setQuery(e.target.value)}
                   onKeyDown={handleKeyDown}
@@ -354,32 +355,34 @@ export default function GlobalSearch({ isOpen, onClose }: GlobalSearchProps) {
                         const isSelected = index === selectedIndex;
 
                         return (
-                          <li
-                            key={`${result.type}-${result.id}`}
-                            className={`
-                              px-4 py-3 cursor-pointer flex items-center gap-3 transition-colors
-                              ${isSelected ? 'bg-white/[0.04] shadow-[inset_2px_0_0_#2f81f7]' : 'hover:bg-white/[0.02]'}
-                            `}
-                            onClick={() => handleSelect(result)}
-                            onMouseEnter={() => setSelectedIndex(index)}
-                          >
-                            <div className={`p-2 rounded-[3px] ${config.color}`}>
-                              <IconComponent className="h-5 w-5" />
-                            </div>
-                            <div className="flex-1 min-w-0">
-                              <div className="flex items-center gap-2">
-                                <span className="font-medium text-fd-ink truncate">{result.title}</span>
-                                <span className={`inline-flex px-1.5 py-0.5 rounded-[3px] text-[10px] font-mono uppercase tracking-wide ${config.color}`}>{config.label}</span>
+                          <li key={`${result.type}-${result.id}`}>
+                            <button
+                              type="button"
+                              className={`
+                                w-full text-left px-4 py-3 cursor-pointer flex items-center gap-3 transition-colors
+                                ${isSelected ? 'bg-white/[0.04] shadow-[inset_2px_0_0_#2f81f7]' : 'hover:bg-white/[0.02]'}
+                              `}
+                              onClick={() => handleSelect(result)}
+                              onMouseEnter={() => setSelectedIndex(index)}
+                            >
+                              <div className={`p-2 rounded-[3px] ${config.color}`}>
+                                <IconComponent className="h-5 w-5" />
                               </div>
-                              {result.subtitle && (
-                                <p className="text-sm text-fd-mute truncate">{result.subtitle}</p>
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2">
+                                  <span className="font-medium text-fd-ink truncate">{result.title}</span>
+                                  <span className={`inline-flex px-1.5 py-0.5 rounded-[3px] text-[10px] font-mono uppercase tracking-wide ${config.color}`}>{config.label}</span>
+                                </div>
+                                {result.subtitle && (
+                                  <p className="text-sm text-fd-mute truncate">{result.subtitle}</p>
+                                )}
+                              </div>
+                              {isSelected && (
+                                <kbd className="hidden sm:inline-flex items-center px-1.5 py-0.5 font-mono text-[10px] text-fd-faint rounded-[3px]" style={{ border: '1px solid var(--fd-line)' }}>
+                                  Enter
+                                </kbd>
                               )}
-                            </div>
-                            {isSelected && (
-                              <kbd className="hidden sm:inline-flex items-center px-1.5 py-0.5 font-mono text-[10px] text-fd-faint rounded-[3px]" style={{ border: '1px solid var(--fd-line)' }}>
-                                Enter
-                              </kbd>
-                            )}
+                            </button>
                           </li>
                         );
                       })}
@@ -395,13 +398,15 @@ export default function GlobalSearch({ isOpen, onClose }: GlobalSearchProps) {
                     </div>
                     <ul>
                       {quickActions.map(action => (
-                        <li
-                          key={action.url}
-                          className="px-4 py-3 cursor-pointer flex items-center gap-3 hover:bg-white/[0.02] transition-colors"
-                          onClick={() => handleSelect(action)}
-                        >
-                          <action.icon className="h-5 w-5 text-fd-mute" />
-                          <span className="text-fd-body">{action.name}</span>
+                        <li key={action.url}>
+                          <button
+                            type="button"
+                            className="w-full text-left px-4 py-3 cursor-pointer flex items-center gap-3 hover:bg-white/[0.02] transition-colors"
+                            onClick={() => handleSelect(action)}
+                          >
+                            <action.icon className="h-5 w-5 text-fd-mute" />
+                            <span className="text-fd-body">{action.name}</span>
+                          </button>
                         </li>
                       ))}
                     </ul>

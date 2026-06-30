@@ -39,6 +39,7 @@ import api from '../../services/api';
 import { useToast } from '../ui/Toast';
 import { Modal } from '../ui/Modal';
 import { LoadingButton } from '../ui/LoadingButton';
+import { FormField } from '../ui/FormField';
 import { formatCentralDate } from '../../utils/centralTime';
 import type {
   ShippingAddress,
@@ -603,28 +604,33 @@ function PackagesStep({
               </div>
             </div>
             <div className="grid grid-cols-12 gap-2 items-end">
-              <div className="col-span-6 sm:col-span-3">
-                <label className="label">Freight class</label>
-                <input
-                  className="input"
-                  value={p.freight_class}
-                  onChange={(e) => updatePallet(i, { freight_class: e.target.value })}
-                  placeholder="e.g. 70"
-                />
-              </div>
-              <div className="col-span-6 sm:col-span-3">
-                <label className="label">NMFC</label>
-                <input
-                  className="input"
-                  value={p.nmfc}
-                  onChange={(e) => updatePallet(i, { nmfc: e.target.value })}
-                  placeholder="NMFC code"
-                />
-              </div>
+              <FormField label="Freight class" className="col-span-6 sm:col-span-3">
+                {(field) => (
+                  <input
+                    {...field}
+                    className="input"
+                    value={p.freight_class}
+                    onChange={(e) => updatePallet(i, { freight_class: e.target.value })}
+                    placeholder="e.g. 70"
+                  />
+                )}
+              </FormField>
+              <FormField label="NMFC" className="col-span-6 sm:col-span-3">
+                {(field) => (
+                  <input
+                    {...field}
+                    className="input"
+                    value={p.nmfc}
+                    onChange={(e) => updatePallet(i, { nmfc: e.target.value })}
+                    placeholder="NMFC code"
+                  />
+                )}
+              </FormField>
               <div className="col-span-12 sm:col-span-3 flex items-center pb-2">
                 <label className="flex items-center gap-2 text-sm text-slate-300">
                   <input
                     type="checkbox"
+                    aria-label="Stackable"
                     checked={p.stackable}
                     onChange={(e) => updatePallet(i, { stackable: e.target.checked })}
                   />
@@ -636,16 +642,18 @@ function PackagesStep({
         ))}
 
       {isFreight && (
-        <div className="w-40">
-          <label className="label">Pallet count (BOL)</label>
-          <input
-            type="number"
-            min={1}
-            className="input"
-            value={palletCount}
-            onChange={(e) => setPalletCount(e.target.value)}
-          />
-        </div>
+        <FormField label="Pallet count (BOL)" className="w-40">
+          {(field) => (
+            <input
+              {...field}
+              type="number"
+              min={1}
+              className="input"
+              value={palletCount}
+              onChange={(e) => setPalletCount(e.target.value)}
+            />
+          )}
+        </FormField>
       )}
 
       <button
@@ -668,6 +676,7 @@ function DimField({ label, value, onChange }: { label: string; value: string; on
       <label className="label">{label}</label>
       <input
         type="number"
+        aria-label={label}
         min={0}
         step="0.1"
         className="input"
@@ -702,73 +711,98 @@ function AddressStep({
         Confirm the ship-to address, then validate it with the carrier (or skip straight to rates).
       </p>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        <div className="sm:col-span-2">
-          <label className="label">Name / Attn</label>
-          <input className="input" value={address.name ?? ''} onChange={(e) => set({ name: e.target.value })} />
-        </div>
-        <div className="sm:col-span-2">
-          <label className="label">Company</label>
-          <input className="input" value={address.company ?? ''} onChange={(e) => set({ company: e.target.value })} />
-        </div>
-        <div className="sm:col-span-2">
-          <label className="label">Street 1</label>
-          <input
-            className="input"
-            aria-label="Street 1"
-            value={address.street1}
-            onChange={(e) => set({ street1: e.target.value })}
-          />
-        </div>
-        <div className="sm:col-span-2">
-          <label className="label">Street 2</label>
-          <input
-            className="input"
-            aria-label="Street 2"
-            value={address.street2 ?? ''}
-            onChange={(e) => set({ street2: e.target.value })}
-          />
-        </div>
-        <div>
-          <label className="label">City</label>
-          <input
-            className="input"
-            aria-label="City"
-            value={address.city}
-            onChange={(e) => set({ city: e.target.value })}
-          />
-        </div>
+        <FormField label="Name / Attn" className="sm:col-span-2">
+          {(field) => (
+            <input
+              {...field}
+              className="input"
+              value={address.name ?? ''}
+              onChange={(e) => set({ name: e.target.value })}
+            />
+          )}
+        </FormField>
+        <FormField label="Company" className="sm:col-span-2">
+          {(field) => (
+            <input
+              {...field}
+              className="input"
+              value={address.company ?? ''}
+              onChange={(e) => set({ company: e.target.value })}
+            />
+          )}
+        </FormField>
+        <FormField label="Street 1" className="sm:col-span-2">
+          {(field) => (
+            <input
+              {...field}
+              className="input"
+              value={address.street1}
+              onChange={(e) => set({ street1: e.target.value })}
+            />
+          )}
+        </FormField>
+        <FormField label="Street 2" className="sm:col-span-2">
+          {(field) => (
+            <input
+              {...field}
+              className="input"
+              value={address.street2 ?? ''}
+              onChange={(e) => set({ street2: e.target.value })}
+            />
+          )}
+        </FormField>
+        <FormField label="City">
+          {(field) => (
+            <input
+              {...field}
+              className="input"
+              value={address.city}
+              onChange={(e) => set({ city: e.target.value })}
+            />
+          )}
+        </FormField>
         <div className="grid grid-cols-3 gap-2">
-          <div>
-            <label className="label">State</label>
-            <input
-              className="input"
-              aria-label="State"
-              value={address.state}
-              onChange={(e) => set({ state: e.target.value })}
-            />
-          </div>
-          <div>
-            <label className="label">ZIP</label>
-            <input
-              className="input"
-              aria-label="ZIP"
-              value={address.zip}
-              onChange={(e) => set({ zip: e.target.value })}
-            />
-          </div>
-          <div>
-            <label className="label">Country</label>
-            <input
-              className="input"
-              value={address.country ?? 'US'}
-              onChange={(e) => set({ country: e.target.value })}
-            />
-          </div>
+          <FormField label="State">
+            {(field) => (
+              <input
+                {...field}
+                className="input"
+                value={address.state}
+                onChange={(e) => set({ state: e.target.value })}
+              />
+            )}
+          </FormField>
+          <FormField label="ZIP">
+            {(field) => (
+              <input
+                {...field}
+                className="input"
+                value={address.zip}
+                onChange={(e) => set({ zip: e.target.value })}
+              />
+            )}
+          </FormField>
+          <FormField label="Country">
+            {(field) => (
+              <input
+                {...field}
+                className="input"
+                value={address.country ?? 'US'}
+                onChange={(e) => set({ country: e.target.value })}
+              />
+            )}
+          </FormField>
         </div>
-        <div>
-          <label className="label">Phone</label>
-          <input className="input" value={address.phone ?? ''} onChange={(e) => set({ phone: e.target.value })} />
-        </div>
+        <FormField label="Phone">
+          {(field) => (
+            <input
+              {...field}
+              className="input"
+              value={address.phone ?? ''}
+              onChange={(e) => set({ phone: e.target.value })}
+            />
+          )}
+        </FormField>
       </div>
 
       {validation && (
@@ -806,7 +840,12 @@ function AddressStep({
             </ul>
           )}
           <label className="mt-2 flex items-center gap-2 text-xs text-slate-300">
-            <input type="checkbox" checked={useNormalized} onChange={(e) => setUseNormalized(e.target.checked)} />
+            <input
+              type="checkbox"
+              aria-label="Use the carrier-normalized address for rating"
+              checked={useNormalized}
+              onChange={(e) => setUseNormalized(e.target.checked)}
+            />
             Use the carrier-normalized address for rating
           </label>
         </div>
@@ -857,7 +896,7 @@ function RatesStep({
         <table className="min-w-full divide-y divide-slate-700 text-sm">
           <thead className="bg-slate-800">
             <tr>
-              <th className="px-3 py-2 w-8"></th>
+              <th className="px-3 py-2 w-8" aria-label="Select rate"></th>
               <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">Carrier</th>
               <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">Service</th>
               <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">Mode</th>
@@ -878,6 +917,7 @@ function RatesStep({
                     <input
                       type="radio"
                       name="rate"
+                      aria-label={`Select ${r.carrier} ${r.service_name || r.service_code || ''} rate`}
                       checked={!!selected}
                       onChange={() => setSelectedRate(r)}
                     />

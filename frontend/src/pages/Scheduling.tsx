@@ -29,7 +29,7 @@ import {
   Squares2X2Icon,
 } from '@heroicons/react/24/outline';
 import { Modal } from '../components/ui/Modal';
-import { Button, EmptyState, ErrorState, statusVariant, useToast } from '../components/ui';
+import { Button, EmptyState, ErrorState, FormField, statusVariant, useToast } from '../components/ui';
 import type { StatusVariant } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 
@@ -1157,9 +1157,17 @@ export default function Scheduling() {
                                 <div
                                   key={job.work_order_id}
                                   draggable
+                                  role="button"
+                                  tabIndex={0}
                                   onDragStart={(e) => handleDragStart(e, job)}
                                   onDragEnd={handleDragEnd}
                                   onClick={() => openScheduleModal(job)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter' || e.key === ' ') {
+                                      e.preventDefault();
+                                      openScheduleModal(job);
+                                    }
+                                  }}
                                   className={`text-xs p-1.5 rounded cursor-move hover:opacity-90 border-l-4 shadow-sm ${
                                     priorityColors[job.priority] || 'border-l-gray-400'
                                   } ${statusBarFill(job.operation_status || job.status)} text-white ${
@@ -1221,6 +1229,7 @@ export default function Scheduling() {
                 onChange={(e) => setSearchQuery(e.target.value)}
                 className="input text-sm pl-8 w-48"
                 placeholder="Search WO#, part..."
+                aria-label="Search WO#, part"
               />
               {searchQuery && (
                 <button onClick={() => setSearchQuery('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-400">
@@ -1243,6 +1252,7 @@ export default function Scheduling() {
                 type="checkbox"
                 checked={showScheduledRows}
                 onChange={(e) => setShowScheduledRows(e.target.checked)}
+                aria-label="Show scheduled rows"
               />
               Scheduled
             </label>
@@ -1277,6 +1287,7 @@ export default function Scheduling() {
                   className="input text-xs py-1"
                   maxLength={500}
                   placeholder="Priority reason (optional)"
+                  aria-label="Priority reason (optional)"
                 />
               </div>
             )}
@@ -1335,6 +1346,7 @@ export default function Scheduling() {
                 className="input text-sm w-24"
                 min={-30}
                 max={30}
+                aria-label="Shift dates by days"
               />
               <Button
                 variant="secondary"
@@ -1365,6 +1377,7 @@ export default function Scheduling() {
                     type="checkbox"
                     checked={filteredQueueRows.length > 0 && filteredQueueRows.every((job) => selectedWorkOrderIds.has(job.work_order_id))}
                     onChange={(e) => (e.target.checked ? selectAllVisibleRows() : clearSelections())}
+                    aria-label="Select all work orders"
                   />
                 </th>
                 <th className="px-4 py-2 text-left text-xs font-medium text-slate-400 uppercase">WO #</th>
@@ -1388,6 +1401,7 @@ export default function Scheduling() {
                       type="checkbox"
                       checked={selectedWorkOrderIds.has(job.work_order_id)}
                       onChange={() => toggleRowSelection(job.work_order_id)}
+                      aria-label={`Select work order ${job.work_order_number}`}
                     />
                   </td>
                   <td className="px-4 py-2 font-medium text-werco-primary">{job.work_order_number}</td>
@@ -1422,6 +1436,7 @@ export default function Scheduling() {
                           onChange={(e) => setInlineEditDate(e.target.value)}
                           className="input text-xs w-32 py-0.5"
                           autoFocus
+                          aria-label="Scheduled date"
                           onKeyDown={(e) => {
                             if (e.key === 'Enter') handleInlineDateSave(job);
                             if (e.key === 'Escape') setInlineEditJobId(null);
@@ -1442,12 +1457,23 @@ export default function Scheduling() {
                       </div>
                     ) : (
                       <span
+                        role="button"
+                        tabIndex={0}
                         className={`cursor-pointer hover:underline ${job.scheduled_start ? 'text-white' : 'text-orange-600 italic'}`}
                         onClick={() => {
                           setInlineEditJobId(job.work_order_id);
                           setInlineEditDate(
                             job.scheduled_start ? getCentralDateStamp(job.scheduled_start) : getCentralTodayISODate()
                           );
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            setInlineEditJobId(job.work_order_id);
+                            setInlineEditDate(
+                              job.scheduled_start ? getCentralDateStamp(job.scheduled_start) : getCentralTodayISODate()
+                            );
+                          }
                         }}
                         title="Click to edit date"
                       >
@@ -1582,28 +1608,32 @@ export default function Scheduling() {
             </div>
             <form onSubmit={handleSchedule} className="space-y-4">
               <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="label">Start Date *</label>
-                  <input
-                    type="date"
-                    value={scheduleForm.scheduled_start}
-                    onChange={(e) => setScheduleForm({ ...scheduleForm, scheduled_start: e.target.value })}
-                    className="input"
-                    required
-                  />
-                </div>
-                <div>
-                  <label className="label">Work Center</label>
-                  <select
-                    value={scheduleForm.work_center_id}
-                    onChange={(e) => setScheduleForm({ ...scheduleForm, work_center_id: parseInt(e.target.value, 10) })}
-                    className="input"
-                  >
-                    {workCenters.map((wc) => (
-                      <option key={wc.id} value={wc.id}>{wc.code} - {wc.name}</option>
-                    ))}
-                  </select>
-                </div>
+                <FormField label="Start Date" required>
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="date"
+                      value={scheduleForm.scheduled_start}
+                      onChange={(e) => setScheduleForm({ ...scheduleForm, scheduled_start: e.target.value })}
+                      className="input"
+                      required
+                    />
+                  )}
+                </FormField>
+                <FormField label="Work Center">
+                  {(field) => (
+                    <select
+                      {...field}
+                      value={scheduleForm.work_center_id}
+                      onChange={(e) => setScheduleForm({ ...scheduleForm, work_center_id: parseInt(e.target.value, 10) })}
+                      className="input"
+                    >
+                      {workCenters.map((wc) => (
+                        <option key={wc.id} value={wc.id}>{wc.code} - {wc.name}</option>
+                      ))}
+                    </select>
+                  )}
+                </FormField>
               </div>
 
               {/* Capacity Preview */}
@@ -1677,6 +1707,7 @@ export default function Scheduling() {
                   type="checkbox"
                   checked={forwardSchedule}
                   onChange={(e) => setForwardSchedule(e.target.checked)}
+                  aria-label="Forward-schedule all remaining operations"
                 />
                 Forward-schedule all remaining operations
                 <span className="text-xs text-slate-500">(cascades dates through routing)</span>

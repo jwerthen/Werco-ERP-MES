@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState, useRef } from 'react';
 import api from '../services/api';
 import { Modal } from '../components/ui/Modal';
 import { EmptyState, ErrorState, useToast } from '../components/ui';
+import { FormField } from '../components/ui/FormField';
 import { RoutingImportWizard } from '../components/routing/RoutingImportWizard';
 import { useAuth } from '../context/AuthContext';
 import { hasPermission } from '../utils/permissions';
@@ -674,7 +675,16 @@ export default function RoutingPage() {
             {routings.map((routing) => (
               <div
                 key={routing.id}
+                role="button"
+                tabIndex={0}
                 onClick={() => loadRouting(routing.id)}
+                onKeyDown={(e) => {
+                  if (e.target !== e.currentTarget) return;
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    loadRouting(routing.id);
+                  }
+                }}
                 className={`p-3 rounded-lg border cursor-pointer transition-colors ${
                   selectedRouting?.id === routing.id
                     ? 'border-werco-primary bg-blue-500/10'
@@ -903,9 +913,10 @@ export default function RoutingPage() {
             <h3 className="text-lg font-semibold mb-4">Create New Routing</h3>
             <form onSubmit={handleCreateRouting} className="space-y-4">
               <div>
-                <label className="label">Part</label>
+                <label htmlFor="routing-part-search" className="label">Part</label>
                 <div className="relative">
                   <input
+                    id="routing-part-search"
                     type="text"
                     value={routingPartSearch}
                     onChange={(e) => {
@@ -922,6 +933,7 @@ export default function RoutingPage() {
                     }}
                     className="input pr-10"
                     placeholder="Search by part number or name..."
+                    aria-label="Search parts by number or name"
                   />
                   {newRouting.part_id ? (
                     <button
@@ -953,6 +965,7 @@ export default function RoutingPage() {
                             className={`w-full px-3 py-2 text-left hover:bg-slate-800/50 ${
                               part.id === newRouting.part_id ? 'bg-blue-500/10' : ''
                             }`}
+                            aria-label={`Select part ${part.part_number}`}
                           >
                             <div className="flex items-center justify-between gap-3">
                               <div>
@@ -973,25 +986,29 @@ export default function RoutingPage() {
                   Type to search. Select a result to continue.
                 </div>
               </div>
-              <div>
-                <label className="label">Revision</label>
-                <input
-                  type="text"
-                  value={newRouting.revision}
-                  onChange={(e) => setNewRouting({ ...newRouting, revision: e.target.value })}
-                  className="input"
-                  required
-                />
-              </div>
-              <div>
-                <label className="label">Description</label>
-                <textarea
-                  value={newRouting.description}
-                  onChange={(e) => setNewRouting({ ...newRouting, description: e.target.value })}
-                  className="input"
-                  rows={2}
-                />
-              </div>
+              <FormField label="Revision" required>
+                {(field) => (
+                  <input
+                    {...field}
+                    type="text"
+                    value={newRouting.revision}
+                    onChange={(e) => setNewRouting({ ...newRouting, revision: e.target.value })}
+                    className="input"
+                    required
+                  />
+                )}
+              </FormField>
+              <FormField label="Description">
+                {(field) => (
+                  <textarea
+                    {...field}
+                    value={newRouting.description}
+                    onChange={(e) => setNewRouting({ ...newRouting, description: e.target.value })}
+                    className="input"
+                    rows={2}
+                  />
+                )}
+              </FormField>
               <div className="flex justify-end gap-3">
                 <button
                   type="button"
@@ -1033,9 +1050,10 @@ export default function RoutingPage() {
 
                 {/* Part selector */}
                 <div>
-                  <label className="label">Part</label>
+                  <label htmlFor="generate-part-search" className="label">Part</label>
                   <div className="relative">
                     <input
+                      id="generate-part-search"
                       type="text"
                       value={generatePartSearch}
                       onChange={(e) => {
@@ -1047,6 +1065,7 @@ export default function RoutingPage() {
                       onBlur={() => window.setTimeout(() => setGeneratePartOpen(false), 150)}
                       className="input"
                       placeholder="Search by part number or name..."
+                      aria-label="Search parts by number or name"
                     />
                     {generatePartOpen && (
                       <div className="absolute z-10 mt-1 w-full rounded-md border border-slate-700 bg-fd-panel shadow-lg max-h-48 overflow-y-auto">
@@ -1076,17 +1095,28 @@ export default function RoutingPage() {
 
                 {/* File upload */}
                 <div>
-                  <label className="label">Drawing File</label>
+                  <label htmlFor="generate-drawing-file" className="label">Drawing File</label>
                   <div
+                    role="button"
+                    tabIndex={0}
                     className="border-2 border-dashed border-slate-600 rounded-lg p-6 text-center cursor-pointer hover:border-werco-primary transition-colors"
                     onClick={() => fileInputRef.current?.click()}
+                    onKeyDown={(e) => {
+                      if (e.target !== e.currentTarget) return;
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        fileInputRef.current?.click();
+                      }
+                    }}
                   >
                     <input
+                      id="generate-drawing-file"
                       ref={fileInputRef}
                       type="file"
                       accept=".pdf,.dxf,.step,.stp"
                       className="hidden"
                       onChange={(e) => setGenerateFile(e.target.files?.[0] || null)}
+                      aria-label="Upload drawing file"
                     />
                     <DocumentArrowUpIcon className="h-10 w-10 mx-auto text-slate-500 mb-2" />
                     {generateFile ? (
@@ -1206,7 +1236,7 @@ export default function RoutingPage() {
                           <th className="px-3 py-2 text-right text-xs font-medium text-slate-400 uppercase">Setup</th>
                           <th className="px-3 py-2 text-right text-xs font-medium text-slate-400 uppercase">Run/Unit</th>
                           <th className="px-3 py-2 text-center text-xs font-medium text-slate-400 uppercase">Conf.</th>
-                          <th className="px-3 py-2 text-center text-xs font-medium text-slate-400 uppercase w-10"></th>
+                          <th className="px-3 py-2 text-center text-xs font-medium text-slate-400 uppercase w-10" aria-label="Actions"></th>
                         </tr>
                       </thead>
                       <tbody className="bg-fd-panel divide-y divide-slate-700">
@@ -1221,6 +1251,7 @@ export default function RoutingPage() {
                                   className="input py-1 text-sm w-20 text-center"
                                   step={10}
                                   min={10}
+                                  aria-label="Operation sequence"
                                 />
                               </td>
                               <td className="px-3 py-2">
@@ -1229,6 +1260,7 @@ export default function RoutingPage() {
                                   value={op.operation_name}
                                   onChange={(e) => updateEditedOp(idx, 'operation_name', e.target.value)}
                                   className={`input py-1 text-sm w-full ${!op.operation_name.trim() ? 'border-red-300' : ''}`}
+                                  aria-label="Operation name"
                                 />
                               </td>
                               <td className="px-3 py-2">
@@ -1264,6 +1296,7 @@ export default function RoutingPage() {
                                   className="input py-1 text-sm w-20 text-right"
                                   step={1}
                                   min={0}
+                                  aria-label="Setup time in minutes"
                                 />
                                 <span className="text-xs text-slate-500 ml-1">min</span>
                               </td>
@@ -1275,6 +1308,7 @@ export default function RoutingPage() {
                                   className="input py-1 text-sm w-20 text-right"
                                   step={0.1}
                                   min={0}
+                                  aria-label="Run time per unit in minutes"
                                 />
                                 <span className="text-xs text-slate-500 ml-1">min</span>
                               </td>
@@ -1294,27 +1328,31 @@ export default function RoutingPage() {
                               </td>
                             </tr>
                             <tr className="bg-slate-900/30">
-                              <td className="px-3 pb-3"></td>
+                              <td className="px-3 pb-3" aria-hidden="true"></td>
                               <td className="px-3 pb-3" colSpan={6}>
                                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-                                  <div>
-                                    <label className="label text-xs">Description</label>
-                                    <textarea
-                                      value={op.description || ''}
-                                      onChange={(e) => updateEditedOp(idx, 'description', e.target.value)}
-                                      className="input py-2 text-sm w-full"
-                                      rows={2}
-                                    />
-                                  </div>
-                                  <div>
-                                    <label className="label text-xs">Work Instructions</label>
-                                    <textarea
-                                      value={op.work_instructions || ''}
-                                      onChange={(e) => updateEditedOp(idx, 'work_instructions', e.target.value)}
-                                      className="input py-2 text-sm w-full"
-                                      rows={2}
-                                    />
-                                  </div>
+                                  <FormField label="Description" labelClassName="text-xs">
+                                    {(field) => (
+                                      <textarea
+                                        {...field}
+                                        value={op.description || ''}
+                                        onChange={(e) => updateEditedOp(idx, 'description', e.target.value)}
+                                        className="input py-2 text-sm w-full"
+                                        rows={2}
+                                      />
+                                    )}
+                                  </FormField>
+                                  <FormField label="Work Instructions" labelClassName="text-xs">
+                                    {(field) => (
+                                      <textarea
+                                        {...field}
+                                        value={op.work_instructions || ''}
+                                        onChange={(e) => updateEditedOp(idx, 'work_instructions', e.target.value)}
+                                        className="input py-2 text-sm w-full"
+                                        rows={2}
+                                      />
+                                    )}
+                                  </FormField>
                                 </div>
                                 <div className="mt-2 flex flex-wrap gap-4 text-xs text-slate-300">
                                   <label className="inline-flex items-center gap-2">
@@ -1323,6 +1361,7 @@ export default function RoutingPage() {
                                       checked={op.is_inspection_point}
                                       onChange={(e) => updateEditedOp(idx, 'is_inspection_point', e.target.checked)}
                                       className="rounded border-slate-600 bg-slate-800"
+                                      aria-label="Inspection point"
                                     />
                                     Inspection point
                                   </label>
@@ -1332,6 +1371,7 @@ export default function RoutingPage() {
                                       checked={op.is_outside_operation}
                                       onChange={(e) => updateEditedOp(idx, 'is_outside_operation', e.target.checked)}
                                       className="rounded border-slate-600 bg-slate-800"
+                                      aria-label="Outside operation"
                                     />
                                     Outside operation
                                   </label>
@@ -1434,61 +1474,70 @@ export default function RoutingPage() {
               {!isReleasedEdit && (
                 <>
                   <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="label">Sequence #</label>
+                    <FormField label="Sequence #" required>
+                      {(field) => (
+                        <input
+                          {...field}
+                          type="number"
+                          value={newOperation.sequence}
+                          onChange={(e) => setNewOperation({ ...newOperation, sequence: parseInt(e.target.value) })}
+                          className="input"
+                          step={10}
+                          required
+                        />
+                      )}
+                    </FormField>
+                    <FormField label="Work Center" required>
+                      {(field) => (
+                        <select
+                          {...field}
+                          value={newOperation.work_center_id}
+                          onChange={(e) => setNewOperation({ ...newOperation, work_center_id: parseInt(e.target.value) })}
+                          className="input"
+                          required
+                        >
+                          <option value={0}>Select...</option>
+                          {workCenters.map(wc => (
+                            <option key={wc.id} value={wc.id}>
+                              {wc.code} - {wc.name}
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                    </FormField>
+                  </div>
+                  <FormField label="Operation Name" required>
+                    {(field) => (
                       <input
-                        type="number"
-                        value={newOperation.sequence}
-                        onChange={(e) => setNewOperation({ ...newOperation, sequence: parseInt(e.target.value) })}
+                        {...field}
+                        type="text"
+                        value={newOperation.name}
+                        onChange={(e) => setNewOperation({ ...newOperation, name: e.target.value })}
                         className="input"
-                        step={10}
+                        placeholder="e.g., Cut to size, Weld assembly, Paint"
                         required
                       />
-                    </div>
-                    <div>
-                      <label className="label">Work Center</label>
-                      <select
-                        value={newOperation.work_center_id}
-                        onChange={(e) => setNewOperation({ ...newOperation, work_center_id: parseInt(e.target.value) })}
+                    )}
+                  </FormField>
+                  <FormField label="Description">
+                    {(field) => (
+                      <textarea
+                        {...field}
+                        value={newOperation.description}
+                        onChange={(e) => setNewOperation({ ...newOperation, description: e.target.value })}
                         className="input"
-                        required
-                      >
-                        <option value={0}>Select...</option>
-                        {workCenters.map(wc => (
-                          <option key={wc.id} value={wc.id}>
-                            {wc.code} - {wc.name}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-                  <div>
-                    <label className="label">Operation Name</label>
-                    <input
-                      type="text"
-                      value={newOperation.name}
-                      onChange={(e) => setNewOperation({ ...newOperation, name: e.target.value })}
-                      className="input"
-                      placeholder="e.g., Cut to size, Weld assembly, Paint"
-                      required
-                    />
-                  </div>
-                  <div>
-                    <label className="label">Description</label>
-                    <textarea
-                      value={newOperation.description}
-                      onChange={(e) => setNewOperation({ ...newOperation, description: e.target.value })}
-                      className="input"
-                      rows={2}
-                    />
-                  </div>
+                        rows={2}
+                      />
+                    )}
+                  </FormField>
                 </>
               )}
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="label">Setup Time</label>
+                  <label htmlFor="operation-setup-time" className="label">Setup Time</label>
                   <div className="flex gap-2">
                     <input
+                      id="operation-setup-time"
                       type="number"
                       value={timeUnits.setup === 'min' ? Math.round(newOperation.setup_hours * 60 * 100) / 100 : newOperation.setup_hours}
                       onChange={(e) => {
@@ -1498,6 +1547,7 @@ export default function RoutingPage() {
                       className="input flex-1"
                       step={timeUnits.setup === 'min' ? 1 : 0.01}
                       min={0}
+                      aria-label="Setup time"
                     />
                     <select
                       value={timeUnits.setup}
@@ -1510,9 +1560,10 @@ export default function RoutingPage() {
                   </div>
                 </div>
                 <div>
-                  <label className="label">Run Time/Unit</label>
+                  <label htmlFor="operation-run-time" className="label">Run Time/Unit</label>
                   <div className="flex gap-2">
                     <input
+                      id="operation-run-time"
                       type="number"
                       value={timeUnits.run === 'min' ? Math.round(newOperation.run_hours_per_unit * 60 * 100) / 100 : newOperation.run_hours_per_unit}
                       onChange={(e) => {
@@ -1522,6 +1573,7 @@ export default function RoutingPage() {
                       className="input flex-1"
                       step={timeUnits.run === 'min' ? 0.1 : 0.001}
                       min={0}
+                      aria-label="Run time per unit"
                     />
                     <select
                       value={timeUnits.run}
@@ -1536,9 +1588,10 @@ export default function RoutingPage() {
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="label">Move Time</label>
+                  <label htmlFor="operation-move-time" className="label">Move Time</label>
                   <div className="flex gap-2">
                     <input
+                      id="operation-move-time"
                       type="number"
                       value={timeUnits.move === 'min' ? Math.round(newOperation.move_hours * 60 * 100) / 100 : newOperation.move_hours}
                       onChange={(e) => {
@@ -1548,6 +1601,7 @@ export default function RoutingPage() {
                       className="input flex-1"
                       step={timeUnits.move === 'min' ? 1 : 0.01}
                       min={0}
+                      aria-label="Move time"
                     />
                     <select
                       value={timeUnits.move}
@@ -1560,9 +1614,10 @@ export default function RoutingPage() {
                   </div>
                 </div>
                 <div>
-                  <label className="label">Queue Time</label>
+                  <label htmlFor="operation-queue-time" className="label">Queue Time</label>
                   <div className="flex gap-2">
                     <input
+                      id="operation-queue-time"
                       type="number"
                       value={timeUnits.queue === 'min' ? Math.round(newOperation.queue_hours * 60 * 100) / 100 : newOperation.queue_hours}
                       onChange={(e) => {
@@ -1572,6 +1627,7 @@ export default function RoutingPage() {
                       className="input flex-1"
                       step={timeUnits.queue === 'min' ? 1 : 0.01}
                       min={0}
+                      aria-label="Queue time"
                     />
                     <select
                       value={timeUnits.queue}
@@ -1587,9 +1643,10 @@ export default function RoutingPage() {
               {/* Machine cycle fields — time standards, editable on released routings too. */}
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="label">Cycle Time</label>
+                  <label htmlFor="operation-cycle-time" className="label">Cycle Time</label>
                   <div className="flex gap-2">
                     <input
+                      id="operation-cycle-time"
                       type="number"
                       value={newOperation.cycle_time_seconds}
                       onChange={(e) =>
@@ -1598,25 +1655,28 @@ export default function RoutingPage() {
                       className="input flex-1"
                       step={1}
                       min={0}
+                      aria-label="Cycle time in seconds"
                     />
                     <span className="inline-flex items-center px-3 py-2 w-20 text-sm text-slate-400 border border-slate-700 rounded-lg bg-fd-panel">
                       sec
                     </span>
                   </div>
                 </div>
-                <div>
-                  <label className="label">Pieces / Cycle</label>
-                  <input
-                    type="number"
-                    value={newOperation.pieces_per_cycle}
-                    onChange={(e) =>
-                      setNewOperation({ ...newOperation, pieces_per_cycle: parseInt(e.target.value) || 1 })
-                    }
-                    className="input"
-                    step={1}
-                    min={1}
-                  />
-                </div>
+                <FormField label="Pieces / Cycle">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="number"
+                      value={newOperation.pieces_per_cycle}
+                      onChange={(e) =>
+                        setNewOperation({ ...newOperation, pieces_per_cycle: parseInt(e.target.value) || 1 })
+                      }
+                      className="input"
+                      step={1}
+                      min={1}
+                    />
+                  )}
+                </FormField>
               </div>
               {!isReleasedEdit && (
                 <div className="flex gap-6">
@@ -1626,6 +1686,7 @@ export default function RoutingPage() {
                       checked={newOperation.is_inspection_point}
                       onChange={(e) => setNewOperation({ ...newOperation, is_inspection_point: e.target.checked })}
                       className="mr-2"
+                      aria-label="Inspection Point"
                     />
                     <span className="text-sm">Inspection Point</span>
                   </label>
@@ -1635,6 +1696,7 @@ export default function RoutingPage() {
                       checked={newOperation.is_outside_operation}
                       onChange={(e) => setNewOperation({ ...newOperation, is_outside_operation: e.target.checked })}
                       className="mr-2"
+                      aria-label="Outside Operation"
                     />
                     <span className="text-sm">Outside Operation</span>
                   </label>

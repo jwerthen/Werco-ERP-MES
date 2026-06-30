@@ -125,7 +125,12 @@ function RowActionsCell({
 }) {
   // Stop propagation so action clicks don't trigger the row click-through.
   return (
-    <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+    <div
+      className="flex items-center gap-1"
+      role="presentation"
+      onClick={(e) => e.stopPropagation()}
+      onKeyDown={(e) => e.stopPropagation()}
+    >
       {onRelease && wo.status === 'draft' && (
         <button
           onClick={() => onRelease(wo)}
@@ -576,6 +581,7 @@ export default function WorkOrders() {
             <input
               type="text"
               placeholder="Search by WO#, part, or customer..."
+              aria-label="Search work orders"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               className="input pl-11"
@@ -632,6 +638,7 @@ export default function WorkOrders() {
               checked={hideCOTS}
               onChange={(e) => setHideCOTS(e.target.checked)}
               className="checkbox"
+              aria-label="Hide COTS/Hardware"
             />
             <span className="text-sm text-surface-600 group-hover:text-surface-900">Hide COTS/Hardware</span>
           </label>

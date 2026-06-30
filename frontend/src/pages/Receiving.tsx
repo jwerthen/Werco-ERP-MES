@@ -25,6 +25,7 @@ import {
   StatusBadge,
   MobileDataCard,
   Button,
+  FormField,
   statusColor,
 } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
@@ -858,10 +859,11 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                     />
                   ) : (
                     openPOs.map((po) => (
-                      <div
+                      <button
+                        type="button"
                         key={po.po_id}
                         onClick={() => handleSelectPO(po)}
-                        className={`p-3 rounded-xl border-2 cursor-pointer transition-all ${
+                        className={`w-full text-left p-3 rounded-xl border-2 cursor-pointer transition-all ${
                           selectedPO?.po_id === po.po_id
                             ? 'border-werco-primary bg-werco-500/10'
                             : 'border-slate-700 hover:border-slate-600 hover:bg-slate-800'
@@ -881,7 +883,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                             Required: {formatCentralDate(po.required_date)}
                           </p>
                         )}
-                      </div>
+                      </button>
                     ))
                   )}
                 </div>
@@ -950,7 +952,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                             <th className="px-3 py-2 text-right text-xs font-semibold text-slate-400 uppercase w-16">Rem</th>
                             <th className="px-3 py-2 text-right text-xs font-semibold text-slate-400 uppercase w-20">Unit $</th>
                             <th className="px-3 py-2 text-center text-xs font-semibold text-slate-400 uppercase w-20">Status</th>
-                            <th className="px-3 py-2 text-center text-xs font-semibold text-slate-400 uppercase w-20"></th>
+                            <th className="px-3 py-2 text-center text-xs font-semibold text-slate-400 uppercase w-20" aria-label="Actions"></th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-700">
@@ -1010,7 +1012,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                             <td className="px-3 py-2 text-right text-sm font-bold">
                               ${selectedPO.lines?.reduce((sum: number, l: any) => sum + ((l.unit_price || 0) * (l.quantity_ordered || 0)), 0).toFixed(2)}
                             </td>
-                            <td colSpan={2}></td>
+                            <td colSpan={2} aria-label="Actions"></td>
                           </tr>
                         </tfoot>
                       </table>
@@ -1159,112 +1161,126 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
             {/* Form */}
             <div className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-1">
-                    Quantity Received <span className="text-red-500">*</span>
-                  </label>
-                  <input
-                    type="number"
-                    value={formData.quantity_received}
-                    onChange={(e) => setFormData({ ...formData, quantity_received: parseFloat(e.target.value) || 0 })}
-                    className="input w-full"
-                    min="0"
-                    step="1"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-1">
-                    Lot Number <span className="text-red-500">*</span>
-                  </label>
-                  <input
-                    type="text"
-                    value={formData.lot_number}
-                    onChange={(e) => setFormData({ ...formData, lot_number: e.target.value })}
-                    className="input w-full"
-                    placeholder="Required for traceability"
-                  />
-                </div>
+                <FormField label="Quantity Received" required labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="number"
+                      value={formData.quantity_received}
+                      onChange={(e) => setFormData({ ...formData, quantity_received: parseFloat(e.target.value) || 0 })}
+                      className="input w-full"
+                      min="0"
+                      step="1"
+                    />
+                  )}
+                </FormField>
+                <FormField label="Lot Number" required labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={formData.lot_number}
+                      onChange={(e) => setFormData({ ...formData, lot_number: e.target.value })}
+                      className="input w-full"
+                      placeholder="Required for traceability"
+                    />
+                  )}
+                </FormField>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-1">Heat Number</label>
-                  <input
-                    type="text"
-                    value={formData.heat_number}
-                    onChange={(e) => setFormData({ ...formData, heat_number: e.target.value })}
-                    className="input w-full"
-                    placeholder="For metals"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-1">Cert Number</label>
-                  <input
-                    type="text"
-                    value={formData.cert_number}
-                    onChange={(e) => setFormData({ ...formData, cert_number: e.target.value })}
-                    className="input w-full"
-                    placeholder="Certificate of conformance"
-                  />
-                </div>
+                <FormField label="Heat Number" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={formData.heat_number}
+                      onChange={(e) => setFormData({ ...formData, heat_number: e.target.value })}
+                      className="input w-full"
+                      placeholder="For metals"
+                    />
+                  )}
+                </FormField>
+                <FormField label="Cert Number" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={formData.cert_number}
+                      onChange={(e) => setFormData({ ...formData, cert_number: e.target.value })}
+                      className="input w-full"
+                      placeholder="Certificate of conformance"
+                    />
+                  )}
+                </FormField>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-1">Location</label>
-                  <select
-                    value={formData.location_id || ''}
-                    onChange={(e) => setFormData({ ...formData, location_id: e.target.value ? parseInt(e.target.value) : null })}
-                    className="input w-full"
-                  >
-                    <option value="">Select location</option>
-                    {locations.map((loc) => (
-                      <option key={loc.id} value={loc.id}>{loc.code} - {loc.name}</option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-1">Packing Slip #</label>
-                  <input
-                    type="text"
-                    value={formData.packing_slip_number}
-                    onChange={(e) => setFormData({ ...formData, packing_slip_number: e.target.value })}
-                    className="input w-full"
-                  />
-                </div>
+                <FormField label="Location" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                  {(field) => (
+                    <select
+                      {...field}
+                      value={formData.location_id || ''}
+                      onChange={(e) => setFormData({ ...formData, location_id: e.target.value ? parseInt(e.target.value) : null })}
+                      className="input w-full"
+                    >
+                      <option value="">Select location</option>
+                      {locations.map((loc) => (
+                        <option key={loc.id} value={loc.id}>{loc.code} - {loc.name}</option>
+                      ))}
+                    </select>
+                  )}
+                </FormField>
+                <FormField label="Packing Slip #" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={formData.packing_slip_number}
+                      onChange={(e) => setFormData({ ...formData, packing_slip_number: e.target.value })}
+                      className="input w-full"
+                    />
+                  )}
+                </FormField>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-1">Carrier</label>
-                  <input
-                    type="text"
-                    value={formData.carrier}
-                    onChange={(e) => setFormData({ ...formData, carrier: e.target.value })}
-                    className="input w-full"
-                    placeholder="e.g., UPS, FedEx"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-1">Tracking Number</label>
-                  <input
-                    type="text"
-                    value={formData.tracking_number}
-                    onChange={(e) => setFormData({ ...formData, tracking_number: e.target.value })}
-                    className="input w-full"
-                  />
-                </div>
+                <FormField label="Carrier" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={formData.carrier}
+                      onChange={(e) => setFormData({ ...formData, carrier: e.target.value })}
+                      className="input w-full"
+                      placeholder="e.g., UPS, FedEx"
+                    />
+                  )}
+                </FormField>
+                <FormField label="Tracking Number" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={formData.tracking_number}
+                      onChange={(e) => setFormData({ ...formData, tracking_number: e.target.value })}
+                      className="input w-full"
+                    />
+                  )}
+                </FormField>
               </div>
 
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Notes</label>
-                <textarea
-                  value={formData.notes}
-                  onChange={(e) => setFormData({ ...formData, notes: e.target.value })}
-                  className="input w-full"
-                  rows={2}
-                />
-              </div>
+              <FormField label="Notes" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                {(field) => (
+                  <textarea
+                    {...field}
+                    value={formData.notes}
+                    onChange={(e) => setFormData({ ...formData, notes: e.target.value })}
+                    className="input w-full"
+                    rows={2}
+                  />
+                )}
+              </FormField>
 
               <div className="flex gap-6">
                 <label className="flex items-center gap-2">
@@ -1273,6 +1289,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                     checked={formData.requires_inspection}
                     onChange={(e) => setFormData({ ...formData, requires_inspection: e.target.checked })}
                     className="rounded border-slate-600"
+                    aria-label="Requires Inspection"
                   />
                   <span className="text-sm">Requires Inspection</span>
                 </label>
@@ -1282,6 +1299,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                     checked={formData.coc_attached}
                     onChange={(e) => setFormData({ ...formData, coc_attached: e.target.checked })}
                     className="rounded border-slate-600"
+                    aria-label="CoC Attached"
                   />
                   <span className="text-sm">CoC Attached</span>
                 </label>
@@ -1295,6 +1313,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                       checked={formData.over_receive_approved}
                       onChange={(e) => setFormData({ ...formData, over_receive_approved: e.target.checked })}
                       className="rounded border-amber-500/40"
+                      aria-label="Approve Over-Receipt"
                     />
                     <span className="text-sm text-amber-300">
                       <strong>Approve Over-Receipt:</strong> Receiving {formData.quantity_received - selectedLine.quantity_remaining} more than remaining quantity
@@ -1380,80 +1399,86 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
             {/* Inspection Form */}
             <div className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-1">
-                    Quantity Accepted <span className="text-green-600">✓</span>
-                  </label>
-                  <input
-                    type="number"
-                    value={inspectionData.quantity_accepted}
-                    onChange={(e) => {
-                      const val = parseFloat(e.target.value) || 0;
-                      setInspectionData({
-                        ...inspectionData,
-                        quantity_accepted: val,
-                        quantity_rejected: Math.max(0, receiptDetail.quantity_received - val)
-                      });
-                    }}
-                    className="input w-full"
-                    min="0"
-                    max={receiptDetail.quantity_received}
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-1">
-                    Quantity Rejected <span className="text-red-600">✗</span>
-                  </label>
-                  <input
-                    type="number"
-                    value={inspectionData.quantity_rejected}
-                    onChange={(e) => {
-                      const val = parseFloat(e.target.value) || 0;
-                      setInspectionData({
-                        ...inspectionData,
-                        quantity_rejected: val,
-                        quantity_accepted: Math.max(0, receiptDetail.quantity_received - val)
-                      });
-                    }}
-                    className="input w-full"
-                    min="0"
-                    max={receiptDetail.quantity_received}
-                  />
-                </div>
+                <FormField
+                  label={<>Quantity Accepted <span className="text-green-600">✓</span></>}
+                  labelClassName="block text-sm font-medium text-slate-300 mb-1"
+                >
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="number"
+                      value={inspectionData.quantity_accepted}
+                      onChange={(e) => {
+                        const val = parseFloat(e.target.value) || 0;
+                        setInspectionData({
+                          ...inspectionData,
+                          quantity_accepted: val,
+                          quantity_rejected: Math.max(0, receiptDetail.quantity_received - val)
+                        });
+                      }}
+                      className="input w-full"
+                      min="0"
+                      max={receiptDetail.quantity_received}
+                    />
+                  )}
+                </FormField>
+                <FormField
+                  label={<>Quantity Rejected <span className="text-red-600">✗</span></>}
+                  labelClassName="block text-sm font-medium text-slate-300 mb-1"
+                >
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="number"
+                      value={inspectionData.quantity_rejected}
+                      onChange={(e) => {
+                        const val = parseFloat(e.target.value) || 0;
+                        setInspectionData({
+                          ...inspectionData,
+                          quantity_rejected: val,
+                          quantity_accepted: Math.max(0, receiptDetail.quantity_received - val)
+                        });
+                      }}
+                      className="input w-full"
+                      min="0"
+                      max={receiptDetail.quantity_received}
+                    />
+                  )}
+                </FormField>
               </div>
 
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">
-                  Inspection Method <span className="text-red-500">*</span>
-                </label>
-                <select
-                  value={inspectionData.inspection_method}
-                  onChange={(e) => setInspectionData({ ...inspectionData, inspection_method: e.target.value })}
-                  className="input w-full"
-                >
-                  {inspectionMethods.map((m) => (
-                    <option key={m.value} value={m.value}>{m.label}</option>
-                  ))}
-                </select>
-              </div>
+              <FormField label="Inspection Method" required labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                {(field) => (
+                  <select
+                    {...field}
+                    value={inspectionData.inspection_method}
+                    onChange={(e) => setInspectionData({ ...inspectionData, inspection_method: e.target.value })}
+                    className="input w-full"
+                  >
+                    {inspectionMethods.map((m) => (
+                      <option key={m.value} value={m.value}>{m.label}</option>
+                    ))}
+                  </select>
+                )}
+              </FormField>
 
               {inspectionData.quantity_rejected > 0 && (
                 <>
-                  <div>
-                    <label className="block text-sm font-medium text-slate-300 mb-1">
-                      Defect Type <span className="text-red-500">*</span>
-                    </label>
-                    <select
-                      value={inspectionData.defect_type}
-                      onChange={(e) => setInspectionData({ ...inspectionData, defect_type: e.target.value })}
-                      className="input w-full"
-                    >
-                      <option value="">Select defect type</option>
-                      {defectTypes.map((d) => (
-                        <option key={d.value} value={d.value}>{d.label}</option>
-                      ))}
-                    </select>
-                  </div>
+                  <FormField label="Defect Type" required labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                    {(field) => (
+                      <select
+                        {...field}
+                        value={inspectionData.defect_type}
+                        onChange={(e) => setInspectionData({ ...inspectionData, defect_type: e.target.value })}
+                        className="input w-full"
+                      >
+                        <option value="">Select defect type</option>
+                        {defectTypes.map((d) => (
+                          <option key={d.value} value={d.value}>{d.label}</option>
+                        ))}
+                      </select>
+                    )}
+                  </FormField>
                   <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4">
                     <p className="text-sm text-red-300 mb-2">
                       <strong>Note:</strong> An NCR will be auto-created for the rejected quantity ({inspectionData.quantity_rejected})
@@ -1472,6 +1497,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                   className="input w-full"
                   rows={3}
                   placeholder={inspectionData.quantity_rejected > 0 ? 'Required - describe the non-conformance' : 'Optional notes'}
+                  aria-label="Inspection Notes"
                 />
               </div>
 

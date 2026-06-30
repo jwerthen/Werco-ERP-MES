@@ -30,6 +30,7 @@ import api from '../../services/api';
 import { useToast } from '../ui/Toast';
 import { LoadingButton } from '../ui/LoadingButton';
 import { SelectField } from '../ui/SelectField';
+import { FormField } from '../ui/FormField';
 import type {
   CarrierAccount,
   CarrierAccountCreate,
@@ -221,6 +222,7 @@ export default function CarrierIntegrationsTab() {
                           disabled={testingId === account.id}
                           className="p-2 rounded-lg text-surface-500 hover:text-werco-600 hover:bg-werco-500/10 disabled:opacity-50"
                           title="Test connection"
+                          aria-label="Test connection"
                         >
                           {testingId === account.id ? (
                             <ArrowPathIcon className="h-4 w-4 animate-spin" />
@@ -232,6 +234,7 @@ export default function CarrierIntegrationsTab() {
                           onClick={() => { setEditingAccount(account); setAccountModalOpen(true); }}
                           className="p-2 rounded-lg text-surface-500 hover:text-werco-600 hover:bg-werco-500/10"
                           title="Edit"
+                          aria-label="Edit"
                         >
                           <PencilIcon className="h-4 w-4" />
                         </button>
@@ -239,6 +242,7 @@ export default function CarrierIntegrationsTab() {
                           onClick={() => setDeletingAccount(account)}
                           className="p-2 rounded-lg text-surface-500 hover:text-red-600 hover:bg-red-500/10"
                           title="Delete"
+                          aria-label="Delete"
                         >
                           <TrashIcon className="h-4 w-4" />
                         </button>
@@ -269,8 +273,12 @@ export default function CarrierIntegrationsTab() {
       )}
 
       {deletingAccount && (
-        <div className="modal-overlay" onClick={() => setDeletingAccount(null)}>
-          <div className="modal max-w-md" onClick={(e) => e.stopPropagation()}>
+        <div
+          className="modal-overlay"
+          role="presentation"
+          onClick={(e) => { if (e.target === e.currentTarget) setDeletingAccount(null); }}
+        >
+          <div className="modal max-w-md">
             <div className="modal-header">
               <h3 className="text-lg font-semibold">Delete carrier account</h3>
               <button onClick={() => setDeletingAccount(null)} className="p-2 rounded-lg hover:bg-surface-100">
@@ -435,8 +443,12 @@ function CarrierAccountModal({
   };
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal max-w-2xl" onClick={(e) => e.stopPropagation()}>
+    <div
+      className="modal-overlay"
+      role="presentation"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div className="modal max-w-2xl">
         <div className="modal-header">
           <h3 className="text-lg font-semibold">{isEdit ? 'Edit Carrier Account' : 'Add Carrier Account'}</h3>
           <button onClick={onClose} className="p-2 rounded-lg hover:bg-surface-100">
@@ -446,69 +458,83 @@ function CarrierAccountModal({
 
         <form onSubmit={handleSubmit} className="p-5 space-y-4 max-h-[70vh] overflow-y-auto">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <FormField label="Name">
+              {(field) => (
+                <input
+                  {...field}
+                  className="input"
+                  value={form.name}
+                  onChange={(e) => update('name', e.target.value)}
+                  placeholder="e.g. EasyPost (production)"
+                  required
+                />
+              )}
+            </FormField>
             <div>
-              <label className="label">Name</label>
-              <input
-                className="input"
-                value={form.name}
-                onChange={(e) => update('name', e.target.value)}
-                placeholder="e.g. EasyPost (production)"
-                required
-              />
-            </div>
-            <div>
-              <label className="label">Provider</label>
-              <SelectField
-                value={form.provider}
-                options={PROVIDER_OPTIONS}
-                onChange={(v) => update('provider', String(v))}
-                disabled={isEdit}
-                ariaLabel="Provider"
-              />
+              <FormField label="Provider">
+                <SelectField
+                  value={form.provider}
+                  options={PROVIDER_OPTIONS}
+                  onChange={(v) => update('provider', String(v))}
+                  disabled={isEdit}
+                  ariaLabel="Provider"
+                />
+              </FormField>
               {isEdit && (
                 <p className="text-xs text-surface-500 mt-1">Provider can&apos;t be changed after creation.</p>
               )}
             </div>
-            <div>
-              <label className="label">Environment</label>
+            <FormField label="Environment">
               <SelectField
                 value={form.environment}
                 options={ENVIRONMENT_OPTIONS}
                 onChange={(v) => update('environment', String(v))}
                 ariaLabel="Environment"
               />
-            </div>
-            <div>
-              <label className="label">
-                API Key {isEdit && <span className="text-surface-500 font-normal">(leave blank to keep)</span>}
-              </label>
+            </FormField>
+            <FormField
+              label={
+                <>
+                  API Key {isEdit && <span className="text-surface-500 font-normal">(leave blank to keep)</span>}
+                </>
+              }
+            >
+              {(field) => (
+                <input
+                  {...field}
+                  type="password"
+                  autoComplete="new-password"
+                  className="input font-mono"
+                  value={form.api_key}
+                  onChange={(e) => update('api_key', e.target.value)}
+                  placeholder={isEdit && account?.api_key_last4 ? `••••${account.api_key_last4}` : 'Write-only; encrypted at rest'}
+                />
+              )}
+            </FormField>
+          </div>
+
+          <FormField
+            label={
+              <>
+                Webhook Secret <span className="text-surface-500 font-normal">(optional, write-only)</span>
+              </>
+            }
+          >
+            {(field) => (
               <input
+                {...field}
                 type="password"
                 autoComplete="new-password"
                 className="input font-mono"
-                value={form.api_key}
-                onChange={(e) => update('api_key', e.target.value)}
-                placeholder={isEdit && account?.api_key_last4 ? `••••${account.api_key_last4}` : 'Write-only; encrypted at rest'}
+                value={form.webhook_secret}
+                onChange={(e) => update('webhook_secret', e.target.value)}
+                placeholder={isEdit && account?.has_webhook_secret ? 'Configured — leave blank to keep' : 'Used to verify inbound tracking webhooks'}
               />
-            </div>
-          </div>
+            )}
+          </FormField>
 
           <div>
-            <label className="label">
-              Webhook Secret <span className="text-surface-500 font-normal">(optional, write-only)</span>
-            </label>
-            <input
-              type="password"
-              autoComplete="new-password"
-              className="input font-mono"
-              value={form.webhook_secret}
-              onChange={(e) => update('webhook_secret', e.target.value)}
-              placeholder={isEdit && account?.has_webhook_secret ? 'Configured — leave blank to keep' : 'Used to verify inbound tracking webhooks'}
-            />
-          </div>
-
-          <div>
-            <label className="label">Bring-your-own carrier account refs</label>
+            <span className="label">Bring-your-own carrier account refs</span>
             <p className="text-xs text-surface-500 mb-2">
               Optional per-carrier account identifiers from your aggregator. Values are not displayed after
               saving; re-enter to change.
@@ -516,13 +542,15 @@ function CarrierAccountModal({
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
               {CARRIER_REF_FIELDS.map((field) => (
                 <div key={field.key}>
-                  <label className="text-xs text-surface-600">
+                  <label htmlFor={`carrier-ref-${field.key}`} className="text-xs text-surface-600">
                     {field.label}
                     {existingRefKeys.includes(field.key) && (
                       <span className="badge badge-neutral ml-1">set</span>
                     )}
                   </label>
                   <input
+                    id={`carrier-ref-${field.key}`}
+                    aria-label={field.label}
                     className="input font-mono"
                     value={form.carrier_refs[field.key] || ''}
                     onChange={(e) => updateRef(field.key, e.target.value)}
@@ -537,6 +565,7 @@ function CarrierAccountModal({
             <label className="flex items-center gap-2 cursor-pointer">
               <input
                 type="checkbox"
+                aria-label="Active"
                 className="checkbox"
                 checked={form.is_active}
                 onChange={(e) => update('is_active', e.target.checked)}
@@ -546,6 +575,7 @@ function CarrierAccountModal({
             <label className="flex items-center gap-2 cursor-pointer">
               <input
                 type="checkbox"
+                aria-label="Default account"
                 className="checkbox"
                 checked={form.is_default}
                 onChange={(e) => update('is_default', e.target.checked)}
@@ -671,76 +701,90 @@ function ShippingProfileForm({
 
       <form onSubmit={handleSubmit} className="space-y-5">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div>
-            <label className="label">Ship-from name</label>
-            <input className="input" value={form.ship_from_name ?? ''} onChange={(e) => update('ship_from_name', e.target.value)} />
-          </div>
-          <div>
-            <label className="label">Company</label>
-            <input className="input" value={form.ship_from_company ?? ''} onChange={(e) => update('ship_from_company', e.target.value)} />
-          </div>
-          <div>
-            <label className="label">Phone</label>
-            <input className="input" value={form.ship_from_phone ?? ''} onChange={(e) => update('ship_from_phone', e.target.value)} />
-          </div>
-          <div>
-            <label className="label">Email</label>
-            <input type="email" className="input" value={form.ship_from_email ?? ''} onChange={(e) => update('ship_from_email', e.target.value)} />
-          </div>
+          <FormField label="Ship-from name">
+            {(field) => (
+              <input {...field} className="input" value={form.ship_from_name ?? ''} onChange={(e) => update('ship_from_name', e.target.value)} />
+            )}
+          </FormField>
+          <FormField label="Company">
+            {(field) => (
+              <input {...field} className="input" value={form.ship_from_company ?? ''} onChange={(e) => update('ship_from_company', e.target.value)} />
+            )}
+          </FormField>
+          <FormField label="Phone">
+            {(field) => (
+              <input {...field} className="input" value={form.ship_from_phone ?? ''} onChange={(e) => update('ship_from_phone', e.target.value)} />
+            )}
+          </FormField>
+          <FormField label="Email">
+            {(field) => (
+              <input {...field} type="email" className="input" value={form.ship_from_email ?? ''} onChange={(e) => update('ship_from_email', e.target.value)} />
+            )}
+          </FormField>
+          <FormField label="Street address" className="md:col-span-2">
+            {(field) => (
+              <input {...field} className="input" value={form.ship_from_street1 ?? ''} onChange={(e) => update('ship_from_street1', e.target.value)} placeholder="Street 1" />
+            )}
+          </FormField>
           <div className="md:col-span-2">
-            <label className="label">Street address</label>
-            <input className="input" value={form.ship_from_street1 ?? ''} onChange={(e) => update('ship_from_street1', e.target.value)} placeholder="Street 1" />
+            <input aria-label="Street address line 2" className="input" value={form.ship_from_street2 ?? ''} onChange={(e) => update('ship_from_street2', e.target.value)} placeholder="Street 2 (optional)" />
           </div>
-          <div className="md:col-span-2">
-            <input className="input" value={form.ship_from_street2 ?? ''} onChange={(e) => update('ship_from_street2', e.target.value)} placeholder="Street 2 (optional)" />
-          </div>
-          <div>
-            <label className="label">City</label>
-            <input className="input" value={form.ship_from_city ?? ''} onChange={(e) => update('ship_from_city', e.target.value)} />
-          </div>
+          <FormField label="City">
+            {(field) => (
+              <input {...field} className="input" value={form.ship_from_city ?? ''} onChange={(e) => update('ship_from_city', e.target.value)} />
+            )}
+          </FormField>
           <div className="grid grid-cols-3 gap-3">
-            <div>
-              <label className="label">State</label>
-              <input className="input" value={form.ship_from_state ?? ''} onChange={(e) => update('ship_from_state', e.target.value)} />
-            </div>
-            <div>
-              <label className="label">ZIP</label>
-              <input className="input" value={form.ship_from_zip ?? ''} onChange={(e) => update('ship_from_zip', e.target.value)} />
-            </div>
-            <div>
-              <label className="label">Country</label>
-              <input className="input" value={form.ship_from_country ?? ''} onChange={(e) => update('ship_from_country', e.target.value)} placeholder="US" />
-            </div>
+            <FormField label="State">
+              {(field) => (
+                <input {...field} className="input" value={form.ship_from_state ?? ''} onChange={(e) => update('ship_from_state', e.target.value)} />
+              )}
+            </FormField>
+            <FormField label="ZIP">
+              {(field) => (
+                <input {...field} className="input" value={form.ship_from_zip ?? ''} onChange={(e) => update('ship_from_zip', e.target.value)} />
+              )}
+            </FormField>
+            <FormField label="Country">
+              {(field) => (
+                <input {...field} className="input" value={form.ship_from_country ?? ''} onChange={(e) => update('ship_from_country', e.target.value)} placeholder="US" />
+              )}
+            </FormField>
           </div>
         </div>
 
         <div>
-          <label className="label">Default package dimensions</label>
+          <span className="label">Default package dimensions</span>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             <div>
-              <label className="text-xs text-surface-600">Weight (lbs)</label>
-              <input type="number" step="0.01" min="0" className="input" value={form.default_package_weight_lbs ?? ''} onChange={(e) => update('default_package_weight_lbs', e.target.value)} />
+              <label htmlFor="default-package-weight-lbs" className="text-xs text-surface-600">Weight (lbs)</label>
+              <input id="default-package-weight-lbs" aria-label="Weight (lbs)" type="number" step="0.01" min="0" className="input" value={form.default_package_weight_lbs ?? ''} onChange={(e) => update('default_package_weight_lbs', e.target.value)} />
             </div>
             <div>
-              <label className="text-xs text-surface-600">Length (in)</label>
-              <input type="number" step="0.01" min="0" className="input" value={form.default_package_length_in ?? ''} onChange={(e) => update('default_package_length_in', e.target.value)} />
+              <label htmlFor="default-package-length-in" className="text-xs text-surface-600">Length (in)</label>
+              <input id="default-package-length-in" aria-label="Length (in)" type="number" step="0.01" min="0" className="input" value={form.default_package_length_in ?? ''} onChange={(e) => update('default_package_length_in', e.target.value)} />
             </div>
             <div>
-              <label className="text-xs text-surface-600">Width (in)</label>
-              <input type="number" step="0.01" min="0" className="input" value={form.default_package_width_in ?? ''} onChange={(e) => update('default_package_width_in', e.target.value)} />
+              <label htmlFor="default-package-width-in" className="text-xs text-surface-600">Width (in)</label>
+              <input id="default-package-width-in" aria-label="Width (in)" type="number" step="0.01" min="0" className="input" value={form.default_package_width_in ?? ''} onChange={(e) => update('default_package_width_in', e.target.value)} />
             </div>
             <div>
-              <label className="text-xs text-surface-600">Height (in)</label>
-              <input type="number" step="0.01" min="0" className="input" value={form.default_package_height_in ?? ''} onChange={(e) => update('default_package_height_in', e.target.value)} />
+              <label htmlFor="default-package-height-in" className="text-xs text-surface-600">Height (in)</label>
+              <input id="default-package-height-in" aria-label="Height (in)" type="number" step="0.01" min="0" className="input" value={form.default_package_height_in ?? ''} onChange={(e) => update('default_package_height_in', e.target.value)} />
             </div>
           </div>
         </div>
 
         {/* Egress kill switch */}
         <div className={`rounded border px-4 py-4 ${egressOn ? 'border-red-500/40 bg-red-500/5' : 'border-surface-200'}`}>
-          <label className="flex items-start gap-3 cursor-pointer">
+          <label htmlFor="allow-carrier-egress" className="flex items-start gap-3 cursor-pointer">
             <input
+              id="allow-carrier-egress"
               type="checkbox"
+              // The accessible name comes from the visible title span below; aria-label
+              // restates it so the checkbox's accessible name stays "Allow carrier
+              // egress" without a duplicate sr-only text node.
+              aria-label="Allow carrier egress"
               className="checkbox mt-0.5"
               checked={egressOn}
               onChange={(e) => update('allow_carrier_egress', e.target.checked)}

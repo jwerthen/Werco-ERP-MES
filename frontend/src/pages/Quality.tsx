@@ -10,6 +10,7 @@ import {
   StatusBadge,
   MobileDataCard,
   Button,
+  FormField,
   statusColorMap,
   statusVariantClass,
 } from '../components/ui';
@@ -642,49 +643,57 @@ export default function QualityPage() {
               <button onClick={() => setShowNCRModal(false)} aria-label="Close dialog"><XMarkIcon className="h-6 w-6" aria-hidden="true" /></button>
             </div>
             <form onSubmit={handleCreateNCR} className="space-y-4">
-              <div>
-                <label className="label">Title</label>
-                <input type="text" value={ncrForm.title} onChange={(e) => setNcrForm({...ncrForm, title: e.target.value})} className="input" required />
-              </div>
-              <div>
-                <label className="label">Part (optional)</label>
-                <select value={ncrForm.part_id} onChange={(e) => setNcrForm({...ncrForm, part_id: parseInt(e.target.value)})} className="input">
-                  <option value={0}>Select part...</option>
-                  {parts.map(p => <option key={p.id} value={p.id}>{p.part_number} - {p.name}</option>)}
-                </select>
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Source</label>
-                  <select value={ncrForm.source} onChange={(e) => setNcrForm({...ncrForm, source: e.target.value})} className="input">
-                    <option value="incoming_inspection">Incoming Inspection</option>
-                    <option value="in_process">In Process</option>
-                    <option value="final_inspection">Final Inspection</option>
-                    <option value="customer_return">Customer Return</option>
+              <FormField label="Title" required>
+                {(field) => (
+                  <input {...field} type="text" value={ncrForm.title} onChange={(e) => setNcrForm({...ncrForm, title: e.target.value})} className="input" required />
+                )}
+              </FormField>
+              <FormField label="Part (optional)">
+                {(field) => (
+                  <select {...field} value={ncrForm.part_id} onChange={(e) => setNcrForm({...ncrForm, part_id: parseInt(e.target.value)})} className="input">
+                    <option value={0}>Select part...</option>
+                    {parts.map(p => <option key={p.id} value={p.id}>{p.part_number} - {p.name}</option>)}
                   </select>
-                </div>
-                <div>
-                  <label className="label">Qty Affected</label>
-                  <input type="number" value={ncrForm.quantity_affected} onChange={(e) => setNcrForm({...ncrForm, quantity_affected: parseFloat(e.target.value)})} className="input" min={1} />
-                </div>
+                )}
+              </FormField>
+              <div className="grid grid-cols-2 gap-4">
+                <FormField label="Source">
+                  {(field) => (
+                    <select {...field} value={ncrForm.source} onChange={(e) => setNcrForm({...ncrForm, source: e.target.value})} className="input">
+                      <option value="incoming_inspection">Incoming Inspection</option>
+                      <option value="in_process">In Process</option>
+                      <option value="final_inspection">Final Inspection</option>
+                      <option value="customer_return">Customer Return</option>
+                    </select>
+                  )}
+                </FormField>
+                <FormField label="Qty Affected">
+                  {(field) => (
+                    <input {...field} type="number" value={ncrForm.quantity_affected} onChange={(e) => setNcrForm({...ncrForm, quantity_affected: parseFloat(e.target.value)})} className="input" min={1} />
+                  )}
+                </FormField>
               </div>
-              <div>
-                <label className="label">Description</label>
-                <textarea value={ncrForm.description} onChange={(e) => setNcrForm({...ncrForm, description: e.target.value})} className="input" rows={3} required />
-              </div>
+              <FormField label="Description" required>
+                {(field) => (
+                  <textarea {...field} value={ncrForm.description} onChange={(e) => setNcrForm({...ncrForm, description: e.target.value})} className="input" rows={3} required />
+                )}
+              </FormField>
               <div className="grid grid-cols-3 gap-4">
-                <div>
-                  <label className="label">Specification</label>
-                  <input type="text" value={ncrForm.specification} onChange={(e) => setNcrForm({...ncrForm, specification: e.target.value})} className="input" placeholder="e.g., 10.00 ± 0.05" />
-                </div>
-                <div>
-                  <label className="label">Actual Value</label>
-                  <input type="text" value={ncrForm.actual_value} onChange={(e) => setNcrForm({...ncrForm, actual_value: e.target.value})} className="input" placeholder="e.g., 10.12" />
-                </div>
-                <div>
-                  <label className="label">Required</label>
-                  <input type="text" value={ncrForm.required_value} onChange={(e) => setNcrForm({...ncrForm, required_value: e.target.value})} className="input" placeholder="e.g., 9.95-10.05" />
-                </div>
+                <FormField label="Specification">
+                  {(field) => (
+                    <input {...field} type="text" value={ncrForm.specification} onChange={(e) => setNcrForm({...ncrForm, specification: e.target.value})} className="input" placeholder="e.g., 10.00 ± 0.05" />
+                  )}
+                </FormField>
+                <FormField label="Actual Value">
+                  {(field) => (
+                    <input {...field} type="text" value={ncrForm.actual_value} onChange={(e) => setNcrForm({...ncrForm, actual_value: e.target.value})} className="input" placeholder="e.g., 10.12" />
+                  )}
+                </FormField>
+                <FormField label="Required">
+                  {(field) => (
+                    <input {...field} type="text" value={ncrForm.required_value} onChange={(e) => setNcrForm({...ncrForm, required_value: e.target.value})} className="input" placeholder="e.g., 9.95-10.05" />
+                  )}
+                </FormField>
               </div>
               <div className="flex justify-end gap-3">
                 <Button type="button" variant="secondary" onClick={() => setShowNCRModal(false)}>Cancel</Button>
@@ -700,32 +709,36 @@ export default function QualityPage() {
               <button onClick={() => setShowCARModal(false)} aria-label="Close dialog"><XMarkIcon className="h-6 w-6" aria-hidden="true" /></button>
             </div>
             <form onSubmit={handleCreateCAR} className="space-y-4">
-              <div>
-                <label className="label">Title</label>
-                <input type="text" value={carForm.title} onChange={(e) => setCarForm({...carForm, title: e.target.value})} className="input" required />
-              </div>
+              <FormField label="Title" required>
+                {(field) => (
+                  <input {...field} type="text" value={carForm.title} onChange={(e) => setCarForm({...carForm, title: e.target.value})} className="input" required />
+                )}
+              </FormField>
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Type</label>
-                  <select value={carForm.car_type} onChange={(e) => setCarForm({...carForm, car_type: e.target.value})} className="input">
-                    <option value="corrective">Corrective</option>
-                    <option value="preventive">Preventive</option>
-                    <option value="improvement">Improvement</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="label">Priority</label>
-                  <select value={carForm.priority} onChange={(e) => setCarForm({...carForm, priority: parseInt(e.target.value)})} className="input">
-                    <option value={1}>Critical</option>
-                    <option value={2}>Major</option>
-                    <option value={3}>Minor</option>
-                  </select>
-                </div>
+                <FormField label="Type">
+                  {(field) => (
+                    <select {...field} value={carForm.car_type} onChange={(e) => setCarForm({...carForm, car_type: e.target.value})} className="input">
+                      <option value="corrective">Corrective</option>
+                      <option value="preventive">Preventive</option>
+                      <option value="improvement">Improvement</option>
+                    </select>
+                  )}
+                </FormField>
+                <FormField label="Priority">
+                  {(field) => (
+                    <select {...field} value={carForm.priority} onChange={(e) => setCarForm({...carForm, priority: parseInt(e.target.value)})} className="input">
+                      <option value={1}>Critical</option>
+                      <option value={2}>Major</option>
+                      <option value={3}>Minor</option>
+                    </select>
+                  )}
+                </FormField>
               </div>
-              <div>
-                <label className="label">Problem Description</label>
-                <textarea value={carForm.problem_description} onChange={(e) => setCarForm({...carForm, problem_description: e.target.value})} className="input" rows={4} required />
-              </div>
+              <FormField label="Problem Description" required>
+                {(field) => (
+                  <textarea {...field} value={carForm.problem_description} onChange={(e) => setCarForm({...carForm, problem_description: e.target.value})} className="input" rows={4} required />
+                )}
+              </FormField>
               <div className="flex justify-end gap-3">
                 <Button type="button" variant="secondary" onClick={() => setShowCARModal(false)}>Cancel</Button>
                 <Button type="submit">Create CAR</Button>
@@ -740,34 +753,37 @@ export default function QualityPage() {
               <button onClick={() => setShowFAIModal(false)} aria-label="Close dialog"><XMarkIcon className="h-6 w-6" aria-hidden="true" /></button>
             </div>
             <form onSubmit={handleCreateFAI} className="space-y-4">
-              <div>
-                <label className="label">Part</label>
-                <select value={faiForm.part_id} onChange={(e) => setFaiForm({...faiForm, part_id: parseInt(e.target.value)})} className="input" required>
-                  <option value={0}>Select part...</option>
-                  {parts.map(p => <option key={p.id} value={p.id}>{p.part_number} - {p.name}</option>)}
-                </select>
-              </div>
+              <FormField label="Part" required>
+                {(field) => (
+                  <select {...field} value={faiForm.part_id} onChange={(e) => setFaiForm({...faiForm, part_id: parseInt(e.target.value)})} className="input" required>
+                    <option value={0}>Select part...</option>
+                    {parts.map(p => <option key={p.id} value={p.id}>{p.part_number} - {p.name}</option>)}
+                  </select>
+                )}
+              </FormField>
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">FAI Type</label>
-                  <select value={faiForm.fai_type} onChange={(e) => setFaiForm({...faiForm, fai_type: e.target.value})} className="input">
-                    <option value="full">Full</option>
-                    <option value="partial">Partial</option>
-                    <option value="delta">Delta</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="label">Reason</label>
-                  <select value={faiForm.reason} onChange={(e) => setFaiForm({...faiForm, reason: e.target.value})} className="input">
-                    <option value="new_part">New Part</option>
-                    <option value="design_change">Design Change</option>
-                    <option value="process_change">Process Change</option>
-                    <option value="new_supplier">New Supplier</option>
-                  </select>
-                </div>
+                <FormField label="FAI Type">
+                  {(field) => (
+                    <select {...field} value={faiForm.fai_type} onChange={(e) => setFaiForm({...faiForm, fai_type: e.target.value})} className="input">
+                      <option value="full">Full</option>
+                      <option value="partial">Partial</option>
+                      <option value="delta">Delta</option>
+                    </select>
+                  )}
+                </FormField>
+                <FormField label="Reason">
+                  {(field) => (
+                    <select {...field} value={faiForm.reason} onChange={(e) => setFaiForm({...faiForm, reason: e.target.value})} className="input">
+                      <option value="new_part">New Part</option>
+                      <option value="design_change">Design Change</option>
+                      <option value="process_change">Process Change</option>
+                      <option value="new_supplier">New Supplier</option>
+                    </select>
+                  )}
+                </FormField>
               </div>
               <label className="flex items-center">
-                <input type="checkbox" checked={faiForm.customer_approval_required} onChange={(e) => setFaiForm({...faiForm, customer_approval_required: e.target.checked})} className="mr-2" />
+                <input type="checkbox" aria-label="Customer Approval Required" checked={faiForm.customer_approval_required} onChange={(e) => setFaiForm({...faiForm, customer_approval_required: e.target.checked})} className="mr-2" />
                 <span className="text-sm">Customer Approval Required</span>
               </label>
               <div className="flex justify-end gap-3">

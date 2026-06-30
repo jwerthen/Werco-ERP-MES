@@ -219,7 +219,12 @@ export default function Users() {
         header: 'Actions',
         align: 'center',
         render: (u) => (
-          <div className="flex justify-center gap-2" onClick={(e) => e.stopPropagation()}>
+          <div
+            className="flex justify-center gap-2"
+            role="presentation"
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => e.stopPropagation()}
+          >
             <button
               onClick={() => handleEdit(u)}
               className="text-slate-400 hover:text-slate-400"
@@ -512,6 +517,7 @@ export default function Users() {
             checked={showInactive}
             onChange={(e) => setShowInactive(e.target.checked)}
             className="mr-2 rounded border-slate-600"
+            aria-label="Show inactive users"
           />
           <span className="text-sm text-slate-300">Show inactive users</span>
         </label>

@@ -429,6 +429,7 @@ export default function ActionInbox() {
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               placeholder="Search actions..."
+              aria-label="Search actions"
               className="w-full rounded-sm border border-fd-line bg-slate-950/70 py-2 pl-10 pr-3 text-white placeholder:text-slate-500 focus:border-fd-blue focus:outline-none focus:ring-1 focus:ring-fd-blue"
             />
           </div>

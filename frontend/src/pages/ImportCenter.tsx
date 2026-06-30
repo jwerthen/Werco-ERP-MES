@@ -16,6 +16,7 @@ import {
   WorkOrderImportRowResult,
 } from '../types/importKit';
 import { importTimeoutMessage, ImportPhase } from '../utils/apiError';
+import { FormField } from '../components/ui/FormField';
 
 interface ImportTypeConfig {
   label: string;
@@ -538,28 +539,36 @@ export default function ImportCenter() {
                 <h3 className="font-semibold text-white">Upload {selected.label}</h3>
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                  <label className="label">File (.csv or .xlsx)</label>
-                  <input
-                    key={fileInputKey}
-                    type="file"
-                    accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    aria-label="Import file"
-                    className="input"
-                    onChange={(e) => handleFileChange(e.target.files?.[0] || null)}
-                  />
-                </div>
-                {selectedKey === 'employees' && (
-                  <div>
-                    <label className="label">Default Password</label>
+                <FormField label="File (.csv or .xlsx)">
+                  {(field) => (
                     <input
-                      type="password"
+                      {...field}
+                      key={fileInputKey}
+                      type="file"
+                      accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                      // Keep the original "Import file" accessible name (the visible
+                      // FormField label reads "File (.csv or .xlsx)"); aria-label
+                      // sets the accessible name while htmlFor/id still associates
+                      // the label so jsx-a11y/label-has-associated-control passes.
+                      aria-label="Import file"
                       className="input"
-                      value={defaultPassword}
-                      onChange={(e) => setDefaultPassword(e.target.value)}
-                      placeholder="Required for non-operator rows without a password"
+                      onChange={(e) => handleFileChange(e.target.files?.[0] || null)}
                     />
-                  </div>
+                  )}
+                </FormField>
+                {selectedKey === 'employees' && (
+                  <FormField label="Default Password">
+                    {(field) => (
+                      <input
+                        {...field}
+                        type="password"
+                        className="input"
+                        value={defaultPassword}
+                        onChange={(e) => setDefaultPassword(e.target.value)}
+                        placeholder="Required for non-operator rows without a password"
+                      />
+                    )}
+                  </FormField>
                 )}
               </div>
               <div className="flex flex-wrap items-center gap-3">

@@ -10,6 +10,7 @@ import {
   StatusBadge,
   MobileDataCard,
   Button,
+  FormField,
   statusColor,
 } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
@@ -547,6 +548,7 @@ export default function Maintenance() {
             <div className="relative flex-1 min-w-[200px]">
               <MagnifyingGlassIcon className="absolute left-3 top-2.5 w-5 h-5 text-slate-400" />
               <input type="text" placeholder="Search..." value={search} onChange={e => setSearch(e.target.value)}
+                aria-label="Search work orders"
                 className="w-full pl-10 pr-4 py-2 border border-slate-600 rounded-lg focus:ring-2 focus:ring-blue-500" />
             </div>
             <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)} className="px-3 py-2 border border-slate-600 rounded-lg">
@@ -589,47 +591,53 @@ export default function Maintenance() {
               <button onClick={() => setShowCreateScheduleModal(false)} aria-label="Close dialog"><XMarkIcon className="w-5 h-5" aria-hidden="true" /></button>
             </div>
             <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Work Center ID *</label>
-                <input type="number" value={scheduleForm.work_center_id} onChange={e => setScheduleForm(f => ({ ...f, work_center_id: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
-              </div>
+              <FormField label="Work Center ID" required labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                {(field) => (
+                  <input {...field} type="number" value={scheduleForm.work_center_id} onChange={e => setScheduleForm(f => ({ ...f, work_center_id: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
+                )}
+              </FormField>
               <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-1">Type</label>
-                  <select value={scheduleForm.maintenance_type} onChange={e => setScheduleForm(f => ({ ...f, maintenance_type: e.target.value }))} className="w-full px-3 py-2 border rounded-lg">
-                    <option value="preventive">Preventive</option>
-                    <option value="predictive">Predictive</option>
-                    <option value="calibration">Calibration</option>
-                    <option value="inspection">Inspection</option>
-                    <option value="lubrication">Lubrication</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-1">Frequency</label>
-                  <select value={scheduleForm.frequency} onChange={e => setScheduleForm(f => ({ ...f, frequency: e.target.value }))} className="w-full px-3 py-2 border rounded-lg">
-                    <option value="daily">Daily</option>
-                    <option value="weekly">Weekly</option>
-                    <option value="biweekly">Bi-weekly</option>
-                    <option value="monthly">Monthly</option>
-                    <option value="quarterly">Quarterly</option>
-                    <option value="semi_annual">Semi-Annual</option>
-                    <option value="annual">Annual</option>
-                    <option value="usage_based">Usage Based</option>
-                  </select>
-                </div>
+                <FormField label="Type" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                  {(field) => (
+                    <select {...field} value={scheduleForm.maintenance_type} onChange={e => setScheduleForm(f => ({ ...f, maintenance_type: e.target.value }))} className="w-full px-3 py-2 border rounded-lg">
+                      <option value="preventive">Preventive</option>
+                      <option value="predictive">Predictive</option>
+                      <option value="calibration">Calibration</option>
+                      <option value="inspection">Inspection</option>
+                      <option value="lubrication">Lubrication</option>
+                    </select>
+                  )}
+                </FormField>
+                <FormField label="Frequency" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                  {(field) => (
+                    <select {...field} value={scheduleForm.frequency} onChange={e => setScheduleForm(f => ({ ...f, frequency: e.target.value }))} className="w-full px-3 py-2 border rounded-lg">
+                      <option value="daily">Daily</option>
+                      <option value="weekly">Weekly</option>
+                      <option value="biweekly">Bi-weekly</option>
+                      <option value="monthly">Monthly</option>
+                      <option value="quarterly">Quarterly</option>
+                      <option value="semi_annual">Semi-Annual</option>
+                      <option value="annual">Annual</option>
+                      <option value="usage_based">Usage Based</option>
+                    </select>
+                  )}
+                </FormField>
               </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Description *</label>
-                <textarea value={scheduleForm.description} onChange={e => setScheduleForm(f => ({ ...f, description: e.target.value }))} rows={3} className="w-full px-3 py-2 border rounded-lg" />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Checklist</label>
-                <textarea value={scheduleForm.checklist} onChange={e => setScheduleForm(f => ({ ...f, checklist: e.target.value }))} rows={3} className="w-full px-3 py-2 border rounded-lg" placeholder="One item per line" />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Est. Duration (hours)</label>
-                <input type="number" step="0.5" value={scheduleForm.estimated_duration_hours} onChange={e => setScheduleForm(f => ({ ...f, estimated_duration_hours: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
-              </div>
+              <FormField label="Description" required labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                {(field) => (
+                  <textarea {...field} value={scheduleForm.description} onChange={e => setScheduleForm(f => ({ ...f, description: e.target.value }))} rows={3} className="w-full px-3 py-2 border rounded-lg" />
+                )}
+              </FormField>
+              <FormField label="Checklist" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                {(field) => (
+                  <textarea {...field} value={scheduleForm.checklist} onChange={e => setScheduleForm(f => ({ ...f, checklist: e.target.value }))} rows={3} className="w-full px-3 py-2 border rounded-lg" placeholder="One item per line" />
+                )}
+              </FormField>
+              <FormField label="Est. Duration (hours)" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                {(field) => (
+                  <input {...field} type="number" step="0.5" value={scheduleForm.estimated_duration_hours} onChange={e => setScheduleForm(f => ({ ...f, estimated_duration_hours: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
+                )}
+              </FormField>
             </div>
             <div className="flex justify-end gap-2 p-4 border-t">
               <Button variant="secondary" onClick={() => setShowCreateScheduleModal(false)}>Cancel</Button>
@@ -644,43 +652,49 @@ export default function Maintenance() {
               <button onClick={() => setShowCreateWOModal(false)} aria-label="Close dialog"><XMarkIcon className="w-5 h-5" aria-hidden="true" /></button>
             </div>
             <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Title *</label>
-                <input type="text" value={woForm.title} onChange={e => setWoForm(f => ({ ...f, title: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Work Center ID *</label>
-                <input type="number" value={woForm.work_center_id} onChange={e => setWoForm(f => ({ ...f, work_center_id: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
-              </div>
+              <FormField label="Title" required labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                {(field) => (
+                  <input {...field} type="text" value={woForm.title} onChange={e => setWoForm(f => ({ ...f, title: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
+                )}
+              </FormField>
+              <FormField label="Work Center ID" required labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                {(field) => (
+                  <input {...field} type="number" value={woForm.work_center_id} onChange={e => setWoForm(f => ({ ...f, work_center_id: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
+                )}
+              </FormField>
               <div className="grid grid-cols-3 gap-3">
-                <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-1">Type</label>
-                  <select value={woForm.maintenance_type} onChange={e => setWoForm(f => ({ ...f, maintenance_type: e.target.value }))} className="w-full px-3 py-2 border rounded-lg">
-                    <option value="preventive">Preventive</option>
-                    <option value="corrective">Corrective</option>
-                    <option value="predictive">Predictive</option>
-                    <option value="emergency">Emergency</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-1">Priority</label>
-                  <select value={woForm.priority} onChange={e => setWoForm(f => ({ ...f, priority: e.target.value }))} className="w-full px-3 py-2 border rounded-lg">
-                    <option value="low">Low</option>
-                    <option value="medium">Medium</option>
-                    <option value="high">High</option>
-                    <option value="critical">Critical</option>
-                    <option value="emergency">Emergency</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-1">Scheduled Date</label>
-                  <input type="date" value={woForm.scheduled_date} onChange={e => setWoForm(f => ({ ...f, scheduled_date: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
-                </div>
+                <FormField label="Type" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                  {(field) => (
+                    <select {...field} value={woForm.maintenance_type} onChange={e => setWoForm(f => ({ ...f, maintenance_type: e.target.value }))} className="w-full px-3 py-2 border rounded-lg">
+                      <option value="preventive">Preventive</option>
+                      <option value="corrective">Corrective</option>
+                      <option value="predictive">Predictive</option>
+                      <option value="emergency">Emergency</option>
+                    </select>
+                  )}
+                </FormField>
+                <FormField label="Priority" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                  {(field) => (
+                    <select {...field} value={woForm.priority} onChange={e => setWoForm(f => ({ ...f, priority: e.target.value }))} className="w-full px-3 py-2 border rounded-lg">
+                      <option value="low">Low</option>
+                      <option value="medium">Medium</option>
+                      <option value="high">High</option>
+                      <option value="critical">Critical</option>
+                      <option value="emergency">Emergency</option>
+                    </select>
+                  )}
+                </FormField>
+                <FormField label="Scheduled Date" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                  {(field) => (
+                    <input {...field} type="date" value={woForm.scheduled_date} onChange={e => setWoForm(f => ({ ...f, scheduled_date: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
+                  )}
+                </FormField>
               </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Description</label>
-                <textarea value={woForm.description} onChange={e => setWoForm(f => ({ ...f, description: e.target.value }))} rows={3} className="w-full px-3 py-2 border rounded-lg" />
-              </div>
+              <FormField label="Description" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                {(field) => (
+                  <textarea {...field} value={woForm.description} onChange={e => setWoForm(f => ({ ...f, description: e.target.value }))} rows={3} className="w-full px-3 py-2 border rounded-lg" />
+                )}
+              </FormField>
             </div>
             <div className="flex justify-end gap-2 p-4 border-t">
               <Button variant="secondary" onClick={() => setShowCreateWOModal(false)}>Cancel</Button>
@@ -695,23 +709,27 @@ export default function Maintenance() {
               <button onClick={() => setShowCompleteModal(false)} aria-label="Close dialog"><XMarkIcon className="w-5 h-5" aria-hidden="true" /></button>
             </div>
             <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Completion Notes</label>
-                <textarea value={completeForm.notes} onChange={e => setCompleteForm(f => ({ ...f, notes: e.target.value }))} rows={3} className="w-full px-3 py-2 border rounded-lg" />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Parts Used</label>
-                <input type="text" value={completeForm.parts_used} onChange={e => setCompleteForm(f => ({ ...f, parts_used: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
-              </div>
+              <FormField label="Completion Notes" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                {(field) => (
+                  <textarea {...field} value={completeForm.notes} onChange={e => setCompleteForm(f => ({ ...f, notes: e.target.value }))} rows={3} className="w-full px-3 py-2 border rounded-lg" />
+                )}
+              </FormField>
+              <FormField label="Parts Used" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                {(field) => (
+                  <input {...field} type="text" value={completeForm.parts_used} onChange={e => setCompleteForm(f => ({ ...f, parts_used: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
+                )}
+              </FormField>
               <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-1">Labor Cost ($)</label>
-                  <input type="number" step="0.01" value={completeForm.labor_cost} onChange={e => setCompleteForm(f => ({ ...f, labor_cost: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-1">Parts Cost ($)</label>
-                  <input type="number" step="0.01" value={completeForm.parts_cost} onChange={e => setCompleteForm(f => ({ ...f, parts_cost: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
-                </div>
+                <FormField label="Labor Cost ($)" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                  {(field) => (
+                    <input {...field} type="number" step="0.01" value={completeForm.labor_cost} onChange={e => setCompleteForm(f => ({ ...f, labor_cost: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
+                  )}
+                </FormField>
+                <FormField label="Parts Cost ($)" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                  {(field) => (
+                    <input {...field} type="number" step="0.01" value={completeForm.parts_cost} onChange={e => setCompleteForm(f => ({ ...f, parts_cost: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
+                  )}
+                </FormField>
               </div>
             </div>
             <div className="flex justify-end gap-2 p-4 border-t">

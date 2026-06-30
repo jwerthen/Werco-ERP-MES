@@ -5,6 +5,7 @@ import {
   Button,
   DataTable,
   DataTableColumn,
+  FormField,
   MobileDataCard,
   StatusBadge,
   statusVariant,
@@ -197,10 +198,13 @@ export default function WorkCenters() {
     {} as Record<string, number>
   );
 
-  // Inline status-change control — preserved from the cockpit layout. Stops row
-  // click-through so changing status never navigates / triggers an edit.
+  // Inline status-change control — preserved from the cockpit layout. The wrapper
+  // is purely presentational: its only job is to stop row click-through so changing
+  // status never navigates / triggers an edit. Keyboard users operate the <select>
+  // inside it directly, so role="presentation" (no focus/keyboard handler of its own)
+  // is the accurate a11y shape here.
   const renderStatusCell = (wc: WorkCenter) => (
-    <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+    <div className="flex items-center gap-2" role="presentation" onClick={(e) => e.stopPropagation()}>
       <span
         className={`h-2 w-2 flex-shrink-0 rounded-full ${statusDotColor[statusVariant(wc.current_status)]}`}
         aria-hidden="true"
@@ -445,99 +449,115 @@ export default function WorkCenters() {
             
             <form onSubmit={handleSubmit} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Code</label>
+                <FormField label="Code">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={formData.code}
+                      onChange={(e) => setFormData({ ...formData, code: e.target.value })}
+                      className="input"
+                      required
+                      disabled={!!editingWc}
+                    />
+                  )}
+                </FormField>
+                <FormField label="Type">
+                  {(field) => (
+                    <select
+                      {...field}
+                      value={formData.work_center_type}
+                      onChange={(e) => setFormData({ ...formData, work_center_type: e.target.value as WorkCenterType })}
+                      className="input"
+                      required
+                    >
+                      {workCenterTypeOrder.map((type) => (
+                        <option key={type} value={type}>
+                          {formatTypeLabel(type)}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </FormField>
+              </div>
+              
+              <FormField label="Name">
+                {(field) => (
                   <input
+                    {...field}
                     type="text"
-                    value={formData.code}
-                    onChange={(e) => setFormData({ ...formData, code: e.target.value })}
+                    value={formData.name}
+                    onChange={(e) => setFormData({ ...formData, name: e.target.value })}
                     className="input"
                     required
-                    disabled={!!editingWc}
                   />
-                </div>
-                <div>
-                  <label className="label">Type</label>
-                  <select
-                    value={formData.work_center_type}
-                    onChange={(e) => setFormData({ ...formData, work_center_type: e.target.value as WorkCenterType })}
+                )}
+              </FormField>
+
+              <FormField label="Description">
+                {(field) => (
+                  <textarea
+                    {...field}
+                    value={formData.description}
+                    onChange={(e) => setFormData({ ...formData, description: e.target.value })}
                     className="input"
-                    required
-                  >
-                    {workCenterTypeOrder.map((type) => (
-                      <option key={type} value={type}>
-                        {formatTypeLabel(type)}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
+                    rows={2}
+                  />
+                )}
+              </FormField>
               
-              <div>
-                <label className="label">Name</label>
-                <input
-                  type="text"
-                  value={formData.name}
-                  onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                  className="input"
-                  required
-                />
-              </div>
-              
-              <div>
-                <label className="label">Description</label>
-                <textarea
-                  value={formData.description}
-                  onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-                  className="input"
-                  rows={2}
-                />
+              <div className="grid grid-cols-2 gap-4">
+                <FormField label="Hourly Rate ($)">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={formData.hourly_rate}
+                      onChange={(e) => setFormData({ ...formData, hourly_rate: parseFloat(e.target.value) || 0 })}
+                      className="input"
+                    />
+                  )}
+                </FormField>
+                <FormField label="Capacity (hrs/day)">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="number"
+                      min="0"
+                      step="0.5"
+                      value={formData.capacity_hours_per_day}
+                      onChange={(e) => setFormData({ ...formData, capacity_hours_per_day: parseFloat(e.target.value) || 8 })}
+                      className="input"
+                    />
+                  )}
+                </FormField>
               </div>
               
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Hourly Rate ($)</label>
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    value={formData.hourly_rate}
-                    onChange={(e) => setFormData({ ...formData, hourly_rate: parseFloat(e.target.value) || 0 })}
-                    className="input"
-                  />
-                </div>
-                <div>
-                  <label className="label">Capacity (hrs/day)</label>
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.5"
-                    value={formData.capacity_hours_per_day}
-                    onChange={(e) => setFormData({ ...formData, capacity_hours_per_day: parseFloat(e.target.value) || 8 })}
-                    className="input"
-                  />
-                </div>
-              </div>
-              
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Building</label>
-                  <input
-                    type="text"
-                    value={formData.building}
-                    onChange={(e) => setFormData({ ...formData, building: e.target.value })}
-                    className="input"
-                  />
-                </div>
-                <div>
-                  <label className="label">Area</label>
-                  <input
-                    type="text"
-                    value={formData.area}
-                    onChange={(e) => setFormData({ ...formData, area: e.target.value })}
-                    className="input"
-                  />
-                </div>
+                <FormField label="Building">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={formData.building}
+                      onChange={(e) => setFormData({ ...formData, building: e.target.value })}
+                      className="input"
+                    />
+                  )}
+                </FormField>
+                <FormField label="Area">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={formData.area}
+                      onChange={(e) => setFormData({ ...formData, area: e.target.value })}
+                      className="input"
+                    />
+                  )}
+                </FormField>
               </div>
               
               <div className="flex justify-end gap-3 mt-6">

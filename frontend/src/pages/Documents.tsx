@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import api from '../services/api';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import { Modal } from '../components/ui/Modal';
+import { FormField } from '../components/ui/FormField';
 import {
   useToast,
   DataTable,
@@ -311,6 +312,7 @@ export default function Documents() {
           <input
             type="text"
             placeholder="Search documents..."
+            aria-label="Search documents"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             className="input pl-10"
@@ -365,71 +367,83 @@ export default function Documents() {
       <Modal open={showUploadModal} onClose={() => setShowUploadModal(false)} size="md" closeOnBackdrop={false}>
             <h3 className="text-lg font-semibold mb-4">Upload Document</h3>
             <form onSubmit={handleUpload} className="space-y-4">
-              <div>
-                <label className="label">File *</label>
-                <input
-                  type="file"
-                  onChange={(e) => setUploadForm({ ...uploadForm, file: e.target.files?.[0] || null })}
-                  className="input"
-                  required
-                />
-              </div>
-              <div>
-                <label className="label">Title *</label>
-                <input
-                  type="text"
-                  value={uploadForm.title}
-                  onChange={(e) => setUploadForm({ ...uploadForm, title: e.target.value })}
-                  className="input"
-                  placeholder="Document title"
-                  required
-                />
-              </div>
+              <FormField label="File" required>
+                {(field) => (
+                  <input
+                    {...field}
+                    type="file"
+                    onChange={(e) => setUploadForm({ ...uploadForm, file: e.target.files?.[0] || null })}
+                    className="input"
+                    required
+                  />
+                )}
+              </FormField>
+              <FormField label="Title" required>
+                {(field) => (
+                  <input
+                    {...field}
+                    type="text"
+                    value={uploadForm.title}
+                    onChange={(e) => setUploadForm({ ...uploadForm, title: e.target.value })}
+                    className="input"
+                    placeholder="Document title"
+                    required
+                  />
+                )}
+              </FormField>
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Type</label>
+                <FormField label="Type">
+                  {(field) => (
+                    <select
+                      {...field}
+                      value={uploadForm.document_type}
+                      onChange={(e) => setUploadForm({ ...uploadForm, document_type: e.target.value })}
+                      className="input"
+                    >
+                      {documentTypes.map(t => (
+                        <option key={t.value} value={t.value}>{t.label}</option>
+                      ))}
+                    </select>
+                  )}
+                </FormField>
+                <FormField label="Revision">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={uploadForm.revision}
+                      onChange={(e) => setUploadForm({ ...uploadForm, revision: e.target.value })}
+                      className="input"
+                    />
+                  )}
+                </FormField>
+              </div>
+              <FormField label="Associated Part">
+                {(field) => (
                   <select
-                    value={uploadForm.document_type}
-                    onChange={(e) => setUploadForm({ ...uploadForm, document_type: e.target.value })}
+                    {...field}
+                    value={uploadForm.part_id}
+                    onChange={(e) => setUploadForm({ ...uploadForm, part_id: parseInt(e.target.value) })}
                     className="input"
                   >
-                    {documentTypes.map(t => (
-                      <option key={t.value} value={t.value}>{t.label}</option>
+                    <option value={0}>None</option>
+                    {parts.map(p => (
+                      <option key={p.id} value={p.id}>{p.part_number} - {p.name}</option>
                     ))}
                   </select>
-                </div>
-                <div>
-                  <label className="label">Revision</label>
-                  <input
-                    type="text"
-                    value={uploadForm.revision}
-                    onChange={(e) => setUploadForm({ ...uploadForm, revision: e.target.value })}
+                )}
+              </FormField>
+              <FormField label="Description">
+                {(field) => (
+                  <textarea
+                    {...field}
+                    value={uploadForm.description}
+                    onChange={(e) => setUploadForm({ ...uploadForm, description: e.target.value })}
                     className="input"
+                    rows={2}
                   />
-                </div>
-              </div>
-              <div>
-                <label className="label">Associated Part</label>
-                <select
-                  value={uploadForm.part_id}
-                  onChange={(e) => setUploadForm({ ...uploadForm, part_id: parseInt(e.target.value) })}
-                  className="input"
-                >
-                  <option value={0}>None</option>
-                  {parts.map(p => (
-                    <option key={p.id} value={p.id}>{p.part_number} - {p.name}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="label">Description</label>
-                <textarea
-                  value={uploadForm.description}
-                  onChange={(e) => setUploadForm({ ...uploadForm, description: e.target.value })}
-                  className="input"
-                  rows={2}
-                />
-              </div>
+                )}
+              </FormField>
               <div className="flex justify-end gap-3 pt-4 border-t">
                 <button type="button" onClick={() => setShowUploadModal(false)} className="btn-secondary">
                   Cancel

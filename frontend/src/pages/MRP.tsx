@@ -252,9 +252,13 @@ export default function MRPPage() {
         <h1 className="text-2xl font-bold text-white">Material Requirements Planning</h1>
         <div className="flex flex-wrap items-end gap-3">
           <div>
-            <label className="label !text-[10px] uppercase tracking-wide">Horizon (days)</label>
+            <label htmlFor="mrp-horizon-days" className="label !text-[10px] uppercase tracking-wide">
+              Horizon (days)
+            </label>
             <input
+              id="mrp-horizon-days"
               type="number"
+              aria-label="Horizon (days)"
               value={horizonDays}
               onChange={(e) => setHorizonDays(parseInt(e.target.value))}
               className="input w-24 tabular-nums"
@@ -265,6 +269,7 @@ export default function MRPPage() {
           <label className="flex items-center h-9">
             <input
               type="checkbox"
+              aria-label="Safety Stock"
               checked={includeSafetyStock}
               onChange={(e) => setIncludeSafetyStock(e.target.checked)}
               className="mr-2"
@@ -388,6 +393,7 @@ export default function MRPPage() {
             {runs.map((run) => (
               <button
                 key={run.id}
+                aria-label={`View MRP run ${run.run_number}`}
                 onClick={() => loadRunActions(run)}
                 className={`w-full text-left p-2.5 rounded-sm border cursor-pointer transition-colors min-w-0 ${
                   selectedRun?.id === run.id

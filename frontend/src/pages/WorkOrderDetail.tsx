@@ -1070,6 +1070,7 @@ export default function WorkOrderDetail() {
                     <button
                       key={document.id}
                       type="button"
+                      aria-label={`Preview ${document.title}`}
                       onClick={() => setSelectedDocumentId(document.id)}
                       className={`w-full px-4 py-3 text-left transition-colors ${
                         selectedDocumentId === document.id
@@ -1101,6 +1102,7 @@ export default function WorkOrderDetail() {
                 <input
                   key={documentUploadInputKey}
                   type="file"
+                  aria-label="PDF File"
                   accept=".pdf,application/pdf"
                   onChange={(event) => {
                     const file = event.target.files?.[0] || null;
@@ -1117,6 +1119,7 @@ export default function WorkOrderDetail() {
                 <span className="text-xs font-medium text-slate-400">Title</span>
                 <input
                   type="text"
+                  aria-label="Title"
                   value={documentTitle}
                   onChange={(event) => setDocumentTitle(event.target.value)}
                   placeholder="Drawing title"
@@ -1253,6 +1256,7 @@ export default function WorkOrderDetail() {
           <input
             ref={nestAttachInputRef}
             type="file"
+            aria-label="Attach nest PDF"
             accept="application/pdf"
             onChange={handleNestAttachFileChange}
             className="hidden"
@@ -1502,8 +1506,9 @@ export default function WorkOrderDetail() {
           <form onSubmit={handleCreateBlocker} className="rounded-sm border border-fd-line bg-slate-900/40 p-3 space-y-3">
             <h3 className="font-semibold text-white">Report Blocker</h3>
             <div>
-              <label className="text-sm text-slate-400 block mb-1">Operation</label>
+              <label htmlFor="blocker-operation" className="text-sm text-slate-400 block mb-1">Operation</label>
               <select
+                id="blocker-operation"
                 value={blockerForm.operation_id}
                 onChange={(e) => setBlockerForm({ ...blockerForm, operation_id: e.target.value })}
                 className="input"
@@ -1518,8 +1523,9 @@ export default function WorkOrderDetail() {
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="text-sm text-slate-400 block mb-1">Category</label>
+                <label htmlFor="blocker-category" className="text-sm text-slate-400 block mb-1">Category</label>
                 <select
+                  id="blocker-category"
                   value={blockerForm.category}
                   onChange={(e) => setBlockerForm({ ...blockerForm, category: e.target.value as WorkOrderBlockerCategory })}
                   className="input"
@@ -1534,8 +1540,9 @@ export default function WorkOrderDetail() {
                 </select>
               </div>
               <div>
-                <label className="text-sm text-slate-400 block mb-1">Severity</label>
+                <label htmlFor="blocker-severity" className="text-sm text-slate-400 block mb-1">Severity</label>
                 <select
+                  id="blocker-severity"
                   value={blockerForm.severity}
                   onChange={(e) => setBlockerForm({ ...blockerForm, severity: e.target.value as WorkOrderBlockerSeverity })}
                   className="input"
@@ -1548,8 +1555,10 @@ export default function WorkOrderDetail() {
               </div>
             </div>
             <div>
-              <label className="text-sm text-slate-400 block mb-1">Note</label>
+              <label htmlFor="blocker-note" className="text-sm text-slate-400 block mb-1">Note</label>
               <textarea
+                id="blocker-note"
+                aria-label="Note"
                 value={blockerForm.note}
                 onChange={(e) => setBlockerForm({ ...blockerForm, note: e.target.value })}
                 className="input"

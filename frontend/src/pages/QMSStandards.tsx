@@ -9,6 +9,7 @@ import {
 } from '@heroicons/react/24/outline';
 import api from '../services/api';
 import { Button, statusColor } from '../components/ui';
+import { FormField } from '../components/ui/FormField';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import {
   QMSStandardListResponse,
@@ -309,6 +310,7 @@ export default function QMSStandards() {
               <input
                 type="file"
                 accept=".pdf"
+                aria-label="Upload PDF"
                 className="hidden"
                 onChange={handlePdfUpload}
                 disabled={uploading}
@@ -434,10 +436,11 @@ export default function QMSStandards() {
           ) : (
             <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
               {standards.map(std => (
-                <div
+                <button
+                  type="button"
                   key={std.id}
                   onClick={() => loadStandardDetail(std.id)}
-                  className="card card-compact !p-3 min-w-0 cursor-pointer hover:border-fd-line-bright transition-colors"
+                  className="card card-compact !p-3 min-w-0 cursor-pointer hover:border-fd-line-bright transition-colors text-left w-full block"
                 >
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
@@ -471,7 +474,7 @@ export default function QMSStandards() {
                       <p className="text-xs text-slate-400 mt-1 tabular-nums">{std.total_clauses} clauses</p>
                     </div>
                   )}
-                </div>
+                </button>
               ))}
             </div>
           )}
@@ -496,6 +499,7 @@ export default function QMSStandards() {
                   <input
                     type="file"
                     accept=".pdf"
+                    aria-label="Upload quality manual PDF"
                     className="hidden"
                     onChange={handlePdfUpload}
                     disabled={uploading}
@@ -535,45 +539,53 @@ export default function QMSStandards() {
       {showAddStandard && (
         <Modal title="Add QMS Standard" onClose={() => setShowAddStandard(false)}>
           <div className="space-y-4">
-            <div>
-              <label className="label"><span className="label-text font-medium">Standard Name *</span></label>
-              <input
-                className="input input-bordered w-full"
-                placeholder="e.g. AS9100D, ISO 9001:2015"
-                value={standardForm.name}
-                onChange={e => setStandardForm(f => ({ ...f, name: e.target.value }))}
-              />
-            </div>
+            <FormField label={<span className="label-text font-medium">Standard Name</span>} required>
+              {field => (
+                <input
+                  {...field}
+                  className="input input-bordered w-full"
+                  placeholder="e.g. AS9100D, ISO 9001:2015"
+                  value={standardForm.name}
+                  onChange={e => setStandardForm(f => ({ ...f, name: e.target.value }))}
+                />
+              )}
+            </FormField>
             <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="label"><span className="label-text">Version</span></label>
-                <input
-                  className="input input-bordered w-full"
-                  placeholder="e.g. Rev D, 2015"
-                  value={standardForm.version}
-                  onChange={e => setStandardForm(f => ({ ...f, version: e.target.value }))}
-                />
-              </div>
-              <div>
-                <label className="label"><span className="label-text">Standard Body</span></label>
-                <input
-                  className="input input-bordered w-full"
-                  placeholder="e.g. SAE International, ISO"
-                  value={standardForm.standard_body}
-                  onChange={e => setStandardForm(f => ({ ...f, standard_body: e.target.value }))}
-                />
-              </div>
+              <FormField label={<span className="label-text">Version</span>}>
+                {field => (
+                  <input
+                    {...field}
+                    className="input input-bordered w-full"
+                    placeholder="e.g. Rev D, 2015"
+                    value={standardForm.version}
+                    onChange={e => setStandardForm(f => ({ ...f, version: e.target.value }))}
+                  />
+                )}
+              </FormField>
+              <FormField label={<span className="label-text">Standard Body</span>}>
+                {field => (
+                  <input
+                    {...field}
+                    className="input input-bordered w-full"
+                    placeholder="e.g. SAE International, ISO"
+                    value={standardForm.standard_body}
+                    onChange={e => setStandardForm(f => ({ ...f, standard_body: e.target.value }))}
+                  />
+                )}
+              </FormField>
             </div>
-            <div>
-              <label className="label"><span className="label-text">Description</span></label>
-              <textarea
-                className="textarea textarea-bordered w-full"
-                rows={3}
-                placeholder="Brief description of this standard..."
-                value={standardForm.description}
-                onChange={e => setStandardForm(f => ({ ...f, description: e.target.value }))}
-              />
-            </div>
+            <FormField label={<span className="label-text">Description</span>}>
+              {field => (
+                <textarea
+                  {...field}
+                  className="textarea textarea-bordered w-full"
+                  rows={3}
+                  placeholder="Brief description of this standard..."
+                  value={standardForm.description}
+                  onChange={e => setStandardForm(f => ({ ...f, description: e.target.value }))}
+                />
+              )}
+            </FormField>
             <div className="flex justify-end gap-2">
               <Button variant="ghost" size="sm" onClick={() => setShowAddStandard(false)}>Cancel</Button>
               <Button size="sm" onClick={handleCreateStandard} disabled={saving || !standardForm.name}>
@@ -589,35 +601,41 @@ export default function QMSStandards() {
         <Modal title="Add Clause" onClose={() => setShowAddClause(false)}>
           <div className="space-y-4">
             <div className="grid grid-cols-3 gap-4">
-              <div>
-                <label className="label"><span className="label-text font-medium">Clause # *</span></label>
-                <input
-                  className="input input-bordered w-full"
-                  placeholder="e.g. 8.5.2"
-                  value={clauseForm.clause_number}
-                  onChange={e => setClauseForm(f => ({ ...f, clause_number: e.target.value }))}
-                />
-              </div>
-              <div className="col-span-2">
-                <label className="label"><span className="label-text font-medium">Title *</span></label>
-                <input
-                  className="input input-bordered w-full"
-                  placeholder="e.g. Identification and Traceability"
-                  value={clauseForm.title}
-                  onChange={e => setClauseForm(f => ({ ...f, title: e.target.value }))}
-                />
-              </div>
+              <FormField label={<span className="label-text font-medium">Clause #</span>} required>
+                {field => (
+                  <input
+                    {...field}
+                    className="input input-bordered w-full"
+                    placeholder="e.g. 8.5.2"
+                    value={clauseForm.clause_number}
+                    onChange={e => setClauseForm(f => ({ ...f, clause_number: e.target.value }))}
+                  />
+                )}
+              </FormField>
+              <FormField label={<span className="label-text font-medium">Title</span>} required className="col-span-2">
+                {field => (
+                  <input
+                    {...field}
+                    className="input input-bordered w-full"
+                    placeholder="e.g. Identification and Traceability"
+                    value={clauseForm.title}
+                    onChange={e => setClauseForm(f => ({ ...f, title: e.target.value }))}
+                  />
+                )}
+              </FormField>
             </div>
-            <div>
-              <label className="label"><span className="label-text">Description / Requirements</span></label>
-              <textarea
-                className="textarea textarea-bordered w-full"
-                rows={4}
-                placeholder="Full clause text or summary of requirements..."
-                value={clauseForm.description}
-                onChange={e => setClauseForm(f => ({ ...f, description: e.target.value }))}
-              />
-            </div>
+            <FormField label={<span className="label-text">Description / Requirements</span>}>
+              {field => (
+                <textarea
+                  {...field}
+                  className="textarea textarea-bordered w-full"
+                  rows={4}
+                  placeholder="Full clause text or summary of requirements..."
+                  value={clauseForm.description}
+                  onChange={e => setClauseForm(f => ({ ...f, description: e.target.value }))}
+                />
+              )}
+            </FormField>
             <div className="flex justify-end gap-2">
               <Button variant="ghost" size="sm" onClick={() => setShowAddClause(false)}>Cancel</Button>
               <Button
@@ -636,46 +654,54 @@ export default function QMSStandards() {
       {showAddEvidence && (
         <Modal title="Link Evidence to Clause" onClose={() => { setShowAddEvidence(false); setEvidenceClauseId(null); }}>
           <div className="space-y-4">
-            <div>
-              <label className="label"><span className="label-text font-medium">Evidence Type *</span></label>
-              <select
-                className="select select-bordered w-full"
-                value={evidenceForm.evidence_type}
-                onChange={e => setEvidenceForm(f => ({ ...f, evidence_type: e.target.value }))}
-              >
-                {EVIDENCE_TYPES.map(t => (
-                  <option key={t.value} value={t.value}>{t.label}</option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="label"><span className="label-text font-medium">Title *</span></label>
-              <input
-                className="input input-bordered w-full"
-                placeholder="e.g. Lot Traceability Module, QP-042 Calibration Procedure"
-                value={evidenceForm.title}
-                onChange={e => setEvidenceForm(f => ({ ...f, title: e.target.value }))}
-              />
-            </div>
-            <div>
-              <label className="label"><span className="label-text">Description</span></label>
-              <textarea
-                className="textarea textarea-bordered w-full"
-                rows={3}
-                placeholder="How does this evidence satisfy the clause requirement?"
-                value={evidenceForm.description}
-                onChange={e => setEvidenceForm(f => ({ ...f, description: e.target.value }))}
-              />
-            </div>
-            <div>
-              <label className="label"><span className="label-text">System Module Link</span></label>
-              <input
-                className="input input-bordered w-full"
-                placeholder="e.g. /traceability, /quality, /calibration"
-                value={evidenceForm.module_reference}
-                onChange={e => setEvidenceForm(f => ({ ...f, module_reference: e.target.value }))}
-              />
-            </div>
+            <FormField label={<span className="label-text font-medium">Evidence Type</span>} required>
+              {field => (
+                <select
+                  {...field}
+                  className="select select-bordered w-full"
+                  value={evidenceForm.evidence_type}
+                  onChange={e => setEvidenceForm(f => ({ ...f, evidence_type: e.target.value }))}
+                >
+                  {EVIDENCE_TYPES.map(t => (
+                    <option key={t.value} value={t.value}>{t.label}</option>
+                  ))}
+                </select>
+              )}
+            </FormField>
+            <FormField label={<span className="label-text font-medium">Title</span>} required>
+              {field => (
+                <input
+                  {...field}
+                  className="input input-bordered w-full"
+                  placeholder="e.g. Lot Traceability Module, QP-042 Calibration Procedure"
+                  value={evidenceForm.title}
+                  onChange={e => setEvidenceForm(f => ({ ...f, title: e.target.value }))}
+                />
+              )}
+            </FormField>
+            <FormField label={<span className="label-text">Description</span>}>
+              {field => (
+                <textarea
+                  {...field}
+                  className="textarea textarea-bordered w-full"
+                  rows={3}
+                  placeholder="How does this evidence satisfy the clause requirement?"
+                  value={evidenceForm.description}
+                  onChange={e => setEvidenceForm(f => ({ ...f, description: e.target.value }))}
+                />
+              )}
+            </FormField>
+            <FormField label={<span className="label-text">System Module Link</span>}>
+              {field => (
+                <input
+                  {...field}
+                  className="input input-bordered w-full"
+                  placeholder="e.g. /traceability, /quality, /calibration"
+                  value={evidenceForm.module_reference}
+                  onChange={e => setEvidenceForm(f => ({ ...f, module_reference: e.target.value }))}
+                />
+              )}
+            </FormField>
             <div className="flex justify-end gap-2">
               <Button variant="ghost" size="sm" onClick={() => { setShowAddEvidence(false); setEvidenceClauseId(null); }}>Cancel</Button>
               <Button
@@ -756,6 +782,7 @@ export default function QMSStandards() {
               className="textarea textarea-bordered w-full font-mono text-sm"
               rows={12}
               placeholder="Paste clauses here..."
+              aria-label="Bulk clause import data"
               value={bulkText}
               onChange={e => setBulkText(e.target.value)}
             />
@@ -793,7 +820,11 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
         </div>
         {children}
       </div>
-      <div className="modal-backdrop" onClick={onClose}></div>
+      <div
+        className="modal-backdrop"
+        role="presentation"
+        onClick={e => { if (e.target === e.currentTarget) onClose(); }}
+      ></div>
     </div>
   );
 }
@@ -835,7 +866,10 @@ function ClauseRow({
       {/* Clause Header */}
       <div
         className="flex items-center gap-3 p-3 cursor-pointer hover:bg-fd-raised"
+        role="button"
+        tabIndex={0}
         onClick={() => setExpanded(!expanded)}
+        onKeyDown={e => { if (e.target !== e.currentTarget) return; if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded(!expanded); } }}
       >
         <span className="text-xs font-mono font-bold text-slate-400 w-16 shrink-0">
           {clause.clause_number}

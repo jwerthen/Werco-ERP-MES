@@ -16,6 +16,7 @@ import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
 } from 'recharts';
 import { Modal } from '../components/ui/Modal';
+import { FormField } from '../components/ui/FormField';
 import {
   useToast,
   DataTable,
@@ -504,6 +505,7 @@ const SupplierScorecards = () => {
           <MagnifyingGlassIcon className="w-5 h-5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
           <input
             type="text"
+            aria-label="Search by vendor name"
             placeholder="Search by vendor name..."
             value={search}
             onChange={e => setSearch(e.target.value)}
@@ -624,37 +626,46 @@ const SupplierScorecards = () => {
               </button>
             </div>
             <form onSubmit={handleCreateScorecard} className="p-6 space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Vendor ID</label>
-                <input
-                  type="number" required
-                  value={scorecardForm.vendor_id}
-                  onChange={e => setScorecardForm(f => ({ ...f, vendor_id: e.target.value }))}
-                  className="w-full px-3 py-2 border border-slate-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Period</label>
-                <input
-                  type="text" required placeholder="e.g., 2026-Q1"
-                  value={scorecardForm.period}
-                  onChange={e => setScorecardForm(f => ({ ...f, period: e.target.value }))}
-                  className="w-full px-3 py-2 border border-slate-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
-                />
-              </div>
+              <FormField label="Vendor ID" required>
+                {(field) => (
+                  <input
+                    {...field}
+                    type="number" required
+                    value={scorecardForm.vendor_id}
+                    onChange={e => setScorecardForm(f => ({ ...f, vendor_id: e.target.value }))}
+                    className="w-full px-3 py-2 border border-slate-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
+                  />
+                )}
+              </FormField>
+              <FormField label="Period" required>
+                {(field) => (
+                  <input
+                    {...field}
+                    type="text" required placeholder="e.g., 2026-Q1"
+                    value={scorecardForm.period}
+                    onChange={e => setScorecardForm(f => ({ ...f, period: e.target.value }))}
+                    className="w-full px-3 py-2 border border-slate-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
+                  />
+                )}
+              </FormField>
               <div className="grid grid-cols-2 gap-4">
                 {(['quality_score', 'delivery_score', 'cost_score', 'responsiveness_score'] as const).map(field => (
-                  <div key={field}>
-                    <label className="block text-sm font-medium text-slate-300 mb-1 capitalize">
-                      {field.replace('_score', '').replace('_', ' ')}
-                    </label>
-                    <input
-                      type="number" min="0" max="100" required
-                      value={scorecardForm[field]}
-                      onChange={e => setScorecardForm(f => ({ ...f, [field]: e.target.value }))}
-                      className="w-full px-3 py-2 border border-slate-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
-                    />
-                  </div>
+                  <FormField
+                    key={field}
+                    label={field.replace('_score', '').replace('_', ' ')}
+                    required
+                    labelClassName="capitalize"
+                  >
+                    {(wiring) => (
+                      <input
+                        {...wiring}
+                        type="number" min="0" max="100" required
+                        value={scorecardForm[field]}
+                        onChange={e => setScorecardForm(f => ({ ...f, [field]: e.target.value }))}
+                        className="w-full px-3 py-2 border border-slate-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
+                      />
+                    )}
+                  </FormField>
                 ))}
               </div>
               <div className="flex justify-end gap-3 pt-2">
@@ -683,66 +694,78 @@ const SupplierScorecards = () => {
               </button>
             </div>
             <form onSubmit={handleCreateAudit} className="p-6 space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Vendor ID</label>
-                <input
-                  type="number" required
-                  value={auditForm.vendor_id}
-                  onChange={e => setAuditForm(f => ({ ...f, vendor_id: e.target.value }))}
-                  className="w-full px-3 py-2 border border-slate-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
-                />
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-1">Audit Date</label>
+              <FormField label="Vendor ID" required>
+                {(field) => (
                   <input
-                    type="date" required
-                    value={auditForm.audit_date}
-                    onChange={e => setAuditForm(f => ({ ...f, audit_date: e.target.value }))}
+                    {...field}
+                    type="number" required
+                    value={auditForm.vendor_id}
+                    onChange={e => setAuditForm(f => ({ ...f, vendor_id: e.target.value }))}
                     className="w-full px-3 py-2 border border-slate-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
                   />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-1">Audit Type</label>
-                  <select
-                    value={auditForm.audit_type}
-                    onChange={e => setAuditForm(f => ({ ...f, audit_type: e.target.value }))}
+                )}
+              </FormField>
+              <div className="grid grid-cols-2 gap-4">
+                <FormField label="Audit Date" required>
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="date" required
+                      value={auditForm.audit_date}
+                      onChange={e => setAuditForm(f => ({ ...f, audit_date: e.target.value }))}
+                      className="w-full px-3 py-2 border border-slate-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
+                    />
+                  )}
+                </FormField>
+                <FormField label="Audit Type">
+                  {(field) => (
+                    <select
+                      {...field}
+                      value={auditForm.audit_type}
+                      onChange={e => setAuditForm(f => ({ ...f, audit_type: e.target.value }))}
+                      className="w-full px-3 py-2 border border-slate-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
+                    >
+                      <option value="on-site">On-Site</option>
+                      <option value="remote">Remote</option>
+                      <option value="document">Document Review</option>
+                      <option value="follow-up">Follow-Up</option>
+                    </select>
+                  )}
+                </FormField>
+              </div>
+              <FormField label="Score (0-100)" required>
+                {(field) => (
+                  <input
+                    {...field}
+                    type="number" min="0" max="100" required
+                    value={auditForm.score}
+                    onChange={e => setAuditForm(f => ({ ...f, score: e.target.value }))}
                     className="w-full px-3 py-2 border border-slate-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
-                  >
-                    <option value="on-site">On-Site</option>
-                    <option value="remote">Remote</option>
-                    <option value="document">Document Review</option>
-                    <option value="follow-up">Follow-Up</option>
-                  </select>
-                </div>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Score (0-100)</label>
-                <input
-                  type="number" min="0" max="100" required
-                  value={auditForm.score}
-                  onChange={e => setAuditForm(f => ({ ...f, score: e.target.value }))}
-                  className="w-full px-3 py-2 border border-slate-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Findings</label>
-                <textarea
-                  rows={3}
-                  value={auditForm.findings}
-                  onChange={e => setAuditForm(f => ({ ...f, findings: e.target.value }))}
-                  className="w-full px-3 py-2 border border-slate-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Next Audit Due</label>
-                <input
-                  type="date"
-                  value={auditForm.next_audit_due}
-                  onChange={e => setAuditForm(f => ({ ...f, next_audit_due: e.target.value }))}
-                  className="w-full px-3 py-2 border border-slate-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
-                />
-              </div>
+                  />
+                )}
+              </FormField>
+              <FormField label="Findings">
+                {(field) => (
+                  <textarea
+                    {...field}
+                    rows={3}
+                    value={auditForm.findings}
+                    onChange={e => setAuditForm(f => ({ ...f, findings: e.target.value }))}
+                    className="w-full px-3 py-2 border border-slate-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
+                  />
+                )}
+              </FormField>
+              <FormField label="Next Audit Due">
+                {(field) => (
+                  <input
+                    {...field}
+                    type="date"
+                    value={auditForm.next_audit_due}
+                    onChange={e => setAuditForm(f => ({ ...f, next_audit_due: e.target.value }))}
+                    className="w-full px-3 py-2 border border-slate-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
+                  />
+                )}
+              </FormField>
               <div className="flex justify-end gap-3 pt-2">
                 <button type="button" onClick={() => setShowAuditModal(false)} className="px-4 py-2 text-sm font-medium text-slate-300 bg-fd-panel border border-slate-600 rounded-lg hover:bg-slate-800">
                   Cancel
