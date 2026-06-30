@@ -312,6 +312,7 @@ export default function Documents() {
           <input
             type="text"
             placeholder="Search documents..."
+            aria-label="Search documents"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             className="input pl-10"

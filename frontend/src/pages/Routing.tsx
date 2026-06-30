@@ -933,6 +933,7 @@ export default function RoutingPage() {
                     }}
                     className="input pr-10"
                     placeholder="Search by part number or name..."
+                    aria-label="Search parts by number or name"
                   />
                   {newRouting.part_id ? (
                     <button
@@ -964,6 +965,7 @@ export default function RoutingPage() {
                             className={`w-full px-3 py-2 text-left hover:bg-slate-800/50 ${
                               part.id === newRouting.part_id ? 'bg-blue-500/10' : ''
                             }`}
+                            aria-label={`Select part ${part.part_number}`}
                           >
                             <div className="flex items-center justify-between gap-3">
                               <div>
@@ -1063,6 +1065,7 @@ export default function RoutingPage() {
                       onBlur={() => window.setTimeout(() => setGeneratePartOpen(false), 150)}
                       className="input"
                       placeholder="Search by part number or name..."
+                      aria-label="Search parts by number or name"
                     />
                     {generatePartOpen && (
                       <div className="absolute z-10 mt-1 w-full rounded-md border border-slate-700 bg-fd-panel shadow-lg max-h-48 overflow-y-auto">
@@ -1113,6 +1116,7 @@ export default function RoutingPage() {
                       accept=".pdf,.dxf,.step,.stp"
                       className="hidden"
                       onChange={(e) => setGenerateFile(e.target.files?.[0] || null)}
+                      aria-label="Upload drawing file"
                     />
                     <DocumentArrowUpIcon className="h-10 w-10 mx-auto text-slate-500 mb-2" />
                     {generateFile ? (
@@ -1232,7 +1236,7 @@ export default function RoutingPage() {
                           <th className="px-3 py-2 text-right text-xs font-medium text-slate-400 uppercase">Setup</th>
                           <th className="px-3 py-2 text-right text-xs font-medium text-slate-400 uppercase">Run/Unit</th>
                           <th className="px-3 py-2 text-center text-xs font-medium text-slate-400 uppercase">Conf.</th>
-                          <th className="px-3 py-2 text-center text-xs font-medium text-slate-400 uppercase w-10"></th>
+                          <th className="px-3 py-2 text-center text-xs font-medium text-slate-400 uppercase w-10" aria-label="Actions"></th>
                         </tr>
                       </thead>
                       <tbody className="bg-fd-panel divide-y divide-slate-700">
@@ -1247,6 +1251,7 @@ export default function RoutingPage() {
                                   className="input py-1 text-sm w-20 text-center"
                                   step={10}
                                   min={10}
+                                  aria-label="Operation sequence"
                                 />
                               </td>
                               <td className="px-3 py-2">
@@ -1255,6 +1260,7 @@ export default function RoutingPage() {
                                   value={op.operation_name}
                                   onChange={(e) => updateEditedOp(idx, 'operation_name', e.target.value)}
                                   className={`input py-1 text-sm w-full ${!op.operation_name.trim() ? 'border-red-300' : ''}`}
+                                  aria-label="Operation name"
                                 />
                               </td>
                               <td className="px-3 py-2">
@@ -1290,6 +1296,7 @@ export default function RoutingPage() {
                                   className="input py-1 text-sm w-20 text-right"
                                   step={1}
                                   min={0}
+                                  aria-label="Setup time in minutes"
                                 />
                                 <span className="text-xs text-slate-500 ml-1">min</span>
                               </td>
@@ -1301,6 +1308,7 @@ export default function RoutingPage() {
                                   className="input py-1 text-sm w-20 text-right"
                                   step={0.1}
                                   min={0}
+                                  aria-label="Run time per unit in minutes"
                                 />
                                 <span className="text-xs text-slate-500 ml-1">min</span>
                               </td>
@@ -1320,7 +1328,7 @@ export default function RoutingPage() {
                               </td>
                             </tr>
                             <tr className="bg-slate-900/30">
-                              <td className="px-3 pb-3"></td>
+                              <td className="px-3 pb-3" aria-hidden="true"></td>
                               <td className="px-3 pb-3" colSpan={6}>
                                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
                                   <FormField label="Description" labelClassName="text-xs">
@@ -1353,6 +1361,7 @@ export default function RoutingPage() {
                                       checked={op.is_inspection_point}
                                       onChange={(e) => updateEditedOp(idx, 'is_inspection_point', e.target.checked)}
                                       className="rounded border-slate-600 bg-slate-800"
+                                      aria-label="Inspection point"
                                     />
                                     Inspection point
                                   </label>
@@ -1362,6 +1371,7 @@ export default function RoutingPage() {
                                       checked={op.is_outside_operation}
                                       onChange={(e) => updateEditedOp(idx, 'is_outside_operation', e.target.checked)}
                                       className="rounded border-slate-600 bg-slate-800"
+                                      aria-label="Outside operation"
                                     />
                                     Outside operation
                                   </label>
@@ -1537,6 +1547,7 @@ export default function RoutingPage() {
                       className="input flex-1"
                       step={timeUnits.setup === 'min' ? 1 : 0.01}
                       min={0}
+                      aria-label="Setup time"
                     />
                     <select
                       value={timeUnits.setup}
@@ -1562,6 +1573,7 @@ export default function RoutingPage() {
                       className="input flex-1"
                       step={timeUnits.run === 'min' ? 0.1 : 0.001}
                       min={0}
+                      aria-label="Run time per unit"
                     />
                     <select
                       value={timeUnits.run}
@@ -1589,6 +1601,7 @@ export default function RoutingPage() {
                       className="input flex-1"
                       step={timeUnits.move === 'min' ? 1 : 0.01}
                       min={0}
+                      aria-label="Move time"
                     />
                     <select
                       value={timeUnits.move}
@@ -1614,6 +1627,7 @@ export default function RoutingPage() {
                       className="input flex-1"
                       step={timeUnits.queue === 'min' ? 1 : 0.01}
                       min={0}
+                      aria-label="Queue time"
                     />
                     <select
                       value={timeUnits.queue}
@@ -1641,6 +1655,7 @@ export default function RoutingPage() {
                       className="input flex-1"
                       step={1}
                       min={0}
+                      aria-label="Cycle time in seconds"
                     />
                     <span className="inline-flex items-center px-3 py-2 w-20 text-sm text-slate-400 border border-slate-700 rounded-lg bg-fd-panel">
                       sec
@@ -1671,6 +1686,7 @@ export default function RoutingPage() {
                       checked={newOperation.is_inspection_point}
                       onChange={(e) => setNewOperation({ ...newOperation, is_inspection_point: e.target.checked })}
                       className="mr-2"
+                      aria-label="Inspection Point"
                     />
                     <span className="text-sm">Inspection Point</span>
                   </label>
@@ -1680,6 +1696,7 @@ export default function RoutingPage() {
                       checked={newOperation.is_outside_operation}
                       onChange={(e) => setNewOperation({ ...newOperation, is_outside_operation: e.target.checked })}
                       className="mr-2"
+                      aria-label="Outside Operation"
                     />
                     <span className="text-sm">Outside Operation</span>
                   </label>

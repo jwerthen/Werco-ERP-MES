@@ -584,6 +584,7 @@ export default function PartsPage() {
             value={search}
             onChange={e => setSearch(e.target.value)}
             className="input pl-9 py-2 text-sm"
+            aria-label="Search parts"
           />
         </div>
         <div className="flex flex-wrap gap-2 items-center">
@@ -605,6 +606,7 @@ export default function PartsPage() {
               checked={showBOMComponents}
               onChange={e => setShowBOMComponents(e.target.checked)}
               className="rounded border-slate-600 text-werco-navy-400"
+              aria-label="Show BOM components as top-level parts"
             />
             Show BOM components as top-level parts
           </label>
@@ -724,7 +726,7 @@ export default function PartsPage() {
                       aria-label="Select all visible parts"
                     />
                   </th>
-                  <th className="px-4 py-3 w-10" />
+                  <th className="px-4 py-3 w-10" aria-label="Expand BOM" />
                   <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Part #</th>
                   <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Name</th>
                   <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Customer</th>
@@ -732,7 +734,7 @@ export default function PartsPage() {
                   <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Rev</th>
                   <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Cost</th>
                   <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Status</th>
-                  <th className="px-4 py-3 w-10" />
+                  <th className="px-4 py-3 w-10" aria-label="Actions" />
                 </tr>
               </thead>
               <tbody className="bg-fd-panel divide-y divide-slate-700">
@@ -823,9 +825,9 @@ export default function PartsPage() {
                             onClick={() => componentPart && navigate(`/parts/${componentPart.id}`)}
                             className="bg-slate-900/30 hover:bg-slate-800/50 cursor-pointer transition-colors"
                           >
-                            <td className="px-4 py-2" />
-                            <td className="px-4 py-2" />
-                            <td className="px-4 py-2 pl-8">
+                            <td className="px-4 py-2" aria-label="Select" />
+                            <td className="px-4 py-2" aria-label="Expand BOM" />
+                            <td className="px-4 py-2 pl-8" aria-label="Component part">
                               <div className="flex items-center gap-2">
                                 <span className="text-slate-600">└</span>
                                 <span className="text-sm font-medium text-werco-navy-400">
@@ -1137,6 +1139,7 @@ export default function PartsPage() {
                       checked={createForm.is_critical}
                       onChange={e => setCreateForm(p => ({ ...p, is_critical: e.target.checked }))}
                       className="rounded border-slate-600 text-werco-navy-600"
+                      aria-label="Critical Characteristic"
                     />
                     <span className="text-sm">Critical Characteristic</span>
                   </label>
@@ -1146,6 +1149,7 @@ export default function PartsPage() {
                       checked={createForm.requires_inspection}
                       onChange={e => setCreateForm(p => ({ ...p, requires_inspection: e.target.checked }))}
                       className="rounded border-slate-600 text-werco-navy-600"
+                      aria-label="Requires Inspection"
                     />
                     <span className="text-sm">Requires Inspection</span>
                   </label>

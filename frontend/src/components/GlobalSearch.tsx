@@ -312,6 +312,7 @@ export default function GlobalSearch({ isOpen, onClose }: GlobalSearchProps) {
                   type="text"
                   className="w-full h-14 bg-transparent pl-12 pr-12 text-lg text-fd-ink placeholder:text-fd-faint focus:outline-none"
                   placeholder="Search across your workspace..."
+                  aria-label="Search across your workspace"
                   value={query}
                   onChange={e => setQuery(e.target.value)}
                   onKeyDown={handleKeyDown}

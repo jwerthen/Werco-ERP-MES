@@ -243,7 +243,7 @@ export default function PrintIntegrationsTab() {
                     />
                     <datalist id="print-paper-sizes">
                       {PAPER_SIZE_OPTIONS.map((size) => (
-                        <option key={size} value={size} />
+                        <option key={size} value={size} aria-label={size} />
                       ))}
                     </datalist>
                   </>

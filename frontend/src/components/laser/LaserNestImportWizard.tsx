@@ -212,6 +212,7 @@ export default function LaserNestImportWizard({
                 key={fileInputKey}
                 type="file"
                 accept=".zip"
+                aria-label="ZIP package"
                 onChange={(e) => {
                   setFile(e.target.files?.[0] || null);
                   setError('');
@@ -224,6 +225,7 @@ export default function LaserNestImportWizard({
               <input
                 type="text"
                 value={sourcePath}
+                aria-label="Server folder path"
                 onChange={(e) => {
                   setSourcePath(e.target.value);
                   setError('');

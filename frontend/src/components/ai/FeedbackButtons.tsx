@@ -104,6 +104,7 @@ export function FeedbackButtons({ disabled = false, onAccept, onDismiss, onFeedb
             value={feedback}
             onChange={(event) => setFeedback(event.target.value)}
             placeholder="What should AI learn from this?"
+            aria-label="What should AI learn from this?"
             className="min-w-0 flex-1 rounded-lg border border-slate-700 bg-slate-950/70 px-3 py-2 text-sm text-white placeholder:text-slate-500 focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500"
           />
           <button

@@ -356,7 +356,7 @@ export default function MaterialsPage() {
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <input ref={importInputRef} type="file" accept=".csv" className="hidden" onChange={handleImport} />
+          <input ref={importInputRef} type="file" accept=".csv" className="hidden" onChange={handleImport} aria-label="Import materials from CSV file" />
           <button type="button" onClick={() => importInputRef.current?.click()} className="btn-secondary flex items-center gap-2">
             <ArrowUpTrayIcon className="h-4 w-4" />
             Import CSV
@@ -377,6 +377,7 @@ export default function MaterialsPage() {
             value={search}
             onChange={event => setSearch(event.target.value)}
             className="input pl-9 py-2 text-sm"
+            aria-label="Search materials"
           />
         </div>
         <div className="flex flex-wrap gap-2">
@@ -533,6 +534,7 @@ export default function MaterialsPage() {
                   checked={form.requires_inspection}
                   onChange={event => setForm(prev => ({ ...prev, requires_inspection: event.target.checked }))}
                   className="rounded border-slate-600 text-werco-navy-600"
+                  aria-label="Requires receiving inspection"
                 />
                 Requires receiving inspection
               </label>

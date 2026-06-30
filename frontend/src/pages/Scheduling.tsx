@@ -1229,6 +1229,7 @@ export default function Scheduling() {
                 onChange={(e) => setSearchQuery(e.target.value)}
                 className="input text-sm pl-8 w-48"
                 placeholder="Search WO#, part..."
+                aria-label="Search WO#, part"
               />
               {searchQuery && (
                 <button onClick={() => setSearchQuery('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-400">
@@ -1251,6 +1252,7 @@ export default function Scheduling() {
                 type="checkbox"
                 checked={showScheduledRows}
                 onChange={(e) => setShowScheduledRows(e.target.checked)}
+                aria-label="Show scheduled rows"
               />
               Scheduled
             </label>
@@ -1285,6 +1287,7 @@ export default function Scheduling() {
                   className="input text-xs py-1"
                   maxLength={500}
                   placeholder="Priority reason (optional)"
+                  aria-label="Priority reason (optional)"
                 />
               </div>
             )}
@@ -1343,6 +1346,7 @@ export default function Scheduling() {
                 className="input text-sm w-24"
                 min={-30}
                 max={30}
+                aria-label="Shift dates by days"
               />
               <Button
                 variant="secondary"
@@ -1373,6 +1377,7 @@ export default function Scheduling() {
                     type="checkbox"
                     checked={filteredQueueRows.length > 0 && filteredQueueRows.every((job) => selectedWorkOrderIds.has(job.work_order_id))}
                     onChange={(e) => (e.target.checked ? selectAllVisibleRows() : clearSelections())}
+                    aria-label="Select all work orders"
                   />
                 </th>
                 <th className="px-4 py-2 text-left text-xs font-medium text-slate-400 uppercase">WO #</th>
@@ -1396,6 +1401,7 @@ export default function Scheduling() {
                       type="checkbox"
                       checked={selectedWorkOrderIds.has(job.work_order_id)}
                       onChange={() => toggleRowSelection(job.work_order_id)}
+                      aria-label={`Select work order ${job.work_order_number}`}
                     />
                   </td>
                   <td className="px-4 py-2 font-medium text-werco-primary">{job.work_order_number}</td>
@@ -1430,6 +1436,7 @@ export default function Scheduling() {
                           onChange={(e) => setInlineEditDate(e.target.value)}
                           className="input text-xs w-32 py-0.5"
                           autoFocus
+                          aria-label="Scheduled date"
                           onKeyDown={(e) => {
                             if (e.key === 'Enter') handleInlineDateSave(job);
                             if (e.key === 'Escape') setInlineEditJobId(null);
@@ -1700,6 +1707,7 @@ export default function Scheduling() {
                   type="checkbox"
                   checked={forwardSchedule}
                   onChange={(e) => setForwardSchedule(e.target.checked)}
+                  aria-label="Forward-schedule all remaining operations"
                 />
                 Forward-schedule all remaining operations
                 <span className="text-xs text-slate-500">(cascades dates through routing)</span>

@@ -400,6 +400,7 @@ export default function Customers() {
           <input
             type="text"
             placeholder="Search customers..."
+            aria-label="Search customers"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             className="input pl-10"
@@ -410,6 +411,7 @@ export default function Customers() {
             type="checkbox"
             checked={showInactive}
             onChange={(e) => setShowInactive(e.target.checked)}
+            aria-label="Show inactive"
             className="mr-2 rounded border-slate-600"
           />
           <span className="text-sm text-slate-300">Show inactive</span>
@@ -594,6 +596,7 @@ export default function Customers() {
                       type="checkbox"
                       checked={formData.requires_coc}
                       onChange={(e) => setFormData({ ...formData, requires_coc: e.target.checked })}
+                      aria-label="Requires COC"
                       className="mr-2 rounded border-slate-600"
                     />
                     <span className="text-sm">Requires COC</span>
@@ -603,6 +606,7 @@ export default function Customers() {
                       type="checkbox"
                       checked={formData.requires_fai}
                       onChange={(e) => setFormData({ ...formData, requires_fai: e.target.checked })}
+                      aria-label="Requires FAI"
                       className="mr-2 rounded border-slate-600"
                     />
                     <span className="text-sm">Requires FAI</span>

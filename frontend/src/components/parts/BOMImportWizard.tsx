@@ -235,6 +235,7 @@ export function BOMImportWizard({ onComplete, onClose }: Props) {
                   checked={createMissingParts}
                   onChange={e => setCreateMissingParts(e.target.checked)}
                   className="rounded border-slate-600 text-werco-navy-400"
+                  aria-label="Create missing parts automatically"
                 />
                 <span className="text-sm">Create missing parts automatically</span>
               </label>
@@ -349,6 +350,7 @@ export function BOMImportWizard({ onComplete, onClose }: Props) {
                                   type="number"
                                   value={lineNumber}
                                   onChange={e => updateDerivedItem(idx, { line_number: parseInt(e.target.value) })}
+                                  aria-label={`Line number for line ${lineNumber}`}
                                 />
                               </td>
                               <td className="px-3 py-2">
@@ -356,6 +358,7 @@ export function BOMImportWizard({ onComplete, onClose }: Props) {
                                   className="input py-1 text-sm w-32"
                                   value={item.part_number || ''}
                                   onChange={e => updateDerivedItem(idx, { part_number: e.target.value })}
+                                  aria-label={`Part number for line ${lineNumber}`}
                                 />
                               </td>
                               <td className="px-3 py-2">
@@ -363,6 +366,7 @@ export function BOMImportWizard({ onComplete, onClose }: Props) {
                                   className="input py-1 text-sm"
                                   value={item.description || ''}
                                   onChange={e => updateDerivedItem(idx, { description: e.target.value })}
+                                  aria-label={`Description for line ${lineNumber}`}
                                 />
                               </td>
                               <td className="px-3 py-2">
@@ -372,6 +376,7 @@ export function BOMImportWizard({ onComplete, onClose }: Props) {
                                   step="1"
                                   value={item.quantity ?? 1}
                                   onChange={e => updateDerivedItem(idx, { quantity: parseFloat(e.target.value) })}
+                                  aria-label={`Quantity for line ${lineNumber}`}
                                 />
                               </td>
                               <td className="px-3 py-2">
@@ -379,6 +384,7 @@ export function BOMImportWizard({ onComplete, onClose }: Props) {
                                   className="input w-16 py-1 text-sm"
                                   value={item.unit_of_measure || ''}
                                   onChange={e => updateDerivedItem(idx, { unit_of_measure: e.target.value })}
+                                  aria-label={`Unit of measure for line ${lineNumber}`}
                                 />
                               </td>
                               <td className="px-3 py-2">
@@ -386,6 +392,7 @@ export function BOMImportWizard({ onComplete, onClose }: Props) {
                                   className="input py-1 text-sm"
                                   value={item.item_type || 'buy'}
                                   onChange={e => updateDerivedItem(idx, { item_type: e.target.value })}
+                                  aria-label={`Item type for line ${lineNumber}`}
                                 >
                                   <option value="make">Make</option>
                                   <option value="buy">Buy</option>
@@ -397,6 +404,7 @@ export function BOMImportWizard({ onComplete, onClose }: Props) {
                                   className="input py-1 text-sm"
                                   value={item.line_type || 'component'}
                                   onChange={e => updateDerivedItem(idx, { line_type: e.target.value as any })}
+                                  aria-label={`Line type for line ${lineNumber}`}
                                 >
                                   <option value="component">Component</option>
                                   <option value="hardware">Hardware</option>

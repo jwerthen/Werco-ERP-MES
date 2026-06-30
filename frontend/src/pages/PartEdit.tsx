@@ -236,6 +236,7 @@ export default function PartEdit() {
             <label className="flex items-center gap-2">
               <input
                 type="checkbox"
+                aria-label="Critical Characteristic"
                 checked={form.is_critical}
                 onChange={e => setForm(p => ({ ...p, is_critical: e.target.checked }))}
                 className="rounded border-slate-600 text-werco-navy-600"
@@ -245,6 +246,7 @@ export default function PartEdit() {
             <label className="flex items-center gap-2">
               <input
                 type="checkbox"
+                aria-label="Requires Inspection"
                 checked={form.requires_inspection}
                 onChange={e => setForm(p => ({ ...p, requires_inspection: e.target.checked }))}
                 className="rounded border-slate-600 text-werco-navy-600"

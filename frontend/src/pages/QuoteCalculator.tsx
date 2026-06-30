@@ -350,6 +350,7 @@ export default function QuoteCalculator() {
                   <div>
                     <input
                       type="number"
+                      aria-label="Length (inches)"
                       value={cncForm.length}
                       onChange={(e) => setCncForm({ ...cncForm, length: parseFloat(e.target.value) || 0 })}
                       className="input text-center"
@@ -360,6 +361,7 @@ export default function QuoteCalculator() {
                   <div>
                     <input
                       type="number"
+                      aria-label="Width (inches)"
                       value={cncForm.width}
                       onChange={(e) => setCncForm({ ...cncForm, width: parseFloat(e.target.value) || 0 })}
                       className="input text-center"
@@ -370,6 +372,7 @@ export default function QuoteCalculator() {
                   <div>
                     <input
                       type="number"
+                      aria-label="Height (inches)"
                       value={cncForm.height}
                       onChange={(e) => setCncForm({ ...cncForm, height: parseFloat(e.target.value) || 0 })}
                       className="input text-center"
@@ -435,6 +438,7 @@ export default function QuoteCalculator() {
                   <div>
                     <input
                       type="number"
+                      aria-label="Holes"
                       value={cncForm.num_holes}
                       onChange={(e) => setCncForm({ ...cncForm, num_holes: parseInt(e.target.value) || 0 })}
                       className="input text-center"
@@ -445,6 +449,7 @@ export default function QuoteCalculator() {
                   <div>
                     <input
                       type="number"
+                      aria-label="Tapped holes"
                       value={cncForm.num_tapped_holes}
                       onChange={(e) => setCncForm({ ...cncForm, num_tapped_holes: parseInt(e.target.value) || 0 })}
                       className="input text-center"
@@ -455,6 +460,7 @@ export default function QuoteCalculator() {
                   <div>
                     <input
                       type="number"
+                      aria-label="Pockets"
                       value={cncForm.num_pockets}
                       onChange={(e) => setCncForm({ ...cncForm, num_pockets: parseInt(e.target.value) || 0 })}
                       className="input text-center"
@@ -465,6 +471,7 @@ export default function QuoteCalculator() {
                   <div>
                     <input
                       type="number"
+                      aria-label="Slots"
                       value={cncForm.num_slots}
                       onChange={(e) => setCncForm({ ...cncForm, num_slots: parseInt(e.target.value) || 0 })}
                       className="input text-center"
@@ -527,6 +534,7 @@ export default function QuoteCalculator() {
                   <label className="relative flex items-center cursor-pointer group">
                     <input
                       type="checkbox"
+                      aria-label="Rush Order (1.5x)"
                       checked={cncForm.rush}
                       onChange={(e) => setCncForm({ ...cncForm, rush: e.target.checked })}
                       className="sr-only peer"
@@ -551,6 +559,7 @@ export default function QuoteCalculator() {
                   <label className="cursor-pointer block py-2">
                     <input
                       type="file"
+                      aria-label="Upload DXF File"
                       accept=".dxf,.DXF"
                       onChange={handleDxfUpload}
                       className="hidden"
@@ -620,6 +629,7 @@ export default function QuoteCalculator() {
                   <div>
                     <input
                       type="number"
+                      aria-label="Flat pattern length (inches)"
                       value={sheetForm.flat_length}
                       onChange={(e) => setSheetForm({ ...sheetForm, flat_length: parseFloat(e.target.value) || 0 })}
                       className="input text-center"
@@ -630,6 +640,7 @@ export default function QuoteCalculator() {
                   <div>
                     <input
                       type="number"
+                      aria-label="Flat pattern width (inches)"
                       value={sheetForm.flat_width}
                       onChange={(e) => setSheetForm({ ...sheetForm, flat_width: parseFloat(e.target.value) || 0 })}
                       className="input text-center"
@@ -682,6 +693,7 @@ export default function QuoteCalculator() {
                   <div>
                     <input
                       type="number"
+                      aria-label="Cut Length (in)"
                       value={sheetForm.cut_perimeter}
                       onChange={(e) => setSheetForm({ ...sheetForm, cut_perimeter: parseFloat(e.target.value) || 0 })}
                       className="input text-center"
@@ -692,6 +704,7 @@ export default function QuoteCalculator() {
                   <div>
                     <input
                       type="number"
+                      aria-label="Holes"
                       value={sheetForm.num_holes}
                       onChange={(e) => setSheetForm({ ...sheetForm, num_holes: parseInt(e.target.value) || 0 })}
                       className="input text-center"
@@ -702,6 +715,7 @@ export default function QuoteCalculator() {
                   <div>
                     <input
                       type="number"
+                      aria-label="Slots"
                       value={sheetForm.num_slots}
                       onChange={(e) => setSheetForm({ ...sheetForm, num_slots: parseInt(e.target.value) || 0 })}
                       className="input text-center"
@@ -722,6 +736,7 @@ export default function QuoteCalculator() {
                   <div>
                     <input
                       type="number"
+                      aria-label="Total Bends"
                       value={sheetForm.num_bends}
                       onChange={(e) => setSheetForm({ ...sheetForm, num_bends: parseInt(e.target.value) || 0 })}
                       className="input text-center"
@@ -732,6 +747,7 @@ export default function QuoteCalculator() {
                   <div>
                     <input
                       type="number"
+                      aria-label="Unique Bends"
                       value={sheetForm.num_unique_bends}
                       onChange={(e) => setSheetForm({ ...sheetForm, num_unique_bends: parseInt(e.target.value) || 0 })}
                       className="input text-center"
@@ -749,6 +765,7 @@ export default function QuoteCalculator() {
                   <div>
                     <input
                       type="number"
+                      aria-label="PEM Inserts"
                       value={sheetForm.num_pem_inserts}
                       onChange={(e) => setSheetForm({ ...sheetForm, num_pem_inserts: parseInt(e.target.value) || 0 })}
                       className="input text-center"
@@ -759,6 +776,7 @@ export default function QuoteCalculator() {
                   <div>
                     <input
                       type="number"
+                      aria-label="Weld Nuts"
                       value={sheetForm.num_weld_nuts}
                       onChange={(e) => setSheetForm({ ...sheetForm, num_weld_nuts: parseInt(e.target.value) || 0 })}
                       className="input text-center"
@@ -787,6 +805,7 @@ export default function QuoteCalculator() {
                   <label className="relative flex items-center cursor-pointer group">
                     <input
                       type="checkbox"
+                      aria-label="Rush Order (1.5x)"
                       checked={sheetForm.rush}
                       onChange={(e) => setSheetForm({ ...sheetForm, rush: e.target.checked })}
                       className="sr-only peer"

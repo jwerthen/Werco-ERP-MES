@@ -665,7 +665,7 @@ export default function ShopFloor() {
             <table className="table">
               <thead>
                 <tr>
-                  <th className="w-10"></th>
+                  <th className="w-10" aria-label="Expand row"></th>
                   <th>Priority</th>
                   <th>Work Order</th>
                   <th>Part</th>
@@ -723,19 +723,19 @@ export default function ShopFloor() {
                         <td>
                           <span className="font-semibold text-werco-600">{item.work_order_number}</span>
                         </td>
-                        <td>
+                        <td aria-label="Part">
                           <div>
                             <p className="font-medium text-surface-900">{item.part_number}</p>
                             <p className="text-sm text-surface-500 line-clamp-1">{item.part_name}</p>
                           </div>
                         </td>
-                        <td>
+                        <td aria-label="Operation">
                           <div>
                             <p className="font-medium text-surface-900">Op {item.operation_number}</p>
                             <p className="text-sm text-surface-500">{item.operation_name}</p>
                           </div>
                         </td>
-                        <td>
+                        <td aria-label="Progress">
                           <div className="w-32">
                             <div className="flex items-center justify-between text-sm mb-1">
                               <span className="font-medium text-surface-700 tabular-nums">

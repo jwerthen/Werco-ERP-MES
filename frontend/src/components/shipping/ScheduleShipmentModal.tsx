@@ -630,6 +630,7 @@ function PackagesStep({
                 <label className="flex items-center gap-2 text-sm text-slate-300">
                   <input
                     type="checkbox"
+                    aria-label="Stackable"
                     checked={p.stackable}
                     onChange={(e) => updatePallet(i, { stackable: e.target.checked })}
                   />
@@ -675,6 +676,7 @@ function DimField({ label, value, onChange }: { label: string; value: string; on
       <label className="label">{label}</label>
       <input
         type="number"
+        aria-label={label}
         min={0}
         step="0.1"
         className="input"
@@ -838,7 +840,12 @@ function AddressStep({
             </ul>
           )}
           <label className="mt-2 flex items-center gap-2 text-xs text-slate-300">
-            <input type="checkbox" checked={useNormalized} onChange={(e) => setUseNormalized(e.target.checked)} />
+            <input
+              type="checkbox"
+              aria-label="Use the carrier-normalized address for rating"
+              checked={useNormalized}
+              onChange={(e) => setUseNormalized(e.target.checked)}
+            />
             Use the carrier-normalized address for rating
           </label>
         </div>
@@ -889,7 +896,7 @@ function RatesStep({
         <table className="min-w-full divide-y divide-slate-700 text-sm">
           <thead className="bg-slate-800">
             <tr>
-              <th className="px-3 py-2 w-8"></th>
+              <th className="px-3 py-2 w-8" aria-label="Select rate"></th>
               <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">Carrier</th>
               <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">Service</th>
               <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">Mode</th>
@@ -910,6 +917,7 @@ function RatesStep({
                     <input
                       type="radio"
                       name="rate"
+                      aria-label={`Select ${r.carrier} ${r.service_name || r.service_code || ''} rate`}
                       checked={!!selected}
                       onChange={() => setSelectedRate(r)}
                     />

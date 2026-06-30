@@ -280,7 +280,7 @@ export function PartRoutingTab({ part, routing, onRoutingChanged }: Props) {
                 <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Run/Unit</th>
                 <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Inspect</th>
                 {routing.status === 'draft' && (
-                  <th className="px-4 py-3 w-20" />
+                  <th className="px-4 py-3 w-20" aria-label="Actions" />
                 )}
               </tr>
             </thead>
@@ -307,10 +307,10 @@ export function PartRoutingTab({ part, routing, onRoutingChanged }: Props) {
                   {routing.status === 'draft' && (
                     <td className="px-4 py-3">
                       <div className="flex items-center justify-end gap-1">
-                        <button onClick={() => openEditOp(op)} className="text-slate-500 hover:text-werco-navy-400 p-1">
+                        <button onClick={() => openEditOp(op)} aria-label="Edit operation" className="text-slate-500 hover:text-werco-navy-400 p-1">
                           <PencilIcon className="h-4 w-4" />
                         </button>
-                        <button onClick={() => handleDeleteOp(op.id)} className="text-slate-500 hover:text-red-400 p-1">
+                        <button onClick={() => handleDeleteOp(op.id)} aria-label="Delete operation" className="text-slate-500 hover:text-red-400 p-1">
                           <TrashIcon className="h-4 w-4" />
                         </button>
                       </div>
@@ -407,6 +407,7 @@ export function PartRoutingTab({ part, routing, onRoutingChanged }: Props) {
                       <div className="flex gap-2">
                         <input
                           type="number"
+                          aria-label={labels[field]}
                           value={toDisplay(hoursValue, timeUnits[field])}
                           onChange={e => {
                             const val = parseFloat(e.target.value) || 0;
@@ -434,6 +435,7 @@ export function PartRoutingTab({ part, routing, onRoutingChanged }: Props) {
                 <label className="flex items-center gap-2">
                   <input
                     type="checkbox"
+                    aria-label="Inspection Point"
                     checked={opForm.is_inspection_point}
                     onChange={e => setOpForm(p => ({ ...p, is_inspection_point: e.target.checked }))}
                     className="rounded border-slate-600 text-werco-navy-400"
@@ -443,6 +445,7 @@ export function PartRoutingTab({ part, routing, onRoutingChanged }: Props) {
                 <label className="flex items-center gap-2">
                   <input
                     type="checkbox"
+                    aria-label="Outside Operation"
                     checked={opForm.is_outside_operation}
                     onChange={e => setOpForm(p => ({ ...p, is_outside_operation: e.target.checked }))}
                     className="rounded border-slate-600 text-werco-navy-400"

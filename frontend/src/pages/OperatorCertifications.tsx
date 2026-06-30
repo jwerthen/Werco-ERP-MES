@@ -627,6 +627,7 @@ export default function OperatorCertifications() {
             <MagnifyingGlassIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
             <input
               type="text"
+              aria-label={activeTab === 'certifications' ? 'Search by operator, certification, type' : 'Search by operator, training, trainer'}
               placeholder={activeTab === 'certifications' ? 'Search by operator, certification, type...' : 'Search by operator, training, trainer...'}
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
@@ -746,7 +747,7 @@ export default function OperatorCertifications() {
                         const entry = matrixMap.get(`${op.id}-${wc.id}`);
                         const level = entry?.skill_level ?? 0;
                         return (
-                          <td key={wc.id} className="px-4 py-3 text-center">
+                          <td key={wc.id} className="px-4 py-3 text-center" aria-label={`${wc.name}: ${skillLabel(level)} (Level ${level})`}>
                             <div className="flex flex-col items-center gap-0.5" title={`${skillLabel(level)} (Level ${level})`}>
                               <span className={`inline-block h-4 w-4 rounded-full ${skillColor(level)}`} />
                               <span className="text-[10px] text-slate-400 tabular-nums">{level}</span>
@@ -927,7 +928,7 @@ export default function OperatorCertifications() {
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div className="flex items-center gap-2">
-                  <input type="checkbox" id="passed" checked={trainingForm.passed} onChange={(e) => setTrainingForm({ ...trainingForm, passed: e.target.checked })}
+                  <input type="checkbox" id="passed" aria-label="Passed" checked={trainingForm.passed} onChange={(e) => setTrainingForm({ ...trainingForm, passed: e.target.checked })}
                     className="h-4 w-4 rounded border-slate-600 text-blue-600 focus:ring-blue-500" />
                   <label htmlFor="passed" className="text-sm text-slate-300">Passed</label>
                 </div>

@@ -952,7 +952,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                             <th className="px-3 py-2 text-right text-xs font-semibold text-slate-400 uppercase w-16">Rem</th>
                             <th className="px-3 py-2 text-right text-xs font-semibold text-slate-400 uppercase w-20">Unit $</th>
                             <th className="px-3 py-2 text-center text-xs font-semibold text-slate-400 uppercase w-20">Status</th>
-                            <th className="px-3 py-2 text-center text-xs font-semibold text-slate-400 uppercase w-20"></th>
+                            <th className="px-3 py-2 text-center text-xs font-semibold text-slate-400 uppercase w-20" aria-label="Actions"></th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-700">
@@ -1012,7 +1012,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                             <td className="px-3 py-2 text-right text-sm font-bold">
                               ${selectedPO.lines?.reduce((sum: number, l: any) => sum + ((l.unit_price || 0) * (l.quantity_ordered || 0)), 0).toFixed(2)}
                             </td>
-                            <td colSpan={2}></td>
+                            <td colSpan={2} aria-label="Actions"></td>
                           </tr>
                         </tfoot>
                       </table>
@@ -1289,6 +1289,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                     checked={formData.requires_inspection}
                     onChange={(e) => setFormData({ ...formData, requires_inspection: e.target.checked })}
                     className="rounded border-slate-600"
+                    aria-label="Requires Inspection"
                   />
                   <span className="text-sm">Requires Inspection</span>
                 </label>
@@ -1298,6 +1299,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                     checked={formData.coc_attached}
                     onChange={(e) => setFormData({ ...formData, coc_attached: e.target.checked })}
                     className="rounded border-slate-600"
+                    aria-label="CoC Attached"
                   />
                   <span className="text-sm">CoC Attached</span>
                 </label>
@@ -1311,6 +1313,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                       checked={formData.over_receive_approved}
                       onChange={(e) => setFormData({ ...formData, over_receive_approved: e.target.checked })}
                       className="rounded border-amber-500/40"
+                      aria-label="Approve Over-Receipt"
                     />
                     <span className="text-sm text-amber-300">
                       <strong>Approve Over-Receipt:</strong> Receiving {formData.quantity_received - selectedLine.quantity_remaining} more than remaining quantity
@@ -1494,6 +1497,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                   className="input w-full"
                   rows={3}
                   placeholder={inspectionData.quantity_rejected > 0 ? 'Required - describe the non-conformance' : 'Optional notes'}
+                  aria-label="Inspection Notes"
                 />
               </div>
 

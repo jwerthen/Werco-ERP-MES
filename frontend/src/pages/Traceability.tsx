@@ -138,6 +138,7 @@ export default function Traceability() {
               onKeyDown={handleKeyDown}
               className="input pl-10"
               placeholder="Enter lot number, serial number, cert number, or heat lot..."
+              aria-label="Search by lot, serial, cert, or heat lot number"
             />
           </div>
           <button

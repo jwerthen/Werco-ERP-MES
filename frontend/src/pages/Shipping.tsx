@@ -432,7 +432,7 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
           <table className="min-w-full divide-y divide-fd-line">
             <thead className="bg-fd-sunken">
               <tr>
-                <th className="px-4 py-2 text-left text-xs font-medium text-slate-400 uppercase w-8"></th>
+                <th className="px-4 py-2 text-left text-xs font-medium text-slate-400 uppercase w-8" aria-label="Expand tracking"></th>
                 <th className="px-4 py-2 text-left text-xs font-medium text-slate-400 uppercase">Shipment #</th>
                 <th className="px-4 py-2 text-left text-xs font-medium text-slate-400 uppercase">WO #</th>
                 <th className="px-4 py-2 text-left text-xs font-medium text-slate-400 uppercase">Customer</th>
@@ -613,6 +613,7 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
                     checked={shipForm.cert_of_conformance}
                     onChange={(e) => setShipForm({ ...shipForm, cert_of_conformance: e.target.checked })}
                     className="mr-2"
+                    aria-label="Include Certificate of Conformance"
                   />
                   Include Certificate of Conformance
                 </label>

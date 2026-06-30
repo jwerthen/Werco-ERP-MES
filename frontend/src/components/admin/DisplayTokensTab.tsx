@@ -121,6 +121,7 @@ export default function DisplayTokensTab() {
             Label
             <input
               type="text"
+              aria-label="Display label"
               value={label}
               onChange={(e) => setLabel(e.target.value)}
               placeholder="North wall TV"
@@ -134,6 +135,7 @@ export default function DisplayTokensTab() {
             Expires (days)
             <input
               type="number"
+              aria-label="Expires (days)"
               min={1}
               max={365}
               value={expiresDays}
@@ -158,6 +160,7 @@ export default function DisplayTokensTab() {
           <div className="flex items-center gap-2">
             <input
               readOnly
+              aria-label="Wallboard URL"
               value={wallboardUrl}
               className="input input-bordered flex-1 font-mono text-xs"
               onFocus={(e) => e.target.select()}
@@ -171,6 +174,7 @@ export default function DisplayTokensTab() {
           <div className="flex items-center gap-2">
             <input
               readOnly
+              aria-label="Display token"
               value={issued.token}
               className="input input-bordered flex-1 font-mono text-xs"
               onFocus={(e) => e.target.select()}

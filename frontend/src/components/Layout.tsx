@@ -931,6 +931,7 @@ export default function Layout({ children }: LayoutProps) {
                 onChange={e => setLogoutEmployeeId(e.target.value.replace(/[^A-Za-z0-9\-_]/g, '').slice(0, 50))}
                 className="du-input du-input-bordered w-full text-center text-lg"
                 placeholder="0000 or EMP-1001"
+                aria-label="Employee or badge ID to sign out"
                 autoFocus
               />
               {logoutError && <div className="du-alert du-alert-error py-2 text-sm">{logoutError}</div>}

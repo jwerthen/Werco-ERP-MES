@@ -69,10 +69,13 @@ npm test -- path/to/File.test.tsx     # single test file
 npm run test:coverage
 npm run test:e2e       # Playwright E2E (test:e2e:ui / test:e2e:headed for debugging)
 npm run lint           # eslint src --ext .ts,.tsx  (lint:fix to autofix)
-                       # jsx-a11y is enforced: the clean recommended rules are `error` (new a11y
-                       # regressions FAIL CI). CI lints with --max-warnings=0 (ci-cd.yml), so there
-                       # is no non-blocking warn tier — known label-association/clickable-div debt is
-                       # `off` (tracked follow-up: burn down via FormField); no-autofocus is off.
+                       # jsx-a11y is FULLY enforced: the recommended ruleset plus the three
+                       # formerly-`off` debt families — label-has-associated-control, control-
+                       # has-associated-label (with the plugin's recommended options), and the
+                       # clickable-element trio (click-events-have-key-events / no-static-element-
+                       # interactions / no-noninteractive-element-interactions) — are all `error`.
+                       # CI lints with --max-warnings=0 (ci-cd.yml), so any a11y regression FAILS
+                       # CI; there is no non-blocking warn tier. Only no-autofocus stays off.
 npm run type-check     # tsc --noEmit
 npm run format         # prettier
 
@@ -158,4 +161,4 @@ There are 37+ Alembic versions over live, multi-tenant data. When adding a migra
 - Backend line length is 120 (flake8/black configured to it). Status/priority/role values are `str`-backed `enum.Enum` classes co-located with their model.
 - Keep routers thin and push logic into `services/`; keep query scoping in `db/tenant_filter` helpers.
 - Frontend: typed API responses, forms via RHF+Zod, brand palette + instrument-panel styling.
-- Accessibility: icon-only buttons need an `aria-label`. The `jsx-a11y/control-has-associated-label` and `label-has-associated-control` debt is currently `off` (CI's `--max-warnings=0` leaves no non-blocking tier), not yet `error` — burn it down by giving form inputs a real associated `<label>` (the shared FormField pattern), then flip the rule to `error`; don't suppress per-line. The Getting-Started tour **auto-starts once per user on first login** (per-user localStorage flag; skip/dismiss is respected and does not re-trigger) — see `src/data/tours.ts` (`shouldAutoStartGettingStarted`) wired in `Layout.tsx`.
+- Accessibility: the jsx-a11y debt is **burned down and fully enforced** (all three families flipped `off`→`error`). Keep it green: icon-only buttons need an `aria-label` (reuse any `title`); form fields get a real associated `<label>` via the shared **FormField** primitive (or `htmlFor`+`id` for inline/filter controls); clickable non-interactive elements must be a native `<button>` or carry a literal interactive `role` + `tabIndex` + `onKeyDown` (and `e.target===e.currentTarget` guard when they wrap focusable children). `control-has-associated-label` runs with the plugin's recommended options (it ignores `input`/`textarea`/`tr`, so don't add redundant labels there). Don't suppress per-line. The Getting-Started tour **auto-starts once per user on first login** (per-user localStorage flag; skip/dismiss is respected and does not re-trigger) — see `src/data/tours.ts` (`shouldAutoStartGettingStarted`) wired in `Layout.tsx`.

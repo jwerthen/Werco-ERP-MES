@@ -39,10 +39,30 @@ module.exports = [
       // extending the FormField label-association pattern across the forms.
       ...jsxA11yPlugin.configs.recommended.rules,
 
-      // Known pre-existing debt — OFF until burned down (can't be `warn`:
-      // CI's --max-warnings=0 would treat warnings as failures).
-      // ~630 sites; icon-only controls needing an accessible name.
-      "jsx-a11y/control-has-associated-label": "off",
+      // Icon-only / unnamed controls must carry an accessible name — burned
+      // down to zero; now ENFORCED. Enforced with the plugin's RECOMMENDED
+      // options (the bare rule's empty `ignoreElements` spuriously flags inputs,
+      // textareas, and table rows that already get a name elsewhere). Genuine
+      // controls (icon buttons, selects) get an `aria-label`.
+      "jsx-a11y/control-has-associated-label": [
+        "error",
+        {
+          ignoreElements: ["audio", "canvas", "embed", "input", "textarea", "tr", "video"],
+          ignoreRoles: [
+            "grid",
+            "listbox",
+            "menu",
+            "menubar",
+            "radiogroup",
+            "row",
+            "tablist",
+            "toolbar",
+            "tree",
+            "treegrid",
+          ],
+          includeRoles: ["alert", "dialog"],
+        },
+      ],
 
       // Form <label>s associated with their control — burned down to zero; now
       // ENFORCED. Use the <FormField> primitive (label↔control id wiring) for

@@ -220,6 +220,7 @@ export default function Login() {
                     <input
                       id="employeeId"
                       type="text"
+                      aria-label="Employee / Badge ID"
                       inputMode="text"
                       maxLength={50}
                       required
@@ -257,6 +258,7 @@ export default function Login() {
                         id="email"
                         name="email"
                         type="email"
+                        aria-label="Email"
                         required
                         value={email}
                         onChange={e => setEmail(e.target.value)}
@@ -288,6 +290,7 @@ export default function Login() {
                         id="password"
                         name="password"
                         type={showPassword ? 'text' : 'password'}
+                        aria-label="Password"
                         required
                         value={password}
                         onChange={e => setPassword(e.target.value)}

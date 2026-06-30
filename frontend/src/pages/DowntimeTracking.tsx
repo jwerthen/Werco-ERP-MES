@@ -701,6 +701,7 @@ export default function DowntimeTracking() {
             value={filterDateFrom}
             onChange={(e) => setFilterDateFrom(e.target.value)}
             placeholder="From"
+            aria-label="Filter from date"
           />
           <input
             type="date"
@@ -708,6 +709,7 @@ export default function DowntimeTracking() {
             value={filterDateTo}
             onChange={(e) => setFilterDateTo(e.target.value)}
             placeholder="To"
+            aria-label="Filter to date"
           />
           {(filterWorkCenter || filterCategory || filterPlannedType || filterDateFrom || filterDateTo) && (
             <button

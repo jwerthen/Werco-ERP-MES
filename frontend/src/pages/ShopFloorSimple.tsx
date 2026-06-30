@@ -973,6 +973,7 @@ export default function ShopFloorSimple() {
                 onChange={(e) => setScannerCode(e.target.value)}
                 className="input h-12 flex-1 text-base"
                 placeholder="Scan or enter traveler code"
+                aria-label="Scan Traveler"
                 autoFocus
               />
               <button
@@ -993,6 +994,7 @@ export default function ShopFloorSimple() {
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search WO or part..."
+              aria-label="Search work orders or parts"
               className="input pl-9 text-sm"
             />
           </div>
@@ -1043,6 +1045,7 @@ export default function ShopFloorSimple() {
                   className="input text-sm"
                   maxLength={500}
                   placeholder="Applied to your next priority change"
+                  aria-label="Optional Priority Reason"
                 />
               </div>
             )}
@@ -1159,6 +1162,7 @@ export default function ShopFloorSimple() {
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="Search WO# or Part#..."
+                aria-label="Search work orders or parts"
                 className="input pl-10"
               />
             </div>
@@ -1207,6 +1211,7 @@ export default function ShopFloorSimple() {
               className="input text-sm max-w-md"
               maxLength={500}
               placeholder="Applied to your next priority change"
+              aria-label="Optional Priority Reason"
             />
           </div>
         )}
@@ -1781,6 +1786,7 @@ export default function ShopFloorSimple() {
                   value={productionData.quantity_complete_delta}
                   onChange={(e) => setProductionData({ ...productionData, quantity_complete_delta: Number(e.target.value) || 0 })}
                   className="input h-14 text-center text-2xl font-bold"
+                  aria-label="Good parts to add"
                   autoFocus
                 />
                 <div className="mt-3 grid grid-cols-3 gap-2">
@@ -1820,6 +1826,7 @@ export default function ShopFloorSimple() {
                   value={productionData.quantity_scrapped_delta}
                   onChange={(e) => setProductionData({ ...productionData, quantity_scrapped_delta: Number(e.target.value) || 0 })}
                   className="input h-12 text-center text-lg font-semibold"
+                  aria-label="Scrap to add"
                 />
               </div>
 
@@ -1852,6 +1859,7 @@ export default function ShopFloorSimple() {
                   className="input"
                   rows={3}
                   placeholder="Production notes, scrap details, or inspection notes..."
+                  aria-label="Notes (optional)"
                 />
               </div>
             </div>
@@ -1926,6 +1934,7 @@ export default function ShopFloorSimple() {
                     value={checkOutData.quantity_produced}
                     onChange={(e) => setCheckOutData({ ...checkOutData, quantity_produced: Number(e.target.value) || 0 })}
                     className="input h-14 flex-1 text-center text-2xl font-bold"
+                    aria-label="Additional good parts at checkout"
                     autoFocus
                   />
                 </div>
@@ -1966,6 +1975,7 @@ export default function ShopFloorSimple() {
                   value={checkOutData.quantity_scrapped}
                   onChange={(e) => setCheckOutData({ ...checkOutData, quantity_scrapped: Number(e.target.value) || 0 })}
                   className="input h-12 text-center text-lg font-semibold"
+                  aria-label="Scrap"
                 />
               </div>
 
@@ -1998,6 +2008,7 @@ export default function ShopFloorSimple() {
                   className="input"
                   rows={3}
                   placeholder="Issues, observations, or notes from this session..."
+                  aria-label="Notes (optional)"
                 />
               </div>
             </div>
@@ -2085,6 +2096,7 @@ export default function ShopFloorSimple() {
                   className="input"
                   rows={3}
                   placeholder="Add context for the blocker (what's needed, who to notify)..."
+                  aria-label="Note (optional)"
                 />
               </div>
             </div>

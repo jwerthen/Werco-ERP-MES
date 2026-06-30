@@ -351,6 +351,7 @@ export default function Register() {
                       id="firstName"
                       type="text"
                       required
+                      aria-label="First Name"
                       value={firstName}
                       onChange={e => setFirstName(e.target.value)}
                       onFocus={() => setFocusedField('firstName')}
@@ -378,6 +379,7 @@ export default function Register() {
                       id="lastName"
                       type="text"
                       required
+                      aria-label="Last Name"
                       value={lastName}
                       onChange={e => setLastName(e.target.value)}
                       onFocus={() => setFocusedField('lastName')}
@@ -407,6 +409,7 @@ export default function Register() {
                     id="email"
                     type="email"
                     required
+                    aria-label="Email Address"
                     value={email}
                     onChange={e => setEmail(e.target.value)}
                     onFocus={() => setFocusedField('email')}
@@ -434,6 +437,7 @@ export default function Register() {
                   <input
                     id="employeeId"
                     type="text"
+                    aria-label="Employee ID (optional)"
                     value={employeeId}
                     onChange={e => setEmployeeId(e.target.value.replace(/[^A-Za-z0-9\-_]/g, '').slice(0, 50))}
                     onFocus={() => setFocusedField('employeeId')}
@@ -463,6 +467,7 @@ export default function Register() {
                     type={showPassword ? 'text' : 'password'}
                     required
                     minLength={12}
+                    aria-label="Password"
                     value={password}
                     onChange={e => setPassword(e.target.value)}
                     onFocus={() => setFocusedField('password')}
@@ -502,6 +507,7 @@ export default function Register() {
                     type={showConfirmPassword ? 'text' : 'password'}
                     required
                     minLength={12}
+                    aria-label="Confirm Password"
                     value={confirmPassword}
                     onChange={e => setConfirmPassword(e.target.value)}
                     onFocus={() => setFocusedField('confirmPassword')}

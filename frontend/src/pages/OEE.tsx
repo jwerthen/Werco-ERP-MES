@@ -313,6 +313,7 @@ export default function OEE() {
             <input
               id="oee-filter-from"
               type="date"
+              aria-label="Filter from date"
               className="input input-bordered input-sm rounded-sm"
               value={dateFrom}
               onChange={(e) => setDateFrom(e.target.value)}
@@ -323,6 +324,7 @@ export default function OEE() {
             <input
               id="oee-filter-to"
               type="date"
+              aria-label="Filter to date"
               className="input input-bordered input-sm rounded-sm"
               value={dateTo}
               onChange={(e) => setDateTo(e.target.value)}

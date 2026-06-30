@@ -159,6 +159,7 @@ export default function AIEgressTab() {
             <input
               id="ai-egress-toggle"
               type="checkbox"
+              aria-label="Allow AI egress"
               className="checkbox mt-0.5 row-span-2"
               checked={enabled}
               disabled={!canEdit || saving}

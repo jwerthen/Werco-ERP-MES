@@ -505,6 +505,7 @@ const SupplierScorecards = () => {
           <MagnifyingGlassIcon className="w-5 h-5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
           <input
             type="text"
+            aria-label="Search by vendor name"
             placeholder="Search by vendor name..."
             value={search}
             onChange={e => setSearch(e.target.value)}

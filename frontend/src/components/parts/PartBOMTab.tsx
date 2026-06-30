@@ -487,7 +487,7 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
                 {viewMode === 'exploded' && <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Ext Qty</th>}
                 <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">UOM</th>
                 {viewMode === 'single' && bom.status === 'draft' && (
-                  <th className="px-4 py-3 w-16" />
+                  <th className="px-4 py-3 w-16" aria-label="Actions" />
                 )}
               </tr>
             </thead>
@@ -726,7 +726,7 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
                       <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase min-w-36">Line</th>
                       <th className="px-3 py-2 text-right text-xs font-medium text-slate-400 uppercase min-w-36">Qty</th>
                       <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase min-w-44">Notes</th>
-                      <th className="px-3 py-2 w-12" />
+                      <th className="px-3 py-2 w-12" aria-label="Actions" />
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-700">
@@ -740,6 +740,7 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
                             className="input py-1.5 px-2 text-sm"
                             step={1}
                             min={10}
+                            aria-label={`Item number for row ${index + 1}`}
                           />
                         </td>
                         <td className="px-3 py-2 align-top">
@@ -750,6 +751,7 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
                             className="input py-1.5 px-2 text-sm"
                             placeholder="Part number"
                             autoFocus={index === 0}
+                            aria-label={`Part number for row ${index + 1}`}
                           />
                         </td>
                         <td className="px-3 py-2 align-top">
@@ -758,6 +760,7 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
                             value={row.revision}
                             onChange={e => updateBatchRow(row.id, 'revision', e.target.value.toUpperCase())}
                             className="input py-1.5 px-2 text-sm"
+                            aria-label={`Revision for row ${index + 1}`}
                           />
                         </td>
                         <td className="px-3 py-2 align-top">
@@ -767,6 +770,7 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
                             onChange={e => updateBatchRow(row.id, 'name', e.target.value)}
                             className="input py-1.5 px-2 text-sm"
                             placeholder="Part name"
+                            aria-label={`Part name for row ${index + 1}`}
                           />
                         </td>
                         <td className="px-3 py-2 align-top">
@@ -776,6 +780,7 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
                             onChange={e => updateBatchRow(row.id, 'description', e.target.value)}
                             className="input py-1.5 px-2 text-sm"
                             placeholder="Optional"
+                            aria-label={`Description for row ${index + 1}`}
                           />
                         </td>
                         <td className="px-3 py-2 align-top">
@@ -783,6 +788,7 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
                             value={row.part_type}
                             onChange={e => updateBatchRow(row.id, 'part_type', e.target.value as PartType)}
                             className="input py-1.5 px-2 text-sm"
+                            aria-label={`Part type for row ${index + 1}`}
                           >
                             <option value="manufactured">Manufactured</option>
                             <option value="purchased">Purchased</option>
@@ -797,6 +803,7 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
                             value={row.line_type}
                             onChange={e => updateBatchRow(row.id, 'line_type', e.target.value as LineType)}
                             className="input py-1.5 px-2 text-sm"
+                            aria-label={`Line type for row ${index + 1}`}
                           >
                             <option value="component">Component</option>
                             <option value="hardware">Hardware</option>
@@ -812,6 +819,7 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
                             className="input w-32 py-1.5 px-3 text-sm text-right"
                             step="1"
                             min="0"
+                            aria-label={`Quantity for row ${index + 1}`}
                           />
                         </td>
                         <td className="px-3 py-2 align-top">
@@ -821,6 +829,7 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
                             onChange={e => updateBatchRow(row.id, 'notes', e.target.value)}
                             className="input py-1.5 px-2 text-sm"
                             placeholder="Optional"
+                            aria-label={`Notes for row ${index + 1}`}
                           />
                         </td>
                         <td className="px-3 py-2 align-top text-right">

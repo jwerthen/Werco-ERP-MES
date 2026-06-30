@@ -501,6 +501,7 @@ export default function Quotes() {
                         onChange={(e) => updateLine(idx, 'description', e.target.value)}
                         className="input text-sm"
                         placeholder="Description"
+                        aria-label="Line item description"
                         required
                       />
                     </div>
@@ -510,6 +511,7 @@ export default function Quotes() {
                         value={line.quantity}
                         onChange={(e) => updateLine(idx, 'quantity', parseFloat(e.target.value))}
                         className="input text-sm"
+                        aria-label="Line item quantity"
                         min={1}
                       />
                     </div>
@@ -519,6 +521,7 @@ export default function Quotes() {
                         value={line.unit_price}
                         onChange={(e) => updateLine(idx, 'unit_price', parseFloat(e.target.value))}
                         className="input text-sm"
+                        aria-label="Line item unit price"
                         step={0.01}
                         min={0}
                       />

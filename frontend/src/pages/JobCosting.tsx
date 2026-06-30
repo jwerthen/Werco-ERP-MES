@@ -481,6 +481,7 @@ export default function JobCosting() {
         <input
           type="text"
           placeholder="Search WO#, part, customer..."
+          aria-label="Search job costs by WO number, part, or customer"
           value={searchTerm}
           onChange={(e) => setSearchTerm(e.target.value)}
           className="du-input du-input-bordered du-input-sm w-64"
@@ -503,7 +504,7 @@ export default function JobCosting() {
         <table className="du-table du-table-sm w-full">
           <thead>
             <tr>
-              <th className="w-8"></th>
+              <th className="w-8" aria-label="Expand row"></th>
               <th>WO #</th>
               <th>Part</th>
               <th>Customer</th>
@@ -589,7 +590,7 @@ export default function JobCosting() {
                         {statusLabel[jc.status] || jc.status}
                       </span>
                     </td>
-                    <td onClick={(e) => e.stopPropagation()}>
+                    <td aria-label="Job cost actions" onClick={(e) => e.stopPropagation()}>
                       <div className="flex gap-1">
                         <button
                           onClick={() => openEntryModal(jc.id)}
@@ -686,7 +687,7 @@ export default function JobCosting() {
                                       <th className="text-right">Qty</th>
                                       <th className="text-right">Unit Cost</th>
                                       <th className="text-right">Total</th>
-                                      <th className="w-10"></th>
+                                      <th className="w-10" aria-label="Actions"></th>
                                     </tr>
                                   </thead>
                                   <tbody>

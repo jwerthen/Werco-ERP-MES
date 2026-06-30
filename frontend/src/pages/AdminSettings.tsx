@@ -389,6 +389,7 @@ export default function AdminSettings() {
                 checked={showInactive}
                 onChange={(e) => setShowInactive(e.target.checked)}
                 className="checkbox"
+                aria-label="Show inactive"
               />
               <span className="text-sm text-surface-600">Show inactive</span>
             </label>
@@ -731,6 +732,7 @@ function WorkCenterTypesPanel({
             onChange={(e) => onInputChange(e.target.value)}
             className="input"
             placeholder="e.g., Blending or Final Assembly"
+            aria-label="Add type"
           />
           {inputValue && (
             <p className="text-xs text-surface-500 mt-1">
@@ -866,6 +868,7 @@ function OverheadSettings({ data, onUpdate }: { data: Record<string, any>; onUpd
                     onChange={(e) => setEditValue(e.target.value)}
                     className="input w-48"
                     autoFocus
+                    aria-label={`Edit ${def.label}`}
                   />
                   <button onClick={() => saveEdit(def.key, def.type)} className="p-2 rounded-lg bg-emerald-500/20 text-emerald-600 hover:bg-emerald-200">
                     <CheckIcon className="h-4 w-4" />
@@ -1291,6 +1294,7 @@ function RolePermissionsManager({ data, onUpdate }: { data: RolePermissionsData;
                       checked={permissions.includes(permission)}
                       onChange={() => togglePermission(permission)}
                       className="checkbox"
+                      aria-label={formatPermissionLabel(permission)}
                     />
                     <span className="text-sm text-surface-700">
                       {formatPermissionLabel(permission)}

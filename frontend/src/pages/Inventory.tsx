@@ -577,6 +577,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
               value={filterText}
               onChange={(e) => setFilterText(e.target.value)}
               placeholder="Filter by part number or name..."
+              aria-label="Filter by part number or name"
               className="input pr-10"
             />
             {filterText && (
