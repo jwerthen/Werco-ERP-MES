@@ -760,8 +760,7 @@ def test_complete_work_order_inf_scrap_with_reason_is_400(client: TestClient, db
     wo_id = wo.id
 
     resp = client.post(
-        f"/api/v1/work-orders/{wo_id}/complete"
-        f"?quantity_complete=8&quantity_scrapped=inf&scrap_reason=Failed",
+        f"/api/v1/work-orders/{wo_id}/complete" f"?quantity_complete=8&quantity_scrapped=inf&scrap_reason=Failed",
         headers=headers_for(operator),
     )
     assert resp.status_code == status.HTTP_400_BAD_REQUEST, resp.text
