@@ -93,6 +93,7 @@ export default function DXFViewer({ file, analysis }: DXFViewerProps) {
       )}
       <canvas
         ref={canvasRef}
+        aria-label="DXF drawing preview"
         style={{ width: displayWidth, height: displayHeight }}
         className="block"
       />

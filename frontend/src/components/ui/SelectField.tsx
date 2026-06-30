@@ -199,6 +199,7 @@ export function SelectField<TValue extends string | number = string | number>({
                 onKeyDown={handleKeyDown}
                 className="w-full bg-slate-950/40 py-2.5 pl-9 pr-3 text-sm text-slate-100 outline-none placeholder:text-slate-500"
                 placeholder="Search..."
+                aria-label="Search options"
               />
             </div>
           )}

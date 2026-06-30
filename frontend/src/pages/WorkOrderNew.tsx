@@ -1142,7 +1142,7 @@ export default function WorkOrderNew() {
                       <th>Work Center</th>
                       <th className="w-28">Setup (min)</th>
                       <th className="w-28">Run (min)</th>
-                      <th className="w-16"></th>
+                      <th className="w-16" aria-label="Actions"></th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1155,6 +1155,7 @@ export default function WorkOrderNew() {
                               value={op.sequence}
                               onChange={(e) => updateOperation(index, 'sequence', parseInt(e.target.value) || 0)}
                               className="input input-sm w-16 text-center"
+                              aria-label="Operation sequence"
                             />
                           </td>
                           <td>
@@ -1164,6 +1165,7 @@ export default function WorkOrderNew() {
                               onChange={(e) => updateOperation(index, 'name', e.target.value)}
                               className="input input-sm"
                               placeholder="Operation name"
+                              aria-label="Operation name"
                             />
                           </td>
                           <td>
@@ -1186,6 +1188,7 @@ export default function WorkOrderNew() {
                               value={hoursToMinutes(op.setup_time_hours)}
                               onChange={(e) => updateOperation(index, 'setup_time_hours', minutesToHours(parseFloat(e.target.value) || 0))}
                               className="input input-sm text-right"
+                              aria-label="Setup time in minutes"
                             />
                           </td>
                           <td>
@@ -1196,6 +1199,7 @@ export default function WorkOrderNew() {
                               value={hoursToMinutes(op.run_time_hours)}
                               onChange={(e) => updateOperation(index, 'run_time_hours', minutesToHours(parseFloat(e.target.value) || 0))}
                               className="input input-sm text-right"
+                              aria-label="Run time in minutes"
                             />
                           </td>
                           <td>
@@ -1203,31 +1207,34 @@ export default function WorkOrderNew() {
                               type="button"
                               onClick={() => removeOperation(index)}
                               className="p-1.5 rounded-lg text-slate-500 hover:text-red-600 hover:bg-red-500/100/10"
+                              aria-label="Remove operation"
                             >
                               <TrashIcon className="h-4 w-4" />
                             </button>
                           </td>
                         </tr>
                         <tr className={!op.fromRouting ? 'bg-amber-500/10' : ''}>
-                          <td></td>
+                          <td aria-label="Spacer"></td>
                           <td colSpan={5} className="pb-3">
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                               <div>
-                                <label htmlFor={`routing-op-${index}-setup-instructions`} className="label text-xs">Setup Instructions</label>
+                                <label id={`routing-op-${index}-setup-instructions-label`} htmlFor={`routing-op-${index}-setup-instructions`} className="label text-xs">Setup Instructions</label>
                                 <textarea
                                   id={`routing-op-${index}-setup-instructions`}
                                   value={op.setup_instructions || ''}
                                   onChange={(e) => updateOperation(index, 'setup_instructions', e.target.value)}
                                   className="input input-sm min-h-16"
+                                  aria-labelledby={`routing-op-${index}-setup-instructions-label`}
                                 />
                               </div>
                               <div>
-                                <label htmlFor={`routing-op-${index}-run-instructions`} className="label text-xs">Run Instructions</label>
+                                <label id={`routing-op-${index}-run-instructions-label`} htmlFor={`routing-op-${index}-run-instructions`} className="label text-xs">Run Instructions</label>
                                 <textarea
                                   id={`routing-op-${index}-run-instructions`}
                                   value={op.run_instructions || ''}
                                   onChange={(e) => updateOperation(index, 'run_instructions', e.target.value)}
                                   className="input input-sm min-h-16"
+                                  aria-labelledby={`routing-op-${index}-run-instructions-label`}
                                 />
                               </div>
                             </div>
@@ -1237,6 +1244,7 @@ export default function WorkOrderNew() {
                                 checked={Boolean(op.requires_inspection)}
                                 onChange={(e) => updateOperation(index, 'requires_inspection', e.target.checked)}
                                 className="rounded border-slate-600 bg-slate-800"
+                                aria-label="Requires inspection"
                               />
                               Requires inspection
                             </label>
@@ -1284,7 +1292,7 @@ export default function WorkOrderNew() {
                         <th>Work Center</th>
                         <th className="w-28">Setup (min)</th>
                         <th className="w-28">Run (min)</th>
-                        <th className="w-16"></th>
+                        <th className="w-16" aria-label="Actions"></th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1297,6 +1305,7 @@ export default function WorkOrderNew() {
                                 value={op.sequence}
                                 onChange={(e) => updateOperation(index, 'sequence', parseInt(e.target.value) || 0)}
                                 className="input input-sm w-16 text-center"
+                                aria-label="Operation sequence"
                               />
                             </td>
                             <td>
@@ -1307,6 +1316,7 @@ export default function WorkOrderNew() {
                                 className="input input-sm"
                                 placeholder="Operation name"
                                 required
+                                aria-label="Operation name"
                               />
                             </td>
                             <td>
@@ -1329,6 +1339,7 @@ export default function WorkOrderNew() {
                                 value={hoursToMinutes(op.setup_time_hours)}
                                 onChange={(e) => updateOperation(index, 'setup_time_hours', minutesToHours(parseFloat(e.target.value) || 0))}
                                 className="input input-sm text-right"
+                                aria-label="Setup time in minutes"
                               />
                             </td>
                             <td>
@@ -1339,6 +1350,7 @@ export default function WorkOrderNew() {
                                 value={hoursToMinutes(op.run_time_hours)}
                                 onChange={(e) => updateOperation(index, 'run_time_hours', minutesToHours(parseFloat(e.target.value) || 0))}
                                 className="input input-sm text-right"
+                                aria-label="Run time in minutes"
                               />
                             </td>
                             <td>
@@ -1346,31 +1358,34 @@ export default function WorkOrderNew() {
                                 type="button"
                                 onClick={() => removeOperation(index)}
                                 className="p-1.5 rounded-lg text-slate-500 hover:text-red-600 hover:bg-red-500/100/10"
+                                aria-label="Remove operation"
                               >
                                 <TrashIcon className="h-4 w-4" />
                               </button>
                             </td>
                           </tr>
                           <tr>
-                            <td></td>
+                            <td aria-label="Spacer"></td>
                             <td colSpan={5} className="pb-3">
                               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                                 <div>
-                                  <label htmlFor={`manual-op-${index}-setup-instructions`} className="label text-xs">Setup Instructions</label>
+                                  <label id={`manual-op-${index}-setup-instructions-label`} htmlFor={`manual-op-${index}-setup-instructions`} className="label text-xs">Setup Instructions</label>
                                   <textarea
                                     id={`manual-op-${index}-setup-instructions`}
                                     value={op.setup_instructions || ''}
                                     onChange={(e) => updateOperation(index, 'setup_instructions', e.target.value)}
                                     className="input input-sm min-h-16"
+                                    aria-labelledby={`manual-op-${index}-setup-instructions-label`}
                                   />
                                 </div>
                                 <div>
-                                  <label htmlFor={`manual-op-${index}-run-instructions`} className="label text-xs">Run Instructions</label>
+                                  <label id={`manual-op-${index}-run-instructions-label`} htmlFor={`manual-op-${index}-run-instructions`} className="label text-xs">Run Instructions</label>
                                   <textarea
                                     id={`manual-op-${index}-run-instructions`}
                                     value={op.run_instructions || ''}
                                     onChange={(e) => updateOperation(index, 'run_instructions', e.target.value)}
                                     className="input input-sm min-h-16"
+                                    aria-labelledby={`manual-op-${index}-run-instructions-label`}
                                   />
                                 </div>
                               </div>
@@ -1380,6 +1395,7 @@ export default function WorkOrderNew() {
                                   checked={Boolean(op.requires_inspection)}
                                   onChange={(e) => updateOperation(index, 'requires_inspection', e.target.checked)}
                                   className="rounded border-slate-600 bg-slate-800"
+                                  aria-label="Requires inspection"
                                 />
                                 Requires inspection
                               </label>

@@ -630,6 +630,7 @@ export default function CustomerComplaints() {
           <input
             type="text"
             placeholder="Search complaints..."
+            aria-label="Search complaints"
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
             className="du-input du-input-bordered du-input-sm w-full pl-9"

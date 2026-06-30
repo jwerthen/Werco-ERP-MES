@@ -632,7 +632,7 @@ export default function BOMPage() {
             </div>
           </td>
           <td className="px-4 py-3 font-medium">{item.find_number || item.item_number}</td>
-          <td className="px-4 py-3">
+          <td className="px-4 py-3" aria-label={`Component ${item.component_part?.part_number || ''} ${item.component_part?.name || ''}`.trim()}>
             <div>
               <div className="font-medium text-werco-primary">{item.component_part?.part_number}</div>
               <div className="text-sm text-slate-400">{item.component_part?.name}</div>
@@ -1000,6 +1000,7 @@ export default function BOMPage() {
                   checked={importCreateMissingParts}
                   onChange={(e) => setImportCreateMissingParts(e.target.checked)}
                   className="rounded border-slate-600"
+                  aria-label="Create missing parts automatically"
                 />
                 <span className="text-sm">Create missing parts automatically</span>
               </label>
@@ -1179,6 +1180,7 @@ export default function BOMPage() {
                           <input
                             className="input w-20"
                             type="number"
+                            aria-label="Line number"
                             value={item.line_number || (index + 1) * 10}
                             onChange={(e) => {
                               const value = parseInt(e.target.value);
@@ -1196,6 +1198,7 @@ export default function BOMPage() {
                           <textarea
                             className="input min-h-[44px] h-auto leading-snug"
                             rows={2}
+                            aria-label="Part number"
                             value={item.part_number || ''}
                             onChange={(e) => {
                               const value = e.target.value;
@@ -1213,6 +1216,7 @@ export default function BOMPage() {
                           <textarea
                             className="input min-h-[44px] h-auto leading-snug"
                             rows={2}
+                            aria-label="Description"
                             value={item.description || ''}
                             onChange={(e) => {
                               const value = e.target.value;
@@ -1231,6 +1235,7 @@ export default function BOMPage() {
                             className="input w-24 text-right"
                             type="number"
                             step="1"
+                            aria-label="Quantity"
                             value={item.quantity ?? 1}
                             onChange={(e) => {
                               const value = parseFloat(e.target.value);
@@ -1247,6 +1252,7 @@ export default function BOMPage() {
                         <td className="px-3 py-2 text-sm">
                           <input
                             className="input w-24"
+                            aria-label="Unit of measure"
                             value={item.unit_of_measure || ''}
                             onChange={(e) => {
                               const value = e.target.value;
@@ -1263,6 +1269,7 @@ export default function BOMPage() {
                         <td className="px-3 py-2 text-sm">
                           <select
                             className="input"
+                            aria-label="Item type"
                             value={item.item_type || 'buy'}
                             onChange={(e) => {
                               const value = e.target.value;
@@ -1283,6 +1290,7 @@ export default function BOMPage() {
                         <td className="px-3 py-2 text-sm">
                           <select
                             className="input"
+                            aria-label="Line type"
                             value={item.line_type || 'component'}
                             onChange={(e) => {
                               const value = e.target.value;
@@ -1357,6 +1365,7 @@ export default function BOMPage() {
                     <input
                       type="text"
                       placeholder="Search parts..."
+                      aria-label="Search parts"
                       value={partSearch}
                       onChange={(e) => setPartSearch(e.target.value)}
                       className="input pr-10"
@@ -1397,6 +1406,7 @@ export default function BOMPage() {
                         key={part.id}
                         type="button"
                         onClick={() => handleSelectPart(part.id)}
+                        aria-label={`Select part ${part.part_number}`}
                         className={`w-full text-left rounded-xl border px-3 py-2.5 transition ${
                           newItem.component_part_id === part.id
                             ? 'border-werco-500 bg-werco-50 shadow-sm'
@@ -1584,6 +1594,7 @@ export default function BOMPage() {
                     checked={newItem.is_optional}
                     onChange={(e) => setNewItem({ ...newItem, is_optional: e.target.checked })}
                     className="mr-2"
+                    aria-label="Optional component"
                   />
                   <span className="text-sm">Optional component</span>
                 </label>

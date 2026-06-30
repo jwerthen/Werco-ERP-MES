@@ -340,6 +340,7 @@ export default function LaserNestManualModal({
                   accept="application/pdf"
                   onChange={handleFileChange}
                   disabled={extracting}
+                  aria-label="Reference PDF (optional)"
                   className="mt-1 block w-full text-sm text-fd-body file:mr-3 file:rounded file:border-0 file:bg-fd-raised file:px-3 file:py-2 file:text-sm file:font-semibold file:text-fd-ink hover:file:bg-fd-line-bright disabled:opacity-60"
                 />
               </label>

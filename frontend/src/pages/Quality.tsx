@@ -783,7 +783,7 @@ export default function QualityPage() {
                 </FormField>
               </div>
               <label className="flex items-center">
-                <input type="checkbox" checked={faiForm.customer_approval_required} onChange={(e) => setFaiForm({...faiForm, customer_approval_required: e.target.checked})} className="mr-2" />
+                <input type="checkbox" aria-label="Customer Approval Required" checked={faiForm.customer_approval_required} onChange={(e) => setFaiForm({...faiForm, customer_approval_required: e.target.checked})} className="mr-2" />
                 <span className="text-sm">Customer Approval Required</span>
               </label>
               <div className="flex justify-end gap-3">

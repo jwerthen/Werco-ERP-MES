@@ -1089,6 +1089,7 @@ export default function WorkOrderDetail() {
                     <button
                       key={document.id}
                       type="button"
+                      aria-label={`Preview ${document.title}`}
                       onClick={() => setSelectedDocumentId(document.id)}
                       className={`w-full px-4 py-3 text-left transition-colors ${
                         selectedDocumentId === document.id
@@ -1120,6 +1121,7 @@ export default function WorkOrderDetail() {
                 <input
                   key={documentUploadInputKey}
                   type="file"
+                  aria-label="PDF File"
                   accept=".pdf,application/pdf"
                   onChange={(event) => {
                     const file = event.target.files?.[0] || null;
@@ -1136,6 +1138,7 @@ export default function WorkOrderDetail() {
                 <span className="text-xs font-medium text-slate-400">Title</span>
                 <input
                   type="text"
+                  aria-label="Title"
                   value={documentTitle}
                   onChange={(event) => setDocumentTitle(event.target.value)}
                   placeholder="Drawing title"
@@ -1272,6 +1275,7 @@ export default function WorkOrderDetail() {
           <input
             ref={nestAttachInputRef}
             type="file"
+            aria-label="Attach nest PDF"
             accept="application/pdf"
             onChange={handleNestAttachFileChange}
             className="hidden"
@@ -1573,6 +1577,7 @@ export default function WorkOrderDetail() {
               <label htmlFor="blocker-note" className="text-sm text-slate-400 block mb-1">Note</label>
               <textarea
                 id="blocker-note"
+                aria-label="Note"
                 value={blockerForm.note}
                 onChange={(e) => setBlockerForm({ ...blockerForm, note: e.target.value })}
                 className="input"

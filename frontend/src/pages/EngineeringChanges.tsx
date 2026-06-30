@@ -642,6 +642,7 @@ export default function EngineeringChanges() {
           <input
             type="text"
             placeholder="Search ECO number, title, requestor..."
+            aria-label="Search ECO number, title, requestor"
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
             className="w-full rounded-sm border border-fd-line bg-fd-panel py-2 pl-10 pr-3 text-sm focus:border-werco-navy-600 focus:ring-werco-navy-600"

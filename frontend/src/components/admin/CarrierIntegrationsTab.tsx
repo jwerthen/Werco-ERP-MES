@@ -222,6 +222,7 @@ export default function CarrierIntegrationsTab() {
                           disabled={testingId === account.id}
                           className="p-2 rounded-lg text-surface-500 hover:text-werco-600 hover:bg-werco-500/10 disabled:opacity-50"
                           title="Test connection"
+                          aria-label="Test connection"
                         >
                           {testingId === account.id ? (
                             <ArrowPathIcon className="h-4 w-4 animate-spin" />
@@ -233,6 +234,7 @@ export default function CarrierIntegrationsTab() {
                           onClick={() => { setEditingAccount(account); setAccountModalOpen(true); }}
                           className="p-2 rounded-lg text-surface-500 hover:text-werco-600 hover:bg-werco-500/10"
                           title="Edit"
+                          aria-label="Edit"
                         >
                           <PencilIcon className="h-4 w-4" />
                         </button>
@@ -240,6 +242,7 @@ export default function CarrierIntegrationsTab() {
                           onClick={() => setDeletingAccount(account)}
                           className="p-2 rounded-lg text-surface-500 hover:text-red-600 hover:bg-red-500/10"
                           title="Delete"
+                          aria-label="Delete"
                         >
                           <TrashIcon className="h-4 w-4" />
                         </button>
@@ -547,6 +550,7 @@ function CarrierAccountModal({
                   </label>
                   <input
                     id={`carrier-ref-${field.key}`}
+                    aria-label={field.label}
                     className="input font-mono"
                     value={form.carrier_refs[field.key] || ''}
                     onChange={(e) => updateRef(field.key, e.target.value)}
@@ -561,6 +565,7 @@ function CarrierAccountModal({
             <label className="flex items-center gap-2 cursor-pointer">
               <input
                 type="checkbox"
+                aria-label="Active"
                 className="checkbox"
                 checked={form.is_active}
                 onChange={(e) => update('is_active', e.target.checked)}
@@ -570,6 +575,7 @@ function CarrierAccountModal({
             <label className="flex items-center gap-2 cursor-pointer">
               <input
                 type="checkbox"
+                aria-label="Default account"
                 className="checkbox"
                 checked={form.is_default}
                 onChange={(e) => update('is_default', e.target.checked)}
@@ -721,7 +727,7 @@ function ShippingProfileForm({
             )}
           </FormField>
           <div className="md:col-span-2">
-            <input className="input" value={form.ship_from_street2 ?? ''} onChange={(e) => update('ship_from_street2', e.target.value)} placeholder="Street 2 (optional)" />
+            <input aria-label="Street address line 2" className="input" value={form.ship_from_street2 ?? ''} onChange={(e) => update('ship_from_street2', e.target.value)} placeholder="Street 2 (optional)" />
           </div>
           <FormField label="City">
             {(field) => (
@@ -752,19 +758,19 @@ function ShippingProfileForm({
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             <div>
               <label htmlFor="default-package-weight-lbs" className="text-xs text-surface-600">Weight (lbs)</label>
-              <input id="default-package-weight-lbs" type="number" step="0.01" min="0" className="input" value={form.default_package_weight_lbs ?? ''} onChange={(e) => update('default_package_weight_lbs', e.target.value)} />
+              <input id="default-package-weight-lbs" aria-label="Weight (lbs)" type="number" step="0.01" min="0" className="input" value={form.default_package_weight_lbs ?? ''} onChange={(e) => update('default_package_weight_lbs', e.target.value)} />
             </div>
             <div>
               <label htmlFor="default-package-length-in" className="text-xs text-surface-600">Length (in)</label>
-              <input id="default-package-length-in" type="number" step="0.01" min="0" className="input" value={form.default_package_length_in ?? ''} onChange={(e) => update('default_package_length_in', e.target.value)} />
+              <input id="default-package-length-in" aria-label="Length (in)" type="number" step="0.01" min="0" className="input" value={form.default_package_length_in ?? ''} onChange={(e) => update('default_package_length_in', e.target.value)} />
             </div>
             <div>
               <label htmlFor="default-package-width-in" className="text-xs text-surface-600">Width (in)</label>
-              <input id="default-package-width-in" type="number" step="0.01" min="0" className="input" value={form.default_package_width_in ?? ''} onChange={(e) => update('default_package_width_in', e.target.value)} />
+              <input id="default-package-width-in" aria-label="Width (in)" type="number" step="0.01" min="0" className="input" value={form.default_package_width_in ?? ''} onChange={(e) => update('default_package_width_in', e.target.value)} />
             </div>
             <div>
               <label htmlFor="default-package-height-in" className="text-xs text-surface-600">Height (in)</label>
-              <input id="default-package-height-in" type="number" step="0.01" min="0" className="input" value={form.default_package_height_in ?? ''} onChange={(e) => update('default_package_height_in', e.target.value)} />
+              <input id="default-package-height-in" aria-label="Height (in)" type="number" step="0.01" min="0" className="input" value={form.default_package_height_in ?? ''} onChange={(e) => update('default_package_height_in', e.target.value)} />
             </div>
           </div>
         </div>

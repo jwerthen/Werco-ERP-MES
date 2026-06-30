@@ -203,6 +203,7 @@ function EditableField({
                 onKeyDown={e => { if (e.key === 'Escape') onCancel(); }}
                 className="input text-sm py-1 px-2 w-48"
                 rows={2}
+                aria-label={`Edit ${label}`}
                 autoFocus
               />
             ) : (
@@ -213,6 +214,7 @@ function EditableField({
                 onKeyDown={e => onKeyDown(e, field)}
                 className="input text-sm py-1 px-2 w-48"
                 step={inputType === 'number' ? '0.01' : undefined}
+                aria-label={`Edit ${label}`}
                 autoFocus
               />
             )}

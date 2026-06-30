@@ -668,6 +668,7 @@ export default function Purchasing() {
               onChange={(e) => setPoSearch(e.target.value)}
               className="input max-w-sm"
               placeholder="Search by PO # or vendor..."
+              aria-label="Search purchase orders"
             />
           </div>
           <DataTable
@@ -835,6 +836,7 @@ export default function Purchasing() {
                         className="input text-sm"
                         min={1}
                         required
+                        aria-label="Quantity ordered"
                       />
                     </div>
                     <div className="w-28">
@@ -846,6 +848,7 @@ export default function Purchasing() {
                         step={0.01}
                         min={0}
                         required
+                        aria-label="Unit price"
                       />
                     </div>
                     <button type="button" onClick={() => removePOLine(idx)} className="text-red-500 hover:text-red-400 mt-2">
@@ -962,6 +965,7 @@ export default function Purchasing() {
                     checked={newVendor.is_approved}
                     onChange={(e) => setNewVendor({ ...newVendor, is_approved: e.target.checked })}
                     className="mr-2"
+                    aria-label="Approved Vendor"
                   />
                   <span>Approved Vendor</span>
                 </label>
@@ -1137,6 +1141,7 @@ export default function Purchasing() {
                     checked={editVendorForm.is_approved}
                     onChange={(e) => setEditVendorForm({ ...editVendorForm, is_approved: e.target.checked })}
                     className="rounded border-slate-600"
+                    aria-label="Approved Vendor"
                   />
                   <span>Approved Vendor</span>
                 </label>
@@ -1146,6 +1151,7 @@ export default function Purchasing() {
                     checked={editVendorForm.is_active}
                     onChange={(e) => setEditVendorForm({ ...editVendorForm, is_active: e.target.checked })}
                     className="rounded border-slate-600"
+                    aria-label="Active"
                   />
                   <span>Active</span>
                 </label>
@@ -1158,6 +1164,7 @@ export default function Purchasing() {
                     checked={editVendorForm.is_as9100_certified}
                     onChange={(e) => setEditVendorForm({ ...editVendorForm, is_as9100_certified: e.target.checked })}
                     className="rounded border-slate-600"
+                    aria-label="AS9100D Certified"
                   />
                   <span>AS9100D Certified</span>
                 </label>
@@ -1167,6 +1174,7 @@ export default function Purchasing() {
                     checked={editVendorForm.is_iso9001_certified}
                     onChange={(e) => setEditVendorForm({ ...editVendorForm, is_iso9001_certified: e.target.checked })}
                     className="rounded border-slate-600"
+                    aria-label="ISO 9001 Certified"
                   />
                   <span>ISO 9001 Certified</span>
                 </label>
@@ -1204,6 +1212,7 @@ export default function Purchasing() {
                   onChange={(e) => setVendorDocForm({ ...vendorDocForm, title: e.target.value })}
                   className="input md:col-span-2"
                   placeholder="Title"
+                  aria-label="Document title"
                 />
                 <select
                   value={vendorDocForm.document_type}
@@ -1224,11 +1233,13 @@ export default function Purchasing() {
                   onChange={(e) => setVendorDocForm({ ...vendorDocForm, revision: e.target.value })}
                   className="input md:col-span-1"
                   placeholder="Rev"
+                  aria-label="Document revision"
                 />
                 <input
                   type="file"
                   onChange={(e) => setVendorDocForm({ ...vendorDocForm, file: e.target.files?.[0] || null })}
                   className="input md:col-span-1"
+                  aria-label="Document file"
                 />
                 <Button type="submit" className="md:col-span-1">Upload</Button>
                 <input
@@ -1237,6 +1248,7 @@ export default function Purchasing() {
                   onChange={(e) => setVendorDocForm({ ...vendorDocForm, description: e.target.value })}
                   className="input md:col-span-6"
                   placeholder="Description (optional)"
+                  aria-label="Document description"
                 />
               </form>
 
@@ -1272,7 +1284,7 @@ export default function Purchasing() {
                             <div className="text-xs text-slate-400">{formatFileSize(doc.file_size)}</div>
                           </td>
                           <td className="px-3 py-2 text-sm">{formatCentralDate(doc.created_at)}</td>
-                          <td className="px-3 py-2 text-right">
+                          <td className="px-3 py-2 text-right" aria-label="Document actions">
                             <div className="flex justify-end gap-2">
                               <button
                                 type="button"

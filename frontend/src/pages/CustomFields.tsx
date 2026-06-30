@@ -492,6 +492,7 @@ export default function CustomFieldsPage() {
                       checked={formData.is_required}
                       onChange={(e) => setFormData({ ...formData, is_required: e.target.checked })}
                       className="mr-2"
+                      aria-label="Required"
                     />
                     <span className="text-sm">Required</span>
                   </label>
@@ -501,6 +502,7 @@ export default function CustomFieldsPage() {
                       checked={formData.show_in_list}
                       onChange={(e) => setFormData({ ...formData, show_in_list: e.target.checked })}
                       className="mr-2"
+                      aria-label="Show in List View"
                     />
                     <span className="text-sm">Show in List View</span>
                   </label>
@@ -510,6 +512,7 @@ export default function CustomFieldsPage() {
                       checked={formData.show_in_filter}
                       onChange={(e) => setFormData({ ...formData, show_in_filter: e.target.checked })}
                       className="mr-2"
+                      aria-label="Enable Filtering"
                     />
                     <span className="text-sm">Enable Filtering</span>
                   </label>

@@ -517,6 +517,7 @@ export default function Users() {
             checked={showInactive}
             onChange={(e) => setShowInactive(e.target.checked)}
             className="mr-2 rounded border-slate-600"
+            aria-label="Show inactive users"
           />
           <span className="text-sm text-slate-300">Show inactive users</span>
         </label>

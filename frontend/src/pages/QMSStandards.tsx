@@ -310,6 +310,7 @@ export default function QMSStandards() {
               <input
                 type="file"
                 accept=".pdf"
+                aria-label="Upload PDF"
                 className="hidden"
                 onChange={handlePdfUpload}
                 disabled={uploading}
@@ -498,6 +499,7 @@ export default function QMSStandards() {
                   <input
                     type="file"
                     accept=".pdf"
+                    aria-label="Upload quality manual PDF"
                     className="hidden"
                     onChange={handlePdfUpload}
                     disabled={uploading}
@@ -780,6 +782,7 @@ export default function QMSStandards() {
               className="textarea textarea-bordered w-full font-mono text-sm"
               rows={12}
               placeholder="Paste clauses here..."
+              aria-label="Bulk clause import data"
               value={bulkText}
               onChange={e => setBulkText(e.target.value)}
             />

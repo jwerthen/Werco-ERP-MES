@@ -310,6 +310,7 @@ export default function AuditLog() {
                 onKeyDown={(e) => e.key === 'Enter' && applyFilters()}
                 className="input pl-10"
                 placeholder="Search description, user..."
+                aria-label="Search audit log"
               />
             </div>
           </div>

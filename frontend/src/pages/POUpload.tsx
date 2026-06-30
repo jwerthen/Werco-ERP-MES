@@ -473,6 +473,7 @@ export default function POUpload() {
                   <span className="btn-primary cursor-pointer">Browse Files</span>
                   <input
                     type="file"
+                    aria-label="Browse files"
                     accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                     onChange={handleFileSelect}
                     className="hidden"
@@ -723,6 +724,7 @@ export default function POUpload() {
                 <div className="relative">
                   <input
                     type="text"
+                    aria-label="Search vendors"
                     value={vendorSearch}
                     onChange={(e) => setVendorSearch(e.target.value)}
                     placeholder="Search vendors..."
@@ -944,6 +946,7 @@ export default function POUpload() {
                           <label className="flex items-center gap-1.5 cursor-pointer">
                             <input
                               type="radio"
+                              aria-label="Purchased Part"
                               name={`part-type-${idx}`}
                               checked={item.new_part_type === 'purchased'}
                               onChange={() => setPartType(idx, 'purchased')}
@@ -954,6 +957,7 @@ export default function POUpload() {
                           <label className="flex items-center gap-1.5 cursor-pointer">
                             <input
                               type="radio"
+                              aria-label="Raw Material"
                               name={`part-type-${idx}`}
                               checked={item.new_part_type === 'raw_material'}
                               onChange={() => setPartType(idx, 'raw_material')}
@@ -964,6 +968,7 @@ export default function POUpload() {
                           <label className="flex items-center gap-1.5 cursor-pointer">
                             <input
                               type="radio"
+                              aria-label="Hardware"
                               name={`part-type-${idx}`}
                               checked={item.new_part_type === 'hardware'}
                               onChange={() => setPartType(idx, 'hardware')}
@@ -974,6 +979,7 @@ export default function POUpload() {
                           <label className="flex items-center gap-1.5 cursor-pointer">
                             <input
                               type="radio"
+                              aria-label="Consumable"
                               name={`part-type-${idx}`}
                               checked={item.new_part_type === 'consumable'}
                               onChange={() => setPartType(idx, 'consumable')}
@@ -1009,6 +1015,7 @@ export default function POUpload() {
                         <div className="relative">
                           <input
                             type="text"
+                            aria-label="Search parts"
                             value={partSearches[idx] || ''}
                             onChange={(e) => searchParts(idx, e.target.value)}
                             placeholder="Search parts..."
@@ -1073,6 +1080,7 @@ export default function POUpload() {
               onChange={(e) => setFormData({ ...formData, notes: e.target.value })}
               className="input w-full"
               rows={3}
+              aria-label="Notes"
               placeholder="Additional notes..."
             />
           </div>
