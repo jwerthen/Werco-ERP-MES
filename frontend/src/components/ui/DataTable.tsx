@@ -68,6 +68,15 @@ export interface DataTableServerPagination {
   onPageChange: (page: number) => void;
 }
 
+export interface DataTableGroupBy<T> {
+  /** Group key for a row, e.g. `(wc) => wc.work_center_type`. */
+  key: (row: T) => string;
+  /** Curated group order; groups not listed fall after, alphabetically. */
+  order?: string[];
+  /** Group-header cell content (label + count). Defaults to a humanized key + count. */
+  header?: (groupKey: string, rows: T[]) => React.ReactNode;
+}
+
 export interface DataTableProps<T> {
   columns: Array<DataTableColumn<T>>;
   data: T[];
@@ -81,6 +90,14 @@ export interface DataTableProps<T> {
   /** Client-side page size. Ignored when `serverPagination` is set. */
   pageSize?: number;
   serverPagination?: DataTableServerPagination;
+  /**
+   * Partition rows into ordered groups, each preceded by a full-width section
+   * header row. Sorting applies WITHIN each group (group order stays fixed) and
+   * client pagination is disabled (all groups render). Not combinable with
+   * `serverPagination`. When set with `mobileCards`, each group renders as a
+   * mobile section with the same header. CSV exports all rows flat.
+   */
+  groupBy?: DataTableGroupBy<T>;
   selection?: DataTableSelection;
   bulkActions?: React.ReactNode;
   csvExport?: { filename: string };
@@ -89,6 +106,8 @@ export interface DataTableProps<T> {
   className?: string;
   /** Render a row as a mobile card below the md breakpoint instead of scrolling the table. */
   mobileCards?: (row: T) => React.ReactNode;
+  /** Optional extra classes per row (the <tr>), e.g. to dim inactive/soft-deleted rows. */
+  rowClassName?: (row: T) => string;
 }
 
 const alignClass: Record<ColumnAlign, string> = {
@@ -123,6 +142,57 @@ function csvCellValue<T>(col: DataTableColumn<T>, row: T): string | number {
   return '';
 }
 
+/**
+ * Partition rows into ordered groups for `groupBy`.
+ * Groups listed in `order` come first in that order; any leftover groups follow
+ * alphabetically. Row order within each group is preserved from `rows`.
+ */
+export function partitionGroups<T>(
+  rows: T[],
+  keyOf: (row: T) => string,
+  order?: string[]
+): Array<{ key: string; rows: T[] }> {
+  const byKey = new Map<string, T[]>();
+  rows.forEach((row) => {
+    const k = keyOf(row);
+    const bucket = byKey.get(k);
+    if (bucket) bucket.push(row);
+    else byKey.set(k, [row]);
+  });
+
+  const orderedKeys: string[] = [];
+  const seen = new Set<string>();
+  (order ?? []).forEach((k) => {
+    if (byKey.has(k) && !seen.has(k)) {
+      orderedKeys.push(k);
+      seen.add(k);
+    }
+  });
+  const leftover = Array.from(byKey.keys())
+    .filter((k) => !seen.has(k))
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
+
+  return [...orderedKeys, ...leftover].map((k) => ({ key: k, rows: byKey.get(k)! }));
+}
+
+/** Title-case a snake/lower group key for labels + aria. */
+function humanizeGroupKey(key: string): string {
+  return key.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+/** Default group-header content: humanized key + a row count. */
+function defaultGroupHeader(groupKey: string, rows: unknown[]): React.ReactNode {
+  const label = humanizeGroupKey(groupKey);
+  return (
+    <span className="inline-flex items-center gap-2">
+      <span>{label}</span>
+      <span className="text-fd-mute tabular-nums">
+        {rows.length} row{rows.length !== 1 ? 's' : ''}
+      </span>
+    </span>
+  );
+}
+
 export function buildCsv<T>(columns: Array<DataTableColumn<T>>, rows: T[]): string {
   const exportable = columns.filter((c) => c.csv || c.accessor);
   const headerLine = exportable
@@ -146,6 +216,7 @@ export function DataTable<T>({
   defaultSort,
   pageSize,
   serverPagination,
+  groupBy,
   selection,
   bulkActions,
   csvExport,
@@ -153,6 +224,7 @@ export function DataTable<T>({
   dense = false,
   className = '',
   mobileCards,
+  rowClassName,
 }: DataTableProps<T>) {
   const [sort, setSort] = useState<{ key: string; dir: SortDir } | null>(
     defaultSort ?? null
@@ -165,22 +237,44 @@ export function DataTable<T>({
     return map;
   }, [columns]);
 
+  // Pure sort applied to an arbitrary row set (never mutates its input).
+  const sortRows = useCallback(
+    (rows: T[]): T[] => {
+      if (serverPagination || !sort) return rows;
+      const col = columnByKey.get(sort.key);
+      if (!col?.accessor) return rows;
+      const copy = [...rows];
+      copy.sort((a, b) => {
+        const cmp = compareValues(col.accessor!(a), col.accessor!(b));
+        return sort.dir === 'asc' ? cmp : -cmp;
+      });
+      return copy;
+    },
+    [serverPagination, sort, columnByKey]
+  );
+
+  // ---- Grouping (additive). When set, rows partition into ordered groups and
+  // sorting applies within each group; the group order itself stays fixed. ----
+  const groups = useMemo(() => {
+    if (!groupBy) return null;
+    return partitionGroups(data, groupBy.key, groupBy.order).map((g) => ({
+      ...g,
+      rows: sortRows(g.rows),
+    }));
+  }, [groupBy, data, sortRows]);
+
   // ---- Sorting (client only; server pagination disables it) ----
+  // When grouped, the flat sorted set is the group-ordered concatenation (used
+  // for CSV export and selection book-keeping); otherwise it's the plain sort.
   const sortedData = useMemo(() => {
-    if (serverPagination || !sort) return data;
-    const col = columnByKey.get(sort.key);
-    if (!col?.accessor) return data;
-    // Copy first — never mutate the data prop.
-    const copy = [...data];
-    copy.sort((a, b) => {
-      const cmp = compareValues(col.accessor!(a), col.accessor!(b));
-      return sort.dir === 'asc' ? cmp : -cmp;
-    });
-    return copy;
-  }, [data, sort, serverPagination, columnByKey]);
+    if (groups) return groups.flatMap((g) => g.rows);
+    return sortRows(data);
+  }, [groups, sortRows, data]);
 
   // ---- Pagination ----
-  const usingClientPagination = !serverPagination && !!pageSize && pageSize > 0;
+  // Grouping renders all groups; client pagination is disabled when grouped.
+  const usingClientPagination =
+    !serverPagination && !groupBy && !!pageSize && pageSize > 0;
   const totalRows = sortedData.length;
   const totalPages = usingClientPagination
     ? Math.max(1, Math.ceil(totalRows / (pageSize as number)))
@@ -199,7 +293,7 @@ export function DataTable<T>({
     return sortedData.slice(start, start + (pageSize as number));
   }, [usingClientPagination, sortedData, safeClientPage, pageSize]);
 
-  const visibleRows = serverPagination ? data : pagedData;
+  const visibleRows = serverPagination ? data : groups ? sortedData : pagedData;
 
   const handleSort = useCallback(
     (key: string) => {
@@ -396,50 +490,82 @@ export function DataTable<T>({
     );
   };
 
-  const renderBody = () => (
-    <tbody>
-      {visibleRows.map((row) => {
-        const key = rowKey(row);
-        const selected = !!selection && selection.selectedKeys.has(key);
-        return (
-          <tr
-            key={key}
-            onClick={onRowClick ? () => onRowClick(row) : undefined}
-            className={`${onRowClick ? 'cursor-pointer' : ''} ${
-              selected ? 'bg-werco-navy-600/10' : ''
+  // Total rendered columns (selection checkbox + data columns) — for group-header colSpan.
+  const totalCols = columns.length + (selection ? 1 : 0);
+
+  const renderRow = (row: T) => {
+    const key = rowKey(row);
+    const selected = !!selection && selection.selectedKeys.has(key);
+    return (
+      <tr
+        key={key}
+        onClick={onRowClick ? () => onRowClick(row) : undefined}
+        className={`${onRowClick ? 'cursor-pointer' : ''} ${
+          selected ? 'bg-werco-navy-600/10' : ''
+        } ${rowClassName ? rowClassName(row) : ''}`}
+      >
+        {selection && (
+          <td className={cellPad} onClick={(e) => e.stopPropagation()}>
+            <input
+              type="checkbox"
+              className="checkbox"
+              aria-label={`Select row ${key}`}
+              checked={selected}
+              onChange={() => toggleRow(key)}
+            />
+          </td>
+        )}
+        {columns.map((col) => (
+          <td
+            key={col.key}
+            className={`${cellPad} text-sm ${alignClass[col.align ?? 'left']} ${
+              col.className ?? ''
             }`}
+            style={{ borderBottom: '1px solid var(--fd-line)' }}
           >
-            {selection && (
-              <td className={cellPad} onClick={(e) => e.stopPropagation()}>
-                <input
-                  type="checkbox"
-                  className="checkbox"
-                  aria-label={`Select row ${key}`}
-                  checked={selected}
-                  onChange={() => toggleRow(key)}
-                />
-              </td>
-            )}
-            {columns.map((col) => (
-              <td
-                key={col.key}
-                className={`${cellPad} text-sm ${alignClass[col.align ?? 'left']} ${
-                  col.className ?? ''
-                }`}
-                style={{ borderBottom: '1px solid var(--fd-line)' }}
-              >
-                {col.render
-                  ? col.render(row)
-                  : col.accessor
-                  ? col.accessor(row)
-                  : null}
-              </td>
-            ))}
-          </tr>
-        );
-      })}
-    </tbody>
+            {col.render
+              ? col.render(row)
+              : col.accessor
+              ? col.accessor(row)
+              : null}
+          </td>
+        ))}
+      </tr>
+    );
+  };
+
+  const renderGroupHeaderRow = (groupKey: string, groupRows: T[]) => (
+    <tr key={`__group-${groupKey}`} className="bg-slate-800/40" data-testid="group-header">
+      <td
+        colSpan={totalCols}
+        className={`${headPad} font-mono uppercase text-fd-mute`}
+        style={{
+          fontSize: '0.68rem',
+          letterSpacing: '0.1em',
+          borderTop: '1px solid var(--fd-line)',
+          borderBottom: '1px solid var(--fd-line)',
+        }}
+      >
+        {groupBy?.header
+          ? groupBy.header(groupKey, groupRows)
+          : defaultGroupHeader(groupKey, groupRows)}
+      </td>
+    </tr>
   );
+
+  const renderBody = () =>
+    groups ? (
+      <tbody>
+        {groups.map((g) => (
+          <React.Fragment key={`group-${g.key}`}>
+            {renderGroupHeaderRow(g.key, g.rows)}
+            {g.rows.map((row) => renderRow(row))}
+          </React.Fragment>
+        ))}
+      </tbody>
+    ) : (
+      <tbody>{visibleRows.map((row) => renderRow(row))}</tbody>
+    );
 
   // ---- Pagination footer ----
   let footer: React.ReactNode = null;
@@ -530,6 +656,27 @@ export function DataTable<T>({
           description={empty.description}
           action={empty.action}
         />
+      ) : groups ? (
+        <div className="space-y-4">
+          {groups.map((g) => (
+            <section key={`group-${g.key}`} aria-label={humanizeGroupKey(g.key)}>
+              <div
+                className="font-mono uppercase text-fd-mute mb-2 pb-1 border-b border-fd-line"
+                style={{ fontSize: '0.68rem', letterSpacing: '0.1em' }}
+                data-testid="group-header-mobile"
+              >
+                {groupBy?.header
+                  ? groupBy.header(g.key, g.rows)
+                  : defaultGroupHeader(g.key, g.rows)}
+              </div>
+              <MobileDataList>
+                {g.rows.map((row) => (
+                  <React.Fragment key={rowKey(row)}>{mobileCards(row)}</React.Fragment>
+                ))}
+              </MobileDataList>
+            </section>
+          ))}
+        </div>
       ) : (
         <MobileDataList>
           {visibleRows.map((row) => (

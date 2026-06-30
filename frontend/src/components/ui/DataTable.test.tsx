@@ -12,7 +12,7 @@
 
 import React from 'react';
 import { render, screen, fireEvent, within } from '@testing-library/react';
-import { DataTable, DataTableColumn, buildCsv } from './DataTable';
+import { DataTable, DataTableColumn, buildCsv, partitionGroups } from './DataTable';
 
 interface Row {
   id: number;
@@ -368,5 +368,369 @@ describe('DataTable — server pagination', () => {
     expect(screen.getByText('51–52')).toBeInTheDocument();
     // Server mode has no client total, so no "of N".
     expect(screen.queryByText(/of\s*\d/)).not.toBeInTheDocument();
+  });
+});
+
+describe('DataTable — groupBy', () => {
+  // groupBy is strictly additive: rows partition into ordered groups, each
+  // preceded by a full-width section-header row; sorting applies WITHIN each
+  // group while the group order itself stays fixed; client pagination is off.
+  interface GRow {
+    id: number;
+    type: string;
+    name: string;
+    qty: number;
+  }
+
+  const grouped: GRow[] = [
+    { id: 1, type: 'welding', name: 'Charlie', qty: 30 },
+    { id: 2, type: 'laser', name: 'Delta', qty: 5 },
+    { id: 3, type: 'welding', name: 'Alpha', qty: 20 },
+    { id: 4, type: 'laser', name: 'Bravo', qty: 15 },
+  ];
+
+  const gColumns: Array<DataTableColumn<GRow>> = [
+    { key: 'name', header: 'Name', accessor: (r) => r.name, sortable: true },
+    { key: 'qty', header: 'Qty', accessor: (r) => r.qty, sortable: true, align: 'right' },
+  ];
+
+  // Returns the table's body rows split into the group headers (colSpan rows)
+  // and the data-row first-cell texts, IN DOM ORDER.
+  function getGroupedLayout(): Array<{ group?: string } | { row: string }> {
+    const table = screen.getByTestId('data-table');
+    const bodyRows = within(table).getAllByRole('row').slice(1); // drop the sort header
+    return bodyRows.map((tr) => {
+      const headerCell = tr.querySelector('td[colspan]');
+      if (headerCell) return { group: headerCell.textContent || '' };
+      const firstCell = within(tr).getAllByRole('cell')[0];
+      return { row: firstCell.textContent || '' };
+    });
+  }
+
+  it('group-header colSpan spans every rendered column', () => {
+    render(
+      <DataTable
+        columns={gColumns}
+        data={grouped}
+        rowKey={(r) => r.id}
+        groupBy={{ key: (r) => r.type, order: ['laser', 'welding'] }}
+      />
+    );
+    // Two data columns, no selection → colSpan must equal 2 so the header rule
+    // runs the full table width.
+    screen.getAllByTestId('group-header').forEach((tr) => {
+      const cell = tr.querySelector('td[colspan]') as HTMLTableCellElement;
+      expect(cell).not.toBeNull();
+      expect(cell.colSpan).toBe(gColumns.length);
+    });
+  });
+
+  it('group-header colSpan includes the selection checkbox column when selectable', () => {
+    function Harness() {
+      const [keys, setKeys] = React.useState<Set<string | number>>(new Set());
+      return (
+        <DataTable
+          columns={gColumns}
+          data={grouped}
+          rowKey={(r) => r.id}
+          groupBy={{ key: (r) => r.type, order: ['laser', 'welding'] }}
+          selection={{ selectedKeys: keys, onChange: setKeys }}
+        />
+      );
+    }
+    render(<Harness />);
+    // Selection adds a leading checkbox <th>/<td>, so the header must span
+    // columns.length + 1 to stay flush with the body rows.
+    screen.getAllByTestId('group-header').forEach((tr) => {
+      const cell = tr.querySelector('td[colspan]') as HTMLTableCellElement;
+      expect(cell.colSpan).toBe(gColumns.length + 1);
+    });
+  });
+
+  it('renders groups in the curated order with header rows + counts', () => {
+    render(
+      <DataTable
+        columns={gColumns}
+        data={grouped}
+        rowKey={(r) => r.id}
+        groupBy={{ key: (r) => r.type, order: ['laser', 'welding'] }}
+      />
+    );
+
+    const layout = getGroupedLayout();
+    // laser group first (curated order), with 2 rows, then welding with 2 rows.
+    expect(layout[0]).toEqual({ group: expect.stringContaining('Laser') });
+    expect(layout[0]).toEqual({ group: expect.stringContaining('2 rows') });
+    // laser rows (source order within group: Delta, Bravo)
+    expect(layout[1]).toEqual({ row: 'Delta' });
+    expect(layout[2]).toEqual({ row: 'Bravo' });
+    expect(layout[3]).toEqual({ group: expect.stringContaining('Welding') });
+    expect(layout[4]).toEqual({ row: 'Charlie' });
+    expect(layout[5]).toEqual({ row: 'Alpha' });
+
+    // Exactly two group-header rows render.
+    expect(screen.getAllByTestId('group-header')).toHaveLength(2);
+  });
+
+  it('places groups not listed in `order` after the listed ones, alphabetically', () => {
+    const withExtra: GRow[] = [
+      ...grouped,
+      { id: 5, type: 'assembly', name: 'Echo', qty: 1 },
+      { id: 6, type: 'paint', name: 'Foxtrot', qty: 2 },
+    ];
+    render(
+      <DataTable
+        columns={gColumns}
+        data={withExtra}
+        rowKey={(r) => r.id}
+        // Only welding curated; assembly/laser/paint fall after, alphabetically.
+        groupBy={{ key: (r) => r.type, order: ['welding'] }}
+      />
+    );
+    const headers = screen
+      .getAllByTestId('group-header')
+      .map((tr) => tr.textContent || '');
+    expect(headers[0]).toContain('Welding');
+    expect(headers[1]).toContain('Assembly');
+    expect(headers[2]).toContain('Laser');
+    expect(headers[3]).toContain('Paint');
+  });
+
+  it('sorts WITHIN each group, keeping the group order fixed', () => {
+    render(
+      <DataTable
+        columns={gColumns}
+        data={grouped}
+        rowKey={(r) => r.id}
+        groupBy={{ key: (r) => r.type, order: ['laser', 'welding'] }}
+      />
+    );
+
+    // Sort by Name asc.
+    fireEvent.click(screen.getByRole('button', { name: /Name/i }));
+    const layout = getGroupedLayout();
+
+    // Group order unchanged (laser then welding); rows sorted A→Z inside each.
+    expect(layout[0]).toEqual({ group: expect.stringContaining('Laser') });
+    expect(layout[1]).toEqual({ row: 'Bravo' }); // laser: Bravo < Delta
+    expect(layout[2]).toEqual({ row: 'Delta' });
+    expect(layout[3]).toEqual({ group: expect.stringContaining('Welding') });
+    expect(layout[4]).toEqual({ row: 'Alpha' }); // welding: Alpha < Charlie
+    expect(layout[5]).toEqual({ row: 'Charlie' });
+
+    // Sort desc → within-group order flips, group order still fixed.
+    fireEvent.click(screen.getByRole('button', { name: /Name/i }));
+    const desc = getGroupedLayout();
+    expect(desc[0]).toEqual({ group: expect.stringContaining('Laser') });
+    expect(desc[1]).toEqual({ row: 'Delta' });
+    expect(desc[2]).toEqual({ row: 'Bravo' });
+    expect(desc[3]).toEqual({ group: expect.stringContaining('Welding') });
+    expect(desc[4]).toEqual({ row: 'Charlie' });
+    expect(desc[5]).toEqual({ row: 'Alpha' });
+  });
+
+  it('does not mutate the data prop when grouped + sorted', () => {
+    const snapshot = grouped.map((r) => `${r.type}:${r.name}`);
+    render(
+      <DataTable
+        columns={gColumns}
+        data={grouped}
+        rowKey={(r) => r.id}
+        groupBy={{ key: (r) => r.type, order: ['laser', 'welding'] }}
+      />
+    );
+    fireEvent.click(screen.getByRole('button', { name: /Name/i }));
+    expect(grouped.map((r) => `${r.type}:${r.name}`)).toEqual(snapshot);
+  });
+
+  it('uses a custom `header` renderer when provided', () => {
+    render(
+      <DataTable
+        columns={gColumns}
+        data={grouped}
+        rowKey={(r) => r.id}
+        groupBy={{
+          key: (r) => r.type,
+          order: ['laser', 'welding'],
+          header: (k, rs) => `${k.toUpperCase()} — ${rs.length}`,
+        }}
+      />
+    );
+    const headers = screen.getAllByTestId('group-header').map((tr) => tr.textContent);
+    expect(headers[0]).toBe('LASER — 2');
+    expect(headers[1]).toBe('WELDING — 2');
+  });
+
+  it('disables client pagination when grouped (renders all groups)', () => {
+    const many: GRow[] = Array.from({ length: 8 }, (_, i) => ({
+      id: i + 1,
+      type: i % 2 === 0 ? 'laser' : 'welding',
+      name: `Row ${i + 1}`,
+      qty: i,
+    }));
+    render(
+      <DataTable
+        columns={gColumns}
+        data={many}
+        rowKey={(r) => r.id}
+        pageSize={2}
+        groupBy={{ key: (r) => r.type, order: ['laser', 'welding'] }}
+      />
+    );
+    // All 8 rows + 2 group headers render; no Prev/Next pagination footer.
+    expect(screen.getByText('Row 1')).toBeInTheDocument();
+    expect(screen.getByText('Row 8')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Next page' })).not.toBeInTheDocument();
+  });
+
+  it('exports ALL rows flat when grouped (group key naturally appears as a column)', () => {
+    const createSpy = jest.spyOn(URL, 'createObjectURL').mockReturnValue('blob:mock');
+    const revokeSpy = jest.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
+    const clickSpy = jest
+      .spyOn(HTMLAnchorElement.prototype, 'click')
+      .mockImplementation(() => {});
+    const csvCols: Array<DataTableColumn<GRow>> = [
+      { key: 'type', header: 'Type', accessor: (r) => r.type },
+      ...gColumns,
+    ];
+
+    render(
+      <DataTable
+        columns={csvCols}
+        data={grouped}
+        rowKey={(r) => r.id}
+        groupBy={{ key: (r) => r.type, order: ['laser', 'welding'] }}
+        csvExport={{ filename: 'grouped' }}
+      />
+    );
+    fireEvent.click(screen.getByRole('button', { name: /Export CSV/i }));
+    expect(createSpy).toHaveBeenCalledTimes(1);
+    expect(clickSpy).toHaveBeenCalledTimes(1);
+
+    createSpy.mockRestore();
+    revokeSpy.mockRestore();
+    clickSpy.mockRestore();
+  });
+
+  it('keeps selection + select-all working across groups', () => {
+    function Harness() {
+      const [keys, setKeys] = React.useState<Set<string | number>>(new Set());
+      return (
+        <DataTable
+          columns={gColumns}
+          data={grouped}
+          rowKey={(r) => r.id}
+          groupBy={{ key: (r) => r.type, order: ['laser', 'welding'] }}
+          selection={{ selectedKeys: keys, onChange: setKeys }}
+        />
+      );
+    }
+    render(<Harness />);
+    const selectAll = screen.getByLabelText('Select all rows') as HTMLInputElement;
+    fireEvent.click(selectAll);
+    // All four rows across both groups become selected.
+    [1, 2, 3, 4].forEach((id) => {
+      expect((screen.getByLabelText(`Select row ${id}`) as HTMLInputElement).checked).toBe(true);
+    });
+  });
+
+  it('renders EmptyState (not group headers) when grouped data is empty', () => {
+    render(
+      <DataTable
+        columns={gColumns}
+        data={[]}
+        rowKey={(r) => r.id}
+        groupBy={{ key: (r) => r.type, order: ['laser', 'welding'] }}
+        empty={{ title: 'No rows' }}
+      />
+    );
+    expect(screen.getByTestId('empty-state')).toBeInTheDocument();
+    expect(screen.queryByTestId('group-header')).not.toBeInTheDocument();
+  });
+
+  // ---- Regression guard: groupBy is purely additive. ----
+  // With groupBy OMITTED the table must behave EXACTLY as it did before the
+  // feature existed: no group-header rows, no full-width colSpan cells, rows in
+  // flat source order, and client pagination still slicing as usual. This is the
+  // contract that the feature didn't change the ungrouped code path.
+  it('renders identically to the pre-feature table when groupBy is undefined', () => {
+    render(
+      <DataTable columns={gColumns} data={grouped} rowKey={(r) => r.id} />
+    );
+
+    // No grouping chrome at all.
+    expect(screen.queryByTestId('group-header')).not.toBeInTheDocument();
+    const table = screen.getByTestId('data-table');
+    expect(table.querySelector('td[colspan]')).toBeNull();
+
+    // Every data row renders, in flat SOURCE order (no partitioning).
+    const layout = getGroupedLayout();
+    expect(layout).toEqual([
+      { row: 'Charlie' },
+      { row: 'Delta' },
+      { row: 'Alpha' },
+      { row: 'Bravo' },
+    ]);
+  });
+
+  it('still client-paginates (groupBy undefined) — grouping does not leak in', () => {
+    const many: GRow[] = Array.from({ length: 5 }, (_, i) => ({
+      id: i + 1,
+      type: i % 2 === 0 ? 'laser' : 'welding',
+      name: `Row ${i + 1}`,
+      qty: i,
+    }));
+    // Same data shape as the grouped pagination test, but WITHOUT groupBy:
+    // pageSize must take effect (only the first 2 rows render) and the Next
+    // button must exist — i.e. the ungrouped pagination path is unchanged.
+    render(
+      <DataTable columns={gColumns} data={many} rowKey={(r) => r.id} pageSize={2} />
+    );
+    expect(screen.getByText('Row 1')).toBeInTheDocument();
+    expect(screen.getByText('Row 2')).toBeInTheDocument();
+    expect(screen.queryByText('Row 3')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Next page' })).toBeInTheDocument();
+    expect(screen.queryByTestId('group-header')).not.toBeInTheDocument();
+  });
+});
+
+describe('partitionGroups', () => {
+  const rows = [
+    { t: 'b', n: 1 },
+    { t: 'a', n: 2 },
+    { t: 'c', n: 3 },
+    { t: 'a', n: 4 },
+  ];
+
+  it('orders by `order`, then leftover groups alphabetically, preserving row order', () => {
+    const groups = partitionGroups(rows, (r) => r.t, ['c']);
+    expect(groups.map((g) => g.key)).toEqual(['c', 'a', 'b']);
+    // `a` group preserves source row order (n:2 before n:4).
+    expect(groups[1].rows.map((r) => r.n)).toEqual([2, 4]);
+  });
+
+  it('falls back to all-alphabetical when no `order` is given', () => {
+    const groups = partitionGroups(rows, (r) => r.t);
+    expect(groups.map((g) => g.key)).toEqual(['a', 'b', 'c']);
+  });
+});
+
+describe('DataTable — rowClassName', () => {
+  it('applies per-row classes to the <tr> (and only where the predicate returns one)', () => {
+    render(
+      <DataTable
+        columns={columns}
+        data={rows}
+        rowKey={(r) => r.id}
+        rowClassName={(r) => (r.qty >= 20 ? 'opacity-60' : '')}
+      />
+    );
+    const table = screen.getByTestId('data-table');
+    const bodyRows = within(table).getAllByRole('row').slice(1);
+    // Charlie (30) and Bravo (20) dimmed; Alpha (10) not.
+    const byName = (name: string) => bodyRows.find((r) => within(r).queryByText(name));
+    expect(byName('Charlie')).toHaveClass('opacity-60');
+    expect(byName('Bravo')).toHaveClass('opacity-60');
+    expect(byName('Alpha')).not.toHaveClass('opacity-60');
   });
 });

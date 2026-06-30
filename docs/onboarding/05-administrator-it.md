@@ -99,7 +99,7 @@ A work center is a machine or station where work happens (a laser, a press brake
 
 > Heads up: You can't change a work center's **Code** after it's created — pick it carefully.
 
-Work centers are listed in a single sortable table — click any column header (Code/Name, Type, Rate, Capacity, Efficiency, Status) to sort, and use **Export CSV** to download the list. On a phone or tablet the table collapses to one card per work center. (On larger lists the table pages; use the controls at the bottom.)
+Work centers are listed in a single table, grouped into sections by **Type** (each section header shows the type and a count). Within each section you can sort — click a column header (Code, Name, Status, Rate/hr, Capacity, Efficiency) to reorder the rows in that section; the type sections themselves stay in their fixed order. Inactive (decommissioned) work centers stay in the list but appear dimmed. Use **Export CSV** to download the full list (including the Type column). On a phone or tablet the table collapses to one card per work center, with the same type section headers.
 
 ### Edit a work center
 Click the **pencil** icon on the work center's row (or card, on a phone/tablet), change the details, and click **Update**.
