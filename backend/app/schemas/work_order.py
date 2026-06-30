@@ -228,8 +228,32 @@ class WorkOrderOperationUpdate(BaseModel):
     status: Optional[OperationStatus] = None
     quantity_complete: Optional[Decimal] = Field(None, ge=Decimal("0"))
     quantity_scrapped: Optional[Decimal] = Field(None, ge=Decimal("0"))
+    # max_length matches the WorkOrderOperation.scrap_reason String(255) column (migration 055).
+    scrap_reason: Optional[str] = Field(
+        None,
+        max_length=255,
+        description="Reason for scrapped parts; required when quantity_scrapped > 0, ignored otherwise.",
+    )
     requires_inspection: Optional[bool] = None
     inspection_complete: Optional[bool] = None
+
+    @model_validator(mode="after")
+    def _require_scrap_reason(self) -> "WorkOrderOperationUpdate":
+        # AS9100D defect-traceability invariant (compliance, not cosmetics): any scrapped
+        # quantity MUST carry a reason. Enforced at the data boundary -- not just in the
+        # office/admin UIs -- so a scripted/API client can't record reasonless scrap.
+        # A blank/whitespace-only reason is treated as missing. Raised as a Pydantic
+        # ValueError -> FastAPI returns 422. quantity_scrapped is Optional on this partial
+        # update, so the ``is not None`` guard means an update that doesn't touch scrap is
+        # never forced to supply a reason. scrap == 0 with no reason stays valid; negatives
+        # are already rejected by the field's ge=0 constraint.
+        if (
+            self.quantity_scrapped is not None
+            and self.quantity_scrapped > 0
+            and not (self.scrap_reason and self.scrap_reason.strip())
+        ):
+            raise ValueError("scrap_reason is required when quantity_scrapped is greater than 0")
+        return self
 
 
 class WorkOrderOperationResponse(WorkOrderOperationBase):
@@ -331,6 +355,30 @@ class WorkOrderUpdate(BaseModel):
     special_instructions: Optional[str] = Field(None, max_length=2000)
     quantity_complete: Optional[Decimal] = Field(None, ge=Decimal("0"))
     quantity_scrapped: Optional[Decimal] = Field(None, ge=Decimal("0"))
+    # max_length matches the WorkOrder.scrap_reason String(255) column (migration 055).
+    scrap_reason: Optional[str] = Field(
+        None,
+        max_length=255,
+        description="Reason for scrapped parts; required when quantity_scrapped > 0, ignored otherwise.",
+    )
+
+    @model_validator(mode="after")
+    def _require_scrap_reason(self) -> "WorkOrderUpdate":
+        # AS9100D defect-traceability invariant (compliance, not cosmetics): any scrapped
+        # quantity MUST carry a reason. Enforced at the data boundary -- not just in the
+        # office/admin UIs -- so a scripted/API client can't record reasonless scrap.
+        # A blank/whitespace-only reason is treated as missing. Raised as a Pydantic
+        # ValueError -> FastAPI returns 422. quantity_scrapped is Optional on this partial
+        # update, so the ``is not None`` guard means an update that doesn't touch scrap is
+        # never forced to supply a reason. scrap == 0 with no reason stays valid; negatives
+        # are already rejected by the field's ge=0 constraint.
+        if (
+            self.quantity_scrapped is not None
+            and self.quantity_scrapped > 0
+            and not (self.scrap_reason and self.scrap_reason.strip())
+        ):
+            raise ValueError("scrap_reason is required when quantity_scrapped is greater than 0")
+        return self
 
 
 class WorkOrderResponse(WorkOrderBase):

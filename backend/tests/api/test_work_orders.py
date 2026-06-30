@@ -1765,7 +1765,7 @@ class TestWorkOrdersAPI:
         response = client.post(
             f"/api/v1/shop-floor/operations/{operation.id}/production",
             headers=operator_headers,
-            json={"quantity_complete_delta": 2, "quantity_scrapped_delta": 1},
+            json={"quantity_complete_delta": 2, "quantity_scrapped_delta": 1, "scrap_reason": "Material defect"},
         )
 
         assert response.status_code == status.HTTP_200_OK

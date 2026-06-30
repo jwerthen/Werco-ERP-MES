@@ -1,21 +1,24 @@
 /**
- * FEPERF-4 — WorkOrderDetail "Complete" button double-submit guard.
+ * FEPERF-4 — WorkOrderDetail "Complete" double-submit guard, plus the
+ * scrap-reason capture the backend now requires (HTTP 422 when scrap > 0).
  *
- * handleComplete now flips a `completing` state around the api.completeWorkOrder
- * call and early-returns if already in-flight; the header "Complete" button is
- * `disabled={completing}`. This test renders an in_progress work order, holds
- * api.completeWorkOrder on a pending promise, clicks Complete, and asserts the
- * button disables and a second click does NOT fire a second mutation until the
- * promise resolves.
+ * The completion flow no longer uses stacked prompt() dialogs: the header
+ * "Complete" button opens a CompleteWorkModal that collects qty complete + qty
+ * scrapped + a conditionally-required scrap reason, and the modal's own submit
+ * button fires api.completeWorkOrder (server-gated → non-optimistic). This test
+ * holds api.completeWorkOrder on a pending promise, submits the modal, and
+ * asserts the submit button disables and a second click does NOT fire a second
+ * mutation until the promise resolves. A second test confirms the entered
+ * quantities reach the API.
  *
  * The page is heavy (websocket, many secondary fetches) so all side-channels are
  * mocked. The component fixture has zero operations, which keeps exactly ONE
- * "Complete" button on screen (the work-order-level header button) — the unit
- * under test — without the per-row operation Complete buttons.
+ * header "Complete" button on screen (the work-order-level button that opens the
+ * modal) without the per-row operation Complete buttons.
  */
 
 import React from 'react';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import api from '../services/api';
 import WorkOrderDetail from './WorkOrderDetail';
@@ -86,9 +89,6 @@ function renderDetail() {
 }
 
 describe('FEPERF-4: WorkOrderDetail Complete double-submit guard', () => {
-  let promptSpy: jest.SpyInstance;
-  let alertSpy: jest.SpyInstance;
-
   beforeEach(() => {
     jest.clearAllMocks();
 
@@ -100,22 +100,17 @@ describe('FEPERF-4: WorkOrderDetail Complete double-submit guard', () => {
     mockedApi.getActiveUsers.mockResolvedValue([]);
     mockedApi.getUsers.mockResolvedValue([]);
     mockedApi.getDocuments.mockResolvedValue([]);
-
-    // handleComplete reads two quantities via prompt(); supply valid answers.
-    promptSpy = jest.spyOn(window, 'prompt').mockImplementation((message?: string) => {
-      // First prompt: quantity completed. Second: quantity scrapped.
-      if (message && message.includes('scrapped')) return '0';
-      return '10';
-    });
-    alertSpy = jest.spyOn(window, 'alert').mockImplementation(() => undefined);
   });
 
-  afterEach(() => {
-    promptSpy.mockRestore();
-    alertSpy.mockRestore();
-  });
+  // Opens the CompleteWorkModal from the header button and returns the dialog.
+  async function openCompleteModal() {
+    const headerButton = await screen.findByRole('button', { name: /^Complete$/ });
+    expect(headerButton).toBeEnabled();
+    fireEvent.click(headerButton);
+    return screen.findByRole('dialog');
+  }
 
-  it('disables the Complete button while the mutation is in flight and ignores a second click', async () => {
+  it('disables the modal submit while the mutation is in flight and ignores a second click', async () => {
     // Hold the mutation open so the in-flight state is observable.
     let resolveComplete!: (value: unknown) => void;
     mockedApi.completeWorkOrder.mockReturnValue(
@@ -126,40 +121,68 @@ describe('FEPERF-4: WorkOrderDetail Complete double-submit guard', () => {
 
     renderDetail();
 
-    // Wait for the in_progress header button to appear after the WO loads.
-    const completeButton = await screen.findByRole('button', { name: /^Complete$/ });
-    expect(completeButton).toBeEnabled();
+    const dialog = await openCompleteModal();
 
-    // First click kicks off the mutation.
-    fireEvent.click(completeButton);
+    // The modal's own submit fires the mutation (default qty = ordered, scrap 0).
+    const submit = within(dialog).getByRole('button', { name: /^Complete$/ });
+    fireEvent.click(submit);
 
-    // Button reflects the in-flight state and is disabled.
-    const inFlightButton = await screen.findByRole('button', { name: /Completing/i });
+    // Submit reflects the in-flight state and is disabled.
+    const inFlightButton = await within(dialog).findByRole('button', { name: /Completing/i });
     expect(inFlightButton).toBeDisabled();
     expect(mockedApi.completeWorkOrder).toHaveBeenCalledTimes(1);
 
-    // A second click while in-flight must NOT fire another mutation (button is
-    // disabled AND handleComplete early-returns on the `completing` guard).
+    // A second click while in-flight must NOT fire another mutation.
     fireEvent.click(inFlightButton);
     expect(mockedApi.completeWorkOrder).toHaveBeenCalledTimes(1);
 
-    // Resolving the promise releases the guard and re-enables the button.
     resolveComplete({ id: 42, status: 'complete' });
     await waitFor(() => {
       expect(mockedApi.completeWorkOrder).toHaveBeenCalledTimes(1);
     });
   });
 
-  it('passes the prompted quantities to api.completeWorkOrder', async () => {
+  it('passes the entered quantities to api.completeWorkOrder (no scrap → no reason)', async () => {
     mockedApi.completeWorkOrder.mockResolvedValue({ id: 42, status: 'complete' });
 
     renderDetail();
 
-    const completeButton = await screen.findByRole('button', { name: /^Complete$/ });
-    fireEvent.click(completeButton);
+    const dialog = await openCompleteModal();
+    fireEvent.click(within(dialog).getByRole('button', { name: /^Complete$/ }));
 
     await waitFor(() => {
-      expect(mockedApi.completeWorkOrder).toHaveBeenCalledWith(42, 10, 0);
+      // qty complete defaults to ordered (10), scrap 0, scrapReason undefined.
+      expect(mockedApi.completeWorkOrder).toHaveBeenCalledWith(42, 10, 0, undefined);
+    });
+  });
+
+  it('requires a scrap reason when scrap > 0 before the API can fire', async () => {
+    mockedApi.completeWorkOrder.mockResolvedValue({ id: 42, status: 'complete' });
+
+    renderDetail();
+
+    const dialog = await openCompleteModal();
+
+    // Enter a positive scrap quantity — the reason field appears and submit blocks.
+    const scrapInput = within(dialog).getByLabelText(/Quantity scrapped/i);
+    fireEvent.change(scrapInput, { target: { value: '2' } });
+
+    const submit = within(dialog).getByRole('button', { name: /^Complete$/ });
+    expect(submit).toBeDisabled(); // no reason chosen yet
+    fireEvent.click(submit);
+    expect(mockedApi.completeWorkOrder).not.toHaveBeenCalled();
+
+    // Choose a scrap reason from the SelectField, then submit succeeds. The
+    // SelectField commits a choice on mousedown (it preventDefaults to keep
+    // focus), so drive it with mouseDown rather than click.
+    fireEvent.click(within(dialog).getByRole('button', { name: /scrap reason/i }));
+    fireEvent.mouseDown(await screen.findByRole('option', { name: /Out of tolerance/i }));
+
+    await waitFor(() => expect(submit).toBeEnabled());
+    fireEvent.click(submit);
+
+    await waitFor(() => {
+      expect(mockedApi.completeWorkOrder).toHaveBeenCalledWith(42, 10, 2, 'Out of tolerance');
     });
   });
 });

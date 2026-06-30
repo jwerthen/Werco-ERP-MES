@@ -364,7 +364,7 @@ def test_clock_out_is_additive_and_floored_at_evidence(client: TestClient, db_se
     resp = client.post(
         f"/api/v1/shop-floor/clock-out/{entry.id}",
         headers=headers_for(operator),
-        json={"quantity_produced": 3, "quantity_scrapped": 2},
+        json={"quantity_produced": 3, "quantity_scrapped": 2, "scrap_reason": "Dimensional out of tolerance"},
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
 
@@ -426,7 +426,11 @@ def test_production_is_additive_and_floored_at_evidence(client: TestClient, db_s
     resp = client.post(
         f"/api/v1/shop-floor/operations/{op.id}/production",
         headers=headers_for(operator),
-        json={"quantity_complete_delta": 3, "quantity_scrapped_delta": 1},
+        json={
+            "quantity_complete_delta": 3,
+            "quantity_scrapped_delta": 1,
+            "scrap_reason": "Dimensional out of tolerance",
+        },
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
 

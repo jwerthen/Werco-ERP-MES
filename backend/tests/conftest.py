@@ -1,4 +1,5 @@
 import os
+import random
 from datetime import date, timedelta
 from typing import Generator
 
@@ -46,6 +47,40 @@ TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engin
 
 # Faker instance
 fake = Faker()
+
+
+def _fake_part_name() -> str:
+    """Generate a faker-driven part name that is always schema-valid.
+
+    ``PartBase.name`` (inherited by ``PartResponse``/``PartCreate``) requires
+    ``min_length=2``. Bare ``fake.word()`` returns a 1-character word (e.g. "a",
+    "I") ~0.2% of the time, which is genuinely invalid business data and makes
+    any test that round-trips a part through ``PartResponse`` flake with a
+    ``ResponseValidationError`` (or a 422 on POST). Appending " part" guarantees
+    the result is >= "i part" (6 chars) while preserving faker-driven variety.
+    """
+    return f"{fake.word()} part"
+
+
+@pytest.fixture(autouse=True)
+def _seed_random_fixture_data():
+    """Make all faker/random-driven fixture data deterministic per test.
+
+    There is otherwise no Faker/random seeding anywhere in the suite, so any
+    data-shape flake (e.g. a 1-char ``fake.word()``) surfaces as a ~1-in-500
+    ghost that vanishes on re-run. Seeding both Faker and the stdlib ``random``
+    module (used by ``part_factory`` via ``from random import choice``) before
+    each test turns such failures into deterministic, reproducible ones.
+
+    A constant seed is safe for within-test uniqueness: tables are dropped
+    between tests (``db_session``) and xdist uses per-worker SQLite DBs, so the
+    same generated values never collide across tests. Within a single test the
+    generators still advance normally, so multiple fixture calls stay distinct.
+    """
+    Faker.seed(0)
+    random.seed(0)
+    yield
+
 
 # Test password (hashed version of "TestPassword123!")
 TEST_PASSWORD = "TestPassword123!"
@@ -285,7 +320,7 @@ def test_part(db_session: Session) -> Part:
     """Create a test part."""
     part = Part(
         part_number=f"P-{fake.pyint(min_value=10000, max_value=99999)}",
-        name=fake.word(),
+        name=_fake_part_name(),
         description=fake.sentence(),
         part_type="manufactured",
         unit_of_measure="each",
@@ -344,7 +379,7 @@ def sample_part_data():
     """Return sample part data for API requests."""
     return {
         "part_number": f"P-{fake.pyint(min_value=10000, max_value=99999)}",
-        "name": fake.word(),
+        "name": _fake_part_name(),
         "description": fake.sentence(),
         "part_type": "manufactured",
         "unit_of_measure": "each",
@@ -414,7 +449,7 @@ def part_factory(db_session: Session):
     def create_part(part_number: str, name: str = None) -> Part:
         part = Part(
             part_number=part_number,
-            name=name or fake.word(),
+            name=name or _fake_part_name(),
             description=fake.sentence(),
             part_type=choice(["manufactured", "purchased"]),
             unit_of_measure="each",

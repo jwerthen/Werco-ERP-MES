@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.core.time_utils import to_utc_iso
 from app.models.time_entry import TimeEntrySource, TimeEntryType
@@ -53,6 +53,19 @@ class ClockOut(BaseModel):
         description="Adoption-telemetry channel of this clock-out write "
         "(kiosk | desktop | scanner | import | backfill). Omit to keep the channel recorded at clock-in.",
     )
+
+    @model_validator(mode="after")
+    def _require_scrap_reason(self) -> "ClockOut":
+        # AS9100D defect-traceability invariant (compliance, not cosmetics): any scrapped
+        # quantity MUST carry a reason. Enforced at the data boundary -- not just in the
+        # kiosk/desktop UIs -- so a scripted/API client can't record reasonless scrap.
+        # A blank/whitespace-only reason is treated as missing. Raised as a Pydantic
+        # ValueError -> FastAPI returns 422. scrap == 0 with no reason stays valid (the
+        # kiosk COMPLETE flow clocks out with zero scrap and no reason); negatives/NaN
+        # fall through to the handler's existing numeric guards.
+        if (self.quantity_scrapped or 0) > 0 and not (self.scrap_reason and self.scrap_reason.strip()):
+            raise ValueError("scrap_reason is required when quantity_scrapped is greater than 0")
+        return self
 
 
 class TimeEntryCreate(TimeEntryBase):

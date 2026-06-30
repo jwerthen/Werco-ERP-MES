@@ -782,10 +782,23 @@ class ApiService {
     return response.data;
   }
 
-  async completeWorkOrder(id: number, quantityComplete: number, quantityScrapped = 0) {
-    const response = await this.api.post(`/work-orders/${id}/complete`, null, {
-      params: { quantity_complete: quantityComplete, quantity_scrapped: quantityScrapped }
-    });
+  async completeWorkOrder(
+    id: number,
+    quantityComplete: number,
+    quantityScrapped = 0,
+    scrapReason?: string | null
+  ) {
+    // scrap_reason is required by the backend (HTTP 422) when scrap > 0 — an
+    // AS9100D defect-traceability rule. Only send it when there is scrap so the
+    // signature stays backward-compatible for the no-scrap path.
+    const params: Record<string, number | string> = {
+      quantity_complete: quantityComplete,
+      quantity_scrapped: quantityScrapped,
+    };
+    if (quantityScrapped > 0 && scrapReason) {
+      params.scrap_reason = scrapReason;
+    }
+    const response = await this.api.post(`/work-orders/${id}/complete`, null, { params });
     this.invalidateDashboardCache();
     return response.data;
   }
@@ -943,10 +956,23 @@ class ApiService {
     return response.data;
   }
 
-  async completeWOOperation(operationId: number, quantityComplete: number, quantityScrapped = 0) {
-    const response = await this.api.post(`/work-orders/operations/${operationId}/complete`, null, {
-      params: { quantity_complete: quantityComplete, quantity_scrapped: quantityScrapped }
-    });
+  async completeWOOperation(
+    operationId: number,
+    quantityComplete: number,
+    quantityScrapped = 0,
+    scrapReason?: string | null
+  ) {
+    // scrap_reason is required by the backend (HTTP 422) when scrap > 0 — an
+    // AS9100D defect-traceability rule. Only send it when there is scrap so the
+    // signature stays backward-compatible for the no-scrap path.
+    const params: Record<string, number | string> = {
+      quantity_complete: quantityComplete,
+      quantity_scrapped: quantityScrapped,
+    };
+    if (quantityScrapped > 0 && scrapReason) {
+      params.scrap_reason = scrapReason;
+    }
+    const response = await this.api.post(`/work-orders/operations/${operationId}/complete`, null, { params });
     this.invalidateDashboardCache();
     return response.data;
   }
