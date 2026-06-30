@@ -1,4 +1,5 @@
 import pytest
+from faker import Faker
 from fastapi import status
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
@@ -225,6 +226,58 @@ class TestPartsAPI:
         part_numbers = {part["part_number"] for part in response.json()}
         assert assembly.part_number in part_numbers
         assert component.part_number in part_numbers
+
+
+@pytest.mark.api
+@pytest.mark.requires_db
+class TestPartFixtureNameValidity:
+    """Regression guard for the random-fixture-data flake.
+
+    Bare ``fake.word()`` returns a 1-character word (e.g. "a", "I") ~0.2% of the
+    time. The ``test_part`` fixture builds a ``Part`` directly via the SQLAlchemy
+    model (no Pydantic validation), but ``GET /api/v1/parts/{id}`` serializes the
+    row back through ``PartResponse`` whose ``name`` field requires
+    ``min_length=2`` -- so a 1-char name made the endpoint raise
+    ``ResponseValidationError`` (a 500) intermittently in CI. The seeds below all
+    previously produced a 1-char ``fake.word()`` for the fixture's call sequence
+    (pyint -> word); 335 is the seed from the original CI investigation.
+
+    These tests re-seed Faker *inside* the test (overriding the autouse
+    determinism guard for this body) to force the historically-bad data shape,
+    proving the fixture now always yields a schema-valid name.
+    """
+
+    BAD_WORD_SEEDS = [335, 475, 521, 1074, 1496]
+
+    @pytest.mark.parametrize("seed", BAD_WORD_SEEDS)
+    def test_test_part_fixture_name_is_schema_valid(self, seed: int, request: pytest.FixtureRequest):
+        """The test_part fixture name is always >= 2 chars, even under bad seeds."""
+        Faker.seed(seed)
+        part = request.getfixturevalue("test_part")
+        assert len(part.name) >= 2, f"seed {seed} produced too-short part name {part.name!r}"
+
+    @pytest.mark.parametrize("seed", BAD_WORD_SEEDS)
+    def test_get_part_by_id_returns_200_under_bad_seed(
+        self, seed: int, client: TestClient, auth_headers: dict, request: pytest.FixtureRequest
+    ):
+        """GET /parts/{id} round-trips through PartResponse without a 500 under bad seeds."""
+        Faker.seed(seed)
+        part = request.getfixturevalue("test_part")
+        response = client.get(f"/api/v1/parts/{part.id}", headers=auth_headers)
+        assert response.status_code == status.HTTP_200_OK, response.text
+        data = response.json()
+        assert data["id"] == part.id
+        assert len(data["name"]) >= 2
+
+    @pytest.mark.parametrize("seed", BAD_WORD_SEEDS)
+    def test_create_part_returns_201_under_bad_seed(
+        self, seed: int, client: TestClient, auth_headers: dict, request: pytest.FixtureRequest
+    ):
+        """POST /parts validates sample_part_data through PartCreate without a 422 under bad seeds."""
+        Faker.seed(seed)
+        sample_part_data = request.getfixturevalue("sample_part_data")
+        response = client.post("/api/v1/parts/", headers=auth_headers, json=sample_part_data)
+        assert response.status_code == status.HTTP_201_CREATED, response.text
 
 
 @pytest.mark.api
