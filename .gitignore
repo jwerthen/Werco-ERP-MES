@@ -1,5 +1,7 @@
 # Dependencies
-node_modules/
+# No trailing slash: also ignores a stray *symlink* named node_modules (mode 120000),
+# which a directory-only pattern misses — that slipped in via #74 and broke prod deploys.
+node_modules
 __pycache__/
 *.pyc
 .pyo
