@@ -94,8 +94,8 @@ stations); each is tamper-evidently audit-logged.
 ## Visitor flow (on the tablet)
 
 1. **PIN unlock.** With no/expired token the tablet shows a numeric keypad. The PIN is 4–8 digits
-   (see the security note below for the recommended length); a bad PIN shows the server's rejection
-   and clears the field.
+   (see the security note below — brute force is now rate-limited server-side); a bad PIN shows the
+   server's rejection and clears the field.
 2. **Welcome.** Two large touch targets: **Sign In** / **Sign Out**.
 3. **Sign in** — a touch-first form: name (required), company, phone, "who are you here to see?"
    (host), **purpose** chosen from structured tiles (Meeting · Delivery · Contractor · Interview ·
@@ -198,16 +198,16 @@ the **normal `api` client**, not the tablet's `signinClient`.
 - **No new unauthenticated write surface** beyond the PIN-gated `station-login` → scoped-token path.
   `verify_token` still fences `type != "access"` everywhere else.
 
-> **Security note — provision 6–8 digit PINs in the interim.** The per-path auth rate limiter for
-> `POST /visitor-logs/station-login` is **declared but not yet wired** (the limit is registered in
-> `main.py`'s `AUTH_RATE_LIMITS` as `5/minute`, but the per-path middleware currently only *logs*
-> sensitive auth paths — it does not enforce them; only the app-wide default limit applies). This is
-> a known gap with a **tracked, separate fix**. Until it lands, **provision 6–8 digit station PINs**
-> (the schema allows 4–8) so the unlock has more entropy against online guessing. Mitigations already
-> in place: PINs are **bcrypt-hashed** at rest and never echoed, every **failed attempt is audited**
-> (`LOGIN_FAILED`), and **revocation is instant** (DB-authoritative, re-checked every request). Treat
-> a station PIN like a shared password — rotate it (Reset PIN) on staff turnover and revoke a lost or
-> decommissioned tablet immediately.
+> **Security note — station-login is rate-limited.** The per-path auth rate limiter for
+> `POST /visitor-logs/station-login` is **now enforced at `5/minute` per client IP** (registered in
+> `main.py`'s `AUTH_RATE_LIMITS`; the per-path middleware actually rejects over-limit requests with
+> **429 + `Retry-After`**, not just logs them). With online brute force throttled server-side, the
+> interim **6–8 digit PIN-length recommendation can relax** — the schema's 4–8 digit range is
+> acceptable, though longer PINs still add entropy. Mitigations in place: PINs are **bcrypt-hashed**
+> at rest and never echoed, every **failed attempt is audited** (`LOGIN_FAILED`), the unlock is
+> **rate-limited** (5/min/IP), and **revocation is instant** (DB-authoritative, re-checked every
+> request). Treat a station PIN like a shared password — rotate it (Reset PIN) on staff turnover and
+> revoke a lost or decommissioned tablet immediately.
 
 ## Reference
 

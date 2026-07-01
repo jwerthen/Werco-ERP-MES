@@ -76,9 +76,33 @@ SUPABASE_DB_PASSWORD=<your-supabase-db-pass>
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `RATE_LIMIT_ENABLED` | No | `true` | Enable/disable rate limiting |
-| `RATE_LIMIT_TIMES` | No | `100` | Max requests per window |
-| `RATE_LIMIT_SECONDS` | No | `60` | Rate limit window in seconds |
+| `RATE_LIMIT_TIMES` | No | `100` | Max requests per window (global default limit) |
+| `RATE_LIMIT_SECONDS` | No | `60` | Rate limit window in seconds (global default limit) |
 | `RATE_LIMIT_EXEMPT_PATHS` | No | `/health,...` | Comma-separated paths exempt from rate limiting |
+
+The global default (`RATE_LIMIT_TIMES`/`RATE_LIMIT_SECONDS`, default 100 per 60s) is the
+fallback for all paths. Storage is keyed per client IP and backed by `REDIS_URL` when set,
+otherwise in-process memory (per-worker; use Redis in production so limits are shared across
+workers).
+
+**Enforced stricter per-path limits.** Sensitive auth endpoints carry tighter limits that are
+now actually enforced (previously declared but only the global default applied). Over-limit
+requests get **HTTP 429** with a `Retry-After` header and body `{"detail": "Rate limit exceeded: <limit>"}`:
+
+| Path | Limit |
+|------|-------|
+| `/api/v1/auth/login` | 5/minute |
+| `/api/v1/auth/register` | 3/minute |
+| `/api/v1/auth/register-public` | 3/minute |
+| `/api/v1/auth/refresh` | 30/minute |
+| `/api/v1/auth/employee-login` | 3/minute |
+| `/api/v1/visitor-logs/station-login` | 5/minute |
+| `/api/v1/scanner/resolve-action` | 60/minute |
+
+These limits are not configurable by env var — they are defined in `backend/app/main.py`
+(`AUTH_RATE_LIMITS` / `ENDPOINT_RATE_LIMITS`). Enforcement **fails open**: if the limiter
+backend errors, the request is allowed (the global default limit still applies) and a warning
+is logged. Blocked attempts emit a `logger.warning`.
 
 ### CORS (Cross-Origin Resource Sharing)
 

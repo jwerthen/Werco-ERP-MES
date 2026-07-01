@@ -113,6 +113,34 @@ def _allow_ai_egress_by_default(monkeypatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _reset_rate_limiter():
+    """Clear slowapi rate-limit counters before every test.
+
+    Rate limiting is enabled in the test environment (settings.RATE_LIMIT_ENABLED
+    defaults True), and the limiter's in-memory storage persists for the life of a
+    worker process. Without a reset, the stricter per-path auth limits (e.g.
+    /api/v1/auth/login at 5/min, keyed by the fixed TestClient address) would
+    accumulate across unrelated tests and fire spurious 429s. Resetting per test
+    isolates each test's request budget so only tests that intentionally exceed a
+    limit see a 429.
+    """
+    try:
+        from app.main import app
+
+        limiter = getattr(app.state, "limiter", None)
+        if limiter is not None:
+            try:
+                limiter.reset()
+            except Exception:
+                storage = getattr(limiter, "_storage", None)
+                if storage is not None:
+                    storage.reset()
+    except Exception:
+        pass
+    yield
+
+
 @pytest.fixture(scope="function")
 def db_session() -> Generator[Session, None, None]:
     """Create a fresh database session for each test."""

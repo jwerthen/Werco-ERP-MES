@@ -544,9 +544,15 @@ Authorization: Bearer <your_token>
 
 ### Rate Limiting
 
-- Default: 100 requests per 60 seconds
-- Auth endpoints: 5 login attempts per minute
-- Register: 3 attempts per minute
+Over-limit requests return **429** with a `Retry-After` header. Limits are keyed per client IP.
+
+- Default: 100 requests per 60 seconds (all other paths)
+- `POST /auth/login`: 5 per minute
+- `POST /auth/register`, `POST /auth/register-public`: 3 per minute
+- `POST /auth/employee-login`: 3 per minute
+- `POST /auth/refresh`: 30 per minute
+- `POST /visitor-logs/station-login`: 5 per minute
+- `POST /scanner/resolve-action`: 60 per minute
 
 ### Support
 
@@ -706,6 +712,10 @@ async def add_security_headers(request: Request, call_next):
 # Rate limiting middleware (if enabled)
 if settings.RATE_LIMIT_ENABLED:
     try:
+        import math
+        import time
+
+        from limits import parse as parse_rate_limit
         from slowapi import Limiter
         from slowapi.errors import RateLimitExceeded
         from slowapi.middleware import SlowAPIMiddleware
@@ -716,6 +726,7 @@ if settings.RATE_LIMIT_ENABLED:
         AUTH_RATE_LIMITS = {
             "/api/v1/auth/login": "5/minute",  # Prevent brute force
             "/api/v1/auth/register": "3/minute",  # Prevent mass registration
+            "/api/v1/auth/register-public": "3/minute",  # Prevent mass self-registration
             "/api/v1/auth/refresh": "30/minute",  # Allow reasonable token refreshes
             "/api/v1/auth/employee-login": "3/minute",  # Employee ID kiosk login
             "/api/v1/visitor-logs/station-login": "5/minute",  # Shared-PIN visitor tablet unlock
@@ -726,14 +737,19 @@ if settings.RATE_LIMIT_ENABLED:
         ENDPOINT_RATE_LIMITS = {
             "/api/v1/scanner/resolve-action": "60/minute",
         }
+        # Single merged source of truth for the path-specific resolver below.
+        PATH_RATE_LIMITS = {**AUTH_RATE_LIMITS, **ENDPOINT_RATE_LIMITS}
 
         def get_rate_limit_for_path(request):
-            """Get rate limit based on request path"""
-            path = request.url.path
-            for rated_path, limit in {**AUTH_RATE_LIMITS, **ENDPOINT_RATE_LIMITS}.items():
-                if path.startswith(rated_path):
-                    return limit
-            return f"{settings.RATE_LIMIT_TIMES}/{settings.RATE_LIMIT_SECONDS} second"
+            """Return the stricter per-path limit string for this request, or None.
+
+            None means the path has no override and only the global default limit
+            (enforced separately by ``SlowAPIMiddleware``) applies. Exact-match on
+            the full endpoint path — these keys are complete routes, so a prefix
+            match risked shadowing siblings (e.g. ``/login`` vs a future
+            ``/login-sso``).
+            """
+            return PATH_RATE_LIMITS.get(request.url.path)
 
         limiter = Limiter(
             key_func=get_remote_address,
@@ -743,36 +759,93 @@ if settings.RATE_LIMIT_ENABLED:
         app.state.limiter = limiter
         app.add_middleware(SlowAPIMiddleware)
 
-        # Custom rate limit handler with CORS headers
+        def _rate_limit_response(request: Request, detail: str, retry_after: int = None) -> JSONResponse:
+            """Build the canonical 429 body (+ CORS, optional Retry-After).
+
+            Shared by the SlowAPI default-limit exception handler and the
+            path-specific enforcement middleware so every rate-limit rejection
+            looks identical to clients.
+            """
+            headers = {"Retry-After": str(retry_after)} if retry_after is not None else None
+            response = JSONResponse(
+                status_code=429,
+                content={"detail": f"Rate limit exceeded: {detail}"},
+                headers=headers,
+            )
+            return add_cors_headers(response, request.headers.get("origin"))
+
+        # Custom rate limit handler with CORS headers (SlowAPI default-limit breaches)
         async def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded):
-            detail = getattr(exc, "detail", str(exc))
-            response = JSONResponse(status_code=429, content={"detail": f"Rate limit exceeded: {detail}"})
-            origin = request.headers.get("origin")
-            return add_cors_headers(response, origin)
+            return _rate_limit_response(request, getattr(exc, "detail", str(exc)))
 
         # Ensure SlowAPI uses our safe handler as well
         limiter._rate_limit_exceeded_handler = rate_limit_exceeded_handler
         app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
 
-        # Add middleware for path-specific rate limiting
+        # Path-specific enforcement. The global SlowAPIMiddleware only applies the
+        # default limit; without this, the stricter AUTH_RATE_LIMITS/ENDPOINT_RATE_LIMITS
+        # entries were declared but never enforced (brute-force gap on /auth/login,
+        # station-login, etc.). We consult the limiter's own strategy+storage so the
+        # Redis/memory backend and reset semantics stay shared with the default limit.
+        # Note: we RETURN a 429 rather than raise RateLimitExceeded — exceptions raised
+        # from a Starlette BaseHTTPMiddleware bypass registered exception handlers (they
+        # surface as 500s), so raising here would defeat the custom handler.
         @app.middleware("http")
         async def rate_limit_by_path(request: Request, call_next):
-            """Apply stricter rate limits to sensitive endpoints"""
-            path = request.url.path
-
-            # Check if this is a sensitive auth endpoint
-            if path in AUTH_RATE_LIMITS:
-                # The limiter will handle this with its default limits
-                # For now, we just log that it's a sensitive endpoint
-                logger.debug(f"Rate limiting auth endpoint: {path}")
-
+            """Enforce the stricter per-path limit for sensitive endpoints."""
+            limit_str = get_rate_limit_for_path(request)
+            if limit_str:
+                identifier = get_remote_address(request)
+                path = request.url.path
+                try:
+                    item = parse_rate_limit(limit_str)
+                    allowed = limiter.limiter.hit(item, "path-limit", path, identifier)
+                except Exception as exc:  # pragma: no cover - storage backend failure
+                    # Fail OPEN: the global default limit (SlowAPIMiddleware) is still a
+                    # backstop, and a dead limiter backend must not hard-block auth. A
+                    # sustained fail-open during an attack is itself a security event, so
+                    # emit a structured, SIEM-filterable record (CMMC AU-6 monitoring).
+                    logger.warning(
+                        "Path rate-limit check failed; failing open",
+                        data={
+                            "event": "rate_limit_check_failed_open",
+                            "path": path,
+                            "client_ip": identifier,
+                            "limit": limit_str,
+                            "error": str(exc),
+                        },
+                    )
+                    return await call_next(request)
+                if not allowed:
+                    try:
+                        stats = limiter.limiter.get_window_stats(item, "path-limit", path, identifier)
+                        retry_after = max(1, math.ceil(stats.reset_time - time.time()))
+                    except Exception:  # pragma: no cover - stats are best-effort
+                        retry_after = None
+                    # Structured so blocked brute-force attempts are queryable in a SIEM
+                    # (CMMC AU-2/AU-6) — a 429 short-circuits before the endpoint, so the
+                    # handler-level auth audit rows are never written for throttled hits.
+                    logger.warning(
+                        "Rate limit exceeded",
+                        data={
+                            "event": "rate_limit_block",
+                            "path": path,
+                            "client_ip": identifier,
+                            "limit": limit_str,
+                            "retry_after": retry_after,
+                        },
+                    )
+                    return _rate_limit_response(request, limit_str, retry_after)
             return await call_next(request)
 
         logger.info(
             f"Rate limiting enabled: {settings.RATE_LIMIT_TIMES} requests/{settings.RATE_LIMIT_SECONDS}s (default)"
         )
-        logger.info("Auth rate limits: login=5/min, register=3/min, refresh=30/min")
-        logger.info("Per-route rate limits: scanner resolve-action=60/min")
+        logger.info(
+            "Auth rate limits enforced: login=5/min, register=3/min, register-public=3/min, "
+            "refresh=30/min, employee-login=3/min, station-login=5/min"
+        )
+        logger.info("Per-route rate limits enforced: scanner resolve-action=60/min")
     except ImportError:
         logger.warning("Rate limiting requested but slowapi not installed")
 
