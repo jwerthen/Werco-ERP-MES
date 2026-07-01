@@ -6,9 +6,10 @@ from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 
-from app.core.security import verify_display_token, verify_token
+from app.core.security import verify_display_token, verify_signin_token, verify_token
 from app.db.database import get_db
 from app.models.display_token import DisplayToken
+from app.models.signin_station import SigninStation
 from app.models.user import User, UserRole
 from app.services.audit_service import AuditService
 
@@ -176,3 +177,77 @@ def get_display_or_user(
         raise credentials_exception
 
     return WallboardPrincipal(company_id=record.company_id, kind="display", display_label=record.label)
+
+
+@dataclass
+class SigninPrincipal:
+    """Resolved caller identity for the two visitor-write endpoints.
+
+    ``kind`` is ``"user"`` (a normal authenticated staff member) or
+    ``"station"`` (a PIN-unlocked entrance tablet holding a scoped signin
+    token). ``company_id`` is the ONLY field tenant scoping may use — for a
+    station it comes from the ``signin_stations`` DB row, never from the client.
+
+    On the station path ``user`` is ``None`` and the audit actor is the
+    ``station_label`` (recorded explicitly by the write path). On the user path
+    ``station_id`` / ``station_label`` are ``None``.
+    """
+
+    company_id: int
+    kind: str  # "user" | "station"
+    station_id: Optional[int] = None
+    station_label: Optional[str] = None
+    user: Optional[User] = None
+
+
+def get_signin_principal(
+    request: Request,
+    db: Session = Depends(get_db),
+    token: str = Depends(oauth2_scheme),
+) -> SigninPrincipal:
+    """Accept EITHER a normal staff access token OR a station signin token.
+
+    SECURITY (visitor sign-in): this dependency, alongside ``get_display_or_user``,
+    is one of the only two that honor a non-``"access"`` JWT type, and it must
+    only ever guard the two visitor write endpoints (sign-in / sign-out).
+    Everywhere else auth flows through ``get_current_user`` / ``verify_token``,
+    which reject any JWT whose ``type`` is not ``"access"`` — so a signin token
+    presented to any other endpoint gets a 401. ``get_display_or_user`` is left
+    untouched (the read-only wallboard path stays uncontaminated).
+
+    Station-token path checks, in order (the wallboard two-layer pattern):
+      1. signature + JWT expiry + ``type == "signin"`` (``verify_signin_token``)
+      2. the ``signin_stations`` row exists for the JWT's ``sid``
+      3. the row is not revoked
+      4. the JWT's ``cid`` claim matches the row's ``company_id``
+    The active company comes from the DB row (authoritative), so a forged or
+    stale ``cid`` claim can never widen tenant scope.
+    """
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+    # Normal staff token first — get_current_user applies the full user checks
+    # (active flag, platform-admin company context, read-only context).
+    if verify_token(token) is not None:
+        user = get_current_user(request=request, db=db, token=token)
+        return SigninPrincipal(company_id=user._active_company_id, kind="user", user=user)
+
+    claims = verify_signin_token(token)
+    if claims is None or not claims.get("station_id"):
+        raise credentials_exception
+
+    station = db.query(SigninStation).filter(SigninStation.id == claims["station_id"]).first()
+    if station is None or station.revoked:
+        raise credentials_exception
+    if claims.get("company_id") != station.company_id:
+        raise credentials_exception
+
+    return SigninPrincipal(
+        company_id=station.company_id,
+        kind="station",
+        station_id=station.id,
+        station_label=station.label,
+    )

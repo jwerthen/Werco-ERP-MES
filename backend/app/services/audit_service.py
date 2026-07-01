@@ -163,6 +163,8 @@ class AuditService:
         "quote": "quote",
         "shipment": "shipment",
         "time_entry": "time_entry",
+        "visitor_log": "visitor_log",
+        "signin_station": "signin_station",
         "authentication": "authentication",
         "system": "system",
     }

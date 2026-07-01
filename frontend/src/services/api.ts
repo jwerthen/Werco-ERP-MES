@@ -79,6 +79,13 @@ import {
   PrintProfile,
   PrintProfileUpdate,
 } from '../types/print';
+import {
+  SigninStationCreate,
+  SigninStationListResponse,
+  SigninStationResponse,
+  VisitorLogListResponse,
+  VisitorLogResponse,
+} from '../types/visitor';
 
 const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000/api/v1';
 
@@ -1900,6 +1907,62 @@ class ApiService {
 
   async revokeDisplayToken(id: number): Promise<DisplayToken> {
     const response = await this.api.delete(`/auth/display-token/${id}`);
+    return response.data;
+  }
+
+  // Visitor log (admin). Staff-authenticated via the normal client — the tablet
+  // sign-in/out path uses the isolated services/signinClient.ts (PIN-station token)
+  // instead, so a station credential never enters the global axios auth state.
+  async getVisitorLogs(params?: {
+    status?: string;
+    q?: string;
+    date_from?: string;
+    date_to?: string;
+    on_site_only?: boolean;
+    skip?: number;
+    limit?: number;
+  }): Promise<VisitorLogListResponse> {
+    const response = await this.api.get('/visitor-logs/', { params });
+    return response.data;
+  }
+
+  async exportVisitorLogsCsv(params?: {
+    status?: string;
+    date_from?: string;
+    date_to?: string;
+  }): Promise<{ blob: Blob; filename: string }> {
+    const response = await this.api.get('/visitor-logs/export.csv', { params, responseType: 'blob' });
+    const disposition: string | undefined = response.headers?.['content-disposition'];
+    const match = disposition?.match(/filename="?([^";]+)"?/i);
+    return { blob: response.data, filename: match?.[1] || 'visitor_log.csv' };
+  }
+
+  async signOutVisitor(visitorLogId: number): Promise<VisitorLogResponse> {
+    const response = await this.api.post('/visitor-logs/sign-out', { visitor_log_id: visitorLogId });
+    return response.data;
+  }
+
+  async deleteVisitorLog(visitorLogId: number): Promise<void> {
+    await this.api.delete(`/visitor-logs/${visitorLogId}`);
+  }
+
+  async getSigninStations(): Promise<SigninStationListResponse> {
+    const response = await this.api.get('/visitor-logs/stations');
+    return response.data;
+  }
+
+  async createSigninStation(data: SigninStationCreate): Promise<SigninStationResponse> {
+    const response = await this.api.post('/visitor-logs/stations', data);
+    return response.data;
+  }
+
+  async revokeSigninStation(stationId: number): Promise<SigninStationResponse> {
+    const response = await this.api.post(`/visitor-logs/stations/${stationId}/revoke`);
+    return response.data;
+  }
+
+  async resetSigninStationPin(stationId: number, pin: string): Promise<SigninStationResponse> {
+    const response = await this.api.post(`/visitor-logs/stations/${stationId}/reset-pin`, { pin });
     return response.data;
   }
 

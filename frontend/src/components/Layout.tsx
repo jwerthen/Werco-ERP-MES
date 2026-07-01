@@ -56,6 +56,7 @@ import {
   RocketLaunchIcon,
   BellAlertIcon,
   UserPlusIcon,
+  UserGroupIcon,
 } from '@heroicons/react/24/outline';
 
 interface LayoutProps {
@@ -208,6 +209,7 @@ const navSections: NavSection[] = [
           { name: 'Admin Settings', href: '/admin/settings', icon: Cog6ToothIcon, adminOnly: true },
           { name: 'Platform Overview', href: '/platform', icon: BuildingOfficeIcon, platformOnly: true },
           { name: 'Audit Log', href: '/audit-log', icon: ShieldCheckIcon },
+          { name: 'Visitor Log', href: '/visitor-log', icon: UserGroupIcon },
         ],
       },
     ],

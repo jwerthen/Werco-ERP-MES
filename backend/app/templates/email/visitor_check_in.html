@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h2>Your visitor has arrived</h2>
+
+<div class="alert alert-info">
+    <strong>{{ visitor_name }}</strong> has signed in to see you.
+</div>
+
+<table style="width: 100%; margin: 20px 0;">
+    <tr>
+        <td><strong>Visitor:</strong></td>
+        <td>{{ visitor_name }}</td>
+    </tr>
+    {% if visitor_company %}
+    <tr>
+        <td><strong>Company:</strong></td>
+        <td>{{ visitor_company }}</td>
+    </tr>
+    {% endif %}
+    <tr>
+        <td><strong>Purpose:</strong></td>
+        <td>{{ purpose }}</td>
+    </tr>
+    <tr>
+        <td><strong>Signed in:</strong></td>
+        <td>{{ signed_in_at }}</td>
+    </tr>
+    {% if station_label %}
+    <tr>
+        <td><strong>Station:</strong></td>
+        <td>{{ station_label }}</td>
+    </tr>
+    {% endif %}
+</table>
+
+<p>Please meet your visitor at the entrance.</p>
+{% endblock %}

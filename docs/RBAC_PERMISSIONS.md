@@ -439,6 +439,39 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > are dropped before dispatch. Per-user rate limit: 20 requests/minute default
 > (`COPILOT_RATE_LIMIT_PER_MINUTE`). See [docs/API.md](API.md) → Werco Copilot.
 
+### Visitor Logs
+
+| Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
+|------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
+| View / search log (`visitor_logs:view`) | ✓ | ✓ | ✓ | | | | |
+| Sign in / sign out a visitor | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Export log (CSV) | ✓ | ✓ | | | | | |
+| Delete (soft) a visitor record | ✓ | ✓ | | | | | |
+| Manage sign-in stations (create / reset-PIN / revoke) | ✓ | ✓ | | | | | |
+
+> **Per-endpoint mapping (`/api/v1/visitor-logs`, `app/api/endpoints/visitor_logs.py`).** The two
+> **visitor write** endpoints — `POST /sign-in` and `POST /sign-out` — are gated by the dedicated
+> `get_signin_principal` dependency, which accepts **either** a PIN-minted station signin token
+> (`type="signin"`, the lobby tablet) **or any authenticated staff user**. So the "Sign in / sign
+> out" row is open to every authenticated user (and to an unattended station tablet), not a role —
+> it is **not** the `require_role` model the rows below use. The **list** endpoint `GET /` is
+> `require_role([ADMIN, MANAGER, SUPERVISOR])` (this is the server-enforced read gate the
+> `visitor_logs:view` permission and the `/visitor-log` route mirror — visitor PII is *not* on the
+> read-broad domain default). **Export** (`GET /export.csv`, audits an `EXPORT` action), **soft-delete**
+> (`DELETE /{id}`), and **all station administration** (`POST /stations`, `GET /stations`,
+> `POST /stations/{id}/revoke`, `POST /stations/{id}/reset-pin`) are `require_role([ADMIN, MANAGER])`.
+> Every query is tenant-scoped (staff via `get_current_company_id`; the tablet via the authoritative
+> `signin_stations` row, never the client `cid`); visitor records are soft-deleted, never
+> hard-deleted; and every state change is tamper-evidently audited (station writes record the station
+> label as the actor). See [docs/API.md](API.md) → Visitor Logs and
+> [docs/VISITOR_SIGNIN.md](VISITOR_SIGNIN.md).
+>
+> **`station-login` is the only new public write surface.** `POST /visitor-logs/station-login` is
+> unauthenticated by design — a tablet cannot present a JWT — but it is **PIN-gated**: it verifies the
+> shared station PIN against the bcrypt `pin_hash` and a bad/revoked station or wrong PIN returns
+> **401** (indistinguishable; the failed attempt is audited). It is therefore not on this permission
+> matrix. Like the inbound carrier webhook, trust is established without a user role.
+
 ### Admin
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
@@ -449,6 +482,7 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 | AI usage & cost summary (`/ai-usage/summary`) | ✓ | ✓ | | | | | |
 | AI egress kill switch (`PUT /companies/me/ai-egress`) | ✓ | | | | | | |
 | Wallboard display tokens (`/auth/display-token` issue/list/revoke) | ✓ | ✓ | | | | | |
+| Visitor sign-in stations (`/visitor-logs/stations` create/list/revoke/reset-pin) | ✓ | ✓ | | | | | |
 | System | ✓ | | | | | | |
 
 > **Integrations (carrier-account credentials + shipping profile) — endpoint mapping.** The
@@ -469,6 +503,12 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > secret, and the owning tenant is resolved **only from stored shipment data**
 > (`Shipment.aggregator_shipment_id`), never from caller input. A request that matches no secret or no
 > shipment is dropped with **204** (no existence oracle). It is therefore not on this permission matrix.
+>
+> **Intentionally-unauthenticated endpoints (the full set).** Three write/verify surfaces establish trust
+> *without* a user role — and so none appears on the role matrix: the **carrier webhook** above (HMAC
+> signature), the visitor **`station-login`** (a shared station PIN mints a scoped `signin` token — see
+> Visitor Logs above), and the wallboard **display-token** verification (a scoped `display` JWT — see
+> below). Each binds the request to a tenant through stored server-side state, never caller-supplied identity.
 
 > **Audit-log access (tenant-scoped).** The **Audit Logs** row above covers audit *retrieval*:
 > `GET /api/v1/audit/`, `/audit/summary`, `/audit/actions`, `/audit/resource-types`

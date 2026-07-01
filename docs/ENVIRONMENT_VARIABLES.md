@@ -251,6 +251,13 @@ REDIS_URL=redis://default:xxx@xxx.railway.internal:6379
 2. Generate an App Password at https://myaccount.google.com/apppasswords
 3. Use the app password as `SMTP_PASSWORD`
 
+> **Visitor sign-in tablet — no new variables.** The visitor sign-in feature
+> ([docs/VISITOR_SIGNIN.md](VISITOR_SIGNIN.md)) introduces **no new environment variables**. The
+> host check-in email reuses this existing `SMTP_*` block (internal SMTP to the company's own
+> employee only), and the scoped station signin token reuses the existing JWT signing keys
+> (`SECRET_KEY` / `ALGORITHM` under **Security** above) — the same keys that sign access, refresh, and
+> wallboard display tokens.
+
 ### File Storage
 
 Persistent document bytes — quality-document uploads, **purchased shipping labels /
