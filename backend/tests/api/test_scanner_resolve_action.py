@@ -810,9 +810,10 @@ def test_scanner_resolve_action_rate_limit_declared(client: TestClient):
     """resolve-action carries a 60/minute per-route limit in main.py's central
     path -> limit map (the same declaration style as the auth limits).
 
-    NOTE: like AUTH_RATE_LIMITS, this map feeds get_rate_limit_for_path, which is
-    not yet wired into the slowapi Limiter -- enforcement today is the global
-    default. This locks the declaration so the wiring fix has the value in place.
+    Like AUTH_RATE_LIMITS, this map feeds get_rate_limit_for_path, which the
+    rate_limit_by_path middleware now enforces (a 61st scan/min from one client
+    gets a 429). This locks the declared value; per-path 429 enforcement itself is
+    covered in tests/api/test_auth_rate_limit.py.
     """
     import app.main as app_main
 

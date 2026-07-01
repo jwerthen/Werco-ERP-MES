@@ -1829,10 +1829,10 @@ See [docs/VISITOR_SIGNIN.md](VISITOR_SIGNIN.md).
 | POST | `/visitor-logs/stations/{id}/revoke` | Revoke a station (idempotent status flip; tablet loses access next request) → `SigninStationResponse` | Admin / Manager |
 | POST | `/visitor-logs/stations/{id}/reset-pin` | Re-hash a station's shared PIN. Body `{"pin"}` → `SigninStationResponse` | Admin / Manager |
 
-> ¹ **Rate limit not yet enforced.** `station-login` is registered in `main.py`'s `AUTH_RATE_LIMITS`
-> as `5/minute`, but the per-path auth limiter currently only **logs** sensitive paths — only the
-> app-wide default limit applies. This is a tracked, separate fix; provision **6–8 digit** PINs in
-> the interim (see [docs/VISITOR_SIGNIN.md](VISITOR_SIGNIN.md) → Security note).
+> ¹ **Rate-limited at `5/minute` per client IP** (enforced). `station-login` is registered in
+> `main.py`'s `AUTH_RATE_LIMITS`; the per-path auth limiter now rejects over-limit requests with
+> **429 + `Retry-After`**. With brute force throttled server-side, the interim 6–8 digit PIN
+> recommendation can relax (see [docs/VISITOR_SIGNIN.md](VISITOR_SIGNIN.md) → Security note).
 
 **`GET /visitor-logs/` query params:** `status` (`signed_in` / `signed_out`), `q` (matches visitor
 name / company / host), `date_from`, `date_to` (filter on `signed_in_at`), `on_site_only` (bool —
@@ -2078,16 +2078,30 @@ fallback.
 
 ## Rate Limiting
 
-API endpoints are rate limited:
-- Default: 100 requests per 60 seconds per IP
+API endpoints are rate limited per client IP:
+- Default: 100 requests per 60 seconds (all other paths)
 - Health check endpoints: Exempt from rate limiting
 
-Rate limit headers are included in responses:
+Sensitive auth endpoints carry stricter, **enforced** per-path limits (previously declared but only
+the global default applied):
+
+| Path | Limit |
+|------|-------|
+| `POST /auth/login` | 5/minute |
+| `POST /auth/register` | 3/minute |
+| `POST /auth/register-public` | 3/minute |
+| `POST /auth/refresh` | 30/minute |
+| `POST /auth/employee-login` | 3/minute |
+| `POST /visitor-logs/station-login` | 5/minute |
+| `POST /scanner/resolve-action` | 60/minute |
+
+An over-limit request returns **HTTP 429** with a `Retry-After` header (seconds until the window
+resets) and body:
+```json
+{ "detail": "Rate limit exceeded: 5/minute" }
 ```
-X-RateLimit-Limit: 100
-X-RateLimit-Remaining: 75
-X-RateLimit-Reset: 1704097200
-```
+Enforcement fails open: if the limiter backend errors, the request is allowed (the global default
+limit still applies).
 
 ## CORS
 
