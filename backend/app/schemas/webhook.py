@@ -3,8 +3,10 @@ from typing import List, Optional
 
 from pydantic import BaseModel
 
+from app.schemas.base import UTCModel
 
-class WebhookBase(BaseModel):
+
+class WebhookBase(UTCModel):
     name: str
     url: str
     events: List[str]
@@ -35,7 +37,7 @@ class WebhookResponse(WebhookBase):
         from_attributes = True
 
 
-class WebhookDeliveryResponse(BaseModel):
+class WebhookDeliveryResponse(UTCModel):
     id: int
     webhook_id: int
     event: str

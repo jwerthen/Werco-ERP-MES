@@ -39,6 +39,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.core.time_utils import to_utc_iso
 from app.models.audit_log import AuditLog
 from app.models.company import Company
 from app.models.governance import DataClassification, ExportEvent, LegalHold, RetentionPolicy
@@ -110,7 +111,7 @@ class AuditArchivalService:
             "sequence_number": row.sequence_number,
             "integrity_hash": row.integrity_hash,
             "previous_hash": row.previous_hash,
-            "timestamp": row.timestamp.isoformat() if row.timestamp else None,
+            "timestamp": to_utc_iso(row.timestamp),
             "user_id": row.user_id,
             "user_email": row.user_email,
             "user_name": row.user_name,
@@ -192,7 +193,7 @@ class AuditArchivalService:
         base = {
             "company_id": company_id,
             "retention_days": retention_days,
-            "cutoff": cutoff.isoformat(),
+            "cutoff": to_utc_iso(cutoff),
             "high_water_sequence": high_water,
         }
 
@@ -250,9 +251,9 @@ class AuditArchivalService:
             "first_id": first_row.id,
             "last_id": last_row.id,
             "count": len(rows),
-            "first_timestamp": first_row.timestamp.isoformat() if first_row.timestamp else None,
-            "last_timestamp": last_row.timestamp.isoformat() if last_row.timestamp else None,
-            "cutoff": cutoff.isoformat(),
+            "first_timestamp": to_utc_iso(first_row.timestamp),
+            "last_timestamp": to_utc_iso(last_row.timestamp),
+            "cutoff": to_utc_iso(cutoff),
             "retention_days": retention_days,
             "truncated": truncated,
         }
@@ -386,7 +387,7 @@ class AuditArchivalService:
         return {
             "status": "completed" if not errors else "completed_with_errors",
             "dry_run": dry_run,
-            "as_of": as_of.isoformat(),
+            "as_of": to_utc_iso(as_of),
             "total_archived": total_archived,
             "companies": results,
             "errors": errors,

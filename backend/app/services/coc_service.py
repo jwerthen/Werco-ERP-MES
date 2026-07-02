@@ -31,6 +31,7 @@ from typing import List, Optional
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.core.time_utils import to_utc_iso
 from app.models.customer import Customer
 from app.models.part import Part
 from app.models.shipping import CertificateOfConformance, Shipment
@@ -173,7 +174,7 @@ def generate_coc_for_shipment(
         "conformance_statement": DEFAULT_COC_STATEMENT,
         "issued_by_name": issued_by_name,
         "ship_date": ship_date_iso,
-        "issued_at": issued_at.isoformat(),
+        "issued_at": to_utc_iso(issued_at),
     }
 
     coc = CertificateOfConformance(
@@ -269,5 +270,5 @@ def render_coc_pdf(coc: CertificateOfConformance, db: Optional[Session] = None) 
         ship_date=snapshot.get("ship_date"),
         conformance_statement=_fact("conformance_statement", coc.conformance_statement),
         issued_by_name=snapshot.get("issued_by_name"),
-        issued_at=_fact("issued_at", coc.issued_at.isoformat() if coc.issued_at else None),
+        issued_at=_fact("issued_at", to_utc_iso(coc.issued_at)),
     )

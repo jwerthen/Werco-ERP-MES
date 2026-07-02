@@ -612,10 +612,15 @@ class TestWorkOrdersAPI:
         assert data["id"] == test_work_order.id
         assert data["work_order_number"] == test_work_order.work_order_number
 
-    def test_get_work_order_serializes_datetimes_in_tulsa_time(
+    def test_get_work_order_serializes_datetimes_as_utc_z(
         self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder, db_session
     ):
-        """Work order detail timestamps should render in America/Chicago time."""
+        """Work order detail timestamps serialize as UTC ISO-8601 with a trailing 'Z'.
+
+        Layer 2 timezone-consistency fix: naive-UTC datetimes are emitted as
+        ``...Z`` (via ``UTCModel`` / ``to_utc_iso``) rather than a Central offset, so
+        the frontend can parse them unambiguously as UTC.
+        """
         operation = test_work_order.operations[0]
         test_work_order.actual_start = datetime(2026, 5, 1, 18, 17, 0)
         operation.actual_start = datetime(2026, 5, 1, 18, 17, 0)
@@ -625,8 +630,8 @@ class TestWorkOrdersAPI:
 
         assert response.status_code == status.HTTP_200_OK
         data = response.json()
-        assert data["actual_start"] == "2026-05-01T13:17:00-05:00"
-        assert data["operations"][0]["actual_start"] == "2026-05-01T13:17:00-05:00"
+        assert data["actual_start"] == "2026-05-01T18:17:00Z"
+        assert data["operations"][0]["actual_start"] == "2026-05-01T18:17:00Z"
 
     def test_get_work_order_not_found(self, client: TestClient, auth_headers: dict):
         """Test retrieving a non-existent work order."""

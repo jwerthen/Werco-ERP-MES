@@ -3,7 +3,7 @@ import { useParams, useLocation } from 'react-router-dom';
 import api from '../services/api';
 import { Part, WorkOrder } from '../types';
 import QRCode from 'qrcode';
-import { formatCentralDate, getCentralTodayISODate } from '../utils/centralTime';
+import { formatCentralDate, formatCentralDateTime, getCentralTodayISODate } from '../utils/centralTime';
 import { useAuth } from '../context/AuthContext';
 import { ErrorState } from '../components/ui';
 
@@ -172,7 +172,8 @@ export default function PrintTraveler() {
     year: 'numeric',
   });
   // A0.4 print control: full timestamp + who printed, for the traveler footer.
-  const printedAt = new Date().toLocaleString();
+  // Shop-local Central so every printed traveler reads the same wall-clock time.
+  const printedAt = formatCentralDateTime(new Date());
   const printedBy = user ? `${user.first_name} ${user.last_name}`.trim() : '-';
   const dueDate = workOrder.due_date
     ? formatCentralDate(workOrder.due_date, { month: '2-digit', day: '2-digit', year: 'numeric' })

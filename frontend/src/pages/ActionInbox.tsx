@@ -17,6 +17,7 @@ import { useOptimisticMutation } from '../hooks/useOptimisticMutation';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { AISuggestionCard, ConfidenceBadge, FeedbackButtons, WhyThisSuggestion } from '../components/ai';
 import { AIRecommendation } from '../types/aiLearning';
+import { formatCentralDateTime, toDate } from '../utils/centralTime';
 
 type Severity = 'high' | 'medium' | 'low' | 'info';
 type ItemSource = 'setup' | 'master-data' | 'notification' | 'ai';
@@ -97,11 +98,11 @@ const filterLabels: Record<FilterKey, string> = {
   dismissed: 'Dismissed',
 };
 
+// Shop-local Central date+time; returns null for an empty/invalid timestamp so
+// the caller can conditionally render (kept from the prior local formatter).
 const formatDate = (value?: string) => {
-  if (!value) return null;
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return null;
-  return date.toLocaleString();
+  if (!value || !toDate(value)) return null;
+  return formatCentralDateTime(value);
 };
 
 const getStoredDismissed = () => {

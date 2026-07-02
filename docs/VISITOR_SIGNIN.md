@@ -168,7 +168,9 @@ the **normal `api` client**, not the tablet's `signinClient`.
   in · signed out · station · status) with client sort, a status filter (all / on-site / signed
   out), a date-from/to range, and a debounced free-text search over visitor name / company / host.
   Status renders via `<StatusBadge>` — **signed_in → amber, signed_out → slate**. The header shows
-  the live on-site count.
+  the live on-site count. The `signed_in_at` / `signed_out_at` timestamps arrive from the API as UTC
+  (`Z`) and render in shop-local **Central** time via `utils/centralTime.ts` (`formatCentralDateTime`),
+  the same as the sign-out disambiguation picker on the tablet — not the viewer's browser timezone.
 - **CSV export.** Built into the DataTable; the server also exposes `GET /visitor-logs/export.csv`
   (ADMIN/MANAGER), which **audits an `EXPORT` action**.
 - **Staff sign-out.** ADMIN/MANAGER can sign out an on-site visitor directly from a row (`POST

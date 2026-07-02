@@ -11,6 +11,7 @@ import {
 } from '@heroicons/react/24/outline';
 import { Modal } from '../components/ui/Modal';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
+import { formatCentralDate, formatCentralDateTime } from '../utils/centralTime';
 import {
   ErrorState,
   useToast,
@@ -405,7 +406,7 @@ export default function ToolManagement() {
                   <div><span className="text-slate-400">Model:</span> {detailTool.model_number || '-'}</div>
                   <div><span className="text-slate-400">Serial:</span> {detailTool.serial_number || '-'}</div>
                   <div><span className="text-slate-400">Purchase Cost:</span> {detailTool.purchase_cost ? `$${detailTool.purchase_cost.toFixed(2)}` : '-'}</div>
-                  <div><span className="text-slate-400">Purchase Date:</span> {detailTool.purchase_date ? new Date(detailTool.purchase_date).toLocaleDateString() : '-'}</div>
+                  <div><span className="text-slate-400">Purchase Date:</span> {detailTool.purchase_date ? formatCentralDate(detailTool.purchase_date) : '-'}</div>
                 </div>
               </div>
               <div>
@@ -413,8 +414,8 @@ export default function ToolManagement() {
                 <div className="space-y-1 text-sm">
                   <div><span className="text-slate-400">Uses:</span> {detailTool.current_uses}{detailTool.max_uses ? ` / ${detailTool.max_uses}` : ''}</div>
                   <div><span className="text-slate-400">Life Hours:</span> {detailTool.current_life_hours.toFixed(1)}{detailTool.max_life_hours ? ` / ${detailTool.max_life_hours}` : ''} hrs</div>
-                  <div><span className="text-slate-400">Last Inspection:</span> {detailTool.last_inspection_date ? new Date(detailTool.last_inspection_date).toLocaleDateString() : '-'}</div>
-                  <div><span className="text-slate-400">Next Inspection:</span> {detailTool.next_inspection_date ? new Date(detailTool.next_inspection_date).toLocaleDateString() : '-'}</div>
+                  <div><span className="text-slate-400">Last Inspection:</span> {detailTool.last_inspection_date ? formatCentralDate(detailTool.last_inspection_date) : '-'}</div>
+                  <div><span className="text-slate-400">Next Inspection:</span> {detailTool.next_inspection_date ? formatCentralDate(detailTool.next_inspection_date) : '-'}</div>
                   {detailTool.notes && <div><span className="text-slate-400">Notes:</span> {detailTool.notes}</div>}
                 </div>
               </div>
@@ -427,7 +428,7 @@ export default function ToolManagement() {
                     {toolHistory.slice(0, 10).map((h: any, i: number) => (
                       <div key={i} className="text-xs border-l-2 border-slate-600 pl-2">
                         <div className="font-medium">{h.action || h.event_type}</div>
-                        <div className="text-slate-400">{h.created_at ? new Date(h.created_at).toLocaleString() : ''}</div>
+                        <div className="text-slate-400">{h.created_at ? formatCentralDateTime(h.created_at) : ''}</div>
                         {h.notes && <div className="text-slate-400">{h.notes}</div>}
                       </div>
                     ))}

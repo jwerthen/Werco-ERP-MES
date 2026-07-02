@@ -18,6 +18,7 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app.core.security import create_display_token
+from app.core.time_utils import to_utc_iso
 from app.db.tenant_filter import tenant_query
 from app.models.display_token import DisplayToken
 from app.services.audit_service import AuditService
@@ -59,7 +60,7 @@ def issue_display_token(
         resource_identifier=label,
         new_values={
             "label": label,
-            "expires_at": expires_at.isoformat(),
+            "expires_at": to_utc_iso(expires_at),
             "company_id": company_id,
         },
         description=f"Issued wallboard display token '{label}' (expires {expires_at.date().isoformat()})",

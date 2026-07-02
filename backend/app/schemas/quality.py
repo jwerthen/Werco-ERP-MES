@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.core.validation import DescriptionLong, Money, MoneySmall
 from app.models.quality import CARStatus, CARType, FAIStatus, NCRDisposition, NCRSource, NCRStatus
+from app.schemas.base import UTCModel
 
 
 # NCR Schemas
@@ -68,7 +69,7 @@ class PartSummary(BaseModel):
         from_attributes = True
 
 
-class NCRResponse(BaseModel):
+class NCRResponse(UTCModel):
     id: int
     version: Optional[int] = 0
     ncr_number: str
@@ -147,7 +148,7 @@ class CARUpdate(BaseModel):
     verification_due: Optional[date] = None
 
 
-class CARResponse(BaseModel):
+class CARResponse(UTCModel):
     id: int
     car_number: str
     car_type: CARType
@@ -229,7 +230,7 @@ class FAIUpdate(BaseModel):
     inspector_id: Optional[int] = Field(None, gt=0)
 
 
-class FAIResponse(BaseModel):
+class FAIResponse(UTCModel):
     id: int
     fai_number: str
     part_id: int

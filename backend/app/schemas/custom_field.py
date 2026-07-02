@@ -4,9 +4,10 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel
 
 from app.models.custom_field import EntityType, FieldType
+from app.schemas.base import UTCModel
 
 
-class CustomFieldDefinitionBase(BaseModel):
+class CustomFieldDefinitionBase(UTCModel):
     field_key: str
     display_name: str
     description: Optional[str] = None
@@ -67,7 +68,7 @@ class CustomFieldValueSet(BaseModel):
     value: Any  # Will be converted based on field type
 
 
-class CustomFieldValueResponse(BaseModel):
+class CustomFieldValueResponse(UTCModel):
     id: int
     field_definition_id: int
     field_key: str

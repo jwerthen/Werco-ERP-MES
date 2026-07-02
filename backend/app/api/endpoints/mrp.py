@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, joinedload
 
 from app.api.deps import get_current_company_id, get_current_user, require_role
+from app.core.time_utils import to_utc_iso
 from app.db.database import get_db
 from app.models.mrp import MRPAction, MRPRequirement, MRPRun, MRPRunStatus, PlanningAction
 from app.models.user import User, UserRole
@@ -291,7 +292,7 @@ def get_current_shortages(
     return {
         "mrp_run_id": latest_run.id,
         "mrp_run_number": latest_run.run_number,
-        "run_date": latest_run.completed_at.isoformat() if latest_run.completed_at else None,
+        "run_date": to_utc_iso(latest_run.completed_at),
         "total_shortages": len(shortages),
         "expedite_count": sum(1 for s in shortages if s['is_expedite']),
         "shortages": shortages,

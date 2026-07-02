@@ -3,11 +3,13 @@ Report Builder Service - Dynamic query execution for custom reports
 """
 
 import logging
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import asc, desc, func
 from sqlalchemy.orm import Session
 
+from app.core.time_utils import to_utc_iso
 from app.db.tenant_filter import tenant_filter
 from app.models.inventory import InventoryItem
 from app.models.part import Part
@@ -265,7 +267,9 @@ class ReportBuilderService:
             return None
         if hasattr(value, 'value'):  # Enum
             return value.value
-        if hasattr(value, 'isoformat'):  # Date/datetime
+        if isinstance(value, datetime):  # datetime -> UTC ISO with trailing Z
+            return to_utc_iso(value)
+        if hasattr(value, 'isoformat'):  # date (day-only) -> bare YYYY-MM-DD
             return value.isoformat()
         if isinstance(value, float):
             return round(value, 2)

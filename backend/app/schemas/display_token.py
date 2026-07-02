@@ -10,6 +10,8 @@ from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.base import UTCModel
+
 
 class DisplayTokenCreate(BaseModel):
     label: str = Field(
@@ -23,7 +25,7 @@ class DisplayTokenCreate(BaseModel):
     )
 
 
-class DisplayTokenResponse(BaseModel):
+class DisplayTokenResponse(UTCModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int

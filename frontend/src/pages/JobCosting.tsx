@@ -24,6 +24,7 @@ import {
 } from 'recharts';
 import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
 import { EmptyState, ErrorState, FormField, useToast } from '../components/ui';
+import { getCentralTodayISODate } from '../utils/centralTime';
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -119,7 +120,9 @@ const entryTypeLabel: Record<string, string> = {
   other: 'Other',
 };
 
-const todayISO = () => new Date().toISOString().split('T')[0];
+// Central-local "today" (YYYY-MM-DD) so date-only form defaults don't roll to
+// tomorrow on a Central evening (UTC midnight).
+const todayISO = () => getCentralTodayISODate();
 
 // ── Component ────────────────────────────────────────────────────
 

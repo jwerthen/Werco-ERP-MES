@@ -10,6 +10,7 @@ import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from app.core.time_utils import to_utc_iso
 from app.services.llm_client import LLMEgressDisabledError, LLMNotConfiguredError, run_llm_task
 from app.services.llm_model_router import LLMTaskContext
 from app.services.prompts import ROUTING_GENERATION_PROMPT
@@ -262,7 +263,7 @@ Return ONLY the JSON object, no other text."""
 
         result = json.loads(response_text.strip())
         result["_extraction_metadata"] = {
-            "extracted_at": datetime.utcnow().isoformat(),
+            "extracted_at": to_utc_iso(datetime.utcnow()),
             "source_was_ocr": is_ocr,
             "model": llm_result.model,
             "model_tier": llm_result.tier,
@@ -1014,7 +1015,7 @@ def _create_empty_routing_result(error_message: str) -> Dict[str, Any]:
         "extraction_confidence": "low",
         "_error": error_message,
         "_extraction_metadata": {
-            "extracted_at": datetime.utcnow().isoformat(),
+            "extracted_at": to_utc_iso(datetime.utcnow()),
             "source_was_ocr": False,
             "model": None,
         },

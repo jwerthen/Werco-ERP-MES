@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_company_id, require_role
+from app.core.time_utils import to_utc_iso
 from app.db.database import get_db
 from app.models.quote_config import (
     CostUnit,
@@ -728,7 +729,7 @@ def get_overhead_settings(
             "value": s.setting_value,
             "type": s.setting_type,
             "description": s.description,
-            "updated_at": s.updated_at.isoformat() if s.updated_at else None,
+            "updated_at": to_utc_iso(s.updated_at),
         }
     return result
 

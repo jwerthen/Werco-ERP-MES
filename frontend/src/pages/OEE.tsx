@@ -24,6 +24,7 @@ import {
 } from 'recharts';
 import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
 import { EmptyState, ErrorState, FormField, useToast } from '../components/ui';
+import { formatCentralDate, getCentralDateStamp, getCentralTodayISODate } from '../utils/centralTime';
 
 // ============== Types ==============
 
@@ -115,12 +116,13 @@ function gaugeColor(value: number): string {
 }
 
 function defaultDateRange(): { from: string; to: string } {
-  const to = new Date();
   const from = new Date();
   from.setDate(from.getDate() - 30);
+  // Central-local date stamps so the default report window doesn't shift a day
+  // on a Central evening (UTC-midnight off-by-one).
   return {
-    from: from.toISOString().split('T')[0],
-    to: to.toISOString().split('T')[0],
+    from: getCentralDateStamp(from),
+    to: getCentralTodayISODate(),
   };
 }
 
@@ -143,7 +145,7 @@ export default function OEE() {
   const [showAddModal, setShowAddModal] = useState(false);
   const [addForm, setAddForm] = useState({
     work_center_id: 0,
-    record_date: new Date().toISOString().split('T')[0],
+    record_date: getCentralTodayISODate(),
     shift: '',
     planned_production_time: 480,
     actual_run_time: 0,
@@ -207,7 +209,7 @@ export default function OEE() {
       setShowAddModal(false);
       setAddForm({
         work_center_id: 0,
-        record_date: new Date().toISOString().split('T')[0],
+        record_date: getCentralTodayISODate(),
         shift: '',
         planned_production_time: 480,
         actual_run_time: 0,
@@ -269,7 +271,7 @@ export default function OEE() {
             onClick={() => {
               setAddForm({
                 work_center_id: 0,
-                record_date: new Date().toISOString().split('T')[0],
+                record_date: getCentralTodayISODate(),
                 shift: '',
                 planned_production_time: 480,
                 actual_run_time: 0,
@@ -494,19 +496,15 @@ export default function OEE() {
               <XAxis
                 dataKey="date"
                 tick={{ fontSize: 11, fill: '#94a3b8' }}
-                tickFormatter={(val) => {
-                  const d = new Date(val);
-                  return `${d.getMonth() + 1}/${d.getDate()}`;
-                }}
+                tickFormatter={(val) =>
+                  formatCentralDate(val as string, { month: 'numeric', day: 'numeric', year: undefined })
+                }
               />
               <YAxis domain={[0, 100]} tick={{ fontSize: 11, fill: '#94a3b8' }} />
               <Tooltip
                 contentStyle={{ backgroundColor: '#1a1f2e', border: '1px solid #334155', borderRadius: '4px', color: '#e2e8f0' }}
                 formatter={(value: number | undefined, name: string | undefined) => [`${(value ?? 0).toFixed(1)}%`, name ?? '']}
-                labelFormatter={(label) => {
-                  const d = new Date(label);
-                  return d.toLocaleDateString();
-                }}
+                labelFormatter={(label) => formatCentralDate(label as string)}
               />
               <Legend />
               <ReferenceLine y={85} stroke="#9ca3af" strokeDasharray="5 5" label={{ value: '85% Target', position: 'right', fontSize: 10 }} />

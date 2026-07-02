@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session, joinedload
 
+from app.core.time_utils import to_utc_iso
 from app.models.operational_event import OperationalEvent
 from app.models.part import Part
 from app.models.work_order import WorkOrder, WorkOrderOperation, WorkOrderStatus
@@ -86,7 +87,7 @@ class AIContextService:
                     "severity": blocker.severity,
                     "title": blocker.title,
                     "note": blocker.note,
-                    "reported_at": blocker.reported_at.isoformat() if blocker.reported_at else None,
+                    "reported_at": to_utc_iso(blocker.reported_at),
                 }
                 for blocker in blockers
             ],
@@ -95,7 +96,7 @@ class AIContextService:
                     "event_type": event.event_type,
                     "source_module": event.source_module,
                     "severity": event.severity,
-                    "occurred_at": event.occurred_at.isoformat() if event.occurred_at else None,
+                    "occurred_at": to_utc_iso(event.occurred_at),
                     "payload": event.event_payload or {},
                 }
                 for event in events

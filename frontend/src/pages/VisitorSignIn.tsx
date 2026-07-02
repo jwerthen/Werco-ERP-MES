@@ -39,6 +39,7 @@ import {
   stationLogin,
 } from '../services/signinClient';
 import { PURPOSE_TILES } from '../components/visitor/visitorConstants';
+import { formatCentralDateTime } from '../utils/centralTime';
 import type { VisitorLogResponse, VisitorPurpose, VisitorSignOut409, VisitorSignOutMatch } from '../types/visitor';
 
 const PIN_MIN = 4;
@@ -75,15 +76,10 @@ const EMPTY_FORM: SignInForm = {
 
 const OFFLINE_HINT_ID = 'visitor-offline-hint';
 
+// Signed-in timestamp on the sign-out picker: shop-local Central, no year
+// (matches the original month/day/time layout).
 function formatSignedInAt(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleString('en-US', {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  });
+  return formatCentralDateTime(iso, { year: undefined });
 }
 
 /** Pull a 409 disambiguation body out of a SigninApiError, if shaped like one. */

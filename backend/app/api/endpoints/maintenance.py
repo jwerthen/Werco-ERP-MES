@@ -7,6 +7,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_company_id, get_current_user
+from app.core.time_utils import to_utc_iso
 from app.db.database import get_db
 from app.models.maintenance import (
     FREQUENCY_DAYS_MAP,
@@ -149,8 +150,8 @@ def _serialize_schedule(s: MaintenanceSchedule, wc: Optional[WorkCenter] = None)
         "last_completed_date": s.last_completed_date.isoformat() if s.last_completed_date else None,
         "next_due_date": s.next_due_date.isoformat() if s.next_due_date else None,
         "is_active": s.is_active,
-        "created_at": s.created_at.isoformat() if s.created_at else None,
-        "updated_at": s.updated_at.isoformat() if s.updated_at else None,
+        "created_at": to_utc_iso(s.created_at),
+        "updated_at": to_utc_iso(s.updated_at),
     }
 
 
@@ -169,8 +170,8 @@ def _serialize_wo(wo: MaintenanceWorkOrder) -> dict:
         "checklist_results": wo.checklist_results,
         "scheduled_date": wo.scheduled_date.isoformat() if wo.scheduled_date else None,
         "due_date": wo.due_date.isoformat() if wo.due_date else None,
-        "started_at": wo.started_at.isoformat() if wo.started_at else None,
-        "completed_at": wo.completed_at.isoformat() if wo.completed_at else None,
+        "started_at": to_utc_iso(wo.started_at),
+        "completed_at": to_utc_iso(wo.completed_at),
         "actual_duration_hours": wo.actual_duration_hours,
         "requires_shutdown": wo.requires_shutdown,
         "downtime_minutes": wo.downtime_minutes,
@@ -182,8 +183,8 @@ def _serialize_wo(wo: MaintenanceWorkOrder) -> dict:
         "completed_by": wo.completed_by,
         "notes": wo.notes,
         "findings": wo.findings,
-        "created_at": wo.created_at.isoformat() if wo.created_at else None,
-        "updated_at": wo.updated_at.isoformat() if wo.updated_at else None,
+        "created_at": to_utc_iso(wo.created_at),
+        "updated_at": to_utc_iso(wo.updated_at),
     }
 
 
@@ -196,9 +197,9 @@ def _serialize_log(log: MaintenanceLog) -> dict:
         "event_type": log.event_type,
         "description": log.description,
         "performed_by": log.performed_by,
-        "event_date": log.event_date.isoformat() if log.event_date else None,
+        "event_date": to_utc_iso(log.event_date),
         "cost": log.cost,
-        "created_at": log.created_at.isoformat() if log.created_at else None,
+        "created_at": to_utc_iso(log.created_at),
     }
 
 

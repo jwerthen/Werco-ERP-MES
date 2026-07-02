@@ -12,6 +12,8 @@ from typing import List, Optional
 
 from pydantic import BaseModel
 
+from app.schemas.base import UTCModel
+
 
 class WorkOrderImportError(BaseModel):
     row: int
@@ -20,7 +22,7 @@ class WorkOrderImportError(BaseModel):
     reason: str
 
 
-class WorkOrderImportRowResult(BaseModel):
+class WorkOrderImportRowResult(UTCModel):
     """Would-be/created work order for one accepted row (preview and commit)."""
 
     row: int

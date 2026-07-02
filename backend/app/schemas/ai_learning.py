@@ -4,6 +4,8 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
+from app.schemas.base import UTCModel
+
 
 class AIEventType(str, Enum):
     SUGGESTION_SHOWN = "suggestion_shown"
@@ -38,7 +40,7 @@ class AICorrectionCreate(BaseModel):
     confidence_score: Optional[float] = Field(None, ge=0, le=1)
 
 
-class AICorrectionResponse(BaseModel):
+class AICorrectionResponse(UTCModel):
     id: int
     event_id: Optional[int] = None
     recommendation_id: Optional[int] = None
@@ -73,7 +75,7 @@ class AIInteractionEventCreate(BaseModel):
     corrections: List[AICorrectionCreate] = Field(default_factory=list)
 
 
-class AIInteractionEventResponse(BaseModel):
+class AIInteractionEventResponse(UTCModel):
     id: int
     event_type: str
     source_module: str
@@ -113,7 +115,7 @@ class AIRecommendationCreate(BaseModel):
     expires_at: Optional[datetime] = None
 
 
-class AIRecommendationResponse(BaseModel):
+class AIRecommendationResponse(UTCModel):
     id: int
     source_module: str
     recommendation_type: str
@@ -175,7 +177,7 @@ class AIOutcomeCreate(BaseModel):
     observed_at: Optional[datetime] = None
 
 
-class AIOutcomeResponse(BaseModel):
+class AIOutcomeResponse(UTCModel):
     id: int
     recommendation_id: Optional[int] = None
     source_module: str

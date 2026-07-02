@@ -27,6 +27,7 @@ from app.api.deps import (
     get_signin_principal,
     require_role,
 )
+from app.core.time_utils import to_utc_iso
 from app.db.database import get_db
 from app.models.user import User, UserRole
 from app.models.visitor_log import VisitorStatus
@@ -239,8 +240,8 @@ def export_visitors_csv(
                 r.purpose_note or "",
                 r.safety_acknowledged,
                 r.status.value if r.status else "",
-                r.signed_in_at.isoformat() if r.signed_in_at else "",
-                r.signed_out_at.isoformat() if r.signed_out_at else "",
+                to_utc_iso(r.signed_in_at) or "",
+                to_utc_iso(r.signed_out_at) or "",
                 r.station_label or "",
             ]
         )

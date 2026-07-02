@@ -8,6 +8,7 @@ from app.models.work_order_blocker import (
     WorkOrderBlockerSeverity,
     WorkOrderBlockerStatus,
 )
+from app.schemas.base import UTCModel
 
 
 class WorkOrderBlockerCreate(BaseModel):
@@ -32,7 +33,7 @@ class WorkOrderBlockerResolve(BaseModel):
     resolution_note: Optional[str] = Field(None, max_length=2000)
 
 
-class WorkOrderBlockerResponse(BaseModel):
+class WorkOrderBlockerResponse(UTCModel):
     id: int
     company_id: int
     work_order_id: int

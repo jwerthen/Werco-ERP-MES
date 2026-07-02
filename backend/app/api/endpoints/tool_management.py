@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_company_id, get_current_user
+from app.core.time_utils import to_utc_iso
 from app.db.database import get_db
 from app.models.tool_management import Tool, ToolCheckout, ToolStatus, ToolType, ToolUsageLog
 from app.models.user import User
@@ -151,8 +152,8 @@ def _tool_to_dict(tool: Tool) -> dict:
         "inspection_interval_days": tool.inspection_interval_days,
         "notes": tool.notes,
         "is_active": tool.is_active,
-        "created_at": tool.created_at.isoformat() if tool.created_at else None,
-        "updated_at": tool.updated_at.isoformat() if tool.updated_at else None,
+        "created_at": to_utc_iso(tool.created_at),
+        "updated_at": to_utc_iso(tool.updated_at),
     }
 
 
@@ -164,14 +165,14 @@ def _checkout_to_dict(co: ToolCheckout) -> dict:
         "checked_out_by_name": (
             co.user.full_name if co.user and hasattr(co.user, 'full_name') else str(co.checked_out_by)
         ),
-        "checked_out_at": co.checked_out_at.isoformat() if co.checked_out_at else None,
-        "checked_in_at": co.checked_in_at.isoformat() if co.checked_in_at else None,
+        "checked_out_at": to_utc_iso(co.checked_out_at),
+        "checked_in_at": to_utc_iso(co.checked_in_at),
         "work_center_id": co.work_center_id,
         "work_order_id": co.work_order_id,
         "condition_out": co.condition_out,
         "condition_in": co.condition_in,
         "notes": co.notes,
-        "created_at": co.created_at.isoformat() if co.created_at else None,
+        "created_at": to_utc_iso(co.created_at),
     }
 
 
@@ -186,7 +187,7 @@ def _usage_to_dict(ul: ToolUsageLog) -> dict:
         "usage_date": ul.usage_date.isoformat() if ul.usage_date else None,
         "recorded_by": ul.recorded_by,
         "notes": ul.notes,
-        "created_at": ul.created_at.isoformat() if ul.created_at else None,
+        "created_at": to_utc_iso(ul.created_at),
     }
 
 

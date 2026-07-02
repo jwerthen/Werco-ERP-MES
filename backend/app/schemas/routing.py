@@ -3,8 +3,10 @@ from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
+from app.schemas.base import UTCModel
 
-class RoutingOperationBase(BaseModel):
+
+class RoutingOperationBase(UTCModel):
     sequence: int
     operation_number: Optional[str] = None
     name: str
@@ -85,7 +87,7 @@ class RoutingOperationResponse(RoutingOperationBase):
         use_enum_values = True
 
 
-class RoutingBase(BaseModel):
+class RoutingBase(UTCModel):
     part_id: int
     revision: str = "A"
     description: Optional[str] = None
@@ -131,7 +133,7 @@ class RoutingResponse(RoutingBase):
         from_attributes = True
 
 
-class RoutingListResponse(BaseModel):
+class RoutingListResponse(UTCModel):
     id: int
     part_id: int
     part: Optional[PartSummary] = None

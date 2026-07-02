@@ -23,6 +23,7 @@ import {
 import { Modal } from '../components/ui/Modal';
 import { EmptyState, ErrorState, FormField, useToast } from '../components/ui';
 import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
+import { formatCentralDateTime } from '../utils/centralTime';
 
 interface DashboardStats {
   characteristics_monitored: number;
@@ -442,7 +443,7 @@ const SPC = () => {
                               </td>
                               <td className="px-3 py-2 text-slate-300 truncate">{m.measured_by}</td>
                               <td className="px-3 py-2 text-slate-400 whitespace-nowrap">
-                                {new Date(m.measured_at).toLocaleString()}
+                                {formatCentralDateTime(m.measured_at)}
                               </td>
                               <td className="px-3 py-2 text-slate-400 truncate">{m.notes || '--'}</td>
                             </tr>
@@ -476,7 +477,7 @@ const SPC = () => {
                             <p className="text-sm font-medium text-red-300 truncate">{v.rule}</p>
                             <p className="text-sm text-fd-red">{v.description}</p>
                             <p className="text-xs text-red-400 mt-1 tabular-nums">
-                              Value: {v.measurement_value} | {new Date(v.detected_at).toLocaleString()}
+                              Value: {v.measurement_value} | {formatCentralDateTime(v.detected_at)}
                             </p>
                           </div>
                         </div>

@@ -36,6 +36,7 @@ from typing import List, Optional, Tuple
 from fastapi import APIRouter, Request, Response, status
 
 from app.core.queue import enqueue_job
+from app.core.time_utils import to_utc_iso
 from app.db.database import SessionLocal
 from app.models.carrier_account import CarrierAccount
 from app.services.carriers import registry
@@ -58,7 +59,7 @@ def _event_to_payload(event: TrackingEvent) -> dict:
     return {
         "status": status_value,
         "status_detail": event.status_detail,
-        "occurred_at": event.occurred_at.isoformat() if event.occurred_at else None,
+        "occurred_at": to_utc_iso(event.occurred_at),
         "location": event.location,
         "message": event.message,
         "provider_event_id": event.provider_event_id,

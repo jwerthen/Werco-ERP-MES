@@ -12,6 +12,7 @@ from app.core.cache import (
     invalidate_work_centers_cache,
 )
 from app.core.realtime import safe_broadcast
+from app.core.time_utils import to_utc_iso
 from app.core.websocket import broadcast_dashboard_update, broadcast_shop_floor_update
 from app.db.database import get_db
 from app.models.user import User, UserRole
@@ -109,8 +110,8 @@ def list_work_centers(
                 "is_active": wc.is_active,
                 "current_status": wc.current_status or "available",
                 "version": getattr(wc, 'version', 0),
-                "created_at": wc.created_at.isoformat() if wc.created_at else None,
-                "updated_at": wc.updated_at.isoformat() if wc.updated_at else None,
+                "created_at": to_utc_iso(wc.created_at),
+                "updated_at": to_utc_iso(wc.updated_at),
             }
             for wc in result
         ]

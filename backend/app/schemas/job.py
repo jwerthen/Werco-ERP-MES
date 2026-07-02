@@ -4,9 +4,10 @@ from typing import Any, Dict, Optional
 from pydantic import BaseModel
 
 from app.models.job import JobPriority, JobStatus
+from app.schemas.base import UTCModel
 
 
-class JobBase(BaseModel):
+class JobBase(UTCModel):
     job_type: str
     queue: str = "default"
     priority: JobPriority = JobPriority.NORMAL

@@ -5,6 +5,8 @@ from typing import List, Optional
 
 from pydantic import BaseModel
 
+from app.schemas.base import UTCModel
+
 
 class AIUsageAggregate(BaseModel):
     """Aggregated usage for one bucket (a task, a model, or the whole window)."""
@@ -27,7 +29,7 @@ class AIUsageModelSummary(AIUsageAggregate):
     model: str
 
 
-class AIUsageSummaryResponse(BaseModel):
+class AIUsageSummaryResponse(UTCModel):
     window_days: int
     since: datetime
     totals: AIUsageAggregate

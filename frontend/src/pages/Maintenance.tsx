@@ -15,6 +15,7 @@ import {
 } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
+import { formatCentralDate, toDate } from '../utils/centralTime';
 import {
   PlusIcon,
   MagnifyingGlassIcon,
@@ -251,8 +252,8 @@ export default function Maintenance() {
       header: 'Scheduled',
       sortable: true,
       accessor: (wo) => wo.scheduled_date || '',
-      csv: (wo) => (wo.scheduled_date ? new Date(wo.scheduled_date).toLocaleDateString() : ''),
-      render: (wo) => (wo.scheduled_date ? new Date(wo.scheduled_date).toLocaleDateString() : '-'),
+      csv: (wo) => (wo.scheduled_date ? formatCentralDate(wo.scheduled_date) : ''),
+      render: (wo) => (wo.scheduled_date ? formatCentralDate(wo.scheduled_date) : '-'),
     },
     {
       key: 'actions',
@@ -269,7 +270,7 @@ export default function Maintenance() {
       fields={[
         { label: 'Type', value: <span className="capitalize">{wo.maintenance_type}</span> },
         { label: 'Priority', value: <StatusBadge status={wo.priority} colorMap={priorityBadgeColors} /> },
-        { label: 'Scheduled', value: wo.scheduled_date ? new Date(wo.scheduled_date).toLocaleDateString() : '-' },
+        { label: 'Scheduled', value: wo.scheduled_date ? formatCentralDate(wo.scheduled_date) : '-' },
       ]}
       actions={
         (wo.status === 'open' || wo.status === 'in_progress') ? woRowActions(wo) : undefined
@@ -323,19 +324,19 @@ export default function Maintenance() {
       header: 'Last Performed',
       sortable: true,
       accessor: (s) => s.last_performed_at || '',
-      csv: (s) => (s.last_performed_at ? new Date(s.last_performed_at).toLocaleDateString() : ''),
-      render: (s) => (s.last_performed_at ? new Date(s.last_performed_at).toLocaleDateString() : '-'),
+      csv: (s) => (s.last_performed_at ? formatCentralDate(s.last_performed_at) : ''),
+      render: (s) => (s.last_performed_at ? formatCentralDate(s.last_performed_at) : '-'),
     },
     {
       key: 'next_due',
       header: 'Next Due',
       sortable: true,
       accessor: (s) => s.next_due_date || '',
-      csv: (s) => (s.next_due_date ? new Date(s.next_due_date).toLocaleDateString() : ''),
+      csv: (s) => (s.next_due_date ? formatCentralDate(s.next_due_date) : ''),
       render: (s) =>
         s.next_due_date ? (
-          <span className={new Date(s.next_due_date) < new Date() ? 'text-red-600 font-medium' : ''}>
-            {new Date(s.next_due_date).toLocaleDateString()}
+          <span className={(toDate(s.next_due_date) ?? new Date()) < new Date() ? 'text-red-600 font-medium' : ''}>
+            {formatCentralDate(s.next_due_date)}
           </span>
         ) : (
           '-'
@@ -373,8 +374,8 @@ export default function Maintenance() {
         {
           label: 'Next Due',
           value: s.next_due_date ? (
-            <span className={new Date(s.next_due_date) < new Date() ? 'text-red-600 font-medium' : ''}>
-              {new Date(s.next_due_date).toLocaleDateString()}
+            <span className={(toDate(s.next_due_date) ?? new Date()) < new Date() ? 'text-red-600 font-medium' : ''}>
+              {formatCentralDate(s.next_due_date)}
             </span>
           ) : (
             '-'
@@ -467,7 +468,7 @@ export default function Maintenance() {
                 <div key={i} className="bg-fd-panel rounded-lg shadow p-4 border-l-4 border-blue-400">
                   <div className="font-medium">{item.title || item.description}</div>
                   <div className="text-sm text-slate-400 mt-1">{item.work_center_name}</div>
-                  <div className="text-sm text-slate-400 mt-1">Due: {item.next_due_date ? new Date(item.next_due_date).toLocaleDateString() : item.scheduled_date ? new Date(item.scheduled_date).toLocaleDateString() : '-'}</div>
+                  <div className="text-sm text-slate-400 mt-1">Due: {item.next_due_date ? formatCentralDate(item.next_due_date) : item.scheduled_date ? formatCentralDate(item.scheduled_date) : '-'}</div>
                   <div className="mt-2">
                     <span className={`text-xs px-2 py-1 rounded-full ${item.maintenance_type === 'preventive' ? 'bg-blue-500/20 text-blue-400' : 'bg-orange-500/20 text-orange-700'}`}>
                       {item.maintenance_type}
@@ -513,7 +514,7 @@ export default function Maintenance() {
                         {wo.status?.replace(/_/g, ' ')}
                       </span>
                     </td>
-                    <td className="px-4 py-3">{wo.scheduled_date ? new Date(wo.scheduled_date).toLocaleDateString() : new Date(wo.created_at).toLocaleDateString()}</td>
+                    <td className="px-4 py-3">{wo.scheduled_date ? formatCentralDate(wo.scheduled_date) : formatCentralDate(wo.created_at)}</td>
                   </tr>
                 ))}
               </tbody>

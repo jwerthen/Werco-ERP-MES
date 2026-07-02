@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Part } from '../../types';
 import { useToast } from '../ui/Toast';
 import api from '../../services/api';
+import { formatCentralDate } from '../../utils/centralTime';
 import { PencilIcon, CheckIcon, XMarkIcon } from '@heroicons/react/24/outline';
 
 interface Props {
@@ -147,8 +148,8 @@ export function PartOverviewTab({ part, onPartUpdated }: Props) {
         <h3 className="text-base font-semibold text-white mb-3">Metadata</h3>
         <dl className="space-y-2">
           <Field label="Active" value={part.is_active ? 'Yes' : 'No'} />
-          <Field label="Created" value={new Date(part.created_at).toLocaleDateString()} />
-          <Field label="Updated" value={new Date(part.updated_at).toLocaleDateString()} />
+          <Field label="Created" value={formatCentralDate(part.created_at)} />
+          <Field label="Updated" value={formatCentralDate(part.updated_at)} />
         </dl>
       </div>
     </div>

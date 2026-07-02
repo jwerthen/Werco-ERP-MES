@@ -27,6 +27,7 @@ import type {
   WallboardResponse,
   WallboardWorkCenter,
 } from '../types/wallboard';
+import { formatCentralTime } from '../utils/centralTime';
 
 const POLL_INTERVAL_MS = 30_000;
 const TICKER_ROTATE_MS = 6_000;
@@ -36,10 +37,6 @@ function formatElapsed(minutes: number): string {
   const h = Math.floor(minutes / 60);
   const m = minutes % 60;
   return `${h}h ${String(m).padStart(2, '0')}m`;
-}
-
-function formatClock(d: Date): string {
-  return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
 }
 
 function blockerLabel(category: string): string {
@@ -170,10 +167,10 @@ export default function Wallboard() {
             </span>
           )}
           <span className="text-xl text-[#8b98a9] tabular-nums" data-testid="last-updated">
-            {lastUpdated ? `Updated ${formatClock(lastUpdated)}` : 'Loading…'}
+            {lastUpdated ? `Updated ${formatCentralTime(lastUpdated)}` : 'Loading…'}
           </span>
           <span className="text-5xl font-bold tabular-nums" data-testid="wall-clock">
-            {formatClock(now)}
+            {formatCentralTime(now)}
           </span>
         </div>
       </header>

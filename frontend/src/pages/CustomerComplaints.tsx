@@ -24,6 +24,7 @@ import {
   MobileDataCard,
   FormField,
 } from '../components/ui';
+import { formatCentralDate, getCentralTodayISODate } from '../utils/centralTime';
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -139,7 +140,9 @@ interface RMACreateForm {
 
 // ── Helpers ──────────────────────────────────────────────────────
 
-const todayISO = () => new Date().toISOString().split('T')[0];
+// Central-local "today" (YYYY-MM-DD) so date-only form defaults don't roll to
+// tomorrow on a Central evening (UTC midnight).
+const todayISO = () => getCentralTodayISODate();
 
 const severityBadge: Record<ComplaintSeverity, string> = {
   minor: 'bg-yellow-500/20 text-yellow-300',
@@ -181,14 +184,8 @@ const rmaStatusLabel: Record<RMAStatus, string> = {
   completed: 'Completed',
 };
 
-const formatDate = (d: string | null) => {
-  if (!d) return '-';
-  return new Date(d).toLocaleDateString('en-US', {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-  });
-};
+// Shop-local Central date; '-' fallback matches centralTime's default.
+const formatDate = (d: string | null) => formatCentralDate(d);
 
 const fmt = (n: number) =>
   new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n);

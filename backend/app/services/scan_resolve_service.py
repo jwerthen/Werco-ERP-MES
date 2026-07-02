@@ -42,6 +42,7 @@ from urllib.parse import parse_qs, urlsplit
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload, selectinload
 
+from app.core.time_utils import to_utc_iso
 from app.db.tenant_filter import tenant_query
 from app.models.routing import Routing
 from app.models.user import User
@@ -302,7 +303,7 @@ def _routing_revision_check(
     check = RoutingRevisionCheck(
         current_released_revision=routing.revision,
         released_routing_changed_after_wo_creation=changed,
-        checked_against=baseline.isoformat() if baseline else None,
+        checked_against=to_utc_iso(baseline),
         note=ROUTING_CHECK_NOTE,
     )
     return check, ("routing_revision_changed" if changed else None)

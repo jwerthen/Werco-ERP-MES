@@ -29,19 +29,13 @@ import {
   useToast,
 } from '../components/ui';
 import { purposeLabel, VISITOR_STATUS_COLORS } from '../components/visitor/visitorConstants';
+import { formatCentralDateTime } from '../utils/centralTime';
 import type { VisitorLogResponse, SigninStationResponse } from '../types/visitor';
 
+// Shop-local Central date+time; em-dash for an empty timestamp (matches the
+// prior local formatter's fallback rather than centralTime's default '-').
 function formatDateTime(iso: string | null): string {
-  if (!iso) return '—';
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleString('en-US', {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  });
+  return iso ? formatCentralDateTime(iso) : '—';
 }
 
 const STATUS_OPTIONS = [

@@ -4,9 +4,10 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 
 from app.models.bom import BOMItemType, BOMLineType
+from app.schemas.base import UTCModel
 
 
-class BOMItemBase(BaseModel):
+class BOMItemBase(UTCModel):
     component_part_id: int
     item_number: int = Field(..., gt=0)
     quantity: float = Field(default=1.0, gt=0)
@@ -90,7 +91,7 @@ class BOMItemWithChildren(BOMItemResponse):
         from_attributes = True
 
 
-class BOMBase(BaseModel):
+class BOMBase(UTCModel):
     part_id: int
     revision: str = "A"
     description: Optional[str] = None

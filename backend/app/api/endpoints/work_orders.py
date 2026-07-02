@@ -23,6 +23,7 @@ from sqlalchemy.orm.exc import StaleDataError
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.core.cache import invalidate_work_centers_cache
 from app.core.realtime import safe_broadcast
+from app.core.time_utils import to_utc_iso
 from app.core.websocket import (
     broadcast_dashboard_update,
     broadcast_shop_floor_update,
@@ -2455,7 +2456,7 @@ def start_work_order(
         current_user=current_user,
         work_order=work_order,
         event_type="work_order_started",
-        payload={"actual_start": work_order.actual_start.isoformat() if work_order.actual_start else None},
+        payload={"actual_start": to_utc_iso(work_order.actual_start)},
     )
 
     # Audit the status transition on the tamper-evident chain. Logged BEFORE the

@@ -8,6 +8,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
 
 from app.api.deps import get_current_company_id, get_current_user, require_role
+from app.core.time_utils import to_utc_iso
 from app.db.database import get_db
 from app.models.customer import Customer
 from app.models.part import Part, PartType
@@ -382,7 +383,7 @@ def get_customer_stats(
             "status": status_value,
             "due_date": wo.due_date.isoformat() if wo.due_date else None,
             "quantity_ordered": float(wo.quantity_ordered),
-            "created_at": wo.created_at.isoformat() if wo.created_at else None,
+            "created_at": to_utc_iso(wo.created_at),
             "part_id": wo.part_id,
             "part_number": wo.part.part_number if wo.part else None,
             "part_name": wo.part.name if wo.part else None,

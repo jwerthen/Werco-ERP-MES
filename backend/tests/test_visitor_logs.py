@@ -617,6 +617,55 @@ def test_sign_out_by_name_single_match(client: TestClient, db_session: Session):
     assert any(r.resource_id == visitor.id for r in changes), "expected a STATUS_CHANGE audit row for sign-out"
 
 
+def test_sign_in_response_signed_in_at_ends_with_z(client: TestClient, db_session: Session):
+    """The sign-in response ``signed_in_at`` is UTC ISO-8601 with a trailing 'Z'.
+
+    Timezone-consistency regression guard: the visitor timestamps flow through
+    ``VisitorLogResponse`` (a ``UTCModel`` subclass that re-declares its own
+    ``model_config``). The inherited ``json_encoders={datetime: to_utc_iso}``
+    must still apply so the frontend parses the value as UTC (not viewer-local).
+    """
+    station = _make_station(db_session, company_id=COMPANY_A)
+    token = _signin_token_for(station)
+
+    resp = client.post(
+        "/api/v1/visitor-logs/sign-in",
+        headers=_station_headers(token),
+        json=_valid_signin_payload(),
+    )
+    assert resp.status_code == status.HTTP_201_CREATED, resp.text
+    body = resp.json()
+    assert body["signed_in_at"].endswith("Z"), body["signed_in_at"]
+    # No offset was smuggled in place of 'Z'.
+    assert "+" not in body["signed_in_at"]
+
+
+def test_sign_out_response_signed_out_at_ends_with_z(client: TestClient, db_session: Session):
+    """The sign-out response ``signed_out_at`` is UTC ISO-8601 with a trailing 'Z'.
+
+    This is the exact trigger for the fix: a sign-out timestamp serialized
+    without the 'Z' rendered as viewer-local time on the frontend instead of the
+    shop's Central time.
+    """
+    station = _make_station(db_session, company_id=COMPANY_A)
+    token = _signin_token_for(station)
+    _make_visitor(db_session, company_id=COMPANY_A, visitor_name="Zulu Visitor")
+
+    resp = client.post(
+        "/api/v1/visitor-logs/sign-out",
+        headers=_station_headers(token),
+        json={"name": "Zulu Visitor"},
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    body = resp.json()
+    assert body["status"] == VisitorStatus.SIGNED_OUT.value
+    assert body["signed_out_at"] is not None
+    assert body["signed_out_at"].endswith("Z"), body["signed_out_at"]
+    assert "+" not in body["signed_out_at"]
+    # signed_in_at is likewise UTC-Z on the same response.
+    assert body["signed_in_at"].endswith("Z"), body["signed_in_at"]
+
+
 def test_sign_out_by_visitor_log_id(client: TestClient, db_session: Session):
     """Sign-out by explicit visitor_log_id signs out that exact row."""
     admin = _make_user(db_session, company_id=COMPANY_A, role=UserRole.ADMIN)
