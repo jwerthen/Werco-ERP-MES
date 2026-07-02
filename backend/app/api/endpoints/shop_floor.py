@@ -1292,11 +1292,11 @@ def _set_time_entry_approval(
         resource_id=time_entry.id,
         resource_identifier=str(time_entry.id),
         old_values={
-            "approved": old_approved.isoformat() if old_approved else None,
+            "approved": to_utc_iso(old_approved),
             "approved_by": old_approved_by,
         },
         new_values={
-            "approved": time_entry.approved.isoformat() if time_entry.approved else None,
+            "approved": to_utc_iso(time_entry.approved),
             "approved_by": time_entry.approved_by,
         },
         description=description,
@@ -1858,7 +1858,7 @@ def shop_floor_dashboard(
                     if op.completed_by in completed_users_by_id
                     else None
                 ),
-                "completed_at": op.actual_end.isoformat() if op.actual_end else None,
+                "completed_at": to_utc_iso(op.actual_end),
                 "quantity_complete": op.quantity_complete,
             }
             for op in recent_operations
@@ -2046,7 +2046,7 @@ def get_all_operations(
                 "due_date": wo.due_date.isoformat() if wo.due_date else None,
                 "customer_name": wo.customer_name,
                 "customer_po": wo.customer_po,
-                "actual_start": op.actual_start.isoformat() if op.actual_start else None,
+                "actual_start": to_utc_iso(op.actual_start),
                 "setup_instructions": op.setup_instructions,
                 "run_instructions": op.run_instructions,
                 "requires_inspection": op.requires_inspection,
@@ -2250,7 +2250,7 @@ def start_operation(
         "operation": {
             "id": operation.id,
             "status": operation.status.value,
-            "actual_start": operation.actual_start.isoformat() if operation.actual_start else None,
+            "actual_start": to_utc_iso(operation.actual_start),
         },
         # G5-B: surface any unsatisfied qualification gate (warn-only; defaults to []).
         "qualification_exceptions": [exc.as_dict() for exc in qualification_exceptions],
@@ -2457,7 +2457,7 @@ def report_operation_production(
             "id": active_entry.id,
             "quantity_produced": active_entry.quantity_produced,
             "quantity_scrapped": active_entry.quantity_scrapped,
-            "clock_out": active_entry.clock_out.isoformat() if active_entry.clock_out else None,
+            "clock_out": to_utc_iso(active_entry.clock_out),
         },
     }
 
@@ -2818,8 +2818,8 @@ def complete_operation(
             "id": operation.id,
             "status": operation.status.value,
             "quantity_complete": operation.quantity_complete,
-            "actual_start": operation.actual_start.isoformat() if operation.actual_start else None,
-            "actual_end": operation.actual_end.isoformat() if operation.actual_end else None,
+            "actual_start": to_utc_iso(operation.actual_start),
+            "actual_end": to_utc_iso(operation.actual_end),
         },
         "work_order": {
             "id": work_order.id,
@@ -2913,8 +2913,8 @@ def get_operation_details(
             "run_time_hours": operation.run_time_hours,
             "actual_setup_hours": operation.actual_setup_hours,
             "actual_run_hours": operation.actual_run_hours,
-            "actual_start": operation.actual_start.isoformat() if operation.actual_start else None,
-            "actual_end": operation.actual_end.isoformat() if operation.actual_end else None,
+            "actual_start": to_utc_iso(operation.actual_start),
+            "actual_end": to_utc_iso(operation.actual_end),
             "requires_inspection": operation.requires_inspection,
             "inspection_type": operation.inspection_type,
             "inspection_complete": operation.inspection_complete,
@@ -2957,8 +2957,8 @@ def get_operation_details(
                 "laser_nest": _laser_nest_payload(op),
                 "actual_setup_hours": op.actual_setup_hours,
                 "actual_run_hours": op.actual_run_hours,
-                "actual_start": op.actual_start.isoformat() if op.actual_start else None,
-                "actual_end": op.actual_end.isoformat() if op.actual_end else None,
+                "actual_start": to_utc_iso(op.actual_start),
+                "actual_end": to_utc_iso(op.actual_end),
                 "started_by": op.started_by,
                 "completed_by": op.completed_by,
                 "is_current": op.id == operation_id,
@@ -2970,7 +2970,7 @@ def get_operation_details(
             {
                 "action": h.action,
                 "details": h.description,
-                "created_at": h.timestamp.isoformat() if h.timestamp else None,
+                "created_at": to_utc_iso(h.timestamp),
             }
             for h in history
         ],

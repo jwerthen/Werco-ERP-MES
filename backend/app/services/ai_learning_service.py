@@ -7,6 +7,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
+from app.core.time_utils import to_utc_iso
 from app.models.ai_learning import AICorrection, AIInteractionEvent, AIOutcome, AIRecommendation
 from app.models.company import Company
 from app.models.user import User
@@ -366,7 +367,7 @@ class AILearningService:
 
         now = _now()
         snoozed_until = now + timedelta(days=days)
-        status_reason = f"Snoozed until {snoozed_until.isoformat()}Z"
+        status_reason = f"Snoozed until {to_utc_iso(snoozed_until)}"
         if reason:
             status_reason = f"{status_reason} — {reason}"
         recommendation.status = "snoozed"
@@ -388,7 +389,7 @@ class AILearningService:
                 context_summary=reason,
                 event_payload={
                     "status": "snoozed",
-                    "snoozed_until": snoozed_until.isoformat(),
+                    "snoozed_until": to_utc_iso(snoozed_until),
                     "snooze_days": days,
                     "note": "Suggest-only status change; no controlled ERP record was mutated.",
                 },

@@ -4,13 +4,14 @@ from typing import List, Optional
 
 from pydantic import BaseModel, Field, field_serializer, model_validator
 
-from app.core.time_utils import to_central_iso
+from app.core.time_utils import to_utc_iso
 from app.core.validation import (
     DescriptionLong,
     Money,
     MoneySmall,
 )
 from app.models.work_order import OperationStatus, WorkOrderStatus
+from app.schemas.base import UTCModel
 
 
 def _serialize_decimal_as_number(value: Optional[Decimal]) -> Optional[float]:
@@ -43,7 +44,7 @@ class QualityExceptionInfo(BaseModel):
     severity: Optional[str] = None
 
 
-class WorkOrderOperationBase(BaseModel):
+class WorkOrderOperationBase(UTCModel):
     work_center_id: int = Field(..., gt=0, description="Work center ID")
     sequence: int = Field(
         ...,
@@ -309,14 +310,14 @@ class WorkOrderOperationResponse(WorkOrderOperationBase):
         "updated_at",
         when_used="json",
     )
-    def serialize_central_datetime(self, value: Optional[datetime]) -> Optional[str]:
-        return to_central_iso(value)
+    def serialize_utc_datetime(self, value: Optional[datetime]) -> Optional[str]:
+        return to_utc_iso(value)
 
     class Config:
         from_attributes = True
 
 
-class WorkOrderBase(BaseModel):
+class WorkOrderBase(UTCModel):
     part_id: int = Field(..., gt=0, description="Part ID")
     parent_work_order_id: Optional[int] = Field(None, gt=0)
     work_order_type: str = Field(default="production", max_length=50)
@@ -425,14 +426,14 @@ class WorkOrderResponse(WorkOrderBase):
         "updated_at",
         when_used="json",
     )
-    def serialize_central_datetime(self, value: Optional[datetime]) -> Optional[str]:
-        return to_central_iso(value)
+    def serialize_utc_datetime(self, value: Optional[datetime]) -> Optional[str]:
+        return to_utc_iso(value)
 
     class Config:
         from_attributes = True
 
 
-class WorkOrderSummary(BaseModel):
+class WorkOrderSummary(UTCModel):
     """Lightweight work order for lists/dashboards"""
 
     id: int

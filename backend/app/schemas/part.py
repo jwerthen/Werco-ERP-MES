@@ -12,9 +12,10 @@ from app.core.validation import (
     Revision,
 )
 from app.models.part import PartType, UnitOfMeasure
+from app.schemas.base import UTCModel
 
 
-class PartBase(BaseModel):
+class PartBase(UTCModel):
     part_number: PartNumber
     revision: Revision = "A"
     name: str = Field(min_length=2, max_length=255)

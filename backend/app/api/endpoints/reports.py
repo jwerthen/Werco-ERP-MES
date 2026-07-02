@@ -6,6 +6,7 @@ from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session, joinedload
 
 from app.api.deps import get_current_company_id, get_current_user
+from app.core.time_utils import to_utc_iso
 from app.db.database import get_db
 from app.models.inventory import InventoryItem
 from app.models.purchasing import POReceipt, PurchaseOrder
@@ -473,15 +474,15 @@ def get_employee_time_report(
         by_employee[uid]["entries"].append(
             {
                 "date": entry.clock_in.date().isoformat() if entry.clock_in else None,
-                "clock_in": entry.clock_in.isoformat() if entry.clock_in else None,
-                "clock_out": entry.clock_out.isoformat() if entry.clock_out else None,
+                "clock_in": to_utc_iso(entry.clock_in),
+                "clock_out": to_utc_iso(entry.clock_out),
                 "hours": hours,
                 "work_order_number": entry.work_order.work_order_number if entry.work_order else None,
                 "operation": entry.operation.name if entry.operation else None,
                 "work_center": entry.work_center.name if entry.work_center else None,
                 "quantity_produced": quantity_produced,
                 "quantity_scrapped": quantity_scrapped,
-                "completed_at": entry.operation.actual_end.isoformat() if operation_completed_by_user else None,
+                "completed_at": to_utc_iso(entry.operation.actual_end) if operation_completed_by_user else None,
                 "source": "time_entry",
             }
         )
@@ -540,14 +541,14 @@ def get_employee_time_report(
             {
                 "date": op.actual_end.date().isoformat() if op.actual_end else None,
                 "clock_in": None,
-                "clock_out": op.actual_end.isoformat() if op.actual_end else None,
+                "clock_out": to_utc_iso(op.actual_end),
                 "hours": 0,
                 "work_order_number": op.work_order.work_order_number if op.work_order else None,
                 "operation": op.name,
                 "work_center": op.work_center.name if op.work_center else None,
                 "quantity_produced": float(op.quantity_complete or 0),
                 "quantity_scrapped": float(op.quantity_scrapped or 0),
-                "completed_at": op.actual_end.isoformat() if op.actual_end else None,
+                "completed_at": to_utc_iso(op.actual_end),
                 "source": "operation_completion",
             }
         )

@@ -25,6 +25,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from app.core.time_utils import to_utc_iso
 from app.services.llm_client import (
     LLMEgressDisabledError,
     LLMNotConfiguredError,
@@ -207,7 +208,7 @@ Return ONLY the JSON object, no other text."""
 
         result["warning"] = None
         result["_extraction_metadata"] = {
-            "extracted_at": datetime.utcnow().isoformat(),
+            "extracted_at": to_utc_iso(datetime.utcnow()),
             "source_was_ocr": is_ocr,
             "input_mode": input_mode,
             "model": llm_result.model,
@@ -268,7 +269,7 @@ def _create_empty_nest_result(
         "source": "filename",
         "warning": error_message,
         "_extraction_metadata": {
-            "extracted_at": datetime.utcnow().isoformat(),
+            "extracted_at": to_utc_iso(datetime.utcnow()),
             "source_was_ocr": is_ocr,
             "input_mode": input_mode,
             "model": None,

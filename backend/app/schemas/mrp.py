@@ -4,6 +4,7 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 
 from app.models.mrp import MRPRunStatus, PlanningAction
+from app.schemas.base import UTCModel
 
 
 class MRPRunCreate(BaseModel):
@@ -12,7 +13,7 @@ class MRPRunCreate(BaseModel):
     include_allocated: bool = True
 
 
-class MRPRunResponse(BaseModel):
+class MRPRunResponse(UTCModel):
     id: int
     run_number: str
     planning_horizon_days: int
@@ -41,7 +42,7 @@ class PartSummary(BaseModel):
         from_attributes = True
 
 
-class MRPRequirementResponse(BaseModel):
+class MRPRequirementResponse(UTCModel):
     id: int
     mrp_run_id: int
     part_id: int
@@ -61,7 +62,7 @@ class MRPRequirementResponse(BaseModel):
         from_attributes = True
 
 
-class MRPActionResponse(BaseModel):
+class MRPActionResponse(UTCModel):
     id: int
     mrp_run_id: int
     part_id: int

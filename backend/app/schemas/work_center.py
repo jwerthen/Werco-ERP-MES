@@ -3,8 +3,10 @@ from typing import Optional
 
 from pydantic import BaseModel
 
+from app.schemas.base import UTCModel
 
-class WorkCenterBase(BaseModel):
+
+class WorkCenterBase(UTCModel):
     code: str
     name: str
     work_center_type: str

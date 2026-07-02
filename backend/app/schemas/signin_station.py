@@ -10,6 +10,8 @@ from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.base import UTCModel
+
 # Shared PIN policy: 4–8 digits, numeric only.
 _PIN_PATTERN = r'^\d{4,8}$'
 
@@ -34,7 +36,7 @@ class StationResetPinRequest(BaseModel):
     pin: str = Field(..., pattern=_PIN_PATTERN, description="New shared station PIN (4–8 digits)")
 
 
-class SigninStationResponse(BaseModel):
+class SigninStationResponse(UTCModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int

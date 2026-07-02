@@ -439,6 +439,22 @@ Once the backend is running, access the interactive API documentation:
 4. **Add route** in `src/App.tsx`
 5. **Write tests** alongside component files
 
+## Timezone handling
+
+The platform rule is **store UTC, serve UTC (`Z`), display Central**:
+
+- **Store UTC.** Persist naive/aware UTC datetimes as usual — nothing about storage changes.
+- **Serve UTC with `Z`.** API responses serialize `datetime` fields as UTC ISO-8601 with a trailing
+  `Z` (e.g. `2026-07-01T19:17:00Z`). New **response** schemas inherit `UTCModel`
+  (`app/schemas/base.py`) rather than bare `BaseModel`; hand-built response dicts run datetime values
+  through `app.core.time_utils.to_utc_iso(...)`. `date`-only fields stay `YYYY-MM-DD` (unaffected).
+- **Display Central.** The frontend renders every timestamp in shop-local Central time
+  (America/Chicago) via `frontend/src/utils/centralTime.ts` (`formatCentralDateTime` /
+  `formatCentralDate` / `formatCentralTime`; `toDate` to parse — it treats zone-less strings as UTC;
+  `getCentralTodayISODate` / `getCentralDateStamp` for date-only form defaults). Never hand-roll
+  `new Date(x).toLocaleString()` for display — it renders in the viewer's timezone and mis-parses
+  no-`Z` strings.
+
 ## Debugging
 
 ### Backend Debugging

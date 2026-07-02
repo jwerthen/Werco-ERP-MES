@@ -4,6 +4,7 @@ import { UserRole } from '../types';
 import { useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { usePermissions } from '../hooks/usePermissions';
+import { formatCentralDate } from '../utils/centralTime';
 import {
   PlusIcon,
   PencilIcon,
@@ -575,7 +576,7 @@ export default function Users() {
                   <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-sm text-slate-400">
                     <span>{user.email}</span>
                     <span>ID: {user.employee_id}</span>
-                    <span>Requested {new Date(user.created_at).toLocaleDateString()}</span>
+                    <span>Requested {formatCentralDate(user.created_at)}</span>
                   </div>
                 </div>
                 <select

@@ -21,6 +21,7 @@ import {
   MobileDataCard,
 } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
+import { formatCentralDate, getCentralTodayISODate } from '../utils/centralTime';
 
 // ── Types ────────────────────────────────────────────────────────
 type CertStatus = 'active' | 'expired' | 'suspended' | 'revoked' | 'pending';
@@ -118,10 +119,12 @@ interface TrainingCreateForm {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────
-const todayISO = () => new Date().toISOString().split('T')[0];
+// Central-local "today" (YYYY-MM-DD) so date-only form defaults don't roll to
+// tomorrow on a Central evening (UTC midnight).
+const todayISO = () => getCentralTodayISODate();
 
-const formatDate = (d: string | null | undefined) =>
-  d ? new Date(d).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' }) : '-';
+// Shop-local Central date; '-' fallback matches centralTime's default.
+const formatDate = (d: string | null | undefined) => formatCentralDate(d);
 
 const statusBadge: Record<CertStatus, string> = {
   active: 'bg-green-500/20 text-emerald-300',

@@ -8,6 +8,8 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
+from app.schemas.base import UTCModel
+
 
 class DateGranularity(str, Enum):
     DAY = "day"
@@ -41,7 +43,7 @@ class KPIValue(BaseModel):
         from_attributes = True
 
 
-class KPIDashboard(BaseModel):
+class KPIDashboard(UTCModel):
     oee: KPIValue
     on_time_delivery: KPIValue
     first_pass_yield: KPIValue
@@ -65,7 +67,7 @@ class OEEComponents(BaseModel):
     oee: float
 
 
-class OEEDataPoint(BaseModel):
+class OEEDataPoint(UTCModel):
     date: date
     work_center_id: Optional[int] = None
     work_center_name: Optional[str] = None
@@ -92,7 +94,7 @@ class OEEResponse(BaseModel):
 # ============ PRODUCTION TRENDS ============
 
 
-class ProductionDataPoint(BaseModel):
+class ProductionDataPoint(UTCModel):
     date: date
     group_key: Optional[str] = None
     group_name: Optional[str] = None
@@ -152,7 +154,7 @@ class DefectPareto(BaseModel):
     cumulative_pct: float
 
 
-class QualityDataPoint(BaseModel):
+class QualityDataPoint(UTCModel):
     date: date
     defect_rate: float
     first_pass_yield: float
@@ -193,7 +195,7 @@ class InventoryTurnover(BaseModel):
     days_on_hand: float
 
 
-class StockLevel(BaseModel):
+class StockLevel(UTCModel):
     date: date
     part_id: int
     part_number: str
@@ -273,7 +275,7 @@ class ReportTemplateCreate(BaseModel):
     is_shared: bool = False
 
 
-class ReportTemplateResponse(BaseModel):
+class ReportTemplateResponse(UTCModel):
     id: int
     name: str
     description: Optional[str]
@@ -302,7 +304,7 @@ class WorkCenterForecast(BaseModel):
     is_overloaded: bool
 
 
-class CapacityForecast(BaseModel):
+class CapacityForecast(UTCModel):
     week_start: date
     week_end: date
     work_centers: List[WorkCenterForecast]
@@ -316,7 +318,7 @@ class CapacityForecastResponse(BaseModel):
     alerts: List[Dict[str, Any]]
 
 
-class OperationPrediction(BaseModel):
+class OperationPrediction(UTCModel):
     operation_id: int
     operation_name: str
     work_center_name: str
@@ -326,7 +328,7 @@ class OperationPrediction(BaseModel):
     estimated_hours: float
 
 
-class DeliveryPrediction(BaseModel):
+class DeliveryPrediction(UTCModel):
     work_order_id: int
     work_order_number: str
     part_number: str
@@ -339,7 +341,7 @@ class DeliveryPrediction(BaseModel):
     bottleneck_work_center: Optional[str] = None
 
 
-class StockoutPrediction(BaseModel):
+class StockoutPrediction(UTCModel):
     part_id: int
     part_number: str
     part_name: str

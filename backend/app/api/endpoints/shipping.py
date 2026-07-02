@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.core.realtime import safe_broadcast
+from app.core.time_utils import to_utc_iso
 from app.core.websocket import broadcast_dashboard_update, broadcast_work_order_update
 from app.db.database import get_db
 from app.models.shipping import (
@@ -249,7 +250,7 @@ def get_shipment(
         "ship_date": shipment.ship_date.isoformat() if shipment.ship_date else None,
         "cert_of_conformance": shipment.cert_of_conformance,
         "packing_notes": shipment.packing_notes,
-        "created_at": shipment.created_at.isoformat(),
+        "created_at": to_utc_iso(shipment.created_at),
     }
 
 

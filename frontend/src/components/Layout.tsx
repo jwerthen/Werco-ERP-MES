@@ -21,6 +21,7 @@ import { buildWsUrl, getAccessToken } from '../services/realtime';
 import { isKioskMode } from '../utils/kiosk';
 import { getCurrentShift } from '../utils/shifts';
 import { getRouteTitle } from '../utils/routeMeta';
+import { formatCentralTime } from '../utils/centralTime';
 import {
   HomeIcon,
   ClipboardDocumentListIcon,
@@ -387,11 +388,19 @@ const SidebarPattern = () => (
   </svg>
 );
 
-// Foundry HUD live clock (24h)
+// Foundry HUD live clock (24h, shop-local Central)
 const HudClock = React.memo(function HudClock() {
   const [t, setT] = useState('');
   useEffect(() => {
-    const tick = () => setT(new Date().toLocaleTimeString('en-GB'));
+    const tick = () =>
+      setT(
+        formatCentralTime(new Date(), {
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+          hour12: false,
+        }),
+      );
     tick();
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);

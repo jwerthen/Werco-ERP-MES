@@ -5,9 +5,10 @@ from typing import Optional
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
 from app.models.user import UserRole
+from app.schemas.base import UTCModel
 
 
-class UserBase(BaseModel):
+class UserBase(UTCModel):
     email: EmailStr = Field(..., max_length=255, description="Email address")
     employee_id: str = Field(..., min_length=1, max_length=50, pattern=r'^[A-Za-z0-9\-_]+$', description="Employee ID")
     first_name: str = Field(

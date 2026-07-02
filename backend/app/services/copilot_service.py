@@ -38,6 +38,7 @@ from typing import Any, Callable, Dict, FrozenSet, Generator, List, Optional
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
+from app.core.time_utils import to_utc_iso
 from app.models.inventory import InventoryItem
 from app.models.part import Part
 from app.models.quote import Quote, QuoteStatus
@@ -229,7 +230,7 @@ def _tool_list_blocked_work_orders(*, db: Session, company_id: int, user: User) 
                 "status": blocker.status,
                 "work_order_number": work_order.work_order_number if work_order else None,
                 "operation": blocker.operation.name if blocker.operation else None,
-                "reported_at": blocker.reported_at.isoformat() if blocker.reported_at else None,
+                "reported_at": to_utc_iso(blocker.reported_at),
             }
         )
         if work_order and work_order.id not in seen_wo_ids:

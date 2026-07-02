@@ -17,6 +17,7 @@ from sqlalchemy import asc
 from sqlalchemy.orm import Session
 
 from app.core.logging import get_logger
+from app.core.time_utils import to_utc_iso
 from app.models.audit_log import AuditLog
 from app.services.audit_service import compute_audit_hash
 
@@ -54,7 +55,7 @@ class IntegrityReport:
 
     def to_dict(self) -> Dict:
         return {
-            "verified_at": self.verified_at.isoformat(),
+            "verified_at": to_utc_iso(self.verified_at),
             "total_records": self.total_records,
             "records_checked": self.records_checked,
             "first_sequence": self.first_sequence,

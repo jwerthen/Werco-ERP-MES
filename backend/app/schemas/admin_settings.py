@@ -4,11 +4,12 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel
 
 from app.models.quote_config import CostUnit, MachineType, MaterialCategory, ProcessType
+from app.schemas.base import UTCModel
 
 # ============ MATERIALS ============
 
 
-class MaterialBase(BaseModel):
+class MaterialBase(UTCModel):
     name: str
     category: MaterialCategory
     description: Optional[str] = None
@@ -50,7 +51,7 @@ class MaterialResponse(MaterialBase):
 # ============ MACHINES ============
 
 
-class MachineBase(BaseModel):
+class MachineBase(UTCModel):
     name: str
     machine_type: MachineType
     description: Optional[str] = None
@@ -92,7 +93,7 @@ class MachineResponse(MachineBase):
 # ============ FINISHES ============
 
 
-class FinishBase(BaseModel):
+class FinishBase(UTCModel):
     name: str
     category: Optional[str] = None
     description: Optional[str] = None
@@ -131,7 +132,7 @@ class FinishResponse(FinishBase):
 # ============ LABOR RATES ============
 
 
-class LaborRateBase(BaseModel):
+class LaborRateBase(UTCModel):
     name: str
     rate_per_hour: float
     description: Optional[str] = None
@@ -192,7 +193,7 @@ class WorkCenterTypesResponse(BaseModel):
 # ============ OUTSIDE SERVICES ============
 
 
-class OutsideServiceBase(BaseModel):
+class OutsideServiceBase(UTCModel):
     name: str
     vendor_name: Optional[str] = None
     process_type: ProcessType
@@ -238,7 +239,7 @@ class SettingUpdate(BaseModel):
     description: Optional[str] = None
 
 
-class SettingResponse(BaseModel):
+class SettingResponse(UTCModel):
     setting_key: str
     setting_value: str
     setting_type: str
@@ -252,7 +253,7 @@ class SettingResponse(BaseModel):
 # ============ AUDIT LOG ============
 
 
-class AuditLogResponse(BaseModel):
+class AuditLogResponse(UTCModel):
     id: int
     entity_type: str
     entity_id: Optional[int] = None

@@ -243,8 +243,8 @@ request, so a revoked station's tokens die on the next call. See
   "status": "planned",
   "priority": 2,
   "due_date": "2024-01-31",
-  "created_at": "2024-01-01T10:00:00",
-  "updated_at": "2024-01-01T10:00:00"
+  "created_at": "2024-01-01T10:00:00Z",
+  "updated_at": "2024-01-01T10:00:00Z"
 }
 ```
 
@@ -396,7 +396,7 @@ mixed**:
   "material_type": "ST-304",
   "is_active": true,
   "backflush_components": false,
-  "created_at": "2024-01-01T10:00:00"
+  "created_at": "2024-01-01T10:00:00Z"
 }
 ```
 
@@ -1870,7 +1870,7 @@ overrides `status`), `skip` (default 0), `limit` (default 50, **max 200**). Newe
   "purpose_note": null,
   "safety_acknowledged": true,
   "status": "signed_in",
-  "signed_in_at": "2026-06-30T14:05:00",
+  "signed_in_at": "2026-06-30T14:05:00Z",
   "signed_out_at": null,
   "signin_station_id": 1,
   "station_label": "Lobby Tablet"
@@ -1891,8 +1891,8 @@ list (no PII beyond company) so the tablet can show a picker, then re-POST by `v
   "detail": {
     "message": "Multiple visitors signed in under that name — choose one to sign out",
     "matches": [
-      { "id": 42, "visitor_company": "Acme Corp", "signed_in_at": "2026-06-30T14:05:00" },
-      { "id": 51, "visitor_company": "Globex", "signed_in_at": "2026-06-30T15:20:00" }
+      { "id": 42, "visitor_company": "Acme Corp", "signed_in_at": "2026-06-30T14:05:00Z" },
+      { "id": 51, "visitor_company": "Globex", "signed_in_at": "2026-06-30T15:20:00Z" }
     ]
   }
 }
@@ -1907,9 +1907,9 @@ list (no PII beyond company) so the tablet can show a picker, then re-POST by `v
   "revoked": false,
   "revoked_at": null,
   "revoked_by": null,
-  "last_used_at": "2026-06-30T08:00:00",
+  "last_used_at": "2026-06-30T08:00:00Z",
   "created_by": 3,
-  "created_at": "2026-06-29T17:00:00"
+  "created_at": "2026-06-29T17:00:00Z"
 }
 ```
 
@@ -1938,12 +1938,21 @@ close code **1008** (policy violation).
 
 ## Common Response Formats
 
+### Timestamps
+
+All `datetime` fields in responses are serialized as **UTC ISO-8601 with a trailing `Z`**
+(e.g. `"2026-07-01T19:17:00Z"`) — the store-UTC / serve-UTC contract, applied uniformly across
+every endpoint (response schemas inherit `UTCModel`; hand-built dicts use
+`app.core.time_utils.to_utc_iso(...)`). `date`-only fields (e.g. `due_date`) are unaffected and
+stay `YYYY-MM-DD` with no time or zone. Clients should treat `Z` timestamps as UTC and convert for
+display; the web UI renders them in shop-local Central time.
+
 ### Success Response
 ```json
 {
   "id": 1,
-  "created_at": "2024-01-01T10:00:00",
-  "updated_at": "2024-01-01T10:00:00"
+  "created_at": "2024-01-01T10:00:00Z",
+  "updated_at": "2024-01-01T10:00:00Z"
 }
 ```
 
@@ -2037,7 +2046,7 @@ identifiers a subscriber needs to react and then re-fetch full detail via the au
   "quantity_complete": 100.0,
   "quantity_scrapped": 2.0,
   "company_id": 42,
-  "completed_at": "2026-06-07T14:30:00"
+  "completed_at": "2026-06-07T14:30:00Z"
 }
 ```
 

@@ -17,6 +17,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.queue import enqueue_job_best_effort
+from app.core.time_utils import to_utc_iso
 from app.models.notification import NotificationPreference
 from app.models.user import User
 from app.models.visitor_log import VisitorLog, VisitorStatus
@@ -67,7 +68,7 @@ def _notify_host_best_effort(db: Session, *, host: User, row: VisitorLog) -> Non
                 "visitor_name": row.visitor_name,
                 "visitor_company": row.visitor_company,
                 "purpose": row.purpose.value if row.purpose else None,
-                "signed_in_at": row.signed_in_at.isoformat() if row.signed_in_at else None,
+                "signed_in_at": to_utc_iso(row.signed_in_at),
                 "station_label": row.station_label,
             },
         )
@@ -162,7 +163,7 @@ def sign_out(
                         {
                             "id": m.id,
                             "visitor_company": m.visitor_company,
-                            "signed_in_at": m.signed_in_at.isoformat() if m.signed_in_at else None,
+                            "signed_in_at": to_utc_iso(m.signed_in_at),
                         }
                         for m in matches
                     ],

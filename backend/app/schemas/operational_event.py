@@ -1,10 +1,12 @@
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import Field
+
+from app.schemas.base import UTCModel
 
 
-class OperationalEventCreate(BaseModel):
+class OperationalEventCreate(UTCModel):
     event_type: str = Field(..., min_length=2, max_length=80)
     source_module: str = Field(..., min_length=2, max_length=80)
     entity_type: Optional[str] = Field(None, max_length=80)

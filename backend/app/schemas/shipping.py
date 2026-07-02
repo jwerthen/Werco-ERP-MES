@@ -17,6 +17,8 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.base import UTCModel
+
 # ---------------------------------------------------------------------------
 # Legacy manual-shipment shapes (moved verbatim from the endpoint module).
 # ---------------------------------------------------------------------------
@@ -47,7 +49,7 @@ class ShipmentUpdate(BaseModel):
     status: Optional[str] = None
 
 
-class ShipmentResponse(BaseModel):
+class ShipmentResponse(UTCModel):
     id: int
     shipment_number: str
     work_order_id: int
@@ -107,7 +109,7 @@ class CarrierAccountUpdate(BaseModel):
     is_default: Optional[bool] = None
 
 
-class CarrierAccountResponse(BaseModel):
+class CarrierAccountResponse(UTCModel):
     """Carrier account read shape. NEVER exposes the plaintext key/secret."""
 
     id: int
@@ -135,7 +137,7 @@ class CarrierConnectionTestResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class CompanyShippingProfileBase(BaseModel):
+class CompanyShippingProfileBase(UTCModel):
     ship_from_name: Optional[str] = None
     ship_from_company: Optional[str] = None
     ship_from_phone: Optional[str] = None
@@ -241,7 +243,7 @@ class RateShopRequest(BaseModel):
     pallets: List[PalletSchema] = Field(default_factory=list)
 
 
-class RateQuoteResponse(BaseModel):
+class RateQuoteResponse(UTCModel):
     id: Optional[int] = None  # persisted ShipmentRateQuote id (None for transient)
     provider_rate_id: str
     carrier: str
@@ -289,7 +291,7 @@ class SchedulePickupRequest(BaseModel):
     carrier_account_id: Optional[int] = None
 
 
-class SchedulePickupResponse(BaseModel):
+class SchedulePickupResponse(UTCModel):
     provider_pickup_id: str
     confirmation_number: Optional[str] = None
     scheduled_date: Optional[date] = None
@@ -298,7 +300,7 @@ class SchedulePickupResponse(BaseModel):
     status: Optional[str] = None
 
 
-class VoidRefundResponse(BaseModel):
+class VoidRefundResponse(UTCModel):
     """Result of a void / refund request (a money-moving CANCEL)."""
 
     shipment_id: int
@@ -323,7 +325,7 @@ class ShipmentPackageCreate(BaseModel):
     quantity: int = 1
 
 
-class ShipmentPackageResponse(BaseModel):
+class ShipmentPackageResponse(UTCModel):
     id: int
     shipment_id: int
     sequence: Optional[int] = None
@@ -346,7 +348,7 @@ class ShipmentPackageResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class TrackingEventResponse(BaseModel):
+class TrackingEventResponse(UTCModel):
     id: Optional[int] = None
     status: Optional[str] = None
     status_detail: Optional[str] = None
@@ -360,7 +362,7 @@ class TrackingEventResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-class ShipmentTrackingResponse(BaseModel):
+class ShipmentTrackingResponse(UTCModel):
     shipment_id: int
     shipment_number: str
     tracking_number: Optional[str] = None
@@ -376,7 +378,7 @@ class ShipmentTrackingResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class BuyLabelResponse(BaseModel):
+class BuyLabelResponse(UTCModel):
     shipment_id: int
     shipment_number: str
     carrier: Optional[str] = None
@@ -389,7 +391,7 @@ class BuyLabelResponse(BaseModel):
     already_purchased: bool = False
 
 
-class BuyBolResponse(BaseModel):
+class BuyBolResponse(UTCModel):
     shipment_id: int
     shipment_number: str
     carrier: Optional[str] = None

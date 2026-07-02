@@ -7,6 +7,7 @@ from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_company_id, require_platform_admin, require_role
+from app.core.time_utils import to_utc_iso
 from app.db.database import get_db
 from app.models.audit_log import AuditLog
 from app.models.user import User, UserRole
@@ -295,7 +296,7 @@ def verify_single_record(
     return {
         "sequence_number": record.sequence_number,
         "id": record.id,
-        "timestamp": record.timestamp.isoformat(),
+        "timestamp": to_utc_iso(record.timestamp),
         "action": record.action,
         "resource_type": record.resource_type,
         "resource_identifier": record.resource_identifier,

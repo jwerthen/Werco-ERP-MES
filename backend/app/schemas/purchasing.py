@@ -5,10 +5,11 @@ from typing import List, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.core.validation import Money, MoneySmall
+from app.schemas.base import UTCModel
 
 
 # Vendor schemas
-class VendorBase(BaseModel):
+class VendorBase(UTCModel):
     code: str = Field(..., min_length=2, max_length=20, pattern=r'^[A-Z0-9\-]+$', description="Vendor code (unique)")
     name: str = Field(..., min_length=2, max_length=200, description="Vendor name")
     contact_name: Optional[str] = Field(None, max_length=100)
@@ -83,7 +84,7 @@ class VendorResponse(VendorBase):
 
 
 # PO Line schemas
-class POLineBase(BaseModel):
+class POLineBase(UTCModel):
     part_id: int = Field(..., gt=0)
     quantity_ordered: MoneySmall = Field(..., gt=Decimal("0"), description="Quantity to order")
     unit_price: Money = Field(..., ge=Decimal("0"), description="Unit price")
@@ -119,7 +120,7 @@ class POLineResponse(POLineBase):
 
 
 # PO schemas
-class POBase(BaseModel):
+class POBase(UTCModel):
     vendor_id: int = Field(..., gt=0)
     required_date: Optional[date] = None
     expected_date: Optional[date] = None
@@ -180,7 +181,7 @@ class POResponse(POBase):
         use_enum_values = True
 
 
-class POListResponse(BaseModel):
+class POListResponse(UTCModel):
     id: int
     po_number: str
     vendor_id: int
@@ -242,7 +243,7 @@ class UserSummary(BaseModel):
         from_attributes = True
 
 
-class ReceiptResponse(BaseModel):
+class ReceiptResponse(UTCModel):
     id: int
     receipt_number: str
     po_line_id: int
@@ -276,7 +277,7 @@ class ReceiptResponse(BaseModel):
         use_enum_values = True
 
 
-class InspectionQueueItem(BaseModel):
+class InspectionQueueItem(UTCModel):
     receipt_id: int
     receipt_number: str
     po_number: str

@@ -4,8 +4,10 @@ from typing import Optional
 
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
+from app.schemas.base import UTCModel
 
-class CompanyBase(BaseModel):
+
+class CompanyBase(UTCModel):
     name: str = Field(..., min_length=1, max_length=255, description="Company name")
     slug: Optional[str] = Field(
         None, max_length=100, description="URL-safe identifier (auto-generated if not provided)"

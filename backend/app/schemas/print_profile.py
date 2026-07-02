@@ -10,8 +10,10 @@ from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.schemas.base import UTCModel
 
-class PrintProfileRead(BaseModel):
+
+class PrintProfileRead(UTCModel):
     """Print profile read shape. NEVER exposes the plaintext ProxyBox key."""
 
     id: int

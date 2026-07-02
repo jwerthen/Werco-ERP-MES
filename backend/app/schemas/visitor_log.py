@@ -10,6 +10,7 @@ from typing import List, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.models.visitor_log import VisitorPurpose, VisitorStatus
+from app.schemas.base import UTCModel
 
 
 class VisitorSignInRequest(BaseModel):
@@ -71,7 +72,7 @@ class VisitorSignOutRequest(BaseModel):
         return self
 
 
-class VisitorLogResponse(BaseModel):
+class VisitorLogResponse(UTCModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -95,7 +96,7 @@ class VisitorLogListResponse(BaseModel):
     total: int
 
 
-class VisitorSignOutMatch(BaseModel):
+class VisitorSignOutMatch(UTCModel):
     """One open visitor row in a sign-out name-disambiguation list (no PII beyond company)."""
 
     id: int

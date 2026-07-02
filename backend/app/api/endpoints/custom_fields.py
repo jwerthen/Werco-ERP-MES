@@ -6,6 +6,7 @@ from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_company_id, get_current_user, require_role
+from app.core.time_utils import to_utc_iso
 from app.db.database import get_db
 from app.models.custom_field import CustomFieldDefinition, CustomFieldValue, EntityType, FieldType
 from app.models.user import User, UserRole
@@ -177,7 +178,12 @@ def get_value(field_value: CustomFieldValue, field_type: FieldType) -> Any:
     elif field_type == FieldType.BOOLEAN:
         return field_value.value_boolean
     elif field_type in [FieldType.DATE, FieldType.DATETIME]:
-        return field_value.value_date.isoformat() if field_value.value_date else None
+        if field_value.value_date is None:
+            return None
+        # DATETIME values are true timestamps (emit UTC Z); DATE values are day-only (keep YYYY-MM-DD).
+        if field_type == FieldType.DATETIME:
+            return to_utc_iso(field_value.value_date)
+        return field_value.value_date.isoformat()
     elif field_type == FieldType.MULTISELECT:
         return field_value.value_json
     return field_value.value_text

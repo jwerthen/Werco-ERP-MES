@@ -3,6 +3,8 @@ from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
+from app.schemas.base import UTCModel
+
 # ============ QMS Standard Schemas ============
 
 
@@ -78,7 +80,7 @@ class QMSEvidenceUpdate(BaseModel):
 # ============ Response Schemas ============
 
 
-class QMSEvidenceResponse(BaseModel):
+class QMSEvidenceResponse(UTCModel):
     id: int
     clause_id: int
     evidence_type: str
@@ -104,7 +106,7 @@ class QMSEvidenceResponse(BaseModel):
         from_attributes = True
 
 
-class QMSClauseResponse(BaseModel):
+class QMSClauseResponse(UTCModel):
     id: int
     standard_id: int
     clause_number: str
@@ -126,7 +128,7 @@ class QMSClauseResponse(BaseModel):
         from_attributes = True
 
 
-class QMSStandardResponse(BaseModel):
+class QMSStandardResponse(UTCModel):
     id: int
     name: str
     version: Optional[str]
@@ -143,7 +145,7 @@ class QMSStandardResponse(BaseModel):
         from_attributes = True
 
 
-class QMSStandardListResponse(BaseModel):
+class QMSStandardListResponse(UTCModel):
     """Lightweight response for listing standards (without full clause tree)"""
 
     id: int
@@ -183,7 +185,7 @@ class QMSAuditReadinessSummary(BaseModel):
 # ============ Auto-Evidence Discovery Schemas ============
 
 
-class AutoEvidenceExample(BaseModel):
+class AutoEvidenceExample(UTCModel):
     """A single real record from the ERP/MES used as evidence"""
 
     record_id: int

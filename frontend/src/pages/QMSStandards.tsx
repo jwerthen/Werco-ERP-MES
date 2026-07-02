@@ -11,6 +11,7 @@ import api from '../services/api';
 import { Button, statusColor } from '../components/ui';
 import { FormField } from '../components/ui/FormField';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
+import { formatCentralDate } from '../utils/centralTime';
 import {
   QMSStandardListResponse,
   QMSStandardResponse,
@@ -942,7 +943,7 @@ function ClauseRow({
                       {ev.title}
                       {ev.is_auto_linked && ev.live_count != null && (
                         <span className="ml-2 text-xs text-amber-300 font-medium">
-                          ({ev.live_count} records{ev.last_refreshed ? ` | Refreshed ${new Date(ev.last_refreshed).toLocaleDateString()}` : ''})
+                          ({ev.live_count} records{ev.last_refreshed ? ` | Refreshed ${formatCentralDate(ev.last_refreshed)}` : ''})
                         </span>
                       )}
                     </span>

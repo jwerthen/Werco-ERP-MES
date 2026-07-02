@@ -12,7 +12,7 @@ Compliance assertions covered here:
 - Operator names on the public wallboard are truncated to "First L.".
 """
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -57,7 +57,8 @@ def test_admin_can_issue_display_token(client: TestClient, admin_headers: dict, 
     assert data["token"]  # the one-time JWT
     # Default lifetime ~90 days
     expires_at = datetime.fromisoformat(data["expires_at"])
-    delta_days = (expires_at - datetime.utcnow()).days
+    # expires_at is now UTC-aware (API emits a trailing 'Z'); compare aware-to-aware.
+    delta_days = (expires_at - datetime.now(timezone.utc)).days
     assert 88 <= delta_days <= 91
 
     record = db_session.query(DisplayToken).filter(DisplayToken.id == data["id"]).first()

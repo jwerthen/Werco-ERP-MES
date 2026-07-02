@@ -7,6 +7,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
+from app.core.time_utils import to_utc_iso
 from app.db.database import get_db
 from app.models.operator_certification import (
     CertificationStatus,
@@ -192,8 +193,8 @@ def serialize_cert(cert: OperatorCertification, db: Session) -> dict:
         "verified_by_name": f"{verifier.first_name} {verifier.last_name}" if verifier else None,
         "verified_date": cert.verified_date.isoformat() if cert.verified_date else None,
         "days_until_expiry": (cert.expiration_date - date.today()).days if cert.expiration_date else None,
-        "created_at": cert.created_at.isoformat() if cert.created_at else None,
-        "updated_at": cert.updated_at.isoformat() if cert.updated_at else None,
+        "created_at": to_utc_iso(cert.created_at),
+        "updated_at": to_utc_iso(cert.updated_at),
     }
 
 
@@ -228,7 +229,7 @@ def serialize_training(record: TrainingRecord, db: Session) -> dict:
         "notes": record.notes,
         "recorded_by": record.recorded_by,
         "recorded_by_name": f"{recorder.first_name} {recorder.last_name}" if recorder else None,
-        "created_at": record.created_at.isoformat() if record.created_at else None,
+        "created_at": to_utc_iso(record.created_at),
     }
 
 
@@ -256,8 +257,8 @@ def serialize_skill(entry: SkillMatrix, db: Session) -> dict:
         "approved_by": entry.approved_by,
         "approved_by_name": f"{approver.first_name} {approver.last_name}" if approver else None,
         "is_active": entry.is_active,
-        "created_at": entry.created_at.isoformat() if entry.created_at else None,
-        "updated_at": entry.updated_at.isoformat() if entry.updated_at else None,
+        "created_at": to_utc_iso(entry.created_at),
+        "updated_at": to_utc_iso(entry.updated_at),
     }
 
 

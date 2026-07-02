@@ -23,6 +23,7 @@ import {
 } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
+import { formatCentralDate } from '../utils/centralTime';
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -141,14 +142,9 @@ const priorityLabel: Record<ECOPriority, string> = { low: 'Low', medium: 'Medium
 const statusLabel: Record<ECOStatus, string> = { draft: 'Draft', submitted: 'Submitted', under_review: 'Under Review', approved: 'Approved', rejected: 'Rejected', in_implementation: 'In Implementation', completed: 'Completed', cancelled: 'Cancelled' };
 const taskStatusLabel: Record<string, string> = { pending: 'Pending', in_progress: 'In Progress', completed: 'Completed', skipped: 'Skipped' };
 
-const formatDate = (d: string | null) => {
-  if (!d) return '-';
-  return new Date(d).toLocaleDateString('en-US', {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-  });
-};
+// Shop-local Central date (naive-UTC API strings parsed correctly, rendered in
+// America/Chicago); '-' fallback matches centralTime's default.
+const formatDate = (d: string | null) => formatCentralDate(d);
 
 const fmt = (n: number) =>
   new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n);

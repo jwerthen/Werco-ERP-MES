@@ -8,6 +8,7 @@ from sqlalchemy import and_, func
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_company_id, get_current_user
+from app.core.time_utils import to_utc_iso
 from app.db.database import get_db
 from app.models.spc import ChartType, SPCCharacteristic, SPCControlLimit, SPCMeasurement, SPCProcessCapability
 from app.models.user import User
@@ -394,7 +395,7 @@ def get_chart_data(
                 "sample_count": len(values),
                 "is_out_of_control": any_ooc,
                 "violations": list(violations),
-                "measured_at": sg_measurements[0].measured_at.isoformat() if sg_measurements else None,
+                "measured_at": to_utc_iso(sg_measurements[0].measured_at) if sg_measurements else None,
             }
         )
 
@@ -684,7 +685,7 @@ def get_out_of_control(db: Session = Depends(get_db), current_user: User = Depen
                     "part_id": char.part_id,
                     "is_critical": char.is_critical,
                     "ooc_count": row.ooc_count,
-                    "last_ooc": row.last_ooc.isoformat() if row.last_ooc else None,
+                    "last_ooc": to_utc_iso(row.last_ooc),
                 }
             )
 

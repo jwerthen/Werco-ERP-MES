@@ -10,6 +10,8 @@ from typing import Optional
 
 from pydantic import BaseModel
 
+from app.schemas.base import UTCModel
+
 
 class WallboardActiveJob(BaseModel):
     wo_number: Optional[str] = None
@@ -21,7 +23,7 @@ class WallboardActiveJob(BaseModel):
     qty_target: float = 0
 
 
-class WallboardDowntime(BaseModel):
+class WallboardDowntime(UTCModel):
     category: str
     since: Optional[datetime] = None
     minutes: int = 0
@@ -38,7 +40,7 @@ class WallboardWorkCenter(BaseModel):
     down: Optional[WallboardDowntime] = None
 
 
-class WallboardLateWorkOrder(BaseModel):
+class WallboardLateWorkOrder(UTCModel):
     wo_number: str
     part_number: Optional[str] = None
     due_date: Optional[date] = None
@@ -52,7 +54,7 @@ class WallboardBlockedWorkOrder(BaseModel):
     age_hours: float = 0
 
 
-class WallboardResponse(BaseModel):
+class WallboardResponse(UTCModel):
     work_centers: list[WallboardWorkCenter]
     late_wos: list[WallboardLateWorkOrder]
     blocked_wos: list[WallboardBlockedWorkOrder]
