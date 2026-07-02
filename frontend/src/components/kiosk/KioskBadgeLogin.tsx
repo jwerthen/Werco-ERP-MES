@@ -1,15 +1,12 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import { IdentificationIcon, ArrowRightCircleIcon } from '@heroicons/react/24/solid';
 import KioskKeypad from './KioskKeypad';
+import { MAX_BADGE_LENGTH, useBadgeCapture } from './useBadgeCapture';
 
 interface KioskBadgeLoginProps {
   stationLabel: string;
   onLogin: (employeeId: string) => Promise<void>;
 }
-
-const MAX_BADGE_LENGTH = 32;
-// Printable characters a badge/wedge scanner can emit (employee IDs like "EMP-0042").
-const BADGE_CHAR = /^[0-9A-Za-z\-_.]$/;
 
 /**
  * Full-screen badge prompt. A keyboard-wedge scanner "types" the employee id
@@ -48,28 +45,12 @@ export default function KioskBadgeLogin({ stationLabel, onLogin }: KioskBadgeLog
   );
 
   // Window-level capture: badge scanners type wherever "focus" happens to be.
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (submitting) return;
-      // Keyboard shortcuts (Ctrl/Cmd/Alt chords) and in-progress IME composition
-      // are not badge input — don't let them pollute the buffer.
-      if (event.ctrlKey || event.metaKey || event.altKey || event.isComposing) return;
-      if (event.key === 'Enter') {
-        event.preventDefault();
-        void submit(value);
-        return;
-      }
-      if (event.key === 'Backspace') {
-        setValue((prev) => prev.slice(0, -1));
-        return;
-      }
-      if (BADGE_CHAR.test(event.key)) {
-        setValue((prev) => (prev.length >= MAX_BADGE_LENGTH ? prev : prev + event.key));
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [submit, submitting, value]);
+  useBadgeCapture({
+    enabled: !submitting,
+    value,
+    onValueChange: setValue,
+    onSubmit: (raw) => void submit(raw),
+  });
 
   return (
     <div className="flex min-h-screen flex-col items-center justify-center bg-fd-canvas px-6 py-10">

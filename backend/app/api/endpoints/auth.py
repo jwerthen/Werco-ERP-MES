@@ -11,6 +11,7 @@ from app.api.deps import (
     get_audit_service,
     get_current_company_id,
     get_current_user,
+    oauth2_scheme,
     require_platform_admin,
     require_role,
 )
@@ -19,17 +20,24 @@ from app.core.security import (
     create_access_token,
     create_refresh_token,
     get_password_hash,
+    verify_kiosk_token,
     verify_password,
     verify_refresh_token,
 )
 from app.db.database import get_db
 from app.models.company import Company
+from app.models.kiosk_station import KioskStation
 from app.models.user import User, UserRole
 from app.schemas.display_token import (
     DisplayTokenCreate,
     DisplayTokenIssueResponse,
     DisplayTokenListResponse,
     DisplayTokenResponse,
+)
+from app.schemas.kiosk_station import (
+    KioskBadgeTokenRequest,
+    KioskBadgeTokenResponse,
+    KioskBadgeUser,
 )
 from app.schemas.user import (
     EmployeeLoginRequest,
@@ -344,6 +352,184 @@ def employee_logout(request: Request, payload: EmployeeLoginRequest, db: Session
     log_auth_event(db, "EMPLOYEE_LOGOUT", user=user, success=True, request=request)
     db.commit()
     return {"message": "Logged out successfully"}
+
+
+# ---------------------------------------------------------------------------
+# Crew-station kiosk: badge → 5-minute kiosk-scoped operator token.
+#
+# The shared crew tablet holds a scoped type="kiosk" STATION token (minted by
+# POST /shop-floor/kiosk-stations/station-login). Each badge scan exchanges
+# (station token + badge) for a short-lived type="access" OPERATOR token with a
+# scope="kiosk" claim, path-fenced in get_current_user to the shop-floor
+# endpoints (+ employee-logout). NO refresh token is ever minted here — a
+# shared terminal must never hold a long-lived credential for an individual
+# operator. Rate-limited (30/min per IP, see main.py AUTH_RATE_LIMITS) — safe
+# because the endpoint is station-token-gated, not public.
+# ---------------------------------------------------------------------------
+
+# Lifetime of a badge-minted kiosk operator token (minutes). Long enough for
+# one join/leave/report action window, short enough that a stolen token dies
+# before it matters.
+KIOSK_BADGE_TOKEN_TTL_MINUTES = 5
+
+_KIOSK_INVALID_BADGE = "Invalid badge"
+
+
+def _find_user_by_employee_id_in_company(db: Session, employee_id: str, company_id: int) -> Optional[User]:
+    """Company-scoped variant of ``_find_user_by_employee_id`` (kiosk badge mint).
+
+    Identical exact-then-normalized matching, but every query is fenced to the
+    station's company so a foreign tenant's badge can never resolve — it reads
+    as "unknown badge" (uniform 401 upstream). Ambiguity within the company is
+    still a 409 (an admin data problem, not an auth probe).
+    """
+    raw_id = (employee_id or "").strip()
+    if not raw_id:
+        return None
+
+    exact_matches = (
+        db.query(User).filter(func.lower(User.employee_id) == raw_id.lower(), User.company_id == company_id).all()
+    )
+    if len(exact_matches) > 1:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Employee ID is not unique. Please contact an administrator."
+        )
+    if len(exact_matches) == 1:
+        return exact_matches[0]
+
+    normalized_input = _normalize_employee_id(raw_id)
+    if not normalized_input:
+        return None
+
+    # Same bounded fallback as the global helper (see its comment), fenced to
+    # the station's company.
+    core_digits = normalized_input.lstrip("0") or normalized_input[-1:]
+    candidates = (
+        db.query(User)
+        .filter(
+            User.company_id == company_id,
+            User.employee_id.isnot(None),
+            User.employee_id.ilike(f"%{core_digits}%"),
+        )
+        .limit(50)
+        .all()
+    )
+    matches = [u for u in candidates if _normalize_employee_id(u.employee_id) == normalized_input]
+    if not matches:
+        return None
+    if len(matches) > 1:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Employee ID is not unique. Please contact an administrator."
+        )
+    return matches[0]
+
+
+def _audit_kiosk_badge_event(
+    db: Session,
+    *,
+    request: Request,
+    station: KioskStation,
+    action: str,
+    user: Optional[User] = None,
+    error: Optional[str] = None,
+) -> None:
+    """Write + commit the KIOSK_BADGE_TOKEN_ISSUED / _FAILED audit row.
+
+    Attributed to the station's company (the authoritative DB row); the actor
+    is the badge-identified operator on success, the station (user=None) on
+    failure. Follows the visitor station-login failed-PIN pattern: AuditService
+    only flushes, so we commit here to persist the row before raising/returning.
+    The scanned badge value is deliberately NOT logged (a failed scan may be a
+    mistyped credential fragment).
+    """
+    try:
+        audit = AuditService(db, user=user, request=request, company_id=station.company_id)
+        audit.log(
+            action=action,
+            resource_type="kiosk_station",
+            resource_id=station.id,
+            resource_identifier=station.label,
+            description=(f"{action} at crew-station kiosk '{station.label}'" + (f": {error}" if error else "")),
+            success=error is None,
+            error_message=error,
+        )
+        db.commit()
+    except Exception:  # pragma: no cover - defensive: audit failure must not mask the auth result
+        import logging
+
+        logging.getLogger(__name__).exception("Failed to audit kiosk badge-token event")
+
+
+@router.post("/kiosk-badge-token", response_model=KioskBadgeTokenResponse, summary="Kiosk badge token mint")
+def kiosk_badge_token(
+    request: Request,
+    payload: KioskBadgeTokenRequest,
+    db: Session = Depends(get_db),
+    token: str = Depends(oauth2_scheme),
+):
+    """Exchange (station token + badge scan) for a 5-minute kiosk-scoped operator token.
+
+    **Auth**: ``Authorization: Bearer <kiosk station token>`` — validated
+    against the ``kiosk_stations`` row (exists, not revoked, ``cid`` matches).
+    **Rate limited**: 30/minute per IP.
+
+    Badge lookup is fenced to the station's company; unknown, inactive, locked,
+    and foreign-tenant badges are all a uniform 401 "Invalid badge" so the
+    response can't be used to probe accounts. Returns a ``scope="kiosk"``
+    access token (path-fenced to ``/api/v1/shop-floor`` + employee-logout) and
+    the operator's display identity. **Never** returns a refresh token.
+    """
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+    claims = verify_kiosk_token(token)
+    if claims is None or not claims.get("station_id"):
+        raise credentials_exception
+
+    station = db.query(KioskStation).filter(KioskStation.id == claims["station_id"]).first()
+    if station is None or station.revoked:
+        raise credentials_exception
+    if claims.get("company_id") != station.company_id:
+        raise credentials_exception
+
+    user = _find_user_by_employee_id_in_company(db, payload.employee_id, station.company_id)
+
+    if not user:
+        _audit_kiosk_badge_event(
+            db, request=request, station=station, action="KIOSK_BADGE_TOKEN_FAILED", error="Badge not recognized"
+        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=_KIOSK_INVALID_BADGE)
+
+    if user.locked_until and user.locked_until > datetime.utcnow():
+        _audit_kiosk_badge_event(
+            db, request=request, station=station, action="KIOSK_BADGE_TOKEN_FAILED", error="Account locked"
+        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=_KIOSK_INVALID_BADGE)
+
+    if not user.is_active:
+        _audit_kiosk_badge_event(
+            db, request=request, station=station, action="KIOSK_BADGE_TOKEN_FAILED", error="Account disabled"
+        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=_KIOSK_INVALID_BADGE)
+
+    _audit_kiosk_badge_event(db, request=request, station=station, action="KIOSK_BADGE_TOKEN_ISSUED", user=user)
+
+    access_token = create_access_token(
+        subject=user.id,
+        company_id=station.company_id,
+        expires_delta=timedelta(minutes=KIOSK_BADGE_TOKEN_TTL_MINUTES),
+        scope="kiosk",
+    )
+
+    return KioskBadgeTokenResponse(
+        access_token=access_token,
+        token_type="bearer",
+        expires_in=KIOSK_BADGE_TOKEN_TTL_MINUTES * 60,
+        user=KioskBadgeUser(id=user.id, full_name=user.full_name, employee_id=user.employee_id),
+    )
 
 
 @router.post("/refresh", response_model=TokenRefresh)

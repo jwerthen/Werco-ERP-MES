@@ -86,6 +86,11 @@ import {
   VisitorLogListResponse,
   VisitorLogResponse,
 } from '../types/visitor';
+import {
+  KioskStationCreate,
+  KioskStationListResponse,
+  KioskStationResponse,
+} from '../types/kioskStation';
 
 const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000/api/v1';
 
@@ -1963,6 +1968,29 @@ class ApiService {
 
   async resetSigninStationPin(stationId: number, pin: string): Promise<SigninStationResponse> {
     const response = await this.api.post(`/visitor-logs/stations/${stationId}/reset-pin`, { pin });
+    return response.data;
+  }
+
+  // Crew-station kiosk stations (admin lifecycle — ADMIN/MANAGER server-side).
+  // Station-login and the roster queue read live in kioskStationClient.ts, NOT
+  // here: those run on the unattended terminal with the scoped station token.
+  async getKioskStations(): Promise<KioskStationListResponse> {
+    const response = await this.api.get('/shop-floor/kiosk-stations');
+    return response.data;
+  }
+
+  async createKioskStation(data: KioskStationCreate): Promise<KioskStationResponse> {
+    const response = await this.api.post('/shop-floor/kiosk-stations', data);
+    return response.data;
+  }
+
+  async revokeKioskStation(stationId: number): Promise<KioskStationResponse> {
+    const response = await this.api.post(`/shop-floor/kiosk-stations/${stationId}/revoke`);
+    return response.data;
+  }
+
+  async resetKioskStationPin(stationId: number, pin: string): Promise<KioskStationResponse> {
+    const response = await this.api.post(`/shop-floor/kiosk-stations/${stationId}/reset-pin`, { pin });
     return response.data;
   }
 

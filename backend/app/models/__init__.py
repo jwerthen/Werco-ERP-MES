@@ -48,6 +48,7 @@ from .inventory import (
 )
 from .job import Job, JobPriority, JobStatus
 from .job_costing import CostEntry, CostEntrySource, CostEntryType, JobCost, JobCostStatus
+from .kiosk_station import KioskStation
 from .laser_nest import LaserNest, LaserNestPackage
 from .maintenance import (
     MaintenanceFrequency,
@@ -321,6 +322,7 @@ __all__ = [
     "CompanyPrintProfile",
     "SupplierPartMapping",
     "SigninStation",
+    "KioskStation",
     "VisitorLog",
     "VisitorStatus",
     "VisitorPurpose",

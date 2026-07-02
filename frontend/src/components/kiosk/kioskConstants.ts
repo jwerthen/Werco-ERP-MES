@@ -70,6 +70,60 @@ export interface KioskQueueItem {
   laser_nest?: LaserNestInfo | null;
 }
 
+/** One operator's open TimeEntry on a queued operation (crew-station roster). */
+export interface KioskRosterEntry {
+  time_entry_id: number;
+  user_id: number;
+  /** Server emits null when the entry's user record is missing. */
+  operator_name: string | null;
+  employee_id: string | null;
+  entry_type: string;
+  /** UTC ISO clock-in — feed through formatElapsed with the skew-corrected now. */
+  clock_in: string;
+}
+
+/** Display fallback for a roster/closed entry whose user record is missing. */
+export const UNKNOWN_OPERATOR_LABEL = 'Operator';
+
+/**
+ * Crew-station queue row: the standard queue item plus the live roster of
+ * operators clocked into the operation. `quantity_scrapped` feeds the
+ * operation-level tally ("37 of 50 · 2 scrap") that guards double counting.
+ */
+export interface KioskCrewQueueItem extends KioskQueueItem {
+  roster: KioskRosterEntry[];
+  quantity_scrapped?: number | null;
+}
+
+/** "37 of 50 · 2 scrap" — the operation-level crew tally line. */
+export function formatCrewTally(item: Pick<KioskCrewQueueItem, 'quantity_complete' | 'quantity_ordered' | 'quantity_scrapped'>): string {
+  const done = Number(item.quantity_complete || 0);
+  const ordered = Number(item.quantity_ordered || 0);
+  const scrap = Number(item.quantity_scrapped || 0);
+  return scrap > 0 ? `${done} of ${ordered} · ${scrap} scrap` : `${done} of ${ordered}`;
+}
+
+/** hh:mm:ss elapsed since a UTC clock-in, for the live per-person timers. */
+export function formatElapsed(clockInIso: string, nowMs: number): string {
+  const startMs = Date.parse(clockInIso);
+  if (!Number.isFinite(startMs)) return '--:--:--';
+  const totalSeconds = Math.max(0, Math.floor((nowMs - startMs) / 1000));
+  const h = Math.floor(totalSeconds / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  const s = totalSeconds % 60;
+  return [h, m, s].map((n) => String(n).padStart(2, '0')).join(':');
+}
+
+/** h:mm elapsed (e.g. "2:10") — the compact form the COMPLETE confirm dialog uses. */
+export function formatElapsedShort(clockInIso: string, nowMs: number): string {
+  const startMs = Date.parse(clockInIso);
+  if (!Number.isFinite(startMs)) return '-:--';
+  const totalMinutes = Math.max(0, Math.floor((nowMs - startMs) / 60_000));
+  const h = Math.floor(totalMinutes / 60);
+  const m = totalMinutes % 60;
+  return `${h}:${String(m).padStart(2, '0')}`;
+}
+
 /**
  * Surface a backend error VERBATIM (sequence/predecessor gating, holds, locks).
  * Suppressing or rewording these is a compliance bug — the operator must see

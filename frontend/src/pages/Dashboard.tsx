@@ -326,15 +326,35 @@ export default function Dashboard() {
   const signedInUsers = data?.signed_in_users || [];
   const idleSignedInUsers = signedInUsers.filter((user) => !user.has_active_job);
   const onJobSignedInUsers = signedInUsers.filter((user) => user.has_active_job);
-  const timeEntryByUserId = useMemo(() => {
-    const map = new Map<number, number>();
+  // Crew-station world: one operator can hold SEVERAL open entries at once, so
+  // keep every assignment (in the sorted render order), not just the first.
+  const timeEntriesByUserId = useMemo(() => {
+    const map = new Map<number, number[]>();
     activeAssignments.forEach((assignment) => {
-      if (!map.has(assignment.user.id)) {
-        map.set(assignment.user.id, assignment.time_entry_id);
+      const existing = map.get(assignment.user.id);
+      if (existing) {
+        existing.push(assignment.time_entry_id);
+      } else {
+        map.set(assignment.user.id, [assignment.time_entry_id]);
       }
     });
     return map;
   }, [activeAssignments]);
+  // Per-user cursor so repeated chip clicks cycle through that operator's
+  // assignments (pure navigation state — a ref avoids pointless re-renders).
+  // Reset only when the underlying assignment SET changes, not on every poll
+  // (the memo above gets a fresh identity each refresh even when nothing moved).
+  const chipCycleRef = useRef(new Map<number, number>());
+  const assignmentFingerprint = useMemo(
+    () =>
+      Array.from(timeEntriesByUserId.entries())
+        .map(([userId, ids]) => `${userId}:${ids.join('.')}`)
+        .join('|'),
+    [timeEntriesByUserId]
+  );
+  useEffect(() => {
+    chipCycleRef.current.clear();
+  }, [assignmentFingerprint]);
   const machineCapacityOverview = useMemo<MachineCapacityOverview[]>(() => {
     return (capacityHeatmap?.work_centers || [])
       .map((row) => {
@@ -693,19 +713,22 @@ export default function Dashboard() {
                   </p>
                   <div className="flex flex-wrap gap-1">
                     {onJobSignedInUsers.map((user) => {
-                      const timeEntryId = timeEntryByUserId.get(user.id);
+                      const timeEntryIds = timeEntriesByUserId.get(user.id) || [];
                       return (
                         <button
                           key={user.id}
                           type="button"
                           onClick={() => {
-                            if (timeEntryId != null) {
-                              document
-                                .getElementById(`assign-${timeEntryId}`)
-                                ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                            }
+                            if (timeEntryIds.length === 0) return;
+                            // Cycle: each click jumps to the operator's NEXT assignment.
+                            const cursor = chipCycleRef.current.get(user.id) ?? 0;
+                            const timeEntryId = timeEntryIds[cursor % timeEntryIds.length];
+                            chipCycleRef.current.set(user.id, (cursor + 1) % timeEntryIds.length);
+                            document
+                              .getElementById(`assign-${timeEntryId}`)
+                              ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
                           }}
-                          title={`${user.name} · ${user.role.replace('_', ' ')}${user.active_work_orders.length ? ` · ${user.active_work_orders.join(', ')}` : ''}`}
+                          title={`${user.name} · ${user.role.replace('_', ' ')}${user.active_work_orders.length ? ` · ${user.active_work_orders.join(', ')}` : ''}${timeEntryIds.length > 1 ? ` · ${timeEntryIds.length} jobs` : ''}`}
                           className="inline-flex items-center gap-1 rounded-sm border border-fd-line bg-fd-panel px-2 py-0.5 text-xs font-medium text-slate-200 transition-colors hover:border-fd-line-bright hover:text-white"
                         >
                           <span className="h-1.5 w-1.5 rounded-full bg-fd-green" />

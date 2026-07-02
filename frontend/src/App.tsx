@@ -11,7 +11,7 @@ import { TourHighlight } from './components/Tour';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import Layout from './components/Layout';
 import { SkeletonDashboard, LoadingOverlay } from './components/ui/Skeleton';
-import { isKioskMode, syncKioskMode } from './utils/kiosk';
+import { getKioskStationId, isKioskMode, syncKioskMode } from './utils/kiosk';
 import { lazyWithRetry } from './utils/lazyWithRetry';
 
 // Eagerly loaded - critical path
@@ -28,6 +28,7 @@ const WorkOrderDetail = lazyWithRetry(() => import('./pages/WorkOrderDetail'));
 const ShopFloor = lazyWithRetry(() => import('./pages/ShopFloor'));
 const ShopFloorSimple = lazyWithRetry(() => import('./pages/ShopFloorSimple'));
 const OperatorKiosk = lazyWithRetry(() => import('./pages/OperatorKiosk'));
+const CrewStationKiosk = lazyWithRetry(() => import('./pages/CrewStationKiosk'));
 const Wallboard = lazyWithRetry(() => import('./pages/Wallboard'));
 const WorkCenters = lazyWithRetry(() => import('./pages/WorkCenters'));
 const Parts = lazyWithRetry(() => import('./pages/PartsNew'));
@@ -252,6 +253,16 @@ function KioskGuard({ children }: { children: React.ReactNode }) {
 }
 
 
+/**
+ * /kiosk mode dispatcher: ?station=<id> selects the crew-station kiosk
+ * (shared-PIN station auth, multi-operator roster); ?work_center_id=N keeps
+ * the existing single-operator badge-login kiosk unchanged.
+ */
+function KioskRouteDispatcher() {
+  const location = useLocation();
+  return getKioskStationId(location.search) != null ? <CrewStationKiosk /> : <OperatorKiosk />;
+}
+
 // Wrapper for lazy-loaded routes with Suspense
 function LazyRoute({ children }: { children: React.ReactNode }) {
   return (
@@ -332,9 +343,12 @@ function AppRoutes() {
       } />
       
       {/* Operator kiosk (A0.3) — full-screen, no Layout. Handles its own auth:
-          unauthenticated visitors get the badge-login screen, not a redirect. */}
+          unauthenticated visitors get the badge-login screen, not a redirect.
+          ?station=<id> routes to the crew-station kiosk (shared-PIN station
+          auth + per-badge operator tokens); ?work_center_id=N stays the
+          single-operator badge-login kiosk. */}
       <Route path="/kiosk" element={
-        <LazyRoute><OperatorKiosk /></LazyRoute>
+        <LazyRoute><KioskRouteDispatcher /></LazyRoute>
       } />
 
       {/* Shop Floor */}
