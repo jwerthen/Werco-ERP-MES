@@ -125,3 +125,23 @@ def test_encoder_matches_to_utc_iso_helper():
     when = datetime(2026, 7, 1, 19, 17, 0)
     model = _PlainChild(when=when)
     assert model.model_dump(mode="json")["when"] == to_utc_iso(when)
+
+
+def test_time_entry_response_emits_z_via_own_config():
+    """``TimeEntryResponse`` predates ``UTCModel`` and does NOT inherit it — it
+    carries its OWN ``class Config: json_encoders={datetime: to_utc_iso}``. It
+    must keep emitting the trailing 'Z' on its clock_in/clock_out datetimes.
+    Guards against a refactor that drops that Config assuming ``UTCModel`` covers
+    it (it does not — ``TimeEntryBase`` extends ``BaseModel``)."""
+    from app.schemas.time_entry import TimeEntryResponse
+
+    entry = TimeEntryResponse.model_construct(
+        id=1,
+        clock_in=datetime(2026, 7, 1, 19, 17, 0),
+        clock_out=datetime(2026, 7, 1, 21, 17, 0),
+        created_at=datetime(2026, 7, 1, 19, 17, 0),
+        updated_at=datetime(2026, 7, 1, 19, 17, 0),
+    )
+    js = entry.model_dump_json()
+    assert '"clock_in":"2026-07-01T19:17:00Z"' in js
+    assert '"clock_out":"2026-07-01T21:17:00Z"' in js

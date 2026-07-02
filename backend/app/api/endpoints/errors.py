@@ -13,6 +13,8 @@ from fastapi import APIRouter, BackgroundTasks, Request
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
+from app.core.time_utils import to_utc_iso
+
 router = APIRouter(prefix="/errors", tags=["errors"])
 logger = logging.getLogger(__name__)
 
@@ -210,4 +212,4 @@ async def send_error_alert(error: ErrorLogEntry):
 @router.get("/health")
 async def error_logging_health():
     """Health check for error logging service."""
-    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
+    return {"status": "healthy", "timestamp": to_utc_iso(datetime.utcnow())}
