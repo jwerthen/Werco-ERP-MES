@@ -48,7 +48,9 @@ _TERMINAL_WO_STATUSES = [WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED, WorkO
 
 # Entry types that represent labor on an operation. Open BREAK/DOWNTIME entries
 # are clocked time but not jobs — they must not render as ghost rows on the TV.
-_LABOR_ENTRY_TYPES = [TimeEntryType.SETUP, TimeEntryType.RUN, TimeEntryType.REWORK, TimeEntryType.INSPECTION]
+# Public: the crew-kiosk roster (shop_floor work-center-queue) shares this so
+# the two surfaces can never silently diverge on what counts as crew.
+LABOR_ENTRY_TYPES = [TimeEntryType.SETUP, TimeEntryType.RUN, TimeEntryType.REWORK, TimeEntryType.INSPECTION]
 
 # Cap the tickers — a TV ticker cycling 500 rows is unreadable anyway.
 _TICKER_LIMIT = 25
@@ -140,7 +142,7 @@ def build_wallboard_payload(db: Session, company_id: int, dept: Optional[str] = 
             # DOWNTIME entry (no operation, or non-labor type) must not render
             # a ghost job row on the TV.
             TimeEntry.operation_id.isnot(None),
-            TimeEntry.entry_type.in_(_LABOR_ENTRY_TYPES),
+            TimeEntry.entry_type.in_(LABOR_ENTRY_TYPES),
         )
         .all()
     )

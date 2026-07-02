@@ -730,6 +730,10 @@ if settings.RATE_LIMIT_ENABLED:
             "/api/v1/auth/refresh": "30/minute",  # Allow reasonable token refreshes
             "/api/v1/auth/employee-login": "3/minute",  # Employee ID kiosk login
             "/api/v1/visitor-logs/station-login": "5/minute",  # Shared-PIN visitor tablet unlock
+            "/api/v1/shop-floor/kiosk-stations/station-login": "5/minute",  # Shared-PIN crew kiosk unlock
+            # Badge → 5-min kiosk-scoped operator token. Generous (a whole crew
+            # taps one terminal) but safe: the endpoint is station-token-gated.
+            "/api/v1/auth/kiosk-badge-token": "30/minute",
         }
         # Per-route limits for non-auth hot paths, same path -> limit shape as the
         # auth map above. A0.4: wedge scanners hammer the scan resolver; ~1 scan/sec
@@ -843,7 +847,8 @@ if settings.RATE_LIMIT_ENABLED:
         )
         logger.info(
             "Auth rate limits enforced: login=5/min, register=3/min, register-public=3/min, "
-            "refresh=30/min, employee-login=3/min, station-login=5/min"
+            "refresh=30/min, employee-login=3/min, station-login=5/min, "
+            "kiosk-station-login=5/min, kiosk-badge-token=30/min"
         )
         logger.info("Per-route rate limits enforced: scanner resolve-action=60/min")
     except ImportError:

@@ -2,6 +2,7 @@ import React from 'react';
 import { PlusCircleIcon, CheckCircleIcon, PauseCircleIcon } from '@heroicons/react/24/solid';
 import { ActiveJob } from '../../types';
 import LaserNestOperatorPanel from '../laser/LaserNestOperatorPanel';
+import { formatElapsed } from './kioskConstants';
 
 interface KioskActiveJobBannerProps {
   job: ActiveJob;
@@ -10,16 +11,6 @@ interface KioskActiveJobBannerProps {
   onReportProduction: () => void;
   onComplete: () => void;
   onHold: () => void;
-}
-
-function formatElapsed(clockInIso: string, nowMs: number): string {
-  const startMs = Date.parse(clockInIso);
-  if (!Number.isFinite(startMs)) return '--:--:--';
-  const totalSeconds = Math.max(0, Math.floor((nowMs - startMs) / 1000));
-  const h = Math.floor(totalSeconds / 3600);
-  const m = Math.floor((totalSeconds % 3600) / 60);
-  const s = totalSeconds % 60;
-  return [h, m, s].map((n) => String(n).padStart(2, '0')).join(':');
 }
 
 /**

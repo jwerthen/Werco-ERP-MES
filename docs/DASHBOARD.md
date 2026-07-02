@@ -41,7 +41,10 @@ repeating it:
 - **Work Center Status** shows only the **People count** (no nested per-person list). The count is a
   button that scrolls to that station's group in Live Shop Activity.
 - **Signed In Right Now** shows on-the-job users as **name chips** (each scrolls to that operator's
-  assignment row); only **idle** users (signed in, not clocked into work) render as full rows.
+  assignment row); only **idle** users (signed in, not clocked into work) render as full rows. An
+  operator can hold **several** open assignments at once (crew-station multi-job clock-in), so
+  repeated clicks on their chip **cycle through each assignment** in turn, and the chip tooltip
+  gains "· N jobs".
 
 Cross-links are keyed on **stable ids** — `work_center.id` (`#wc-live-<id>`) and `time_entry_id`
 (`#assign-<id>`) — never on display names. Detail fields that don't fit a one-line row (started/elapsed,

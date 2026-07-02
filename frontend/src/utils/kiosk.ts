@@ -56,6 +56,18 @@ export function getKioskWorkCenterCode(search: string): string | null {
   return params.get('work_center_code');
 }
 
+/**
+ * Crew-station id from ?station=N. Presence of this param is what routes
+ * /kiosk into the crew-station mode (station PIN auth) instead of the
+ * single-operator badge-login kiosk.
+ */
+export function getKioskStationId(search: string): number | null {
+  const raw = new URLSearchParams(search).get('station');
+  if (!raw || !/^\d+$/.test(raw)) return null;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : null;
+}
+
 /** Default idle auto-logout for the operator kiosk (seconds). */
 export const KIOSK_IDLE_LOGOUT_DEFAULT_S = 240;
 /** Floor so a typo can't make the kiosk log out mid-scan. */

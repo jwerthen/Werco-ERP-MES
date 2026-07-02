@@ -13,6 +13,7 @@ import {
 } from '../components/ui';
 import { WorkCenter, WorkCenterType } from '../types';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
+import KioskStationsAdminModal from '../components/kiosk/KioskStationsAdminModal';
 import {
   PlusIcon,
   PencilIcon,
@@ -21,6 +22,7 @@ import {
   BoltIcon,
   WrenchScrewdriverIcon,
   NoSymbolIcon,
+  ComputerDesktopIcon,
 } from '@heroicons/react/24/outline';
 
 // Solid status-dot color per canonical semantic variant (resolved from the
@@ -39,6 +41,7 @@ export default function WorkCenters() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [showModal, setShowModal] = useState(false);
+  const [showKioskStations, setShowKioskStations] = useState(false);
   const [editingWc, setEditingWc] = useState<WorkCenter | null>(null);
   const [workCenterTypes, setWorkCenterTypes] = useState<string[]>([]);
   const [formData, setFormData] = useState({
@@ -344,13 +347,23 @@ export default function WorkCenters() {
     <div className="space-y-4">
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold text-white">Work Centers</h1>
-        <Button
-          onClick={() => { resetForm(); setShowModal(true); }}
-          className="flex items-center"
-        >
-          <PlusIcon className="h-5 w-5 mr-2" />
-          Add Work Center
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="secondary"
+            onClick={() => setShowKioskStations(true)}
+            className="flex items-center"
+          >
+            <ComputerDesktopIcon className="h-5 w-5 mr-2" />
+            Kiosk Stations
+          </Button>
+          <Button
+            onClick={() => { resetForm(); setShowModal(true); }}
+            className="flex items-center"
+          >
+            <PlusIcon className="h-5 w-5 mr-2" />
+            Add Work Center
+          </Button>
+        </div>
       </div>
 
       {/* Status KPI strip */}
@@ -573,6 +586,11 @@ export default function WorkCenters() {
               </div>
             </form>
       </Modal>
+
+      {/* Crew-station kiosk management (stations are work-center-bound) */}
+      {showKioskStations && (
+        <KioskStationsAdminModal workCenters={workCenters} onClose={() => setShowKioskStations(false)} />
+      )}
     </div>
   );
 }

@@ -472,6 +472,36 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > **401** (indistinguishable; the failed attempt is audited). It is therefore not on this permission
 > matrix. Like the inbound carrier webhook, trust is established without a user role.
 
+### Crew-Station Kiosk
+
+| Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
+|------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
+| Manage kiosk stations (create / list / reset-PIN / revoke) | ✓ | ✓ | | | | | |
+
+> **Per-endpoint mapping (`/api/v1/shop-floor/kiosk-stations` + `POST /auth/kiosk-badge-token`).**
+> All four station-administration endpoints (`POST /kiosk-stations`, `GET /kiosk-stations`,
+> `POST /kiosk-stations/{id}/revoke`, `POST /kiosk-stations/{id}/reset-pin`, in
+> `app/api/endpoints/shop_floor.py`) are `require_role([ADMIN, MANAGER])` — the same set as
+> visitor sign-in stations. Everything the crew terminal itself does is **not** on the role
+> matrix, because neither of its credentials is a role-bearing user session:
+>
+> - The **station token** (`type="kiosk"`, PIN-minted via the public rate-limited
+>   `POST /shop-floor/kiosk-stations/station-login`) carries no user identity and is honored by
+>   exactly two things — the roster-enriched work-center-queue read (its own bound work center
+>   only, via the dedicated `get_kiosk_or_user` dependency) and the badge-token mint. Every other
+>   endpoint rejects it with **401**; tenant scope and revocation come from the authoritative
+>   `kiosk_stations` row, never the client `cid`.
+> - The **badge-minted operator token** (`POST /auth/kiosk-badge-token`, station-token-gated) is
+>   a 5-minute `scope="kiosk"` access token for the badge-identified user — on the allowed paths
+>   the operator IS `current_user`, so the shop-floor endpoints' existing role/tenant/audit rules
+>   apply unchanged and every labor mutation is attributed to the operator, never the station.
+>   Outside `/api/v1/shop-floor/*` (+ `POST /auth/employee-logout`) the token is **403**
+>   (path-fenced in `get_current_user`). No refresh token is ever minted.
+>
+> Station lifecycle (create / reset-PIN / revoke), station-login failures, and badge-token
+> issuance/failures all write tamper-evident audit rows. See [docs/API.md](API.md) →
+> Authentication → Kiosk station tokens, and [docs/KIOSK.md](KIOSK.md) → Crew station mode.
+
 ### Admin
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
@@ -483,6 +513,7 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 | AI egress kill switch (`PUT /companies/me/ai-egress`) | ✓ | | | | | | |
 | Wallboard display tokens (`/auth/display-token` issue/list/revoke) | ✓ | ✓ | | | | | |
 | Visitor sign-in stations (`/visitor-logs/stations` create/list/revoke/reset-pin) | ✓ | ✓ | | | | | |
+| Crew kiosk stations (`/shop-floor/kiosk-stations` create/list/revoke/reset-pin) | ✓ | ✓ | | | | | |
 | System | ✓ | | | | | | |
 
 > **Integrations (carrier-account credentials + shipping profile) — endpoint mapping.** The
@@ -504,11 +535,13 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > (`Shipment.aggregator_shipment_id`), never from caller input. A request that matches no secret or no
 > shipment is dropped with **204** (no existence oracle). It is therefore not on this permission matrix.
 >
-> **Intentionally-unauthenticated endpoints (the full set).** Three write/verify surfaces establish trust
+> **Intentionally-unauthenticated endpoints (the full set).** Four write/verify surfaces establish trust
 > *without* a user role — and so none appears on the role matrix: the **carrier webhook** above (HMAC
 > signature), the visitor **`station-login`** (a shared station PIN mints a scoped `signin` token — see
-> Visitor Logs above), and the wallboard **display-token** verification (a scoped `display` JWT — see
-> below). Each binds the request to a tenant through stored server-side state, never caller-supplied identity.
+> Visitor Logs above), the crew-kiosk **`station-login`** (`POST /shop-floor/kiosk-stations/station-login`,
+> a shared station PIN mints a scoped `kiosk` token — see Crew-Station Kiosk above), and the wallboard
+> **display-token** verification (a scoped `display` JWT — see below). Each binds the request to a
+> tenant through stored server-side state, never caller-supplied identity.
 
 > **Audit-log access (tenant-scoped).** The **Audit Logs** row above covers audit *retrieval*:
 > `GET /api/v1/audit/`, `/audit/summary`, `/audit/actions`, `/audit/resource-types`
