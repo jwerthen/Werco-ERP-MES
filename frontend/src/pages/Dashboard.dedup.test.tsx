@@ -226,3 +226,41 @@ test('cross-link: clicking an on-the-job presence chip jumps to its assignment r
   expect(getById).toHaveBeenCalledWith('assign-101');
   getById.mockRestore();
 });
+
+test('multi-assignment (crew stations): chip clicks CYCLE through every assignment, title shows the job count', async () => {
+  // One operator with TWO concurrent open entries (allowed by uq_open_time_entry
+  // for different operations) — the chip must reach BOTH, not just the first.
+  const secondAssignment = {
+    ...dashboardData.active_assignments[0],
+    time_entry_id: 102,
+    clock_in: '2026-06-28T19:00:00Z',
+    work_order: {
+      ...dashboardData.active_assignments[0].work_order,
+      id: 3042,
+      work_order_number: 'WO-3042',
+    },
+    operation: { ...dashboardData.active_assignments[0].operation, id: 2, operation_number: '20', name: 'Deburr' },
+  };
+  mockedApi.getDashboardWithCache.mockResolvedValue({
+    data: {
+      ...dashboardData,
+      active_assignments: [dashboardData.active_assignments[0], secondAssignment],
+    } as any,
+    fromCache: false,
+    changed: true,
+  });
+  renderDashboard();
+  await screen.findByText('Capacity Overview');
+
+  const chip = screen.getByRole('button', { name: /Alex Reyes/i });
+  expect(chip).toHaveAttribute('title', expect.stringContaining('· 2 jobs'));
+
+  const getById = jest.spyOn(document, 'getElementById');
+  const anchorCalls = () => getById.mock.calls.map((c) => c[0]).filter((id) => String(id).startsWith('assign-'));
+
+  fireEvent.click(chip); // first assignment (sorted by clock_in)
+  fireEvent.click(chip); // second assignment
+  fireEvent.click(chip); // wraps back to the first
+  expect(anchorCalls()).toEqual(['assign-101', 'assign-102', 'assign-101']);
+  getById.mockRestore();
+});

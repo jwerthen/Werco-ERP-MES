@@ -73,6 +73,38 @@ accepts only `type="access"` JWTs). It carries no user identity; the active comp
 request, so a revoked station's tokens die on the next call. See
 [docs/VISITOR_SIGNIN.md](VISITOR_SIGNIN.md).
 
+### Kiosk station tokens + badge-minted operator tokens (crew-station kiosk)
+
+Two-tier credentials for an unattended **shop-floor crew tablet** (`/kiosk?kiosk=1&station=<id>`,
+see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
+
+- **Station tier** — a JWT with `type="kiosk"`, **24 h** TTL, minted by the shared station **PIN**
+  via `POST /shop-floor/kiosk-stations/station-login` (see Shop Floor below). It authenticates
+  **only** the roster-enriched `GET /shop-floor/work-center-queue/{id}` (its bound work center
+  only, via the dedicated `get_kiosk_or_user` dependency) and the badge-token mint below — every
+  other endpoint rejects it with **401** (`verify_token` accepts only `type="access"` JWTs). It
+  carries no user identity; the active company and the bound work center come from the
+  `kiosk_stations` DB row (never the JWT's claims), and the row's `revoked` flag is re-checked on
+  every request.
+- **Operator tier** — each badge scan exchanges (station token + badge) for a **5-minute**
+  `type="access"` JWT carrying a **`scope="kiosk"`** claim and **no refresh token**:
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| POST | `/auth/kiosk-badge-token` | Exchange a badge scan for a 5-min kiosk-scoped operator token. Body `{"employee_id"}` → `{"access_token", "token_type", "expires_in": 300, "user": {"id", "full_name", "employee_id"}}`. Unknown / inactive / locked / foreign-tenant badge → uniform **401** "Invalid badge"; ambiguous badge within the company → **409**. Issuance and failures are audited (`KIOSK_BADGE_TOKEN_ISSUED` / `KIOSK_BADGE_TOKEN_FAILED`). Rate-limited **30/minute** per IP | Kiosk station token |
+
+> **Path fence.** A `scope="kiosk"` operator token is honored only on `/api/v1/shop-floor/*` and
+> `POST /api/v1/auth/employee-logout`; `get_current_user` rejects it with **403** everywhere else
+> (the token is valid — it just cannot reach the resource). Two shop-floor carve-outs are also
+> **denied** to kiosk-scoped tokens regardless of role: `/shop-floor/kiosk-stations/*` (station
+> lifecycle admin) and `/shop-floor/time-entries/{id}/approve|unapprove` (G5-A labor approval).
+> Tokens without a `scope` claim are
+> unaffected. On the allowed paths the operator IS `current_user`, so audit attribution, tenant
+> isolation, and RBAC apply unchanged. Known residual: the WebSocket auth path
+> (`get_current_user_from_token`) has no request path to fence, so a kiosk-scoped token can open
+> the read-only `/ws/*` broadcast channels during its ≤5-minute life (documented in
+> [docs/KIOSK.md](KIOSK.md)).
+
 ## Core Endpoints
 
 ### Work Orders
@@ -620,8 +652,13 @@ uploads go through text extraction + LLM. See
 | POST | `/shop-floor/operations/{id}/inspection` | Record operation inspection complete (sets `inspection_complete`) | Admin / Manager / Supervisor / Quality |
 | POST | `/shop-floor/time-entries/{id}/approve` | Approve a TimeEntry (sets `approved` / `approved_by`) | Admin / Manager / Supervisor / Quality |
 | POST | `/shop-floor/time-entries/{id}/unapprove` | Clear approval on a TimeEntry | Admin / Manager / Supervisor / Quality |
-| GET | `/shop-floor/work-center-queue/{id}` | Get work center queue | Yes |
+| GET | `/shop-floor/work-center-queue/{id}` | Get work center queue, each row carrying the live crew `roster` (see note below) | User **or** kiosk station token |
 | GET | `/shop-floor/wallboard` | Read-only TV wallboard snapshot (`?dept=` narrows to one work-center type, case-insensitive) | User **or** display token |
+| POST | `/shop-floor/kiosk-stations/station-login` | Unlock a crew tablet with the shared station PIN. Body `{"station_id", "pin"}` (PIN 4–8 digits) → `{"access_token", "token_type", "expires_in", "station": {"id", "label", "work_center_id", "work_center_code", "work_center_name"}}` (24 h scoped `type="kiosk"` JWT). Bad/revoked station or wrong PIN → **401** (indistinguishable; failed attempt audited) | **Public** (PIN-gated, 5/minute per IP) |
+| POST | `/shop-floor/kiosk-stations` | Create a PIN-protected crew-station kiosk bound to a work center. Body `{"label", "work_center_id", "pin"}` → **201** `KioskStationResponse` (PIN hashed, never echoed; a work center outside the active company → **404**) | Admin / Manager |
+| GET | `/shop-floor/kiosk-stations` | List this company's kiosk stations (no PIN/`pin_hash`) → `{"stations"}` | Admin / Manager |
+| POST | `/shop-floor/kiosk-stations/{id}/revoke` | Revoke a kiosk station (idempotent status flip; tablet loses access next request) → `KioskStationResponse` | Admin / Manager |
+| POST | `/shop-floor/kiosk-stations/{id}/reset-pin` | Re-hash a kiosk station's shared PIN. Body `{"pin"}` → `KioskStationResponse` | Admin / Manager |
 
 > **Wallboard display-token threat model (A0.5).** `GET /shop-floor/wallboard` is the **only**
 > endpoint a display token can reach — it is guarded by `get_display_or_user`, the sole dependency
@@ -640,6 +677,29 @@ uploads go through text extraction + LLM. See
 > qty_target}`), `late_wos[]`, `blocked_wos[]` (tickers capped at 25), `generated_at`. Token
 > issuance/revocation: see Authentication → Display tokens. Operating a TV: see
 > [docs/WALLBOARD.md](WALLBOARD.md).
+
+> **Crew roster on `GET /shop-floor/work-center-queue/{id}` (crew-station kiosk).** The queue read
+> accepts **either** a normal user access token **or** a crew-station kiosk token (the dedicated
+> `get_kiosk_or_user` dependency — the only *endpoint dependency* that honors `type="kiosk"` JWTs;
+> the badge-token mint validates the station token itself against the same DB-row checks). A station
+> may only read **its own** work center's queue (any other id → **403**, "Kiosk station may only
+> read its own work center queue"); users read any queue in their company, as before. Each queue
+> row now carries `quantity_scrapped` (feeding the kiosk's crew tally, "37 of 50 · 2 scrap") and a
+> `roster` array of the operation's **open labor** TimeEntries (labor entry types only — an open
+> BREAK/DOWNTIME row never renders as a crew member), each
+> `{time_entry_id, user_id, operator_name, employee_id, entry_type, clock_in}` with
+> `operator_name` in the public-screen-safe "First L." form. The response adds top-level
+> `server_time` (UTC ISO — the kiosk anchors its per-person timers to the server clock) and
+> `station` (`{id, label}` for a station caller, `null` for users). Station lifecycle + PIN model:
+> see the `/shop-floor/kiosk-stations` rows above and [docs/KIOSK.md](KIOSK.md) → Crew station
+> mode.
+>
+> **`closed_time_entries` on `POST /shop-floor/operations/{id}/complete`.** When a completion is
+> fully complete it auto-closes **every** operator's open time entry on the operation (existing
+> behavior); the response now names them —
+> `closed_time_entries: [{time_entry_id, user_id, operator_name}]`, empty on a partial/progress
+> update — so the crew kiosk can toast who was auto-clocked-out. Read-only addition; the
+> auto-close mutation is unchanged.
 
 > **Laser-nest payload on operator reads (`/work-center-queue/{id}`, `/my-active-job`).** So the
 > kiosk/operator station can surface the laser nest at clock-in, **every `/work-center-queue/{id}` row
@@ -2101,7 +2161,9 @@ the global default applied):
 | `POST /auth/register-public` | 3/minute |
 | `POST /auth/refresh` | 30/minute |
 | `POST /auth/employee-login` | 3/minute |
+| `POST /auth/kiosk-badge-token` | 30/minute |
 | `POST /visitor-logs/station-login` | 5/minute |
+| `POST /shop-floor/kiosk-stations/station-login` | 5/minute |
 | `POST /scanner/resolve-action` | 60/minute |
 
 An over-limit request returns **HTTP 429** with a `Retry-After` header (seconds until the window

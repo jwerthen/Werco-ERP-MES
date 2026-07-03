@@ -7,8 +7,17 @@ deliberately minimal — badge in, clock in to a queued job in two taps, and rep
 production / complete / hold on the active job. No supervisor verbs (inspection, labor
 approval, resume-from-hold, or any override) exist on this screen.
 
-Frontend: `frontend/src/pages/OperatorKiosk.tsx` (+ `frontend/src/components/kiosk/`,
-`frontend/src/utils/kiosk.ts`, `frontend/src/hooks/useKioskIdleLogout.ts`).
+`/kiosk` now serves **two coexisting modes**, dispatched by URL param:
+
+- `?work_center_id=N` — the **single-operator kiosk** documented in the sections below
+  (one badge login bound to the terminal, one active job). Unchanged.
+- `?station=<id>` — the **crew station** (multi-operator terminal): a shared-PIN station
+  unlock, a live per-job crew roster, and per-badge JOIN/LEAVE/report/complete/hold. See
+  [Crew station mode](#crew-station-mode-kioskkiosk1stationid) at the end of this doc.
+
+Frontend: `frontend/src/pages/OperatorKiosk.tsx` and `frontend/src/pages/CrewStationKiosk.tsx`
+(+ `frontend/src/components/kiosk/`, `frontend/src/utils/kiosk.ts`,
+`frontend/src/hooks/useKioskIdleLogout.ts`, `frontend/src/services/kioskStationClient.ts`).
 
 ## Station URL and parameters
 
@@ -21,6 +30,7 @@ Each physical terminal is identified by its URL — there is no server-side stat
 | Param | Required | Meaning |
 | --- | --- | --- |
 | `work_center_id` | **Yes** | Numeric work-center id; drives the station queue (`GET /shop-floor/work-center-queue/{id}`). Without it the kiosk shows a "Station not configured" screen and does nothing. |
+| `station` | — | **Routes to crew station mode instead** (server-side `kiosk_stations` id; see the crew-station section below). When present, none of the single-operator params in this table apply. |
 | `kiosk=1` | Recommended | Arms the app-wide kiosk mode (persisted in `localStorage`; `kiosk=0` clears it). `/kiosk` is a kiosk-eligible path alongside `/shop-floor` and `/login`. |
 | `work_center_code` | No | Display fallback for the station header until the work-center name resolves. |
 | `dept` | No | Department tag read by the shared kiosk-mode helpers (`getKioskDept`); not used by the `/kiosk` screen itself. |
@@ -160,3 +170,151 @@ backfill writes on the adoption dashboard.
 - There is **no offline write queue**: because mutations are disabled rather than queued, the
   operator retries them once the banner clears. Error toasts linger 12 s so they are readable
   from arm's length.
+
+## Crew station mode (`/kiosk?kiosk=1&station=<id>`)
+
+The crew station is the multi-operator variant of the kiosk, for work centers where several
+people work the **same** operation at once (three welders on one weldment). The backend labor
+model already supports this — one `TimeEntry` per operator per clock-in window, hour rollups sum
+across operators, and `uq_open_time_entry` allows different users on the same operation — so the
+crew station changes only the terminal UX and its auth model. It coexists with the
+single-operator mode: `?station=<id>` selects crew mode, `?work_center_id=N` keeps the
+single-operator kiosk unchanged.
+
+Frontend: `frontend/src/pages/CrewStationKiosk.tsx` +
+`frontend/src/services/kioskStationClient.ts` (the isolated fetch helper — it never touches the
+global axios client, whose 401→`/login` interceptor would be fatal on an unattended terminal).
+
+### Station PIN model and admin setup
+
+Each crew terminal is a server-side **`kiosk_stations`** record: a label, a **bound work
+center** (non-null — the station may only read its own work center's queue), and a shared
+numeric **PIN** (4–8 digits, bcrypt-hashed, never echoed back). This is the work-center-bound
+twin of the visitor sign-in tablet's `signin_stations` model.
+
+Admin setup (**Admin / Manager**): Work Centers page → **Kiosk Stations** button → the
+management modal (list / create / reset-PIN / revoke), which also shows each station's pinned
+terminal URL to copy:
+
+```
+/kiosk?kiosk=1&station=<id>
+```
+
+Pin the terminal's kiosk browser to that URL (same lockdown recommendation as the
+single-operator mode). Station lifecycle endpoints live under
+`/shop-floor/kiosk-stations` (see `docs/API.md` → Shop Floor); create, PIN reset, revoke, and
+every station-login failure write tamper-evident audit rows.
+
+### Two-tier auth
+
+- **Station tier.** Entering the PIN calls the public, rate-limited
+  `POST /shop-floor/kiosk-stations/station-login`, which mints a **24 h scoped `type="kiosk"`
+  JWT** (sessionStorage only). That token is honored by exactly **two** things: the
+  roster-enriched queue read (`GET /shop-floor/work-center-queue/{id}`, its own work center
+  only — any other work center is **403**) and the badge-token mint below. Every other endpoint
+  rejects it with **401** (`verify_token` accepts only `type="access"` JWTs), so the station can
+  never act as a user. The `kiosk_stations` DB row is authoritative on every request — company
+  scope comes from the row (never the JWT's `cid`), and the `revoked` flag is re-checked each
+  call.
+- **Operator tier.** Each badge scan calls `POST /auth/kiosk-badge-token` (station-token-gated),
+  exchanging the badge for a **5-minute `scope="kiosk"` access token** with **no refresh
+  token** — a shared terminal never holds a long-lived personal credential. The token lives in
+  memory only (never persisted) and is **path-fenced in `get_current_user`** to
+  `/api/v1/shop-floor/*` plus `/api/v1/auth/employee-logout`; any other path returns **403**.
+  Two carve-outs inside the shop-floor prefix are **denied** to kiosk-scoped tokens even for
+  MANAGER/ADMIN badges: the station lifecycle endpoints (`/shop-floor/kiosk-stations/*` — a
+  scanned manager badge must not be able to reset a station PIN from the shared terminal) and
+  the labor-approval pair (`/shop-floor/time-entries/{id}/approve|unapprove` — G5-A approval is
+  a desktop supervisor workflow).
+  Badge lookup is fenced to the station's company; unknown / inactive / locked / foreign-tenant
+  badges are a uniform **401 "Invalid badge"**. Mints and failures are audited
+  (`KIOSK_BADGE_TOKEN_ISSUED` / `KIOSK_BADGE_TOKEN_FAILED`).
+
+All labor mutations then hit the **existing** shop-floor endpoints with the operator token, so
+the badge-identified **operator — never the station — is the audit actor**, and tenant scoping,
+optimistic locking, qualification warnings (G5-B), and `source: "kiosk"` telemetry all apply
+unchanged.
+
+### What the crew sees and does
+
+The unlocked station shows the work center's **crew board**: one card per queued operation with
+the operation-level tally and a roster chip strip of everyone clocked in, each with a live
+per-person timer (computed against the server clock via the queue's `server_time`, so a
+fast/slow tablet can't lie). The queue polls every **10 s** and refetches immediately after
+every successful action.
+
+- **JOIN / LEAVE (badge decides).** Tap a job → "scan badge to join or leave". If the badge's
+  user is already on the roster, it's a **LEAVE**: the quantity screen closes their own entry
+  (`POST /shop-floor/clock-out/{their time_entry_id}`; 0/0 allowed, scrap requires a structured
+  reason). Otherwise it's a **JOIN** (`POST /shop-floor/clock-in`, entry type **Run** by default
+  with a **Setup** toggle). Joining while clocked in elsewhere is allowed — the kiosk shows an
+  informational "also clocked in at …" toast, never a block. A stale-roster double join gets the
+  server's 400 ("already clocked in") as an info toast plus a refresh. **Badge-first** also
+  works: scanning a badge at the board opens that operator's sheet — their open entries (tap to
+  clock out) and the joinable jobs at this station.
+- **REPORT PRODUCTION.** Quantities first, then a **badge-signature scan** saves the report as
+  that operator (`POST /shop-floor/operations/{id}/production`).
+- **COMPLETE (crew-wide, confirmed).** Completion auto-closes **every** operator's open entry on
+  the operation, so the confirm dialog names who else gets clocked out, with their running
+  durations, re-derived live from queue state. A badge scan inside the dialog signs it; if final
+  new pieces were entered, the kiosk posts `production` first, then `complete` — if the
+  production lands but completion is refused, it says so ("Saved production, but completing
+  failed: …"). A concurrent 409 is surfaced verbatim and the board refreshes. The success toast
+  names everyone auto-clocked-out (the complete response's `closed_time_entries`).
+- **HOLD.** The same required blocker-category grid as the single-operator kiosk, then a
+  badge-signature scan (`PUT /shop-floor/operations/{id}/hold`).
+
+Every verb is server-gated and therefore **non-optimistic** — the kiosk shows a loading state,
+reflects only what the server returns, and surfaces rejections verbatim.
+
+### Shared tally — the double-count guard
+
+Quantities are **additive server-side** with no crew de-duplication, so the guard against two
+welders both reporting the same 10 pieces is the prominently displayed operation-level tally:
+every quantity screen carries the banner **"CREW TOTAL SO FAR: 37 of 50 · 2 scrap — enter only
+NEW pieces"**, and the production success toast quotes the new crew total. Train crews to enter
+only pieces not yet counted; the tally (`quantity_complete` / `quantity_scrapped` on the queue
+row) is server-derived, so all terminals and desktop views agree.
+
+### Idle = flow reset, not logout
+
+After **90 s** of inactivity on any screen other than the crew board, a half-entered flow
+(quantities, badge prompt, hold reason) is abandoned back to the board so a walked-away operator
+can't block the crew — but the **station stays unlocked**. There is no idle station logout: the
+station locks only via the explicit **Lock station** button or when a station-authed read gets a
+**401** (revoked/expired), which drops the token and returns to the PIN screen. The reset never
+fires mid-request. This differs deliberately from the single-operator mode's idle **logout**:
+that mode binds a personal login to the terminal; the crew station holds no personal credential
+between actions (operator tokens die in ≤5 minutes on their own).
+
+### Revocation runbook
+
+1. Work Centers → Kiosk Stations → **Revoke** on the station (or
+   `POST /shop-floor/kiosk-stations/{id}/revoke`, Admin/Manager). Revocation is an idempotent,
+   audited status flip — the row is kept as the issuance record, never deleted.
+2. The station's DB row is re-checked on **every** queue read and badge mint, so the tablet
+   locks to the PIN screen on its next poll (≤10 s) even though its JWT is still
+   signature-valid.
+3. Outstanding badge-minted operator tokens are not individually revocable but expire on their
+   own in **≤5 minutes**.
+4. There is no un-revoke: to bring the terminal back, create a new station (new id → new pinned
+   URL) or, for a suspected-PIN-leak only, use **Reset PIN** on a still-active station
+   (PIN reset does not invalidate the already-minted 24 h station token — revoke for that).
+
+### Known residual: WebSocket auth is not path-fenced
+
+The kiosk-scope path fence lives in `get_current_user`, which sees the HTTP request path. The
+WebSocket endpoints authenticate via `get_current_user_from_token` (`app/core/security.py`),
+which has no request path — so a `scope="kiosk"` operator token **can** open the `/ws/*`
+channels during its ≤5-minute life. Accepted residual: those channels are read-only,
+tenant-scoped broadcast streams (no mutations), and the token identifies a real operator of the
+same tenant. The crew station itself does not use WebSockets (v1 is poll-only, 10 s).
+
+### Rate limits
+
+| Path | Limit | Note |
+|------|-------|------|
+| `POST /shop-floor/kiosk-stations/station-login` | 5/minute per IP | Same posture as the visitor tablet's PIN unlock |
+| `POST /auth/kiosk-badge-token` | 30/minute per IP | Generous — a whole crew taps one terminal — but safe: the endpoint is station-token-gated, not public |
+
+The public `POST /auth/employee-login` (3/minute) is untouched — the crew station never uses it.

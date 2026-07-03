@@ -6,7 +6,7 @@ from collections import defaultdict
 from datetime import date, datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import and_, func, or_
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -14,11 +14,13 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy.orm.exc import StaleDataError
 
 from app.api.deps import (
+    KioskReadPrincipal,
     WallboardPrincipal,
     get_audit_service,
     get_current_company_id,
     get_current_user,
     get_display_or_user,
+    get_kiosk_or_user,
     require_role,
 )
 from app.core.cache import invalidate_work_centers_cache
@@ -44,9 +46,19 @@ from app.models.work_order_blocker import (
     WorkOrderBlockerSeverity,
     WorkOrderBlockerStatus,
 )
+from app.schemas.kiosk_station import (
+    KioskStationCreate,
+    KioskStationInfo,
+    KioskStationListResponse,
+    KioskStationLoginRequest,
+    KioskStationLoginResponse,
+    KioskStationResetPinRequest,
+    KioskStationResponse,
+)
 from app.schemas.time_entry import ClockIn, ClockOut, TimeEntryResponse
 from app.schemas.wallboard import WallboardResponse
 from app.schemas.work_order_blocker import WorkOrderBlockerCreate
+from app.services import kiosk_station_service
 from app.services.audit_service import AuditService
 from app.services.completion_cost_service import (
     apply_completion_cost_rollup,
@@ -80,7 +92,12 @@ from app.services.quality_gate_service import (
     record_reconcile_inspection_exception,
 )
 from app.services.scheduling_service import SchedulingService
-from app.services.wallboard_service import build_wallboard_payload, operation_counts_by_work_center
+from app.services.wallboard_service import (
+    LABOR_ENTRY_TYPES,
+    build_wallboard_payload,
+    operation_counts_by_work_center,
+    operator_display_name,
+)
 from app.services.work_order_blocker_service import WorkOrderBlockerService
 from app.services.work_order_state_service import (
     TERMINAL_WO_STATUSES,
@@ -1368,10 +1385,23 @@ def unapprove_time_entry(
 def get_work_center_queue(
     work_center_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id),
+    principal: KioskReadPrincipal = Depends(get_kiosk_or_user),
 ):
-    """Get operations queued at a work center"""
+    """Get operations queued at a work center, with the live crew roster per item.
+
+    Auth accepts EITHER a normal user access token OR a crew-station kiosk
+    token (``get_kiosk_or_user``). A station principal may only read ITS OWN
+    work center's queue (403 otherwise); users read any queue in their company,
+    as before. Each queued item carries a ``roster`` of the open (labor)
+    TimeEntries on that operation so the crew kiosk can render per-person
+    timers; ``server_time`` lets the client correct clock skew.
+    """
+    company_id = principal.company_id
+    if principal.kind == "station" and principal.work_center_id != work_center_id:
+        # The station is physically bound to one work center (from the DB row,
+        # never the client) — it can never read another work center's queue.
+        raise HTTPException(status_code=403, detail="Kiosk station may only read its own work center queue")
+
     operations = (
         db.query(WorkOrderOperation)
         .options(
@@ -1384,6 +1414,7 @@ def get_work_center_queue(
         .filter(
             and_(
                 WorkOrder.company_id == company_id,
+                WorkOrder.is_deleted == False,  # noqa: E712
                 WorkOrder.status.not_in([WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED, WorkOrderStatus.CANCELLED]),
                 WorkOrderOperation.work_center_id == work_center_id,
                 WorkOrderOperation.status.in_([OperationStatus.READY, OperationStatus.IN_PROGRESS]),
@@ -1392,6 +1423,39 @@ def get_work_center_queue(
         .order_by(WorkOrderOperation.scheduled_start)
         .all()
     )
+
+    # Crew roster: open labor TimeEntries for the queued operations, one bucket
+    # per operation (the wallboard open-entry query shape — company-scoped,
+    # clock_out IS NULL, labor entry types only so an open BREAK/DOWNTIME row
+    # never renders as a crew member). joinedload(User) avoids N+1 name lookups.
+    roster_by_operation: dict[int, list[dict]] = defaultdict(list)
+    operation_ids = [op.id for op in operations]
+    if operation_ids:
+        open_entries = (
+            db.query(TimeEntry)
+            .options(joinedload(TimeEntry.user))
+            .filter(
+                TimeEntry.company_id == company_id,
+                TimeEntry.operation_id.in_(operation_ids),
+                TimeEntry.clock_out.is_(None),
+                TimeEntry.entry_type.in_(LABOR_ENTRY_TYPES),
+            )
+            .order_by(TimeEntry.clock_in.asc())
+            .all()
+        )
+        for entry in open_entries:
+            roster_by_operation[entry.operation_id].append(
+                {
+                    "time_entry_id": entry.id,
+                    "user_id": entry.user_id,
+                    "operator_name": (
+                        operator_display_name(entry.user.first_name, entry.user.last_name) if entry.user else None
+                    ),
+                    "employee_id": entry.user.employee_id if entry.user else None,
+                    "entry_type": entry.entry_type.value if hasattr(entry.entry_type, "value") else entry.entry_type,
+                    "clock_in": to_utc_iso(entry.clock_in),
+                }
+            )
 
     queue = []
     for op in operations:
@@ -1412,15 +1476,28 @@ def get_work_center_queue(
                 "work_order_quantity_ordered": wo.quantity_ordered,
                 "component_quantity": op.component_quantity,
                 "quantity_complete": op.quantity_complete,
+                # Crew tally: scrap surfaces next to quantity_complete so the
+                # kiosk tally block ("37 of 50 · 2 scrap") is server-derived.
+                "quantity_scrapped": op.quantity_scrapped,
                 "priority": wo.priority,
                 "due_date": wo.due_date,
                 "setup_time_hours": op.setup_time_hours,
                 "run_time_hours": op.run_time_hours,
                 "laser_nest": _laser_nest_payload(op),
+                "roster": roster_by_operation.get(op.id, []),
             }
         )
 
-    return {"queue": queue}
+    return {
+        "queue": queue,
+        # Timer skew correction: honest per-person timers are computed against
+        # the server clock, not the tablet's.
+        "server_time": to_utc_iso(datetime.utcnow()),
+        # Station identity for the kiosk header; null for normal user callers.
+        "station": (
+            {"id": principal.station_id, "label": principal.station_label} if principal.kind == "station" else None
+        ),
+    }
 
 
 def _dashboard_state_fingerprint(
@@ -2477,6 +2554,10 @@ def complete_operation(
     - If qty_complete >= qty_ordered: status = COMPLETE, record actual_end_time
     - If qty_complete < qty_ordered: status remains IN_PROGRESS
     - Optionally record notes
+    - Auto-closes every open TimeEntry on the operation (all clocked-in
+      operators) and names them in the response's ``closed_time_entries``
+      (time_entry_id / user_id / operator_name) so the crew kiosk can say
+      who was clocked out
 
     ON_HOLD policy (QG-5 / BLK-1): completing an ON_HOLD operation is REFUSED
     with **409 Conflict** ("Operation is on hold and cannot be completed"),
@@ -2628,9 +2709,11 @@ def complete_operation(
     work_order.updated_at = datetime.utcnow()
 
     # Close any open time entries for this operation when fully complete
+    closed_time_entries: list[dict] = []
     if is_fully_complete:
         open_entries = (
             db.query(TimeEntry)
+            .options(joinedload(TimeEntry.user))
             .filter(
                 and_(
                     TimeEntry.operation_id == operation_id,
@@ -2656,6 +2739,20 @@ def complete_operation(
                 entry.source = completion_data.source.value
         if open_entries and completion_delta > 0:
             open_entries[0].quantity_produced = float(open_entries[0].quantity_produced or 0) + completion_delta
+        # Crew-station kiosk: surface WHO this completion auto-clocked-out so the
+        # client can toast it ("also clocked out: Bob T, Charlie M"). Captured
+        # BEFORE the terminal commit while the rows are loaded; read-only —
+        # the auto-close mutation above is unchanged.
+        closed_time_entries = [
+            {
+                "time_entry_id": entry.id,
+                "user_id": entry.user_id,
+                "operator_name": (
+                    operator_display_name(entry.user.first_name, entry.user.last_name) if entry.user else None
+                ),
+            }
+            for entry in open_entries
+        ]
 
         # COST-3 (Batch 7, OPT-IN): this path auto-closes the open TimeEntries above by
         # writing clock_out + duration_hours, but historically dropped those hours from
@@ -2829,6 +2926,9 @@ def complete_operation(
         "is_fully_complete": is_fully_complete,
         # Warn-and-record (Batch 4 / rank 7): unsatisfied quality gates at completion.
         "quality_exceptions": [exc.as_dict() for exc in quality_exceptions],
+        # Crew-station kiosk: the open entries this completion auto-closed
+        # (empty on a partial/progress update).
+        "closed_time_entries": closed_time_entries,
     }
 
 
@@ -3335,3 +3435,168 @@ def mark_operation_inspected(
         "inspection_complete": operation.inspection_complete,
         "inspection_type": operation.inspection_type,
     }
+
+
+# ============================================================================
+# Crew-station kiosk stations (A0 crew kiosk).
+#
+# A KioskStation is the PIN-unlocked, work-center-bound, revocable auth anchor
+# for the shared crew tablet (twin of the visitor SigninStation). Admin
+# lifecycle is ADMIN/MANAGER-gated and mirrors visitor_logs.py; station-login
+# is PUBLIC + rate-limited (see /api/v1/shop-floor/kiosk-stations/station-login
+# in main.py AUTH_RATE_LIMITS) and mints the scoped type="kiosk" JWT honored
+# ONLY by get_kiosk_or_user (queue read) and POST /auth/kiosk-badge-token.
+# ============================================================================
+
+# Staff roles allowed to manage kiosk stations (same set as visitor stations).
+_KIOSK_STATION_MANAGE_ROLES = [UserRole.ADMIN, UserRole.MANAGER]
+
+
+def _kiosk_station_response(station) -> KioskStationResponse:
+    """Serialize a KioskStation row + its bound work center identity (no PIN/hash)."""
+    return KioskStationResponse(
+        id=station.id,
+        label=station.label,
+        work_center_id=station.work_center_id,
+        work_center_code=station.work_center.code if station.work_center else None,
+        work_center_name=station.work_center.name if station.work_center else None,
+        revoked=station.revoked,
+        revoked_at=station.revoked_at,
+        revoked_by=station.revoked_by,
+        last_used_at=station.last_used_at,
+        created_by=station.created_by,
+        created_at=station.created_at,
+    )
+
+
+@router.post("/kiosk-stations/station-login", response_model=KioskStationLoginResponse)
+def kiosk_station_login(
+    payload: KioskStationLoginRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Unlock a crew tablet with the shared station PIN → scoped type='kiosk' JWT.
+
+    PUBLIC + rate-limited (5/minute per IP). The DB row is the company-binding
+    authority; the minted token's ``cid`` comes from it, never from the client.
+    The response carries the station identity (label + bound work center) the
+    tablet needs to render its header and scope its queue polling. Failed PIN
+    attempts are recorded as an operational audit event.
+    """
+    try:
+        station, token, expires_in = kiosk_station_service.authenticate_station(
+            db, station_id=payload.station_id, pin=payload.pin
+        )
+    except Exception:
+        # Audit the failed attempt against the station's company when the station
+        # exists (so the trail stays tenant-attributed); swallow lookup issues so
+        # we never leak whether the station id or the PIN was wrong.
+        try:
+            from app.models.kiosk_station import KioskStation
+
+            existing = db.query(KioskStation).filter(KioskStation.id == payload.station_id).first()
+            if existing is not None:
+                audit = AuditService(db, user=None, request=request, company_id=existing.company_id)
+                audit.log(
+                    action="LOGIN_FAILED",
+                    resource_type="kiosk_station",
+                    resource_id=existing.id,
+                    resource_identifier=existing.label,
+                    description=f"Failed PIN attempt for crew-station kiosk '{existing.label}'",
+                    success=False,
+                )
+                db.commit()
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("Failed to audit kiosk station-login failure")
+        raise
+
+    return KioskStationLoginResponse(
+        access_token=token,
+        token_type="bearer",
+        expires_in=expires_in,
+        station=KioskStationInfo(
+            id=station.id,
+            label=station.label,
+            work_center_id=station.work_center_id,
+            work_center_code=station.work_center.code if station.work_center else None,
+            work_center_name=station.work_center.name if station.work_center else None,
+        ),
+    )
+
+
+@router.post("/kiosk-stations", response_model=KioskStationResponse, status_code=201)
+def create_kiosk_station(
+    payload: KioskStationCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(_KIOSK_STATION_MANAGE_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Create a PIN-protected crew-station kiosk bound to a work center.
+
+    ADMIN/MANAGER. The PIN is bcrypt-hashed and never echoed; the work center
+    must belong to the active company (404 otherwise).
+    """
+    audit = AuditService(db, user=current_user, request=request, company_id=company_id)
+    station = kiosk_station_service.create_station(
+        db,
+        company_id=company_id,
+        label=payload.label,
+        work_center_id=payload.work_center_id,
+        pin=payload.pin,
+        created_by=current_user.id,
+        audit=audit,
+    )
+    return _kiosk_station_response(station)
+
+
+@router.get("/kiosk-stations", response_model=KioskStationListResponse)
+def list_kiosk_stations(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(_KIOSK_STATION_MANAGE_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+):
+    """List this company's crew-station kiosks (no PIN/pin_hash exposed)."""
+    stations = kiosk_station_service.list_stations(db, company_id=company_id)
+    return KioskStationListResponse(stations=[_kiosk_station_response(s) for s in stations])
+
+
+@router.post("/kiosk-stations/{station_id}/revoke", response_model=KioskStationResponse)
+def revoke_kiosk_station(
+    station_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(_KIOSK_STATION_MANAGE_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Revoke a kiosk station (idempotent, audited). The tablet loses access next request."""
+    audit = AuditService(db, user=current_user, request=request, company_id=company_id)
+    station = kiosk_station_service.revoke_station(
+        db,
+        company_id=company_id,
+        station_id=station_id,
+        revoked_by=current_user.id,
+        audit=audit,
+    )
+    return _kiosk_station_response(station)
+
+
+@router.post("/kiosk-stations/{station_id}/reset-pin", response_model=KioskStationResponse)
+def reset_kiosk_station_pin(
+    station_id: int,
+    payload: KioskStationResetPinRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(_KIOSK_STATION_MANAGE_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Reset a kiosk station's shared PIN (re-hashed, audited; PIN never logged)."""
+    audit = AuditService(db, user=current_user, request=request, company_id=company_id)
+    station = kiosk_station_service.reset_pin(
+        db,
+        company_id=company_id,
+        station_id=station_id,
+        pin=payload.pin,
+        audit=audit,
+    )
+    return _kiosk_station_response(station)

@@ -12,6 +12,11 @@ interface KioskQuantityScreenProps {
   initialGood?: number;
   /** When true (production report) the backend rejects 0/0, so block it client-side too. */
   requireTotalPositive: boolean;
+  /**
+   * Crew-station double-count guard: the operation-level tally, e.g.
+   * "CREW TOTAL SO FAR: 37 of 50 · 2 scrap — enter only NEW pieces".
+   */
+  tallyBanner?: string;
   busy: boolean;
   onConfirm: (good: number, scrap: number, scrapReason: string | null) => void;
   onCancel: () => void;
@@ -29,6 +34,7 @@ export default function KioskQuantityScreen({
   confirmLabel,
   initialGood,
   requireTotalPositive,
+  tallyBanner,
   busy,
   onConfirm,
   onCancel,
@@ -56,6 +62,15 @@ export default function KioskQuantityScreen({
     <section aria-label={title} className="mx-auto w-full max-w-2xl">
       <h2 className="text-3xl font-bold text-fd-ink">{title}</h2>
       <p className="mt-1 font-mono text-lg text-fd-mute">{jobLabel}</p>
+
+      {tallyBanner && (
+        <p
+          data-testid="kiosk-tally-banner"
+          className="mt-4 rounded border border-fd-blue/50 bg-fd-blue/10 px-4 py-3 text-center font-mono text-xl font-bold text-fd-blue"
+        >
+          {tallyBanner}
+        </p>
+      )}
 
       <div className="mt-5 grid grid-cols-2 gap-3">
         <button

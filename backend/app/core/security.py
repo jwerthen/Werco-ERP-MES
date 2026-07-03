@@ -21,8 +21,16 @@ def create_access_token(
     expires_delta: Optional[timedelta] = None,
     company_id: Optional[int] = None,
     read_only: bool = False,
+    scope: Optional[str] = None,
 ) -> str:
-    """Create a short-lived access token (default 15 minutes)."""
+    """Create a short-lived access token (default 15 minutes).
+
+    ``scope`` optionally constrains WHERE the token is honored: a
+    ``scope="kiosk"`` token (minted by ``POST /auth/kiosk-badge-token``) is
+    path-fenced by ``get_current_user`` to the shop-floor endpoints (+
+    employee-logout) and 403s everywhere else. Tokens without a scope claim
+    are unaffected.
+    """
     if expires_delta:
         expire = datetime.utcnow() + expires_delta
     else:
@@ -37,6 +45,8 @@ def create_access_token(
     }
     if company_id is not None:
         to_encode["cid"] = company_id
+    if scope is not None:
+        to_encode["scope"] = scope
     encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
     return encoded_jwt
 
@@ -160,12 +170,63 @@ def verify_signin_token(token: str) -> Optional[dict]:
         return None
 
 
+def create_kiosk_token(station_id: int, company_id: int, label: str, ttl_hours: int = 24) -> str:
+    """Create a scope-limited token for an unattended crew-station kiosk tablet.
+
+    Twin of ``create_signin_token``: the ``type`` claim is ``"kiosk"`` — NOT
+    ``"access"`` — so ``verify_token`` (and therefore ``get_current_user`` and
+    every dependency built on it) rejects it. Kiosk tokens only authenticate
+    via the dedicated ``get_kiosk_or_user`` dependency on the roster-enriched
+    work-center-queue read, and gate the badge-token mint
+    (``POST /auth/kiosk-badge-token``). ``sid`` ties the JWT to a
+    ``kiosk_stations`` row so admins can revoke it; ``cid`` is cross-checked
+    against that row (the DB row is authoritative).
+    """
+    expire = datetime.utcnow() + timedelta(hours=ttl_hours)
+    to_encode = {
+        "exp": expire,
+        "sub": f"kiosk:{station_id}",
+        "type": "kiosk",
+        "sid": station_id,
+        "cid": company_id,
+        "label": label,
+        "iat": datetime.utcnow(),
+    }
+    return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+
+def verify_kiosk_token(token: str) -> Optional[dict]:
+    """Verify a crew-station kiosk token and return its claims, or None.
+
+    Twin of ``verify_signin_token``: only checks signature/expiry/type. The
+    caller MUST additionally check the ``kiosk_stations`` row (exists, not
+    revoked, ``cid`` matches the row's ``company_id``) — the DB row is the
+    revocation authority and the tenant-scoping source of truth.
+    """
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        if payload.get("type") != "kiosk":
+            return None
+        return {
+            "station_id": payload.get("sid"),
+            "company_id": payload.get("cid"),
+            "label": payload.get("label"),
+        }
+    except JWTError:
+        return None
+
+
 def verify_token(token: str) -> Optional[dict]:
     """Verify an access token and return user context claims.
 
     SECURITY: the ``type == "access"`` check below is what fences display
-    tokens (``type == "display"``, see ``create_display_token``) and refresh
-    tokens out of every user-auth dependency. Do not relax it.
+    tokens (``type == "display"``, see ``create_display_token``), signin/kiosk
+    station tokens, and refresh tokens out of every user-auth dependency. Do
+    not relax it.
+
+    ``scope`` is surfaced so ``get_current_user`` can path-fence
+    kiosk-scoped operator tokens (``scope == "kiosk"``); ``None`` for every
+    token minted without a scope claim.
     """
     try:
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
@@ -175,6 +236,7 @@ def verify_token(token: str) -> Optional[dict]:
             "user_id": payload.get("sub"),
             "company_id": payload.get("cid"),  # None for legacy tokens
             "read_only": bool(payload.get("ro", False)),
+            "scope": payload.get("scope"),  # None for unscoped tokens
         }
     except JWTError:
         return None
