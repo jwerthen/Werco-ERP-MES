@@ -90,6 +90,9 @@ class SPCMeasurement(Base, TenantMixin):
     measured_at = Column(DateTime, default=datetime.utcnow)
     measured_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     work_order_id = Column(Integer, ForeignKey("work_orders.id"), nullable=True)
+    # Step-level SPC traceability: the WO operation the measurement was captured on
+    # (populated by the process-sheet capture path in PR 4; nullable, no behavior here).
+    operation_id = Column(Integer, ForeignKey("work_order_operations.id"), nullable=True, index=True)
     lot_number = Column(String(100), nullable=True)
     serial_number = Column(String(100), nullable=True)
     is_out_of_control = Column(Boolean, default=False)
@@ -100,6 +103,7 @@ class SPCMeasurement(Base, TenantMixin):
     # Relationships
     characteristic = relationship("SPCCharacteristic", back_populates="measurements")
     work_order = relationship("WorkOrder")
+    operation = relationship("WorkOrderOperation")
 
 
 class SPCProcessCapability(Base, TenantMixin):

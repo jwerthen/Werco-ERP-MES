@@ -48,6 +48,9 @@ class WorkOrderBlocker(Base, TenantMixin):
     work_order_id = Column(Integer, ForeignKey("work_orders.id"), nullable=False, index=True)
     operation_id = Column(Integer, ForeignKey("work_order_operations.id"), nullable=True, index=True)
     material_part_id = Column(Integer, ForeignKey("parts.id"), nullable=True, index=True)
+    # The NCR a QUALITY_HOLD blocker was raised with (process-sheets OOT escape hatch, PR 4).
+    # Nullable — the link was previously "cultural"; no behavior here.
+    ncr_id = Column(Integer, ForeignKey("ncrs.id"), nullable=True, index=True)
 
     category = Column(String(40), nullable=False, default=WorkOrderBlockerCategory.OTHER.value, index=True)
     severity = Column(String(20), nullable=False, default=WorkOrderBlockerSeverity.MEDIUM.value, index=True)
@@ -70,6 +73,7 @@ class WorkOrderBlocker(Base, TenantMixin):
     work_order = relationship("WorkOrder")
     operation = relationship("WorkOrderOperation")
     material_part = relationship("Part")
+    ncr = relationship("NonConformanceReport")
     reporter = relationship("User", foreign_keys=[reported_by])
     assignee = relationship("User", foreign_keys=[assigned_to])
     resolver = relationship("User", foreign_keys=[resolved_by])

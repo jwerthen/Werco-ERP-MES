@@ -10,8 +10,10 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
+from app.db.tenant_filter import tenant_query
 from app.models.bom import BOM, BOMItem
 from app.models.part import Part, PartType
+from app.models.process_sheet import ProcessSheet, ProcessSheetStatus
 from app.models.routing import Routing, RoutingOperation
 from app.models.routing_learning import RoutingGenerationSession
 from app.models.user import User, UserRole
@@ -152,6 +154,25 @@ TIME_STANDARD_FIELDS = {
 
 ALLOWED_DRAWING_EXTENSIONS = {".pdf", ".dxf", ".step", ".stp"}
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+
+
+def _validate_process_sheet_attach(db: Session, company_id: int, process_sheet_id: int) -> ProcessSheet:
+    """Validate a process-sheet attach target: must exist in the ACTIVE company (tenant-scoped),
+    not be soft-deleted (404 otherwise), and be RELEASED (409 otherwise) — only released
+    inspection content may reach a traveler (docs/PROCESS_SHEETS_SCOPE.md)."""
+    sheet = (
+        tenant_query(db, ProcessSheet, company_id)
+        .filter(ProcessSheet.id == process_sheet_id, ProcessSheet.is_deleted == False)  # noqa: E712
+        .first()
+    )
+    if not sheet:
+        raise HTTPException(status_code=404, detail="Process sheet not found")
+    if sheet.status != ProcessSheetStatus.RELEASED.value:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Only a released process sheet can be attached (sheet {sheet.sheet_number} is {sheet.status})",
+        )
+    return sheet
 
 
 @router.post("/generate-from-drawing", response_model=RoutingGenerationResult)
@@ -924,6 +945,10 @@ def add_operation(
     if not work_center:
         raise HTTPException(status_code=404, detail="Work center not found")
 
+    # Verify the attached process sheet (same company, not deleted, RELEASED) if provided
+    if operation_in.process_sheet_id is not None:
+        _validate_process_sheet_attach(db, company_id, operation_in.process_sheet_id)
+
     # Auto-generate operation number if not provided
     op_data = operation_in.model_dump()
     if not op_data.get('operation_number'):
@@ -937,6 +962,18 @@ def add_operation(
     db.refresh(routing)
     calculate_routing_totals(routing, db)
 
+    # Audit BEFORE the terminal commit so the CREATE row commits atomically with the
+    # operation — AuditService.log() only flushes, and the request session never commits
+    # on teardown, so an audit call placed after db.commit() opens a new transaction that
+    # get_db teardown rolls back (the row would be silently discarded). The flush above
+    # already assigned the operation's PK.
+    audit.log_create(
+        "routing_operation",
+        operation.id,
+        operation.operation_number or operation.name or str(operation.id),
+        new_values=operation,
+    )
+
     db.commit()
     db.refresh(operation)
 
@@ -946,13 +983,6 @@ def add_operation(
         .options(joinedload(RoutingOperation.work_center))
         .filter(RoutingOperation.id == operation.id)
         .first()
-    )
-
-    audit.log_create(
-        "routing_operation",
-        operation.id,
-        operation.operation_number or operation.name or str(operation.id),
-        new_values=operation,
     )
 
     return operation
@@ -1038,6 +1068,15 @@ def update_operation(
         )
         if not work_center:
             raise HTTPException(status_code=404, detail="Work center not found")
+
+    # Verify the process sheet only when it actually CHANGES (a change is only reachable on
+    # draft — process_sheet_id is a structural field, so a released routing would have 400'd
+    # above). An unchanged echo of the current value in a full-payload PUT must NOT re-validate:
+    # the attached sheet may have been obsoleted or soft-deleted since attach, and e.g. a
+    # released-routing time-standards edit legitimately echoes it. Explicit null detaches.
+    new_process_sheet_id = update_data.get("process_sheet_id")
+    if new_process_sheet_id is not None and new_process_sheet_id != operation.process_sheet_id:
+        _validate_process_sheet_attach(db, company_id, new_process_sheet_id)
 
     for field, value in update_data.items():
         setattr(operation, field, value)
@@ -1212,6 +1251,7 @@ def copy_routing(
             vendor_id=op.vendor_id,
             outside_cost=op.outside_cost,
             outside_lead_days=op.outside_lead_days,
+            process_sheet_id=op.process_sheet_id,
         )
         db.add(new_op)
 
