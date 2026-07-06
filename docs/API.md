@@ -541,6 +541,7 @@ uploads go through text extraction + LLM. See
 | GET | `/routing/{id}` | Get routing by ID | Yes |
 | PUT | `/routing/{id}` | Update routing | Yes |
 | POST | `/routing/{id}/release` | Release a draft routing for production (status → `released`, stamps `approved_by`/`approved_at`/`effective_date`) | Admin / Manager |
+| POST | `/routing/{id}/copy` | Copy a routing to a target part or new revision as a new **draft** — query params `target_part_id` (required) and `new_revision` (default `A`); copies all operations incl. `process_sheet_id`; **404** if the source routing or target part isn't found | Admin / Manager |
 | POST | `/routing/{id}/operations` | Add an operation (**400** on a released routing) | Admin / Manager / Supervisor |
 | PUT | `/routing/{id}/operations/{operation_id}` | Update an operation — draft: all fields; released: **time standards only** (see note) | Admin / Manager / Supervisor (released-routing edits: Admin / Manager) |
 | DELETE | `/routing/{id}/operations/{operation_id}` | Delete an operation (**400** on a released routing) | Admin / Manager / Supervisor |
@@ -564,6 +565,22 @@ uploads go through text extraction + LLM. See
 > UPDATE (old→new values); a successful **released** time-standard edit also re-stamps
 > `routing.approved_by` / `approved_at` (the editor / now), leaving `effective_date` and the revision
 > letter unchanged. See [docs/RBAC_PERMISSIONS.md](RBAC_PERMISSIONS.md) → Routings.
+
+> **Attaching a process sheet to an operation (`feat/process-sheets-library`).** Routing operations
+> carry an optional **`process_sheet_id`** (on create, update, and every operation response) that
+> attaches a Process Sheets library entry by reference (see Process Sheets below). The attach target
+> is validated on `POST /routing/{id}/operations` and `PUT /routing/{id}/operations/{operation_id}`:
+> a sheet that doesn't exist in the **active company** (missing, cross-tenant, or soft-deleted)
+> returns **404** (*"Process sheet not found"*); a sheet that is not **RELEASED** returns **409**
+> (*"Only a released process sheet can be attached (sheet PS-000123 is draft)"*) — only released
+> inspection content may reach a traveler. Sending an explicit `process_sheet_id: null` on update
+> **detaches** (no validation needed). `process_sheet_id` is a structural (process) field, so on a
+> **released** routing changing it returns **400** like any non-time-standard field — the attach
+> validation is only reachable on a draft. `POST /routing/{routing_id}/copy` carries
+> `process_sheet_id` onto the copied draft's operations. The attached sheet is snapshotted onto WO
+> operations at WO creation in a later PR (see
+> [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)); in this PR the field is a validated
+> reference only.
 
 > **Routing import (CSV/XLSX).** Both endpoints are multipart uploads with two form fields:
 > `file` (the CSV or XLSX upload, via the shared `parse_import_file`) and an optional `assignments`
@@ -633,11 +650,59 @@ uploads go through text extraction + LLM. See
   "work_center_id": 1,
   "setup_time": 0.5,
   "run_time": 2.5,
-  "notes": "Use roughing tool"
+  "notes": "Use roughing tool",
+  "process_sheet_id": null
 }
 ```
 
-### Shop Floor
+### Process Sheets
+
+Typed, revision-controlled operation-step documents ("process sheets") authored in engineering and
+attached by reference to routing operations (see the Routing attach note above). Library CRUD +
+lifecycle only in this PR — the WO-creation snapshot and shop-floor per-step capture land in later
+PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/process-sheets/` | List process sheets, all revisions, newest sheet number first (`?status=`, `?search=` on number/title, `skip`/`limit` paging) | Yes |
+| GET | `/process-sheets/{id}` | Get a process sheet with its steps | Yes |
+| POST | `/process-sheets/` | Create a process sheet (status `draft`, Rev `A`, auto-numbered `PS-000123`). Body: `{"title", "description"}` | Admin / Manager / Supervisor / Quality |
+| PATCH | `/process-sheets/{id}` | Update sheet header fields (`title` / `description`) — **409** unless the sheet is a draft | Admin / Manager / Supervisor / Quality |
+| DELETE | `/process-sheets/{id}` | Soft-delete a **draft** sheet (**409** for released/obsolete — obsolete those instead) | Admin / Manager / Supervisor / Quality |
+| POST | `/process-sheets/{id}/release` | Release a draft sheet (status → `released`, stamps `effective_date`; **400** with no steps, **409** if not a draft) | Admin / Manager / Quality |
+| POST | `/process-sheets/{id}/obsolete` | Obsolete a released sheet (status → `obsolete`, stamps `obsolete_date`, clears `is_active`; **409** if not released) | Admin / Manager / Quality |
+| POST | `/process-sheets/{id}/new-revision` | Copy a released/obsolete sheet **and its steps** to a new draft row with the next revision letter (**409** on a draft — edit it directly — or when a draft revision of the sheet already exists) | Admin / Manager / Supervisor / Quality |
+| POST | `/process-sheets/{id}/steps` | Add a typed step to a **draft** sheet (**409** otherwise; per-type config validation — see note) | Admin / Manager / Supervisor / Quality |
+| PATCH | `/process-sheets/{id}/steps/{step_id}` | Update a step on a **draft** sheet — the merged (effective) definition is re-validated, not just the delta | Admin / Manager / Supervisor / Quality |
+| DELETE | `/process-sheets/{id}/steps/{step_id}` | Delete a step from a **draft** sheet (hard delete — steps only exist on drafts) | Admin / Manager / Supervisor / Quality |
+
+> **Draft-only mutability (409 semantics).** Only a **draft** sheet is mutable — header updates,
+> step add/edit/delete, and delete of the sheet itself all return **409** on a released or obsolete
+> sheet (*"Cannot update a released process sheet — only drafts are editable. Create a new revision
+> to change released content."*). Released content changes go through `POST
+> /process-sheets/{id}/new-revision`, which mirrors routing revisions: revisions are separate rows
+> sharing `sheet_number`, with Excel-style letter increments (`A` → `B` → … → `Z` → `AA`), and at
+> most **one draft revision per sheet family** at a time (**409** otherwise). Sheet numbers are
+> generated per company under an advisory lock and **never reused** (soft-deleted sheets still hold
+> their number). Every mutation writes a tamper-evident `audit_log` row (create / update /
+> soft-delete / status change).
+>
+> **Roles.** Authoring (create / header edit / step CRUD / delete / new-revision) is **Admin /
+> Manager / Supervisor / Quality**; release and obsolete are **Admin / Manager / Quality** (quality
+> owns released inspection documents); GETs are any authenticated user (tenant-scoped). See
+> [docs/RBAC_PERMISSIONS.md](RBAC_PERMISSIONS.md) → Process Sheets.
+>
+> **Step schema + per-type `config` validation.** A step is `{"sequence"` (int > 0)`, "label",
+> "instruction_text", "step_type", "is_required", "config", "requires_gauge",
+> "spc_characteristic_id"}` with `step_type` one of `measurement | checkbox | list | value | photo |
+> file | instruction`. The service validates the per-type shape (**400** on violation):
+> `measurement` requires a `config` with **numeric `lsl` / `nominal` / `usl`** satisfying
+> `lsl <= nominal <= usl` and `lsl < usl`; `list` requires a `config` with a non-empty `options`
+> array; `requires_gauge` is valid **only** on measurement steps; `spc_characteristic_id` is
+> measurement-only and must resolve to an SPC characteristic in the active company (**404**
+> otherwise). `instruction` steps are display-only and **never required** — the server forces
+> `is_required: false` regardless of the payload. Step updates validate the **merged** (existing +
+> payload) definition so a partial payload can't sneak an invalid combination past per-field checks.
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|

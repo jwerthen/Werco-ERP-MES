@@ -37,6 +37,7 @@ from app.api.endpoints import (
     platform,
     po_upload,
     print_reports,
+    process_sheets,
     purchasing,
     qms_standards,
     quality,
@@ -74,6 +75,7 @@ api_router.include_router(parts.router, prefix="/parts", tags=["Parts"])
 api_router.include_router(materials.router, prefix="/materials", tags=["Materials & Supplies"])
 api_router.include_router(bom.router, prefix="/bom", tags=["Bill of Materials"])
 api_router.include_router(routing.router, prefix="/routing", tags=["Routing"])
+api_router.include_router(process_sheets.router, prefix="/process-sheets", tags=["Process Sheets"])
 api_router.include_router(inventory.router, prefix="/inventory", tags=["Inventory"])
 api_router.include_router(mrp.router, prefix="/mrp", tags=["Material Requirements Planning"])
 api_router.include_router(quality.router, prefix="/quality", tags=["Quality Management"])

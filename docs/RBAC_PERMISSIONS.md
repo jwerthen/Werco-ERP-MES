@@ -134,6 +134,31 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > Admin bypass role checks, as elsewhere. Every applied change is tamper-evidently audit-logged; see
 > [docs/CMMC_LEVEL_2_COMPLIANCE.md](CMMC_LEVEL_2_COMPLIANCE.md) → CONFIGURATION MANAGEMENT (CM).
 
+### Process Sheets
+
+| Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
+|------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
+| View | ✓ | ✓ | ✓ | ✓ | ✓ | | ✓ |
+| Create | ✓ | ✓ | ✓ | | ✓ | | |
+| Edit (draft sheet + steps) | ✓ | ✓ | ✓ | | ✓ | | |
+| Delete (draft only) | ✓ | ✓ | ✓ | | ✓ | | |
+| New revision | ✓ | ✓ | ✓ | | ✓ | | |
+| Release | ✓ | ✓ | | | ✓ | | |
+| Obsolete | ✓ | ✓ | | | ✓ | | |
+
+> **Role split — endpoint mapping (`feat/process-sheets-library`).** All `/api/v1/process-sheets`
+> writes are gated by decorator-level `require_role` in `app/api/endpoints/process_sheets.py`:
+> **authoring** (create, header edit, step CRUD, soft-delete, new-revision) carries
+> `AUTHOR_ROLES = [ADMIN, MANAGER, SUPERVISOR, QUALITY]`; **release** and **obsolete** carry
+> `RELEASE_ROLES = [ADMIN, MANAGER, QUALITY]`. Unlike Routings, **Quality** participates in both
+> sets — process sheets are inspection documents, and quality owns released inspection content
+> (release-adjacent authority), while release stays narrower than authoring, mirroring the
+> Routings draft-edit vs release split. Mutability is status-gated in the service: only **draft**
+> sheets are editable — header edits, step CRUD, and delete on a released/obsolete sheet return
+> **409** (create a new revision instead). GET endpoints depend on `get_current_user` only
+> (tenant-scoped, read-broad — see the access enforcement model above). Superuser / Platform Admin
+> bypass role checks, as elsewhere.
+
 ### Inventory
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |

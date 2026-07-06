@@ -86,7 +86,9 @@ def test_migration_057_upgrade_downgrade_upgrade_round_trip(tmp_path):
         tables_at_baseline = _all_tables(engine)
 
         # 1. Upgrade over an existing table: guarded no-op, schema unchanged.
-        _alembic(db_url, "upgrade", "head")
+        # Pinned to 057 (not "head") so later migrations (058+) can't change what
+        # this round-trip exercises -- "downgrade -1" must reverse 057 itself.
+        _alembic(db_url, "upgrade", "057_kiosk_stations")
         assert _snapshot(engine) == reference, "057 upgrade mutated a create_all-bootstrapped schema"
 
         # 2. Downgrade drops table + indexes and nothing else.
@@ -103,12 +105,12 @@ def test_migration_057_upgrade_downgrade_upgrade_round_trip(tmp_path):
         assert not leftover, f"leftover kiosk_stations indexes after downgrade: {leftover}"
 
         # 3. Downgrade with the table already absent: guarded no-op.
-        _alembic(db_url, "stamp", "head")
+        _alembic(db_url, "stamp", "057_kiosk_stations")
         _alembic(db_url, "downgrade", "-1")
         assert _snapshot(engine) is None
 
         # 4. Upgrade re-creates from migration DDL, converging on the model schema.
-        _alembic(db_url, "upgrade", "head")
+        _alembic(db_url, "upgrade", "057_kiosk_stations")
         rebuilt = _snapshot(engine)
         assert rebuilt == reference, (
             "migration-built kiosk_stations differs from the create_all/model schema:\n" f"{rebuilt}\nvs\n{reference}"

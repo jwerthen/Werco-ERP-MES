@@ -72,6 +72,14 @@ from .operator_certification import (
 )
 from .part import Part, PartType, UnitOfMeasure
 from .print_profile import CompanyPrintProfile
+from .process_sheet import (
+    OperationStepRecord,
+    ProcessSheet,
+    ProcessSheetStatus,
+    ProcessSheetStep,
+    StepType,
+    WOOperationStep,
+)
 from .purchasing import (
     DefectType,
     InspectionMethod,
@@ -163,6 +171,12 @@ __all__ = [
     "BOMItemType",
     "Routing",
     "RoutingOperation",
+    "ProcessSheet",
+    "ProcessSheetStatus",
+    "ProcessSheetStep",
+    "StepType",
+    "WOOperationStep",
+    "OperationStepRecord",
     "RoutingGenerationSession",
     "RoutingLearnedAlias",
     "RoutingOperationPattern",

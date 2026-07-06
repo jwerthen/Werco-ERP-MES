@@ -84,6 +84,10 @@ class RoutingOperation(Base, TenantMixin):
     work_instructions = Column(Text)
     setup_instructions = Column(Text)
 
+    # Attached process sheet (must be RELEASED, same company — validated at the endpoint).
+    # Snapshotted onto WO operations at WO creation (PR 3); nullable, no behavior here.
+    process_sheet_id = Column(Integer, ForeignKey("process_sheets.id"), nullable=True, index=True)
+
     # Tool/fixture requirements
     tooling_requirements = Column(Text)
     fixture_requirements = Column(Text)
@@ -104,3 +108,4 @@ class RoutingOperation(Base, TenantMixin):
     # Relationships
     routing = relationship("Routing", back_populates="operations")
     work_center = relationship("WorkCenter")
+    process_sheet = relationship("ProcessSheet")

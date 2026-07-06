@@ -30,6 +30,9 @@ class RoutingOperationBase(UTCModel):
     vendor_id: Optional[int] = None
     outside_cost: float = 0.0
     outside_lead_days: int = 0
+    # Attached process sheet (library reference; must be RELEASED in the same company —
+    # validated at the endpoint). Snapshotted onto WO operations at WO creation (PR 3).
+    process_sheet_id: Optional[int] = None
 
 
 class RoutingOperationCreate(RoutingOperationBase):
@@ -61,6 +64,7 @@ class RoutingOperationUpdate(BaseModel):
     outside_cost: Optional[float] = None
     outside_lead_days: Optional[int] = None
     is_active: Optional[bool] = None
+    process_sheet_id: Optional[int] = None
 
 
 class WorkCenterSummary(BaseModel):
