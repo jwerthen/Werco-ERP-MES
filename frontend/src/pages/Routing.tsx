@@ -1,12 +1,13 @@
 import React, { useEffect, useMemo, useState, useRef } from 'react';
 import api from '../services/api';
 import { Modal } from '../components/ui/Modal';
-import { EmptyState, ErrorState, useToast } from '../components/ui';
+import { EmptyState, ErrorState, SelectField, SelectOption, useToast } from '../components/ui';
 import { FormField } from '../components/ui/FormField';
 import { RoutingImportWizard } from '../components/routing/RoutingImportWizard';
 import { useAuth } from '../context/AuthContext';
 import { hasPermission } from '../utils/permissions';
-import { useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
+import { ProcessSheetListItem } from '../types/processSheet';
 import {
   PlusIcon,
   PencilIcon,
@@ -45,6 +46,8 @@ interface RoutingOperation {
   is_inspection_point: boolean;
   is_outside_operation: boolean;
   is_active: boolean;
+  /** Attached process-sheet library reference (RELEASED sheets only, server-validated). */
+  process_sheet_id?: number | null;
 }
 
 interface Routing {
@@ -167,8 +170,18 @@ export default function RoutingPage() {
     cycle_time_seconds: 0,
     pieces_per_cycle: 1,
     is_inspection_point: false,
-    is_outside_operation: false
+    is_outside_operation: false,
+    // 0 = none. Sent as an explicit null so the server detaches; only RELEASED
+    // sheets are valid attach targets (server-validated on change).
+    process_sheet_id: 0
   });
+  // Released process sheets for the attach select (non-fatal load — the page
+  // works without them, the select just offers only "None").
+  const [releasedSheets, setReleasedSheets] = useState<ProcessSheetListItem[]>([]);
+  // When the operation being edited references a sheet that is no longer in the
+  // released list (obsoleted/deleted since attach), this keeps the select able
+  // to display it — an unchanged echo of the id is accepted by the server.
+  const [attachedSheetOption, setAttachedSheetOption] = useState<SelectOption<number> | null>(null);
   const [timeUnits, setTimeUnits] = useState<{ setup: 'hrs' | 'min'; run: 'hrs' | 'min'; move: 'hrs' | 'min'; queue: 'hrs' | 'min' }>({
     setup: 'min',
     run: 'min',
@@ -252,6 +265,15 @@ export default function RoutingPage() {
     } finally {
       setLoading(false);
     }
+
+    // Released sheets feed the operation modal's attach select. Non-fatal:
+    // a failure must not take down the routing page.
+    try {
+      const sheets = await api.getProcessSheets({ status: 'released', limit: 500 });
+      setReleasedSheets(sheets);
+    } catch (err) {
+      console.error('Failed to load released process sheets:', err);
+    }
   };
 
   const loadRouting = async (id: number) => {
@@ -303,6 +325,13 @@ export default function RoutingPage() {
     // so an unchanged structural field can never trip the backend's 400 guard.
     const releasedEdit = isReleasedEdit;
 
+    // Draft path sends the full structural payload; the 0 sentinel from the
+    // attach select becomes an explicit null (the server treats null as detach).
+    const structuralPayload = {
+      ...newOperation,
+      process_sheet_id: newOperation.process_sheet_id || null,
+    };
+
     try {
       if (editingOperation) {
         const payload = releasedEdit
@@ -314,10 +343,10 @@ export default function RoutingPage() {
               cycle_time_seconds: newOperation.cycle_time_seconds || null,
               pieces_per_cycle: newOperation.pieces_per_cycle,
             }
-          : newOperation;
+          : structuralPayload;
         await api.updateRoutingOperation(selectedRouting.id, editingOperation.id, payload);
       } else {
-        await api.addRoutingOperation(selectedRouting.id, newOperation);
+        await api.addRoutingOperation(selectedRouting.id, structuralPayload);
       }
       await loadRouting(selectedRouting.id);
       setShowAddOperationModal(false);
@@ -377,6 +406,7 @@ export default function RoutingPage() {
 
   const openEditOperation = (op: RoutingOperation) => {
     setEditingOperation(op);
+    const attachedId = op.process_sheet_id ?? 0;
     setNewOperation({
       sequence: op.sequence,
       name: op.name,
@@ -389,8 +419,25 @@ export default function RoutingPage() {
       cycle_time_seconds: op.cycle_time_seconds ?? 0,
       pieces_per_cycle: op.pieces_per_cycle ?? 1,
       is_inspection_point: op.is_inspection_point,
-      is_outside_operation: op.is_outside_operation
+      is_outside_operation: op.is_outside_operation,
+      process_sheet_id: attachedId
     });
+    // The attached sheet may have been obsoleted since attach (so it isn't in
+    // the released list). Fetch it just to LABEL the current selection — an
+    // unchanged echo of the id saves fine; only a CHANGE is re-validated.
+    setAttachedSheetOption(null);
+    if (attachedId && !releasedSheets.some((s) => s.id === attachedId)) {
+      api
+        .getProcessSheet(attachedId)
+        .then((sheet) =>
+          setAttachedSheetOption({
+            value: sheet.id,
+            label: `${sheet.sheet_number} Rev ${sheet.revision} (${sheet.status})`,
+            description: sheet.title,
+          })
+        )
+        .catch(() => setAttachedSheetOption({ value: attachedId, label: `Sheet #${attachedId} (unavailable)` }));
+    }
     setShowAddOperationModal(true);
   };
 
@@ -410,8 +457,10 @@ export default function RoutingPage() {
       cycle_time_seconds: 0,
       pieces_per_cycle: 1,
       is_inspection_point: false,
-      is_outside_operation: false
+      is_outside_operation: false,
+      process_sheet_id: 0
     });
+    setAttachedSheetOption(null);
   };
 
   const openAddOperationModal = () => {
@@ -419,6 +468,23 @@ export default function RoutingPage() {
     resetOperationForm();
     setShowAddOperationModal(true);
   };
+
+  // Attach select options: "None" + every RELEASED sheet, plus (when editing)
+  // a labeled entry for a currently-attached sheet that is no longer released.
+  const processSheetOptions = useMemo<SelectOption<number>[]>(() => {
+    const options: SelectOption<number>[] = [
+      { value: 0, label: 'None', description: 'No process sheet attached' },
+      ...releasedSheets.map((sheet) => ({
+        value: sheet.id,
+        label: `${sheet.sheet_number} Rev ${sheet.revision}`,
+        description: sheet.title,
+      })),
+    ];
+    if (attachedSheetOption && !releasedSheets.some((s) => s.id === attachedSheetOption.value)) {
+      options.push(attachedSheetOption);
+    }
+    return options;
+  }, [releasedSheets, attachedSheetOption]);
 
   // Generate from Drawing handlers
   const openGenerateModal = () => {
@@ -1528,6 +1594,30 @@ export default function RoutingPage() {
                         className="input"
                         rows={2}
                       />
+                    )}
+                  </FormField>
+                  <FormField
+                    label="Process Sheet"
+                    help="Only released process sheets can be attached; steps are snapshotted onto work orders at WO creation."
+                  >
+                    <SelectField
+                      value={newOperation.process_sheet_id}
+                      onChange={(value) =>
+                        setNewOperation({ ...newOperation, process_sheet_id: Number(value) })
+                      }
+                      options={processSheetOptions}
+                      searchable={processSheetOptions.length > 8}
+                      ariaLabel="Process sheet"
+                    />
+                    {newOperation.process_sheet_id > 0 && (
+                      <div className="mt-1">
+                        <Link
+                          to={`/process-sheets?sheet=${newOperation.process_sheet_id}`}
+                          className="text-xs text-werco-primary hover:underline"
+                        >
+                          View process sheet →
+                        </Link>
+                      </div>
                     )}
                   </FormField>
                 </>

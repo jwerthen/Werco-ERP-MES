@@ -29,6 +29,8 @@ jest.mock('../services/api', () => ({
     getWorkCenters: jest.fn(),
     getRouting: jest.fn(),
     getPart: jest.fn(),
+    getProcessSheets: jest.fn(),
+    getProcessSheet: jest.fn(),
     updateRoutingOperation: jest.fn(),
     addRoutingOperation: jest.fn(),
     deleteRoutingOperation: jest.fn(),
@@ -125,6 +127,7 @@ describe('Routing — released time-standard editing', () => {
     mockedApi.getRoutings.mockResolvedValue([releasedRouting, draftRouting]);
     mockedApi.getParts.mockResolvedValue([]);
     mockedApi.getWorkCenters.mockResolvedValue([workCenter]);
+    mockedApi.getProcessSheets.mockResolvedValue([]);
     mockedApi.updateRoutingOperation.mockResolvedValue({});
     jest.spyOn(window, 'alert').mockImplementation(() => {});
     jest.spyOn(window, 'confirm').mockReturnValue(true);

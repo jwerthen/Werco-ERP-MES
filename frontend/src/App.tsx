@@ -36,6 +36,7 @@ const PartDetail = lazyWithRetry(() => import('./pages/PartDetail'));
 const PartEdit = lazyWithRetry(() => import('./pages/PartEdit'));
 const BOM = lazyWithRetry(() => import('./pages/BOM'));
 const Routing = lazyWithRetry(() => import('./pages/Routing'));
+const ProcessSheets = lazyWithRetry(() => import('./pages/ProcessSheets'));
 const SetupWizard = lazyWithRetry(() => import('./pages/SetupWizard'));
 const ImportCenter = lazyWithRetry(() => import('./pages/ImportCenter'));
 const ActionInbox = lazyWithRetry(() => import('./pages/ActionInbox'));
@@ -413,6 +414,15 @@ function AppRoutes() {
         <PrivateRoute>
           <Layout>
             <LazyRoute><Routing /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
+      {/* Reads are open to any authenticated user (mirrors the backend);
+          author/release actions are role-gated inside the page. */}
+      <Route path="/process-sheets" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><ProcessSheets /></LazyRoute>
           </Layout>
         </PrivateRoute>
       } />

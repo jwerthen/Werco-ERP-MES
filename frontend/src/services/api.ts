@@ -91,6 +91,15 @@ import {
   KioskStationListResponse,
   KioskStationResponse,
 } from '../types/kioskStation';
+import {
+  ProcessSheet,
+  ProcessSheetCreateInput,
+  ProcessSheetListItem,
+  ProcessSheetListParams,
+  ProcessSheetStep,
+  ProcessSheetStepInput,
+  ProcessSheetUpdateInput,
+} from '../types/processSheet';
 
 const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000/api/v1';
 
@@ -1430,6 +1439,71 @@ class ApiService {
     operations: any[];
   }) {
     const response = await this.api.post('/routing/create-from-generation', data);
+    return response.data;
+  }
+
+  // --- Process Sheets (engineering library) --------------------------------
+  // Mirrors backend/app/api/endpoints/process_sheets.py. Draft-only writes 409
+  // on released/obsolete sheets; release/obsolete/new-revision are the
+  // lifecycle transitions. Attach-to-routing flows through the existing
+  // routing operation create/update payloads (`process_sheet_id`).
+
+  async getProcessSheets(params?: ProcessSheetListParams): Promise<ProcessSheetListItem[]> {
+    const response = await this.api.get('/process-sheets/', { params });
+    return response.data;
+  }
+
+  async getProcessSheet(id: number): Promise<ProcessSheet> {
+    const response = await this.api.get(`/process-sheets/${id}`);
+    return response.data;
+  }
+
+  async createProcessSheet(data: ProcessSheetCreateInput): Promise<ProcessSheet> {
+    const response = await this.api.post('/process-sheets/', data);
+    return response.data;
+  }
+
+  async updateProcessSheet(id: number, data: ProcessSheetUpdateInput): Promise<ProcessSheet> {
+    const response = await this.api.patch(`/process-sheets/${id}`, data);
+    return response.data;
+  }
+
+  async deleteProcessSheet(id: number): Promise<{ message: string }> {
+    const response = await this.api.delete(`/process-sheets/${id}`);
+    return response.data;
+  }
+
+  async releaseProcessSheet(id: number): Promise<ProcessSheet> {
+    const response = await this.api.post(`/process-sheets/${id}/release`);
+    return response.data;
+  }
+
+  async obsoleteProcessSheet(id: number): Promise<ProcessSheet> {
+    const response = await this.api.post(`/process-sheets/${id}/obsolete`);
+    return response.data;
+  }
+
+  async newProcessSheetRevision(id: number): Promise<ProcessSheet> {
+    const response = await this.api.post(`/process-sheets/${id}/new-revision`);
+    return response.data;
+  }
+
+  async addProcessSheetStep(sheetId: number, data: ProcessSheetStepInput): Promise<ProcessSheetStep> {
+    const response = await this.api.post(`/process-sheets/${sheetId}/steps`, data);
+    return response.data;
+  }
+
+  async updateProcessSheetStep(
+    sheetId: number,
+    stepId: number,
+    data: Partial<ProcessSheetStepInput>
+  ): Promise<ProcessSheetStep> {
+    const response = await this.api.patch(`/process-sheets/${sheetId}/steps/${stepId}`, data);
+    return response.data;
+  }
+
+  async deleteProcessSheetStep(sheetId: number, stepId: number): Promise<{ message: string }> {
+    const response = await this.api.delete(`/process-sheets/${sheetId}/steps/${stepId}`);
     return response.data;
   }
 
@@ -3238,7 +3312,8 @@ class ApiService {
     return response.data;
   }
 
-  async getSPCCharacteristics(params?: { part_id?: number; active_only?: boolean }) {
+  // Backend filter param is `is_active` (see backend/app/api/endpoints/spc.py list_characteristics).
+  async getSPCCharacteristics(params?: { part_id?: number; is_active?: boolean }) {
     const response = await this.api.get('/spc/characteristics', { params });
     return response.data;
   }
