@@ -25,6 +25,7 @@ import { formatCentralTime } from '../utils/centralTime';
 import {
   HomeIcon,
   ClipboardDocumentListIcon,
+  ClipboardDocumentCheckIcon,
   CogIcon,
   CubeIcon,
   WrenchScrewdriverIcon,
@@ -122,6 +123,7 @@ const navSections: NavSection[] = [
           { name: 'Parts', href: '/parts', icon: CubeIcon },
           { name: 'Bill of Materials', href: '/bom', icon: DocumentDuplicateIcon },
           { name: 'Routing', href: '/routing', icon: ListBulletIcon },
+          { name: 'Process Sheets', href: '/process-sheets', icon: ClipboardDocumentCheckIcon },
           { name: 'Engineering Changes', href: '/engineering-changes', icon: DocumentDuplicateIcon },
         ],
       },

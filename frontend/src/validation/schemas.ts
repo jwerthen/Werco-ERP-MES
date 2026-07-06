@@ -344,6 +344,147 @@ export const laserNestManualSchema = z.object({
 });
 
 // ============================================================================
+// PROCESS SHEETS (engineering library)
+// ============================================================================
+
+/**
+ * StepType values (backend app/models/process_sheet.py StepType). A const
+ * array (not an enum) so the parsed form data's `step_type` is exactly the
+ * `ProcessSheetStepType` string-literal union in types/processSheet.ts.
+ */
+export const PROCESS_SHEET_STEP_TYPES = [
+  'measurement',
+  'checkbox',
+  'list',
+  'value',
+  'photo',
+  'file',
+  'instruction',
+] as const;
+
+/** Sheet header (create + draft-only edit). Mirrors ProcessSheetCreate/Update. */
+export const processSheetSchema = z.object({
+  title: z
+    .string({ error: 'Title required' })
+    .trim()
+    .min(1, 'Title required')
+    .max(255, 'Title must be at most 255 characters'),
+  description: z.string().max(5000, 'Description must be at most 5000 characters').optional(),
+});
+
+/** Split a textarea into trimmed, non-empty list options (one per line). */
+export function parseListOptions(text: string): string[] {
+  return text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Step-editor form schema. Flat on purpose — the per-type config fields swap
+ * in the UI, so the numeric measurement fields are held as STRINGS and parsed
+ * in superRefine (an empty <input type="number"> yields '' which
+ * z.coerce.number would silently turn into 0 — a real tolerance value).
+ *
+ * Mirrors backend process_sheet_service._validate_step_definition:
+ *   - MEASUREMENT: numeric lsl / nominal / usl with lsl <= nominal <= usl and
+ *     lsl < usl; unit required client-side; decimals optional whole number.
+ *   - LIST: at least one non-empty option.
+ *   - INSTRUCTION: never required (the modal forces is_required=false and
+ *     disables the toggle).
+ *   - requires_gauge / spc_characteristic_id: MEASUREMENT-only (the modal
+ *     zeroes them for other types at payload build).
+ */
+export const processSheetStepSchema = z
+  .object({
+    sequence: z.coerce
+      .number({ error: 'Enter a sequence number' })
+      .int('Whole numbers only')
+      .positive('Must be greater than 0'),
+    label: z
+      .string({ error: 'Label required' })
+      .trim()
+      .min(1, 'Label required')
+      .max(255, 'Label must be at most 255 characters'),
+    instruction_text: z.string().max(5000, 'Must be at most 5000 characters').optional(),
+    step_type: z.enum(PROCESS_SHEET_STEP_TYPES, { error: 'Select a step type' }),
+    is_required: z.boolean(),
+    requires_gauge: z.boolean(),
+    // 0 = "none" sentinel from the select; mapped to null at payload build.
+    spc_characteristic_id: z.coerce.number().int().min(0),
+    // MEASUREMENT config (strings — see docblock).
+    nominal: z.string().optional(),
+    lsl: z.string().optional(),
+    usl: z.string().optional(),
+    unit: z.string().max(50, 'Unit must be at most 50 characters').optional(),
+    decimals: z.string().optional(),
+    // LIST config: one option per line.
+    options_text: z.string().optional(),
+    // PHOTO / FILE config.
+    hint: z.string().max(255, 'Hint must be at most 255 characters').optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.step_type === 'measurement') {
+      const parseNumber = (raw: string | undefined, field: string, label: string): number | null => {
+        const trimmed = (raw ?? '').trim();
+        if (!trimmed) {
+          ctx.addIssue({ code: 'custom', path: [field], message: `${label} required` });
+          return null;
+        }
+        const num = Number(trimmed);
+        if (!Number.isFinite(num)) {
+          ctx.addIssue({ code: 'custom', path: [field], message: `${label} must be a number` });
+          return null;
+        }
+        return num;
+      };
+
+      const lsl = parseNumber(data.lsl, 'lsl', 'LSL');
+      const nominal = parseNumber(data.nominal, 'nominal', 'Nominal');
+      const usl = parseNumber(data.usl, 'usl', 'USL');
+
+      if (!(data.unit ?? '').trim()) {
+        ctx.addIssue({ code: 'custom', path: ['unit'], message: 'Unit required' });
+      }
+
+      if (lsl !== null && nominal !== null && usl !== null) {
+        if (!(lsl <= nominal && nominal <= usl)) {
+          ctx.addIssue({
+            code: 'custom',
+            path: ['nominal'],
+            message: 'Limits must satisfy LSL ≤ nominal ≤ USL',
+          });
+        }
+        if (!(lsl < usl)) {
+          ctx.addIssue({ code: 'custom', path: ['usl'], message: 'LSL must be less than USL' });
+        }
+      }
+
+      const decimalsRaw = (data.decimals ?? '').trim();
+      if (decimalsRaw) {
+        const decimals = Number(decimalsRaw);
+        if (!Number.isInteger(decimals) || decimals < 0 || decimals > 6) {
+          ctx.addIssue({
+            code: 'custom',
+            path: ['decimals'],
+            message: 'Decimals must be a whole number between 0 and 6',
+          });
+        }
+      }
+    }
+
+    if (data.step_type === 'list') {
+      if (parseListOptions(data.options_text ?? '').length === 0) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['options_text'],
+          message: 'At least one option required (one per line)',
+        });
+      }
+    }
+  });
+
+// ============================================================================
 // TYPES
 // ============================================================================
 
@@ -352,6 +493,10 @@ export type LaserNestManualFormData = z.output<typeof laserNestManualSchema>;
 // Input (what the form fields hold before coercion: planned_runs may be a string).
 export type LaserNestManualFormInput = z.input<typeof laserNestManualSchema>;
 export type PartFormData = z.infer<typeof partSchema>;
+export type ProcessSheetFormData = z.output<typeof processSheetSchema>;
+// Output (post-coercion: sequence is a number) vs input (form fields pre-coercion).
+export type ProcessSheetStepFormData = z.output<typeof processSheetStepSchema>;
+export type ProcessSheetStepFormInput = z.input<typeof processSheetStepSchema>;
 export type WorkOrderFormData = z.infer<typeof workOrderSchema>;
 export type WorkOrderOperationFormData = z.infer<typeof workOrderOperationSchema>;
 export type UserFormData = z.infer<typeof userSchema>;

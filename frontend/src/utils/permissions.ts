@@ -35,6 +35,12 @@ export type Permission =
   | 'routings:edit'
   | 'routings:delete'
   | 'routings:release'
+  // Process Sheets (reads are open to any authenticated user; these gate writes.
+  // Mirrors the backend role split: author = Admin/Manager/Supervisor/Quality,
+  // release/obsolete = Admin/Manager/Quality — quality owns released inspection
+  // documents. See backend/app/api/endpoints/process_sheets.py.)
+  | 'process_sheets:author'
+  | 'process_sheets:release'
   // Inventory
   | 'inventory:view'
   | 'inventory:adjust'
@@ -90,6 +96,7 @@ const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'parts:view', 'parts:create', 'parts:edit', 'parts:delete',
     'boms:view', 'boms:create', 'boms:edit', 'boms:delete', 'boms:release',
     'routings:view', 'routings:create', 'routings:edit', 'routings:delete', 'routings:release',
+    'process_sheets:author', 'process_sheets:release',
     'inventory:view', 'inventory:adjust', 'inventory:transfer',
     'purchasing:view', 'purchasing:create', 'purchasing:approve',
     'receiving:view', 'receiving:create', 'receiving:inspect',
@@ -106,6 +113,7 @@ const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'parts:view', 'parts:create', 'parts:edit', 'parts:delete',
     'boms:view', 'boms:create', 'boms:edit', 'boms:delete', 'boms:release',
     'routings:view', 'routings:create', 'routings:edit', 'routings:delete', 'routings:release',
+    'process_sheets:author', 'process_sheets:release',
     'inventory:view', 'inventory:adjust', 'inventory:transfer',
     'purchasing:view', 'purchasing:create', 'purchasing:approve',
     'receiving:view', 'receiving:create', 'receiving:inspect',
@@ -122,6 +130,7 @@ const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'parts:view', 'parts:create', 'parts:edit',
     'boms:view', 'boms:create', 'boms:edit', 'boms:delete', 'boms:release',
     'routings:view', 'routings:create', 'routings:edit', 'routings:delete', 'routings:release',
+    'process_sheets:author', 'process_sheets:release',
     'inventory:view', 'inventory:adjust', 'inventory:transfer',
     'purchasing:view', 'purchasing:create', 'purchasing:approve',
     'receiving:view', 'receiving:create', 'receiving:inspect',
@@ -138,6 +147,7 @@ const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'parts:view', 'parts:create', 'parts:edit',
     'boms:view', 'boms:create', 'boms:edit',
     'routings:view', 'routings:create', 'routings:edit',
+    'process_sheets:author',
     'inventory:view', 'inventory:adjust', 'inventory:transfer',
     'purchasing:view', 'purchasing:create',
     'receiving:view', 'receiving:create',
@@ -163,6 +173,7 @@ const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'parts:view',
     'boms:view',
     'routings:view',
+    'process_sheets:author', 'process_sheets:release',
     'inventory:view',
     'receiving:view', 'receiving:inspect',
     'quality:view', 'quality:inspect', 'quality:approve', 'quality:calibration',

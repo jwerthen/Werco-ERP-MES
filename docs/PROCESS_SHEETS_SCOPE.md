@@ -1,6 +1,6 @@
 # Process Sheets — Scope & Implementation Plan
 
-**Date:** 2026-07-04 · **Status:** PR 1 (library backend) implemented — awaiting review/merge; PRs 2–4 not started
+**Date:** 2026-07-04 · **Status:** PR 1 merged ([#81](https://github.com/jwerthen/Werco-ERP-MES/pull/81), 2026-07-06); PR 2 (engineering UI) in progress; PRs 3–4 not started
 **Feature:** Typed, revision-controlled operation steps ("Process Sheets") authored in engineering, snapshotted onto work orders, and executed on the shop-floor kiosk with per-step data capture (measurements with tolerance enforcement, checkboxes, lists, photo/file evidence).
 
 ## Context
@@ -139,7 +139,7 @@ Each phase lands independently shippable behind the natural gate (sheets are ine
 
 ### Open decisions carried forward (surfaced in PR 1 review)
 
-- **PR 2 (product/UX):** releasing revision B does **not** auto-obsolete a still-released revision A (mirrors `release_routing`), so two released revisions of one sheet family can coexist and both are attachable. Decide in PR 2 whether the UI warns, blocks, or offers one-click obsolete-prior on release.
+- **PR 2 (product/UX) — SETTLED 2026-07-06:** the release dialog detects a still-released prior revision and shows a **pre-checked "Obsolete Rev X" option** — one click releases B and obsoletes A (sequenced calls, non-optimistic); unchecking allows a deliberate transition period with both released. Backend unchanged (jwerthen decision).
 - **PR 3 (snapshot semantics):** attach is validated at attach time only — an attached sheet can be obsoleted or soft-deleted before a WO is created from the routing. `create_routing_operations_for_work_order()` must define behavior for a non-RELEASED `process_sheet_id` at snapshot time: block WO creation, warn-and-snapshot, or skip. (Compliance-auditor flagged; do not let this land by accident.)
 
 ## How this stays ours

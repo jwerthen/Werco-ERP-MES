@@ -42,6 +42,7 @@ export const routeTitles: Record<string, string> = {
   '/parts': 'Parts',
   '/bom': 'Bill of Materials',
   '/routing': 'Routing',
+  '/process-sheets': 'Process Sheets',
   '/engineering-changes': 'Engineering Changes',
 
   // Inventory & Purchasing
