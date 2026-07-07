@@ -629,6 +629,18 @@ def reconcile_work_orders_from_completion_evidence(
         if entry.operation_id is not None and entry.operation_id not in latest_entry_by_operation:
             latest_entry_by_operation[entry.operation_id] = entry
 
+    # Process-sheet completion gate (PR 3): evidence-at-target must not auto-complete
+    # an operation whose required snapshot steps lack live conforming records — the
+    # same predicate the /complete endpoints and the clock-out path enforce; without
+    # it, this read-time reconcile would undo their refusals on the next page load.
+    # Quantities still reconcile below; only the COMPLETE flip is withheld. Function-
+    # local import: this module is a low-level dependency of many services (several of
+    # which import process_sheet_service themselves), so keeping the reverse edge out
+    # of the module import graph avoids ever creating a cycle as either side grows.
+    from app.services.process_sheet_service import gated_operation_ids
+
+    step_gated_operation_ids = gated_operation_ids(db, operations)
+
     for operation in operations:
         produced_qty, scrapped_qty = produced_by_operation.get(operation.id, (0.0, 0.0))
         if produced_qty > float(operation.quantity_complete or 0):
@@ -642,6 +654,7 @@ def reconcile_work_orders_from_completion_evidence(
             operation,
             latest_entry_by_operation.get(operation.id),
             closed_produced_by_operation.get(operation.id, 0.0) >= operation_target_quantity(operation),
+            completion_gated=operation.id in step_gated_operation_ids,
         )
         if (
             op_changed
@@ -735,7 +748,16 @@ def _sync_operation_status_from_quantity(
     operation: WorkOrderOperation,
     latest_entry: Optional[TimeEntry] = None,
     has_closed_completion_evidence: bool = False,
+    completion_gated: bool = False,
 ) -> bool:
+    """Reconcile an operation's status from its quantities + closed labor evidence.
+
+    ``completion_gated`` (PR 3): True when the operation's required process-sheet
+    steps are missing conforming records — the evidence-driven COMPLETE flip is then
+    withheld (quantities and the PENDING/READY -> IN_PROGRESS lift still apply), so
+    the read-time reconcile can never complete an operation the /complete endpoints
+    and the clock-out path would refuse.
+    """
     target_qty = operation_target_quantity(operation)
     if target_qty <= 0:
         return False
@@ -755,7 +777,7 @@ def _sync_operation_status_from_quantity(
         if not operation.started_by and latest_entry:
             operation.started_by = latest_entry.user_id
             changed = True
-    elif quantity_complete >= target_qty and has_closed_completion_evidence:
+    elif quantity_complete >= target_qty and has_closed_completion_evidence and not completion_gated:
         operation.status = OperationStatus.COMPLETE
         operation.actual_end = operation.actual_end or (latest_entry.clock_out if latest_entry else None)
         operation.completed_by = operation.completed_by or (latest_entry.user_id if latest_entry else None)

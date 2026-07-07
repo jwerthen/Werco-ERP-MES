@@ -24,7 +24,7 @@ Shipped modules, grouped by domain:
 
 ### Engineering
 - **Part master** (make/buy classification, critical-characteristic flags), multi-level **BOM**, **routing**, and **engineering change orders (ECO)** with revision control.
-- **Process sheets** (`/process-sheets`) — typed, revision-controlled operation steps (measurement with tolerances, checkbox, list, value, photo/file evidence, instruction) authored in engineering with a draft → released → obsolete lifecycle; released sheets attach to routing operations. Shop-floor step capture lands in a later phase (see [docs/PROCESS_SHEETS_SCOPE.md](docs/PROCESS_SHEETS_SCOPE.md)).
+- **Process sheets** (`/process-sheets`) — typed, revision-controlled operation steps (measurement with tolerances, checkbox, list, value, photo/file evidence, instruction) authored in engineering with a draft → released → obsolete lifecycle; released sheets attach to routing operations, snapshot immutably onto work orders at creation, and are captured on the shop-floor kiosks: typed step recording with server-enforced tolerance refusal (out-of-tolerance is never stored), per-serial capture, rear-camera photo/file evidence, append-only supersede corrections, and operation completion gated on required steps. SPC, gauge-calibration, and NCR integrations are upcoming (see [docs/PROCESS_SHEETS_SCOPE.md](docs/PROCESS_SHEETS_SCOPE.md)).
 
 ### Warehouse
 - Unified, tabbed warehouse: **inventory** (on-hand, reorder, low-stock, transfers), **receiving** with accept/reject inspection and lot capture, and **shipping** (create shipment, mark shipped, print packing slip).

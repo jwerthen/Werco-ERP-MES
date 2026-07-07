@@ -122,6 +122,111 @@ class ProcessSheetListResponse(UTCModel):
     updated_at: datetime
 
 
+# ---------- Shop-floor capture (PR 3) ----------
+
+
+class OperationStepRecordCreate(BaseModel):
+    """Capture payload for one step record. Exactly the type-shaped value applies:
+    MEASUREMENT -> value_numeric, CHECKBOX -> value_bool, LIST/VALUE -> value_text,
+    PHOTO/FILE -> attachment_document_id (validation ladder in process_sheet_service)."""
+
+    serial_number: Optional[str] = Field(default=None, max_length=100)
+    value_numeric: Optional[float] = None
+    value_bool: Optional[bool] = None
+    value_text: Optional[str] = Field(default=None, max_length=2000)
+    equipment_id: Optional[int] = None
+    attachment_document_id: Optional[int] = None
+
+
+class OperationStepRecordSupersede(BaseModel):
+    """Correction payload: reason + the replacement value fields. No serial_number —
+    a correction always inherits the superseded record's serial slot."""
+
+    reason: str = Field(min_length=1, max_length=255)
+    value_numeric: Optional[float] = None
+    value_bool: Optional[bool] = None
+    value_text: Optional[str] = Field(default=None, max_length=2000)
+    equipment_id: Optional[int] = None
+    attachment_document_id: Optional[int] = None
+
+
+class OperationStepRecordResponse(UTCModel):
+    id: int
+    wo_operation_step_id: int
+    work_order_operation_id: int
+    serial_number: Optional[str] = None
+    value_text: Optional[str] = None
+    value_numeric: Optional[float] = None
+    value_bool: Optional[bool] = None
+    is_conforming: Optional[bool] = None
+    recorded_by: int
+    recorded_by_name: Optional[str] = None  # transient attribute set by the service
+    recorded_at: datetime
+    source: Optional[str] = None
+    equipment_id: Optional[int] = None
+    attachment_document_id: Optional[int] = None
+    superseded_by_id: Optional[int] = None
+    supersede_reason: Optional[str] = None
+    created_at: datetime
+
+
+class WOOperationStepResponse(UTCModel):
+    """One immutable snapshot step on the traveler (wo_operation_steps row)."""
+
+    id: int
+    work_order_operation_id: int
+    source_sheet_id: int
+    source_sheet_revision: str
+    sequence: int
+    label: str
+    instruction_text: Optional[str] = None
+    step_type: str
+    is_required: bool
+    config: Optional[Dict[str, Any]] = None
+    requires_gauge: bool
+    spc_characteristic_id: Optional[int] = None
+    created_at: datetime
+
+
+class OperationStepWithState(WOOperationStepResponse):
+    """Snapshot step + its live (non-superseded) records and completeness state."""
+
+    records: List[OperationStepRecordResponse] = Field(default_factory=list)
+    complete: bool = False
+    missing_serials: List[str] = Field(default_factory=list)
+
+
+class OperationStepsViewResponse(UTCModel):
+    """GET /shop-floor/operations/{id}/steps — the kiosk steps view.
+
+    ``completeness`` is the per-serial map for serialized WOs
+    (``{step_id: {serial: satisfied}}``); empty for non-serialized WOs, where each
+    step's ``complete`` flag carries the state. ``steps_total``/``steps_recorded``
+    count REQUIRED (gating) steps only — the same chip numbers the queue payload carries.
+    """
+
+    operation_id: int
+    work_order_id: int
+    work_order_number: str
+    operation_status: str
+    is_serialized: bool
+    serial_numbers: List[str] = Field(default_factory=list)
+    steps: List[OperationStepWithState] = Field(default_factory=list)
+    steps_total: int = 0
+    steps_recorded: int = 0
+    completeness: Dict[int, Dict[str, bool]] = Field(default_factory=dict)
+
+
+class StepAttachmentResponse(UTCModel):
+    """POST /shop-floor/operations/{id}/steps/{step_id}/attachment — stored evidence."""
+
+    document_id: int
+    document_number: str
+    file_name: Optional[str] = None
+    file_size: int
+    mime_type: Optional[str] = None
+
+
 __all__ = [
     "ProcessSheetStatus",
     "StepType",
@@ -132,4 +237,11 @@ __all__ = [
     "ProcessSheetStepResponse",
     "ProcessSheetResponse",
     "ProcessSheetListResponse",
+    "OperationStepRecordCreate",
+    "OperationStepRecordSupersede",
+    "OperationStepRecordResponse",
+    "WOOperationStepResponse",
+    "OperationStepWithState",
+    "OperationStepsViewResponse",
+    "StepAttachmentResponse",
 ]

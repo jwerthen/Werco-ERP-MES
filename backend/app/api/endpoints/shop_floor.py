@@ -6,7 +6,7 @@ from collections import defaultdict
 from datetime import date, datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, Request, Response, UploadFile
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import and_, func, or_
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -55,10 +55,17 @@ from app.schemas.kiosk_station import (
     KioskStationResetPinRequest,
     KioskStationResponse,
 )
+from app.schemas.process_sheet import (
+    OperationStepRecordCreate,
+    OperationStepRecordResponse,
+    OperationStepRecordSupersede,
+    OperationStepsViewResponse,
+    StepAttachmentResponse,
+)
 from app.schemas.time_entry import ClockIn, ClockOut, TimeEntryResponse
 from app.schemas.wallboard import WallboardResponse
 from app.schemas.work_order_blocker import WorkOrderBlockerCreate
-from app.services import kiosk_station_service
+from app.services import kiosk_station_service, process_sheet_service
 from app.services.audit_service import AuditService
 from app.services.completion_cost_service import (
     apply_completion_cost_rollup,
@@ -1009,6 +1016,10 @@ def clock_out(
     # PERF-5: tracks whether the scheduling refresh ran (it runs with commit=False,
     # so the WC cache must be invalidated by us after the terminal commit succeeds).
     work_centers_refreshed = False
+    # Process-sheet gate (PR 3): set when this clock-out reached the operation target
+    # but required steps lack records — surfaced on the response so the kiosk can
+    # tell the operator why the op did not complete.
+    steps_incomplete: Optional[dict] = None
 
     # Update statuses if operation complete. The shared finalizer owns the rollup
     # (remaining-ops decision, COMPLETE-vs-release branch, actual_start/actual_end
@@ -1024,6 +1035,21 @@ def clock_out(
     if operation and not wo_is_terminal:
         target_qty = operation_target_quantity(operation, work_order)
         is_fully_complete = operation.quantity_complete >= target_qty
+
+        # Process-sheet completion gate (PR 3): reaching target via clock-out must not
+        # auto-complete an operation whose required (non-INSTRUCTION) snapshot steps
+        # lack live conforming records — the same predicate as the /complete twins.
+        # Follows the G6-A never-trap-an-open-TimeEntry precedent: the entry above
+        # ALWAYS closed normally with its full quantities (labor truth is separate
+        # from completion); the operation simply stays IN_PROGRESS at/near target and
+        # the response carries a ``steps_incomplete`` warning so the kiosk can tell
+        # the operator. Completion then happens via /complete once records exist
+        # (or supersede corrections land).
+        if is_fully_complete:
+            missing_steps = process_sheet_service.missing_required_steps(db, company_id, operation, work_order)
+            if missing_steps:
+                steps_incomplete = {"code": "STEPS_INCOMPLETE", "missing": missing_steps}
+                is_fully_complete = False
 
         if is_fully_complete:
             operation.status = OperationStatus.COMPLETE
@@ -1243,6 +1269,9 @@ def clock_out(
     # Attached AFTER db.refresh(time_entry) so the ORM refresh can't clobber it; the
     # TimeEntryResponse schema reads this attribute (default empty list otherwise).
     time_entry.quality_exceptions = [exc.as_dict() for exc in quality_exceptions]
+    # Process-sheet gate (PR 3): tell the kiosk WHY the op did not auto-complete
+    # (same transient-attribute channel as quality_exceptions; null when N/A).
+    time_entry.steps_incomplete = steps_incomplete
 
     return time_entry
 
@@ -1457,10 +1486,16 @@ def get_work_center_queue(
                 }
             )
 
+    # Steps chip (PR 3): required-process-step counts per queued operation so the
+    # kiosk job card can render "Steps 2/6" without an extra round-trip. A step only
+    # counts as recorded when its live conforming records cover every WO serial.
+    step_counts = process_sheet_service.step_counts_for_operations(db, company_id, operations)
+
     queue = []
     for op in operations:
         wo = op.work_order
         target_qty = operation_target_quantity(op, wo)
+        op_step_counts = step_counts.get(op.id, {"steps_total": 0, "steps_recorded": 0})
         queue.append(
             {
                 "operation_id": op.id,
@@ -1485,6 +1520,8 @@ def get_work_center_queue(
                 "run_time_hours": op.run_time_hours,
                 "laser_nest": _laser_nest_payload(op),
                 "roster": roster_by_operation.get(op.id, []),
+                "steps_total": op_step_counts["steps_total"],
+                "steps_recorded": op_step_counts["steps_recorded"],
             }
         )
 
@@ -2652,6 +2689,28 @@ def complete_operation(
     ):
         raise HTTPException(status_code=400, detail="Previous operations must be completed first")
 
+    # Process-sheet completion gate (PR 3): when THIS request would FULLY complete the
+    # operation, every required (non-INSTRUCTION) snapshot step must carry a live
+    # (non-superseded) conforming record — per serial on a serialized WO. Evaluated
+    # under the row lock against the prospective resolved quantity, so a concurrent
+    # completer re-runs the same check on the freshest rows. Partial progress updates
+    # and operations with no snapshot steps are unaffected (zero-step operations
+    # complete exactly as before — regression-sensitive). Non-optimistic by design.
+    prospective_quantity = resolve_absolute_operation_quantity(
+        db, operation, completion_data.quantity_complete, ordered_qty
+    )
+    if prospective_quantity >= ordered_qty:
+        missing_steps = process_sheet_service.missing_required_steps(db, company_id, operation, work_order)
+        if missing_steps:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "STEPS_INCOMPLETE",
+                    "detail": "Required process-sheet steps are missing conforming records for this operation",
+                    "missing": missing_steps,
+                },
+            )
+
     # Auto-start if not already in progress
     if operation.status != OperationStatus.IN_PROGRESS:
         operation.status = OperationStatus.IN_PROGRESS
@@ -3434,6 +3493,205 @@ def mark_operation_inspected(
         "operation_id": operation.id,
         "inspection_complete": operation.inspection_complete,
         "inspection_type": operation.inspection_type,
+    }
+
+
+# ============================================================================
+# Process-sheet step execution (PR 3 of docs/PROCESS_SHEETS_SCOPE.md).
+#
+# Snapshot steps live on wo_operation_steps (copied at WO creation); captured
+# evidence is APPEND-ONLY operation_step_records (corrections supersede, never
+# mutate). These paths sit under /shop-floor on purpose: badge-minted
+# kiosk-scoped operator tokens are path-fenced to this prefix (deps.py), so
+# crew-station operators can read steps, record values and upload PHOTO/FILE
+# evidence with ZERO fence changes — including the attachment endpoint below,
+# which exists precisely because the fence blocks /documents/upload.
+# ============================================================================
+
+
+def _get_operation_and_work_order(
+    db: Session, operation_id: int, company_id: int
+) -> tuple[WorkOrderOperation, WorkOrder]:
+    """Tenant-scoped operation + parent WO fetch shared by the step endpoints."""
+    operation = (
+        db.query(WorkOrderOperation)
+        .options(joinedload(WorkOrderOperation.work_order))
+        .filter(
+            WorkOrderOperation.id == operation_id,
+            WorkOrderOperation.company_id == company_id,
+        )
+        .first()
+    )
+    if not operation:
+        raise HTTPException(status_code=404, detail="Operation not found")
+    work_order = operation.work_order
+    if not work_order or work_order.is_deleted:
+        raise HTTPException(status_code=404, detail="Work order not found for this operation")
+    return operation, work_order
+
+
+def _require_step_recordable(operation: WorkOrderOperation, work_order: WorkOrder) -> None:
+    """Rung 1 of the capture ladder, mirroring the sibling predicates exactly:
+    a TERMINAL parent WO is a state conflict (409, same shape as complete_operation's
+    G6-A guard); a non-IN_PROGRESS operation is bad input (400, same rule as
+    report_operation_production — step data is captured while running the op)."""
+    if work_order.status in TERMINAL_WO_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail=f"cannot record step data: work order is {work_order.status.value}",
+        )
+    if operation.status != OperationStatus.IN_PROGRESS:
+        raise HTTPException(status_code=400, detail="Operation must be in progress to record step data")
+
+
+def _record_source(current_user: User) -> str:
+    """Adoption-telemetry channel for step records, derived from the CREDENTIAL:
+    KIOSK for badge-minted crew-station operator tokens (scope == "kiosk"), DESKTOP
+    otherwise — TimeEntrySource vocabulary, never client-asserted."""
+    if getattr(current_user, "_token_scope", None) == "kiosk":
+        return TimeEntrySource.KIOSK.value
+    return TimeEntrySource.DESKTOP.value
+
+
+@router.get("/operations/{operation_id}/steps", response_model=OperationStepsViewResponse)
+def get_operation_steps(
+    operation_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Snapshot steps (ordered by sequence) + live records + per-serial completeness.
+
+    Read-only; available in any operation/WO state so the kiosk can show the trail
+    on held or completed jobs too. ``completeness`` maps step_id -> serial -> satisfied
+    for serialized WOs; ``steps_total``/``steps_recorded`` are the required-step chip
+    numbers (the work-center queue carries the same pair per item).
+    """
+    operation, work_order = _get_operation_and_work_order(db, operation_id, company_id)
+    return process_sheet_service.build_steps_view(db, company_id, operation, work_order)
+
+
+@router.post(
+    "/operations/{operation_id}/steps/{step_id}/records",
+    response_model=OperationStepRecordResponse,
+    status_code=201,
+)
+def record_operation_step(
+    operation_id: int,
+    step_id: int,
+    data: OperationStepRecordCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Capture one step record (AS9100D objective evidence; append-only).
+
+    Validation ladder (service): WO not terminal (409) -> operation IN_PROGRESS (400)
+    -> step belongs to operation (404) / INSTRUCTION takes no records (400) -> serial
+    required+valid on serialized WOs (400) -> type-shaped value (400) -> MEASUREMENT
+    out-of-tolerance REFUSED (409 ``OUT_OF_TOLERANCE``, no row) -> optional tenant-valid
+    ``equipment_id`` passthrough. Audited before commit.
+    """
+    operation, work_order = _get_operation_and_work_order(db, operation_id, company_id)
+    _require_step_recordable(operation, work_order)
+    step = process_sheet_service.get_wo_step_or_404(db, company_id, operation.id, step_id)
+    return process_sheet_service.create_step_record(
+        db,
+        company_id,
+        work_order=work_order,
+        operation=operation,
+        step=step,
+        data=data,
+        user=current_user,
+        audit=audit,
+        source=_record_source(current_user),
+    )
+
+
+@router.post(
+    "/operations/{operation_id}/steps/{step_id}/records/{record_id}/supersede",
+    response_model=OperationStepRecordResponse,
+    status_code=201,
+)
+def supersede_operation_step_record(
+    operation_id: int,
+    step_id: int,
+    record_id: int,
+    data: OperationStepRecordSupersede,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Correction path: a NEW record replaces ``record_id`` (append-only chain).
+
+    Requires ``reason`` + the replacement value fields; the replacement runs the FULL
+    capture ladder (including the out-of-tolerance refusal) and inherits the superseded
+    record's serial. The old row is stamped ``superseded_by_id``/``supersede_reason``
+    exactly once — an already-superseded record 409s. Audited before commit.
+    """
+    operation, work_order = _get_operation_and_work_order(db, operation_id, company_id)
+    _require_step_recordable(operation, work_order)
+    step = process_sheet_service.get_wo_step_or_404(db, company_id, operation.id, step_id)
+    return process_sheet_service.supersede_step_record(
+        db,
+        company_id,
+        work_order=work_order,
+        operation=operation,
+        step=step,
+        record_id=record_id,
+        data=data,
+        user=current_user,
+        audit=audit,
+        source=_record_source(current_user),
+    )
+
+
+@router.post(
+    "/operations/{operation_id}/steps/{step_id}/attachment",
+    response_model=StepAttachmentResponse,
+    status_code=201,
+)
+async def upload_operation_step_attachment(
+    operation_id: int,
+    step_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Upload PHOTO/FILE step evidence as a QUALITY_RECORD Document.
+
+    Kiosk-scoped operator tokens CANNOT reach ``/documents/upload`` (the deps.py path
+    fence stops at /shop-floor), so this in-fence endpoint wraps the same
+    StorageBackend/Document persistence (receiving-label precedent) with image/PDF MIME
+    and size validation. Returns the document id to pass as ``attachment_document_id``
+    on the subsequent record create.
+    """
+    operation, work_order = _get_operation_and_work_order(db, operation_id, company_id)
+    _require_step_recordable(operation, work_order)
+    step = process_sheet_service.get_wo_step_or_404(db, company_id, operation.id, step_id)
+    content = await file.read()
+    document = process_sheet_service.store_step_attachment(
+        db,
+        company_id,
+        work_order=work_order,
+        operation=operation,
+        step=step,
+        content=content,
+        filename=file.filename,
+        content_type=file.content_type,
+        user=current_user,
+        audit=audit,
+    )
+    return {
+        "document_id": document.id,
+        "document_number": document.document_number,
+        "file_name": document.file_name,
+        "file_size": document.file_size,
+        "mime_type": document.mime_type,
     }
 
 

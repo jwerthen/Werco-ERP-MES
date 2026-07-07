@@ -61,6 +61,7 @@ from app.services.audit_service import AuditService
 from app.services.completion_signal_service import emit_operation_completed_event
 from app.services.import_service import ParsedTable, parse_date_field
 from app.services.operational_event_service import OperationalEventService
+from app.services.process_sheet_service import ProcessSheetUnavailableError
 from app.services.work_order_state_service import (
     operation_target_quantity,
     sync_work_order_quantity_complete,
@@ -313,8 +314,12 @@ def import_open_work_orders(
             row_instances.append(work_order)
 
             # SAME operation generation as POST /work-orders (released routing,
-            # assembly-aware) — never raw operation inserts.
-            create_routing_operations_for_work_order(db, work_order, part, parsed.quantity, company_id)
+            # assembly-aware, process-sheet snapshot included) — never raw operation
+            # inserts. A sheet family with no released revision raises
+            # ProcessSheetUnavailableError, handled below as a row error.
+            process_sheet_snapshot = create_routing_operations_for_work_order(
+                db, work_order, part, parsed.quantity, company_id
+            )
             db.flush()
             operations = (
                 tenant_query(db, WorkOrderOperation, company_id)
@@ -392,6 +397,8 @@ def import_open_work_orders(
                         "operation_count": len(operations),
                         "completed_through_seq": parsed.completed_through_seq,
                         "paper_completed_sequences": [op.sequence for op in completed_ops],
+                        # PR 3 traceability: sheet families -> released revisions snapshotted.
+                        "process_sheet_snapshot": process_sheet_snapshot,
                     },
                 )
                 audit.log_status_change(
@@ -423,6 +430,20 @@ def import_open_work_orders(
             if parsed.wo_number:
                 seen_numbers.add(parsed.wo_number.upper())
             results.append(result)
+        except ProcessSheetUnavailableError as exc:
+            # PR 3: an attached process-sheet family with no released revision blocks
+            # the ROW (savepoint rollback), not the whole import — surfaced with the
+            # same human-readable reason POST /work-orders carries in its 409.
+            _rollback_failed_row(db, nested, row_instances)
+            reason = exc.detail["detail"] if isinstance(exc.detail, dict) else str(exc.detail)
+            errors.append(
+                WorkOrderImportError(
+                    row=row_number,
+                    wo_number=parsed.wo_number,
+                    part_number=parsed.part_number,
+                    reason=reason,
+                )
+            )
         except ValueError as exc:
             _rollback_failed_row(db, nested, row_instances)
             errors.append(

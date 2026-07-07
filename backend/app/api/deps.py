@@ -97,6 +97,10 @@ def get_current_user(
     token_company_id = payload.get("company_id")
     user._active_company_id = token_company_id if token_company_id is not None else user.company_id
     user._read_only_company_context = bool(payload.get("read_only", False))
+    # Token scope ("kiosk" for badge-minted crew-station operator tokens, None
+    # otherwise) — surfaced so shop-floor writes can derive their adoption-telemetry
+    # channel (TimeEntrySource KIOSK vs DESKTOP) from the credential, not the client.
+    user._token_scope = payload.get("scope")
 
     if (
         user._read_only_company_context

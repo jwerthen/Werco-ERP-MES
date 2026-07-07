@@ -68,6 +68,15 @@ export interface KioskQueueItem {
   // Laser cutting: the active nest for this operation (CNC#, runs, optional PDF)
   // so operators can confirm the right nest before cutting.
   laser_nest?: LaserNestInfo | null;
+  // Process Sheets chip (PR 3): REQUIRED snapshot-step counts, server-derived.
+  // 0/0 means the operation has no gating steps — the chip is hidden.
+  steps_total?: number | null;
+  steps_recorded?: number | null;
+}
+
+/** "Steps 2/6" — the process-steps chip label (call only when steps_total > 0). */
+export function formatStepsChip(item: Pick<KioskQueueItem, 'steps_total' | 'steps_recorded'>): string {
+  return `Steps ${Number(item.steps_recorded || 0)}/${Number(item.steps_total || 0)}`;
 }
 
 /** One operator's open TimeEntry on a queued operation (crew-station roster). */

@@ -52,6 +52,7 @@ from app.schemas.work_order import (
     WorkOrderSummary,
     WorkOrderUpdate,
 )
+from app.services import process_sheet_service
 from app.services.audit_service import AuditService
 from app.services.completion_cost_service import (
     apply_completion_cost_rollup,
@@ -1237,8 +1238,12 @@ def create_work_order(
 
     # Auto-generate operations from routing if enabled and no operations provided
 
+    process_sheet_snapshot: list[dict] = []
     if auto_routing and not work_order_in.operations:
-        create_routing_operations_for_work_order(
+        # Copies routed operations AND snapshots attached process sheets (PR 3) in this
+        # same pre-commit unit of work — a family with no released revision raises a
+        # structured 409 here and the whole creation (WO included) rolls back atomically.
+        process_sheet_snapshot = create_routing_operations_for_work_order(
             db, work_order, part, float(work_order_in.quantity_ordered), company_id
         )
     else:
@@ -1308,6 +1313,9 @@ def create_work_order(
             "quantity": float(work_order.quantity_ordered),
             "auto_routing": auto_routing,
             "operation_count": len(work_order.operations),
+            # PR 3 traceability: which sheet families resolved to which released
+            # revisions at snapshot time (empty when no operation carries a sheet).
+            "process_sheet_snapshot": process_sheet_snapshot,
         },
     )
     db.commit()
@@ -1331,11 +1339,16 @@ def _create_assembly_routing_operations(
     work_order: WorkOrder,
     wo_quantity: float,
     company_id: int = None,
-):
-    """Create assembly operations from BOM component routings, then assembly routing."""
+) -> list[tuple[WorkOrderOperation, Optional[int]]]:
+    """Create assembly operations from BOM component routings, then assembly routing.
+
+    Returns (wo_operation, attached process_sheet_id) pairs so the caller can snapshot
+    process-sheet steps onto the new operations (PR 3).
+    """
 
     sequence = 10
     company_id = company_id or work_order.company_id
+    operation_sheet_pairs: list[tuple[WorkOrderOperation, Optional[int]]] = []
     bom = _get_active_bom(db, work_order.part_id, company_id)
 
     if bom:
@@ -1407,6 +1420,7 @@ def _create_assembly_routing_operations(
                     company_id=company_id,
                 )
                 db.add(wo_op)
+                operation_sheet_pairs.append((wo_op, rop.process_sheet_id))
                 sequence += 10
 
     assembly_routing = (
@@ -1422,7 +1436,7 @@ def _create_assembly_routing_operations(
     )
 
     if not assembly_routing:
-        return
+        return operation_sheet_pairs
 
     active_assembly_ops = [op for op in sorted(assembly_routing.operations, key=lambda x: x.sequence) if op.is_active]
     non_inspection_ops = [op for op in active_assembly_ops if not _is_inspection_operation(op)]
@@ -1448,7 +1462,10 @@ def _create_assembly_routing_operations(
             company_id=company_id,
         )
         db.add(wo_op)
+        operation_sheet_pairs.append((wo_op, rop.process_sheet_id))
         sequence += 10
+
+    return operation_sheet_pairs
 
 
 def create_routing_operations_for_work_order(
@@ -1457,7 +1474,7 @@ def create_routing_operations_for_work_order(
     part: Part,
     quantity: float,
     company_id: int,
-) -> None:
+) -> list[dict]:
     """Generate this work order's operations from the part's released routing.
 
     Single source of truth shared by POST /work-orders (auto_routing=True) and
@@ -1467,11 +1484,19 @@ def create_routing_operations_for_work_order(
     (``_create_assembly_routing_operations``); simple parts copy their released
     routing operations. No-op when no released routing exists (the caller
     decides whether that is an error).
+
+    PR 3: routing operations with an attached process sheet get the sheet family's
+    currently-RELEASED revision snapshotted into ``wo_operation_steps`` (both callers,
+    inside the same pre-commit unit of work — atomic with the WO). A family with no
+    released revision raises ``ProcessSheetUnavailableError`` (409) and the whole
+    creation rolls back. Returns the snapshot summary for the WO-creation audit row.
     """
     has_bom = _get_active_bom(db, part.id, company_id) is not None
     if part.part_type == PartType.ASSEMBLY or has_bom:
-        _create_assembly_routing_operations(db, work_order, float(quantity), company_id=company_id)
-        return
+        operation_sheet_pairs = _create_assembly_routing_operations(
+            db, work_order, float(quantity), company_id=company_id
+        )
+        return process_sheet_service.snapshot_steps_for_work_order(db, company_id, operation_sheet_pairs)
 
     routing = (
         db.query(Routing)
@@ -1485,8 +1510,9 @@ def create_routing_operations_for_work_order(
         .first()
     )
     if not routing:
-        return
+        return []
 
+    operation_sheet_pairs: list[tuple[WorkOrderOperation, Optional[int]]] = []
     for rop in sorted(routing.operations, key=lambda x: x.sequence):
         if not rop.is_active:
             continue
@@ -1509,6 +1535,9 @@ def create_routing_operations_for_work_order(
             company_id=company_id,
         )
         db.add(wo_op)
+        operation_sheet_pairs.append((wo_op, rop.process_sheet_id))
+
+    return process_sheet_service.snapshot_steps_for_work_order(db, company_id, operation_sheet_pairs)
 
 
 @router.post("/import", response_model=WorkOrderImportResponse, summary="Import open work orders (CSV/XLSX)")
@@ -2562,6 +2591,11 @@ def get_material_requirements(
     }
 
 
+# S2: cap on the per-step bypass entries stamped onto the force-complete audit row /
+# response — the count is always exact; only the itemized list truncates (flagged).
+STEPS_BYPASSED_AUDIT_CAP = 50
+
+
 @router.post("/{work_order_id}/complete")
 def complete_work_order(
     work_order_id: int,
@@ -2689,6 +2723,23 @@ def complete_work_order(
             ),
         )
 
+    # S2 (settled, user decision): this privileged override stays UNGATED by the
+    # process-sheet steps gate — it is an audited EVIDENCE-OVERRIDE. Make the bypass
+    # deliberate and visible, never silent: BEFORE mutating, compute the required
+    # step records the force-complete is about to bypass (still-open operations
+    # only — already-COMPLETE ops passed their own gate at their own completion)
+    # and stamp them on the force-complete audit row + the response below.
+    steps_bypassed_all: list[dict] = []
+    for operation in operations:
+        if operation.status == OperationStatus.COMPLETE:
+            continue
+        op_identifier = operation.operation_number or f"Op {operation.sequence}"
+        for item in process_sheet_service.missing_required_steps(db, company_id, operation, work_order):
+            steps_bypassed_all.append({"operation": op_identifier, **item})
+    steps_bypassed_count = len(steps_bypassed_all)
+    steps_bypassed_truncated = steps_bypassed_count > STEPS_BYPASSED_AUDIT_CAP
+    steps_bypassed_entries = steps_bypassed_all[:STEPS_BYPASSED_AUDIT_CAP]
+
     old_status = work_order.status.value if work_order.status else None
     old_quantity_complete = float(work_order.quantity_complete or 0)
     old_quantity_scrapped = float(work_order.quantity_scrapped or 0)
@@ -2813,6 +2864,13 @@ def complete_work_order(
         old_status=old_status,
         new_status=WorkOrderStatus.COMPLETE.value,
         description=f"Manually completed work order {work_order.work_order_number}",
+        # S2: the evidence-override trail — which required process-sheet step records
+        # this force-complete bypassed (count is exact; the itemized list is capped).
+        extra_data={
+            "steps_bypassed_count": steps_bypassed_count,
+            "steps_bypassed": steps_bypassed_entries,
+            "steps_bypassed_truncated": steps_bypassed_truncated,
+        },
     )
     audit.log_update(
         resource_type="work_order",
@@ -2911,6 +2969,18 @@ def complete_work_order(
         "message": "Work order completed",
         # Warn-and-record (Batch 4 / rank 7): unsatisfied quality gates at completion.
         "quality_exceptions": [exc.as_dict() for exc in quality_exceptions],
+        # S2: evidence-override summary — the required process-sheet step records this
+        # force-complete bypassed, so the office UI can say "completed with N step
+        # records bypassed". Backward-compatible: null when nothing was bypassed.
+        "steps_bypassed": (
+            {
+                "count": steps_bypassed_count,
+                "steps": steps_bypassed_entries,
+                "truncated": steps_bypassed_truncated,
+            }
+            if steps_bypassed_count
+            else None
+        ),
     }
 
 
@@ -3210,6 +3280,26 @@ def complete_operation(
         if operation.status == OperationStatus.ON_HOLD:
             raise HTTPException(status_code=409, detail="Operation is on hold and cannot be completed")
         raise HTTPException(status_code=400, detail=f"Cannot complete operation with status: {operation.status.value}")
+
+    # Process-sheet completion gate (PR 3): IDENTICAL to the shop-floor twin — an
+    # ungated office/admin completion path would let anyone bypass the objective-
+    # evidence requirement. When THIS request would FULLY complete the operation,
+    # every required (non-INSTRUCTION) snapshot step must carry a live
+    # (non-superseded) conforming record — per serial on a serialized WO. Evaluated
+    # under the same row lock, against the prospective resolved quantity; partial
+    # progress updates and zero-step operations are unaffected.
+    prospective_quantity = resolve_absolute_operation_quantity(db, operation, quantity_complete, target_qty)
+    if work_order and prospective_quantity >= target_qty:
+        missing_steps = process_sheet_service.missing_required_steps(db, company_id, operation, work_order)
+        if missing_steps:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "STEPS_INCOMPLETE",
+                    "detail": "Required process-sheet steps are missing conforming records for this operation",
+                    "missing": missing_steps,
+                },
+            )
 
     # Capture pre-mutation statuses/quantities so transitions can be audited below.
     old_operation_status = operation.status.value if operation.status else None

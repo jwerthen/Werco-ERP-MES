@@ -3,16 +3,17 @@
 The operator kiosk (A0.3) is a touch-first, full-screen station screen for fixed shop-floor
 terminals. It renders outside the normal app `Layout` and handles its own auth: an
 unauthenticated visitor gets the badge-login screen, never a redirect to `/login`. It is
-deliberately minimal — badge in, clock in to a queued job in two taps, and report
-production / complete / hold on the active job. No supervisor verbs (inspection, labor
-approval, resume-from-hold, or any override) exist on this screen.
+deliberately minimal — badge in, clock in to a queued job in two taps, report
+production / complete / hold on the active job, and record process-sheet step data (see
+[Process steps](#process-steps-process-sheets-capture)). No supervisor verbs (inspection,
+labor approval, resume-from-hold, or any override) exist on this screen.
 
 `/kiosk` now serves **two coexisting modes**, dispatched by URL param:
 
 - `?work_center_id=N` — the **single-operator kiosk** documented in the sections below
   (one badge login bound to the terminal, one active job). Unchanged.
 - `?station=<id>` — the **crew station** (multi-operator terminal): a shared-PIN station
-  unlock, a live per-job crew roster, and per-badge JOIN/LEAVE/report/complete/hold. See
+  unlock, a live per-job crew roster, and per-badge JOIN/LEAVE/report/complete/hold/steps. See
   [Crew station mode](#crew-station-mode-kioskkiosk1stationid) at the end of this doc.
 
 Frontend: `frontend/src/pages/OperatorKiosk.tsx` and `frontend/src/pages/CrewStationKiosk.tsx`
@@ -68,8 +69,12 @@ URL is all the station setup there is.
 
 1. **Queue → confirm → clock in (2 taps).** The station queue lists the work center's
    operations; tapping a job shows a confirm card; CLOCK IN calls
-   `POST /shop-floor/clock-in` (entry type `run`).
-2. **Active-job banner** (pinned while clocked in), with three verbs:
+   `POST /shop-floor/clock-in` (entry type `run`). When the operation carries
+   process-sheet steps, the confirm card adds a **REVIEW STEPS 2/6** button so the
+   operator can read the steps before starting (see
+   [Process steps](#process-steps-process-sheets-capture)).
+2. **Active-job banner** (pinned while clocked in), with three verbs — plus a
+   **PROCESS STEPS · 2/6 RECORDED** button when the operation carries steps:
    - **REPORT PRODUCTION** — `POST /shop-floor/operations/{id}/production` with good/scrap
      deltas. Any scrap quantity **requires** a structured reason picked from the shop-standard
      grid (no default, no free text); the reason is sent as the endpoint's `scrap_reason`
@@ -80,6 +85,9 @@ URL is all the station setup there is.
      when any scrap is entered, the same structured-grid scrap reason), then
      `POST /shop-floor/operations/{id}/complete` at the target quantity. If the clock-out
      lands but the completion is refused, the kiosk says so — labor is closed either way.
+     A completion refused with **409 `STEPS_INCOMPLETE`** (required process-sheet steps
+     missing conforming records) opens the steps view with the outstanding steps rendered
+     inline (see [Process steps](#process-steps-process-sheets-capture)).
    - **HOLD** — a required blocker-category grid (material missing, machine down, tooling
      missing, quality hold, …), then `PUT /shop-floor/operations/{id}/hold` at `medium`
      severity. A kiosk hold files the same structured `WorkOrderBlocker` a supervisor would.
@@ -99,6 +107,81 @@ puts on the active job — `null` for non-laser operations, and a soft-deleted m
 appears (see `docs/API.md` → Shop Floor → "Laser-nest payload on operator reads" for the full
 shape). The optional reference PDF is fetched **inline** from `GET /laser-nests/{id}/document`
 when the operator opens it (no approval workflow, and it never gates clock-in).
+
+## Process steps (Process Sheets capture)
+
+Operations whose routing carried a released process sheet get an immutable step snapshot at
+WO creation (`docs/PROCESS_SHEETS_SCOPE.md`); both kiosk modes capture the per-step objective
+evidence against that snapshot through the same shared panel (`KioskStepsPanel`). Every step
+endpoint lives under `/shop-floor` on purpose — badge-minted kiosk-scoped tokens are
+path-fenced to that prefix, so the crew station reaches them with zero fence changes.
+
+**The steps chip.** Queue and job cards render **"Steps 2/6"** — required (non-INSTRUCTION)
+steps vs. those with live conforming records, carried on every
+`GET /shop-floor/work-center-queue/{id}` row (`steps_recorded`/`steps_total`) so no extra
+round-trip. On a serialized WO a step counts only once records cover **every** serial. The
+chip is hidden when the operation has no gating steps (0/0) and turns green when everything
+required is recorded.
+
+**Entry points.** Single-operator kiosk: the confirm card's **REVIEW STEPS** button and the
+active-job banner's **PROCESS STEPS** button. Crew station: a steps verb on the job screen
+that is **badge-gated** — "scan badge to open steps" mints the 5-minute operator token, the
+panel banners *Recording as {name}*, and every record is attributed to that badge identity.
+A 401 mid-flow (the ≤5-minute badge token expired) returns to the badge scan with a
+"Badge session expired" notice — scan again to keep recording.
+
+**Recording (typed, server-authoritative, non-optimistic).** The panel lists the snapshot
+steps in sequence with type chips, instruction text, and each step's append-only record
+trail. It is readable in **any** operation/WO state (held and completed jobs keep their
+trail visible); inputs appear only while the operation is IN_PROGRESS and the station is
+online. Writes go to `POST /shop-floor/operations/{id}/steps/{step_id}/records`; the view
+refetches after every success and refusals surface verbatim. Per type:
+
+- **MEASUREMENT** — the value pad shows the LSL/NOM/USL limits and a live tolerance preview
+  that rounds exactly like the server (`config.decimals`), labeled *"Preview only — the
+  server verdict is final."* An out-of-tolerance value is refused server-side with
+  **409 `OUT_OF_TOLERANCE`** (`{measured, lsl, usl}`) and **no record row is written**; the
+  kiosk renders an inline danger strip ("Out of tolerance — not recorded") telling the
+  operator to re-measure, or to use HOLD on the job screen if the part really is out.
+- **CHECKBOX** — the kiosk records only the affirmative ("Mark done"); an unchecked box is
+  simply not recorded.
+- **LIST / VALUE** — touch option grid / free-text value.
+- **PHOTO / FILE** — evidence capture, below.
+- **INSTRUCTION** — display-only ("Read and follow"); never takes a record, never gates.
+
+**Per-serial capture.** On a serialized WO the panel carries a serial chip strip ("steps are
+recorded per unit"); each record posts with its `serial_number`, and completeness is tracked
+per step **per serial** — a serial's chip gets a check once every required step is covered
+for that unit.
+
+**Photo / file evidence (two-step, in-fence).** PHOTO opens the tablet's rear camera
+(`capture="environment"`, images only); FILE also accepts a PDF. The file uploads **first**
+to `POST /shop-floor/operations/{id}/steps/{step_id}/attachment` — which stores it as a
+QUALITY_RECORD Document on the WO and exists precisely because the kiosk-token path fence
+blocks `/documents/upload` — then the record create references the returned `document_id`
+as `attachment_document_id` (the server rejects any document that isn't a QUALITY_RECORD
+belonging to that WO). 10 MB cap, checked client-side before the upload and again
+server-side.
+
+**Corrections supersede — never edit.** The **Correct** button on an existing record opens a
+modal requiring a **reason** plus the replacement value; the replacement runs the full
+capture ladder (including the out-of-tolerance refusal) via
+`POST .../records/{record_id}/supersede` and inherits the original's serial. The original
+stays on file marked superseded — append-only evidence, per the AS9100D posture.
+
+**Completion gating on the kiosk.**
+
+- **COMPLETE refused.** The complete endpoint 409s with `STEPS_INCOMPLETE` when required
+  steps lack conforming records; the kiosk opens the steps view with a "Cannot complete"
+  strip listing each missing step (and its outstanding serials) with a jump-to-step button.
+  On the crew station, if final production was posted before the refused complete, the
+  toast says "Saved production, but completing failed: …" — the production landed.
+- **Clock-out at target.** The TimeEntry **always closes normally** with its full
+  quantities — labor truth is never trapped behind the steps gate. The operation
+  deliberately stays IN_PROGRESS and the clock-out response carries a `steps_incomplete`
+  warning block; the kiosk shows an **info** (never error) toast ("Clocked out — N step
+  records still needed…") and opens the steps view with the outstanding steps inline.
+  Completion then happens via COMPLETE once the records exist.
 
 ## Scanning (QR travelers & badges — A0.4)
 
@@ -156,6 +239,12 @@ Every kiosk mutation — clock-in, clock-out, production report, complete, hold 
 Kiosk activity is therefore fully distinguishable from desktop, scanner, import, and
 backfill writes on the adoption dashboard.
 
+**Exception — process-step records.** A step record's `source` is derived server-side from
+the **credential**, never client-asserted: badge-minted `scope="kiosk"` operator tokens
+(crew station) land as `kiosk`; any normal session token lands as `desktop`. Because the
+single-operator kiosk runs on a normal employee-login session, its step records currently
+count as `desktop` on the adoption dashboard, unlike its other mutations.
+
 ## Offline behavior
 
 - The kiosk polls queue + active job every **15 s**. When a poll or mutation fails, an
@@ -167,6 +256,9 @@ backfill writes on the adoption dashboard.
   hard-disabled until the connection is restored, so a tap against a dead connection cannot
   silently drop the record. The offline banner is the accessible explanation for the disabled
   buttons (referenced via `aria-describedby`); disabled action buttons read **Offline**.
+- **Process steps follow the same rule**: the steps panel stays readable from its last load,
+  and Record / Save evidence / Correct are hard-disabled (buttons read **Offline**) — no
+  queued or optimistic step writes.
 - There is **no offline write queue**: because mutations are disabled rather than queued, the
   operator retries them once the banner clears. Error toasts linger 12 s so they are readable
   from arm's length.
@@ -263,6 +355,14 @@ every successful action.
   names everyone auto-clocked-out (the complete response's `closed_time_entries`).
 - **HOLD.** The same required blocker-category grid as the single-operator kiosk, then a
   badge-signature scan (`PUT /shop-floor/operations/{id}/hold`).
+- **STEPS (badge-gated).** The job screen's steps verb ("Steps 2/6", present when the
+  operation carries process-sheet steps) opens a badge scan — step records are made in the
+  scanned operator's name — then the shared steps panel bound to that badge-minted token
+  (see [Process steps](#process-steps-process-sheets-capture) for the capture flow). A
+  clock-out that reaches target with required steps outstanding, or a COMPLETE refused with
+  `STEPS_INCOMPLETE`, lands the signing operator in the same steps view with the missing
+  steps inline. Like every other flow, the 90 s idle reset abandons a half-entered steps
+  screen back to the board; a mid-flow 401 (expired badge token) returns to the badge scan.
 
 Every verb is server-gated and therefore **non-optimistic** — the kiosk shows a loading state,
 reflects only what the server returns, and surfaces rejections verbatim.

@@ -28,6 +28,13 @@ import type {
   KioskStationLoginResponse,
   KioskStationSummary,
 } from '../types/kioskStation';
+import type {
+  OperationStepRecord,
+  OperationStepRecordInput,
+  OperationStepSupersedeInput,
+  OperationStepsView,
+  StepAttachmentResult,
+} from '../types/processSheet';
 
 const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000/api/v1';
 const STORAGE_KEY = 'kiosk_station_token';
@@ -283,4 +290,73 @@ export async function holdOperation(
   data: { category: string; severity: string; note?: string; source: string }
 ): Promise<unknown> {
   return operatorFetch(operatorToken, 'PUT', `/shop-floor/operations/${operationId}/hold`, data);
+}
+
+// ---------------------------------------------------------------------------
+// Process Sheets capture (PR 3) — snapshot steps + append-only step records.
+// All four paths live under /shop-floor on purpose: the badge-minted operator
+// token is path-fenced there, so reads AND writes use the OPERATOR token (the
+// station token is honored only by the queue read + badge mint). Records never
+// carry `source` — the server derives KIOSK/DESKTOP from the credential.
+// ---------------------------------------------------------------------------
+
+/** GET /shop-floor/operations/{id}/steps — snapshot steps + live records + completeness. */
+export async function getOperationSteps(operatorToken: string, operationId: number): Promise<OperationStepsView> {
+  return operatorFetch(operatorToken, 'GET', `/shop-floor/operations/${operationId}/steps`);
+}
+
+/** POST .../steps/{step_id}/records — capture ONE type-shaped value (409 OUT_OF_TOLERANCE = no row). */
+export async function recordOperationStep(
+  operatorToken: string,
+  operationId: number,
+  stepId: number,
+  data: OperationStepRecordInput
+): Promise<OperationStepRecord> {
+  return operatorFetch(operatorToken, 'POST', `/shop-floor/operations/${operationId}/steps/${stepId}/records`, data);
+}
+
+/** POST .../records/{record_id}/supersede — correction path (reason required; already-corrected 409s). */
+export async function supersedeOperationStepRecord(
+  operatorToken: string,
+  operationId: number,
+  stepId: number,
+  recordId: number,
+  data: OperationStepSupersedeInput
+): Promise<OperationStepRecord> {
+  return operatorFetch(
+    operatorToken,
+    'POST',
+    `/shop-floor/operations/${operationId}/steps/${stepId}/records/${recordId}/supersede`,
+    data
+  );
+}
+
+/**
+ * POST .../steps/{step_id}/attachment — PHOTO/FILE evidence upload (multipart).
+ * This is the ONLY evidence path the kiosk may use: /documents/upload is
+ * outside the operator-token fence (403). Upload first, then create the record
+ * with the returned document_id as attachment_document_id. No Content-Type
+ * header here — the browser sets the multipart boundary itself.
+ */
+export async function uploadOperationStepAttachment(
+  operatorToken: string,
+  operationId: number,
+  stepId: number,
+  file: File
+): Promise<StepAttachmentResult> {
+  const formData = new FormData();
+  formData.append('file', file);
+  const response = await fetch(
+    `${API_BASE_URL}/shop-floor/operations/${operationId}/steps/${stepId}/attachment`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${operatorToken}`,
+        'X-Requested-With': 'XMLHttpRequest',
+      },
+      body: formData,
+    }
+  );
+  if (!response.ok) await throwOnError(response);
+  return (await response.json()) as StepAttachmentResult;
 }
