@@ -267,13 +267,25 @@ The supported bootstrap is:
 python -m scripts.seed_data            # calls create_all (+ seeds demo data)
 
 # 2. Mark the DB as already at the migration baseline:
-alembic stamp <baseline-revision>      # the latest revision create_all matches
+alembic stamp 058_process_sheets       # NOT head — see the raw-DDL warning below
 
 # 3. Apply migrations newer than the baseline going forward:
 alembic upgrade head
 ```
 
 After bootstrap, normal incremental `alembic upgrade head` is the standard path.
+
+> **`create_all` produces tables and indexes only — never stamp past raw-DDL migrations.**
+> `Base.metadata.create_all()` emits what SQLAlchemy metadata knows about: tables, columns,
+> indexes, constraints. It does **not** produce objects some migrations create with raw DDL —
+> `008`'s audit-log immutability trigger functions/triggers, or the `059`/`060` Supabase
+> hardening (RLS enablement, privilege revocations, `search_path`-pinned trigger functions).
+> Stamping the baseline past such a migration **silently skips that DDL** — this is exactly how
+> production lost the `008` triggers (found and fixed 2026-07-07; see
+> `docs/SUPABASE_SECURITY.md`). On a fresh Supabase Postgres: after `create_all`, stamp at
+> **`058_process_sheets`** (the last pre-hardening revision) so `alembic upgrade head` applies
+> `059`+`060` — both are idempotent and safe on a `create_all` schema. More generally, never
+> stamp past a migration whose DDL `create_all` cannot produce.
 
 > **Keep new revision ids ≤ 32 characters.** On the `create_all → stamp → upgrade` bootstrap path
 > the `alembic_version.version_num` column is `varchar(32)`. Migration `014b_widen_alembic_version`
