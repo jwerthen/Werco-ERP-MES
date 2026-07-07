@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.models.ai_learning import AIRecommendation
 from app.models.notification import NotificationLog
+from app.models.quality import NonConformanceReport
 from app.models.user import User, UserRole
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation
 from app.models.work_order_blocker import (
@@ -98,6 +99,20 @@ class WorkOrderBlockerService:
             if not operation:
                 raise ValueError("Operation not found for this work order")
 
+        # PR 4 (process sheets): a QUALITY_HOLD blocker may carry the NCR it was
+        # raised with. Tenant-validated — a cross-tenant/unknown NCR id never links.
+        if data.ncr_id is not None:
+            ncr_exists = (
+                self.db.query(NonConformanceReport.id)
+                .filter(
+                    NonConformanceReport.id == data.ncr_id,
+                    NonConformanceReport.company_id == company_id,
+                )
+                .first()
+            )
+            if not ncr_exists:
+                raise ValueError("NCR not found")
+
         category = _enum_value(data.category)
         severity = _enum_value(data.severity)
         blocker = WorkOrderBlocker(
@@ -105,6 +120,7 @@ class WorkOrderBlockerService:
             work_order_id=work_order.id,
             operation_id=operation.id if operation else None,
             material_part_id=data.material_part_id,
+            ncr_id=data.ncr_id,
             category=category,
             severity=severity,
             status=WorkOrderBlockerStatus.OPEN.value,

@@ -1,10 +1,29 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { CheckCircleIcon, ClipboardDocumentCheckIcon, LockClosedIcon } from '@heroicons/react/24/outline';
+import {
+  CheckCircleIcon,
+  ClipboardDocumentCheckIcon,
+  ExclamationTriangleIcon,
+  LockClosedIcon,
+} from '@heroicons/react/24/outline';
 import api from '../../services/api';
 import { EmptyState, ErrorState, SkeletonText } from '../ui';
 import { formatCentralDateTime } from '../../utils/centralTime';
 import StepTypeBadge from './StepTypeBadge';
 import type { OperationStepRecord, OperationStepWithState, OperationStepsView } from '../../types/processSheet';
+
+/**
+ * Tooltip text for the warn-and-record qualification marker: the exception
+ * messages frozen on the record at capture time (supervision signal — the
+ * record itself was never blocked).
+ */
+function qualificationTitle(record: OperationStepRecord): string {
+  const messages = (record.qualification_snapshot?.exceptions ?? [])
+    .map((exc) => (typeof exc.message === 'string' ? exc.message : ''))
+    .filter((m) => m.length > 0);
+  return messages.length > 0
+    ? messages.join('; ')
+    : 'Operator qualification exceptions were recorded at capture time';
+}
 
 interface OperationStepsPanelProps {
   operationId: number;
@@ -164,8 +183,23 @@ export default function OperationStepsPanel({ operationId }: OperationStepsPanel
                           Not satisfied
                         </span>
                       )}
+                      {record.qualification_snapshot?.qualified === false && (
+                        <span
+                          data-testid={`record-qualification-warning-${record.id}`}
+                          title={qualificationTitle(record)}
+                          className="inline-flex items-center gap-1 rounded border border-fd-amber/50 px-1 py-0.5 font-mono text-[10px] font-bold uppercase tracking-widest text-fd-amber"
+                        >
+                          <ExclamationTriangleIcon className="h-3.5 w-3.5" aria-hidden="true" />
+                          Qual
+                        </span>
+                      )}
                       {view.is_serialized && record.serial_number && (
                         <span className="font-mono text-slate-400">SN {record.serial_number}</span>
+                      )}
+                      {record.gauge && (
+                        <span data-testid={`record-gauge-${record.id}`} className="text-slate-400">
+                          Gauge {record.gauge.name} ({record.gauge.equipment_code})
+                        </span>
                       )}
                       <span className="text-slate-400">
                         {record.recorded_by_name || 'Operator'} · {formatCentralDateTime(record.recorded_at)}

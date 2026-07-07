@@ -1,6 +1,6 @@
 # Process Sheets — Scope & Implementation Plan
 
-**Date:** 2026-07-04 · **Status:** PR 1 merged ([#81](https://github.com/jwerthen/Werco-ERP-MES/pull/81)); PR 2 merged ([#82](https://github.com/jwerthen/Werco-ERP-MES/pull/82)); PR 3 (snapshot + capture + gating) implemented — in review; PR 4 (integrations) not started
+**Date:** 2026-07-04 · **Status:** PRs 1–4 implemented — PRs 1–3 merged ([#81](https://github.com/jwerthen/Werco-ERP-MES/pull/81), [#82](https://github.com/jwerthen/Werco-ERP-MES/pull/82), [#83](https://github.com/jwerthen/Werco-ERP-MES/pull/83)); PR 4 (integrations) in review — feature complete pending merge
 **Feature:** Typed, revision-controlled operation steps ("Process Sheets") authored in engineering, snapshotted onto work orders, and executed on the shop-floor kiosk with per-step data capture (measurements with tolerance enforcement, checkboxes, lists, photo/file evidence).
 
 ## Context
@@ -98,14 +98,16 @@ After the existing predecessor check, inside the existing `SELECT...FOR UPDATE` 
 
 ## Integrations (built-in, not bolted on — these are the Werco differentiators)
 
-| Integration | Mechanism | Exists today |
-|---|---|---|
-| SPC | step `spc_characteristic_id` → auto `SPCMeasurement` row (`operation_id`, serial, measured_by) on record | `models/spc.py`, `POST /spc/measurements` |
-| Gauge calibration | `requires_gauge` steps validate `Equipment` calibration currency at capture; gauge identity stored on the record | `models/calibration.py` |
-| NCR + hold | OOT → one-tap NCR (`IN_PROCESS`) + QUALITY_HOLD blocker with `ncr_id` FK | `models/quality.py`, `work_order_blockers` |
-| Operator quals | `qualification_snapshot` on every record (warn-and-record) | `operator_qualification_service.py` |
-| FAI (phase 4) | measurement records pre-fill `FAICharacteristic.actual_value`/`measuring_device` for AS9102 | `FirstArticleInspection` models |
-| Audit | every create/status-change/supersede through `AuditService` → hash-chained log | `services/audit_service.py` |
+All six shipped (PR 4 closed the set; "Shipped as" names the as-built mechanism in `services/process_sheet_service.py` unless pathed otherwise):
+
+| Integration | Mechanism | Exists today | Shipped as |
+|---|---|---|---|
+| SPC | step `spc_characteristic_id` → auto `SPCMeasurement` row (`operation_id`, serial, measured_by) on every **conforming** record — a supersede inserts a NEW point (SPC sees the time series); refused OOT values never land; a since-deleted characteristic degrades to an audit note, never fails the record | `models/spc.py`, `POST /spc/measurements` | ✅ `_feed_spc_measurement` |
+| Gauge calibration | `requires_gauge` steps validate `Equipment` calibration currency at capture (scan/type `equipment_code`; checked BEFORE tolerance; fail-closed — no due date fails; 409 `GAUGE_OUT_OF_CAL`); gauge identity stored on the record and echoed as `gauge` | `models/calibration.py` | ✅ `_validate_gauge` |
+| NCR + hold | OOT → one-tap NCR (`IN_PROCESS`, pre-filled spec/actual/required) + QUALITY_HOLD blocker with `ncr_id` FK, op ON_HOLD, open time entries closed | `models/quality.py`, `work_order_blockers` | ✅ `create_quality_hold` (`POST /shop-floor/operations/{id}/steps/{step_id}/quality-hold`) |
+| Operator quals | `qualification_snapshot` on every record (warn-and-record; unqualified exceptions echoed onto the audit row) | `operator_qualification_service.py` | ✅ `build_qualification_snapshot` |
+| FAI | measurement records pre-fill `FAICharacteristic.actual_value`/`measuring_device` for AS9102 (label-match heuristic; never overwrites, never sets `is_conforming`; ambiguous/contradicting specs reported `unmatched`) | `FirstArticleInspection` models | ✅ `prefill_fai_from_step_records` (`POST /quality/fai/{fai_id}/prefill-from-steps`) |
+| Audit | every create/status-change/supersede through `AuditService` → hash-chained log | `services/audit_service.py` | ✅ shipped since PR 1/3 |
 
 ## Compliance checklist (for compliance-auditor review)
 
@@ -172,8 +174,9 @@ Evidence attachments: `attachment_document_id` must reference a `QUALITY_RECORD`
 - Realtime step-progress pushes to wallboard/dashboard (`broadcast_to_company` pattern exists; add once adoption proves demand)
 - Reusable sheet *sections* / includes, conditional steps, and per-type approval workflows
 - AI-assisted sheet drafting from drawing PDFs (natural `run_llm_task` extension; pairs with the AI-ballooning gap-analysis candidate)
-- Authoring guard: measurement `decimals` must be fine enough to resolve the lsl/usl band (PR 3 audit note — coarse rounding can pass an out-of-band measurement and store only the rounded value)
+- ~~Authoring guard: measurement `decimals` must be fine enough to resolve the lsl/usl band~~ **Closed in PR 4** — `_validate_step_definition` rejects a `decimals` too coarse to resolve the band (requires 10^−decimals ≤ usl−lsl)
 - Upload hardening: magic-byte sniffing + streaming size checks on evidence uploads (current posture matches `/documents/upload` — client-declared MIME, buffered read)
-- `serial_numbers` not settable at WO creation (create schema ignores it), so serialized capture isn't reachable end-to-end from the office UI yet — PR 4 candidate alongside the FAI pre-fill
-- PR 3 code-review follow-ups (verdict "ready", none blocking): compute `resolve_absolute_operation_quantity` once per completion (both twins — closes a theoretical TOCTOU and saves a query); cache the uploaded `document_id` in KioskStepsPanel so a failed record-create retry doesn't mint duplicate evidence Documents; extract the 4x-duplicated document-number generator into one helper (+ shared `-9999`/month rollover quirk); re-intersect the OOT refusal strip's serials with live `missing_serials`; point `coc_service._parse_serial_numbers` at the new shared serial parser
-- PR 3 re-audit notes deferred to PR 4: (a) `_copy_slot_completion_evidence` should skip step-gated target ops for full parity (narrow: regenerated op rows sharing a progress key); (b) office `complete_operation` should 404 on a soft-deleted parent WO like the shop-floor twin instead of `work_order and ...`-guarding the gates; (c) single-operator kiosk step records land as `source=desktop` (server derives source from credential; that kiosk uses a normal session) — decide whether to accept or add a server-verified hint; (d) evidence provenance posture is deliberately "QUALITY_RECORD on this WO", not "minted by the step endpoint" — tightening would need a step-linkage column on Document
+- ~~`serial_numbers` not settable at WO creation~~ **Closed in PR 4** — `WorkOrderCreate.serial_numbers` (validated: unique, non-empty, ≤100 chars, count == `quantity_ordered`) stored to the existing JSON-in-Text column, plus a one-per-line serials field on WorkOrderNew with mirrored client-side validation; serialized capture is now reachable end-to-end from the office UI
+- PR 3 code-review follow-ups (verdict "ready", none blocking) — **closed in PR 4:** compute `resolve_absolute_operation_quantity` once per completion (both twins — TOCTOU closed, duplicate evidence query gone); extract the 4x-duplicated document-number generator into one helper (`services/document_numbering.py`, advisory-locked, shared rollover quirk); point `coc_service._parse_serial_numbers` at the shared serial parser (`process_sheet_service.parse_serial_numbers`). **Still open:** cache the uploaded `document_id` in KioskStepsPanel so a failed record-create retry doesn't mint duplicate evidence Documents; re-intersect the OOT refusal strip's serials with live `missing_serials`
+- PR 3 re-audit notes deferred to PR 4: (a) **closed** — `_copy_slot_completion_evidence` now skips step-gated target ops (regenerated op rows sharing a progress key); (b) **closed** — office `complete_operation` 404s on a soft-deleted/missing parent WO like the shop-floor twin; (c) **closed** — step-record `source` now follows TimeEntry's client-hint trust model (the single-operator kiosk sends `source="kiosk"` like clock-in; badge-minted kiosk tokens stay server-authoritative and always record `kiosk`); (d) **stays as designed** — evidence provenance remains "QUALITY_RECORD on this WO", not "minted by the step endpoint" (tightening would need a step-linkage column on Document)
+- `docs/API.md` reference entries for the PR 3/4 shop-floor and quality endpoints (steps view / record / supersede / attachment, quality-hold, FAI pre-fill) — tracked as a separate docs follow-up

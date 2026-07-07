@@ -37,6 +37,7 @@ import KioskCrewJobCard from '../components/kiosk/KioskCrewJobCard';
 import KioskQuantityScreen from '../components/kiosk/KioskQuantityScreen';
 import KioskReasonGrid from '../components/kiosk/KioskReasonGrid';
 import KioskCompleteConfirmModal from '../components/kiosk/KioskCompleteConfirmModal';
+import KioskNcrFiledScreen from '../components/kiosk/KioskNcrFiledScreen';
 import KioskStepsPanel, { StepsTransport } from '../components/kiosk/KioskStepsPanel';
 import { useBadgeCapture } from '../components/kiosk/useBadgeCapture';
 import LaserNestOperatorPanel from '../components/laser/LaserNestOperatorPanel';
@@ -57,7 +58,7 @@ import {
   stepsIncompleteMessage,
 } from '../utils/processSheetErrors';
 import type { KioskStationSummary } from '../types/kioskStation';
-import type { MissingStepInfo } from '../types/processSheet';
+import type { MissingStepInfo, QualityHoldResult } from '../types/processSheet';
 
 const POLL_INTERVAL_MS = 10_000;
 const PIN_MIN = 4;
@@ -103,7 +104,10 @@ type CrewView =
   // Process steps: a badge scan gates entry so every record is attributed to
   // the badge-identified operator (5-minute token; a 401 mid-flow re-scans).
   | { name: 'stepsSign'; operationId: number; missing?: MissingStepInfo[] | null }
-  | { name: 'steps'; operationId: number; operator: OperatorSession; missing?: MissingStepInfo[] | null };
+  | { name: 'steps'; operationId: number; operator: OperatorSession; missing?: MissingStepInfo[] | null }
+  // One-tap OOT hold succeeded: NO operationId on purpose — the held op leaves
+  // the queue and the ghost-guard must not yank the NCR number off the screen.
+  | { name: 'ncrFiled'; result: QualityHoldResult; jobLabel: string };
 
 interface KioskToast {
   id: number;
@@ -131,6 +135,10 @@ function crewStepsTransport(operatorToken: string): StepsTransport {
       kioskClient.supersedeOperationStepRecord(operatorToken, operationId, stepId, recordId, data),
     uploadAttachment: (operationId, stepId, file) =>
       kioskClient.uploadOperationStepAttachment(operatorToken, operationId, stepId, file),
+    // No `source` hint anywhere on this transport: the badge-minted kiosk
+    // token is authoritative — the server records "kiosk" regardless.
+    qualityHold: (operationId, stepId, data) =>
+      kioskClient.raiseStepQualityHold(operatorToken, operationId, stepId, data),
   };
 }
 
@@ -1174,6 +1182,22 @@ export default function CrewStationKiosk() {
               setBadgeError(message);
               setView({ name: 'stepsSign', operationId: view.operationId });
             }}
+            onQualityHeld={(result) => {
+              // The held op leaves the queue on the next refresh, so hand the
+              // NCR number to a queue-independent view BEFORE refreshing.
+              setView({ name: 'ncrFiled', result, jobLabel: crewJobLabel(viewItem) });
+              void bumpAndRefresh();
+            }}
+          />
+        )}
+
+        {/* NCR FILED — one-tap OOT hold confirmation; Done follows the HOLD exit (board) */}
+        {view.name === 'ncrFiled' && (
+          <KioskNcrFiledScreen
+            result={view.result}
+            jobLabel={view.jobLabel}
+            doneLabel="Back to board"
+            onDone={resetToBoard}
           />
         )}
 

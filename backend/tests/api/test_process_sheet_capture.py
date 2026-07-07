@@ -535,7 +535,9 @@ class TestStepRecordCapture:
         body = response.json()
         assert body["value_numeric"] == 1.004  # rounded to config decimals=3
         assert body["is_conforming"] is True
-        assert body["source"] == "desktop"  # normal access token, not kiosk-scoped
+        # PR 4 source trust model (mirrors clock-in): no client hint -> NULL, never
+        # guessed; only a kiosk-scoped credential forces a channel.
+        assert body["source"] is None
         assert body["recorded_by"] == user.id
         assert body["superseded_by_id"] is None
 

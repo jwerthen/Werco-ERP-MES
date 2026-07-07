@@ -682,7 +682,10 @@ def reconcile_work_orders_from_completion_evidence(
         # skipping the whole pair here closes that op-level hole. Read-safe.
         if work_order.status in TERMINAL_WO_STATUSES:
             continue
-        changed = _copy_slot_completion_evidence(work_order, transitions, entry_ids_by_operation) or changed
+        changed = (
+            _copy_slot_completion_evidence(work_order, transitions, entry_ids_by_operation, step_gated_operation_ids)
+            or changed
+        )
         changed = _sync_work_order_status_from_operations(work_order, transitions, entry_ids_by_operation) or changed
 
     return changed
@@ -799,8 +802,19 @@ def _copy_slot_completion_evidence(
     work_order: WorkOrder,
     transitions: Optional[list[StatusTransition]] = None,
     entry_ids_by_operation: Optional[dict[int, list[int]]] = None,
+    step_gated_operation_ids: Optional[set] = None,
 ) -> bool:
+    """Copy completion evidence across regenerated operation rows sharing a progress key.
+
+    PR 4 (re-audit note a): a TARGET operation whose required process-sheet steps lack
+    conforming records (``step_gated_operation_ids``) is SKIPPED entirely — copying a
+    sibling row's completion onto it would flip it COMPLETE (or stamp
+    ``actual_end``/``completed_by``, which reads as completion evidence on the next
+    pass) around the same gate every /complete path enforces. The gated row keeps its
+    own quantities; only the evidence copy is withheld.
+    """
     changed = False
+    gated_ids = step_gated_operation_ids or set()
     operations_by_key: dict[tuple, list[WorkOrderOperation]] = {}
     for operation in work_order.operations or []:
         operations_by_key.setdefault(_operation_progress_key(operation), []).append(operation)
@@ -811,6 +825,8 @@ def _copy_slot_completion_evidence(
             continue
 
         for operation in slot_operations:
+            if operation.id in gated_ids:
+                continue
             target_qty = operation_target_quantity(operation, work_order)
             if target_qty > 0 and float(operation.quantity_complete or 0) < target_qty:
                 operation.quantity_complete = target_qty

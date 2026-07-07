@@ -26,6 +26,8 @@ const RECORD_MEASURE = {
   recorded_at: '2026-07-02T15:30:00Z',
   source: 'kiosk',
   equipment_id: null,
+  gauge: null,
+  qualification_snapshot: null,
   attachment_document_id: null,
   superseded_by_id: null,
   supersede_reason: null,
@@ -119,6 +121,39 @@ describe('OperationStepsPanel (desktop read-only records panel)', () => {
     // Read-only: office staff see evidence, they don't capture or correct it.
     expect(screen.queryByRole('button', { name: /record/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /correct/i })).not.toBeInTheDocument();
+  });
+
+  it('shows the gauge identity and a warn-and-record qualification marker on trail lines (PR 4)', async () => {
+    const flaggedRecord = {
+      ...RECORD_MEASURE,
+      id: 903,
+      gauge: { equipment_id: 5, equipment_code: 'MIC-042', name: '0-1 in micrometer' },
+      qualification_snapshot: {
+        evaluated_at: '2026-07-02T15:30:00Z',
+        user_id: 11,
+        work_center_id: 7,
+        qualified: false,
+        exceptions: [{ message: 'Missing certification: Torque tools L2' }],
+      },
+    };
+    mockedApi.getOperationSteps.mockResolvedValue({
+      ...VIEW,
+      steps: [{ ...VIEW.steps[0], records: [flaggedRecord] }],
+    });
+    render(<OperationStepsPanel operationId={31} />);
+    await screen.findByTestId('operation-steps-panel');
+
+    // Gauge identity straight off the record — no extra fetch.
+    expect(screen.getByTestId('record-gauge-903')).toHaveTextContent('Gauge 0-1 in micrometer (MIC-042)');
+
+    // qualified === false → small amber marker, exception messages on the tooltip.
+    const marker = screen.getByTestId('record-qualification-warning-903');
+    expect(marker).toHaveTextContent('Qual');
+    expect(marker).toHaveAttribute('title', 'Missing certification: Torque tools L2');
+
+    // A qualified (or unevaluable) record shows NO marker: the base fixture
+    // renders in the second step's trail without one.
+    expect(screen.queryByTestId('record-qualification-warning-902')).not.toBeInTheDocument();
   });
 
   it('shows an empty state when the operation has no snapshot steps', async () => {

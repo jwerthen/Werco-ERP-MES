@@ -1,8 +1,9 @@
+import json
 from datetime import date, datetime
 from decimal import Decimal
 from typing import List, Optional
 
-from pydantic import BaseModel, Field, field_serializer, model_validator
+from pydantic import BaseModel, Field, field_serializer, field_validator, model_validator
 
 from app.core.time_utils import to_utc_iso
 from app.core.validation import (
@@ -332,6 +333,14 @@ class WorkOrderBase(UTCModel):
 
 class WorkOrderCreate(WorkOrderBase):
     operations: List[WorkOrderOperationCreate] = Field(default_factory=list)
+    # PR 4 (process sheets): per-unit serial numbers for a serialized work order.
+    # Stored to the existing JSON-in-Text ``WorkOrder.serial_numbers`` column; the
+    # shop-floor capture endpoints then key step records per serial end-to-end.
+    serial_numbers: Optional[List[str]] = Field(
+        None,
+        description="Serial numbers for a serialized work order — unique, non-empty, exactly one per unit "
+        "(count must equal quantity_ordered). Omit for non-serialized work.",
+    )
 
     @model_validator(mode="after")
     def validate_dates(self) -> "WorkOrderCreate":
@@ -341,6 +350,25 @@ class WorkOrderCreate(WorkOrderBase):
         if self.due_date and self.due_date < today:
             raise ValueError("Due date cannot be in the past")
 
+        return self
+
+    @model_validator(mode="after")
+    def validate_serial_numbers(self) -> "WorkOrderCreate":
+        """Serialized WO invariants: trimmed, non-empty, unique, count == quantity_ordered."""
+        if self.serial_numbers is None:
+            return self
+        cleaned = [s.strip() if isinstance(s, str) else s for s in self.serial_numbers]
+        if any(not s for s in cleaned):
+            raise ValueError("serial_numbers entries must be non-empty strings")
+        if any(len(s) > 100 for s in cleaned):
+            raise ValueError("serial_numbers entries must be 100 characters or fewer")
+        if len(set(cleaned)) != len(cleaned):
+            raise ValueError("serial_numbers must be unique")
+        if Decimal(len(cleaned)) != self.quantity_ordered:
+            raise ValueError(
+                f"serial_numbers count ({len(cleaned)}) must equal quantity_ordered ({self.quantity_ordered})"
+            )
+        self.serial_numbers = cleaned
         return self
 
 
@@ -403,6 +431,21 @@ class WorkOrderResponse(WorkOrderBase):
     created_at: datetime
     updated_at: datetime
     operations: List[WorkOrderOperationResponse] = Field(default_factory=list)
+    # PR 4: serials on a serialized WO (parsed from the JSON-in-Text column; None
+    # for non-serialized work). Read-only — set at creation via WorkOrderCreate.
+    serial_numbers: Optional[List[str]] = None
+
+    @field_validator("serial_numbers", mode="before")
+    @classmethod
+    def _parse_serial_numbers_json(cls, value):
+        """ORM hands the raw JSON Text column through; parse it defensively."""
+        if value is None or isinstance(value, list):
+            return value
+        try:
+            parsed = json.loads(value)
+        except (ValueError, TypeError):
+            return None
+        return parsed if isinstance(parsed, list) else None
 
     @field_serializer(
         "quantity_ordered",

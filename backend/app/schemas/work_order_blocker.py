@@ -18,6 +18,9 @@ class WorkOrderBlockerCreate(BaseModel):
     severity: WorkOrderBlockerSeverity = WorkOrderBlockerSeverity.MEDIUM
     title: Optional[str] = Field(None, max_length=255)
     note: Optional[str] = Field(None, max_length=2000)
+    # The NCR this blocker was raised with (QUALITY_HOLD one-tap, process sheets PR 4).
+    # Tenant-validated in the service.
+    ncr_id: Optional[int] = Field(None, gt=0)
     assigned_to: Optional[int] = Field(None, gt=0)
     put_operation_on_hold: bool = True
 
@@ -39,6 +42,7 @@ class WorkOrderBlockerResponse(UTCModel):
     work_order_id: int
     operation_id: Optional[int] = None
     material_part_id: Optional[int] = None
+    ncr_id: Optional[int] = None
     category: WorkOrderBlockerCategory
     severity: WorkOrderBlockerSeverity
     status: WorkOrderBlockerStatus

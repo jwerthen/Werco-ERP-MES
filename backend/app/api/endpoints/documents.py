@@ -16,6 +16,7 @@ from app.models.part import Part
 from app.models.purchasing import Vendor
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder
+from app.services.document_numbering import generate_document_number as generate_shared_document_number
 from app.services.storage_service import (
     delete_ref,
     get_storage,
@@ -69,23 +70,9 @@ def _content_disposition(file_name: Optional[str]) -> str:
 
 
 def generate_document_number(db: Session, doc_type: str) -> str:
-    prefix = doc_type[:3].upper()
-    today = datetime.now().strftime("%Y%m")
-
-    last_doc = (
-        db.query(Document)
-        .filter(Document.document_number.like(f"{prefix}-{today}-%"))
-        .order_by(Document.document_number.desc())
-        .first()
-    )
-
-    if last_doc:
-        last_num = int(last_doc.document_number.split("-")[-1])
-        new_num = last_num + 1
-    else:
-        new_num = 1
-
-    return f"{prefix}-{today}-{new_num:04d}"
+    """Delegates to the shared generator (PR 4 dedupe) — kept as a re-export because
+    callers (this router, laser_nest_service) import it from here."""
+    return generate_shared_document_number(db, doc_type)
 
 
 @router.get("/", response_model=List[DocumentResponse])

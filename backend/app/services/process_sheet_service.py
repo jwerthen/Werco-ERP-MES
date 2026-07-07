@@ -26,15 +26,17 @@ import math
 import os
 import uuid
 from copy import deepcopy
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from fastapi import HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload, selectinload
 
+from app.core.time_utils import to_utc_iso
 from app.db.locks import acquire_generator_lock
 from app.db.tenant_filter import tenant_query
-from app.models.calibration import Equipment
+from app.models.calibration import CalibrationStatus, Equipment
 from app.models.document import Document, DocumentType
 from app.models.process_sheet import (
     OperationStepRecord,
@@ -44,9 +46,17 @@ from app.models.process_sheet import (
     StepType,
     WOOperationStep,
 )
-from app.models.spc import SPCCharacteristic
+from app.models.quality import (
+    FAICharacteristic,
+    FirstArticleInspection,
+    NCRSource,
+    NonConformanceReport,
+)
+from app.models.spc import SPCCharacteristic, SPCMeasurement
+from app.models.time_entry import TimeEntry
 from app.models.user import User
-from app.models.work_order import WorkOrder, WorkOrderOperation
+from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation
+from app.models.work_order_blocker import WorkOrderBlockerCategory, WorkOrderBlockerSeverity
 from app.schemas.process_sheet import (
     OperationStepRecordCreate,
     OperationStepRecordSupersede,
@@ -54,9 +64,15 @@ from app.schemas.process_sheet import (
     ProcessSheetStepCreate,
     ProcessSheetStepUpdate,
     ProcessSheetUpdate,
+    QualityHoldRequest,
 )
+from app.schemas.work_order_blocker import WorkOrderBlockerCreate
 from app.services.audit_service import AuditService
+from app.services.document_numbering import generate_document_number
+from app.services.operational_event_service import OperationalEventService
+from app.services.operator_qualification_service import evaluate_operator_qualification
 from app.services.storage_service import get_storage, resolve_upload_dir, sanitize_ext
+from app.services.work_order_blocker_service import WorkOrderBlockerService
 
 SHEET_NUMBER_PREFIX = "PS-"
 
@@ -168,6 +184,27 @@ def _validate_step_definition(
             raise HTTPException(status_code=400, detail="MEASUREMENT config must satisfy lsl <= nominal <= usl")
         if not lsl < usl:
             raise HTTPException(status_code=400, detail="MEASUREMENT config must satisfy lsl < usl")
+        # PR 4 authoring guard (PR 3 audit note): capture rounds the measured value to
+        # ``decimals`` BEFORE the tolerance check, so a rounding step coarser than the
+        # tolerance band could pass an out-of-band measurement and store only the
+        # rounded value. Require the rounding resolution to resolve the band.
+        decimals = config.get("decimals")
+        if decimals is not None:
+            if isinstance(decimals, bool) or not isinstance(decimals, int) or decimals < 0:
+                raise HTTPException(
+                    status_code=400, detail="MEASUREMENT config 'decimals' must be a non-negative integer"
+                )
+            # Tiny epsilon so a band that EQUALS the resolution (spec: 10^-d <= usl-lsl)
+            # is not rejected on float-subtraction noise.
+            if 10**-decimals > (usl - lsl) + 1e-12:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"MEASUREMENT config 'decimals' ({decimals}) is too coarse to resolve the tolerance "
+                        f"band (usl - lsl = {usl - lsl:g}); rounding at 10^-{decimals} could hide an "
+                        "out-of-tolerance value"
+                    ),
+                )
     elif step_type == StepType.LIST.value:
         options = (config or {}).get("options")
         if not isinstance(options, list) or not options:
@@ -639,13 +676,13 @@ def snapshot_steps_for_work_order(
 # ---------- PR 3: shop-floor capture ----------
 
 
-def parse_work_order_serials(work_order: WorkOrder) -> List[str]:
-    """Parse ``WorkOrder.serial_numbers`` (JSON Text) into a list, guarding non-JSON values.
+def parse_serial_numbers(raw: Any) -> List[str]:
+    """Parse a serial-numbers JSON Text snapshot into a list, guarding non-JSON values.
 
-    Same defensive shape as ``coc_service._parse_serial_numbers``: a WO is "serialized"
-    exactly when this returns a non-empty list.
+    THE shared serial parser (PR 4 ledger): ``parse_work_order_serials`` below and
+    ``coc_service._parse_serial_numbers`` both delegate here so the "what counts as a
+    serialized snapshot" rule can never drift between capture and CoC generation.
     """
-    raw = work_order.serial_numbers
     if not raw:
         return []
     if isinstance(raw, list):
@@ -657,6 +694,11 @@ def parse_work_order_serials(work_order: WorkOrder) -> List[str]:
     if isinstance(parsed, list):
         return [str(s) for s in parsed]
     return []
+
+
+def parse_work_order_serials(work_order: WorkOrder) -> List[str]:
+    """Parse ``WorkOrder.serial_numbers`` — a WO is "serialized" exactly when non-empty."""
+    return parse_serial_numbers(work_order.serial_numbers)
 
 
 def get_wo_step_or_404(db: Session, company_id: int, operation_id: int, step_id: int) -> WOOperationStep:
@@ -685,6 +727,98 @@ def _round_measurement(value: float, config: Optional[Dict[str, Any]]) -> float:
     return value
 
 
+def _resolve_equipment(
+    db: Session, company_id: int, *, equipment_id: Optional[int], equipment_code: Optional[str]
+) -> Optional[Equipment]:
+    """Resolve the gauge reference on a capture payload (PR 4 addendum).
+
+    Kiosk operator tokens are path-fenced away from ``/equipment``, so the kiosk cannot
+    list gauges — operators scan/type the gauge's MARKED identifier instead. Exactly one
+    of ``equipment_id`` (int PK) or ``equipment_code`` (``Equipment.equipment_id``, the
+    unique human-readable/barcode identifier) may be supplied (both -> 400). Both forms
+    resolve tenant-scoped; an unknown code 404s naming the identifier.
+    """
+    if equipment_id is not None and equipment_code is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide either equipment_id or equipment_code for the gauge, not both",
+        )
+    if equipment_code is not None:
+        code = equipment_code.strip()
+        if not code:
+            raise HTTPException(status_code=400, detail="equipment_code must not be blank")
+        # Case-insensitive on purpose (code review): the kiosk field is scan-OR-TYPE
+        # and a typed code shouldn't fail on case. The column is globally unique, so
+        # a lowercase match cannot be ambiguous; the echo carries the CANONICAL
+        # stored code.
+        equipment = (
+            tenant_query(db, Equipment, company_id).filter(func.lower(Equipment.equipment_id) == code.lower()).first()
+        )
+        if not equipment:
+            raise HTTPException(status_code=404, detail=f"No gauge with identifier '{code}'")
+        return equipment
+    if equipment_id is not None:
+        equipment = tenant_query(db, Equipment, company_id).filter(Equipment.id == equipment_id).first()
+        if not equipment:
+            raise HTTPException(status_code=404, detail="Equipment not found")
+        return equipment
+    return None
+
+
+def equipment_ref(equipment: Optional[Equipment]) -> Optional[Dict[str, Any]]:
+    """The resolved-gauge echo for capture responses: {equipment_id, equipment_code, name}."""
+    if equipment is None:
+        return None
+    return {"equipment_id": equipment.id, "equipment_code": equipment.equipment_id, "name": equipment.name}
+
+
+def _validate_gauge(step: WOOperationStep, equipment: Optional[Equipment]) -> None:
+    """Gauge calibration validation for a step record (PR 4 enforcement).
+
+    Takes the already-RESOLVED gauge (``_resolve_equipment`` owns id/code resolution and
+    tenant scoping). ``requires_gauge`` MEASUREMENT steps: a gauge is MANDATORY (400)
+    and must be calibration-current — ``Equipment.status == ACTIVE`` AND a
+    ``next_calibration_date`` on or after today (the caller-implemented currency rule
+    from ``models/calibration.py``; a gauge with NO due date is not demonstrably
+    current, so it fails closed) — else **409 ``GAUGE_OUT_OF_CAL``** and NO record row.
+    Every other step keeps the PR 3 posture: an optional tenant-validated passthrough
+    (no calibration check).
+
+    Runs BEFORE the tolerance evaluation on purpose: a measurement taken with an
+    out-of-cal gauge is untrustworthy in both directions, so it must be refused before
+    it can either pass the gate or trigger the OOT/NCR path.
+    """
+    if step.requires_gauge and step.step_type == StepType.MEASUREMENT.value and equipment is None:
+        raise HTTPException(
+            status_code=400,
+            detail="This measurement step requires a calibrated gauge — equipment_id or equipment_code is required",
+        )
+    if equipment is None:
+        return
+    if step.requires_gauge and step.step_type == StepType.MEASUREMENT.value:
+        is_current = (
+            equipment.status == CalibrationStatus.ACTIVE
+            and equipment.next_calibration_date is not None
+            and equipment.next_calibration_date >= date.today()
+        )
+        if not is_current:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "GAUGE_OUT_OF_CAL",
+                    "detail": (
+                        f"Gauge '{equipment.name}' ({equipment.equipment_id}) is not calibration-current — "
+                        "use a current gauge or route this one to calibration"
+                    ),
+                    "equipment_id": equipment.id,
+                    "status": (equipment.status.value if hasattr(equipment.status, "value") else equipment.status),
+                    "next_calibration_date": (
+                        equipment.next_calibration_date.isoformat() if equipment.next_calibration_date else None
+                    ),
+                },
+            )
+
+
 def _reject_stray_values(step_type: str, provided: Dict[str, Any], allowed: Sequence[str]) -> None:
     stray = [field for field, value in provided.items() if value is not None and field not in allowed]
     if stray:
@@ -709,6 +843,7 @@ def build_step_record(
     attachment_document_id: Optional[int],
     recorded_by: int,
     source: Optional[str],
+    equipment_code: Optional[str] = None,
 ) -> OperationStepRecord:
     """Run the capture validation ladder and return the (unflushed) record row.
 
@@ -717,15 +852,21 @@ def build_step_record(
       1. INSTRUCTION steps take no records (400).
       2. serialized WO -> serial_number required and must be one of the WO's serials;
          non-serialized -> serial_number must be absent (400).
-      3. type-shaped value (exactly the fields the step type takes; 400 otherwise);
+      3. gauge (PR 4): the reference resolves from ``equipment_id`` OR ``equipment_code``
+         (the gauge's marked identifier — kiosk scan/type path; both -> 400, unknown
+         code -> 404). ``requires_gauge`` MEASUREMENT steps demand a MANDATORY,
+         calibration-current gauge — missing -> 400, stale/inactive -> 409
+         ``GAUGE_OUT_OF_CAL`` with NO row; other steps keep the optional
+         tenant-validated passthrough. Checked BEFORE tolerance on purpose (see
+         ``_validate_gauge``).
+      4. type-shaped value (exactly the fields the step type takes; 400 otherwise);
          MEASUREMENT values are rounded per config ``decimals`` before storing.
-      4. MEASUREMENT conformance from the SNAPSHOT lsl/usl — out-of-tolerance is
-         REFUSED with 409 ``OUT_OF_TOLERANCE`` and NO row (hold+NCR or a corrected
-         re-measurement are the only paths forward; the NCR one-tap lands in PR 4).
-         CHECKBOX conformance is the checkbox itself (``is_conforming = value_bool``):
-         a False record is honest evidence that never satisfies the completion gate.
-      5. ``equipment_id`` is an optional tenant-validated passthrough this PR
-         (calibration-currency enforcement is PR 4).
+      5. MEASUREMENT conformance from the SNAPSHOT lsl/usl — out-of-tolerance is
+         REFUSED with 409 ``OUT_OF_TOLERANCE`` and NO row (hold+NCR via the PR 4
+         quality-hold one-tap, or a corrected re-measurement, are the only paths
+         forward). CHECKBOX conformance is the checkbox itself
+         (``is_conforming = value_bool``): a False record is honest evidence that
+         never satisfies the completion gate.
     """
     if step.step_type == StepType.INSTRUCTION.value:
         raise HTTPException(status_code=400, detail="INSTRUCTION steps are display-only and take no records")
@@ -748,6 +889,9 @@ def build_step_record(
             status_code=400,
             detail="This work order is not serialized — serial_number must be omitted",
         )
+
+    equipment = _resolve_equipment(db, company_id, equipment_id=equipment_id, equipment_code=equipment_code)
+    _validate_gauge(step, equipment)
 
     provided = {
         "value_numeric": value_numeric,
@@ -828,11 +972,6 @@ def build_step_record(
     else:  # pragma: no cover — enum is closed; defensive against bad snapshot data
         raise HTTPException(status_code=400, detail=f"Unknown step type: {step.step_type}")
 
-    if equipment_id is not None:
-        equipment = tenant_query(db, Equipment, company_id).filter(Equipment.id == equipment_id).first()
-        if not equipment:
-            raise HTTPException(status_code=404, detail="Equipment not found")
-
     return OperationStepRecord(
         company_id=company_id,
         wo_operation_step_id=step.id,
@@ -845,13 +984,129 @@ def build_step_record(
         recorded_by=recorded_by,
         recorded_at=datetime.utcnow(),
         source=source,
-        equipment_id=equipment_id,
+        equipment_id=equipment.id if equipment else None,
         attachment_document_id=attachment_document_id,
     )
 
 
 def _record_identifier(work_order: WorkOrder, operation: WorkOrderOperation, step: WOOperationStep) -> str:
     return f"WO {work_order.work_order_number} {operation.operation_number or operation.sequence} step {step.sequence}"
+
+
+def build_qualification_snapshot(
+    db: Session, company_id: int, *, user_id: int, operation: WorkOrderOperation
+) -> Optional[Dict[str, Any]]:
+    """Warn-and-record operator-qualification snapshot for a step record (PR 4).
+
+    Evaluates ``evaluate_operator_qualification`` (read-only, tenant-scoped) for
+    (recorded_by, the operation's work center) and returns the JSON to freeze onto
+    ``operation_step_records.qualification_snapshot``. NEVER blocks — an unqualified
+    recorder still records; the snapshot just makes it discoverable at the record.
+    Called once per request (each request writes exactly one record, so one
+    evaluation per (user, work_center) per request). ``None`` when the operation has
+    no work center — there is no gate to evaluate against.
+    """
+    if operation.work_center_id is None:
+        return None
+    exceptions = evaluate_operator_qualification(
+        db, user_id=user_id, work_center_id=operation.work_center_id, company_id=company_id
+    )
+    return {
+        "evaluated_at": to_utc_iso(datetime.utcnow()),
+        "user_id": user_id,
+        "work_center_id": operation.work_center_id,
+        "qualified": not exceptions,
+        "exceptions": [exc.as_dict() for exc in exceptions],
+    }
+
+
+def _feed_spc_measurement(
+    db: Session,
+    company_id: int,
+    *,
+    work_order: WorkOrder,
+    operation: WorkOrderOperation,
+    step: WOOperationStep,
+    record: OperationStepRecord,
+) -> Tuple[Optional[SPCMeasurement], Optional[str]]:
+    """Auto-insert the SPC data point for a conforming MEASUREMENT record (PR 4).
+
+    Fires only for MEASUREMENT steps carrying ``spc_characteristic_id`` whose record is
+    conforming — refused OOT values never reach here (no row, no point), and a
+    superseding re-measurement inserts a NEW point (SPC sees reality; the chart is a
+    time series, not a corrected ledger). Flushes, never commits — the point lands in
+    the same transaction as the record and its audit row.
+
+    The characteristic was validated at AUTHORING time, but sheets outlive
+    characteristics: a missing/cross-tenant characteristic at RECORD time degrades to
+    (None, note) — the caller stamps the note into the audit ``extra_data`` — and never
+    fails the record.
+
+    Returns ``(measurement, None)`` on insert, ``(None, note)`` on a degrade,
+    ``(None, None)`` when the step simply doesn't feed SPC.
+    """
+    if step.step_type != StepType.MEASUREMENT.value or step.spc_characteristic_id is None:
+        return None, None
+    if record.is_conforming is not True or record.value_numeric is None:
+        return None, None
+
+    characteristic = (
+        tenant_query(db, SPCCharacteristic, company_id)
+        .filter(SPCCharacteristic.id == step.spc_characteristic_id)
+        .first()
+    )
+    if characteristic is None:
+        return None, (
+            f"SPC characteristic {step.spc_characteristic_id} no longer exists in this company — "
+            "measurement recorded without an SPC point"
+        )
+
+    # Each capture is an individual point: next subgroup for the characteristic,
+    # sample 1. Computed under no lock on purpose — a rare concurrent capture placing
+    # two points in one subgroup number is still valid chart data (no unique
+    # constraint), and the capture path must stay cheap.
+    last_subgroup = (
+        db.query(SPCMeasurement.subgroup_number)
+        .filter(
+            SPCMeasurement.characteristic_id == characteristic.id,
+            SPCMeasurement.company_id == company_id,
+        )
+        .order_by(SPCMeasurement.subgroup_number.desc())
+        .limit(1)
+        .scalar()
+    )
+    measurement = SPCMeasurement(
+        company_id=company_id,
+        characteristic_id=characteristic.id,
+        subgroup_number=int(last_subgroup or 0) + 1,
+        sample_number=1,
+        measurement_value=float(record.value_numeric),
+        measured_at=record.recorded_at,
+        measured_by=record.recorded_by,
+        work_order_id=work_order.id,
+        operation_id=operation.id,
+        lot_number=work_order.lot_number,
+        serial_number=record.serial_number,
+        notes=f"Auto-captured from process step '{step.label}' ({_record_identifier(work_order, operation, step)})",
+    )
+    db.add(measurement)
+    db.flush()
+    return measurement, None
+
+
+def _integration_extra_data(
+    spc_measurement: Optional[SPCMeasurement], spc_note: Optional[str], snapshot: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """PR 4 additions to the record-create audit ``extra_data`` (only what applies)."""
+    extra: Dict[str, Any] = {}
+    if spc_measurement is not None:
+        extra["spc_measurement_id"] = spc_measurement.id
+        extra["spc_characteristic_id"] = spc_measurement.characteristic_id
+    if spc_note:
+        extra["spc_note"] = spc_note
+    if snapshot is not None and not snapshot.get("qualified", True):
+        extra["qualification_exceptions"] = snapshot.get("exceptions", [])
+    return extra
 
 
 def create_step_record(
@@ -866,7 +1121,13 @@ def create_step_record(
     audit: AuditService,
     source: Optional[str],
 ) -> OperationStepRecord:
-    """Capture one step record (append-only objective evidence). Audited before commit."""
+    """Capture one step record (append-only objective evidence). Audited before commit.
+
+    PR 4 integrations, all inside this one transaction: the operator-qualification
+    snapshot (warn-and-record, never blocks) is frozen onto the record, and a
+    conforming MEASUREMENT with ``spc_characteristic_id`` feeds an ``SPCMeasurement``
+    point (a missing characteristic degrades to a note on the audit row).
+    """
     record = build_step_record(
         db,
         company_id,
@@ -878,12 +1139,17 @@ def create_step_record(
         value_bool=data.value_bool,
         value_text=data.value_text,
         equipment_id=data.equipment_id,
+        equipment_code=data.equipment_code,
         attachment_document_id=data.attachment_document_id,
         recorded_by=user.id,
         source=source,
     )
+    record.qualification_snapshot = build_qualification_snapshot(db, company_id, user_id=user.id, operation=operation)
     db.add(record)
     db.flush()
+    spc_measurement, spc_note = _feed_spc_measurement(
+        db, company_id, work_order=work_order, operation=operation, step=step, record=record
+    )
     audit.log_create(
         "operation_step_record",
         record.id,
@@ -897,11 +1163,13 @@ def create_step_record(
             "step_type": step.step_type,
             "serial_number": record.serial_number,
             "source": source,
+            **_integration_extra_data(spc_measurement, spc_note, record.qualification_snapshot),
         },
     )
     db.commit()
     db.refresh(record)
     record.recorded_by_name = _display_name(user)  # transient, read by the response schema
+    record.gauge = equipment_ref(record.equipment)  # transient echo of the resolved gauge (PR 4 addendum)
     return record
 
 
@@ -954,9 +1222,13 @@ def supersede_step_record(
         value_bool=data.value_bool,
         value_text=data.value_text,
         equipment_id=data.equipment_id,
+        equipment_code=data.equipment_code,
         attachment_document_id=data.attachment_document_id,
         recorded_by=user.id,
         source=source,
+    )
+    replacement.qualification_snapshot = build_qualification_snapshot(
+        db, company_id, user_id=user.id, operation=operation
     )
     db.add(replacement)
     db.flush()
@@ -964,6 +1236,12 @@ def supersede_step_record(
     # The ONE permitted mutation of an existing record: stamp the correction chain.
     old.superseded_by_id = replacement.id
     old.supersede_reason = data.reason
+
+    # PR 4 SPC feed: a superseding re-measurement inserts a NEW point — SPC sees
+    # reality (the chart is a time series); the correction chain lives on the records.
+    spc_measurement, spc_note = _feed_spc_measurement(
+        db, company_id, work_order=work_order, operation=operation, step=step, record=replacement
+    )
 
     identifier = _record_identifier(work_order, operation, step)
     audit.log_create(
@@ -980,6 +1258,7 @@ def supersede_step_record(
             "supersede_reason": data.reason,
             "serial_number": replacement.serial_number,
             "source": source,
+            **_integration_extra_data(spc_measurement, spc_note, replacement.qualification_snapshot),
         },
     )
     audit.log_update(
@@ -993,7 +1272,269 @@ def supersede_step_record(
     db.commit()
     db.refresh(replacement)
     replacement.recorded_by_name = _display_name(user)  # transient, read by the response schema
+    replacement.gauge = equipment_ref(replacement.equipment)  # transient echo of the resolved gauge (PR 4 addendum)
     return replacement
+
+
+# ---------- PR 4: OOT -> NCR one-tap quality hold ----------
+
+
+def _measurement_specification_text(step: WOOperationStep) -> Tuple[str, str]:
+    """(specification, required_value) strings for the NCR, from the SNAPSHOT config."""
+    config = step.config or {}
+    lsl, nominal, usl = config.get("lsl"), config.get("nominal"), config.get("usl")
+    unit = config.get("unit")
+    unit_suffix = f" {unit}" if unit else ""
+    required = f"{lsl} to {usl}{unit_suffix}"
+    specification = f"{step.label}: nominal {nominal}, LSL {lsl}, USL {usl}{unit_suffix}"
+    return specification[:255], required[:255]
+
+
+def create_quality_hold(
+    db: Session,
+    company_id: int,
+    *,
+    work_order: WorkOrder,
+    operation: WorkOrderOperation,
+    step: WOOperationStep,
+    data: QualityHoldRequest,
+    user: User,
+    audit: AuditService,
+    source: Optional[str],
+) -> Dict[str, Any]:
+    """One-tap escape hatch for an out-of-tolerance measurement (PR 4).
+
+    The OOT record was REFUSED (409, no row) — this is the sanctioned path forward.
+    Atomically (one transaction, audited before the terminal commit):
+
+      1. Creates an ``IN_PROCESS`` NCR pre-filled from the SNAPSHOT step config
+         (``specification``/``required_value`` from lsl/nominal/usl, ``actual_value``
+         = the refused measurement, part/lot/serial from the WO).
+      2. Files a QUALITY_HOLD ``WorkOrderBlocker`` carrying the new ``ncr_id`` FK via
+         the existing blocker service — the SAME hold pathway the kiosk hold button
+         uses — which flips the operation ON_HOLD and audits the status change.
+      3. Closes any open TimeEntries on the operation (mirrors ``PUT .../hold``): a
+         held op accrues no labor; channels are filled, never overwritten.
+
+    Only MEASUREMENT steps take a quality hold (400 otherwise), and the same
+    recordable-state / serial rules as the capture endpoint apply, so a hold can only
+    be filed where the refused measurement could have been recorded.
+
+    SF-1 (compliance audit): the value must genuinely be OUT of tolerance. It is
+    rounded per config ``decimals`` (exactly as capture would have) and then REQUIRED
+    to fall outside [lsl, usl] — an in-band value is a 409 ``VALUE_IN_TOLERANCE``
+    (record it as a normal step record instead), and a snapshot config without numeric
+    limits is a 400 (an unbounded measurement has no tolerance to violate). Otherwise
+    the NCR's auto-description would falsely assert "Recording was refused at capture"
+    and the same value could exist as BOTH a conforming record and an OOT NCR.
+
+    N-1: the gauge used may be supplied as ``equipment_id`` OR ``equipment_code``
+    (same resolution rules as capture: tenant-scoped, unknown code -> 404, both ->
+    400) but with NO calibration gating — the escape hatch must never trap the
+    operator behind a stale gauge. The resolved identity lands server-side in the NCR
+    description and the audit ``extra_data``.
+    """
+    # Service->endpoint edge kept function-local on purpose (laser_nest_service
+    # precedent): quality.py owns the canonical company-scoped NCR number generator
+    # and importing it beats a third copy drifting. TERMINAL_WO_STATUSES stays
+    # function-local for the same reason work_order_state_service imports THIS module
+    # function-locally — keep the pss<->wosss edge out of the module import graph.
+    from app.api.endpoints.quality import generate_ncr_number
+    from app.services.work_order_state_service import TERMINAL_WO_STATUSES
+
+    # Code-review fix (concurrent double-tap): re-fetch the operation under
+    # SELECT ... FOR UPDATE (same locking pattern as both /complete twins) and
+    # RE-VERIFY the state after the lock is granted. Two concurrent one-taps both
+    # pass the endpoint's unlocked pre-check; without this, the second files a
+    # duplicate NCR + blocker and audits a no-op on_hold -> on_hold transition.
+    # The second tap now blocks on the row lock, re-reads ON_HOLD, and is refused.
+    locked_operation = (
+        tenant_query(db, WorkOrderOperation, company_id)
+        .filter(WorkOrderOperation.id == operation.id)
+        .with_for_update()
+        .first()
+    )
+    if not locked_operation:
+        raise HTTPException(status_code=404, detail="Operation not found")
+    operation = locked_operation
+    if work_order.status in TERMINAL_WO_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail=f"cannot raise a quality hold: work order is {work_order.status.value}",
+        )
+    if operation.status != OperationStatus.IN_PROGRESS:
+        raise HTTPException(status_code=400, detail="Operation must be in progress to raise a quality hold")
+
+    if step.step_type != StepType.MEASUREMENT.value:
+        raise HTTPException(status_code=400, detail="Only MEASUREMENT steps can raise a quality hold")
+    if data.measured_value is None or math.isnan(data.measured_value) or math.isinf(data.measured_value):
+        raise HTTPException(status_code=400, detail="measured_value must be a valid number")
+
+    # SF-1: verify the claim. Round exactly as capture would, then require the value
+    # to fall OUTSIDE the snapshot tolerance band.
+    config = step.config or {}
+    lsl, usl = config.get("lsl"), config.get("usl")
+    if not (_is_number(lsl) and _is_number(usl)):
+        raise HTTPException(
+            status_code=400,
+            detail="This measurement step has no numeric tolerance limits — an unbounded "
+            "measurement cannot be out of tolerance, so it takes no quality hold",
+        )
+    measured_value = _round_measurement(float(data.measured_value), config)
+    if lsl <= measured_value <= usl:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "VALUE_IN_TOLERANCE",
+                "detail": (
+                    f"Measured {measured_value} is within tolerance ({lsl} to {usl}) — "
+                    "record it as a step record instead of raising a quality hold"
+                ),
+                "measured": measured_value,
+                "lsl": lsl,
+                "usl": usl,
+            },
+        )
+
+    # N-1: resolve the gauge reference (id/code, tenant-scoped) WITHOUT the
+    # calibration gate — never trap the OOT escape hatch behind a stale gauge.
+    equipment = _resolve_equipment(db, company_id, equipment_id=data.equipment_id, equipment_code=data.equipment_code)
+
+    serial_number = data.serial_number.strip() if isinstance(data.serial_number, str) else data.serial_number
+    serials = parse_work_order_serials(work_order)
+    if serials:
+        if not serial_number:
+            raise HTTPException(
+                status_code=400,
+                detail="This work order is serialized — serial_number is required for a quality hold",
+            )
+        if serial_number not in serials:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Serial '{serial_number}' is not one of this work order's serial numbers",
+            )
+    elif serial_number:
+        raise HTTPException(
+            status_code=400,
+            detail="This work order is not serialized — serial_number must be omitted",
+        )
+
+    identifier = _record_identifier(work_order, operation, step)
+    specification, required_value = _measurement_specification_text(step)
+
+    description = (
+        f"Out-of-tolerance measurement on process step '{step.label}' "
+        f"({identifier}): measured {measured_value}, required {required_value}. "
+        "Recording was refused at capture; part placed on quality hold."
+    )
+    if equipment is not None:
+        # N-1: server-resolved gauge identity — not client prose.
+        description += f"\nMeasured with gauge {equipment.equipment_id} — {equipment.name}."
+    if data.notes:
+        description += f"\n\nOperator notes: {data.notes}"
+
+    ncr = NonConformanceReport(
+        ncr_number=generate_ncr_number(db, company_id),
+        part_id=work_order.part_id,
+        work_order_id=work_order.id,
+        lot_number=work_order.lot_number,
+        serial_number=serial_number,
+        quantity_affected=1.0,
+        source=NCRSource.IN_PROCESS,
+        title=f"Out of tolerance: {step.label} ({identifier})"[:255],
+        description=description,
+        specification=specification,
+        actual_value=str(measured_value)[:255],
+        required_value=required_value,
+        detected_by=user.id,
+        detected_date=date.today(),
+    )
+    ncr.company_id = company_id
+    db.add(ncr)
+    db.flush()
+    audit.log_create(
+        "ncr",
+        ncr.id,
+        ncr.ncr_number,
+        new_values=ncr,
+        description=f"Auto-created NCR {ncr.ncr_number} from out-of-tolerance process step '{step.label}'",
+        extra_data={
+            "work_order_id": work_order.id,
+            "work_order_operation_id": operation.id,
+            "wo_operation_step_id": step.id,
+            "measured_value": measured_value,
+            "serial_number": serial_number,
+            "source": source,
+            # N-1: the server-resolved gauge identity (None when no gauge supplied).
+            "equipment_id": equipment.id if equipment else None,
+            "equipment_code": equipment.equipment_id if equipment else None,
+        },
+    )
+    OperationalEventService(db).emit(
+        company_id=company_id,
+        event_type="ncr_created",
+        source_module="shop_floor",
+        entity_type="ncr",
+        entity_id=ncr.id,
+        work_order_id=work_order.id,
+        operation_id=operation.id,
+        user_id=user.id,
+        severity="high",
+        event_payload={
+            "ncr_number": ncr.ncr_number,
+            "title": ncr.title,
+            "source": NCRSource.IN_PROCESS.value,
+            "step_label": step.label,
+            "measured_value": measured_value,
+        },
+    )
+
+    # The existing hold pathway: the blocker service flips the op ON_HOLD and audits
+    # both the blocker creation and the status change (same as the kiosk hold flow).
+    blocker = WorkOrderBlockerService(db).create_blocker(
+        company_id=company_id,
+        user=user,
+        work_order_id=work_order.id,
+        data=WorkOrderBlockerCreate(
+            operation_id=operation.id,
+            category=WorkOrderBlockerCategory.QUALITY_HOLD,
+            severity=WorkOrderBlockerSeverity.HIGH,
+            title=f"Quality hold: {step.label} out of tolerance ({ncr.ncr_number})"[:255],
+            note=data.notes,
+            ncr_id=ncr.id,
+            put_operation_on_hold=True,
+        ),
+        audit=audit,
+        source=source,
+    )
+
+    # Mirror PUT .../hold: a held operation accrues no labor — close open entries,
+    # filling (never overwriting) their adoption-telemetry channel.
+    now = datetime.utcnow()
+    open_entries = (
+        tenant_query(db, TimeEntry, company_id)
+        .filter(TimeEntry.operation_id == operation.id, TimeEntry.clock_out.is_(None))
+        .all()
+    )
+    for entry in open_entries:
+        entry.clock_out = now
+        if entry.clock_in:
+            entry.duration_hours = (now - entry.clock_in).total_seconds() / 3600.0
+        if source and entry.source is None:
+            entry.source = source
+
+    db.commit()
+    db.refresh(ncr)
+    db.refresh(blocker)
+    return {
+        "message": "Quality hold filed — NCR created and operation placed on hold",
+        "ncr_id": ncr.id,
+        "ncr_number": ncr.ncr_number,
+        "blocker_id": blocker.id,
+        "operation_id": operation.id,
+        "operation_status": (operation.status.value if hasattr(operation.status, "value") else operation.status),
+        "closed_time_entry_ids": [entry.id for entry in open_entries],
+    }
 
 
 # ---------- PR 3: completeness / gating / views ----------
@@ -1099,7 +1640,7 @@ def build_steps_view(
             OperationStepRecord.work_order_operation_id == operation.id,
             OperationStepRecord.superseded_by_id.is_(None),
         )
-        .options(joinedload(OperationStepRecord.recorder))
+        .options(joinedload(OperationStepRecord.recorder), joinedload(OperationStepRecord.equipment))
         .order_by(OperationStepRecord.recorded_at, OperationStepRecord.id)
         .all()
     )
@@ -1109,6 +1650,7 @@ def build_steps_view(
     records_by_step: Dict[int, List[OperationStepRecord]] = {}
     for record in records:
         record.recorded_by_name = _display_name(record.recorder)  # transient, read by the response schema
+        record.gauge = equipment_ref(record.equipment)  # transient resolved-gauge echo (PR 4 addendum)
         records_by_step.setdefault(record.wo_operation_step_id, []).append(record)
 
     step_payloads: List[Dict[str, Any]] = []
@@ -1218,31 +1760,6 @@ def gated_operation_ids(db: Session, operations: Sequence[WorkOrderOperation]) -
 # ---------- PR 3: PHOTO/FILE evidence upload ----------
 
 
-def _generate_document_number(db: Session, doc_type: str) -> str:
-    """Sequential document number under the global advisory lock (print_service precedent).
-
-    ``document_number`` is a globally-unique column and the scan is intentionally
-    unscoped, so the lock is global too — concurrent kiosk uploads can't compute the
-    same number and collide on the unique constraint.
-    """
-    acquire_generator_lock(db, "document_number")
-    prefix = doc_type[:3].upper()
-    today = datetime.now().strftime("%Y%m")
-    last_doc = (
-        db.query(Document)
-        .filter(Document.document_number.like(f"{prefix}-{today}-%"))
-        .order_by(Document.document_number.desc())
-        .first()
-    )
-    new_num = 1
-    if last_doc:
-        try:
-            new_num = int(last_doc.document_number.split("-")[-1]) + 1
-        except (ValueError, IndexError):
-            new_num = 1
-    return f"{prefix}-{today}-{new_num:04d}"
-
-
 def store_step_attachment(
     db: Session,
     company_id: int,
@@ -1288,7 +1805,7 @@ def store_step_attachment(
     file_path = storage.save(content, key=key)
 
     document = Document(
-        document_number=_generate_document_number(db, DocumentType.QUALITY_RECORD.value),
+        document_number=generate_document_number(db, DocumentType.QUALITY_RECORD.value),
         revision="A",
         title=f"Step evidence — {_record_identifier(work_order, operation, step)}",
         description=step.label,
@@ -1321,3 +1838,202 @@ def store_step_attachment(
     db.commit()
     db.refresh(document)
     return document
+
+
+# ---------- PR 4: FAI pre-fill from step records ----------
+
+
+def _parse_float(value: Any) -> Optional[float]:
+    """Best-effort float parse of the FAI characteristic's String spec columns."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    try:
+        return float(str(value).strip())
+    except ValueError:
+        return None
+
+
+def _fai_spec_mismatch(char: FAICharacteristic, config: Dict[str, Any]) -> Optional[str]:
+    """Reason the characteristic's nominal/tolerances CONTRADICT the step config, or None.
+
+    Comparison is best-effort by design (the FAI columns are free-text strings): a
+    blank or unparseable side is treated as not-comparable and does not block the
+    label match — only a parseable, materially different value refuses the pre-fill.
+    """
+    char_nominal = _parse_float(char.nominal)
+    config_nominal = config.get("nominal") if _is_number(config.get("nominal")) else None
+    if char_nominal is not None and config_nominal is not None and abs(char_nominal - config_nominal) > 1e-9:
+        return f"nominal mismatch (characteristic {char.nominal} vs step {config_nominal})"
+
+    lsl = config.get("lsl") if _is_number(config.get("lsl")) else None
+    usl = config.get("usl") if _is_number(config.get("usl")) else None
+    if char_nominal is not None:
+        tol_plus = _parse_float(char.tolerance_plus)
+        if tol_plus is not None and usl is not None and abs((char_nominal + abs(tol_plus)) - usl) > 1e-9:
+            return f"tolerance mismatch (characteristic USL {char_nominal + abs(tol_plus):g} vs step {usl})"
+        tol_minus = _parse_float(char.tolerance_minus)
+        if tol_minus is not None and lsl is not None and abs((char_nominal - abs(tol_minus)) - lsl) > 1e-9:
+            return f"tolerance mismatch (characteristic LSL {char_nominal - abs(tol_minus):g} vs step {lsl})"
+    return None
+
+
+def prefill_fai_from_step_records(
+    db: Session, company_id: int, *, fai_id: int, user: User, audit: AuditService
+) -> Dict[str, Any]:
+    """Pre-fill AS9102 FAI characteristics from the WO's conforming measurement records (PR 4).
+
+    For a FAI linked to a work order: each characteristic with no ``actual_value`` yet
+    is matched to a live (non-superseded) CONFORMING measurement step record by the v1
+    heuristic — characteristic description == step label (trimmed, case-insensitive) —
+    cross-checked against the snapshot config (a parseable nominal/tolerance that
+    CONTRADICTS the step config refuses the match). Matches copy the LATEST record's
+    value into ``actual_value`` and the gauge's name into ``measuring_device``.
+
+    Never guesses: ambiguous labels (two measurement steps sharing one label), spec
+    contradictions, already-recorded characteristics and label misses are all reported
+    in ``unmatched`` with a reason instead of being filled. When the FAI carries a
+    ``serial_number``, only that serial's records are considered. ``is_conforming`` is
+    NOT set here — the inspector still disposition each characteristic through the
+    existing FAI update endpoint. Audited; commits (owns its unit of work).
+    """
+    fai = (
+        tenant_query(db, FirstArticleInspection, company_id)
+        .options(selectinload(FirstArticleInspection.characteristics))
+        .filter(FirstArticleInspection.id == fai_id)
+        .first()
+    )
+    if not fai:
+        raise HTTPException(status_code=404, detail="FAI not found")
+    if fai.work_order_id is None:
+        raise HTTPException(status_code=400, detail="This FAI is not linked to a work order — nothing to pre-fill from")
+    work_order = (
+        tenant_query(db, WorkOrder, company_id)
+        .filter(WorkOrder.id == fai.work_order_id, WorkOrder.is_deleted == False)  # noqa: E712
+        .first()
+    )
+    if not work_order:
+        raise HTTPException(status_code=404, detail="Work order not found for this FAI")
+
+    operation_ids = [
+        row.id
+        for row in tenant_query(db, WorkOrderOperation, company_id)
+        .filter(WorkOrderOperation.work_order_id == work_order.id)
+        .all()
+    ]
+
+    rows: List[Tuple[OperationStepRecord, WOOperationStep]] = []
+    if operation_ids:
+        query = (
+            db.query(OperationStepRecord, WOOperationStep)
+            .join(WOOperationStep, OperationStepRecord.wo_operation_step_id == WOOperationStep.id)
+            .filter(
+                OperationStepRecord.company_id == company_id,
+                WOOperationStep.company_id == company_id,
+                OperationStepRecord.work_order_operation_id.in_(operation_ids),
+                OperationStepRecord.superseded_by_id.is_(None),
+                OperationStepRecord.is_conforming.is_(True),
+                WOOperationStep.step_type == StepType.MEASUREMENT.value,
+            )
+            .order_by(OperationStepRecord.recorded_at, OperationStepRecord.id)
+        )
+        if fai.serial_number:
+            query = query.filter(OperationStepRecord.serial_number == fai.serial_number)
+        rows = query.all()
+
+    # label -> {step_id -> (step, latest record)}; two DIFFERENT steps sharing a label
+    # make the label ambiguous (never guess which balloon a value belongs to).
+    by_label: Dict[str, Dict[int, Tuple[WOOperationStep, OperationStepRecord]]] = {}
+    for record, step in rows:
+        by_label.setdefault(step.label.strip().lower(), {})[step.id] = (step, record)
+
+    equipment_ids = {record.equipment_id for record, _ in rows if record.equipment_id}
+    equipment_names: Dict[int, str] = {}
+    if equipment_ids:
+        equipment_names = {
+            equipment.id: equipment.name
+            for equipment in tenant_query(db, Equipment, company_id).filter(Equipment.id.in_(equipment_ids)).all()
+        }
+
+    prefilled: List[Dict[str, Any]] = []
+    unmatched: List[Dict[str, Any]] = []
+    old_devices: Dict[str, Any] = {}  # SF-2: measuring_device audit pairs (chars we SET)
+    new_devices: Dict[str, Any] = {}
+    for char in sorted(fai.characteristics, key=lambda c: (c.char_number or 0, c.id)):
+
+        def _skip(reason: str) -> None:
+            unmatched.append({"char_number": char.char_number, "characteristic": char.characteristic, "reason": reason})
+
+        if char.actual_value is not None and str(char.actual_value).strip():
+            _skip("actual_value already recorded — not overwritten")
+            continue
+        candidates = by_label.get((char.characteristic or "").strip().lower())
+        if not candidates:
+            _skip("no conforming measurement step record with a matching label")
+            continue
+        if len(candidates) > 1:
+            _skip("ambiguous — multiple measurement steps share this label")
+            continue
+        step, record = next(iter(candidates.values()))
+        mismatch = _fai_spec_mismatch(char, step.config or {})
+        if mismatch:
+            _skip(mismatch)
+            continue
+
+        # ``.10g`` (not bare ``g``): the default 6 significant digits would silently
+        # truncate a recorded value like 1234.5678 on the AS9102 form.
+        char.actual_value = f"{record.value_numeric:.10g}"[:100]
+        # SF-2 (compliance audit): measuring_device is only WRITTEN when currently
+        # blank — an inspector-entered device is never overwritten by the pre-fill
+        # (mirrors the actual_value never-overwrite rule). ``device_preserved`` is the
+        # honest report: True when an existing device was kept.
+        gauge_name = equipment_names.get(record.equipment_id) if record.equipment_id else None
+        device_preserved = bool(char.measuring_device and str(char.measuring_device).strip())
+        if gauge_name and not device_preserved:
+            old_devices[str(char.char_number)] = char.measuring_device
+            char.measuring_device = gauge_name[:255]
+            new_devices[str(char.char_number)] = char.measuring_device
+        prefilled.append(
+            {
+                "char_number": char.char_number,
+                "characteristic": char.characteristic,
+                "actual_value": char.actual_value,
+                "measuring_device": char.measuring_device,
+                "device_preserved": device_preserved,
+                "wo_operation_step_id": step.id,
+                "record_id": record.id,
+                "serial_number": record.serial_number,
+            }
+        )
+
+    if prefilled:
+        old_values: Dict[str, Any] = {"actual_values": {str(e["char_number"]): None for e in prefilled}}
+        new_values: Dict[str, Any] = {"actual_values": {str(e["char_number"]): e["actual_value"] for e in prefilled}}
+        if new_devices:
+            # SF-2: device changes are part of the tamper-evident diff, not just prose.
+            old_values["measuring_devices"] = old_devices
+            new_values["measuring_devices"] = new_devices
+        audit.log_update(
+            "fai",
+            fai.id,
+            fai.fai_number,
+            old_values=old_values,
+            new_values=new_values,
+            description=(
+                f"Pre-filled {len(prefilled)} FAI characteristic(s) on {fai.fai_number} from process-sheet "
+                f"step records of WO {work_order.work_order_number}"
+            ),
+            extra_data={"work_order_id": work_order.id, "prefilled": prefilled, "unmatched": unmatched},
+        )
+    db.commit()
+
+    return {
+        "fai_id": fai.id,
+        "fai_number": fai.fai_number,
+        "work_order_id": work_order.id,
+        "prefilled": prefilled,
+        "unmatched": unmatched,
+        "prefilled_count": len(prefilled),
+        "unmatched_count": len(unmatched),
+    }
