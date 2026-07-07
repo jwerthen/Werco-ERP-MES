@@ -1,6 +1,6 @@
 # Process Sheets — Scope & Implementation Plan
 
-**Date:** 2026-07-04 · **Status:** PR 1 merged ([#81](https://github.com/jwerthen/Werco-ERP-MES/pull/81), 2026-07-06); PR 2 (engineering UI) in progress; PRs 3–4 not started
+**Date:** 2026-07-04 · **Status:** PR 1 merged ([#81](https://github.com/jwerthen/Werco-ERP-MES/pull/81)); PR 2 merged ([#82](https://github.com/jwerthen/Werco-ERP-MES/pull/82)); PR 3 (snapshot + capture + gating) implemented — in review; PR 4 (integrations) not started
 **Feature:** Typed, revision-controlled operation steps ("Process Sheets") authored in engineering, snapshotted onto work orders, and executed on the shop-floor kiosk with per-step data capture (measurements with tolerance enforcement, checkboxes, lists, photo/file evidence).
 
 ## Context
@@ -137,10 +137,25 @@ After the existing predecessor check, inside the existing `SELECT...FOR UPDATE` 
 
 Each phase lands independently shippable behind the natural gate (sheets are inert until attached; attached sheets are inert until snapshot code ships). Standard gates per CLAUDE.md: code-reviewer + compliance-auditor (data/auth surface) on every phase; test-engineer + documentation-engineer before done.
 
+### Completion-path postures (settled 2026-07-06, per PR 3 compliance audit)
+
+The required-steps gate covers **every** path that flips an operation COMPLETE, with one deliberate override:
+
+| Path | Posture |
+|---|---|
+| Shop-floor `POST /shop-floor/operations/{id}/complete` | Gated — 409 `STEPS_INCOMPLETE` |
+| Office `POST /work-orders/operations/{id}/complete` | Gated — identical 409 (parity tested both directions) |
+| Kiosk clock-out quantity rollup reaching target | Gated — the TimeEntry **always closes normally** (labor truth; G6-A never-trap precedent); the operation stays IN_PROGRESS at target and the response carries a `steps_incomplete` warning block |
+| Read-time evidence reconcile (`reconcile_work_orders_from_completion_evidence`) | Gated — quantities reconcile, COMPLETE flip withheld while required steps are missing |
+| WO-level `POST /work-orders/{id}/complete` (ADMIN/MANAGER/SUPERVISOR/QUALITY) | **Deliberate audited evidence-override** (jwerthen 2026-07-06): force-complete proceeds; the audit row records `steps_bypassed` count + details and the response carries a bypass summary. This is the sanctioned close-out for legacy/paper-evidenced/MRB-decided jobs |
+| Excel migration import | Paper-evidenced cutover: imported COMPLETE operations carry no step records **by design** — evidence for migration-era WOs lives in the paper system of record |
+
+Evidence attachments: `attachment_document_id` must reference a `QUALITY_RECORD` Document belonging to the operation's WO (exactly what the in-fence step-attachment endpoint produces) — anything else is 400. Kiosk tokens upload via `/shop-floor/.../attachment`; `/documents/upload` remains fenced off.
+
 ### Open decisions carried forward (surfaced in PR 1 review)
 
 - **PR 2 (product/UX) — SETTLED 2026-07-06:** the release dialog detects a still-released prior revision and shows a **pre-checked "Obsolete Rev X" option** — one click releases B and obsoletes A (sequenced calls, non-optimistic); unchecking allows a deliberate transition period with both released. Backend unchanged (jwerthen decision).
-- **PR 3 (snapshot semantics):** attach is validated at attach time only — an attached sheet can be obsoleted or soft-deleted before a WO is created from the routing. `create_routing_operations_for_work_order()` must define behavior for a non-RELEASED `process_sheet_id` at snapshot time: block WO creation, warn-and-snapshot, or skip. (Compliance-auditor flagged; do not let this land by accident.)
+- **PR 3 (snapshot semantics) — SETTLED 2026-07-06 (jwerthen):** at WO creation the snapshot **resolves the attached sheet's family (`sheet_number`) to its currently-RELEASED revision** — so releasing Rev B with obsolete-prior flows to future WOs without re-attaching routings; `wo_operation_steps.source_sheet_id/revision` records exactly what was snapshotted. If the family has **no released revision** (all obsolete, or soft-deleted), **WO creation is blocked with a 409** naming the operation and sheet (fix: release a revision or detach). Never snapshot obsolete content; never silently skip.
 
 ## How this stays ours
 
@@ -157,3 +172,8 @@ Each phase lands independently shippable behind the natural gate (sheets are ine
 - Realtime step-progress pushes to wallboard/dashboard (`broadcast_to_company` pattern exists; add once adoption proves demand)
 - Reusable sheet *sections* / includes, conditional steps, and per-type approval workflows
 - AI-assisted sheet drafting from drawing PDFs (natural `run_llm_task` extension; pairs with the AI-ballooning gap-analysis candidate)
+- Authoring guard: measurement `decimals` must be fine enough to resolve the lsl/usl band (PR 3 audit note — coarse rounding can pass an out-of-band measurement and store only the rounded value)
+- Upload hardening: magic-byte sniffing + streaming size checks on evidence uploads (current posture matches `/documents/upload` — client-declared MIME, buffered read)
+- `serial_numbers` not settable at WO creation (create schema ignores it), so serialized capture isn't reachable end-to-end from the office UI yet — PR 4 candidate alongside the FAI pre-fill
+- PR 3 code-review follow-ups (verdict "ready", none blocking): compute `resolve_absolute_operation_quantity` once per completion (both twins — closes a theoretical TOCTOU and saves a query); cache the uploaded `document_id` in KioskStepsPanel so a failed record-create retry doesn't mint duplicate evidence Documents; extract the 4x-duplicated document-number generator into one helper (+ shared `-9999`/month rollover quirk); re-intersect the OOT refusal strip's serials with live `missing_serials`; point `coc_service._parse_serial_numbers` at the new shared serial parser
+- PR 3 re-audit notes deferred to PR 4: (a) `_copy_slot_completion_evidence` should skip step-gated target ops for full parity (narrow: regenerated op rows sharing a progress key); (b) office `complete_operation` should 404 on a soft-deleted parent WO like the shop-floor twin instead of `work_order and ...`-guarding the gates; (c) single-operator kiosk step records land as `source=desktop` (server derives source from credential; that kiosk uses a normal session) — decide whether to accept or add a server-verified hint; (d) evidence provenance posture is deliberately "QUALITY_RECORD on this WO", not "minted by the step endpoint" — tightening would need a step-linkage column on Document

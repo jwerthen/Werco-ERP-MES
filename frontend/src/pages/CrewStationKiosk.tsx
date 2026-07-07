@@ -37,6 +37,7 @@ import KioskCrewJobCard from '../components/kiosk/KioskCrewJobCard';
 import KioskQuantityScreen from '../components/kiosk/KioskQuantityScreen';
 import KioskReasonGrid from '../components/kiosk/KioskReasonGrid';
 import KioskCompleteConfirmModal from '../components/kiosk/KioskCompleteConfirmModal';
+import KioskStepsPanel, { StepsTransport } from '../components/kiosk/KioskStepsPanel';
 import { useBadgeCapture } from '../components/kiosk/useBadgeCapture';
 import LaserNestOperatorPanel from '../components/laser/LaserNestOperatorPanel';
 import {
@@ -46,9 +47,17 @@ import {
   UNKNOWN_OPERATOR_LABEL,
   formatCrewTally,
   formatElapsed,
+  formatStepsChip,
   kioskErrorMessage,
 } from '../components/kiosk/kioskConstants';
+import {
+  clockedOutStepsMessage,
+  extractClockOutStepsIncomplete,
+  extractStepsIncomplete,
+  stepsIncompleteMessage,
+} from '../utils/processSheetErrors';
 import type { KioskStationSummary } from '../types/kioskStation';
+import type { MissingStepInfo } from '../types/processSheet';
 
 const POLL_INTERVAL_MS = 10_000;
 const PIN_MIN = 4;
@@ -90,7 +99,11 @@ type CrewView =
   | { name: 'completeQty'; operationId: number }
   | { name: 'completeConfirm'; operationId: number; good: number; scrap: number; reason: string | null }
   | { name: 'hold'; operationId: number }
-  | { name: 'operatorSheet'; operator: OperatorSession; openJobs: OperatorOpenJob[] };
+  | { name: 'operatorSheet'; operator: OperatorSession; openJobs: OperatorOpenJob[] }
+  // Process steps: a badge scan gates entry so every record is attributed to
+  // the badge-identified operator (5-minute token; a 401 mid-flow re-scans).
+  | { name: 'stepsSign'; operationId: number; missing?: MissingStepInfo[] | null }
+  | { name: 'steps'; operationId: number; operator: OperatorSession; missing?: MissingStepInfo[] | null };
 
 interface KioskToast {
   id: number;
@@ -102,6 +115,23 @@ let toastSeq = 0;
 
 function crewJobLabel(item: KioskCrewQueueItem): string {
   return `${item.work_order_number || '—'} · Op ${item.operation_number ?? '—'} ${item.operation_name || ''}`.trim();
+}
+
+/**
+ * Steps transport bound to a badge-minted OPERATOR token: the station token is
+ * honored only by the queue read + badge mint, so even the steps READ needs
+ * the operator credential — which is also what attributes every record.
+ */
+function crewStepsTransport(operatorToken: string): StepsTransport {
+  return {
+    fetchView: (operationId) => kioskClient.getOperationSteps(operatorToken, operationId),
+    createRecord: (operationId, stepId, data) =>
+      kioskClient.recordOperationStep(operatorToken, operationId, stepId, data),
+    supersedeRecord: (operationId, stepId, recordId, data) =>
+      kioskClient.supersedeOperationStepRecord(operatorToken, operationId, stepId, recordId, data),
+    uploadAttachment: (operationId, stepId, file) =>
+      kioskClient.uploadOperationStepAttachment(operatorToken, operationId, stepId, file),
+  };
 }
 
 export default function CrewStationKiosk() {
@@ -392,14 +422,34 @@ export default function CrewStationKiosk() {
       if (view.name !== 'leaveQty' || mutationsBlocked) return;
       setBusy(true);
       try {
-        await kioskClient.clockOut(view.operator.token, view.timeEntryId, {
+        const clockOutRes: unknown = await kioskClient.clockOut(view.operator.token, view.timeEntryId, {
           quantity_produced: good,
           quantity_scrapped: scrap,
           scrap_reason: scrap > 0 && scrapReason ? scrapReason : undefined,
           source: KIOSK_SOURCE,
         });
-        showToast('success', `${view.operator.user.full_name} clocked out`);
-        setView(view.operationId != null ? { name: 'job', operationId: view.operationId } : { name: 'board' });
+        // The clock-out succeeded but the server flagged missing required step
+        // records (the operation deliberately stays IN_PROGRESS). NOT an error —
+        // labor was recorded fine. Say so as info and take the just-identified
+        // operator straight into the steps view (their badge token is fresh).
+        const pendingSteps = extractClockOutStepsIncomplete(clockOutRes);
+        if (pendingSteps && view.operationId != null) {
+          showToast('info', clockedOutStepsMessage(pendingSteps));
+          setView({
+            name: 'steps',
+            operationId: view.operationId,
+            operator: view.operator,
+            missing: pendingSteps,
+          });
+        } else if (pendingSteps) {
+          // Clock-out from the operator sheet for a job outside this station's
+          // queue: no steps view to open here, but still say what's outstanding.
+          showToast('info', clockedOutStepsMessage(pendingSteps));
+          setView({ name: 'board' });
+        } else {
+          showToast('success', `${view.operator.user.full_name} clocked out`);
+          setView(view.operationId != null ? { name: 'job', operationId: view.operationId } : { name: 'board' });
+        }
         await bumpAndRefresh();
       } catch (err) {
         // Keep the quantity screen (and its entered quantities) on failure.
@@ -454,8 +504,9 @@ export default function CrewStationKiosk() {
       setBusy(true);
       setBadgeError(null);
       let produced = false;
+      let minted: Awaited<ReturnType<typeof kioskClient.mintBadgeToken>> | null = null;
       try {
-        const minted = await kioskClient.mintBadgeToken(badgeId);
+        minted = await kioskClient.mintBadgeToken(badgeId);
         if (good > 0 || scrap > 0) {
           await kioskClient.reportProduction(minted.access_token, item.operation_id, {
             quantity_complete_delta: good,
@@ -481,6 +532,26 @@ export default function CrewStationKiosk() {
         resetToBoard();
         await bumpAndRefresh();
       } catch (err) {
+        // STEPS_INCOMPLETE (409): required process steps lack conforming
+        // records — jump into the steps view (the badge that signed the
+        // completion attempt carries the recording identity) and render the
+        // missing steps inline, not just a toast.
+        const missing = extractStepsIncomplete(err);
+        if (missing && minted) {
+          const stepsMessage = stepsIncompleteMessage(missing);
+          showToast(
+            'error',
+            produced ? `Saved production, but completing failed: ${stepsMessage}` : stepsMessage
+          );
+          setView({
+            name: 'steps',
+            operationId: item.operation_id,
+            operator: { token: minted.access_token, user: minted.user },
+            missing,
+          });
+          await bumpAndRefresh();
+          return;
+        }
         const message = kioskErrorMessage(err, 'Could not complete. Try again.');
         if (produced) {
           // Two-step verb: the production report landed but completion was
@@ -501,6 +572,30 @@ export default function CrewStationKiosk() {
       }
     },
     [view, findItem, mutationsBlocked, showToast, bumpAndRefresh, resetToBoard]
+  );
+
+  /** STEPS — badge scan gates entry; records are made in the scanned operator's name. */
+  const handleStepsBadge = useCallback(
+    async (badgeId: string) => {
+      if (view.name !== 'stepsSign' || mutationsBlocked) return;
+      const { operationId, missing } = view;
+      setBusy(true);
+      setBadgeError(null);
+      try {
+        const minted = await kioskClient.mintBadgeToken(badgeId);
+        setView({
+          name: 'steps',
+          operationId,
+          operator: { token: minted.access_token, user: minted.user },
+          missing: missing ?? null,
+        });
+      } catch (err) {
+        setBadgeError(kioskErrorMessage(err, 'Could not read that badge. Try again.'));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [view, mutationsBlocked]
   );
 
   /** HOLD — reason first, then badge signature. */
@@ -825,6 +920,21 @@ export default function CrewStationKiosk() {
               >
                 Report production
               </button>
+              {Number(viewItem.steps_total || 0) > 0 && (
+                <button
+                  type="button"
+                  data-testid="crew-steps-verb"
+                  disabled={mutationsBlocked}
+                  aria-describedby={!online ? OFFLINE_HINT_ID : undefined}
+                  onClick={() => {
+                    setBadgeError(null);
+                    setView({ name: 'stepsSign', operationId: viewItem.operation_id });
+                  }}
+                  className="min-h-20 rounded border border-fd-cyan bg-fd-cyan/10 px-4 text-xl font-bold uppercase tracking-wide text-fd-cyan transition-colors hover:bg-fd-cyan/20 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {formatStepsChip(viewItem)}
+                </button>
+              )}
               <button
                 type="button"
                 disabled={mutationsBlocked}
@@ -1022,6 +1132,49 @@ export default function CrewStationKiosk() {
               </button>
             )}
           </section>
+        )}
+
+        {/* STEPS — badge scan gates entry (records carry the badge identity) */}
+        {view.name === 'stepsSign' && viewItem && (
+          <section aria-label="Open process steps" className="mx-auto w-full max-w-2xl">
+            <h2 className="text-3xl font-bold text-fd-ink">Scan badge to open steps</h2>
+            <p className="mt-1 font-mono text-lg text-fd-mute">{crewJobLabel(viewItem)}</p>
+            <p className="mt-3 text-lg text-fd-body">
+              Step records are made in your name — scan your badge first.
+            </p>
+            <BadgeScanPanel
+              busy={busy}
+              blocked={mutationsBlocked}
+              offlineHintId={!online ? OFFLINE_HINT_ID : undefined}
+              error={badgeError}
+              idPrefix="crew-steps"
+              onBadge={(id) => void handleStepsBadge(id)}
+              onCancel={() => setView({ name: 'job', operationId: view.operationId })}
+            />
+          </section>
+        )}
+
+        {/* STEPS — the shared panel bound to the badge-minted operator token */}
+        {view.name === 'steps' && viewItem && (
+          <KioskStepsPanel
+            key={view.operator.token}
+            operationId={view.operationId}
+            jobLabel={crewJobLabel(viewItem)}
+            transport={crewStepsTransport(view.operator.token)}
+            blocked={mutationsBlocked}
+            online={online}
+            offlineHintId={!online ? OFFLINE_HINT_ID : undefined}
+            recordingAs={view.operator.user.full_name}
+            missing={view.missing ?? null}
+            showToast={showToast}
+            onBack={() => setView({ name: 'job', operationId: view.operationId })}
+            onRecorded={bumpAndRefresh}
+            onBusyChange={setBusy}
+            onAuthExpired={(message) => {
+              setBadgeError(message);
+              setView({ name: 'stepsSign', operationId: view.operationId });
+            }}
+          />
         )}
 
         {/* BADGE-FIRST — typed/scanned from the board */}

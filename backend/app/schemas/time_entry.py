@@ -1,11 +1,22 @@
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
 from app.core.time_utils import to_utc_iso
 from app.models.time_entry import TimeEntrySource, TimeEntryType
 from app.schemas.work_order import QualityExceptionInfo
+
+
+class StepsIncompleteInfo(BaseModel):
+    """Process-sheet gate warning (PR 3): this clock-out brought the operation to its
+    target quantity, but required snapshot steps lack live conforming records, so the
+    operation was left IN_PROGRESS instead of auto-completing. ``missing`` carries the
+    same ``[{step_id, label, serials}]`` items as the complete endpoints' 409 payload;
+    complete the operation via /complete once the records exist."""
+
+    code: str = "STEPS_INCOMPLETE"
+    missing: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class TimeEntryBase(BaseModel):
@@ -116,6 +127,10 @@ class TimeEntryResponse(TimeEntryBase):
     # ``code`` values here are ``operator_not_skill_qualified`` /
     # ``operator_certification_missing_or_expired``; reuses QualityExceptionInfo's shape.
     qualification_exceptions: List[QualityExceptionInfo] = Field(default_factory=list)
+    # Process-sheet gate (PR 3): set when THIS clock-out reached the operation target
+    # but required steps lack records — the op stayed IN_PROGRESS (never trapped the
+    # entry; labor closed normally). Backward-compatible: null when not applicable.
+    steps_incomplete: Optional[StepsIncompleteInfo] = None
 
     class Config:
         from_attributes = True

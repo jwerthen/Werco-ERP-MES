@@ -92,6 +92,10 @@ import {
   KioskStationResponse,
 } from '../types/kioskStation';
 import {
+  OperationStepRecord,
+  OperationStepRecordInput,
+  OperationStepSupersedeInput,
+  OperationStepsView,
   ProcessSheet,
   ProcessSheetCreateInput,
   ProcessSheetListItem,
@@ -99,6 +103,7 @@ import {
   ProcessSheetStep,
   ProcessSheetStepInput,
   ProcessSheetUpdateInput,
+  StepAttachmentResult,
 } from '../types/processSheet';
 
 const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000/api/v1';
@@ -1504,6 +1509,54 @@ class ApiService {
 
   async deleteProcessSheetStep(sheetId: number, stepId: number): Promise<{ message: string }> {
     const response = await this.api.delete(`/process-sheets/${sheetId}/steps/${stepId}`);
+    return response.data;
+  }
+
+  // --- Process Sheets capture (shop-floor step endpoints) -------------------
+  // Mirrors the /shop-floor/operations/{id}/steps* endpoints. Records are
+  // append-only evidence: send exactly ONE type-shaped value field (plus
+  // serial_number on serialized WOs) and never `source` — the server derives
+  // the channel from the credential. Corrections supersede, never mutate.
+
+  async getOperationSteps(operationId: number): Promise<OperationStepsView> {
+    const response = await this.api.get(`/shop-floor/operations/${operationId}/steps`);
+    return response.data;
+  }
+
+  async recordOperationStep(
+    operationId: number,
+    stepId: number,
+    data: OperationStepRecordInput
+  ): Promise<OperationStepRecord> {
+    const response = await this.api.post(`/shop-floor/operations/${operationId}/steps/${stepId}/records`, data);
+    return response.data;
+  }
+
+  async supersedeOperationStepRecord(
+    operationId: number,
+    stepId: number,
+    recordId: number,
+    data: OperationStepSupersedeInput
+  ): Promise<OperationStepRecord> {
+    const response = await this.api.post(
+      `/shop-floor/operations/${operationId}/steps/${stepId}/records/${recordId}/supersede`,
+      data
+    );
+    return response.data;
+  }
+
+  /**
+   * PHOTO/FILE evidence upload — the in-fence step attachment endpoint, NEVER
+   * /documents/upload (kiosk-scoped tokens 403 there). Two-step contract:
+   * upload first, then create the record with the returned document_id as
+   * attachment_document_id.
+   */
+  async uploadOperationStepAttachment(operationId: number, stepId: number, file: File): Promise<StepAttachmentResult> {
+    const formData = new FormData();
+    formData.append('file', file);
+    const response = await this.api.post(`/shop-floor/operations/${operationId}/steps/${stepId}/attachment`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
     return response.data;
   }
 

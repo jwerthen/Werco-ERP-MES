@@ -1,5 +1,5 @@
 import React from 'react';
-import { PlusCircleIcon, CheckCircleIcon, PauseCircleIcon } from '@heroicons/react/24/solid';
+import { PlusCircleIcon, CheckCircleIcon, ClipboardDocumentCheckIcon, PauseCircleIcon } from '@heroicons/react/24/solid';
 import { ActiveJob } from '../../types';
 import LaserNestOperatorPanel from '../laser/LaserNestOperatorPanel';
 import { formatElapsed } from './kioskConstants';
@@ -8,6 +8,10 @@ interface KioskActiveJobBannerProps {
   job: ActiveJob;
   nowMs: number;
   busy: boolean;
+  /** Required process-step counts from the queue payload; button hidden at 0/0. */
+  stepsTotal?: number | null;
+  stepsRecorded?: number | null;
+  onSteps?: () => void;
   onReportProduction: () => void;
   onComplete: () => void;
   onHold: () => void;
@@ -17,7 +21,17 @@ interface KioskActiveJobBannerProps {
  * Pinned banner for the operator's active entry: running timer plus the three
  * big actions. Deliberately no supervisor verbs (no resume-others, no edits).
  */
-export default function KioskActiveJobBanner({ job, nowMs, busy, onReportProduction, onComplete, onHold }: KioskActiveJobBannerProps) {
+export default function KioskActiveJobBanner({
+  job,
+  nowMs,
+  busy,
+  stepsTotal,
+  stepsRecorded,
+  onSteps,
+  onReportProduction,
+  onComplete,
+  onHold,
+}: KioskActiveJobBannerProps) {
   return (
     <section
       aria-label="Active job"
@@ -54,6 +68,19 @@ export default function KioskActiveJobBanner({ job, nowMs, busy, onReportProduct
         <div className="mt-4">
           <LaserNestOperatorPanel nest={job.laser_nest} size="kiosk" />
         </div>
+      )}
+
+      {onSteps && Number(stepsTotal || 0) > 0 && (
+        <button
+          type="button"
+          data-testid="kiosk-active-steps"
+          disabled={busy}
+          onClick={onSteps}
+          className="mt-4 flex min-h-16 w-full items-center justify-center gap-3 rounded border border-fd-cyan bg-fd-cyan/10 px-4 text-xl font-bold uppercase tracking-wide text-fd-cyan transition-colors hover:bg-fd-cyan/20 disabled:opacity-40"
+        >
+          <ClipboardDocumentCheckIcon className="h-7 w-7 shrink-0" aria-hidden="true" />
+          Process steps · {Number(stepsRecorded || 0)}/{Number(stepsTotal || 0)} recorded
+        </button>
       )}
 
       <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-3">

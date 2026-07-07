@@ -2,6 +2,7 @@ import React from 'react';
 import { FireIcon, PaperClipIcon, UserIcon } from '@heroicons/react/24/outline';
 import { formatCentralDate, isDateBeforeTodayInCentral, isDateTodayInCentral } from '../../utils/centralTime';
 import { KioskCrewQueueItem, UNKNOWN_OPERATOR_LABEL, formatCrewTally, formatElapsed } from './kioskConstants';
+import { KioskStepsChip } from './KioskQueueCard';
 
 interface KioskCrewJobCardProps {
   item: KioskCrewQueueItem;
@@ -48,6 +49,7 @@ export default function KioskCrewJobCard({ item, nowMs, onSelect, disabled = fal
           >
             {inProgress ? 'In progress' : 'Ready'}
           </span>
+          <KioskStepsChip item={item} />
         </div>
         <div className="mt-2 truncate text-xl text-fd-body">
           <span className="font-mono font-semibold text-fd-ink">{item.part_number || '—'}</span>

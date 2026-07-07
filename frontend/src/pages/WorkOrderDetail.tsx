@@ -11,6 +11,13 @@ import LaserNestManualModal from '../components/laser/LaserNestManualModal';
 import LaserNestImportWizard from '../components/laser/LaserNestImportWizard';
 import LaserNestPdfPreview from '../components/laser/LaserNestPdfPreview';
 import { CompleteWorkModal, CompleteWorkSubmit } from '../components/workorders/CompleteWorkModal';
+import OperationStepsPanel from '../components/processSheets/OperationStepsPanel';
+import {
+  extractStepsBypassed,
+  extractStepsIncomplete,
+  stepsBypassedMessage,
+  stepsIncompleteMessage,
+} from '../utils/processSheetErrors';
 import { Breadcrumbs } from '../components/ui/Breadcrumbs';
 import { getBreadcrumbParent } from '../utils/routeMeta';
 import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
@@ -38,6 +45,7 @@ import {
   HashtagIcon,
   ClockIcon,
   ChartBarIcon,
+  ClipboardDocumentCheckIcon,
   UserGroupIcon,
   WrenchScrewdriverIcon,
 } from '@heroicons/react/24/outline';
@@ -237,6 +245,9 @@ export default function WorkOrderDetail() {
   const [deleting, setDeleting] = useState(false);
   const [completing, setCompleting] = useState(false);
   const [completingOpId, setCompletingOpId] = useState<number | null>(null);
+  // Which operation's read-only "Process steps" evidence panel is expanded
+  // (one at a time — it fetches the steps view on open).
+  const [stepsOpenOpId, setStepsOpenOpId] = useState<number | null>(null);
   // Drives the CompleteWorkModal: either the work-order-level completion or a
   // specific operation. `null` = closed. The modal collects qty complete + qty
   // scrapped + a scrap reason (required when scrap > 0) before we call the API.
@@ -606,12 +617,26 @@ export default function WorkOrderDetail() {
     if (completeTarget.kind === 'work_order') {
       setCompleting(true);
       try {
-        await api.completeWorkOrder(workOrder!.id, quantityComplete, quantityScrapped, scrapReason);
+        const completeRes: unknown = await api.completeWorkOrder(
+          workOrder!.id,
+          quantityComplete,
+          quantityScrapped,
+          scrapReason
+        );
         setCompleteTarget(null);
+        // Force-complete override summary: an authorized user completed the WO
+        // with required step records bypassed (deliberate, audited — the action
+        // SUCCEEDED by design, so this is an info notice, never an error).
+        const bypassed = extractStepsBypassed(completeRes);
+        if (bypassed) {
+          showToast('info', stepsBypassedMessage(bypassed));
+        }
         loadWorkOrder();
       } catch (err: any) {
         // Server-gated: surface the server's verbatim refusal, never a success.
-        showToast('error', err.response?.data?.detail || 'Failed to complete work order');
+        // (String guard: object details must never reach the toast renderer.)
+        const detail = err.response?.data?.detail;
+        showToast('error', typeof detail === 'string' && detail ? detail : 'Failed to complete work order');
       } finally {
         setCompleting(false);
       }
@@ -623,7 +648,19 @@ export default function WorkOrderDetail() {
         setCompleteTarget(null);
         loadWorkOrder();
       } catch (err: any) {
-        showToast('error', err.response?.data?.detail || 'Failed to complete operation');
+        // 409 STEPS_INCOMPLETE: required process-sheet steps lack conforming
+        // records. The detail is an OBJECT (not a string), so surface the
+        // missing labels/serials readably and open the operation's evidence
+        // panel so the gaps are visible inline.
+        const missing = extractStepsIncomplete(err);
+        if (missing) {
+          showToast('error', stepsIncompleteMessage(missing));
+          setCompleteTarget(null);
+          setStepsOpenOpId(operationId);
+        } else {
+          const detail = err.response?.data?.detail;
+          showToast('error', typeof detail === 'string' && detail ? detail : 'Failed to complete operation');
+        }
       } finally {
         setCompletingOpId(null);
       }
@@ -1627,8 +1664,8 @@ export default function WorkOrderDetail() {
                     };
                     
                     return (
-                      <tr 
-                        key={op.id} 
+                      <React.Fragment key={op.id}>
+                      <tr
                         className={`hover:bg-slate-800/50 ${isNewGroup ? 'border-t-2 border-slate-600' : ''}`}
                       >
                         <td className="px-4 py-3 font-medium text-sm">{op.sequence}</td>
@@ -1735,29 +1772,48 @@ export default function WorkOrderDetail() {
                           </span>
                         </td>
                         <td className="px-4 py-3 text-center">
-                          {op.status !== 'complete' && workOrder.status !== 'draft' && (
+                          <div className="flex items-center justify-center gap-3">
                             <button
-                              onClick={() => handleCompleteOperation(op)}
-                              disabled={completingOpId === op.id}
-                              className="text-green-600 hover:text-green-300 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-                              title="Complete Operation"
+                              type="button"
+                              onClick={() => setStepsOpenOpId(stepsOpenOpId === op.id ? null : op.id)}
+                              aria-expanded={stepsOpenOpId === op.id}
+                              className="text-fd-cyan hover:text-cyan-300 text-sm font-medium"
+                              title="Process steps evidence"
                             >
-                              {completingOpId === op.id ? (
-                                <>
-                                  <ArrowPathIcon className="h-5 w-5 inline animate-spin" /> Completing...
-                                </>
-                              ) : (
-                                <>
-                                  <CheckCircleIcon className="h-5 w-5 inline" /> Complete
-                                </>
-                              )}
+                              <ClipboardDocumentCheckIcon className="h-5 w-5 inline" /> Steps
                             </button>
-                          )}
-                          {op.status === 'complete' && (
-                            <span className="text-slate-500 text-sm">Done</span>
-                          )}
+                            {op.status !== 'complete' && workOrder.status !== 'draft' && (
+                              <button
+                                onClick={() => handleCompleteOperation(op)}
+                                disabled={completingOpId === op.id}
+                                className="text-green-600 hover:text-green-300 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                                title="Complete Operation"
+                              >
+                                {completingOpId === op.id ? (
+                                  <>
+                                    <ArrowPathIcon className="h-5 w-5 inline animate-spin" /> Completing...
+                                  </>
+                                ) : (
+                                  <>
+                                    <CheckCircleIcon className="h-5 w-5 inline" /> Complete
+                                  </>
+                                )}
+                              </button>
+                            )}
+                            {op.status === 'complete' && (
+                              <span className="text-slate-500 text-sm">Done</span>
+                            )}
+                          </div>
                         </td>
                       </tr>
+                      {stepsOpenOpId === op.id && (
+                        <tr className={isNewGroup ? '' : 'border-t-0'}>
+                          <td colSpan={isAdminView ? 12 : 8} className="bg-slate-900/40 p-0">
+                            <OperationStepsPanel operationId={op.id} />
+                          </td>
+                        </tr>
+                      )}
+                      </React.Fragment>
                     );
                   });
                 })()}

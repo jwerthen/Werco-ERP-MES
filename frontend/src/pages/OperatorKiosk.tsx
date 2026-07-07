@@ -22,8 +22,22 @@ import KioskActiveJobBanner from '../components/kiosk/KioskActiveJobBanner';
 import KioskQueueCard from '../components/kiosk/KioskQueueCard';
 import KioskQuantityScreen from '../components/kiosk/KioskQuantityScreen';
 import KioskReasonGrid from '../components/kiosk/KioskReasonGrid';
+import KioskStepsPanel, { StepsTransport } from '../components/kiosk/KioskStepsPanel';
 import LaserNestOperatorPanel from '../components/laser/LaserNestOperatorPanel';
-import { HOLD_REASONS, KIOSK_SOURCE, KioskQueueItem, kioskErrorMessage } from '../components/kiosk/kioskConstants';
+import {
+  HOLD_REASONS,
+  KIOSK_SOURCE,
+  KioskQueueItem,
+  formatStepsChip,
+  kioskErrorMessage,
+} from '../components/kiosk/kioskConstants';
+import {
+  clockedOutStepsMessage,
+  extractClockOutStepsIncomplete,
+  extractStepsIncomplete,
+  stepsIncompleteMessage,
+} from '../utils/processSheetErrors';
+import type { MissingStepInfo } from '../types/processSheet';
 
 const POLL_INTERVAL_MS = 15_000;
 
@@ -32,7 +46,17 @@ type KioskView =
   | { name: 'confirm'; item: KioskQueueItem }
   | { name: 'production'; job: ActiveJob }
   | { name: 'complete'; job: ActiveJob }
-  | { name: 'hold'; job: ActiveJob };
+  | { name: 'hold'; job: ActiveJob }
+  | { name: 'steps'; operationId: number; jobLabel: string; missing?: MissingStepInfo[] | null };
+
+/** The logged-in operator's session drives the main api client directly. */
+const OPERATOR_STEPS_TRANSPORT: StepsTransport = {
+  fetchView: (operationId) => api.getOperationSteps(operationId),
+  createRecord: (operationId, stepId, data) => api.recordOperationStep(operationId, stepId, data),
+  supersedeRecord: (operationId, stepId, recordId, data) =>
+    api.supersedeOperationStepRecord(operationId, stepId, recordId, data),
+  uploadAttachment: (operationId, stepId, file) => api.uploadOperationStepAttachment(operationId, stepId, file),
+};
 
 interface KioskToast {
   id: number;
@@ -211,13 +235,24 @@ export default function OperatorKiosk() {
         // Mirrors ShopFloorSimple's sequencing: close the operator's own labor
         // record first (quantities + scrap reason land on the TimeEntry), then
         // assert operation completion at the target quantity.
-        await api.clockOut(job.time_entry_id, {
+        const clockOutRes: unknown = await api.clockOut(job.time_entry_id, {
           quantity_produced: good,
           quantity_scrapped: scrap,
           scrap_reason: scrap > 0 && scrapReason ? scrapReason : undefined,
           source: KIOSK_SOURCE,
         });
         clockedOut = true;
+        // The clock-out itself succeeded but the server flagged missing required
+        // step records (the operation deliberately stays IN_PROGRESS). NOT an
+        // error — labor was recorded fine. Skip the completion call the server
+        // just told us it would refuse, say so as info, and open the steps view
+        // with the outstanding steps inline.
+        const pendingSteps = extractClockOutStepsIncomplete(clockOutRes);
+        if (pendingSteps && job.operation_id != null) {
+          showToast('info', clockedOutStepsMessage(pendingSteps));
+          setView({ name: 'steps', operationId: job.operation_id, jobLabel: jobLabel(job), missing: pendingSteps });
+          return;
+        }
         await api.completeOperation(job.operation_id, {
           quantity_complete: Number(job.quantity_ordered || 0),
           source: KIOSK_SOURCE,
@@ -225,13 +260,24 @@ export default function OperatorKiosk() {
         showToast('success', `Completed ${job.work_order_number}`);
         setView({ name: 'queue' });
       } catch (err) {
+        // STEPS_INCOMPLETE (409): required process steps lack conforming
+        // records — render the missing steps INLINE in the steps view (with
+        // jump-to-step), not just a toast.
+        const missing = extractStepsIncomplete(err);
+        const message = missing
+          ? stepsIncompleteMessage(missing)
+          : kioskErrorMessage(err, 'Could not complete. Try again.');
         // Two-step verb: if the clock-out landed but completion was refused, say so
         // honestly AND keep the backend's gating detail verbatim.
         if (clockedOut) {
-          showToast('error', `Clocked out, but completing failed: ${kioskErrorMessage(err, 'Could not complete. Try again.')}`);
-          setView({ name: 'queue' });
+          showToast('error', `Clocked out, but completing failed: ${message}`);
+          if (missing && job.operation_id != null) {
+            setView({ name: 'steps', operationId: job.operation_id, jobLabel: jobLabel(job), missing });
+          } else {
+            setView({ name: 'queue' });
+          }
         } else {
-          showToast('error', kioskErrorMessage(err, 'Could not complete. Try again.'));
+          showToast('error', message);
         }
       } finally {
         setBusy(false);
@@ -273,6 +319,10 @@ export default function OperatorKiosk() {
     () => workCenterName || workCenterCode || (workCenterId != null ? `Work center #${workCenterId}` : 'Station'),
     [workCenterName, workCenterCode, workCenterId]
   );
+
+  // The active job's queue row carries the server-derived steps chip counts.
+  const activeQueueItem =
+    activeJob?.operation_id != null ? queue.find((q) => q.operation_id === activeJob.operation_id) : undefined;
 
   if (workCenterId == null) {
     return (
@@ -393,6 +443,18 @@ export default function OperatorKiosk() {
                 job={activeJob}
                 nowMs={nowMs}
                 busy={mutationsBlocked}
+                stepsTotal={activeQueueItem?.steps_total}
+                stepsRecorded={activeQueueItem?.steps_recorded}
+                onSteps={
+                  activeJob.operation_id != null
+                    ? () =>
+                        setView({
+                          name: 'steps',
+                          operationId: activeJob.operation_id as number,
+                          jobLabel: jobLabel(activeJob),
+                        })
+                    : undefined
+                }
                 onReportProduction={() => setView({ name: 'production', job: activeJob })}
                 onComplete={() => setView({ name: 'complete', job: activeJob })}
                 onHold={() => {
@@ -444,6 +506,25 @@ export default function OperatorKiosk() {
                 </div>
               )}
             </div>
+            {Number(view.item.steps_total || 0) > 0 && (
+              <button
+                type="button"
+                data-testid="kiosk-confirm-steps"
+                disabled={busy}
+                onClick={() =>
+                  setView({
+                    name: 'steps',
+                    operationId: view.item.operation_id,
+                    jobLabel: `${view.item.work_order_number || '—'} · Op ${view.item.operation_number ?? '—'} ${
+                      view.item.operation_name || ''
+                    }`.trim(),
+                  })
+                }
+                className="mt-3 flex min-h-16 w-full items-center justify-center gap-3 rounded border border-fd-cyan bg-fd-cyan/10 px-4 text-xl font-bold uppercase tracking-wide text-fd-cyan transition-colors hover:bg-fd-cyan/20 disabled:opacity-40"
+              >
+                Review {formatStepsChip(view.item).toLowerCase()}
+              </button>
+            )}
             <div className="mt-5 grid grid-cols-2 gap-3">
               <button
                 type="button"
@@ -490,6 +571,22 @@ export default function OperatorKiosk() {
             busy={mutationsBlocked}
             onConfirm={(good, scrap, reason) => void handleComplete(view.job, good, scrap, reason)}
             onCancel={() => setView({ name: 'queue' })}
+          />
+        )}
+
+        {view.name === 'steps' && (
+          <KioskStepsPanel
+            operationId={view.operationId}
+            jobLabel={view.jobLabel}
+            transport={OPERATOR_STEPS_TRANSPORT}
+            blocked={mutationsBlocked}
+            online={online}
+            offlineHintId={!online ? OFFLINE_HINT_ID : undefined}
+            missing={view.missing ?? null}
+            showToast={showToast}
+            onBack={() => setView({ name: 'queue' })}
+            onRecorded={refresh}
+            onBusyChange={setBusy}
           />
         )}
 

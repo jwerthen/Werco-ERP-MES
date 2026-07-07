@@ -1,7 +1,28 @@
 import React from 'react';
 import { FireIcon, PaperClipIcon } from '@heroicons/react/24/outline';
 import { formatCentralDate, isDateBeforeTodayInCentral, isDateTodayInCentral } from '../../utils/centralTime';
-import { KioskQueueItem } from './kioskConstants';
+import { KioskQueueItem, formatStepsChip } from './kioskConstants';
+
+/**
+ * "Steps 2/6" — required process-step progress for the operation. Hidden when
+ * the snapshot has no gating steps (0/0). Green once every required step has
+ * a satisfying record, cyan while work remains.
+ */
+export function KioskStepsChip({ item }: { item: Pick<KioskQueueItem, 'steps_total' | 'steps_recorded'> }) {
+  const total = Number(item.steps_total || 0);
+  if (total <= 0) return null;
+  const recorded = Number(item.steps_recorded || 0);
+  return (
+    <span
+      data-testid="kiosk-steps-chip"
+      className={`rounded border px-2 py-1 font-mono text-xs font-semibold uppercase tracking-widest ${
+        recorded >= total ? 'border-fd-green/50 text-fd-green' : 'border-fd-cyan/50 text-fd-cyan'
+      }`}
+    >
+      {formatStepsChip(item)}
+    </span>
+  );
+}
 
 interface KioskQueueCardProps {
   item: KioskQueueItem;
@@ -42,6 +63,7 @@ export default function KioskQueueCard({ item, onSelect, disabled = false }: Kio
           >
             {inProgress ? 'In progress' : 'Ready'}
           </span>
+          <KioskStepsChip item={item} />
         </div>
         <div className="mt-2 truncate text-xl text-fd-body">
           <span className="font-mono font-semibold text-fd-ink">{item.part_number || '—'}</span>
