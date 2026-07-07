@@ -32,16 +32,15 @@ from __future__ import annotations
 import logging
 import os
 import uuid
-from datetime import datetime
 from typing import Optional, Tuple
 
 from sqlalchemy.orm import Session, joinedload
 
-from app.db.locks import acquire_generator_lock
 from app.models.document import Document, DocumentType
 from app.models.print_profile import CompanyPrintProfile
 from app.models.purchasing import POReceipt, PurchaseOrder, PurchaseOrderLine
 from app.services.audit_service import AuditService
+from app.services.document_numbering import generate_document_number
 from app.services.label_service import build_receiving_label_pdf
 from app.services.operational_event_service import OperationalEventService
 from app.services.proxybox_client import ProxyBoxClient
@@ -280,34 +279,8 @@ class PrintService:
         return document
 
     def _generate_document_number(self, doc_type: str) -> str:
-        """Sequential document number (mirrors ShippingService._generate_document_number).
-
-        ``document_number`` is a globally-unique column and this read-modify-write
-        scans it WITHOUT a tenant filter (the numbering space is intentionally global),
-        so the advisory lock is global too (``company_id=None``). This serializes
-        concurrent receipts -- which the auto-print path makes much more likely -- so
-        two prints in the same month can't compute the same number and collide on the
-        unique constraint. The lock is transaction-scoped and released on the caller's
-        commit.
-        """
-        acquire_generator_lock(self.db, "document_number")
-        prefix = doc_type[:3].upper()
-        today = datetime.now().strftime("%Y%m")
-        last_doc = (
-            self.db.query(Document)
-            .filter(Document.document_number.like(f"{prefix}-{today}-%"))
-            .order_by(Document.document_number.desc())
-            .first()
-        )
-        if last_doc:
-            try:
-                last_num = int(last_doc.document_number.split("-")[-1])
-            except (ValueError, IndexError):
-                last_num = 0
-            new_num = last_num + 1
-        else:
-            new_num = 1
-        return f"{prefix}-{today}-{new_num:04d}"
+        """Delegates to the shared global-lock generator (PR 4 dedupe of a 4x copy)."""
+        return generate_document_number(self.db, doc_type)
 
 
 # ---------------------------------------------------------------------------

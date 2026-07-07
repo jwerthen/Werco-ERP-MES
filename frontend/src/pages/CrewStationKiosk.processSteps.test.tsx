@@ -28,6 +28,7 @@ jest.mock('../services/kioskStationClient', () => {
     recordOperationStep: jest.fn(),
     supersedeOperationStepRecord: jest.fn(),
     uploadOperationStepAttachment: jest.fn(),
+    raiseStepQualityHold: jest.fn(),
   };
 });
 
@@ -95,6 +96,8 @@ const REC_SN1 = {
   recorded_at: '2026-07-02T15:30:00Z',
   source: 'kiosk',
   equipment_id: null,
+  gauge: null,
+  qualification_snapshot: null,
   attachment_document_id: null,
   superseded_by_id: null,
   supersede_reason: null,
@@ -315,6 +318,62 @@ describe('CrewStationKiosk process steps', () => {
     expect(mocked.getOperationSteps).toHaveBeenCalledWith('op-token-alice', 31);
     // The refusal's outstanding serial is pre-selected for recording.
     expect(screen.getByTestId('kiosk-serial-SN-002')).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('a one-tap OOT hold lands on the NCR screen; Done follows the HOLD exit (board + refreshed queue)', async () => {
+    // The crew transport sends NO source hint (the badge-minted token is
+    // authoritative) and the ncrFiled exit mirrors the HOLD verb: back to the
+    // board with the queue re-read (the held op leaves it server-side).
+    unlockedStation();
+    mocked.recordOperationStep.mockRejectedValue(
+      new KioskApiError(
+        409,
+        {
+          code: 'OUT_OF_TOLERANCE',
+          detail: 'Measured 25 is outside tolerance (10 to 20)',
+          measured: 25,
+          lsl: 10,
+          usl: 20,
+        },
+        'Measured 25 is outside tolerance (10 to 20)'
+      )
+    );
+    mocked.raiseStepQualityHold.mockResolvedValue({
+      message: 'Quality hold filed — NCR created and operation placed on hold',
+      ncr_id: 55,
+      ncr_number: 'NCR-000123',
+      blocker_id: 77,
+      operation_id: 31,
+      operation_status: 'on_hold',
+      closed_time_entry_ids: [501],
+    });
+    renderKiosk();
+    await openStepsAsAlice();
+    const queueCallsBefore = mocked.getQueue.mock.calls.length;
+
+    fireEvent.click(screen.getByTestId('kiosk-serial-SN-002'));
+    fireEvent.change(screen.getByLabelText(/measured value/i), { target: { value: '25' } });
+    fireEvent.click(screen.getByTestId('kiosk-record-201'));
+    await screen.findByTestId('kiosk-step-oot');
+
+    fireEvent.click(screen.getByTestId('kiosk-oot-hold-ncr'));
+    fireEvent.click(await screen.findByTestId('kiosk-oot-hold-submit'));
+
+    await waitFor(() =>
+      expect(mocked.raiseStepQualityHold).toHaveBeenCalledWith('op-token-alice', 31, 201, {
+        measured_value: 25,
+        serial_number: 'SN-002',
+      })
+    );
+
+    // Queue-independent NCR screen with the number readable, queue refreshed.
+    expect(await screen.findByTestId('kiosk-ncr-number')).toHaveTextContent('NCR-000123');
+    await waitFor(() => expect(mocked.getQueue.mock.calls.length).toBeGreaterThan(queueCallsBefore));
+
+    // Done follows the HOLD exit: the crew board, not the held job.
+    fireEvent.click(screen.getByTestId('kiosk-ncr-done'));
+    expect(await screen.findByRole('button', { name: /WO-2026-0142/i })).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: /job detail/i })).not.toBeInTheDocument();
   });
 
   it('a LEAVE clock-out flagged steps_incomplete is INFO (labor recorded fine): message + straight into steps as the leaver', async () => {

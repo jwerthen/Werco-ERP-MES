@@ -69,6 +69,7 @@ from app.services.carriers.types import (
     TrackingEvent,
     TrackingStatus,
 )
+from app.services.document_numbering import generate_document_number
 from app.services.operational_event_service import OperationalEventService
 from app.services.storage_service import get_storage, resolve_upload_dir
 
@@ -1045,23 +1046,8 @@ class ShippingService:
         return document
 
     def _generate_document_number(self, doc_type: str) -> str:
-        prefix = doc_type[:3].upper()
-        today = datetime.now().strftime("%Y%m")
-        last_doc = (
-            self.db.query(Document)
-            .filter(Document.document_number.like(f"{prefix}-{today}-%"))
-            .order_by(Document.document_number.desc())
-            .first()
-        )
-        if last_doc:
-            try:
-                last_num = int(last_doc.document_number.split("-")[-1])
-            except (ValueError, IndexError):
-                last_num = 0
-            new_num = last_num + 1
-        else:
-            new_num = 1
-        return f"{prefix}-{today}-{new_num:04d}"
+        """Delegates to the shared global-lock generator (PR 4 dedupe of a 4x copy)."""
+        return generate_document_number(self.db, doc_type)
 
     @staticmethod
     def _format_to_ext(label_format: Optional[str]) -> str:

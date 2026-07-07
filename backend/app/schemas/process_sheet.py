@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
 from app.models.process_sheet import ProcessSheetStatus, StepType
+from app.models.time_entry import TimeEntrySource
 from app.schemas.base import UTCModel
 
 
@@ -128,26 +129,67 @@ class ProcessSheetListResponse(UTCModel):
 class OperationStepRecordCreate(BaseModel):
     """Capture payload for one step record. Exactly the type-shaped value applies:
     MEASUREMENT -> value_numeric, CHECKBOX -> value_bool, LIST/VALUE -> value_text,
-    PHOTO/FILE -> attachment_document_id (validation ladder in process_sheet_service)."""
+    PHOTO/FILE -> attachment_document_id (validation ladder in process_sheet_service).
+
+    ``source`` (PR 4) is the optional adoption-telemetry channel hint, TimeEntry trust
+    model: the client-reported channel is stored verbatim (NULL when omitted — never
+    guessed), EXCEPT a kiosk-scoped badge token always records ``kiosk`` regardless of
+    the hint — the credential is authoritative where one exists."""
 
     serial_number: Optional[str] = Field(default=None, max_length=100)
     value_numeric: Optional[float] = None
     value_bool: Optional[bool] = None
     value_text: Optional[str] = Field(default=None, max_length=2000)
     equipment_id: Optional[int] = None
+    equipment_code: Optional[str] = Field(
+        default=None,
+        max_length=50,
+        description="The gauge's MARKED identifier (Equipment.equipment_id — the human-readable/barcode code). "
+        "Kiosk alternative to equipment_id (operator tokens cannot list /equipment): scan/type the code and "
+        "the server resolves it tenant-scoped. Provide equipment_id OR equipment_code, never both.",
+    )
     attachment_document_id: Optional[int] = None
+    source: Optional[TimeEntrySource] = Field(
+        None,
+        description="Adoption-telemetry channel of this record (kiosk | desktop | scanner | import | backfill). "
+        "Omit when unknown; a kiosk-scoped operator token always records 'kiosk' regardless of this hint.",
+    )
 
 
 class OperationStepRecordSupersede(BaseModel):
     """Correction payload: reason + the replacement value fields. No serial_number —
-    a correction always inherits the superseded record's serial slot."""
+    a correction always inherits the superseded record's serial slot. ``source`` follows
+    the same trust model as ``OperationStepRecordCreate``."""
 
     reason: str = Field(min_length=1, max_length=255)
     value_numeric: Optional[float] = None
     value_bool: Optional[bool] = None
     value_text: Optional[str] = Field(default=None, max_length=2000)
     equipment_id: Optional[int] = None
+    equipment_code: Optional[str] = Field(
+        default=None,
+        max_length=50,
+        description="The gauge's MARKED identifier (Equipment.equipment_id). Kiosk alternative to "
+        "equipment_id — provide one or the other, never both.",
+    )
     attachment_document_id: Optional[int] = None
+    source: Optional[TimeEntrySource] = Field(
+        None,
+        description="Adoption-telemetry channel of this correction (kiosk | desktop | scanner | import | "
+        "backfill). Omit when unknown; a kiosk-scoped operator token always records 'kiosk'.",
+    )
+
+
+class GaugeRef(BaseModel):
+    """Resolved gauge identity echoed on capture responses (PR 4 addendum).
+
+    ``equipment_id`` is the Equipment PK; ``equipment_code`` is the MARKED identifier
+    (``Equipment.equipment_id``) the kiosk scanned/typed — echoed back so the operator
+    can confirm what was resolved."""
+
+    equipment_id: int
+    equipment_code: str
+    name: str
 
 
 class OperationStepRecordResponse(UTCModel):
@@ -164,6 +206,13 @@ class OperationStepRecordResponse(UTCModel):
     recorded_at: datetime
     source: Optional[str] = None
     equipment_id: Optional[int] = None
+    # PR 4 addendum: the resolved gauge (transient attribute set by the service on
+    # create/supersede and on the steps view; null when no gauge was recorded).
+    gauge: Optional[GaugeRef] = None
+    # PR 4: warn-and-record operator-qualification result frozen at capture time
+    # ({evaluated_at, user_id, work_center_id, qualified, exceptions[]}; null when the
+    # operation has no work center to evaluate against).
+    qualification_snapshot: Optional[Dict[str, Any]] = None
     attachment_document_id: Optional[int] = None
     superseded_by_id: Optional[int] = None
     supersede_reason: Optional[str] = None
@@ -227,6 +276,47 @@ class StepAttachmentResponse(UTCModel):
     mime_type: Optional[str] = None
 
 
+class QualityHoldRequest(BaseModel):
+    """POST /shop-floor/operations/{id}/steps/{step_id}/quality-hold — OOT one-tap (PR 4).
+
+    ``measured_value`` is the refused out-of-tolerance measurement (it was never stored
+    as a record — it lands on the NCR's ``actual_value``); the server VERIFIES it falls
+    outside the snapshot tolerance band (in-band -> 409 ``VALUE_IN_TOLERANCE``, SF-1).
+    ``serial_number`` follows the capture rules: required on a serialized WO, forbidden
+    otherwise. The gauge used may be supplied as ``equipment_id`` OR ``equipment_code``
+    (never both) — resolved tenant-scoped WITHOUT calibration gating (the escape hatch
+    must never trap the operator behind a stale gauge, N-1); the resolved identity
+    lands in the NCR description and the audit trail."""
+
+    measured_value: float
+    serial_number: Optional[str] = Field(default=None, max_length=100)
+    notes: Optional[str] = Field(default=None, max_length=2000)
+    equipment_id: Optional[int] = None
+    equipment_code: Optional[str] = Field(
+        default=None,
+        max_length=50,
+        description="The gauge's MARKED identifier (Equipment.equipment_id). Kiosk alternative to "
+        "equipment_id — provide one or the other, never both. No calibration gating on this path.",
+    )
+    source: Optional[TimeEntrySource] = Field(
+        None,
+        description="Adoption-telemetry channel of this hold (kiosk | desktop | scanner | import | backfill). "
+        "Omit when unknown; a kiosk-scoped operator token always records 'kiosk'.",
+    )
+
+
+class QualityHoldResponse(UTCModel):
+    """Result of the OOT quality-hold one-tap: the NCR + blocker filed and the op state."""
+
+    message: str
+    ncr_id: int
+    ncr_number: str
+    blocker_id: int
+    operation_id: int
+    operation_status: str
+    closed_time_entry_ids: List[int] = Field(default_factory=list)
+
+
 __all__ = [
     "ProcessSheetStatus",
     "StepType",
@@ -244,4 +334,7 @@ __all__ = [
     "OperationStepWithState",
     "OperationStepsViewResponse",
     "StepAttachmentResponse",
+    "QualityHoldRequest",
+    "QualityHoldResponse",
+    "GaugeRef",
 ]

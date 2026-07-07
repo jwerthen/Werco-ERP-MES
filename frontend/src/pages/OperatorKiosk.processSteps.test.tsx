@@ -20,6 +20,7 @@ jest.mock('../services/api', () => ({
     recordOperationStep: jest.fn(),
     supersedeOperationStepRecord: jest.fn(),
     uploadOperationStepAttachment: jest.fn(),
+    raiseStepQualityHold: jest.fn(),
   },
 }));
 
@@ -78,6 +79,8 @@ const RECORD_DONE = {
   recorded_at: '2026-07-03T14:30:00Z',
   source: 'kiosk',
   equipment_id: null,
+  gauge: null,
+  qualification_snapshot: null,
   attachment_document_id: null,
   superseded_by_id: null,
   supersede_reason: null,
@@ -218,7 +221,7 @@ describe('OperatorKiosk process steps', () => {
     );
   });
 
-  it('records a measurement non-optimistically and refetches the steps view + queue', async () => {
+  it('records a measurement non-optimistically (source:"kiosk", like clock-in) and refetches the steps view + queue', async () => {
     mockedApi.recordOperationStep.mockResolvedValue(RECORD_DONE);
     renderKiosk();
     await openStepsFromActiveBanner();
@@ -227,8 +230,14 @@ describe('OperatorKiosk process steps', () => {
     fireEvent.change(screen.getByLabelText(/measured value/i), { target: { value: '0.5001' } });
     fireEvent.click(screen.getByTestId('kiosk-record-101'));
 
+    // source:"kiosk" — this kiosk runs on a normal session (no kiosk-scoped
+    // credential), so the adoption-telemetry channel is client-reported,
+    // exactly as clock-in reports it.
     await waitFor(() =>
-      expect(mockedApi.recordOperationStep).toHaveBeenCalledWith(31, 101, { value_numeric: 0.5001 })
+      expect(mockedApi.recordOperationStep).toHaveBeenCalledWith(31, 101, {
+        value_numeric: 0.5001,
+        source: 'kiosk',
+      })
     );
     // Refetch-after-record: no websocket for records, so the view re-reads…
     await waitFor(() => expect(mockedApi.getOperationSteps).toHaveBeenCalledTimes(2));
@@ -289,7 +298,10 @@ describe('OperatorKiosk process steps', () => {
     fireEvent.click(screen.getByTestId('kiosk-record-103'));
 
     await waitFor(() =>
-      expect(mockedApi.recordOperationStep).toHaveBeenCalledWith(31, 103, { attachment_document_id: 77 })
+      expect(mockedApi.recordOperationStep).toHaveBeenCalledWith(31, 103, {
+        attachment_document_id: 77,
+        source: 'kiosk',
+      })
     );
     expect(mockedApi.uploadOperationStepAttachment).toHaveBeenCalledWith(31, 103, file);
     expect(mockedApi.uploadOperationStepAttachment.mock.invocationCallOrder[0]).toBeLessThan(
@@ -337,6 +349,7 @@ describe('OperatorKiosk process steps', () => {
       expect(mockedApi.supersedeOperationStepRecord).toHaveBeenCalledWith(31, 102, 900, {
         reason: 'Marked by mistake',
         value_bool: true,
+        source: 'kiosk',
       })
     );
     // Refetch after the correction lands.

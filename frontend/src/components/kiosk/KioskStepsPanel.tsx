@@ -6,19 +6,25 @@ import {
   LockClosedIcon,
 } from '@heroicons/react/24/solid';
 import { Modal } from '../ui/Modal';
-import { formatCentralDateTime } from '../../utils/centralTime';
+import { formatCentralDate, formatCentralDateTime } from '../../utils/centralTime';
 import {
   extractErrorStatus,
+  extractGaugeRefusal,
   extractOutOfTolerance,
+  extractValueInTolerance,
+  GaugeRefusalInfo,
   OutOfToleranceInfo,
 } from '../../utils/processSheetErrors';
 import type {
+  GaugeRef,
   MissingStepInfo,
   OperationStepRecord,
   OperationStepRecordInput,
   OperationStepSupersedeInput,
   OperationStepsView,
   OperationStepWithState,
+  QualityHoldInput,
+  QualityHoldResult,
   StepAttachmentResult,
 } from '../../types/processSheet';
 import KioskPhotoInput from './KioskPhotoInput';
@@ -34,14 +40,16 @@ import { kioskErrorMessage } from './kioskConstants';
  */
 export interface StepsTransport {
   fetchView(operationId: number): Promise<OperationStepsView>;
-  createRecord(operationId: number, stepId: number, data: OperationStepRecordInput): Promise<unknown>;
+  createRecord(operationId: number, stepId: number, data: OperationStepRecordInput): Promise<OperationStepRecord>;
   supersedeRecord(
     operationId: number,
     stepId: number,
     recordId: number,
     data: OperationStepSupersedeInput
-  ): Promise<unknown>;
+  ): Promise<OperationStepRecord>;
   uploadAttachment(operationId: number, stepId: number, file: File): Promise<StepAttachmentResult>;
+  /** One-tap OOT escape hatch: NCR + QUALITY_HOLD blocker + op ON_HOLD (PR 4). */
+  qualityHold(operationId: number, stepId: number, data: QualityHoldInput): Promise<QualityHoldResult>;
 }
 
 interface KioskStepsPanelProps {
@@ -66,6 +74,12 @@ interface KioskStepsPanelProps {
   onBusyChange?: (busy: boolean) => void;
   /** Crew station: a 401 means the 5-minute badge token expired — host returns to the scan screen. */
   onAuthExpired?: (message: string) => void;
+  /**
+   * After a successful one-tap quality hold: the host shows the NCR number on
+   * its own view (queue-membership changes must not yank it away) and then
+   * follows its existing HOLD exit. Fallback when absent: info toast + onBack.
+   */
+  onQualityHeld?: (result: QualityHoldResult) => void;
 }
 
 const BADGE_EXPIRED_MESSAGE = 'Badge session expired — scan your badge again to keep recording.';
@@ -141,9 +155,16 @@ interface DraftValue {
   text: string;
   option: string | null;
   file: File | null;
+  /** Scanned/typed gauge identifier (equipment_code) — requires_gauge steps only. */
+  gauge: string;
 }
 
-const EMPTY_DRAFT: DraftValue = { numeric: '', text: '', option: null, file: null };
+const EMPTY_DRAFT: DraftValue = { numeric: '', text: '', option: null, file: null, gauge: '' };
+
+/** True when the step demands a gauge with every measurement record. */
+function needsGauge(step: OperationStepWithState): boolean {
+  return step.step_type === 'measurement' && step.requires_gauge;
+}
 
 /**
  * Type-shaped payload from the current draft, or null while invalid/incomplete.
@@ -155,6 +176,13 @@ function draftPayload(step: OperationStepWithState, draft: DraftValue): Operatio
     case 'measurement': {
       const parsed = Number(draft.numeric);
       if (draft.numeric.trim() === '' || !Number.isFinite(parsed)) return null;
+      if (needsGauge(step)) {
+        // Gauge is MANDATORY on these steps (the server 400s without one) —
+        // hold the payload back until the operator scans/types the gauge ID.
+        const gauge = draft.gauge.trim();
+        if (!gauge) return null;
+        return { value_numeric: parsed, equipment_code: gauge };
+      }
       return { value_numeric: parsed };
     }
     case 'checkbox':
@@ -184,9 +212,11 @@ interface StepValueEditorProps {
   onDraftChange: (draft: DraftValue) => void;
   disabled: boolean;
   idPrefix: string;
+  /** Last server-resolved gauge for this step — echoed beside the gauge field. */
+  resolvedGauge?: GaugeRef | null;
 }
 
-function StepValueEditor({ step, draft, onDraftChange, disabled, idPrefix }: StepValueEditorProps) {
+function StepValueEditor({ step, draft, onDraftChange, disabled, idPrefix, resolvedGauge }: StepValueEditorProps) {
   const config = step.config;
 
   if (step.step_type === 'measurement') {
@@ -199,9 +229,40 @@ function StepValueEditor({ step, draft, onDraftChange, disabled, idPrefix }: Ste
     const rounded = canPreview ? roundLikeServer(parsed, config?.decimals) : null;
     const inTolerance = canPreview && rounded != null && rounded >= (lsl as number) && rounded <= (usl as number);
     const inputId = `${idPrefix}-measurement`;
+    const gaugeId = `${idPrefix}-gauge`;
+    // Echo the resolved identity only while the field still holds that code.
+    const gaugeEcho =
+      resolvedGauge && resolvedGauge.equipment_code.toLowerCase() === draft.gauge.trim().toLowerCase()
+        ? resolvedGauge
+        : null;
     return (
       <div>
         {limits && <p className="font-mono text-lg text-fd-body">{limits}</p>}
+        {needsGauge(step) && (
+          <div className="mt-3">
+            <label
+              htmlFor={gaugeId}
+              className="block font-mono text-xs font-bold uppercase tracking-[0.25em] text-fd-amber"
+            >
+              Gauge — scan or type the gauge ID (required)
+            </label>
+            <input
+              id={gaugeId}
+              type="text"
+              autoComplete="off"
+              maxLength={50}
+              value={draft.gauge}
+              onChange={(e) => onDraftChange({ ...draft, gauge: e.target.value })}
+              disabled={disabled}
+              className="mt-2 w-full rounded border border-fd-line-bright bg-fd-sunken px-4 py-4 font-mono text-2xl font-bold text-fd-ink focus:border-fd-amber focus:outline-none disabled:opacity-40"
+            />
+            {gaugeEcho && (
+              <p data-testid={`${idPrefix}-gauge-echo`} className="mt-2 text-lg font-semibold text-fd-green">
+                ✓ {gaugeEcho.name} ({gaugeEcho.equipment_code})
+              </p>
+            )}
+          </div>
+        )}
         <label
           htmlFor={inputId}
           className="mt-3 block font-mono text-xs font-bold uppercase tracking-[0.25em] text-fd-mute"
@@ -342,10 +403,13 @@ function KioskSupersedeModal({ step, record, serialized, blocked, onCancel, onSu
       await onSubmit(reason.trim(), payload, isAttachment ? draft.file : null);
     } catch (err) {
       const oot = extractOutOfTolerance(err);
+      const gaugeRefusal = extractGaugeRefusal(err);
       setError(
         oot
           ? `${oot.message} — the correction was NOT saved.`
-          : kioskErrorMessage(err, 'Could not save the correction. Try again.')
+          : gaugeRefusal
+            ? `${gaugeRefusal.message} — the correction was NOT saved.`
+            : kioskErrorMessage(err, 'Could not save the correction. Try again.')
       );
       setSaving(false);
     }
@@ -456,6 +520,7 @@ export default function KioskStepsPanel({
   onRecorded,
   onBusyChange,
   onAuthExpired,
+  onQualityHeld,
 }: KioskStepsPanelProps) {
   // Transport + callbacks in refs: identities may churn per host render, but
   // the load effect must fire on operationId changes only.
@@ -477,7 +542,34 @@ export default function KioskStepsPanel({
   const [selectedSerial, setSelectedSerial] = useState<string | null | undefined>(undefined);
   const [expandedStepId, setExpandedStepId] = useState<number | null | undefined>(undefined);
   const [draft, setDraft] = useState<DraftValue>(EMPTY_DRAFT);
-  const [oot, setOot] = useState<{ stepId: number; serial: string | null; info: OutOfToleranceInfo } | null>(null);
+  // The OOT refusal carries the gauge code of the refused attempt so the
+  // one-tap hold sends it as `equipment_code` — the server resolves it
+  // (tenant-scoped, NO calibration gating: the escape hatch must never trap
+  // the operator behind a stale gauge) and writes the identity into the NCR
+  // description and audit trail itself.
+  const [oot, setOot] = useState<{
+    stepId: number;
+    serial: string | null;
+    info: OutOfToleranceInfo;
+    gaugeCode: string | null;
+  } | null>(null);
+  // GAUGE_OUT_OF_CAL / unknown-code refusal — rendered as an inline danger
+  // strip beside the gauge field (no record was written; re-scan and retry).
+  const [gaugeAlert, setGaugeAlert] = useState<{
+    stepId: number;
+    serial: string | null;
+    info: GaugeRefusalInfo;
+  } | null>(null);
+  // Last server-resolved gauge per successful record: echoes the resolved name
+  // beside the field and pre-fills the code for the next slot (same gauge is
+  // the overwhelmingly common case when measuring serial after serial).
+  const [lastGauge, setLastGauge] = useState<{ stepId: number; ref: GaugeRef } | null>(null);
+  // One-tap hold sub-state living INSIDE the OOT strip: confirm before filing.
+  const [hold, setHold] = useState<{ open: boolean; notes: string; error: string | null }>({
+    open: false,
+    notes: '',
+    error: null,
+  });
   const [pending, setPending] = useState(false);
   const [supersedeTarget, setSupersedeTarget] = useState<{
     step: OperationStepWithState;
@@ -545,11 +637,18 @@ export default function KioskStepsPanel({
       ? selectedSerial
       : autoSerial;
 
-  // Fresh inputs (and a cleared refusal strip) per step/serial slot.
+  // Fresh inputs (and cleared refusal strips) per step/serial slot. The gauge
+  // code is seeded from the last resolved gauge for the SAME step, so per-serial
+  // repeat measurements don't force a re-scan (the server revalidates anyway).
   useEffect(() => {
-    setDraft(EMPTY_DRAFT);
+    setDraft({
+      ...EMPTY_DRAFT,
+      gauge: lastGauge && lastGauge.stepId === effectiveExpandedId ? lastGauge.ref.equipment_code : '',
+    });
     setOot(null);
-  }, [effectiveExpandedId, effectiveSerial]);
+    setGaugeAlert(null);
+    setHold({ open: false, notes: '', error: null });
+  }, [effectiveExpandedId, effectiveSerial, lastGauge]);
 
   const recordsForSlot = useCallback(
     (step: OperationStepWithState): OperationStepRecord[] =>
@@ -589,6 +688,7 @@ export default function KioskStepsPanel({
     showToast('success', successMessage);
     setDraft(EMPTY_DRAFT);
     setOot(null);
+    setGaugeAlert(null);
     await load();
     if (onRecorded) await onRecorded();
   };
@@ -596,7 +696,16 @@ export default function KioskStepsPanel({
   const handleWriteError = (err: unknown, step: OperationStepWithState, fallback: string) => {
     const ootInfo = extractOutOfTolerance(err);
     if (ootInfo) {
-      setOot({ stepId: step.id, serial: serialized ? effectiveSerial : null, info: ootInfo });
+      // Freeze the gauge code of the refused attempt: the one-tap hold sends
+      // it as equipment_code so the NCR carries the gauge identity.
+      const gaugeCode = needsGauge(step) ? draft.gauge.trim() || null : null;
+      setOot({ stepId: step.id, serial: serialized ? effectiveSerial : null, info: ootInfo, gaugeCode });
+      setHold({ open: false, notes: '', error: null });
+      return;
+    }
+    const gaugeRefusal = extractGaugeRefusal(err);
+    if (gaugeRefusal) {
+      setGaugeAlert({ stepId: step.id, serial: serialized ? effectiveSerial : null, info: gaugeRefusal });
       return;
     }
     if (extractErrorStatus(err) === 401 && onAuthExpiredRef.current) {
@@ -606,10 +715,17 @@ export default function KioskStepsPanel({
     showToast('error', kioskErrorMessage(err, fallback));
   };
 
+  /** Remember the server-resolved gauge for the echo + next-slot pre-fill. */
+  const captureGaugeEcho = (stepId: number, record: OperationStepRecord | undefined | null) => {
+    const gauge = record?.gauge;
+    if (gauge && gauge.equipment_code) setLastGauge({ stepId, ref: gauge });
+  };
+
   const submitRecord = async (step: OperationStepWithState) => {
     const payload = draftPayload(step, draft);
     if (!payload || inputsDisabled || !recordable) return;
     setOot(null);
+    setGaugeAlert(null);
     setBusy(true);
     try {
       const body: OperationStepRecordInput = { ...payload };
@@ -619,10 +735,69 @@ export default function KioskStepsPanel({
         const uploaded = await transportRef.current.uploadAttachment(operationId, step.id, draft.file);
         body.attachment_document_id = uploaded.document_id;
       }
-      await transportRef.current.createRecord(operationId, step.id, body);
+      const created = await transportRef.current.createRecord(operationId, step.id, body);
+      captureGaugeEcho(step.id, created);
       await finishWrite(`Recorded — ${step.label}`);
     } catch (err) {
       handleWriteError(err, step, 'Could not record this step. Try again.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /**
+   * One-tap OOT escape hatch. NON-optimistic: the server files the NCR +
+   * QUALITY_HOLD blocker, flips the op ON_HOLD, and closes open time entries
+   * atomically; the UI reflects only what came back. The gauge of the refused
+   * attempt goes as `equipment_code` (server-resolved, no calibration gating —
+   * never trap the escape hatch) and the server writes the resolved identity
+   * into the NCR/audit itself, so `notes` stays pure operator notes.
+   */
+  const submitQualityHold = async (step: OperationStepWithState) => {
+    if (!oot || oot.stepId !== step.id || inputsDisabled) return;
+    setBusy(true);
+    setHold((prev) => ({ ...prev, error: null }));
+    try {
+      const body: QualityHoldInput = { measured_value: oot.info.measured };
+      if (serialized && oot.serial) body.serial_number = oot.serial;
+      if (oot.gaugeCode) body.equipment_code = oot.gaugeCode;
+      // Server schema caps notes at 2000 — clamp so the escape hatch never 422s.
+      const notes = hold.notes.trim().slice(0, 2000);
+      if (notes) body.notes = notes;
+      const result = await transportRef.current.qualityHold(operationId, step.id, body);
+      setOot(null);
+      setHold({ open: false, notes: '', error: null });
+      if (onQualityHeld) {
+        onQualityHeld(result);
+      } else {
+        showToast('info', `${result.ncr_number} filed — operation on hold`);
+        onBack();
+      }
+    } catch (err) {
+      if (extractErrorStatus(err) === 401 && onAuthExpiredRef.current) {
+        onAuthExpiredRef.current(BADGE_EXPIRED_MESSAGE);
+        return;
+      }
+      // Stale-premise refusals (practically unreachable from a live OOT strip,
+      // but a delayed retry can hit them): the server verified the claim and
+      // found no hold to raise — VALUE_IN_TOLERANCE (409, the value is fine;
+      // record it normally) or a 400 (limits gone from the snapshot config /
+      // operation no longer running). The strip's premise is dead either way:
+      // surface the verbatim detail and refresh the view to current reality.
+      const inTolerance = extractValueInTolerance(err);
+      if (inTolerance != null || extractErrorStatus(err) === 400) {
+        showToast('error', inTolerance ?? kioskErrorMessage(err, 'Could not file the NCR.'));
+        setOot(null);
+        setHold({ open: false, notes: '', error: null });
+        await load();
+        return;
+      }
+      // Everything else stays retriable: verbatim server detail inline in the
+      // confirm sub-state.
+      setHold((prev) => ({
+        ...prev,
+        error: kioskErrorMessage(err, 'Could not file the NCR. Try again.'),
+      }));
     } finally {
       setBusy(false);
     }
@@ -643,7 +818,8 @@ export default function KioskStepsPanel({
         const uploaded = await transportRef.current.uploadAttachment(operationId, step.id, file);
         body.attachment_document_id = uploaded.document_id;
       }
-      await transportRef.current.supersedeRecord(operationId, step.id, record.id, body);
+      const replacement = await transportRef.current.supersedeRecord(operationId, step.id, record.id, body);
+      captureGaugeEcho(step.id, replacement);
       setSupersedeTarget(null);
       await finishWrite(`Corrected — ${step.label}`);
     } catch (err) {
@@ -816,6 +992,10 @@ export default function KioskStepsPanel({
             const limits = measurementLimits(step);
             const payloadReady = draftPayload(step, draft) != null;
             const showOot = oot != null && oot.stepId === step.id && oot.serial === (serialized ? effectiveSerial : null);
+            const showGaugeAlert =
+              gaugeAlert != null &&
+              gaugeAlert.stepId === step.id &&
+              gaugeAlert.serial === (serialized ? effectiveSerial : null);
             return (
               <li
                 key={step.id}
@@ -893,6 +1073,14 @@ export default function KioskStepsPanel({
                                   Not satisfied
                                 </span>
                               )}
+                              {record.gauge && (
+                                <span
+                                  data-testid={`kiosk-record-gauge-${record.id}`}
+                                  className="text-base text-fd-mute"
+                                >
+                                  Gauge {record.gauge.name} ({record.gauge.equipment_code})
+                                </span>
+                              )}
                               <span className="text-base text-fd-mute">
                                 {record.recorded_by_name || 'Operator'} · {formatCentralDateTime(record.recorded_at)}
                               </span>
@@ -920,10 +1108,42 @@ export default function KioskStepsPanel({
                         <StepValueEditor
                           step={step}
                           draft={draft}
-                          onDraftChange={setDraft}
+                          onDraftChange={(next) => {
+                            // A changed gauge code IS the re-scan — clear the refusal.
+                            if (next.gauge !== draft.gauge) setGaugeAlert(null);
+                            setDraft(next);
+                          }}
                           disabled={inputsDisabled}
                           idPrefix={`kiosk-step-${step.id}`}
+                          resolvedGauge={lastGauge && lastGauge.stepId === step.id ? lastGauge.ref : null}
                         />
+
+                        {showGaugeAlert && gaugeAlert && (
+                          <div
+                            role="alert"
+                            data-testid="kiosk-step-gauge-refused"
+                            className="mt-4 rounded border-2 border-fd-red bg-fd-red/15 p-4"
+                          >
+                            <p className="text-xl font-bold uppercase tracking-wide text-fd-red">
+                              Gauge refused — not recorded
+                            </p>
+                            <p className="mt-1 text-lg text-fd-ink">{gaugeAlert.info.message}</p>
+                            {(gaugeAlert.info.status || gaugeAlert.info.nextCalibrationDate) && (
+                              <p className="mt-1 font-mono text-base text-fd-body">
+                                {gaugeAlert.info.status
+                                  ? `Status ${gaugeAlert.info.status.replace(/_/g, ' ')}`
+                                  : ''}
+                                {gaugeAlert.info.status && gaugeAlert.info.nextCalibrationDate ? ' · ' : ''}
+                                {gaugeAlert.info.nextCalibrationDate
+                                  ? `Calibration due ${formatCentralDate(gaugeAlert.info.nextCalibrationDate)}`
+                                  : ''}
+                              </p>
+                            )}
+                            <p className="mt-2 text-base text-fd-body">
+                              Scan a different gauge (or re-scan the ID) and record again.
+                            </p>
+                          </div>
+                        )}
 
                         {showOot && oot && (
                           <div
@@ -936,11 +1156,81 @@ export default function KioskStepsPanel({
                             </p>
                             <p className="mt-1 font-mono text-lg text-fd-ink">
                               Measured {oot.info.measured} · limits {oot.info.lsl} – {oot.info.usl}
+                              {serialized && oot.serial ? ` · ${oot.serial}` : ''}
                             </p>
-                            <p className="mt-2 text-base text-fd-body">
-                              Re-measure and record again. If the part really is out of tolerance, use HOLD on the
-                              job screen to stop it for quality review.
-                            </p>
+
+                            {!hold.open ? (
+                              <>
+                                <p className="mt-2 text-base text-fd-body">
+                                  Re-measure and record again — or, if the part really is out of tolerance, hold
+                                  the job and file an NCR for quality review.
+                                </p>
+                                <button
+                                  type="button"
+                                  data-testid="kiosk-oot-hold-ncr"
+                                  disabled={inputsDisabled}
+                                  aria-describedby={offlineHintId}
+                                  onClick={() => setHold({ open: true, notes: '', error: null })}
+                                  className="mt-3 min-h-16 w-full rounded border border-fd-red bg-fd-red/10 text-xl font-bold uppercase tracking-wide text-fd-red transition-colors hover:bg-fd-red/20 disabled:cursor-not-allowed disabled:opacity-40"
+                                >
+                                  Hold + file NCR
+                                </button>
+                              </>
+                            ) : (
+                              <div data-testid="kiosk-oot-hold-confirm" className="mt-3">
+                                <p className="text-lg font-semibold text-fd-ink">
+                                  File an NCR for this measurement and put the operation on hold?
+                                </p>
+                                <p className="mt-1 text-base text-fd-body">
+                                  Open labor entries on this job are clocked out automatically.
+                                </p>
+                                <label
+                                  htmlFor={`kiosk-oot-notes-${step.id}`}
+                                  className="mt-3 block font-mono text-xs font-bold uppercase tracking-[0.25em] text-fd-mute"
+                                >
+                                  Notes for quality — optional
+                                </label>
+                                <input
+                                  id={`kiosk-oot-notes-${step.id}`}
+                                  type="text"
+                                  autoComplete="off"
+                                  maxLength={2000}
+                                  value={hold.notes}
+                                  onChange={(e) => setHold((prev) => ({ ...prev, notes: e.target.value }))}
+                                  disabled={inputsDisabled}
+                                  className="mt-2 w-full rounded border border-fd-line-bright bg-fd-sunken px-4 py-4 text-xl text-fd-ink focus:border-fd-red focus:outline-none disabled:opacity-40"
+                                />
+                                {hold.error && (
+                                  <p
+                                    role="alert"
+                                    data-testid="kiosk-oot-hold-error"
+                                    className="mt-3 rounded border border-fd-red bg-fd-red/10 px-4 py-3 text-lg font-semibold text-fd-red"
+                                  >
+                                    {hold.error}
+                                  </p>
+                                )}
+                                <div className="mt-4 grid grid-cols-2 gap-3">
+                                  <button
+                                    type="button"
+                                    disabled={pending}
+                                    onClick={() => setHold({ open: false, notes: '', error: null })}
+                                    className="min-h-16 rounded border border-fd-line bg-fd-sunken text-xl font-bold uppercase tracking-wide text-fd-body transition-colors hover:border-fd-line-bright disabled:opacity-40"
+                                  >
+                                    Cancel
+                                  </button>
+                                  <button
+                                    type="button"
+                                    data-testid="kiosk-oot-hold-submit"
+                                    disabled={inputsDisabled}
+                                    aria-describedby={offlineHintId}
+                                    onClick={() => void submitQualityHold(step)}
+                                    className="min-h-16 rounded border border-fd-red bg-fd-red/15 text-xl font-bold uppercase tracking-wide text-fd-red transition-colors hover:bg-fd-red/25 disabled:cursor-not-allowed disabled:opacity-40"
+                                  >
+                                    {!online ? 'Offline' : pending ? 'Filing NCR…' : 'Hold + file NCR'}
+                                  </button>
+                                </div>
+                              </div>
+                            )}
                           </div>
                         )}
 

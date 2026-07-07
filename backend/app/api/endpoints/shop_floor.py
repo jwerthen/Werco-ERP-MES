@@ -60,6 +60,8 @@ from app.schemas.process_sheet import (
     OperationStepRecordResponse,
     OperationStepRecordSupersede,
     OperationStepsViewResponse,
+    QualityHoldRequest,
+    QualityHoldResponse,
     StepAttachmentResponse,
 )
 from app.schemas.time_entry import ClockIn, ClockOut, TimeEntryResponse
@@ -2692,14 +2694,18 @@ def complete_operation(
     # Process-sheet completion gate (PR 3): when THIS request would FULLY complete the
     # operation, every required (non-INSTRUCTION) snapshot step must carry a live
     # (non-superseded) conforming record — per serial on a serialized WO. Evaluated
-    # under the row lock against the prospective resolved quantity, so a concurrent
-    # completer re-runs the same check on the freshest rows. Partial progress updates
-    # and operations with no snapshot steps are unaffected (zero-step operations
-    # complete exactly as before — regression-sensitive). Non-optimistic by design.
-    prospective_quantity = resolve_absolute_operation_quantity(
+    # under the row lock against the RESOLVED quantity, so a concurrent completer
+    # re-runs the same check on the freshest rows. Partial progress updates and
+    # operations with no snapshot steps are unaffected (zero-step operations complete
+    # exactly as before — regression-sensitive). Non-optimistic by design.
+    #
+    # PR 4 (ledger): resolved ONCE under the lock and reused for both the gate and the
+    # store below — gating and storing can no longer diverge (TOCTOU closed), and the
+    # duplicate evidence query is gone.
+    resolved_quantity = resolve_absolute_operation_quantity(
         db, operation, completion_data.quantity_complete, ordered_qty
     )
-    if prospective_quantity >= ordered_qty:
+    if resolved_quantity >= ordered_qty:
         missing_steps = process_sheet_service.missing_required_steps(db, company_id, operation, work_order)
         if missing_steps:
             raise HTTPException(
@@ -2723,10 +2729,8 @@ def complete_operation(
     # Update quantity. /complete is an ABSOLUTE verb: clamp to
     # max(existing, requested, produced-evidence) capped at target so it can never
     # regress below durable TimeEntry evidence (SFI-5) and a later read-time
-    # reconcile cannot silently re-raise and mask the write.
-    resolved_quantity = resolve_absolute_operation_quantity(
-        db, operation, completion_data.quantity_complete, ordered_qty
-    )
+    # reconcile cannot silently re-raise and mask the write. ``resolved_quantity``
+    # was computed ONCE above (PR 4) — the gate and this store see the same value.
     operation.quantity_complete = resolved_quantity
     operation.updated_at = datetime.utcnow()
     sync_laser_nest_from_operation(operation)
@@ -3544,13 +3548,17 @@ def _require_step_recordable(operation: WorkOrderOperation, work_order: WorkOrde
         raise HTTPException(status_code=400, detail="Operation must be in progress to record step data")
 
 
-def _record_source(current_user: User) -> str:
-    """Adoption-telemetry channel for step records, derived from the CREDENTIAL:
-    KIOSK for badge-minted crew-station operator tokens (scope == "kiosk"), DESKTOP
-    otherwise — TimeEntrySource vocabulary, never client-asserted."""
+def _record_source(current_user: User, client_source: Optional[TimeEntrySource]) -> Optional[str]:
+    """Adoption-telemetry channel for step records — TimeEntry's exact trust model (PR 4).
+
+    Mirrors clock-in: the client-reported channel is stored verbatim, or NULL when
+    omitted (the server never GUESSES a channel), EXCEPT where the credential is
+    authoritative — a badge-minted crew-station operator token (scope == "kiosk")
+    ALWAYS records KIOSK regardless of any hint. Values are fenced to the
+    TimeEntrySource vocabulary by the request schema (422 on anything else)."""
     if getattr(current_user, "_token_scope", None) == "kiosk":
         return TimeEntrySource.KIOSK.value
-    return TimeEntrySource.DESKTOP.value
+    return client_source.value if client_source else None
 
 
 @router.get("/operations/{operation_id}/steps", response_model=OperationStepsViewResponse)
@@ -3589,9 +3597,17 @@ def record_operation_step(
 
     Validation ladder (service): WO not terminal (409) -> operation IN_PROGRESS (400)
     -> step belongs to operation (404) / INSTRUCTION takes no records (400) -> serial
-    required+valid on serialized WOs (400) -> type-shaped value (400) -> MEASUREMENT
-    out-of-tolerance REFUSED (409 ``OUT_OF_TOLERANCE``, no row) -> optional tenant-valid
-    ``equipment_id`` passthrough. Audited before commit.
+    required+valid on serialized WOs (400) -> gauge (PR 4: the reference resolves from
+    ``equipment_id`` OR ``equipment_code`` — the gauge's MARKED identifier, the kiosk
+    scan/type path since operator tokens can't list /equipment; both -> 400, unknown
+    code -> 404. ``requires_gauge`` measurement steps demand a MANDATORY
+    calibration-current gauge — 400 missing / 409 ``GAUGE_OUT_OF_CAL``; other steps
+    keep the optional tenant-valid passthrough) -> type-shaped value (400) ->
+    MEASUREMENT out-of-tolerance REFUSED (409 ``OUT_OF_TOLERANCE``, no row). PR 4 also
+    freezes the warn-and-record operator-qualification snapshot onto the record, feeds
+    the SPC point for conforming measurements wired to a characteristic, and echoes
+    the resolved gauge as ``gauge: {equipment_id, equipment_code, name}``. Audited
+    before commit.
     """
     operation, work_order = _get_operation_and_work_order(db, operation_id, company_id)
     _require_step_recordable(operation, work_order)
@@ -3605,7 +3621,7 @@ def record_operation_step(
         data=data,
         user=current_user,
         audit=audit,
-        source=_record_source(current_user),
+        source=_record_source(current_user, data.source),
     )
 
 
@@ -3644,7 +3660,7 @@ def supersede_operation_step_record(
         data=data,
         user=current_user,
         audit=audit,
-        source=_record_source(current_user),
+        source=_record_source(current_user, data.source),
     )
 
 
@@ -3693,6 +3709,74 @@ async def upload_operation_step_attachment(
         "file_size": document.file_size,
         "mime_type": document.mime_type,
     }
+
+
+@router.post(
+    "/operations/{operation_id}/steps/{step_id}/quality-hold",
+    response_model=QualityHoldResponse,
+    status_code=201,
+)
+def raise_step_quality_hold(
+    operation_id: int,
+    step_id: int,
+    data: QualityHoldRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """One-tap NCR + quality hold for a REFUSED out-of-tolerance measurement (PR 4).
+
+    An OOT value is never stored as a record (409 ``OUT_OF_TOLERANCE``); this is the
+    sanctioned path forward. Atomically: creates an ``IN_PROCESS`` NCR pre-filled from
+    the snapshot step config (specification/required from lsl/nominal/usl, actual =
+    the refused measurement), files a QUALITY_HOLD ``WorkOrderBlocker`` carrying the
+    ``ncr_id``, flips the operation ON_HOLD through the existing blocker hold pathway,
+    and closes open time entries (same as ``PUT .../hold``). All audited.
+
+    Same all-authenticated posture as the other shop-floor writes, and in-fence for
+    badge-minted kiosk operator tokens (this lives under ``/shop-floor``): kiosk
+    operators file these.
+    """
+    operation, work_order = _get_operation_and_work_order(db, operation_id, company_id)
+    _require_step_recordable(operation, work_order)
+    step = process_sheet_service.get_wo_step_or_404(db, company_id, operation.id, step_id)
+    result = process_sheet_service.create_quality_hold(
+        db,
+        company_id,
+        work_order=work_order,
+        operation=operation,
+        step=step,
+        data=data,
+        user=current_user,
+        audit=audit,
+        source=_record_source(current_user, data.source),
+    )
+
+    # Same post-commit broadcasts as PUT .../hold so queues/dashboards refresh.
+    if operation.work_center_id:
+        safe_broadcast(
+            broadcast_shop_floor_update,
+            operation.work_center_id,
+            {"event": "operation_hold", "work_order_id": work_order.id, "operation_id": operation.id},
+            company_id=company_id,
+        )
+    safe_broadcast(
+        broadcast_work_order_update,
+        work_order.id,
+        {
+            "event": "operation_hold",
+            "operation_id": operation.id,
+            "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
+        },
+        company_id=company_id,
+    )
+    safe_broadcast(
+        broadcast_dashboard_update,
+        {"event": "operation_hold", "work_order_id": work_order.id, "operation_id": operation.id},
+        company_id=company_id,
+    )
+    return result
 
 
 # ============================================================================

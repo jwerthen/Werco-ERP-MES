@@ -33,6 +33,8 @@ import type {
   OperationStepRecordInput,
   OperationStepSupersedeInput,
   OperationStepsView,
+  QualityHoldInput,
+  QualityHoldResult,
   StepAttachmentResult,
 } from '../types/processSheet';
 
@@ -293,11 +295,12 @@ export async function holdOperation(
 }
 
 // ---------------------------------------------------------------------------
-// Process Sheets capture (PR 3) — snapshot steps + append-only step records.
-// All four paths live under /shop-floor on purpose: the badge-minted operator
+// Process Sheets capture (PR 3/4) — snapshot steps + append-only step records.
+// All paths live under /shop-floor on purpose: the badge-minted operator
 // token is path-fenced there, so reads AND writes use the OPERATOR token (the
-// station token is honored only by the queue read + badge mint). Records never
-// carry `source` — the server derives KIOSK/DESKTOP from the credential.
+// station token is honored only by the queue read + badge mint). Crew-station
+// calls never send `source` — a kiosk-scoped badge token is authoritative and
+// the server records "kiosk" regardless of any hint.
 // ---------------------------------------------------------------------------
 
 /** GET /shop-floor/operations/{id}/steps — snapshot steps + live records + completeness. */
@@ -327,6 +330,26 @@ export async function supersedeOperationStepRecord(
     operatorToken,
     'POST',
     `/shop-floor/operations/${operationId}/steps/${stepId}/records/${recordId}/supersede`,
+    data
+  );
+}
+
+/**
+ * POST .../steps/{step_id}/quality-hold — the one-tap OOT escape hatch (PR 4).
+ * Atomically files an IN_PROCESS NCR + QUALITY_HOLD blocker, flips the
+ * operation ON_HOLD, and closes open time entries. The refused measurement
+ * lands on the NCR — it is never stored as a step record.
+ */
+export async function raiseStepQualityHold(
+  operatorToken: string,
+  operationId: number,
+  stepId: number,
+  data: QualityHoldInput
+): Promise<QualityHoldResult> {
+  return operatorFetch(
+    operatorToken,
+    'POST',
+    `/shop-floor/operations/${operationId}/steps/${stepId}/quality-hold`,
     data
   );
 }

@@ -112,9 +112,7 @@ describe('Materials form — unsaved-changes discard guard', () => {
     fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }));
 
     expect(confirmSpy).not.toHaveBeenCalled();
-    await waitFor(() =>
-      expect(screen.queryByLabelText(/Item Number/)).not.toBeInTheDocument()
-    );
+    await waitFor(() => expect(screen.queryByLabelText(/Item Number/)).not.toBeInTheDocument());
   });
 
   it('prompts and keeps the modal open when the user cancels the discard confirm', async () => {
@@ -138,18 +136,25 @@ describe('Materials form — unsaved-changes discard guard', () => {
     fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }));
 
     expect(confirmSpy).toHaveBeenCalledTimes(1);
-    await waitFor(() =>
-      expect(screen.queryByLabelText(/Item Number/)).not.toBeInTheDocument()
-    );
+    await waitFor(() => expect(screen.queryByLabelText(/Item Number/)).not.toBeInTheDocument());
     expect(mockedApi.createMaterial).not.toHaveBeenCalled();
   });
 
   it('does NOT prompt on a successful save even though the form is dirty', async () => {
     confirmSpy = jest.spyOn(window, 'confirm').mockReturnValue(false);
+    // Contract-conformant Part response: the page prepends this straight into the
+    // rendered list (Materials.tsx handleSave), so a mock missing a REQUIRED
+    // Part field crashes the post-save re-render in a scheduled task — a
+    // timing-dependent failure that only surfaces under full-suite load
+    // (part_type crashed typeLabel(); status crashed StatusBadge the same way).
     mockedApi.createMaterial.mockResolvedValue({
       id: 1,
       part_number: 'RM-1001',
       name: 'Aluminum Plate',
+      part_type: 'raw_material',
+      unit_of_measure: 'each',
+      is_active: true,
+      status: 'active',
     });
     renderMaterials();
     const { itemNumber, form } = await openCreateModal();
@@ -161,9 +166,7 @@ describe('Materials form — unsaved-changes discard guard', () => {
     fireEvent.submit(form);
 
     await waitFor(() => expect(mockedApi.createMaterial).toHaveBeenCalledTimes(1));
-    await waitFor(() =>
-      expect(screen.queryByLabelText(/Item Number/)).not.toBeInTheDocument()
-    );
+    await waitFor(() => expect(screen.queryByLabelText(/Item Number/)).not.toBeInTheDocument());
     expect(confirmSpy).not.toHaveBeenCalled();
   });
 });

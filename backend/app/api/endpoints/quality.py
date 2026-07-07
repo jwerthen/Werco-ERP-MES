@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
-from app.api.deps import get_current_company_id, get_current_user, require_role
+from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
 from app.db.locks import acquire_generator_lock
 from app.models.quality import (
@@ -28,12 +28,15 @@ from app.schemas.quality import (
     FAICharacteristicResponse,
     FAICharacteristicUpdate,
     FAICreate,
+    FAIPrefillResponse,
     FAIResponse,
     FAIUpdate,
     NCRCreate,
     NCRResponse,
     NCRUpdate,
 )
+from app.services import process_sheet_service
+from app.services.audit_service import AuditService
 from app.services.operational_event_service import OperationalEventService
 
 router = APIRouter()
@@ -551,6 +554,33 @@ def update_fai(
     db.commit()
     db.refresh(fai)
     return fai
+
+
+@router.post("/fai/{fai_id}/prefill-from-steps", response_model=FAIPrefillResponse)
+def prefill_fai_from_steps(
+    fai_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Pre-fill FAI characteristics from the linked WO's process-sheet step records (PR 4).
+
+    AS9102 accelerator: each characteristic with no ``actual_value`` is matched to a
+    live CONFORMING measurement step record — v1 heuristic: characteristic description
+    == step label (trimmed, case-insensitive), refused when a parseable
+    nominal/tolerance contradicts the snapshot config. Matches copy the latest
+    record's value into ``actual_value`` and the recording gauge's name into
+    ``measuring_device``; everything else lands in ``unmatched`` with a reason
+    (ambiguous label, spec mismatch, already recorded, no match). Never sets
+    ``is_conforming`` — disposition stays with the inspector. Audited.
+
+    Same role posture as the other FAI endpoints (any authenticated office user; the
+    kiosk token fence keeps shop-floor-scoped tokens out of /quality entirely).
+    """
+    return process_sheet_service.prefill_fai_from_step_records(
+        db, company_id, fai_id=fai_id, user=current_user, audit=audit
+    )
 
 
 @router.post("/fai/{fai_id}/characteristics", response_model=FAICharacteristicResponse)

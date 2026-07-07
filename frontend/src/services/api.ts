@@ -92,6 +92,7 @@ import {
   KioskStationResponse,
 } from '../types/kioskStation';
 import {
+  FAIPrefillResult,
   OperationStepRecord,
   OperationStepRecordInput,
   OperationStepSupersedeInput,
@@ -103,6 +104,8 @@ import {
   ProcessSheetStep,
   ProcessSheetStepInput,
   ProcessSheetUpdateInput,
+  QualityHoldInput,
+  QualityHoldResult,
   StepAttachmentResult,
 } from '../types/processSheet';
 
@@ -1515,8 +1518,10 @@ class ApiService {
   // --- Process Sheets capture (shop-floor step endpoints) -------------------
   // Mirrors the /shop-floor/operations/{id}/steps* endpoints. Records are
   // append-only evidence: send exactly ONE type-shaped value field (plus
-  // serial_number on serialized WOs) and never `source` — the server derives
-  // the channel from the credential. Corrections supersede, never mutate.
+  // serial_number on serialized WOs). `source` is an optional telemetry hint
+  // (the OperatorKiosk sends "kiosk", exactly like clock-in); requires_gauge
+  // measurement steps carry the scanned `equipment_code`. Corrections
+  // supersede, never mutate.
 
   async getOperationSteps(operationId: number): Promise<OperationStepsView> {
     const response = await this.api.get(`/shop-floor/operations/${operationId}/steps`);
@@ -1560,6 +1565,20 @@ class ApiService {
     return response.data;
   }
 
+  /**
+   * One-tap OOT escape hatch (PR 4): atomically files an IN_PROCESS NCR +
+   * QUALITY_HOLD blocker, flips the operation ON_HOLD, and closes open time
+   * entries. The refused measurement goes on the NCR — it is NEVER stored as a
+   * step record. Server-gated and non-optimistic by design.
+   */
+  async raiseStepQualityHold(operationId: number, stepId: number, data: QualityHoldInput): Promise<QualityHoldResult> {
+    const response = await this.api.post(
+      `/shop-floor/operations/${operationId}/steps/${stepId}/quality-hold`,
+      data
+    );
+    return response.data;
+  }
+
   // Quality Management
   async getNCRs(params?: { status?: string; part_id?: number }) {
     const response = await this.api.get('/quality/ncr', { params });
@@ -1593,6 +1612,22 @@ class ApiService {
 
   async getFAIs(params?: { status?: string; part_id?: number }) {
     const response = await this.api.get('/quality/fai', { params });
+    return response.data;
+  }
+
+  async getFAI(id: number) {
+    const response = await this.api.get(`/quality/fai/${id}`);
+    return response.data;
+  }
+
+  /**
+   * AS9102 accelerator (PR 4): pre-fill FAI characteristics from the linked
+   * WO's conforming measurement step records. Desktop only (kiosk tokens are
+   * fenced out of /quality). Non-optimistic — the caller refreshes the FAI
+   * from the response summary.
+   */
+  async prefillFAIFromSteps(faiId: number): Promise<FAIPrefillResult> {
+    const response = await this.api.post(`/quality/fai/${faiId}/prefill-from-steps`);
     return response.data;
   }
 

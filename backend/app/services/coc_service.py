@@ -39,6 +39,7 @@ from app.models.user import User
 from app.models.work_order import WorkOrder
 from app.services.audit_service import AuditService
 from app.services.coc_pdf_service import DEFAULT_COC_STATEMENT, build_certificate_of_conformance_pdf
+from app.services.process_sheet_service import parse_serial_numbers
 
 logger = logging.getLogger(__name__)
 
@@ -81,18 +82,12 @@ def _resolve_customer(db: Session, customer_name: Optional[str], company_id: int
 
 
 def _parse_serial_numbers(raw) -> List[str]:
-    """Parse a serial-numbers JSON Text snapshot into a list, guarding non-JSON values."""
-    if not raw:
-        return []
-    if isinstance(raw, list):
-        return [str(s) for s in raw]
-    try:
-        parsed = json.loads(raw)
-    except (ValueError, TypeError):
-        return []
-    if isinstance(parsed, list):
-        return [str(s) for s in parsed]
-    return []
+    """Parse a serial-numbers JSON Text snapshot into a list, guarding non-JSON values.
+
+    Delegates to THE shared parser (PR 4 ledger, ``process_sheet_service``) so the
+    CoC's notion of a serialized snapshot can never drift from the capture path's.
+    """
+    return parse_serial_numbers(raw)
 
 
 def coc_required_for_shipment(

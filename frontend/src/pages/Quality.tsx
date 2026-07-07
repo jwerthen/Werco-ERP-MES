@@ -11,11 +11,13 @@ import {
   MobileDataCard,
   Button,
   FormField,
+  LoadingButton,
   statusColorMap,
   statusVariantClass,
 } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { formatCentralDate } from '../utils/centralTime';
+import type { FAIPrefillResult } from '../types/processSheet';
 import {
   PlusIcon,
   ExclamationTriangleIcon,
@@ -71,6 +73,28 @@ interface FAI {
   created_at: string;
 }
 
+interface FAICharacteristic {
+  id: number;
+  char_number: number;
+  characteristic: string;
+  nominal?: string | null;
+  tolerance_plus?: string | null;
+  tolerance_minus?: string | null;
+  specification?: string | null;
+  actual_value?: string | null;
+  measuring_device?: string | null;
+  is_conforming?: boolean | null;
+  is_critical: boolean;
+  is_major: boolean;
+  notes?: string | null;
+}
+
+/** GET /quality/fai/{id} — list row fields + the characteristics. */
+interface FAIDetail extends FAI {
+  work_order_id?: number | null;
+  characteristics: FAICharacteristic[];
+}
+
 interface QualitySummary {
   open_ncrs: number;
   open_cars: number;
@@ -114,6 +138,13 @@ export default function QualityPage() {
   const [showNCRModal, setShowNCRModal] = useState(false);
   const [showCARModal, setShowCARModal] = useState(false);
   const [showFAIModal, setShowFAIModal] = useState(false);
+
+  // FAI detail (characteristics + the PR 4 prefill-from-steps action).
+  const [faiDetailId, setFaiDetailId] = useState<number | null>(null);
+  const [faiDetail, setFaiDetail] = useState<FAIDetail | null>(null);
+  const [faiDetailError, setFaiDetailError] = useState<string | null>(null);
+  const [prefilling, setPrefilling] = useState(false);
+  const [prefillResult, setPrefillResult] = useState<FAIPrefillResult | null>(null);
 
   // Form states
   const [ncrForm, setNcrForm] = useState({
@@ -196,6 +227,58 @@ export default function QualityPage() {
   };
 
   const priorityLabel = (p: number) => (p === 1 ? 'Critical' : p === 2 ? 'Major' : 'Minor');
+
+  const loadFaiDetail = async (id: number) => {
+    try {
+      const detail = await api.getFAI(id);
+      setFaiDetail(detail);
+      setFaiDetailError(null);
+    } catch (err: any) {
+      setFaiDetail(null);
+      setFaiDetailError(err.response?.data?.detail || 'Failed to load FAI detail');
+    }
+  };
+
+  const openFaiDetail = (id: number) => {
+    setFaiDetailId(id);
+    setFaiDetail(null);
+    setFaiDetailError(null);
+    setPrefillResult(null);
+    void loadFaiDetail(id);
+  };
+
+  const closeFaiDetail = () => {
+    setFaiDetailId(null);
+    setFaiDetail(null);
+    setFaiDetailError(null);
+    setPrefillResult(null);
+  };
+
+  /**
+   * Prefill FAI characteristics from the linked WO's conforming measurement
+   * step records (Process Sheets PR 4). NON-optimistic: nothing changes on
+   * screen until the server answers; then the characteristics re-fetch and the
+   * fill/unmatched summary renders from the response.
+   */
+  const handlePrefillFromSteps = async () => {
+    if (faiDetailId == null || prefilling) return;
+    setPrefilling(true);
+    try {
+      const result = await api.prefillFAIFromSteps(faiDetailId);
+      setPrefillResult(result);
+      showToast(
+        'success',
+        `Prefilled ${result.prefilled_count} characteristic${result.prefilled_count === 1 ? '' : 's'} from process steps` +
+          (result.unmatched_count > 0 ? ` — ${result.unmatched_count} unmatched` : '')
+      );
+      await loadFaiDetail(faiDetailId);
+      loadData();
+    } catch (err: any) {
+      showToast('error', err.response?.data?.detail || 'Failed to prefill from process steps');
+    } finally {
+      setPrefilling(false);
+    }
+  };
 
   const filteredNcrs = useMemo(
     () => (ncrStatusFilter ? ncrs.filter((ncr) => ncr.status === ncrStatusFilter) : ncrs),
@@ -602,6 +685,7 @@ export default function QualityPage() {
               defaultSort={{ key: 'fai_number', dir: 'desc' }}
               pageSize={25}
               csvExport={{ filename: 'fais' }}
+              onRowClick={(fai) => openFaiDetail(fai.id)}
               empty={{
                 icon: DocumentMagnifyingGlassIcon,
                 title: 'No FAIs found',
@@ -613,6 +697,7 @@ export default function QualityPage() {
                   title={fai.fai_number}
                   subtitle={`${fai.part?.part_number ?? ''}${fai.part_revision ? ` Rev ${fai.part_revision}` : ''}`}
                   badge={<StatusBadge status={fai.status} />}
+                  onClick={() => openFaiDetail(fai.id)}
                   fields={[
                     { label: 'Type', value: <span className="capitalize">{fai.fai_type}</span> },
                     {
@@ -635,6 +720,149 @@ export default function QualityPage() {
           </>
         )}
       </div>
+
+      {/* FAI detail — characteristics + prefill-from-steps (Process Sheets PR 4) */}
+      <Modal open={faiDetailId != null} onClose={closeFaiDetail} size="3xl" ariaLabelledBy="fai-detail-title">
+        <div className="flex justify-between items-start mb-4 gap-4">
+          <div>
+            <h3 id="fai-detail-title" className="text-lg font-semibold">
+              {faiDetail ? `${faiDetail.fai_number}` : 'First Article Inspection'}
+            </h3>
+            {faiDetail && (
+              <p className="text-sm text-slate-400 mt-0.5">
+                {faiDetail.part?.part_number || '-'}
+                {faiDetail.part_revision ? ` Rev ${faiDetail.part_revision}` : ''} ·{' '}
+                <span className="capitalize">{faiDetail.fai_type}</span>
+              </p>
+            )}
+          </div>
+          <div className="flex items-center gap-3">
+            {faiDetail && <StatusBadge status={faiDetail.status} />}
+            <button onClick={closeFaiDetail} aria-label="Close dialog">
+              <XMarkIcon className="h-6 w-6" aria-hidden="true" />
+            </button>
+          </div>
+        </div>
+
+        {faiDetailError ? (
+          <ErrorState
+            message={faiDetailError}
+            onRetry={() => faiDetailId != null && void loadFaiDetail(faiDetailId)}
+          />
+        ) : !faiDetail ? (
+          <p className="py-8 text-center text-sm text-slate-400">Loading FAI…</p>
+        ) : (
+          <>
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+              <span className="text-sm text-slate-400">
+                {faiDetail.characteristics.length} characteristic{faiDetail.characteristics.length === 1 ? '' : 's'} ·{' '}
+                <span className="text-green-500">{faiDetail.characteristics_passed} passed</span> ·{' '}
+                <span className="text-red-400">{faiDetail.characteristics_failed} failed</span>
+              </span>
+              <LoadingButton
+                loading={prefilling}
+                loadingText="Prefilling…"
+                variant="secondary"
+                size="sm"
+                data-testid="fai-prefill-button"
+                onClick={() => void handlePrefillFromSteps()}
+                title="Copy conforming measurement step records from the linked work order into empty actual values"
+              >
+                Prefill from process steps
+              </LoadingButton>
+            </div>
+
+            {prefillResult && (
+              <div
+                data-testid="fai-prefill-summary"
+                className="mb-4 rounded-sm border border-fd-line bg-slate-900/40 px-3 py-2 text-sm"
+              >
+                <p className="font-semibold text-slate-100">
+                  {prefillResult.prefilled_count} characteristic{prefillResult.prefilled_count === 1 ? '' : 's'} filled
+                  {' · '}
+                  {prefillResult.unmatched_count} unmatched
+                </p>
+                {prefillResult.prefilled.length > 0 && (
+                  <ul className="mt-1 space-y-0.5 text-slate-300">
+                    {prefillResult.prefilled.map((entry) => (
+                      <li key={`filled-${entry.char_number}`}>
+                        <span className="font-mono text-slate-500">#{entry.char_number}</span> {entry.characteristic} →{' '}
+                        <span className="font-mono">{entry.actual_value ?? '—'}</span>
+                        {entry.measuring_device ? (
+                          <span className="text-slate-500"> ({entry.measuring_device})</span>
+                        ) : null}
+                        {entry.serial_number ? (
+                          <span className="font-mono text-slate-500"> SN {entry.serial_number}</span>
+                        ) : null}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {prefillResult.unmatched.length > 0 && (
+                  <ul className="mt-2 space-y-0.5 text-fd-amber">
+                    {prefillResult.unmatched.map((entry) => (
+                      <li key={`unmatched-${entry.char_number}`}>
+                        <span className="font-mono">#{entry.char_number}</span> {entry.characteristic} —{' '}
+                        {entry.reason}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+
+            {faiDetail.characteristics.length === 0 ? (
+              <p className="py-6 text-center text-sm text-slate-400">
+                No characteristics on this FAI yet.
+              </p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="min-w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-slate-700 text-left text-xs uppercase tracking-wider text-slate-400">
+                      <th className="py-2 pr-3">#</th>
+                      <th className="py-2 pr-3">Characteristic</th>
+                      <th className="py-2 pr-3">Nominal / Spec</th>
+                      <th className="py-2 pr-3">Actual</th>
+                      <th className="py-2 pr-3">Device</th>
+                      <th className="py-2">Conforming</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {faiDetail.characteristics.map((char) => (
+                      <tr key={char.id} className="border-b border-slate-800">
+                        <td className="py-2 pr-3 font-mono text-slate-400">{char.char_number}</td>
+                        <td className="py-2 pr-3">
+                          {char.characteristic}
+                          {char.is_critical && (
+                            <span className="ml-1 rounded border border-fd-red/50 px-1 py-0.5 font-mono text-[10px] font-bold uppercase text-fd-red">
+                              Critical
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-2 pr-3 font-mono text-slate-300">
+                          {char.nominal || char.specification || '—'}
+                        </td>
+                        <td className="py-2 pr-3 font-mono">{char.actual_value || '—'}</td>
+                        <td className="py-2 pr-3 text-slate-300">{char.measuring_device || '—'}</td>
+                        <td className="py-2">
+                          {char.is_conforming == null ? (
+                            <span className="text-slate-500">—</span>
+                          ) : char.is_conforming ? (
+                            <span className="text-green-500">Pass</span>
+                          ) : (
+                            <span className="text-red-400">Fail</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </>
+        )}
+      </Modal>
 
       {/* NCR Modal */}
       <Modal open={showNCRModal} onClose={() => setShowNCRModal(false)} size="lg" closeOnBackdrop={false}>

@@ -142,12 +142,50 @@ refetches after every success and refusals surface verbatim. Per type:
   server verdict is final."* An out-of-tolerance value is refused server-side with
   **409 `OUT_OF_TOLERANCE`** (`{measured, lsl, usl}`) and **no record row is written**; the
   kiosk renders an inline danger strip ("Out of tolerance — not recorded") telling the
-  operator to re-measure, or to use HOLD on the job screen if the part really is out.
+  operator to re-measure — or, if the part really is out, to hold the job and file an NCR
+  right from the strip (one-tap flow below).
 - **CHECKBOX** — the kiosk records only the affirmative ("Mark done"); an unchecked box is
   simply not recorded.
 - **LIST / VALUE** — touch option grid / free-text value.
 - **PHOTO / FILE** — evidence capture, below.
 - **INSTRUCTION** — display-only ("Read and follow"); never takes a record, never gates.
+
+**Gauge capture (`requires_gauge` measurement steps).** The value pad grows a mandatory gauge
+field: the operator **scans or types the gauge's marked identifier** (`equipment_code` —
+`Equipment.equipment_id`, the human-readable/barcode code on the gauge). That's the kiosk path
+by design: badge-minted operator tokens are fenced away from `/equipment`, so the kiosk cannot
+browse gauges — the server resolves the scanned code tenant-scoped (`equipment_id` by PK stays
+available to desktop callers; one or the other, never both → 400). The calibration check runs
+**before** the tolerance evaluation on purpose — a measurement taken with an out-of-cal gauge
+is untrustworthy in both directions, so it must be refused before it can either pass the gate
+or trigger the OOT/NCR path — and it is **fail-closed**: the gauge must be ACTIVE **with** a
+`next_calibration_date` on or after today; a gauge with **no due date is refused too** (not
+demonstrably current). Refusals write no record row: an unknown code 404s ("No gauge with
+identifier …"), and a stale/inactive gauge 409s **`GAUGE_OUT_OF_CAL`** — the kiosk renders a
+"Gauge refused — not recorded" strip showing the gauge's **status and calibration due date**;
+changing the code (i.e. re-scanning) clears the strip. On success the record echoes the
+resolved gauge (`gauge: {equipment_id, equipment_code, name}`): the panel confirms
+"✓ {name} ({code})" beside the field, prints the gauge on each record's trail line, and
+pre-fills the code for the next slot on the same step so serial-after-serial measuring doesn't
+force a re-scan (the server revalidates every time regardless).
+
+**Out-of-tolerance → one-tap Hold + file NCR.** The OOT danger strip carries a **HOLD + FILE
+NCR** button that opens a confirm sub-state inside the strip (an optional "notes for quality"
+field, plus a warning that open labor entries will be clocked out). Confirming posts
+`POST /shop-floor/operations/{id}/steps/{step_id}/quality-hold` (in-fence for kiosk operator
+tokens), which atomically: creates an **IN_PROCESS NCR** pre-filled from the snapshot step
+config (`specification`/`required_value` from LSL/NOM/USL, `actual_value` = the refused
+measurement, part/lot/serial from the WO), files a **QUALITY_HOLD `WorkOrderBlocker`**
+carrying the new `ncr_id`, flips the operation **ON_HOLD** through the existing blocker hold
+pathway, and closes any open time entries (same as `PUT .../hold`) — all audited. The hold
+body takes **no gauge field**; the kiosk prepends the refused attempt's gauge context to the
+notes ("Measured with gauge {code} — {name}.") so the NCR keeps gauge traceability. On success
+both kiosks show a dedicated full-screen **NCR-filed view** (`KioskNcrFiledScreen`) — the NCR
+number rendered large enough to tag the part with, plus how many labor entries were closed —
+whose single exit lands exactly where the standard HOLD verb lands (single-operator: back to
+queue; crew station: back to the board). Non-optimistic throughout: the UI reflects only what
+the server returned, and the whole flow is hard-disabled offline like every other kiosk
+mutation.
 
 **Per-serial capture.** On a serialized WO the panel carries a serial chip strip ("steps are
 recorded per unit"); each record posts with its `serial_number`, and completeness is tracked
@@ -165,7 +203,7 @@ server-side.
 
 **Corrections supersede — never edit.** The **Correct** button on an existing record opens a
 modal requiring a **reason** plus the replacement value; the replacement runs the full
-capture ladder (including the out-of-tolerance refusal) via
+capture ladder (including the gauge and out-of-tolerance refusals) via
 `POST .../records/{record_id}/supersede` and inherits the original's serial. The original
 stays on file marked superseded — append-only evidence, per the AS9100D posture.
 
@@ -239,11 +277,14 @@ Every kiosk mutation — clock-in, clock-out, production report, complete, hold 
 Kiosk activity is therefore fully distinguishable from desktop, scanner, import, and
 backfill writes on the adoption dashboard.
 
-**Exception — process-step records.** A step record's `source` is derived server-side from
-the **credential**, never client-asserted: badge-minted `scope="kiosk"` operator tokens
-(crew station) land as `kiosk`; any normal session token lands as `desktop`. Because the
-single-operator kiosk runs on a normal employee-login session, its step records currently
-count as `desktop` on the adoption dashboard, unlike its other mutations.
+**Process-step records follow the same model.** Step writes (record, correct/supersede,
+quality-hold) use **TimeEntry's exact trust model**: the client-reported `source` hint is
+stored verbatim — or NULL when omitted; the server never guesses a channel — EXCEPT where
+the credential is authoritative: a badge-minted `scope="kiosk"` operator token (crew
+station) **always records `kiosk`** regardless of any hint. The single-operator kiosk runs
+on a normal employee-login session, so it sends `source: "kiosk"` on every step write,
+exactly like clock-in; the crew station sends no hint at all (its badge credential decides).
+Either way, kiosk step records count as `kiosk` on the adoption dashboard.
 
 ## Offline behavior
 

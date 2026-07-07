@@ -157,6 +157,11 @@ export default function WorkOrderNew() {
     notes: ''
   });
 
+  // Serialized WO creation (Process Sheets PR 4): optional serial numbers, one
+  // per line. Client-side validation mirrors the server exactly — unique,
+  // non-empty, ≤100 chars, count == quantity_ordered when provided.
+  const [serialsText, setSerialsText] = useState('');
+
   // Snapshot of the values the form opened with, so an untouched form is never
   // treated as dirty. This is a create-only page, so the snapshot is the empty
   // form captured on mount.
@@ -173,10 +178,39 @@ export default function WorkOrderNew() {
   const isFormDirty = useMemo(
     () =>
       JSON.stringify(form) !== JSON.stringify(initialForm) ||
-      operations.length > 0,
-    [form, initialForm, operations]
+      operations.length > 0 ||
+      serialsText.trim() !== '',
+    [form, initialForm, operations, serialsText]
   );
   const { confirmDiscard } = useUnsavedChanges(isFormDirty);
+
+  // Parsed serial lines (trimmed, blanks dropped) + the violations the server
+  // would 422 on. Providing NO serials is always valid (serials are optional).
+  const serialNumbers = useMemo(
+    () =>
+      serialsText
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0),
+    [serialsText]
+  );
+  const serialErrors = useMemo(() => {
+    if (serialNumbers.length === 0) return [];
+    const errors: string[] = [];
+    const duplicates = serialNumbers.filter((sn, i) => serialNumbers.indexOf(sn) !== i);
+    if (duplicates.length > 0) {
+      errors.push(`Duplicate serial number${duplicates.length === 1 ? '' : 's'}: ${Array.from(new Set(duplicates)).join(', ')}`);
+    }
+    if (serialNumbers.some((sn) => sn.length > 100)) {
+      errors.push('Serial numbers must be 100 characters or fewer.');
+    }
+    if (serialNumbers.length !== form.quantity_ordered) {
+      errors.push(
+        `${serialNumbers.length} serial number${serialNumbers.length === 1 ? '' : 's'} entered for quantity ${form.quantity_ordered} — the counts must match.`
+      );
+    }
+    return errors;
+  }, [serialNumbers, form.quantity_ordered]);
 
   useEffect(() => {
     loadInitialData();
@@ -688,6 +722,11 @@ export default function WorkOrderNew() {
       showToast('error', 'Please complete every manual operation with an operation name and work center.');
       return;
     }
+    if (serialErrors.length > 0) {
+      // Mirror of the server's 422 rules — block before the round-trip.
+      showToast('error', `Serial numbers are not valid: ${serialErrors.join(' ')}`);
+      return;
+    }
 
     setSubmitting(true);
     try {
@@ -711,6 +750,11 @@ export default function WorkOrderNew() {
         customer_name: customerNameForPayload,
         due_date: form.due_date || null,
       };
+
+      // Optional per-unit serials (server validates unique/non-empty/count).
+      if (serialNumbers.length > 0) {
+        payload.serial_numbers = serialNumbers;
+      }
 
       // If operations were modified or manually entered, include them
       if (hasManualOperations) {
@@ -737,7 +781,18 @@ export default function WorkOrderNew() {
       const result = await api.createWorkOrder(payload);
       navigate(`/work-orders/${result.id}`);
     } catch (err: any) {
-      showToast('error', err.response?.data?.detail || 'Failed to create work order');
+      // Surface the server refusal VERBATIM. A 422 arrives as Pydantic's
+      // structured array — join its messages instead of showing "[object …]".
+      const detail = err.response?.data?.detail;
+      const message =
+        typeof detail === 'string' && detail.trim()
+          ? detail
+          : Array.isArray(detail)
+            ? detail
+                .map((d: any) => (typeof d?.msg === 'string' ? d.msg : JSON.stringify(d)))
+                .join('; ')
+            : 'Failed to create work order';
+      showToast('error', message);
     } finally {
       setSubmitting(false);
     }
@@ -935,6 +990,43 @@ export default function WorkOrderNew() {
                 />
               </FormField>
             </div>
+
+            {form.quantity_ordered >= 1 && (
+              <FormField
+                label="Serial numbers"
+                help="Optional — one per line. When provided, the count must equal the quantity; shop-floor step records are then captured per unit."
+                error={serialErrors.length > 0 ? serialErrors.join(' ') : null}
+              >
+                {(field) => (
+                  <>
+                    <textarea
+                      {...field}
+                      data-testid="wo-serial-numbers"
+                      value={serialsText}
+                      onChange={(e) => setSerialsText(e.target.value)}
+                      className="input font-mono"
+                      rows={Math.min(8, Math.max(3, serialNumbers.length + 1))}
+                      placeholder={'SN-001\nSN-002\n…'}
+                      spellCheck={false}
+                    />
+                    <p
+                      data-testid="wo-serials-count"
+                      className={`mt-1 text-xs ${
+                        serialNumbers.length === 0
+                          ? 'text-slate-500'
+                          : serialNumbers.length === form.quantity_ordered
+                            ? 'text-green-500'
+                            : 'text-fd-amber'
+                      }`}
+                    >
+                      {serialNumbers.length === 0
+                        ? 'No serial numbers — this work order will not be serialized.'
+                        : `${serialNumbers.length} of ${form.quantity_ordered} serial number${form.quantity_ordered === 1 ? '' : 's'} entered`}
+                    </p>
+                  </>
+                )}
+              </FormField>
+            )}
 
             <div className="grid grid-cols-2 gap-4">
               <FormField label="Customer Name" className="relative">

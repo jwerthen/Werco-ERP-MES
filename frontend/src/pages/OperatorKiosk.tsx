@@ -19,6 +19,7 @@ import {
 import { useKioskIdleLogout } from '../hooks/useKioskIdleLogout';
 import KioskBadgeLogin from '../components/kiosk/KioskBadgeLogin';
 import KioskActiveJobBanner from '../components/kiosk/KioskActiveJobBanner';
+import KioskNcrFiledScreen from '../components/kiosk/KioskNcrFiledScreen';
 import KioskQueueCard from '../components/kiosk/KioskQueueCard';
 import KioskQuantityScreen from '../components/kiosk/KioskQuantityScreen';
 import KioskReasonGrid from '../components/kiosk/KioskReasonGrid';
@@ -37,7 +38,7 @@ import {
   extractStepsIncomplete,
   stepsIncompleteMessage,
 } from '../utils/processSheetErrors';
-import type { MissingStepInfo } from '../types/processSheet';
+import type { MissingStepInfo, QualityHoldResult } from '../types/processSheet';
 
 const POLL_INTERVAL_MS = 15_000;
 
@@ -47,15 +48,26 @@ type KioskView =
   | { name: 'production'; job: ActiveJob }
   | { name: 'complete'; job: ActiveJob }
   | { name: 'hold'; job: ActiveJob }
-  | { name: 'steps'; operationId: number; jobLabel: string; missing?: MissingStepInfo[] | null };
+  | { name: 'steps'; operationId: number; jobLabel: string; missing?: MissingStepInfo[] | null }
+  // One-tap OOT hold succeeded: the NCR number must stay readable (queue
+  // refreshes must not yank it), so it gets its own view like every other verb.
+  | { name: 'ncrFiled'; result: QualityHoldResult; jobLabel: string };
 
-/** The logged-in operator's session drives the main api client directly. */
+/**
+ * The logged-in operator's session drives the main api client directly. Every
+ * WRITE reports source:"kiosk" — the same A0.1 adoption-telemetry channel
+ * clock-in sends (this kiosk uses a normal session, so unlike the crew
+ * station's badge tokens the server has no credential to derive it from).
+ */
 const OPERATOR_STEPS_TRANSPORT: StepsTransport = {
   fetchView: (operationId) => api.getOperationSteps(operationId),
-  createRecord: (operationId, stepId, data) => api.recordOperationStep(operationId, stepId, data),
+  createRecord: (operationId, stepId, data) =>
+    api.recordOperationStep(operationId, stepId, { ...data, source: KIOSK_SOURCE }),
   supersedeRecord: (operationId, stepId, recordId, data) =>
-    api.supersedeOperationStepRecord(operationId, stepId, recordId, data),
+    api.supersedeOperationStepRecord(operationId, stepId, recordId, { ...data, source: KIOSK_SOURCE }),
   uploadAttachment: (operationId, stepId, file) => api.uploadOperationStepAttachment(operationId, stepId, file),
+  qualityHold: (operationId, stepId, data) =>
+    api.raiseStepQualityHold(operationId, stepId, { ...data, source: KIOSK_SOURCE }),
 };
 
 interface KioskToast {
@@ -587,6 +599,22 @@ export default function OperatorKiosk() {
             onBack={() => setView({ name: 'queue' })}
             onRecorded={refresh}
             onBusyChange={setBusy}
+            onQualityHeld={(result) => {
+              // The hold already landed server-side (op ON_HOLD, entries
+              // closed): show the NCR number on a dedicated screen, refresh
+              // the queue underneath — same exit target as the HOLD verb.
+              setView({ name: 'ncrFiled', result, jobLabel: view.jobLabel });
+              void refresh();
+            }}
+          />
+        )}
+
+        {view.name === 'ncrFiled' && (
+          <KioskNcrFiledScreen
+            result={view.result}
+            jobLabel={view.jobLabel}
+            doneLabel="Back to queue"
+            onDone={() => setView({ name: 'queue' })}
           />
         )}
 

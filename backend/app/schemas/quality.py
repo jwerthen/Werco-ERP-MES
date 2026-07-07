@@ -256,3 +256,43 @@ class FAIResponse(UTCModel):
 
     class Config:
         from_attributes = True
+
+
+# FAI pre-fill from process-sheet step records (process sheets PR 4)
+
+
+class FAIPrefillEntry(BaseModel):
+    """One characteristic populated from a conforming measurement step record.
+
+    ``measuring_device`` echoes what is on the characteristic AFTER the pre-fill;
+    ``device_preserved`` is True when an inspector-entered device already existed and
+    was deliberately KEPT — the pre-fill never overwrites a recorded device (SF-2)."""
+
+    char_number: int
+    characteristic: str
+    actual_value: Optional[str] = None
+    measuring_device: Optional[str] = None
+    device_preserved: bool = False
+    wo_operation_step_id: int
+    record_id: int
+    serial_number: Optional[str] = None
+
+
+class FAIPrefillUnmatched(BaseModel):
+    """One characteristic the pre-fill would not populate, and why."""
+
+    char_number: int
+    characteristic: str
+    reason: str
+
+
+class FAIPrefillResponse(BaseModel):
+    """POST /quality/fai/{fai_id}/prefill-from-steps — what was filled vs. reported."""
+
+    fai_id: int
+    fai_number: str
+    work_order_id: int
+    prefilled: List[FAIPrefillEntry] = Field(default_factory=list)
+    unmatched: List[FAIPrefillUnmatched] = Field(default_factory=list)
+    prefilled_count: int = 0
+    unmatched_count: int = 0

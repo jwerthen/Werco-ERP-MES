@@ -1229,9 +1229,13 @@ def create_work_order(
     # Generate work order number
     wo_number = generate_work_order_number(db, company_id)
 
-    # Create work order
-    wo_data = work_order_in.model_dump(exclude={"operations"})
+    # Create work order. serial_numbers (PR 4) is validated by the schema (unique,
+    # non-empty, count == quantity_ordered) and stored to the existing JSON-in-Text
+    # column — the shop-floor capture endpoints then key step records per serial.
+    wo_data = work_order_in.model_dump(exclude={"operations", "serial_numbers"})
     work_order = WorkOrder(**wo_data, work_order_number=wo_number, created_by=current_user.id)
+    if work_order_in.serial_numbers is not None:
+        work_order.serial_numbers = json.dumps(work_order_in.serial_numbers)
     work_order.company_id = company_id
     db.add(work_order)
     db.flush()  # Get the work order ID
@@ -3239,6 +3243,12 @@ def complete_operation(
             .with_for_update()
             .first()
         )
+    # PR 4 (ledger, re-audit note b): a soft-deleted/missing parent WO is a 404 here,
+    # exactly like the shop-floor twin — previously this path `work_order and ...`-
+    # guarded every gate and would complete an orphaned operation against a deleted WO
+    # with no gates evaluated.
+    if not work_order:
+        raise HTTPException(status_code=404, detail="Work order not found for this operation")
 
     # G6-A: refuse to complete an operation against a TERMINAL parent WO
     # (CANCELLED/CLOSED/COMPLETE) before any mutation -- mirrors the ON_HOLD 409 the
@@ -3286,10 +3296,14 @@ def complete_operation(
     # evidence requirement. When THIS request would FULLY complete the operation,
     # every required (non-INSTRUCTION) snapshot step must carry a live
     # (non-superseded) conforming record — per serial on a serialized WO. Evaluated
-    # under the same row lock, against the prospective resolved quantity; partial
-    # progress updates and zero-step operations are unaffected.
-    prospective_quantity = resolve_absolute_operation_quantity(db, operation, quantity_complete, target_qty)
-    if work_order and prospective_quantity >= target_qty:
+    # under the same row lock; partial progress updates and zero-step operations are
+    # unaffected.
+    #
+    # PR 4 (ledger): resolved ONCE under the lock and reused for both the gate and
+    # the store below — gating and storing can no longer diverge (TOCTOU closed),
+    # and the duplicate evidence query is gone.
+    resolved_quantity = resolve_absolute_operation_quantity(db, operation, quantity_complete, target_qty)
+    if resolved_quantity >= target_qty:
         missing_steps = process_sheet_service.missing_required_steps(db, company_id, operation, work_order)
         if missing_steps:
             raise HTTPException(
@@ -3321,7 +3335,8 @@ def complete_operation(
     # ABSOLUTE verb (DUP-3 / SFI-5): clamp to max(existing, requested, evidence)
     # capped at target so the office /complete can never lower the operation below
     # durable TimeEntry evidence (which a later reconcile would silently re-raise).
-    resolved_quantity = resolve_absolute_operation_quantity(db, operation, quantity_complete, target_qty)
+    # ``resolved_quantity`` was computed ONCE above (PR 4) — the gate and this store
+    # see the same value.
     operation.quantity_complete = resolved_quantity
     # DUP-3 scrap: only overwrite when an explicit value was provided.
     if quantity_scrapped is not None:

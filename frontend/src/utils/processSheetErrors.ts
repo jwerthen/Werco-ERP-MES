@@ -58,6 +58,71 @@ export function extractOutOfTolerance(err: unknown): OutOfToleranceInfo | null {
   return { measured, lsl, usl, message };
 }
 
+/**
+ * Parse a 409 VALUE_IN_TOLERANCE refusal on the quality-hold one-tap (the
+ * server verified the claimed measurement and found it IN band — no NCR was
+ * filed; the value should be recorded as a normal step record instead).
+ * Returns the server's human sentence verbatim; null for any other error.
+ */
+export function extractValueInTolerance(err: unknown): string | null {
+  const detail = extractApiErrorDetail(err);
+  if (!detail || typeof detail !== 'object') return null;
+  const d = detail as { code?: unknown; detail?: unknown };
+  if (d.code !== 'VALUE_IN_TOLERANCE') return null;
+  return typeof d.detail === 'string' && d.detail.trim()
+    ? d.detail
+    : 'The measured value is within tolerance — record it as a step record instead';
+}
+
+export interface GaugeRefusalInfo {
+  /** The server's human sentence (names the gauge), verbatim. */
+  message: string;
+  /** Equipment status (e.g. "out_of_calibration"); null on an unknown-code 404. */
+  status: string | null;
+  /** Date-only ISO (YYYY-MM-DD) or null — display via formatCentralDate. */
+  nextCalibrationDate: string | null;
+}
+
+/**
+ * Parse a gauge refusal on a record/supersede attempt (PR 4); null otherwise.
+ * Two shapes qualify:
+ *  - 409 {code:"GAUGE_OUT_OF_CAL", detail, equipment_id, status,
+ *    next_calibration_date} — the gauge exists but is not calibration-current.
+ *  - 404 "No gauge with identifier '<code>'" — the scanned code resolved to
+ *    nothing in this tenant.
+ * Either way NO record was written; the caller re-scans and retries.
+ */
+export function extractGaugeRefusal(err: unknown): GaugeRefusalInfo | null {
+  const detail = extractApiErrorDetail(err);
+  if (detail && typeof detail === 'object') {
+    const d = detail as {
+      code?: unknown;
+      detail?: unknown;
+      status?: unknown;
+      next_calibration_date?: unknown;
+    };
+    if (d.code === 'GAUGE_OUT_OF_CAL') {
+      return {
+        message:
+          typeof d.detail === 'string' && d.detail.trim()
+            ? d.detail
+            : 'This gauge is not calibration-current — use a current gauge',
+        status: typeof d.status === 'string' ? d.status : null,
+        nextCalibrationDate: typeof d.next_calibration_date === 'string' ? d.next_calibration_date : null,
+      };
+    }
+    return null;
+  }
+  if (
+    extractErrorStatus(err) === 404 &&
+    typeof detail === 'string' &&
+    /^no gauge with identifier/i.test(detail.trim())
+  ) {
+    return { message: detail, status: null, nextCalibrationDate: null };
+  }
+  return null;
+}
+
 /** Parse one STEPS_INCOMPLETE payload ({code, missing}) into its missing-step list. */
 function parseStepsIncompleteDetail(detail: unknown): MissingStepInfo[] | null {
   if (!detail || typeof detail !== 'object') return null;
