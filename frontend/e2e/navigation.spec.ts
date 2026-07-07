@@ -55,12 +55,18 @@ test.describe('Sidebar Navigation', () => {
     await page.setViewportSize({ width: 375, height: 667 });
     await page.waitForTimeout(500);
     
-    // Sidebar should be hidden or togglable
+    // Sidebar should be hidden or togglable. Several buttons carry a
+    // menu/toggle aria-label (mobile nav close, Copilot toggle), so count
+    // visible matches instead of isVisible() on a multi-match locator,
+    // which throws a strict-mode violation.
     const sidebar = page.locator('aside, nav').first();
     const isHidden = !(await sidebar.isVisible());
-    const hasToggle = await page.locator('button[aria-label*="menu" i], button[aria-label*="toggle" i]').isVisible();
-    
-    expect(isHidden || hasToggle).toBe(true);
+    const visibleToggles = await page
+      .locator('button[aria-label*="menu" i], button[aria-label*="toggle" i]')
+      .filter({ visible: true })
+      .count();
+
+    expect(isHidden || visibleToggles > 0).toBe(true);
   });
 });
 

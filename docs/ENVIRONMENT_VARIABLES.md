@@ -432,19 +432,30 @@ REACT_APP_API_URL=https://api.werco.com/api/v1
 
 ## E2E Testing
 
-For Playwright E2E tests, set these in `frontend/.env` (see `frontend/.env.example`).
+For Playwright E2E tests, export these in the shell that runs `npx playwright test` —
+nothing loads `frontend/.env` into the Playwright process (`frontend/.env.example`
+documents the canonical values).
 The `E2E_*_EMAIL` / `E2E_*_SECRET` pairs must match **actual seeded users** from
 `backend/scripts/seed_data.py`, otherwise login-based tests fail:
 
-| Variable | Required | Default (seed) | Description |
-|----------|----------|----------------|-------------|
+| Variable | Required | Value for the seed | Description |
+|----------|----------|--------------------|-------------|
 | `E2E_BASE_URL` | No | `http://localhost:5173` | Base URL Playwright targets (Vite dev server) |
+| `E2E_API_URL` | No | `http://localhost:8000/api/v1` | Backend API base for Node-side calls in specs (scaffolding seeds, reachability probes) |
 | `E2E_ADMIN_EMAIL` | Yes* | `admin@werco.com` | Admin user email for tests |
 | `E2E_ADMIN_SECRET` | Yes* | `admin123` | Admin user password for tests |
-| `E2E_MANAGER_EMAIL` | No | `jsmith@werco.com` | Manager user email for tests |
-| `E2E_MANAGER_SECRET` | No | `password123` | Manager user password for tests |
-| `E2E_OPERATOR_EMAIL` | No | `bwilliams@werco.com` | Operator user email for tests |
-| `E2E_OPERATOR_SECRET` | No | `password123` | Operator user password for tests |
+| `E2E_MANAGER_EMAIL` | Yes* | `jsmith@werco.com` | Manager user email for tests |
+| `E2E_MANAGER_SECRET` | Yes* | `password123` | Manager user password for tests |
+| `E2E_OPERATOR_EMAIL` | Yes* | `bwilliams@werco.com` | Operator user email for tests |
+| `E2E_OPERATOR_SECRET` | Yes* | `password123` | Operator user password for tests |
+| `E2E_KIOSK_STATION_ID` | No | (unset) | Kiosk station id for crew-station tests |
+| `E2E_KIOSK_PIN` | No | (unset) | That station's unlock PIN |
+| `E2E_BADGE_A` / `E2E_BADGE_B` | No | (unset) | Two operator badge codes for crew sign-in |
+
+\* Required to run against a `seed_data.py`-seeded backend. **Subtlety:** the code
+defaults in `frontend/e2e/fixtures.ts` are `manager@werco.com` / `operator@werco.com`
+(and empty passwords), and the seed does **not** create those users — so the email
+overrides above are required both locally and in CI, not optional niceties.
 
 **Notes:**
 - Run the suite with the backend rate limiter disabled — set `RATE_LIMIT_ENABLED=false`
@@ -452,6 +463,13 @@ The `E2E_*_EMAIL` / `E2E_*_SECRET` pairs must match **actual seeded users** from
   limit (5/min) and gets `429`s.
 - `E2E_BASE_URL` defaults to `http://localhost:5173` (also wired into
   `frontend/playwright.config.ts` `baseURL` and `webServer.url`).
+- In CI (`.github/workflows/e2e.yml`) all of these are set inline in the workflow to the
+  throwaway dev-seed values above — they are not repository secrets (ephemeral CI
+  database, disposable credentials).
+- The `E2E_KIOSK_*` / `E2E_BADGE_*` vars are optional everywhere: without them the
+  station flows in `e2e/crew-station-kiosk.spec.ts` self-skip (the admin-modal test still
+  runs). They are deliberately unset in CI until the seed provisions a kiosk station +
+  badges (known follow-up).
 
 ## Backend AI Eval Harness
 

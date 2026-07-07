@@ -41,13 +41,16 @@ test.describe('Authentication', () => {
     expect(emailInvalid).toBe(true);
   });
 
-  test('successful login redirects to dashboard', async ({ page }) => {
+  test('successful login redirects to the role default landing', async ({ page }) => {
     await loginAs(page, TEST_USERS.admin);
-    
-    // Should be on dashboard
-    await expect(page).toHaveURL(/\/$/);
-    
-    // Dashboard elements should be visible
+
+    // B0.3 "Action Inbox as the front door": admins/managers land on the
+    // Action Inbox by default (see utils/defaultLanding.ts), not "/".
+    await expect(page).toHaveURL(/\/action-inbox/);
+    await expect(page.locator('text=/action inbox/i').first()).toBeVisible();
+
+    // The classic dashboard remains reachable at "/".
+    await page.goto('/');
     await expect(page.locator('text=/dashboard|overview/i').first()).toBeVisible();
   });
 

@@ -1,0 +1,188 @@
+# E2E Tests — Playwright browser suite against a real, seeded full stack.
+#
+# INTENTIONALLY NON-BLOCKING: this workflow is deliberately kept out of
+# pr-check.yml and is NOT a required status check, so failures stay visible
+# on PRs without blocking merges until the suite's flake behavior in CI is
+# known. Promote it to a required check later by adding the "Playwright E2E"
+# job to branch protection (github-manager owns that policy change).
+#
+# Known follow-up: crew-station kiosk tests need a provisioned kiosk station
+# (E2E_KIOSK_STATION_ID / E2E_KIOSK_PIN / E2E_BADGE_A / E2E_BADGE_B). Those
+# are deliberately unset here — crew-station-kiosk.spec.ts self-skips its
+# station tests without them (its admin-modal test still runs).
+
+name: E2E Tests
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - '.github/workflows/e2e.yml'
+  schedule:
+    # Nightly at 09:00 UTC (3am CST / 4am CDT)
+    - cron: '0 9 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Only cancel superseded PR runs; a manual dispatch must not kill an
+  # in-flight nightly on main (they share the ref-keyed group).
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  PYTHON_VERSION: '3.11'
+  NODE_VERSION: '20'
+
+jobs:
+  e2e:
+    name: Playwright E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Backend runtime config for the seed step and the API process.
+      # Throwaway values for an ephemeral CI database — not secrets.
+      # Settings requires BOTH keys, each >= 32 chars (app/core/config.py
+      # validators) — a shorter value or a missing REFRESH_TOKEN_SECRET_KEY
+      # fails the seed step at import time.
+      DATABASE_URL: postgresql://werco_user:test_password@localhost:5432/werco_erp_e2e
+      SECRET_KEY: test-secret-key-for-ci-only-not-a-real-secret-0123456789
+      REFRESH_TOKEN_SECRET_KEY: test-refresh-secret-for-ci-only-not-a-real-secret-987654
+      ENVIRONMENT: test
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: werco_user
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_DB: werco_erp_e2e
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install backend dependencies
+        working-directory: ./backend
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install frontend dependencies
+        working-directory: ./frontend
+        run: npm ci
+
+      - name: Install Playwright browsers
+        working-directory: ./frontend
+        run: npx playwright install --with-deps chromium
+
+      # Creates the schema (Base.metadata.create_all) and seeds the default
+      # company, users, work centers, parts, and work orders the specs expect.
+      - name: Seed database
+        working-directory: ./backend
+        run: python -m scripts.seed_data
+
+      - name: Start backend API
+        working-directory: ./backend
+        env:
+          # Load-bearing: /api/v1/auth/login is rate-limited to 5/minute and
+          # nearly every Playwright test logs in through the UI from one IP —
+          # with limits on, the suite 429s immediately.
+          RATE_LIMIT_ENABLED: 'false'
+        run: |
+          nohup uvicorn app.main:app --host 127.0.0.1 --port 8000 > "$RUNNER_TEMP/backend.log" 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8000/health > /dev/null 2>&1; then
+              echo "Backend is up"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::Backend failed to start within 60s"
+          tail -50 "$RUNNER_TEMP/backend.log"
+          exit 1
+
+      # playwright.config.ts deliberately leaves webServer undefined when CI is
+      # set — CI boots the app itself. The frontend's built-in API base URL
+      # default is http://localhost:8000/api/v1, so no REACT_APP_API_URL needed.
+      - name: Start frontend dev server
+        working-directory: ./frontend
+        run: |
+          nohup npm run dev -- --host 127.0.0.1 --port 5173 --strictPort > "$RUNNER_TEMP/vite.log" 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:5173 > /dev/null 2>&1; then
+              echo "Frontend is up"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::Frontend failed to start within 60s"
+          tail -50 "$RUNNER_TEMP/vite.log"
+          exit 1
+
+      - name: Run Playwright E2E
+        working-directory: ./frontend
+        env:
+          # Must stay localhost (not 127.0.0.1): the browser's Origin header
+          # has to match the backend's default CORS_ORIGINS allowlist, which
+          # includes http://localhost:5173 only.
+          E2E_BASE_URL: http://localhost:5173
+          # 127.0.0.1, not localhost: the Node-side APIRequestContext in
+          # process-sheets.spec.ts must not depend on resolver AAAA ordering —
+          # uvicorn binds IPv4 only, and an IPv6-first resolution would make
+          # the spec's reachability probe silently skip the whole journey.
+          E2E_API_URL: http://127.0.0.1:8000/api/v1
+          # These must match what scripts/seed_data.py creates. fixtures.ts
+          # defaults to manager@werco.com / operator@werco.com, which the seed
+          # does NOT create — the overrides below are required. Throwaway
+          # dev-seed credentials for an ephemeral CI database, not secrets.
+          E2E_ADMIN_EMAIL: admin@werco.com
+          E2E_ADMIN_SECRET: admin123
+          E2E_MANAGER_EMAIL: jsmith@werco.com
+          E2E_MANAGER_SECRET: password123
+          E2E_OPERATOR_EMAIL: bwilliams@werco.com
+          E2E_OPERATOR_SECRET: password123
+        run: npx playwright test
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: frontend/playwright-report/
+          retention-days: 14
+          # v4 artifacts are immutable per run; without this, "Re-run failed
+          # jobs" dies on a name conflict with the first attempt's upload.
+          overwrite: true
+
+      - name: Upload server logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-logs
+          path: |
+            ${{ runner.temp }}/backend.log
+            ${{ runner.temp }}/vite.log
+          retention-days: 14
+          overwrite: true
