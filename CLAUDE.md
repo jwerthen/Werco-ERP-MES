@@ -67,7 +67,14 @@ npm run build          # production build
 npm test               # Jest unit/component (watch disabled)
 npm test -- path/to/File.test.tsx     # single test file
 npm run test:coverage
-npm run test:e2e       # Playwright E2E (test:e2e:ui / test:e2e:headed for debugging)
+npm run test:e2e       # Playwright E2E (test:e2e:ui / test:e2e:headed for debugging).
+                       # Needs a seeded backend (python -m scripts.seed_data), RATE_LIMIT_ENABLED=false
+                       # on the API, and E2E_* creds matching the seed users — the fixtures.ts
+                       # manager/operator defaults are NOT seeded, so the email overrides are
+                       # required (docs/DEVELOPMENT.md → Testing → E2E). CI runs the suite via
+                       # .github/workflows/e2e.yml — a separate, deliberately NON-blocking workflow
+                       # (PRs touching backend/frontend, nightly 09:00 UTC, manual dispatch);
+                       # promote to required by adding "Playwright E2E" to branch protection.
 npm run lint           # eslint src --ext .ts,.tsx  (lint:fix to autofix)
                        # jsx-a11y is FULLY enforced: the recommended ruleset plus the three
                        # formerly-`off` debt families — label-has-associated-control, control-
