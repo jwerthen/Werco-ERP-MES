@@ -700,7 +700,8 @@ export default function Layout({ children }: LayoutProps) {
             <div className="flex-shrink-0">
               <div
                 className="h-[30px] w-[30px] rounded-[3px] flex items-center justify-center text-fd-blue font-bold font-mono text-xs"
-                style={{ background: 'var(--fd-raised)', border: '1px solid var(--fd-line-bright)' }}
+                /* fd-sunken (not -raised): 12px bold fd-blue needs >=4.5:1 (WCAG AA) — 5.16:1 on the sunken well */
+                style={{ background: 'var(--fd-sunken)', border: '1px solid var(--fd-line-bright)' }}
               >
                 {user?.first_name?.[0]}
                 {user?.last_name?.[0]}
@@ -798,7 +799,7 @@ export default function Layout({ children }: LayoutProps) {
                 >
                   <MagnifyingGlassIcon className="h-4 w-4" />
                   <span className="hidden md:inline font-mono text-xs">search</span>
-                  <kbd className="hidden md:inline-flex items-center px-1.5 py-0.5 font-mono text-[10px] text-fd-faint rounded-[3px]" style={{ border: '1px solid var(--fd-line)' }}>
+                  <kbd className="hidden md:inline-flex items-center px-1.5 py-0.5 font-mono text-[10px] text-fd-mute rounded-[3px]" style={{ border: '1px solid var(--fd-line)' }}>
                     {isMac ? '⌘K' : 'Ctrl K'}
                   </kbd>
                 </button>
@@ -821,11 +822,12 @@ export default function Layout({ children }: LayoutProps) {
                 {/* HUD status cluster */}
                 <div className="hidden xl:flex items-center gap-3.5 pl-1 font-mono text-[11px]">
                   <div>
-                    <span className="text-fd-faint">SYNC </span>
+                    {/* text-fd-mute (not -faint): 11px labels on the #0c1017 header need >=4.5:1 (WCAG AA) */}
+                    <span className="text-fd-mute">SYNC </span>
                     <span className="text-fd-green">OK</span>
                   </div>
                   <div>
-                    <span className="text-fd-faint">SHIFT </span>
+                    <span className="text-fd-mute">SHIFT </span>
                     <HudShift />
                   </div>
                   <HudClock />
@@ -890,7 +892,7 @@ export default function Layout({ children }: LayoutProps) {
               <span className="text-fd-blue font-semibold">ERP / MES</span>
             </div>
             <div className="flex items-center gap-3 font-mono">
-              <span className="text-[10px] uppercase tracking-[0.14em] text-fd-faint">AS9100D &middot; ISO 9001 &middot; ITAR</span>
+              <span className="text-[10px] uppercase tracking-[0.14em] text-fd-mute">AS9100D &middot; ISO 9001 &middot; ITAR</span>
               <span className="text-fd-faint">·</span>
               <span className="text-[10px] text-fd-mute">v1.0.0</span>
             </div>

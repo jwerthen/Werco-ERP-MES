@@ -52,13 +52,23 @@ export const test = base.extend<{
  * Login as a specific user
  */
 export async function loginAs(page: Page, user: typeof TEST_USERS.admin) {
+  // Pre-complete the Getting-Started tour. It auto-starts once per user on
+  // first login (per-user localStorage flag — always unset in a fresh E2E
+  // browser context), and its full-screen spotlight overlay intercepts
+  // pointer events, which breaks every post-login click in the suite.
+  await page.addInitScript(() => {
+    window.localStorage.setItem('werco-completed-tours', JSON.stringify(['getting-started']));
+  });
   await page.goto('/login');
   await page.fill('input[name="email"]', user.email);
   await page.fill('input[type="password"]', user.secret);
   await page.click('button[type="submit"]');
-  
-  // Wait for redirect to the app dashboard.
-  await page.waitForURL('**/', { timeout: 10000 });
+
+  // Wait for the post-login redirect. Operators are redirected to the
+  // shop-floor kiosk route (/shop-floor/operations?kiosk=1), everyone else
+  // to the dashboard — so wait for "no longer on /login" rather than a
+  // specific destination URL.
+  await page.waitForURL((url) => !url.pathname.startsWith('/login'), { timeout: 10000 });
 }
 
 /**

@@ -207,6 +207,45 @@ npm run test:watch
 npm run test:coverage
 ```
 
+### E2E Testing (Playwright)
+
+The Playwright suite (`frontend/e2e/*.spec.ts`) drives a real browser against a running
+full stack — it needs a **seeded backend**, not mocks:
+
+```bash
+# 1. Seed the database (creates the schema + default company, users, work centers,
+#    parts, and work orders the specs expect)
+cd backend
+python -m scripts.seed_data
+
+# 2. Start the API with the rate limiter OFF. Nearly every spec logs in through the
+#    UI and /api/v1/auth/login is limited to 5/min — with limits on, the suite 429s.
+RATE_LIMIT_ENABLED=false uvicorn app.main:app --port 8000
+
+# 3. Run the suite (locally, playwright.config.ts starts the Vite dev server itself)
+cd frontend
+npm run test:e2e             # or: npx playwright test
+npx playwright show-report   # open the HTML report
+```
+
+Credentials come from `E2E_*` env vars, which must be **exported in the shell that runs
+Playwright** — nothing loads `frontend/.env` into the test-runner process
+(`frontend/.env.example` documents the canonical values; see also
+`docs/ENVIRONMENT_VARIABLES.md` → E2E Testing). **Subtlety:
+the fixture defaults in `frontend/e2e/fixtures.ts` are `manager@werco.com` /
+`operator@werco.com`, which the seed does NOT create.** The email overrides are required
+— `E2E_ADMIN_EMAIL=admin@werco.com` / `E2E_ADMIN_SECRET=admin123`,
+`E2E_MANAGER_EMAIL=jsmith@werco.com` and `E2E_OPERATOR_EMAIL=bwilliams@werco.com` (both
+`password123`) — to match the users `scripts/seed_data.py` actually creates.
+
+The crew-station kiosk tests (`e2e/crew-station-kiosk.spec.ts`) self-skip their
+station flows unless `E2E_KIOSK_STATION_ID` / `E2E_KIOSK_PIN` / `E2E_BADGE_A` /
+`E2E_BADGE_B` point at a provisioned station and badges — the seed does not create one
+yet (known follow-up); the admin-modal test still runs.
+
+In CI the same suite runs via `.github/workflows/e2e.yml` — see the CI/CD Pipeline
+section below.
+
 ### Test Coverage Targets
 
 - Backend: 70% minimum coverage
@@ -509,6 +548,17 @@ The project uses GitHub Actions for CI/CD:
 - Builds Docker images
 - Runs security scans
 - Deploys after successful runs
+
+The Playwright E2E suite runs in a separate, **deliberately non-blocking** workflow
+(`.github/workflows/e2e.yml`): on PRs to `main`/`develop` that touch `backend/` or
+`frontend/`, nightly at 09:00 UTC, and on manual dispatch. It boots the full stack in the
+runner (Postgres 15 service → `python -m scripts.seed_data` → uvicorn with
+`ENVIRONMENT=test` and `RATE_LIMIT_ENABLED=false` → Vite dev server) and runs
+`npx playwright test` with the `E2E_*` vars set inline to the throwaway dev-seed users —
+no repo secrets. It is not a required status check until its flake behavior in CI is
+known; the promotion path is adding the "Playwright E2E" job to branch protection. The
+HTML report is always uploaded as the `playwright-report` artifact (14-day retention);
+backend/vite logs upload on failure. Details in `docs/CI_CD_SETUP.md`.
 
 ## Security Considerations
 

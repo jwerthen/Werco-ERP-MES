@@ -204,7 +204,7 @@ pytest
 cd frontend
 npm test
 
-# E2E tests (requires running app)
+# E2E tests (requires a seeded, running backend — see docs/DEVELOPMENT.md → Testing → E2E)
 npm run test:e2e
 
 # Load tests

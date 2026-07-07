@@ -27,6 +27,20 @@ const HAVE_STATION_ENV = Boolean(STATION_ID && STATION_PIN && BADGE_A && BADGE_B
 
 /** Serious+critical axe violations must be zero on every kiosk surface. */
 async function expectNoSeriousAxeViolations(page: Page, context: string) {
+  // Let entrance transitions (e.g. the Modal's 0.2s scale-in fade) settle
+  // before scanning — axe samples computed colors, and a scan mid-fade reads
+  // interpolated opacity as a bogus contrast failure. Finite animations only:
+  // infinite ones (spinners, pulses) never resolve `finished`.
+  await page.evaluate(() =>
+    Promise.all(
+      document
+        .getAnimations()
+        .filter((a) => a.effect?.getTiming().iterations !== Infinity)
+        // then(() => undefined): resolve to a serializable value — the raw
+        // Animation host objects can't round-trip out of page.evaluate.
+        .map((a) => a.finished.then(() => undefined).catch(() => undefined)),
+    ),
+  );
   const results = await new AxeBuilder({ page }).analyze();
   const serious = results.violations.filter((v) => v.impact === 'serious' || v.impact === 'critical');
   expect(serious, `${context}: ${serious.map((v) => v.id).join(', ')}`).toEqual([]);

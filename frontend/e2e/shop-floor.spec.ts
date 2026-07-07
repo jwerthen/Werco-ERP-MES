@@ -11,8 +11,12 @@ test.describe('Shop Floor Access', () => {
     await loginAs(page, TEST_USERS.operator);
     await page.goto('/shop-floor');
     
-    // Should load shop floor page
-    await expect(page.locator('h1, h2').filter({ hasText: /shop.*floor|station/i }).first()).toBeVisible({ timeout: 10000 });
+    // Should load shop floor page. Both a mobile and a desktop heading exist
+    // in the DOM (one hidden per breakpoint), so assert on the visible one
+    // rather than a positional .first() (same pattern as the clock-in test).
+    await expect(
+      page.locator('h1, h2').filter({ hasText: /shop.*floor|station/i }).filter({ visible: true }).first()
+    ).toBeVisible({ timeout: 10000 });
   });
 
   test('shop floor shows work queue', async ({ page }) => {

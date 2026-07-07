@@ -4,10 +4,11 @@ This document explains how to set up and use the GitHub Actions CI/CD pipeline f
 
 ## Overview
 
-The pipeline consists of two workflow files:
+The pipeline consists of three workflow files:
 
 1. **ci-cd.yml** - Main CI/CD pipeline (runs on push to main/develop)
 2. **pr-check.yml** - Pull request checks (runs on PRs)
+3. **e2e.yml** - Playwright E2E suite against a real, seeded full stack (PRs, nightly, manual; deliberately **non-blocking** — see below)
 
 ## Pipeline Stages
 
@@ -45,6 +46,45 @@ Triggered on: Push to `main` or `develop`
 > (`ci-cd.yml`) and `Verify deployment serves the Vite frontend bundle`
 > (`deploy-frontend-production.yml`). Rollback is re-adding the reviewer rule (and/or
 > redeploying a known-good commit). _(Governance change 2026-06-22.)_
+
+### E2E Tests (e2e.yml)
+
+Triggered on: PRs to `main`/`develop` (paths-filtered to `backend/**`, `frontend/**`, and
+the workflow itself), nightly at 09:00 UTC (3am CST / 4am CDT), and manual dispatch.
+
+The single `Playwright E2E` job boots the full stack inside the runner and runs the
+browser suite (`frontend/e2e/*.spec.ts`) against it:
+
+1. `postgres:15-alpine` service container
+2. `python -m scripts.seed_data` — creates the schema and seeds the default company,
+   users, work centers, parts, and work orders the specs expect
+3. uvicorn with `ENVIRONMENT=test` and `RATE_LIMIT_ENABLED=false` (load-bearing:
+   `/api/v1/auth/login` is rate-limited to 5/min and nearly every spec logs in through
+   the UI from one IP — with limits on, the suite 429s immediately)
+4. Vite dev server (`playwright.config.ts` leaves `webServer` undefined when `CI` is set;
+   the workflow boots the app itself)
+5. `npx playwright test`
+
+**Credentials are not secrets.** The `E2E_*` env vars are set inline in the workflow to
+the throwaway dev-seed users (`admin@werco.com`/`admin123`, `jsmith@werco.com` and
+`bwilliams@werco.com` with `password123`) against an ephemeral CI database. The email
+overrides are required — `frontend/e2e/fixtures.ts` defaults to `manager@werco.com` /
+`operator@werco.com`, which the seed does **not** create. See
+[ENVIRONMENT_VARIABLES.md](./ENVIRONMENT_VARIABLES.md) → E2E Testing.
+
+**Intentionally non-blocking.** The job is a separate workflow, not a required status
+check, so failures stay visible on PRs without blocking merges until the suite's flake
+behavior in CI is known. Promotion path: add the "Playwright E2E" job to the `main`
+branch-protection ruleset (github-manager owns that policy change).
+
+**Artifacts:** the Playwright HTML report is always uploaded as `playwright-report`
+(14-day retention; download from the run's Artifacts section and open `index.html`).
+Backend and Vite server logs upload as `server-logs` on failure only.
+
+**Known follow-up:** the crew-station kiosk station tests self-skip —
+`E2E_KIOSK_STATION_ID` / `E2E_KIOSK_PIN` / `E2E_BADGE_A` / `E2E_BADGE_B` are deliberately
+unset until the seed provisions a kiosk station + badges (the spec's admin-modal test
+still runs).
 
 ## Required Secrets
 
@@ -125,8 +165,10 @@ PR-gated for non-admins.
 | Event | Workflow | Action |
 |-------|----------|--------|
 | PR to main/develop | pr-check.yml | Run checks on changed files |
+| PR to main/develop (backend/frontend paths) | e2e.yml | Playwright E2E against seeded full stack (non-blocking) |
 | Push to develop | ci-cd.yml | Full CI + deploy to staging |
 | Push to main | ci-cd.yml | Full CI + deploy to production |
+| Nightly, 09:00 UTC | e2e.yml | Playwright E2E against seeded full stack |
 
 ### Manual Triggers
 
@@ -136,6 +178,8 @@ You can manually trigger the CI/CD pipeline:
 2. Select "CI/CD Pipeline"
 3. Click "Run workflow"
 4. Select branch and deploy target
+
+"E2E Tests" supports the same `workflow_dispatch` flow (steps 1–3, selecting "E2E Tests").
 
 ## Local Development Integration
 
@@ -231,20 +275,12 @@ Add to the `notify` job:
     SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
 ```
 
-### Adding E2E Tests
+### Promoting E2E Tests to a Required Check
 
-Add a new job after frontend-test:
-
-```yaml
-e2e-tests:
-  name: E2E Tests
-  runs-on: ubuntu-latest
-  needs: [backend-test, frontend-test]
-  steps:
-    - uses: actions/checkout@v4
-    - name: Run Playwright tests
-      run: npx playwright test
-```
+E2E tests already run in CI via `e2e.yml` (see "E2E Tests (e2e.yml)" above) but are
+intentionally not a required status check. Once the suite has demonstrated stable
+(non-flaky) behavior in CI, promote it by adding the "Playwright E2E" job to the required
+status checks in the `main` branch-protection ruleset (Settings > Rules > Rulesets).
 
 ## Cost Considerations
 

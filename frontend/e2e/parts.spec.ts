@@ -7,6 +7,8 @@
 import { test, expect, TEST_USERS, loginAs } from './fixtures';
 import type { Page } from '@playwright/test';
 
+const API_URL = process.env.E2E_API_URL || 'http://localhost:8000/api/v1';
+
 async function openCreatePartForm(page: Page) {
   await page.goto('/parts');
   await page.locator('button, a').filter({ hasText: /new|create|add/i }).first().click();
@@ -175,7 +177,7 @@ test.describe('Part Details', () => {
     // detail page directly — robust against list view-mode and row-click targeting
     // (the list->detail click flow is covered by "can click part row to view details").
     const token = await page.evaluate(() => sessionStorage.getItem('token'));
-    const res = await page.request.get('http://localhost:8000/api/v1/parts/?limit=1', {
+    const res = await page.request.get(`${API_URL}/parts/?limit=1`, {
       headers: { Authorization: `Bearer ${token}` },
     });
     const body = await res.json();

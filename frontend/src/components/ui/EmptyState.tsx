@@ -59,8 +59,9 @@ export const EmptyState: React.FC<EmptyStateProps> = ({
         <Icon className="h-10 w-10 text-slate-600 mb-3" aria-hidden="true" />
       )}
       <p className="text-sm font-semibold text-slate-300">{title}</p>
+      {/* slate-400 (not -500): 12px copy on the dark well needs >=4.5:1 (WCAG AA) — 6.7:1 worst case */}
       {description && (
-        <p className="mt-1 text-xs text-slate-500 max-w-sm">{description}</p>
+        <p className="mt-1 text-xs text-slate-400 max-w-sm">{description}</p>
       )}
       {action && (
         <div className="mt-4">
