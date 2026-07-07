@@ -76,6 +76,21 @@
   (dashboard / trends / six-big-losses / list records & targets) remain open to any authenticated user
   so the shop floor can view dashboards (read-broad / write-restricted). See `docs/RBAC_PERMISSIONS.md`
   → OEE.
+- [x] Database-level deny-by-default beneath app-layer tenant isolation (AC-3.1.3 boundary
+  control, defense-in-depth — 2026-07-07, migration `059_supabase_rls_hardening`). The production
+  Supabase Postgres exposed an auto-generated REST API ("Data API") whose roles
+  `anon`/`authenticated` held FULL privileges on all 127 `public` tables with RLS off — the
+  Security Advisor's `rls_disabled_in_public` ERROR, and real exposure: the ERP database was
+  readable/writable to anyone holding the project anon key, bypassing the app entirely. A stray
+  dashboard-created SELECT-to-public policy on `companies` additionally made tenant company data
+  anon-readable. Migration `059` drops the stray policy, enables (non-`FORCE`) RLS on every
+  `public` table with **zero policies (deny-all by design)**, and revokes all
+  table/sequence/function privileges, schema `USAGE`, and default privileges for future objects
+  from `anon`/`authenticated`. App-layer tenancy (`TenantMixin` + `tenant_query`/`tenant_filter`)
+  **remains the enforcement**; RLS is a hard stop for the Data API surface, not a second tenancy
+  implementation. No-op for the app (it connects as the table-owning `postgres` role with
+  `BYPASSRLS`). Manual dashboard follow-ups (disable the unused Data API, SSL enforcement) are
+  tracked in `docs/SUPABASE_SECURITY.md`.
 
 **GAPS:**
 - [ ] **AC-3.1.10 - Session Inactivity Timeout** ⚠️ HIGH
@@ -184,6 +199,25 @@
     single global sequence across all tenants; per-record verification at
     /audit/integrity/record/{sequence_number} is available to a company Admin for their own
     company's records)
+
+  > **DB-level immutability is (re)ensured by migration `060_audit_log_immutability` —
+  > prod gap found and fixed 2026-07-07.** The `tr_audit_log_no_update` / `tr_audit_log_no_delete`
+  > triggers this control relies on were found **missing in production**: prod was bootstrapped
+  > via `Base.metadata.create_all()` + `alembic stamp` past migration `008`, which silently
+  > skipped `008`'s raw DDL (trigger functions/triggers aren't in SQLAlchemy metadata, so
+  > `create_all` never creates them) — until the fix deployed, `audit_logs` had no DB-level
+  > UPDATE/DELETE protection in prod. During that window the hash chain still made **mid-chain**
+  > tampering *evident* (hash break / sequence gap), but a deletion of the newest rows before the
+  > next insert would have re-chained seamlessly and gone undetected (`AuditService` chains from
+  > the current tail); the triggers make both *refused*. **Post-fix follow-up:** run the
+  > Platform-Admin chain verification (`/audit/integrity/verify`) against prod after the deploy
+  > and record the result — and the bootstrap date, i.e. the window's start, if determinable —
+  > in the Change Log below. Migration `060` idempotently re-creates the `008` trigger functions with
+  > `SET search_path = ''` pinned and recreates both triggers if missing; its downgrade only
+  > resets `search_path` and never drops the objects (`008` owns their lifecycle). Applied via the
+  > normal `alembic upgrade head` at container boot. Bootstrap guidance to prevent recurrence:
+  > `docs/DEVELOPMENT.md` → Bootstrap order; posture and verification SQL:
+  > `docs/SUPABASE_SECURITY.md`.
 
   > **`company_id` is deliberately excluded from the AU-3.3.8 integrity hash — do not add it.**
   > Audit rows now carry a `company_id` so audit *retrieval* can be tenant-scoped, but `company_id`
@@ -805,6 +839,7 @@ Backend:
 | 2026-06-25 | AC-3.1.1 / SC-3.13.1 (AI-egress toggle — authorization tightened to ADMIN-only): `PUT /api/v1/companies/me/ai-egress` (`app/api/endpoints/companies.py`) was narrowed from `require_role([ADMIN, MANAGER])` to `require_role([ADMIN])`, so flipping the `allow_ai_egress` CUI kill switch is now **ADMIN-only**. This brings it into symmetry with the two sibling CUI egress kill switches (`allow_carrier_egress` / `allow_print_egress`), which are already ADMIN-only — opening or closing the CUI boundary is a decision reserved to Admins. Managers can no longer flip the flag via any path (the prior allowance had been UI-dormant — `/admin/settings` is AdminRoute-gated — so this removes the latent direct-API path). Authorization-scope change only: the fail-closed enforcement seam, audit behavior, default-OFF/grandfathered-ON posture, and the auditor sign-off open item on the grandfathered-ON default are all unchanged. Docs reconciled in `docs/RBAC_PERMISSIONS.md` / `docs/API.md` / `docs/AI_QUOTING_AGENT_RUNBOOK.md` and the prior row above. Describes shipped working-tree behavior. | Claude |
 | 2026-06-29 | AU-3.3.8 (audit-log reviewability — UI now pages the full history, branch `ui/ux-batch4-datatable`): the Audit Log screen (`frontend/src/pages/AuditLog.tsx`) now uses **server-side offset/limit pagination** (Prev/Next, `desc(timestamp)`) instead of a single fixed-`limit` fetch, so **older audit rows are reachable in the UI** — closing a practical reviewability gap where records beyond the first page were not navigable. **No backend change:** `GET /audit/` already supported `offset`/`limit` (`le=500`); only the frontend `api.getAuditLogs` gained an optional `offset` param and the page was migrated onto the shared `<DataTable>` primitive. Tamper-evident immutability, the hash chain, tenant-scoped retrieval, and retention/archival behavior are all unchanged; this strengthens the **practical accessibility** of the protected audit record without altering any control claim. Documentation-only — describes shipped working-tree behavior, no compliance claim changed. See `docs/API.md` → Audit Log | Claude |
 | 2026-07-01 | AC-3.1.8 / SC-3.13.1 (per-path auth rate limiting — now **enforced**, branch `fix/auth-rate-limit-enforcement`): the stricter per-path limits for sensitive endpoints (`AUTH_RATE_LIMITS` / `ENDPOINT_RATE_LIMITS` in `app/main.py`) were **declared but never wired into slowapi** — only the app-wide default limit applied, so brute-force protection on `/auth/login`, `/auth/register(-public)`, `/auth/employee-login`, `/auth/refresh`, `/visitor-logs/station-login`, and `/scanner/resolve-action` was **not actually in force**. A new per-path middleware now hits the limiter's own strategy+storage (shared Redis/memory backend) and **rejects over-limit requests with 429 + `Retry-After`** (body `{"detail": "Rate limit exceeded: <limit>"}`), keyed per client IP: login `5/min`, register/register-public/employee-login `3/min`, refresh `30/min`, visitor station-login `5/min`, scanner resolve-action `60/min`; all other paths keep the global default (100/60s). Enforcement **fails open** (limiter-backend error → request allowed, global default still applies, warning logged) so a dead backend cannot hard-block auth. This **closes a genuine brute-force-throttling gap** (limits were documented as active but inert); it does not weaken any claim. As a follow-on, the interim 6–8 digit visitor-PIN-length mitigation can relax now that station-login is throttled server-side. Describes shipped working-tree behavior. See `docs/ENVIRONMENT_VARIABLES.md` → Rate Limiting / `docs/API.md` → Rate Limiting / `docs/VISITOR_SIGNIN.md` → Security note | Claude |
+| 2026-07-07 | AC-3.1.3 / AU-3.3.8 (Supabase DB hardening, branch `feat/supabase-security-hardening` — ⚠️ **closes two live prod exposures, flagged for auditor awareness**): the Supabase Security Advisor flagged `rls_disabled_in_public` (ERROR) on all 127 `public` tables — the Data API roles `anon`/`authenticated` held FULL privileges (incl. INSERT/UPDATE/DELETE/TRUNCATE) with RLS off, so the ERP DB was readable/**writable** to anyone holding the project anon key via the auto-generated REST API, and a stray dashboard policy made `companies` anon-readable. **Migration `059_supabase_rls_hardening`** drops the stray policy, enables deny-by-default RLS (no policies, on purpose) on every `public` table, and revokes all `anon`/`authenticated` privileges incl. default privileges for future objects; app-layer tenancy remains the enforcement (no-op for the app — it connects as the table-owning `postgres` role with `BYPASSRLS`). **Separately discovered: the `008` AU-3.3.8 immutability triggers did not exist in prod** (bootstrap `create_all` + `stamp` skipped `008`'s raw DDL), so `audit_logs` had no DB-level UPDATE/DELETE protection until now; **migration `060_audit_log_immutability`** idempotently re-creates the trigger functions (with `SET search_path = ''` pinned) and triggers. New-table convention going forward: every table-creating migration must ENABLE ROW LEVEL SECURITY. Manual dashboard follow-ups (disable unused Data API, SSL enforcement, network restrictions) tracked with verification SQL in `docs/SUPABASE_SECURITY.md` | Claude |
 
 ---
 
