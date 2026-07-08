@@ -53,6 +53,8 @@ TASK_MODEL_ENV = {
     "laser_nest_extraction": "ANTHROPIC_LASER_NEST_MODEL",
     "copilot_chat": "ANTHROPIC_COPILOT_MODEL",
     "nl_search": "ANTHROPIC_NL_SEARCH_MODEL",
+    # Reuses the same Anthropic client; optional override only.
+    "auto_execute": "ANTHROPIC_AUTO_EXECUTE_MODEL",
 }
 
 
@@ -102,6 +104,10 @@ def select_anthropic_model(context: LLMTaskContext) -> LLMModelDecision:
 
     if task == "nl_search":
         return model_decision_for_tier(LLMModelTier.FAST, "NL search intent parse is a cheap classification")
+
+    if task == "auto_execute":
+        # Batch approve/skip of already-structured allowlisted actions — cheap JSON decision.
+        return model_decision_for_tier(LLMModelTier.FAST, "auto-execute decision over structured recommendations")
 
     if task == "copilot_chat":
         if complexity_score >= 5:

@@ -541,7 +541,7 @@ uploads go through text extraction + LLM. See
 | GET | `/routing/{id}` | Get routing by ID | Yes |
 | PUT | `/routing/{id}` | Update routing | Yes |
 | POST | `/routing/{id}/release` | Release a draft routing for production (status → `released`, stamps `approved_by`/`approved_at`/`effective_date`) | Admin / Manager |
-| POST | `/routing/{id}/copy` | Copy a routing to a target part or new revision as a new **draft** — query params `target_part_id` (required) and `new_revision` (default `A`); copies all operations incl. `process_sheet_id`; **404** if the source routing or target part isn't found | Admin / Manager |
+| POST | `/routing/{id}/copy` | Copy a routing to a target part or new revision as a new **draft** — query params `target_part_id` (required) and `new_revision` (default `A`); copies all operations incl. `process_sheet_id`; **404** if the source routing or target part isn't found; writes one tamper-evident `audit_log` CREATE for the new routing (`extra_data.copied_from` = source routing id) | Admin / Manager |
 | POST | `/routing/{id}/operations` | Add an operation (**400** on a released routing) | Admin / Manager / Supervisor |
 | PUT | `/routing/{id}/operations/{operation_id}` | Update an operation — draft: all fields; released: **time standards only** (see note) | Admin / Manager / Supervisor (released-routing edits: Admin / Manager) |
 | DELETE | `/routing/{id}/operations/{operation_id}` | Delete an operation (**400** on a released routing) | Admin / Manager / Supervisor |
@@ -1759,11 +1759,14 @@ controlled ERP records. All routes are scoped to the caller's active company
 |--------|----------|-------------|---------------|
 | GET | `/ai/recommendations` | List recommendations sorted by the deterministic score (see below) | Yes |
 | POST | `/ai/recommendations` | Create a suggest-only recommendation | Admin / Manager / Supervisor |
-| POST | `/ai/recommendations/{id}/accept` | Mark accepted (suggest-only; no ERP record is changed) | Yes |
+| POST | `/ai/recommendations/{id}/accept` | Mark accepted; body `{ reason?, apply? }` — with `apply=true` runs allowlisted `AIActionApplier` | Yes |
+| POST | `/ai/recommendations/{id}/apply` | Accept + apply convenience (`apply=true`) | Yes |
 | POST | `/ai/recommendations/{id}/dismiss` | Dismiss with optional reason | Yes |
 | POST | `/ai/recommendations/{id}/snooze` | Snooze a **pending** recommendation; body `{ "days": 1–30, "reason"? }` | Yes |
 | POST | `/ai/recommendations/{id}/feedback` | Attach free-text feedback / rating | Yes |
-| POST | `/ai/aggregate` | Run learning aggregation + expiry/snooze sweep for the active tenant | Admin / Manager / Supervisor |
+| POST | `/ai/aggregate` | Run learning aggregation + domain sensors + expiry/snooze sweep for the active tenant | Admin / Manager / Supervisor |
+| POST | `/ai/outcomes` | Manually record a downstream outcome (most plant outcomes are auto-captured — see below) | Yes |
+| POST | `/ai/events` | Record an AI interaction / correction signal | Yes |
 
 **List query parameters:** `status` — `pending` (default) | `accepted` | `dismissed` | `stale` |
 `snoozed`; `source_module`, `target_entity_type`, `target_entity_id`, `limit` (1–100, default 50).
@@ -1781,9 +1784,16 @@ single-recommendation responses (accept/dismiss/snooze).
 **Snooze / expiry lifecycle.** Snoozing sets `status = "snoozed"` (409 if not pending; the
 wake-up time is recorded on the snooze interaction event — no schema change). The nightly
 AI-learning job (5:30 AM, and `POST /ai/aggregate` for the active tenant) is a tenant-scoped
-fan-out that marks pending/snoozed recommendations past `expires_at` as `stale` and returns
-elapsed snoozes to `pending`; its summary reports `companies_processed`,
-`recommendations_created`, `stale_recommendations`, and `snoozed_recommendations_woken`.
+fan-out that marks pending/snoozed recommendations past `expires_at` as `stale`, returns
+elapsed snoozes to `pending`, and runs **domain sensors** (late/at-risk WOs, inventory risk,
+quality scrap trends) that mint suggest-only Action Inbox items without a human prompt. Its
+summary reports `companies_processed`, `recommendations_created`, `stale_recommendations`,
+`snoozed_recommendations_woken`, and `sensor_recommendations_created`.
+
+**Always-on outcomes.** Completing a work order (via `emit_work_order_completed_event`)
+auto-records `on_time_delivery`, `scrap_rate`, and optional `cost_variance` outcomes. Terminal
+quote statuses (accepted / rejected / converted / expired) auto-record `quote_result`. See
+[AI_ALWAYS_ON.md](AI_ALWAYS_ON.md).
 
 > **Front door.** After login, Admin / Manager / Supervisor users land on `/action-inbox` by
 > default (operators keep the kiosk station screen; deep links are unaffected). The page shows a

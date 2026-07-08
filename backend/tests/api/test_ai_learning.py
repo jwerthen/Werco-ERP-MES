@@ -99,8 +99,10 @@ class TestAILearningAPI:
 
         assert response.status_code == status.HTTP_200_OK
         data = response.json()
-        assert data["status"] == "accepted"
-        assert data["accepted_by"] is not None
+        assert data["applied"] is False
+        rec = data["recommendation"]
+        assert rec["status"] == "accepted"
+        assert rec["accepted_by"] is not None
 
         event = (
             db_session.query(AIInteractionEvent)

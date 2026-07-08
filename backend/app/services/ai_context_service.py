@@ -111,7 +111,23 @@ class AIContextService:
         entity_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         if entity_type == "work_order" and entity_id:
-            return self.work_order_context(company_id=company_id, work_order_id=entity_id)
+            ctx = self.work_order_context(company_id=company_id, work_order_id=entity_id)
+            ctx["learned_preferences"] = self.learned_preferences(company_id=company_id, limit=10)
+            ctx["pending_recommendations"] = self.pending_recommendations_for(
+                company_id=company_id, entity_type="work_order", entity_id=entity_id, limit=5
+            )
+            return ctx
+
+        if entity_type == "part" and entity_id:
+            return {
+                "scope": "part",
+                "part_id": entity_id,
+                "learned_preferences": self.learned_preferences(company_id=company_id, limit=10),
+                "pending_recommendations": self.pending_recommendations_for(
+                    company_id=company_id, entity_type="part", entity_id=entity_id, limit=5
+                ),
+                "estimate_calibration": self._latest_estimate_factor(company_id=company_id, part_id=entity_id),
+            }
 
         counts = {
             "active_work_orders": self.db.query(WorkOrder)
@@ -131,7 +147,76 @@ class AIContextService:
             .count(),
             "parts": self.db.query(Part).filter(Part.company_id == company_id, Part.is_active == True).count(),
         }
-        return {"scope": "company", "counts": counts}
+        return {
+            "scope": "company",
+            "counts": counts,
+            "learned_preferences": self.learned_preferences(company_id=company_id, limit=15),
+        }
+
+    def learned_preferences(self, *, company_id: int, limit: int = 15) -> List[Dict[str, Any]]:
+        from app.services.ai_learners.preferences import list_active_preferences
+
+        return list_active_preferences(self.db, company_id, limit=limit)
+
+    def pending_recommendations_for(
+        self,
+        *,
+        company_id: int,
+        entity_type: str,
+        entity_id: int,
+        limit: int = 5,
+    ) -> List[Dict[str, Any]]:
+        from app.models.ai_learning import AIRecommendation
+
+        rows = (
+            self.db.query(AIRecommendation)
+            .filter(
+                AIRecommendation.company_id == company_id,
+                AIRecommendation.status == "pending",
+                AIRecommendation.target_entity_type == entity_type,
+                AIRecommendation.target_entity_id == entity_id,
+            )
+            .order_by(AIRecommendation.priority.asc(), AIRecommendation.confidence_score.desc())
+            .limit(limit)
+            .all()
+        )
+        return [
+            {
+                "id": r.id,
+                "type": r.recommendation_type,
+                "title": r.title,
+                "priority": r.priority,
+                "confidence": r.confidence_score,
+                "action_type": (r.suggested_action or {}).get("type"),
+                "autonomy": (r.suggested_action or {}).get("autonomy"),
+            }
+            for r in rows
+        ]
+
+    def _latest_estimate_factor(self, *, company_id: int, part_id: int) -> Optional[Dict[str, Any]]:
+        from app.models.ai_learning import AIRecommendation
+
+        rec = (
+            self.db.query(AIRecommendation)
+            .filter(
+                AIRecommendation.company_id == company_id,
+                AIRecommendation.recommendation_type == "estimate_calibration",
+                AIRecommendation.target_entity_type == "part",
+                AIRecommendation.target_entity_id == part_id,
+                AIRecommendation.status.in_(["pending", "accepted"]),
+            )
+            .order_by(AIRecommendation.created_at.desc())
+            .first()
+        )
+        if not rec:
+            return None
+        action = rec.suggested_action or {}
+        return {
+            "suggested_factor": action.get("suggested_factor"),
+            "confidence": rec.confidence_score,
+            "status": rec.status,
+            "summary": rec.summary,
+        }
 
     def explain_context_sources(self) -> List[str]:
         return [
@@ -141,4 +226,7 @@ class AIContextService:
             "operational_events",
             "parts",
             "work_centers",
+            "learned_preferences",
+            "pending_recommendations",
+            "estimate_calibration",
         ]

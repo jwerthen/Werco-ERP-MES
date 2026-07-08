@@ -9,13 +9,22 @@ export const SNOOZE_CHOICES: Array<{ label: string; days: number }> = [
 
 interface FeedbackButtonsProps {
   disabled?: boolean;
+  /** When true, primary accept is labeled "Accept & apply". */
+  applyable?: boolean;
   onAccept?: () => void | Promise<void>;
   onDismiss?: () => void | Promise<void>;
   onFeedback?: (feedback: string) => void | Promise<void>;
   onSnooze?: (days: number) => void | Promise<void>;
 }
 
-export function FeedbackButtons({ disabled = false, onAccept, onDismiss, onFeedback, onSnooze }: FeedbackButtonsProps) {
+export function FeedbackButtons({
+  disabled = false,
+  applyable = false,
+  onAccept,
+  onDismiss,
+  onFeedback,
+  onSnooze,
+}: FeedbackButtonsProps) {
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [snoozeOpen, setSnoozeOpen] = useState(false);
   const [feedback, setFeedback] = useState('');
@@ -45,7 +54,7 @@ export function FeedbackButtons({ disabled = false, onAccept, onDismiss, onFeedb
             className="inline-flex items-center gap-1 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-sm font-medium text-emerald-200 hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-60"
           >
             <CheckIcon className="h-4 w-4" />
-            Accept
+            {applyable ? 'Accept & apply' : 'Accept'}
           </button>
         )}
         {onDismiss && (

@@ -50,6 +50,8 @@ async def aggregate_ai_learning_task():
                         "type": "escalate_blocker",
                         "blocker_id": blocker.id,
                         "work_order_id": blocker.work_order_id,
+                        "href": f"/work-orders/{blocker.work_order_id}",
+                        "autonomy": "auto_execute",
                     },
                     evidence=[
                         {

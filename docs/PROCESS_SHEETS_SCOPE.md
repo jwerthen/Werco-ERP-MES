@@ -1,6 +1,6 @@
 # Process Sheets — Scope & Implementation Plan
 
-**Date:** 2026-07-04 · **Status:** PRs 1–4 implemented — PRs 1–3 merged ([#81](https://github.com/jwerthen/Werco-ERP-MES/pull/81), [#82](https://github.com/jwerthen/Werco-ERP-MES/pull/82), [#83](https://github.com/jwerthen/Werco-ERP-MES/pull/83)); PR 4 (integrations) in review — feature complete pending merge
+**Date:** 2026-07-04 · **Status:** **FEATURE COMPLETE** — all four PRs merged: [#81](https://github.com/jwerthen/Werco-ERP-MES/pull/81), [#82](https://github.com/jwerthen/Werco-ERP-MES/pull/82), [#83](https://github.com/jwerthen/Werco-ERP-MES/pull/83), [#84](https://github.com/jwerthen/Werco-ERP-MES/pull/84) (2026-07-04 → 2026-07-07). Open follow-ups live in the deferred ledger below
 **Feature:** Typed, revision-controlled operation steps ("Process Sheets") authored in engineering, snapshotted onto work orders, and executed on the shop-floor kiosk with per-step data capture (measurements with tolerance enforcement, checkboxes, lists, photo/file evidence).
 
 ## Context

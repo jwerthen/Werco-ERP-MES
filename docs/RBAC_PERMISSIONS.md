@@ -112,6 +112,8 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 |------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
 | View | ✓ | ✓ | ✓ | ✓ | ✓ | | ✓ |
 | Create | ✓ | ✓ | ✓ | | | | |
+| Copy | ✓ | ✓ | | | | | |
+| Generate from drawing (AI) | ✓ | ✓ | ✓ | | | | |
 | Edit (draft routing) | ✓ | ✓ | ✓ | | | | |
 | Edit time standards (released routing) | ✓ | ✓ | | | | | |
 | Delete | ✓ | ✓ | | | | | |
@@ -133,6 +135,16 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > on a released routing also returns **400** (process is frozen on release). Superuser / Platform
 > Admin bypass role checks, as elsewhere. Every applied change is tamper-evidently audit-logged; see
 > [docs/CMMC_LEVEL_2_COMPLIANCE.md](CMMC_LEVEL_2_COMPLIANCE.md) → CONFIGURATION MANAGEMENT (CM).
+
+> **Copy & AI generation — endpoint mapping (`feat/process-sheets-library`).**
+> `POST /api/v1/routing/{routing_id}/copy` (`copy_routing`, `app/api/endpoints/routing.py`) carries
+> `require_role([ADMIN, MANAGER])` — deliberately **narrower than Create** (no Supervisor). The
+> two-step AI generation flow — `POST /routing/generate-from-drawing` then
+> `POST /routing/create-from-generation` — carries `require_role([ADMIN, MANAGER, SUPERVISOR])`, the
+> Create role set. Both paths produce **draft** routings (Release stays Admin/Manager), and the copy
+> endpoint writes a tamper-evident `audit_log` CREATE with `extra_data.copied_from` (the source
+> routing id) — see `docs/API.md` → Routing and the
+> [CMMC change log](CMMC_LEVEL_2_COMPLIANCE.md) entry dated 2026-07-06.
 
 ### Process Sheets
 

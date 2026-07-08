@@ -419,10 +419,12 @@ class WorkOrderBlockerService:
                 target_entity_type="work_order_blocker",
                 target_entity_id=blocker.id,
                 suggested_action={
-                    "type": "review_blocker",
+                    "type": "escalate_blocker",
                     "work_order_id": work_order.id,
                     "blocker_id": blocker.id,
                     "category": blocker.category,
+                    "href": f"/work-orders/{work_order.id}",
+                    "autonomy": "auto_execute",
                 },
                 evidence=[
                     {

@@ -1,6 +1,6 @@
 import React from 'react';
 import { SparklesIcon } from '@heroicons/react/24/outline';
-import { AIRecommendation } from '../../types/aiLearning';
+import { AIRecommendation, recommendationIsApplyable } from '../../types/aiLearning';
 import { ConfidenceBadge } from './ConfidenceBadge';
 import { FeedbackButtons } from './FeedbackButtons';
 import { WhyThisSuggestion } from './WhyThisSuggestion';
@@ -63,6 +63,7 @@ export function AISuggestionCard({
           {recommendation.status === 'pending' && (
             <FeedbackButtons
               disabled={disabled}
+              applyable={recommendationIsApplyable(recommendation)}
               onAccept={onAccept ? () => onAccept(recommendation) : undefined}
               onDismiss={onDismiss ? () => onDismiss(recommendation) : undefined}
               onFeedback={onFeedback ? (feedback) => onFeedback(recommendation, feedback) : undefined}

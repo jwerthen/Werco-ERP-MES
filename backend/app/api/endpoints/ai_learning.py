@@ -1,6 +1,6 @@
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_company_id, get_current_user
@@ -13,14 +13,17 @@ from app.schemas.ai_learning import (
     AIOutcomeCreate,
     AIOutcomeResponse,
     AIRecommendationActionRequest,
+    AIRecommendationApplyResponse,
     AIRecommendationCreate,
     AIRecommendationFeedbackRequest,
     AIRecommendationResponse,
     AIRecommendationSnoozeRequest,
 )
+from app.services.ai_action_applier import AIActionApplier, AIActionApplyError
 from app.services.ai_context_service import AIContextService
 from app.services.ai_governance_service import AIGovernanceService
 from app.services.ai_learning_service import AILearningService, RecommendationStateError
+from app.services.audit_service import AuditService
 
 router = APIRouter()
 
@@ -86,15 +89,22 @@ def create_ai_recommendation(
     return recommendation
 
 
-@router.post("/recommendations/{recommendation_id}/accept", response_model=AIRecommendationResponse)
+@router.post("/recommendations/{recommendation_id}/accept", response_model=AIRecommendationApplyResponse)
 def accept_ai_recommendation(
     recommendation_id: int,
+    request: Request,
     data: Optional[AIRecommendationActionRequest] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Mark a recommendation accepted without applying changes to controlled records."""
+    """Mark a recommendation accepted; optionally apply allowlisted actions (Phase 2).
+
+    Default (``apply=false``) remains suggest-only status change.
+    With ``apply=true``, runs ``AIActionApplier`` for allowlisted action types
+    when the user has sufficient role. Apply failures are returned in
+    ``apply_error`` without rolling back the accept status.
+    """
     service = AILearningService(db)
     try:
         recommendation = service.set_recommendation_status(
@@ -104,12 +114,71 @@ def accept_ai_recommendation(
             status="accepted",
             reason=data.reason if data else None,
         )
+        applied = False
+        apply_result = None
+        apply_error = None
+        should_apply = bool(data and data.apply)
+        if should_apply:
+            audit = AuditService(db, current_user, request)
+            applier = AIActionApplier(db, company_id=company_id, user=current_user, audit=audit)
+            try:
+                apply_result = applier.apply(recommendation)
+                applied = True
+                service.record_interaction(
+                    company_id=company_id,
+                    user=current_user,
+                    data=AIInteractionEventCreate(
+                        event_type="accepted",
+                        source_module=recommendation.source_module,
+                        ai_feature=recommendation.recommendation_type,
+                        entity_type=recommendation.target_entity_type,
+                        entity_id=recommendation.target_entity_id,
+                        recommendation_id=recommendation.id,
+                        context_summary="Applied allowlisted AI action",
+                        event_payload={"applied": True, "result": apply_result},
+                        confidence_score=recommendation.confidence_score,
+                    ),
+                )
+            except AIActionApplyError as exc:
+                apply_error = str(exc)
+            except Exception as exc:  # pragma: no cover - defensive
+                apply_error = f"Apply failed: {exc}"
+
         db.commit()
         db.refresh(recommendation)
-        return recommendation
+        return AIRecommendationApplyResponse(
+            recommendation=recommendation,
+            applied=applied,
+            apply_result=apply_result,
+            apply_error=apply_error,
+        )
     except ValueError as exc:
         db.rollback()
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/recommendations/{recommendation_id}/apply", response_model=AIRecommendationApplyResponse)
+def apply_ai_recommendation(
+    recommendation_id: int,
+    request: Request,
+    data: Optional[AIRecommendationActionRequest] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Accept and apply in one step (``apply=true`` convenience endpoint)."""
+    payload = AIRecommendationActionRequest(
+        reason=data.reason if data else None,
+        apply=True,
+    )
+    return accept_ai_recommendation(
+        recommendation_id=recommendation_id,
+        request=request,
+        data=payload,
+        db=db,
+        current_user=current_user,
+        company_id=company_id,
+    )
 
 
 @router.post("/recommendations/{recommendation_id}/dismiss", response_model=AIRecommendationResponse)

@@ -21,6 +21,7 @@ import {
 import { Breadcrumbs } from '../components/ui/Breadcrumbs';
 import { getBreadcrumbParent } from '../utils/routeMeta';
 import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
+import { ContextualAIStrip } from '../components/ai';
 import { EmptyState, ErrorState, useToast, statusColor, Button } from '../components/ui';
 import { formatCentralDate, formatCentralDateTime } from '../utils/centralTime';
 import {
@@ -988,6 +989,12 @@ export default function WorkOrderDetail() {
           )}
         </div>
       </div>
+
+      <ContextualAIStrip
+        entityType="work_order"
+        entityId={workOrder.id}
+        title="AI for this work order"
+      />
 
       {/* Work Order Information — compact KPI strip */}
       <MiniStatStrip className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2">

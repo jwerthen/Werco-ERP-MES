@@ -63,6 +63,26 @@ export interface AIRecommendation {
   score?: number | null;
 }
 
+export interface AIRecommendationApplyResult {
+  recommendation: AIRecommendation;
+  applied: boolean;
+  apply_result?: Record<string, unknown> | null;
+  apply_error?: string | null;
+}
+
+/** True when Accept can run an allowlisted ERP mutation. */
+export function recommendationIsApplyable(rec: AIRecommendation): boolean {
+  const action = rec.suggested_action || {};
+  const autonomy = String(action.autonomy || 'suggest_only');
+  const type = String(action.type || '');
+  if (!type) return false;
+  return (
+    autonomy === 'apply_on_accept' ||
+    autonomy === 'execute_controlled' ||
+    autonomy === 'auto_execute'
+  );
+}
+
 export interface AIRecommendationInput {
   source_module: string;
   recommendation_type: string;

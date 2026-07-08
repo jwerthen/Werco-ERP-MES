@@ -399,12 +399,25 @@ def update_quote(
     if not quote:
         raise HTTPException(status_code=404, detail="Quote not found")
 
+    previous_status = quote.status.value if hasattr(quote.status, "value") else str(quote.status)
     update_data = quote_in.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         if field == "status":
             setattr(quote, field, QuoteStatus(value))
         else:
             setattr(quote, field, value)
+
+    # Phase 0 always-on AI: capture win/loss/expired outcomes on status change.
+    if "status" in update_data:
+        from app.services.ai_outcome_capture_service import record_quote_status_outcome
+
+        record_quote_status_outcome(
+            db,
+            company_id=company_id,
+            quote=quote,
+            previous_status=previous_status,
+            user_id=current_user.id,
+        )
 
     db.commit()
     db.refresh(quote)
@@ -491,8 +504,20 @@ def convert_to_work_order(
     db.flush()
 
     # Update quote
+    previous_status = quote.status.value if hasattr(quote.status, "value") else str(quote.status)
     quote.status = QuoteStatus.CONVERTED
     quote.work_order_id = wo.id
+
+    # Phase 0 always-on AI: converted quotes are wins for learning.
+    from app.services.ai_outcome_capture_service import record_quote_status_outcome
+
+    record_quote_status_outcome(
+        db,
+        company_id=company_id,
+        quote=quote,
+        previous_status=previous_status,
+        user_id=current_user.id,
+    )
 
     db.commit()
 

@@ -28,6 +28,7 @@ import {
   AIInteractionEventInput,
   AIOutcomeInput,
   AIRecommendation,
+  AIRecommendationApplyResult,
   AIRecommendationFeedbackInput,
   AIRecommendationInput,
   AIRecommendationStatus,
@@ -1192,8 +1193,23 @@ class ApiService {
     return response.data;
   }
 
-  async acceptAIRecommendation(id: number, reason?: string): Promise<AIRecommendation> {
-    const response = await this.api.post<AIRecommendation>(`/ai/recommendations/${id}/accept`, { reason });
+  async acceptAIRecommendation(
+    id: number,
+    reason?: string,
+    apply: boolean = false
+  ): Promise<AIRecommendationApplyResult> {
+    const response = await this.api.post<AIRecommendationApplyResult>(`/ai/recommendations/${id}/accept`, {
+      reason,
+      apply,
+    });
+    return response.data;
+  }
+
+  async applyAIRecommendation(id: number, reason?: string): Promise<AIRecommendationApplyResult> {
+    const response = await this.api.post<AIRecommendationApplyResult>(`/ai/recommendations/${id}/apply`, {
+      reason,
+      apply: true,
+    });
     return response.data;
   }
 

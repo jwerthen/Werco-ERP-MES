@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.models.ai_learning import AIInteractionEvent, AIRecommendation
 from app.models.operational_event import OperationalEvent
 from app.models.work_order_blocker import WorkOrderBlocker, WorkOrderBlockerStatus
+from app.services.ai_action_applier import DEFAULT_APPLY_ALLOWLIST
 
 
 class AIGovernanceService:
@@ -41,10 +42,35 @@ class AIGovernanceService:
             "requires_approval": True,
         },
         {
-            "tier": "execute_controlled",
-            "description": "AI cannot directly mutate controlled ERP records in v1.",
+            "tier": "apply_on_accept",
+            "description": (
+                "On explicit human accept with apply=true, allowlisted actions may mutate "
+                "ERP records via AIActionApplier (audit-logged)."
+            ),
             "requires_approval": True,
-            "enabled": False,
+            "enabled": True,
+            "allowlist": sorted(DEFAULT_APPLY_ALLOWLIST),
+        },
+        {
+            "tier": "auto_execute",
+            "description": (
+                "Nightly Claude agent (existing run_llm_task / Anthropic) selects and executes "
+                "allowlisted actions without a human prompt. Falls back to high-confidence "
+                "deterministic execute when AI egress is off."
+            ),
+            "requires_approval": False,
+            "enabled": True,
+            "allowlist": sorted(DEFAULT_APPLY_ALLOWLIST),
+        },
+        {
+            "tier": "execute_controlled",
+            "description": (
+                "Allowlisted ERP mutations (draft NCR/PO, priority, blockers) may auto-execute; "
+                "controlled-record soft-gate is not enforced on the allowlist."
+            ),
+            "requires_approval": False,
+            "enabled": True,
+            "allowlist": sorted(DEFAULT_APPLY_ALLOWLIST),
         },
     ]
 
@@ -99,13 +125,17 @@ class AIGovernanceService:
         )
 
         return {
-            "mode": "suggest_only",
+            "mode": "auto_execute_allowlisted",
             "controlled_records": sorted(self.CONTROLLED_RECORDS),
             "autonomy_tiers": self.AUTONOMY_TIERS,
+            "apply_allowlist": sorted(DEFAULT_APPLY_ALLOWLIST),
             "approval_rules": [
-                "AI recommendations never apply production, quality, pricing, purchasing, compliance, scheduling, or security changes by themselves.",
+                "Allowlisted actions may auto-execute via the Claude always-on agent (existing Anthropic run_llm_task).",
+                "Only allowlisted action types may apply; review-only types stay in Action Inbox.",
                 "Every recommendation must include confidence, evidence, expected impact, and a target entity when applicable.",
                 "Prompt/model versions and redacted context are retained for learning events and recommendations.",
+                "Applied actions are audit-logged on the tamper-evident chain when AuditService is available.",
+                "Toggle with AI_AUTO_EXECUTE_ENABLED; Claude path still respects company allow_ai_egress.",
             ],
             "metrics": {
                 "window_days": 30,

@@ -1194,6 +1194,7 @@ def copy_routing(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Copy a routing to another part or create new revision"""
     source = (
@@ -1259,6 +1260,14 @@ def copy_routing(
     db.flush()
     db.refresh(new_routing)
     calculate_routing_totals(new_routing, db)
+
+    audit.log_create(
+        "routing",
+        new_routing.id,
+        target_part.part_number,
+        new_values=new_routing,
+        extra_data={"copied_from": routing_id},
+    )
 
     db.commit()
 

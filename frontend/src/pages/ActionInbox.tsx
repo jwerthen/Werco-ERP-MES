@@ -16,7 +16,7 @@ import api from '../services/api';
 import { useOptimisticMutation } from '../hooks/useOptimisticMutation';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { AISuggestionCard, ConfidenceBadge, FeedbackButtons, WhyThisSuggestion } from '../components/ai';
-import { AIRecommendation } from '../types/aiLearning';
+import { AIRecommendation, recommendationIsApplyable } from '../types/aiLearning';
 import { formatCentralDateTime, toDate } from '../utils/centralTime';
 
 type Severity = 'high' | 'medium' | 'low' | 'info';
@@ -316,8 +316,17 @@ export default function ActionInbox() {
     }
   };
 
-  const acceptAIRecommendation = (recommendation: AIRecommendation) =>
-    runRemoval(recommendation, () => api.acceptAIRecommendation(recommendation.id, 'Accepted from Action Inbox'));
+  const acceptAIRecommendation = (recommendation: AIRecommendation) => {
+    const apply = recommendationIsApplyable(recommendation);
+    // Accept always removes the card; apply errors are non-fatal (status is already accepted).
+    return runRemoval(recommendation, () =>
+      api.acceptAIRecommendation(
+        recommendation.id,
+        apply ? 'Accepted & applied from Action Inbox' : 'Accepted from Action Inbox',
+        apply
+      )
+    );
+  };
 
   const dismissAIRecommendation = (recommendation: AIRecommendation) =>
     runRemoval(recommendation, () => api.dismissAIRecommendation(recommendation.id, 'Dismissed from Action Inbox'));
@@ -510,6 +519,7 @@ export default function ActionInbox() {
                           />
                           <FeedbackButtons
                             disabled={actioningId === item.recommendation.id}
+                            applyable={recommendationIsApplyable(item.recommendation as AIRecommendation)}
                             onAccept={() => acceptAIRecommendation(item.recommendation as AIRecommendation)}
                             onDismiss={() => dismissAIRecommendation(item.recommendation as AIRecommendation)}
                             onFeedback={(feedback) => sendAIFeedback(item.recommendation as AIRecommendation, feedback)}

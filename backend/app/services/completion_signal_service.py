@@ -79,6 +79,9 @@ def emit_work_order_completed_event(
 
     In-process, tenant-scoped, best-effort (see ``emit_operation_completed_event``,
     including the A0.1 ``source`` channel semantics).
+
+    Also captures AI learning outcomes (OTD / scrap / cost) so the always-on
+    learning loop gets fuel without a human posting ``/ai/outcomes``.
     """
     try:
         status = work_order.status.value if hasattr(work_order.status, "value") else work_order.status
@@ -101,6 +104,23 @@ def emit_work_order_completed_event(
         )
     except Exception:  # pragma: no cover - signal failure must not fail completion
         logger.exception("work_order_completed event emit failed for WO %s (company %s)", work_order.id, company_id)
+
+    # Phase 0 always-on AI: auto-record outcomes. Nested try so learning never
+    # interferes with the operational event path above (or the completion itself).
+    try:
+        from app.services.ai_outcome_capture_service import record_work_order_completion_outcomes
+
+        record_work_order_completion_outcomes(
+            db,
+            company_id=company_id,
+            work_order=work_order,
+            user_id=user_id,
+            source_module=source_module or "production",
+        )
+    except Exception:  # pragma: no cover - signal failure must not fail completion
+        logger.exception(
+            "AI WO outcome capture failed for WO %s (company %s)", work_order.id, company_id
+        )
 
 
 def record_parent_children_complete(

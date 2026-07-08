@@ -8,6 +8,7 @@ Shipped modules, grouped by domain:
 
 ### Werco Copilot (AI assistant)
 - **Ask-anything chat over your own ERP data** — a read-only copilot (header button or `Ctrl+.` from any screen) that answers shop questions ("where is WO-2024-0512?", "what's blocked?", "how loaded is the laser this week?") via Claude tool-use over live work orders, blockers, schedules, inventory, customers, and search, with deep links to the records it cites. Strictly read-only, tenant-scoped server-side, streamed answers, per-user rate-limited.
+- **Always-on Action Inbox** — nightly sensors + learners mint recommendations without a prompt; Claude (existing Anthropic `run_llm_task`) auto-executes allowlisted actions (draft PO, draft NCR, expedite priority, escalate blocker). Humans can still Accept & apply. Ambient strips on WO/Part detail + dashboard morning brief. See [docs/AI_ALWAYS_ON.md](docs/AI_ALWAYS_ON.md).
 
 ### Sales & Quoting
 - **AI RFQ quoting** — upload customer drawings (PDF/DXF/STEP); Anthropic Claude parses the package into parts and produces cost/lead-time estimates with confidence scores and stated assumptions, which a user reviews and converts to a quote.
@@ -168,6 +169,7 @@ See **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**, **[docs/DEPLOYMENT_RUNBOOK.md]
 | [docs/RBAC_PERMISSIONS.md](docs/RBAC_PERMISSIONS.md) | The 8-role permission model |
 | [docs/ENVIRONMENT_VARIABLES.md](docs/ENVIRONMENT_VARIABLES.md) | All config and secrets |
 | [docs/EXCEL_MIGRATION_RUNBOOK.md](docs/EXCEL_MIGRATION_RUNBOOK.md) | Go-live migration off Excel: load order, dry-run discipline, rehearsals, cutover checklist |
+| [docs/AI_ALWAYS_ON.md](docs/AI_ALWAYS_ON.md) | Always-on sensors, outcome capture, Action Inbox learning loop |
 | [docs/AI_QUOTING_AGENT_RUNBOOK.md](docs/AI_QUOTING_AGENT_RUNBOOK.md) | Operating the Anthropic-powered RFQ/quoting feature |
 | [docs/IMPLEMENTATION_NOTES_AI_QUOTING_AGENT.md](docs/IMPLEMENTATION_NOTES_AI_QUOTING_AGENT.md) | AI quoting design/implementation notes |
 | [docs/CMMC_LEVEL_2_COMPLIANCE.md](docs/CMMC_LEVEL_2_COMPLIANCE.md) | CMMC L2 compliance posture |

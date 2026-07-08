@@ -5,6 +5,7 @@ import api from '../services/api';
 import { SkeletonDashboard } from '../components/ui/Skeleton';
 import { EmptyState, ErrorState } from '../components/ui';
 import { MiniStat, CockpitPanel, SetupNudge } from '../components/cockpit';
+import { MorningBriefBanner } from '../components/ai/MorningBriefBanner';
 import { statusVariant, type StatusVariant } from '../components/ui';
 import { ActiveAssignment, DashboardData, SignedInUserStatus, WorkCenterStatus } from '../types';
 import { useWebSocket } from '../hooks/useWebSocket';
@@ -452,6 +453,8 @@ export default function Dashboard() {
 
       {/* Setup nudge — admins only, dismissible, deep-links to /setup */}
       <SetupNudge />
+
+      <MorningBriefBanner />
 
       {/* Alerts — compact chip row */}
       {alerts.length > 0 && (

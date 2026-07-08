@@ -4,6 +4,14 @@ Bump a prompt's semver `version` and add an entry here whenever its text or
 request layout changes. The version string is recorded on `AIUsageEvent`
 (every API call) and on `AIInteractionEvent`/`AIRecommendation` learning rows.
 
+## 2026-07-08
+
+- `auto_execute_decision` 1.0.0 — new prompt for the always-on agent that selects
+  which allowlisted Action Inbox recommendations to auto-execute. Sent as the
+  `system` argument to `run_llm_task` (task `auto_execute`, Fast/Haiku by default).
+  Variable recommendation batch travels in the user message; response is JSON
+  `{execute, skip}`. Same Anthropic client as all other LLM features.
+
 ## 2026-06-24
 
 - `laser_nest_extraction` 1.0.0 → 1.1.0 — request layout changed: the primary

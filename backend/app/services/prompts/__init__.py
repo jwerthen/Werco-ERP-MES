@@ -26,6 +26,7 @@ from app.services.prompts.laser_nest import (
     LASER_NEST_EXTRACTION_SCHEMA,
 )
 from app.services.prompts.qms import QMS_CLAUSE_EXTRACTION_PROMPT
+from app.services.prompts.auto_execute import AUTO_EXECUTE_PROMPT
 from app.services.prompts.routing import ROUTING_GENERATION_PROMPT
 
 PROMPT_REGISTRY: Dict[str, Prompt] = {
@@ -38,6 +39,7 @@ PROMPT_REGISTRY: Dict[str, Prompt] = {
         QMS_CLAUSE_EXTRACTION_PROMPT,
         COPILOT_CHAT_PROMPT,
         NL_SEARCH_INTENT_PROMPT,
+        AUTO_EXECUTE_PROMPT,
     )
 }
 
@@ -54,4 +56,5 @@ __all__ = [
     "QMS_CLAUSE_EXTRACTION_PROMPT",
     "COPILOT_CHAT_PROMPT",
     "NL_SEARCH_INTENT_PROMPT",
+    "AUTO_EXECUTE_PROMPT",
 ]

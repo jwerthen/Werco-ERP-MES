@@ -150,6 +150,17 @@ class AIRecommendationResponse(UTCModel):
 
 class AIRecommendationActionRequest(BaseModel):
     reason: Optional[str] = Field(None, max_length=2000)
+    # When true, run the allowlisted action applier after marking accepted (Phase 2).
+    apply: bool = False
+
+
+class AIRecommendationApplyResponse(UTCModel):
+    """Accept + optional apply result."""
+
+    recommendation: AIRecommendationResponse
+    applied: bool = False
+    apply_result: Optional[Dict[str, Any]] = None
+    apply_error: Optional[str] = None
 
 
 class AIRecommendationSnoozeRequest(BaseModel):
@@ -202,3 +213,7 @@ class AIAggregationSummary(BaseModel):
     recommendations_created: int
     stale_recommendations: int
     snoozed_recommendations_woken: int = 0
+    sensor_recommendations_created: int = 0
+    learner_recommendations_created: int = 0
+    auto_executed: int = 0
+    auto_execute_failed: int = 0

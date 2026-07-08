@@ -464,12 +464,21 @@ class AILearningService:
         return outcome
 
     def aggregate_learning_signals(self, *, company_ids: Optional[Iterable[int]] = None) -> Dict[str, int]:
+        from app.services.ai_auto_execute_service import auto_execute_pending_recommendations
+        from app.services.ai_learners import run_domain_learners
+        from app.services.ai_sensors import run_domain_sensors
+        from app.services.ai_sensors.morning_brief import run_morning_brief_sensor
+
         now = _now()
         companies = list(company_ids) if company_ids is not None else self._company_ids_with_learning_data()
 
         created = 0
         stale_count = 0
         woken_count = 0
+        sensor_created = 0
+        learner_created = 0
+        auto_executed = 0
+        auto_failed = 0
         for company_id in companies:
             # Tenant-scoped fan-out: each sweep only ever touches the company being processed,
             # so a tenant-triggered run (/ai/aggregate) cannot write across tenants.
@@ -477,6 +486,32 @@ class AILearningService:
             woken_count += self._wake_snoozed_recommendations_for_company(company_id, now)
             created += self._recommend_from_recent_friction(company_id)
             created += self._recommend_from_repeated_corrections(company_id)
+            # Phase 1 always-on sensors: late WOs, inventory risk, scrap trends.
+            sensor_counts = run_domain_sensors(self.db, company_id)
+            company_sensor_total = sum(sensor_counts.values())
+            sensor_created += company_sensor_total
+            created += company_sensor_total
+            # Phase 3 morning brief
+            brief = run_morning_brief_sensor(self.db, company_id)
+            sensor_created += brief
+            created += brief
+            # Phase 4 continuous learners (draft proposals only)
+            learner_counts = run_domain_learners(self.db, company_id)
+            company_learner_total = sum(learner_counts.values())
+            learner_created += company_learner_total
+            created += company_learner_total
+            # Phase 5: Claude auto-execute allowlisted actions (existing Anthropic stack)
+            try:
+                exec_summary = auto_execute_pending_recommendations(self.db, company_id)
+                auto_executed += int(exec_summary.get("executed") or 0)
+                auto_failed += int(exec_summary.get("failed") or 0)
+            except Exception:
+                # Never fail the whole aggregation on agent errors
+                import logging
+
+                logging.getLogger(__name__).exception(
+                    "auto_execute_pending_recommendations failed company %s", company_id
+                )
 
         self.db.flush()
         return {
@@ -484,6 +519,10 @@ class AILearningService:
             "recommendations_created": created,
             "stale_recommendations": stale_count,
             "snoozed_recommendations_woken": woken_count,
+            "sensor_recommendations_created": sensor_created,
+            "learner_recommendations_created": learner_created,
+            "auto_executed": auto_executed,
+            "auto_execute_failed": auto_failed,
         }
 
     def _expire_recommendations_for_company(self, company_id: int, now: datetime) -> int:

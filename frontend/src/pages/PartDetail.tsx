@@ -14,6 +14,7 @@ import { PartBOMTab } from '../components/parts/PartBOMTab';
 import { PartRoutingTab } from '../components/parts/PartRoutingTab';
 import { partTypeColors } from '../types/engineering';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
+import { ContextualAIStrip } from '../components/ai';
 import {
   CubeIcon,
   ListBulletIcon,
@@ -182,6 +183,8 @@ export default function PartDetail() {
           Edit Part
         </Button>
       </div>
+
+      <ContextualAIStrip entityType="part" entityId={part.id} title="AI for this part" />
 
       {/* Quick Stats */}
       <MiniStatStrip className="grid grid-cols-2 sm:grid-cols-4 gap-2">
