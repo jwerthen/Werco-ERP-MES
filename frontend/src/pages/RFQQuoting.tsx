@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../services/api';
-import { ArrowDownTrayIcon, CheckCircleIcon, DocumentArrowUpIcon, SparklesIcon } from '@heroicons/react/24/outline';
+import { ArrowDownTrayIcon, CheckCircleIcon, DocumentArrowUpIcon, SparklesIcon, CalculatorIcon } from '@heroicons/react/24/outline';
 import { ErrorState, FormField, useToast } from '../components/ui';
 
 interface CustomerOption {
@@ -538,6 +538,18 @@ export default function RFQQuoting() {
             <button onClick={generateCustomerPdf} className="btn-secondary" disabled={loading}>
               Generate Customer Quote PDF
             </button>
+            {packageData?.id != null && (
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() =>
+                  navigate(`/estimate-workbench/new?rfq_package_id=${packageData.id}`)
+                }
+              >
+                <CalculatorIcon className="h-4 w-4 mr-2 inline" />
+                Open Estimate Workbench
+              </button>
+            )}
           </div>
         </div>
       )}

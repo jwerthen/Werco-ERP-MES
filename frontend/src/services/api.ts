@@ -2235,6 +2235,139 @@ class ApiService {
     return response.data;
   }
 
+  // Estimate Workbench (Excel-replacement quoting)
+  async recalcEstimateWorkbench(data: {
+    assemblies: unknown[];
+    machined_parts?: unknown[];
+    rates?: Record<string, number>;
+  }) {
+    const response = await this.api.post('/estimate-workbench/recalc', data);
+    return response.data;
+  }
+
+  async createEstimateWorkbench(rfqPackageId: number) {
+    const response = await this.api.post('/estimate-workbench/', {
+      rfq_package_id: rfqPackageId,
+    });
+    return response.data;
+  }
+
+  async getEstimateWorkbench(estimateId: number) {
+    const response = await this.api.get(`/estimate-workbench/${estimateId}`);
+    return response.data;
+  }
+
+  async saveEstimateWorkbench(
+    estimateId: number,
+    data: {
+      version: number;
+      assemblies: unknown[];
+      machined_parts?: unknown[];
+    }
+  ) {
+    const response = await this.api.put(`/estimate-workbench/${estimateId}`, data);
+    return response.data;
+  }
+
+  async getEstimateWorkbenchVerification(estimateId: number) {
+    const response = await this.api.get(`/estimate-workbench/${estimateId}/verification`);
+    return response.data;
+  }
+
+  async finalizeEstimateWorkbench(
+    estimateId: number,
+    data: { valid_days?: number; force?: boolean } = {}
+  ) {
+    const response = await this.api.post(`/estimate-workbench/${estimateId}/finalize`, data);
+    return response.data;
+  }
+
+  async extractEstimateWorkbenchFromRfq(
+    estimateId: number,
+    data: {
+      rfq_package_id?: number;
+      use_llm?: boolean;
+      apply?: boolean;
+      replace?: boolean;
+      version?: number;
+    } = {}
+  ) {
+    const response = await this.api.post(
+      `/estimate-workbench/${estimateId}/extract-from-rfq`,
+      data
+    );
+    return response.data;
+  }
+
+  async getEstimateShopData() {
+    const response = await this.api.get('/estimate-workbench/shop-data');
+    return response.data;
+  }
+
+  async getEstimateShopDataHistory(params: { kind?: string; limit?: number } = {}) {
+    const response = await this.api.get('/estimate-workbench/shop-data/history', { params });
+    return response.data;
+  }
+
+  async patchEstimateShopDataRow(
+    kind: string,
+    rowId: number,
+    data: Record<string, unknown> & { note: string }
+  ) {
+    const response = await this.api.patch(
+      `/estimate-workbench/shop-data/${kind}/rows/${rowId}`,
+      data
+    );
+    return response.data;
+  }
+
+  async createEstimateShopDataRow(kind: string, data: Record<string, unknown> & { note: string }) {
+    const response = await this.api.post(`/estimate-workbench/shop-data/${kind}/rows`, data);
+    return response.data;
+  }
+
+  async getEstimateJobActuals(params: { limit?: number } = {}) {
+    const response = await this.api.get('/estimate-workbench/job-actuals', { params });
+    return response.data;
+  }
+
+  async upsertEstimateJobActual(data: {
+    quote_estimate_id?: number;
+    work_order_id?: number;
+    job_label?: string;
+    actual_laser_hours?: number | null;
+    actual_brake_hours?: number | null;
+    actual_weld_hours?: number | null;
+    quoted_laser_hours?: number;
+    quoted_brake_hours?: number;
+    quoted_weld_hours?: number;
+    notes?: string;
+  }) {
+    const response = await this.api.post('/estimate-workbench/job-actuals', data);
+    return response.data;
+  }
+
+  async exportEstimateWorkbenchAuditXlsx(estimateId: number): Promise<Blob> {
+    const response = await this.api.get(`/estimate-workbench/${estimateId}/export/audit.xlsx`, {
+      responseType: 'blob',
+    });
+    return response.data;
+  }
+
+  async exportEstimateWorkbenchAuditJson(estimateId: number): Promise<Blob> {
+    const response = await this.api.get(`/estimate-workbench/${estimateId}/export/audit.json`, {
+      responseType: 'blob',
+    });
+    return response.data;
+  }
+
+  async exportEstimateWorkbenchCustomerPdf(estimateId: number): Promise<Blob> {
+    const response = await this.api.get(`/estimate-workbench/${estimateId}/export/customer.pdf`, {
+      responseType: 'blob',
+    });
+    return response.data;
+  }
+
   // Users
   async getUsers(includeInactive = false) {
     const response = await this.api.get('/users/', { params: { include_inactive: includeInactive } });

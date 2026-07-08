@@ -118,6 +118,17 @@ from .quote_config import (
     QuoteSettings,
     SettingsAuditLog,
 )
+from .estimate_workbench import (
+    ConfidenceLevel,
+    CutBendRow,
+    CutBendTable,
+    CutBendTableKind,
+    QuoteAssembly,
+    QuoteBuyoutLineItem,
+    QuoteFabLineItem,
+    QuoteMachinedLineItem,
+)
+from .estimate_job_actual import EstimateJobActual
 from .rfq_quote import PriceSnapshot, QuoteEstimate, QuoteLineSummary, RfqPackage, RfqPackageFile
 from .role_permission import RolePermission
 from .routing import Routing, RoutingOperation
@@ -221,6 +232,15 @@ __all__ = [
     "QuoteEstimate",
     "QuoteLineSummary",
     "PriceSnapshot",
+    "CutBendTable",
+    "CutBendRow",
+    "CutBendTableKind",
+    "ConfidenceLevel",
+    "QuoteAssembly",
+    "QuoteFabLineItem",
+    "QuoteBuyoutLineItem",
+    "QuoteMachinedLineItem",
+    "EstimateJobActual",
     "OEERecord",
     "OEETarget",
     "OperationalEvent",

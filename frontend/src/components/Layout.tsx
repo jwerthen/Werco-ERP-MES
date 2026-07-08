@@ -162,6 +162,8 @@ const navSections: NavSection[] = [
         children: [
           { name: 'AI RFQ Quote', href: '/rfq-packages/new', icon: SparklesIcon },
           { name: 'Quote Calculator', href: '/quote-calculator', icon: CalculatorIcon },
+          { name: 'Estimate Workbench', href: '/estimate-workbench', icon: CalculatorIcon },
+          { name: 'Shop Data', href: '/shop-data', icon: AdjustmentsHorizontalIcon },
           { name: 'Quotes', href: '/quotes', icon: CurrencyDollarIcon },
           { name: 'Customers', href: '/customers', icon: BuildingOfficeIcon },
         ],

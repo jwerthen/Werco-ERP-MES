@@ -62,6 +62,8 @@ const PrintPackingSlip = lazyWithRetry(() => import('./pages/PrintPackingSlip'))
 const PrintShippingLabel = lazyWithRetry(() => import('./pages/PrintShippingLabel'));
 const AuditLog = lazyWithRetry(() => import('./pages/AuditLog'));
 const QuoteCalculator = lazyWithRetry(() => import('./pages/QuoteCalculator'));
+const EstimateWorkbench = lazyWithRetry(() => import('./pages/EstimateWorkbench'));
+const ShopData = lazyWithRetry(() => import('./pages/ShopData'));
 const AdminSettings = lazyWithRetry(() => import('./pages/AdminSettings'));
 const POUpload = lazyWithRetry(() => import('./pages/POUpload'));
 const Analytics = lazyWithRetry(() => import('./pages/Analytics'));
@@ -145,6 +147,8 @@ const routeAccessRequirements: RouteAccessRequirement[] = [
   { prefix: '/supplier-scorecards', permission: 'purchasing:view' },
   { prefix: '/quotes', permission: 'purchasing:view' },
   { prefix: '/quote-calculator', permission: 'purchasing:view' },
+  { prefix: '/estimate-workbench', permission: 'purchasing:view' },
+  { prefix: '/shop-data', permission: 'purchasing:view' },
   { prefix: '/rfq-packages', permission: 'purchasing:create' },
   { prefix: '/customers', permission: 'purchasing:view' },
   { prefix: '/scheduling', permission: 'work_orders:view' },
@@ -577,6 +581,27 @@ function AppRoutes() {
         <PrivateRoute>
           <Layout>
             <LazyRoute><QuoteCalculator /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
+      <Route path="/estimate-workbench" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><EstimateWorkbench /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
+      <Route path="/estimate-workbench/:estimateId" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><EstimateWorkbench /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
+      <Route path="/shop-data" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><ShopData /></LazyRoute>
           </Layout>
         </PrivateRoute>
       } />

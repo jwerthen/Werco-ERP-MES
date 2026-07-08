@@ -16,6 +16,10 @@ from typing import Dict
 from app.services.prompts.auto_execute import AUTO_EXECUTE_PROMPT
 from app.services.prompts.base import Prompt
 from app.services.prompts.copilot import COPILOT_CHAT_PROMPT, NL_SEARCH_INTENT_PROMPT
+from app.services.prompts.estimate_drawing import (
+    ESTIMATE_DRAWING_EXTRACTION_PROMPT,
+    ESTIMATE_DRAWING_EXTRACTION_SCHEMA,
+)
 from app.services.prompts.extraction import (
     BOM_EXTRACTION_PROMPT,
     BOM_EXTRACTION_SCHEMA,
@@ -35,6 +39,7 @@ PROMPT_REGISTRY: Dict[str, Prompt] = {
         PO_EXTRACTION_PROMPT,
         BOM_EXTRACTION_PROMPT,
         LASER_NEST_EXTRACTION_PROMPT,
+        ESTIMATE_DRAWING_EXTRACTION_PROMPT,
         ROUTING_GENERATION_PROMPT,
         QMS_CLAUSE_EXTRACTION_PROMPT,
         COPILOT_CHAT_PROMPT,
@@ -52,6 +57,8 @@ __all__ = [
     "BOM_EXTRACTION_SCHEMA",
     "LASER_NEST_EXTRACTION_PROMPT",
     "LASER_NEST_EXTRACTION_SCHEMA",
+    "ESTIMATE_DRAWING_EXTRACTION_PROMPT",
+    "ESTIMATE_DRAWING_EXTRACTION_SCHEMA",
     "ROUTING_GENERATION_PROMPT",
     "QMS_CLAUSE_EXTRACTION_PROMPT",
     "COPILOT_CHAT_PROMPT",

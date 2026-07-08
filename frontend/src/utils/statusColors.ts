@@ -40,6 +40,10 @@ export const variantClass: Record<StatusVariant, string> = {
  * Keys are the raw status values (snake_case) as they arrive from the API.
  */
 const statusVariantMap: Record<string, StatusVariant> = {
+  confirmed: 'green',
+  majority: 'amber',
+  review: 'red',
+
   // --- green: good / done / active-good ---
   active: 'green',
   released: 'green',

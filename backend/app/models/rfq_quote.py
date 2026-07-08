@@ -100,6 +100,18 @@ class QuoteEstimate(Base, TenantMixin):
     quote = relationship("Quote", back_populates="estimates")
     line_summaries = relationship("QuoteLineSummary", back_populates="quote_estimate", cascade="all, delete-orphan")
     price_snapshots = relationship("PriceSnapshot", back_populates="quote_estimate", cascade="all, delete-orphan")
+    assemblies = relationship(
+        "QuoteAssembly",
+        back_populates="estimate",
+        cascade="all, delete-orphan",
+        order_by="QuoteAssembly.sort_order",
+    )
+    machined_line_items = relationship(
+        "QuoteMachinedLineItem",
+        back_populates="estimate",
+        cascade="all, delete-orphan",
+        order_by="QuoteMachinedLineItem.sort_order",
+    )
 
 
 class QuoteLineSummary(Base, TenantMixin):
