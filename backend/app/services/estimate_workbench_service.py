@@ -23,6 +23,7 @@ from app.models.estimate_workbench import (
 )
 from app.models.quote_config import LaborRate, QuoteMaterial, QuoteSettings
 from app.models.rfq_quote import QuoteEstimate, RfqPackage
+from app.services.audit_service import AuditService
 from app.services.fab_calc_engine import (
     DEFAULT_BRAKE_TIME_ROWS,
     DEFAULT_GAUGE_ROWS,
@@ -42,7 +43,6 @@ from app.services.fab_calc_engine import (
     calc_fab_line_item,
     calc_machined_part,
 )
-from app.services.audit_service import AuditService
 
 # QuoteSettings keys for the estimate workbench (ew_*). Missing → Excel defaults.
 SETTING_KEYS = {
@@ -83,9 +83,7 @@ class ShopDataBundle:
     source: str  # "db" | "defaults" | "mixed"
 
 
-def _get_setting_number(
-    db: Session, company_id: int, key: str, default: float
-) -> float:
+def _get_setting_number(db: Session, company_id: int, key: str, default: float) -> float:
     row = (
         db.query(QuoteSettings)
         .filter(
@@ -103,11 +101,7 @@ def _get_setting_number(
 
 
 def _labor_rate_by_name(db: Session, company_id: int, name_substr: str) -> Optional[float]:
-    rows = (
-        db.query(LaborRate)
-        .filter(LaborRate.company_id == company_id, LaborRate.is_active.is_(True))
-        .all()
-    )
+    rows = db.query(LaborRate).filter(LaborRate.company_id == company_id, LaborRate.is_active.is_(True)).all()
     needle = name_substr.lower()
     for row in rows:
         if needle in (row.name or "").lower():
@@ -172,11 +166,7 @@ def load_rates(db: Session, company_id: int) -> Tuple[FabRates, float, float, fl
 
 def seed_cut_bend_defaults(db: Session, company_id: int, *, force: bool = False) -> int:
     """Insert the five default Cut/Bend tables. Returns number of tables created."""
-    existing = (
-        db.query(CutBendTable)
-        .filter(CutBendTable.company_id == company_id)
-        .count()
-    )
+    existing = db.query(CutBendTable).filter(CutBendTable.company_id == company_id).count()
     if existing and not force:
         return 0
     if existing and force:
@@ -318,20 +308,14 @@ def seed_cut_bend_defaults(db: Session, company_id: int, *, force: bool = False)
 
 def ensure_cut_bend_seeded(db: Session, company_id: int) -> bool:
     """Seed default Cut/Bend tables if company has none. Returns True if seeded."""
-    count = (
-        db.query(CutBendTable)
-        .filter(CutBendTable.company_id == company_id)
-        .count()
-    )
+    count = db.query(CutBendTable).filter(CutBendTable.company_id == company_id).count()
     if count > 0:
         return False
     seed_cut_bend_defaults(db, company_id, force=False)
     return True
 
 
-def _rows_for_kind(
-    db: Session, company_id: int, kind: CutBendTableKind
-) -> List[CutBendRow]:
+def _rows_for_kind(db: Session, company_id: int, kind: CutBendTableKind) -> List[CutBendRow]:
     table = (
         db.query(CutBendTable)
         .options(joinedload(CutBendTable.rows))
@@ -456,9 +440,7 @@ def resolve_material_price(
     if not material_name:
         return fallback, 0.284
     rows = (
-        db.query(QuoteMaterial)
-        .filter(QuoteMaterial.company_id == company_id, QuoteMaterial.is_active.is_(True))
-        .all()
+        db.query(QuoteMaterial).filter(QuoteMaterial.company_id == company_id, QuoteMaterial.is_active.is_(True)).all()
     )
     needle = material_name.strip().lower()
     best = None
@@ -563,9 +545,7 @@ def recompute_estimate(
         for fl in asm.fab_line_items or []:
             if getattr(fl, "is_deleted", False):
                 continue
-            price, density = resolve_material_price(
-                db, estimate.company_id, fl.material or "", fallback=0.0
-            )
+            price, density = resolve_material_price(db, estimate.company_id, fl.material or "", fallback=0.0)
             # Keep explicit zero if catalog miss and no price stored — don't invent
             inp = fab_input_from_line(fl, price, density)
             bd = calc_fab_line_item(
@@ -583,9 +563,7 @@ def recompute_estimate(
     for mp in estimate.machined_line_items or []:
         if getattr(mp, "is_deleted", False):
             continue
-        price, density = resolve_material_price(
-            db, estimate.company_id, mp.material or "", fallback=0.0
-        )
+        price, density = resolve_material_price(db, estimate.company_id, mp.material or "", fallback=0.0)
         result = calc_machined_part(
             stock_dia_in=float(mp.stock_dia_in or 0),
             stock_length_in=float(mp.stock_length_in or 0),
@@ -659,10 +637,8 @@ def get_estimate_tree(db: Session, estimate_id: int, company_id: int) -> Optiona
     return (
         db.query(QuoteEstimate)
         .options(
-            joinedload(QuoteEstimate.assemblies)
-            .joinedload(QuoteAssembly.fab_line_items),
-            joinedload(QuoteEstimate.assemblies)
-            .joinedload(QuoteAssembly.buyout_line_items),
+            joinedload(QuoteEstimate.assemblies).joinedload(QuoteAssembly.fab_line_items),
+            joinedload(QuoteEstimate.assemblies).joinedload(QuoteAssembly.buyout_line_items),
             joinedload(QuoteEstimate.machined_line_items),
         )
         .filter(
@@ -681,11 +657,7 @@ def create_blank_estimate(
     user_id: Optional[int],
     audit: Optional[AuditService] = None,
 ) -> QuoteEstimate:
-    pkg = (
-        db.query(RfqPackage)
-        .filter(RfqPackage.id == rfq_package_id, RfqPackage.company_id == company_id)
-        .first()
-    )
+    pkg = db.query(RfqPackage).filter(RfqPackage.id == rfq_package_id, RfqPackage.company_id == company_id).first()
     if not pkg:
         raise ValueError("RFQ package not found")
 
@@ -925,9 +897,7 @@ def recalc_payload(
         assembly_hrs += float(getattr(asm, "assembly_labor_hrs", 0) or 0)
         electrical_hrs += float(getattr(asm, "electrical_labor_hrs", 0) or 0)
         for bl in getattr(asm, "buyout_lines", None) or []:
-            buyout_extended += float(getattr(bl, "qty", 0) or 0) * float(
-                getattr(bl, "unit_cost", 0) or 0
-            )
+            buyout_extended += float(getattr(bl, "qty", 0) or 0) * float(getattr(bl, "unit_cost", 0) or 0)
         for fl in getattr(asm, "fab_lines", None) or []:
             material = getattr(fl, "material", "") or ""
             price = float(getattr(fl, "price_per_lb", 0) or 0)
@@ -945,9 +915,7 @@ def recalc_payload(
                 bend_count=int(getattr(fl, "bend_count", 0) or 0),
                 weld_length_in=getattr(fl, "weld_length_in", None),
                 weld_minutes_ea=getattr(fl, "weld_minutes_ea", None),
-                material_family_override=_parse_family(
-                    getattr(fl, "material_family_override", None)
-                ),
+                material_family_override=_parse_family(getattr(fl, "material_family_override", None)),
                 include_material=bool(getattr(fl, "include_material", True)),
                 include_laser=bool(getattr(fl, "include_laser", True)),
                 include_brake=bool(getattr(fl, "include_brake", True)),
@@ -1175,12 +1143,8 @@ def build_verification_report(estimate: QuoteEstimate) -> Dict[str, Any]:
 
     # Labor roll-up from bid breakdown (flat hours, treated as confirmed)
     breakdown = estimate.internal_breakdown or {}
-    labor_cost = float(breakdown.get("assembly_labor_cost") or 0) + float(
-        breakdown.get("electrical_labor_cost") or 0
-    )
-    labor_hrs = float(breakdown.get("assembly_hours") or 0) + float(
-        breakdown.get("electrical_hours") or 0
-    )
+    labor_cost = float(breakdown.get("assembly_labor_cost") or 0) + float(breakdown.get("electrical_labor_cost") or 0)
+    labor_hrs = float(breakdown.get("assembly_hours") or 0) + float(breakdown.get("electrical_hours") or 0)
     if labor_hrs > 0 or labor_cost > 0:
         categories["labor"]["count"] = 1
         categories["labor"]["total"] = labor_cost
@@ -1219,9 +1183,7 @@ def build_verification_report(estimate: QuoteEstimate) -> Dict[str, Any]:
 
     can_finalize = len(blockers) == 0
     # Also require at least one priced line so we don't finalize an empty shell
-    has_lines = any(
-        categories[c]["count"] > 0 for c in ("fab", "buyout", "machined")
-    )
+    has_lines = any(categories[c]["count"] > 0 for c in ("fab", "buyout", "machined"))
     if not has_lines:
         can_finalize = False
         blockers.append(
@@ -1347,11 +1309,9 @@ def finalize_estimate(
             subtotal=sell,
             tax=0.0,
             total=sell,
-            notes=f"Finalized from Estimate Workbench EW-{estimate.id}"
-            + (f" / RFQ {pkg.rfq_number}" if pkg else ""),
+            notes=f"Finalized from Estimate Workbench EW-{estimate.id}" + (f" / RFQ {pkg.rfq_number}" if pkg else ""),
             internal_notes=(
-                f"COGS={cogs:.2f}; shop_data={shop.source}; "
-                f"review_cleared={report['can_finalize']}; force={force}"
+                f"COGS={cogs:.2f}; shop_data={shop.source}; " f"review_cleared={report['can_finalize']}; force={force}"
             ),
             created_by=user_id,
             company_id=company_id,
@@ -1386,8 +1346,7 @@ def finalize_estimate(
                 QuoteLine(
                     quote_id=quote.id,
                     line_number=line_number,
-                    description=f"[{asm.name}] {fl.detail_name}"
-                    + (f" ({fl.part_number})" if fl.part_number else ""),
+                    description=f"[{asm.name}] {fl.detail_name}" + (f" ({fl.part_number})" if fl.part_number else ""),
                     quantity=float(fl.qty or 1),
                     unit_price=unit,
                     line_total=float(fl.line_total or 0),
@@ -1422,8 +1381,7 @@ def finalize_estimate(
             QuoteLine(
                 quote_id=quote.id,
                 line_number=line_number,
-                description=f"MACHINED: {mp.description}"
-                + (f" ({mp.part_number})" if mp.part_number else ""),
+                description=f"MACHINED: {mp.description}" + (f" ({mp.part_number})" if mp.part_number else ""),
                 quantity=float(mp.qty or 1),
                 unit_price=unit,
                 line_total=float(mp.line_total or 0),

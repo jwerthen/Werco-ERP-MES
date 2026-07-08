@@ -393,9 +393,7 @@ def align_and_vote_fab_passes(
             # Force Review when a line only appeared in some passes
             voted.confidence = REVIEW
             extra = f"present in {len(present)}/{n} passes"
-            voted.verification_note = (
-                f"{voted.verification_note}; {extra}" if voted.verification_note else extra
-            )
+            voted.verification_note = f"{voted.verification_note}; {extra}" if voted.verification_note else extra
         results.append(voted)
     return results
 
@@ -434,9 +432,7 @@ def align_and_vote_buyout_passes(
         if len(present) < n:
             voted.confidence = REVIEW
             extra = f"present in {len(present)}/{n} passes"
-            voted.verification_note = (
-                f"{voted.verification_note}; {extra}" if voted.verification_note else extra
-            )
+            voted.verification_note = f"{voted.verification_note}; {extra}" if voted.verification_note else extra
         results.append(voted)
     return results
 
@@ -484,9 +480,7 @@ def line_vote_to_buyout_draft(voted: LineVoteResult) -> Dict[str, Any]:
         "vendor": v.get("vendor"),
         "qty": float(v.get("qty") or 1),
         "unit_cost": float(v.get("unit_cost") or 0),
-        "price_source": v.get("price_source") or (
-            "Placeholder" if voted.confidence == REVIEW else "Drawing extract"
-        ),
+        "price_source": v.get("price_source") or ("Placeholder" if voted.confidence == REVIEW else "Drawing extract"),
         "confidence": voted.confidence,
         "verification_note": voted.verification_note,
         "field_confidence": {

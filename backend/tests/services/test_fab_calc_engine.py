@@ -31,7 +31,6 @@ from app.services.fab_calc_engine import (
     suggest_gauge_snap,
 )
 
-
 # ---------------------------------------------------------------------------
 # lookup_banded
 # ---------------------------------------------------------------------------
@@ -89,39 +88,29 @@ class TestMaterialFamily:
 
 class TestLaserSpeed:
     def test_exact_band_mild(self):
-        speed, err = lookup_laser_speed(
-            0.075, MaterialFamily.MILD, DEFAULT_LASER_SPEED_ROWS, 100
-        )
+        speed, err = lookup_laser_speed(0.075, MaterialFamily.MILD, DEFAULT_LASER_SPEED_ROWS, 100)
         assert err is None
         assert speed == 430
 
     def test_between_bands_rounds_down(self):
         # 0.090 → 0.075 band
-        speed, err = lookup_laser_speed(
-            0.090, MaterialFamily.MILD, DEFAULT_LASER_SPEED_ROWS, 100
-        )
+        speed, err = lookup_laser_speed(0.090, MaterialFamily.MILD, DEFAULT_LASER_SPEED_ROWS, 100)
         assert err is None
         assert speed == 430
 
     def test_past_capacity_aluminum(self):
-        speed, err = lookup_laser_speed(
-            0.625, MaterialFamily.ALUMINUM, DEFAULT_LASER_SPEED_ROWS, 100
-        )
+        speed, err = lookup_laser_speed(0.625, MaterialFamily.ALUMINUM, DEFAULT_LASER_SPEED_ROWS, 100)
         assert speed is None
         assert err is not None
         assert err.code == CalcErrorCode.PAST_CAPACITY
 
     def test_past_capacity_stainless_thick(self):
-        speed, err = lookup_laser_speed(
-            0.750, MaterialFamily.STAINLESS, DEFAULT_LASER_SPEED_ROWS, 100
-        )
+        speed, err = lookup_laser_speed(0.750, MaterialFamily.STAINLESS, DEFAULT_LASER_SPEED_ROWS, 100)
         assert err is not None
         assert err.code == CalcErrorCode.PAST_CAPACITY
 
     def test_below_first_band_fallback(self):
-        speed, err = lookup_laser_speed(
-            0.010, MaterialFamily.MILD, DEFAULT_LASER_SPEED_ROWS, 99
-        )
+        speed, err = lookup_laser_speed(0.010, MaterialFamily.MILD, DEFAULT_LASER_SPEED_ROWS, 99)
         assert err is None
         assert speed == 99
 
@@ -224,9 +213,7 @@ class TestFabLineItem:
         assert out.brake_cost == pytest.approx(19.0)
         assert out.brake_hours == pytest.approx(0.2)
         assert out.weld_cost == 0.0
-        assert out.line_total == pytest.approx(
-            out.material_cost + out.laser_cost + out.brake_cost
-        )
+        assert out.line_total == pytest.approx(out.material_cost + out.laser_cost + out.brake_cost)
 
     def test_bend_only_partial_scope(self):
         """Only brake in scope — material/laser/weld $0."""
@@ -349,8 +336,6 @@ class TestMachinedAndBid:
         assert summary.assembly_labor_cost == pytest.approx(150.0)
         assert summary.electrical_labor_cost == pytest.approx(105.0)
         assert summary.cogs > summary.subtotal_before_oh
-        assert summary.sell_price == pytest.approx(
-            summary.cogs / (1.0 - DEFAULT_RATES.target_margin)
-        )
+        assert summary.sell_price == pytest.approx(summary.cogs / (1.0 - DEFAULT_RATES.target_margin))
         assert summary.brake_hours > 0
         assert summary.laser_hours > 0

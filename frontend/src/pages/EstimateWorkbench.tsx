@@ -1264,7 +1264,7 @@ function FabTable({
               <th className="px-2 py-1.5 font-medium text-right">Brake</th>
               <th className="px-2 py-1.5 font-medium text-right">Weld</th>
               <th className="px-2 py-1.5 font-medium text-right">Total</th>
-              <th className="px-2 py-1.5" />
+              <th className="px-2 py-1.5" aria-label="Actions" />
             </tr>
           </thead>
           <tbody>
@@ -1293,6 +1293,7 @@ function FabTable({
                   <td className="px-1 py-1 align-top min-w-[8rem]">
                     <input
                       className={inputCls}
+                      aria-label="Detail name"
                       value={fl.detail_name}
                       onChange={(e) => onChange(idx, { detail_name: e.target.value })}
                     />
@@ -1300,6 +1301,7 @@ function FabTable({
                   <td className="px-1 py-1 align-top min-w-[7rem]">
                     <input
                       className={inputCls}
+                      aria-label="Material"
                       value={fl.material}
                       onChange={(e) => onChange(idx, { material: e.target.value })}
                     />
@@ -1308,6 +1310,7 @@ function FabTable({
                     <input
                       className={inputCls}
                       type="number"
+                      aria-label="Quantity"
                       value={fl.qty}
                       onChange={(e) => onChange(idx, { qty: Math.max(1, numOrZero(e.target.value)) })}
                     />
@@ -1317,6 +1320,7 @@ function FabTable({
                       className={inputCls}
                       type="number"
                       step="0.001"
+                      aria-label="Thickness (in)"
                       value={fl.thickness_in ?? ''}
                       onChange={(e) => onChange(idx, { thickness_in: numOrNull(e.target.value) })}
                     />
@@ -1326,6 +1330,7 @@ function FabTable({
                       className={inputCls}
                       type="number"
                       step="0.01"
+                      aria-label="Width (in)"
                       value={fl.width_in ?? ''}
                       onChange={(e) => onChange(idx, { width_in: numOrNull(e.target.value) })}
                     />
@@ -1335,6 +1340,7 @@ function FabTable({
                       className={inputCls}
                       type="number"
                       step="0.01"
+                      aria-label="Length (in)"
                       value={fl.length_in ?? ''}
                       onChange={(e) => onChange(idx, { length_in: numOrNull(e.target.value) })}
                     />
@@ -1344,6 +1350,7 @@ function FabTable({
                       className={inputCls}
                       type="number"
                       step="0.1"
+                      aria-label="Cut length (in)"
                       value={fl.cut_length_in ?? ''}
                       onChange={(e) => onChange(idx, { cut_length_in: numOrNull(e.target.value) })}
                     />
@@ -1352,6 +1359,7 @@ function FabTable({
                     <input
                       className={inputCls}
                       type="number"
+                      aria-label="Pierce count"
                       value={fl.pierce_count}
                       onChange={(e) => onChange(idx, { pierce_count: numOrZero(e.target.value) })}
                     />
@@ -1360,6 +1368,7 @@ function FabTable({
                     <input
                       className={inputCls}
                       type="number"
+                      aria-label="Bend count"
                       value={fl.bend_count}
                       onChange={(e) => onChange(idx, { bend_count: numOrZero(e.target.value) })}
                     />
@@ -1473,7 +1482,7 @@ function BuyoutTable({
               <th className="px-2 py-1.5 font-medium">Unit $</th>
               <th className="px-2 py-1.5 font-medium text-right">Ext $</th>
               <th className="px-2 py-1.5 font-medium">Source / note</th>
-              <th className="px-2 py-1.5" />
+              <th className="px-2 py-1.5" aria-label="Actions" />
             </tr>
           </thead>
           <tbody>
@@ -1492,6 +1501,7 @@ function BuyoutTable({
                 <td className="px-1 py-1 min-w-[10rem]">
                   <input
                     className={inputCls}
+                    aria-label="Description"
                     value={bl.description}
                     onChange={(e) => onChange(idx, { description: e.target.value })}
                   />
@@ -1499,6 +1509,7 @@ function BuyoutTable({
                 <td className="px-1 py-1 w-28">
                   <input
                     className={inputCls}
+                    aria-label="Vendor"
                     value={bl.vendor || ''}
                     onChange={(e) => onChange(idx, { vendor: e.target.value })}
                   />
@@ -1508,6 +1519,7 @@ function BuyoutTable({
                     className={inputCls}
                     type="number"
                     step="0.01"
+                    aria-label="Quantity"
                     value={bl.qty}
                     onChange={(e) => onChange(idx, { qty: numOrZero(e.target.value) })}
                   />
@@ -1517,6 +1529,7 @@ function BuyoutTable({
                     className={inputCls}
                     type="number"
                     step="0.01"
+                    aria-label="Unit cost"
                     value={bl.unit_cost}
                     onChange={(e) => onChange(idx, { unit_cost: numOrZero(e.target.value) })}
                   />
@@ -1527,6 +1540,7 @@ function BuyoutTable({
                 <td className="px-1 py-1 min-w-[8rem]">
                   <input
                     className={inputCls}
+                    aria-label="Price source / note"
                     value={bl.price_source || bl.verification_note || ''}
                     onChange={(e) =>
                       onChange(idx, { price_source: e.target.value, verification_note: e.target.value })
@@ -1593,7 +1607,7 @@ function MachinedTable({
               <th className="px-2 py-1.5 font-medium">Turn min</th>
               <th className="px-2 py-1.5 font-medium">Mill min</th>
               <th className="px-2 py-1.5 font-medium text-right">Total</th>
-              <th className="px-2 py-1.5" />
+              <th className="px-2 py-1.5" aria-label="Actions" />
             </tr>
           </thead>
           <tbody>
@@ -1612,6 +1626,7 @@ function MachinedTable({
                 <td className="px-1 py-1 min-w-[8rem]">
                   <input
                     className={inputCls}
+                    aria-label="Description"
                     value={mp.description}
                     onChange={(e) => onChange(idx, { description: e.target.value })}
                   />
@@ -1619,6 +1634,7 @@ function MachinedTable({
                 <td className="px-1 py-1 w-28">
                   <input
                     className={inputCls}
+                    aria-label="Material"
                     value={mp.material}
                     onChange={(e) => onChange(idx, { material: e.target.value })}
                   />
@@ -1627,6 +1643,7 @@ function MachinedTable({
                   <input
                     className={inputCls}
                     type="number"
+                    aria-label="Quantity"
                     value={mp.qty}
                     onChange={(e) => onChange(idx, { qty: Math.max(1, numOrZero(e.target.value)) })}
                   />
@@ -1636,6 +1653,7 @@ function MachinedTable({
                     className={inputCls}
                     type="number"
                     step="0.001"
+                    aria-label="Stock diameter (in)"
                     value={mp.stock_dia_in ?? ''}
                     onChange={(e) => onChange(idx, { stock_dia_in: numOrNull(e.target.value) })}
                   />
@@ -1645,6 +1663,7 @@ function MachinedTable({
                     className={inputCls}
                     type="number"
                     step="0.001"
+                    aria-label="Stock length (in)"
                     value={mp.stock_length_in ?? ''}
                     onChange={(e) => onChange(idx, { stock_length_in: numOrNull(e.target.value) })}
                   />
@@ -1654,6 +1673,7 @@ function MachinedTable({
                     className={inputCls}
                     type="number"
                     step="0.1"
+                    aria-label="Turning minutes"
                     value={mp.turning_minutes}
                     onChange={(e) => onChange(idx, { turning_minutes: numOrZero(e.target.value) })}
                   />
@@ -1663,6 +1683,7 @@ function MachinedTable({
                     className={inputCls}
                     type="number"
                     step="0.1"
+                    aria-label="Milling minutes"
                     value={mp.milling_minutes}
                     onChange={(e) => onChange(idx, { milling_minutes: numOrZero(e.target.value) })}
                   />

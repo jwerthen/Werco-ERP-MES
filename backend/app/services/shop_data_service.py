@@ -46,6 +46,7 @@ def _log_cut_bend_change(
         )
     )
 
+
 # Editable numeric / text fields on CutBendRow
 ROW_EDITABLE_FIELDS = (
     "thickness_in",
@@ -367,8 +368,7 @@ def _propose_tune_hints(row: EstimateJobActual) -> List[Dict[str, Any]]:
                     "kind": kind,
                     "delta_pct": round(d, 4),
                     "message": (
-                        f"{label.title()} actual {a:.2f}h vs quoted {q:.2f}h "
-                        f"({d:+.0%}) — consider tuning {kind}"
+                        f"{label.title()} actual {a:.2f}h vs quoted {q:.2f}h " f"({d:+.0%}) — consider tuning {kind}"
                     ),
                 }
             )

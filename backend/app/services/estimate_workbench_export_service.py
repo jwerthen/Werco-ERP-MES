@@ -485,8 +485,7 @@ def build_workbench_customer_pdf(
         customer_name=(package.customer_name if package else None) or "Customer",
         customer_contact=None,
         customer_email=None,
-        rfq_reference=(package.rfq_number if package else None)
-        or (package.rfq_reference if package else None),
+        rfq_reference=(package.rfq_number if package else None) or (package.rfq_reference if package else None),
         quote_date=datetime.utcnow().strftime("%Y-%m-%d"),
         valid_until=None,
         lead_time_label=None,

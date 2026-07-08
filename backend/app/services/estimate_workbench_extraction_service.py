@@ -100,9 +100,11 @@ def _part_to_fab_dict(part: Dict[str, Any]) -> Dict[str, Any]:
         "weld_length_in": _safe_float(part.get("weld_length")),
         "drawing_number": part.get("drawing_number"),
         "revision": part.get("revision"),
-        "source_file": (part.get("sources") or {}).get("drawing_pdf", [None])[0]
-        if isinstance((part.get("sources") or {}).get("drawing_pdf"), list)
-        else None,
+        "source_file": (
+            (part.get("sources") or {}).get("drawing_pdf", [None])[0]
+            if isinstance((part.get("sources") or {}).get("drawing_pdf"), list)
+            else None
+        ),
     }
 
 
@@ -268,9 +270,7 @@ Never invent prices or geometry. Return ONLY the JSON object."""
                     },
                 }
             )
-            content_blocks.append(
-                {"type": "text", "text": f"(Document filename: {doc['file_name']})"}
-            )
+            content_blocks.append({"type": "text", "text": f"(Document filename: {doc['file_name']})"})
             has_pdf = True
         else:
             snippet = (doc.get("text") or "")[:40_000]
@@ -420,9 +420,7 @@ def build_workbench_draft_from_votes(
             "buyout_count": len(buy_drafts),
             "review_count": review_n,
             "majority_count": majority_n,
-            "confirmed_count": sum(
-                1 for d in fab_drafts + buy_drafts if d.get("confidence") == "confirmed"
-            ),
+            "confirmed_count": sum(1 for d in fab_drafts + buy_drafts if d.get("confidence") == "confirmed"),
         },
         "warnings": warnings or [],
         "extraction_artifact": extraction_artifact or {},
@@ -502,17 +500,36 @@ def extract_workbench_draft_from_rfq(
 
 
 def _fab_draft_to_pass_dict(draft: Dict[str, Any]) -> Dict[str, Any]:
-    return {k: draft.get(k) for k in (
-        "detail_name", "part_number", "material", "qty", "thickness_in",
-        "width_in", "length_in", "cut_length_in", "pierce_count", "bend_count",
-        "weld_length_in",
-    )}
+    return {
+        k: draft.get(k)
+        for k in (
+            "detail_name",
+            "part_number",
+            "material",
+            "qty",
+            "thickness_in",
+            "width_in",
+            "length_in",
+            "cut_length_in",
+            "pierce_count",
+            "bend_count",
+            "weld_length_in",
+        )
+    }
 
 
 def _buy_draft_to_pass_dict(draft: Dict[str, Any]) -> Dict[str, Any]:
-    return {k: draft.get(k) for k in (
-        "part_number", "description", "qty", "unit_cost", "category", "vendor",
-    )}
+    return {
+        k: draft.get(k)
+        for k in (
+            "part_number",
+            "description",
+            "qty",
+            "unit_cost",
+            "category",
+            "vendor",
+        )
+    }
 
 
 def _triplicate_as_passes(items: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
@@ -545,12 +562,8 @@ def _deterministic_draft(
         "summary": {
             "fab_count": len(det["fab_lines"]),
             "buyout_count": len(det["buyout_lines"]),
-            "review_count": sum(
-                1 for d in det["fab_lines"] + det["buyout_lines"] if d.get("confidence") == REVIEW
-            ),
-            "majority_count": sum(
-                1 for d in det["fab_lines"] + det["buyout_lines"] if d.get("confidence") == MAJORITY
-            ),
+            "review_count": sum(1 for d in det["fab_lines"] + det["buyout_lines"] if d.get("confidence") == REVIEW),
+            "majority_count": sum(1 for d in det["fab_lines"] + det["buyout_lines"] if d.get("confidence") == MAJORITY),
             "confirmed_count": 0,
         },
         "warnings": warnings,

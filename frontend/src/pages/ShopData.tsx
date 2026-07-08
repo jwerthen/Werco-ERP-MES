@@ -145,7 +145,6 @@ export default function ShopData() {
 
   useEffect(() => {
     void load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const startEdit = (row: CutBendRow, col: string) => {

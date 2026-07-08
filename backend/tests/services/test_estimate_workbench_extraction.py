@@ -128,9 +128,7 @@ def test_extract_workbench_draft_deterministic_flag():
         "app.services.estimate_workbench_extraction_service.parse_rfq_package_files",
         return_value=parsed,
     ):
-        draft = extract_workbench_draft_from_rfq(
-            db, rfq_package_id=7, company_id=1, use_llm=False
-        )
+        draft = extract_workbench_draft_from_rfq(db, rfq_package_id=7, company_id=1, use_llm=False)
 
     assert draft["mode"] == "deterministic"
     assert draft["assemblies"][0]["name"] == "RFQ-7"

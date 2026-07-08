@@ -17,7 +17,6 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List, Optional, Sequence, Tuple
 
-
 # ---------------------------------------------------------------------------
 # Types
 # ---------------------------------------------------------------------------
@@ -238,8 +237,7 @@ def lookup_laser_speed(
         return None, CalcError(
             code=CalcErrorCode.PAST_CAPACITY,
             message=(
-                f"Thickness {thickness}\" is past laser capacity for "
-                f"{family.value} (band {chosen.thickness}\")"
+                f"Thickness {thickness}\" is past laser capacity for " f"{family.value} (band {chosen.thickness}\")"
             ),
             field="thickness_in",
         )
@@ -311,9 +309,7 @@ def calc_part_weight(
     length_in: float,
     density_lb_per_in3: float = 0.284,
 ) -> float:
-    return max(thickness_in, 0.0) * max(width_in, 0.0) * max(length_in, 0.0) * max(
-        density_lb_per_in3, 0.0
-    )
+    return max(thickness_in, 0.0) * max(width_in, 0.0) * max(length_in, 0.0) * max(density_lb_per_in3, 0.0)
 
 
 def calc_material_cost(
@@ -322,9 +318,7 @@ def calc_material_cost(
     scrap_factor: float,
     price_per_lb: float,
 ) -> float:
-    return max(qty, 0) * max(weight_lb, 0.0) * (1.0 + max(scrap_factor, 0.0)) * max(
-        price_per_lb, 0.0
-    )
+    return max(qty, 0) * max(weight_lb, 0.0) * (1.0 + max(scrap_factor, 0.0)) * max(price_per_lb, 0.0)
 
 
 def calc_laser_cost(
@@ -408,9 +402,8 @@ def calc_fab_line_item(
     family = line.material_family_override or detect_material_family(line.material)
     out.material_family = family
 
-    needs_thickness = (
-        (line.include_laser and (line.cut_length_in or line.pierce_count))
-        or (line.include_brake and line.bend_count > 0)
+    needs_thickness = (line.include_laser and (line.cut_length_in or line.pierce_count)) or (
+        line.include_brake and line.bend_count > 0
     )
     if needs_thickness and (line.thickness_in is None or line.thickness_in <= 0):
         out.warnings.append(
@@ -427,12 +420,8 @@ def calc_fab_line_item(
 
     # --- Material ---
     if line.include_material and line.thickness_in and line.width_in and line.length_in:
-        out.weight_ea_lb = calc_part_weight(
-            line.thickness_in, line.width_in, line.length_in, line.density_lb_per_in3
-        )
-        out.material_cost = calc_material_cost(
-            out.weight_ea_lb, line.qty, rates.scrap_factor, line.price_per_lb
-        )
+        out.weight_ea_lb = calc_part_weight(line.thickness_in, line.width_in, line.length_in, line.density_lb_per_in3)
+        out.material_cost = calc_material_cost(out.weight_ea_lb, line.qty, rates.scrap_factor, line.price_per_lb)
 
     # --- Laser ---
     if line.include_laser:
@@ -484,18 +473,14 @@ def calc_fab_line_item(
     if line.include_weld:
         weld_min = line.weld_minutes_ea
         if weld_min is None and line.weld_length_in and line.weld_length_in > 0:
-            weld_min = estimate_weld_minutes(
-                line.weld_length_in, default_fillet_leg_in, weld_table
-            )
+            weld_min = estimate_weld_minutes(line.weld_length_in, default_fillet_leg_in, weld_table)
         weld_min = weld_min or 0.0
         out.weld_minutes_ea = weld_min
         cost, hours = calc_weld_cost(weld_min, line.qty, rates.weld_rate)
         out.weld_cost = cost
         out.weld_hours = hours
 
-    out.line_total = (
-        out.material_cost + out.laser_cost + out.brake_cost + out.weld_cost
-    )
+    out.line_total = out.material_cost + out.laser_cost + out.brake_cost + out.weld_cost
     return out
 
 
@@ -564,11 +549,7 @@ def calc_bid_summary(
     s.electrical_labor_cost = s.electrical_hours * max(electrical_labor_rate, 0.0)
     s.machined_subtotal = max(machined_subtotal, 0.0)
     s.subtotal_before_oh = (
-        s.fab_subtotal
-        + s.buyout_marked_up
-        + s.assembly_labor_cost
-        + s.electrical_labor_cost
-        + s.machined_subtotal
+        s.fab_subtotal + s.buyout_marked_up + s.assembly_labor_cost + s.electrical_labor_cost + s.machined_subtotal
     )
     s.overhead = s.subtotal_before_oh * max(rates.overhead_markup, 0.0)
     s.consumables = max(rates.consumables_per_job, 0.0) if s.subtotal_before_oh > 0 else 0.0

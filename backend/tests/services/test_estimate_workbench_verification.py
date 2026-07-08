@@ -80,9 +80,7 @@ def _save_with_fab(db_session, estimate, *, confidence="review", note=None, buyo
 
 class TestVerificationReport:
     def test_review_items_block_finalize(self, db_session, rfq_package, material):
-        estimate = create_blank_estimate(
-            db_session, rfq_package_id=rfq_package.id, company_id=1, user_id=None
-        )
+        estimate = create_blank_estimate(db_session, rfq_package_id=rfq_package.id, company_id=1, user_id=None)
         saved = _save_with_fab(db_session, estimate, confidence="review")
         report = build_verification_report(saved)
         assert report["can_finalize"] is False
@@ -92,12 +90,8 @@ class TestVerificationReport:
         assert any(a["category"] == "fab" for a in report["priority_actions"])
 
     def test_confirmed_clears_gate(self, db_session, rfq_package, material):
-        estimate = create_blank_estimate(
-            db_session, rfq_package_id=rfq_package.id, company_id=1, user_id=None
-        )
-        saved = _save_with_fab(
-            db_session, estimate, confidence="confirmed", note="Checked against drawing"
-        )
+        estimate = create_blank_estimate(db_session, rfq_package_id=rfq_package.id, company_id=1, user_id=None)
+        saved = _save_with_fab(db_session, estimate, confidence="confirmed", note="Checked against drawing")
         report = build_verification_report(saved)
         assert report["can_finalize"] is True
         assert report["review_count"] == 0
@@ -105,9 +99,7 @@ class TestVerificationReport:
         assert report["banner"] is None
 
     def test_buyout_review_without_note_is_blocker(self, db_session, rfq_package, material):
-        estimate = create_blank_estimate(
-            db_session, rfq_package_id=rfq_package.id, company_id=1, user_id=None
-        )
+        estimate = create_blank_estimate(db_session, rfq_package_id=rfq_package.id, company_id=1, user_id=None)
         saved = _save_with_fab(
             db_session,
             estimate,
@@ -130,21 +122,15 @@ class TestVerificationReport:
 
 class TestFinalize:
     def test_finalize_blocked_when_review(self, db_session, rfq_package, material):
-        estimate = create_blank_estimate(
-            db_session, rfq_package_id=rfq_package.id, company_id=1, user_id=None
-        )
+        estimate = create_blank_estimate(db_session, rfq_package_id=rfq_package.id, company_id=1, user_id=None)
         saved = _save_with_fab(db_session, estimate, confidence="review")
         with pytest.raises(FinalizeBlockedError) as exc:
             finalize_estimate(db_session, saved, company_id=1, user_id=None)
         assert len(exc.value.blockers) >= 1
 
     def test_finalize_creates_quote(self, db_session, rfq_package, material):
-        estimate = create_blank_estimate(
-            db_session, rfq_package_id=rfq_package.id, company_id=1, user_id=None
-        )
-        saved = _save_with_fab(
-            db_session, estimate, confidence="confirmed", note="Verified"
-        )
+        estimate = create_blank_estimate(db_session, rfq_package_id=rfq_package.id, company_id=1, user_id=None)
+        saved = _save_with_fab(db_session, estimate, confidence="confirmed", note="Verified")
         result = finalize_estimate(db_session, saved, company_id=1, user_id=None)
         assert result["quote_id"]
         assert result["quote_number"].startswith("QTE-")

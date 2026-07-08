@@ -44,9 +44,7 @@ class CutBendTable(Base, TenantMixin):
     """One of the five shop-physics lookup tables (per company)."""
 
     __tablename__ = "cut_bend_tables"
-    __table_args__ = (
-        UniqueConstraint("company_id", "kind", name="uq_cut_bend_tables_company_kind"),
-    )
+    __table_args__ = (UniqueConstraint("company_id", "kind", name="uq_cut_bend_tables_company_kind"),)
 
     id = Column(Integer, primary_key=True, index=True)
     # CutBendTableKind values as plain VARCHAR (house pattern — no PG enum types)
@@ -54,9 +52,7 @@ class CutBendTable(Base, TenantMixin):
     name = Column(String(120), nullable=False)
     description = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
-    updated_at = Column(
-        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
-    )
+    updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
     rows = relationship(
         "CutBendRow",
@@ -96,9 +92,7 @@ class CutBendRow(Base, TenantMixin):
 
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
-    updated_at = Column(
-        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
-    )
+    updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
     table = relationship("CutBendTable", back_populates="rows")
 
@@ -109,9 +103,7 @@ class QuoteAssembly(Base, TenantMixin, SoftDeleteMixin, OptimisticLockMixin):
     __tablename__ = "quote_assemblies"
 
     id = Column(Integer, primary_key=True, index=True)
-    quote_estimate_id = Column(
-        Integer, ForeignKey("quote_estimates.id"), nullable=False, index=True
-    )
+    quote_estimate_id = Column(Integer, ForeignKey("quote_estimates.id"), nullable=False, index=True)
     name = Column(String(255), nullable=False)
     sort_order = Column(Integer, nullable=False, default=0)
     assembly_labor_hrs = Column(Float, nullable=False, default=0.0)
@@ -220,9 +212,7 @@ class QuoteMachinedLineItem(Base, TenantMixin, SoftDeleteMixin, OptimisticLockMi
     __tablename__ = "quote_machined_line_items"
 
     id = Column(Integer, primary_key=True, index=True)
-    quote_estimate_id = Column(
-        Integer, ForeignKey("quote_estimates.id"), nullable=False, index=True
-    )
+    quote_estimate_id = Column(Integer, ForeignKey("quote_estimates.id"), nullable=False, index=True)
     sort_order = Column(Integer, nullable=False, default=0)
 
     part_number = Column(String(120), nullable=True, index=True)

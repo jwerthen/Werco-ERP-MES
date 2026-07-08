@@ -124,9 +124,7 @@ def _serialize_tree(estimate, shop_data_source: Optional[str] = None) -> Workben
         if getattr(asm, "is_deleted", False):
             continue
         fab_lines = [
-            FabLineOut.model_validate(fl)
-            for fl in (asm.fab_line_items or [])
-            if not getattr(fl, "is_deleted", False)
+            FabLineOut.model_validate(fl) for fl in (asm.fab_line_items or []) if not getattr(fl, "is_deleted", False)
         ]
         buyout_lines = [
             BuyoutLineOut.model_validate(bl)

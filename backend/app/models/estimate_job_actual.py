@@ -28,9 +28,7 @@ class EstimateJobActual(Base, TenantMixin, SoftDeleteMixin):
     )
 
     id = Column(Integer, primary_key=True, index=True)
-    quote_estimate_id = Column(
-        Integer, ForeignKey("quote_estimates.id"), nullable=True, index=True
-    )
+    quote_estimate_id = Column(Integer, ForeignKey("quote_estimates.id"), nullable=True, index=True)
     work_order_id = Column(Integer, ForeignKey("work_orders.id"), nullable=True, index=True)
     job_label = Column(String(255), nullable=True)  # free-text when no WO link
 
@@ -47,8 +45,6 @@ class EstimateJobActual(Base, TenantMixin, SoftDeleteMixin):
     notes = Column(Text, nullable=True)
     entered_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
-    updated_at = Column(
-        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
-    )
+    updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
     estimate = relationship("QuoteEstimate", foreign_keys=[quote_estimate_id])

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.models.quote_config import QuoteMaterial, MaterialCategory, QuoteSettings
+from app.models.quote_config import MaterialCategory, QuoteMaterial, QuoteSettings
 from app.models.rfq_quote import RfqPackage
 from app.services.estimate_workbench_service import (
     StaleVersionError,
@@ -203,13 +203,7 @@ class TestWorkbenchPersist:
             expected_version=1,
             company_id=1,
         )
-        fab = next(
-            f
-            for a in saved.assemblies
-            if not a.is_deleted
-            for f in a.fab_line_items
-            if not f.is_deleted
-        )
+        fab = next(f for a in saved.assemblies if not a.is_deleted for f in a.fab_line_items if not f.is_deleted)
         assert fab.material_cost == 0.0
         assert fab.laser_cost == 0.0
         assert fab.weld_cost == 0.0

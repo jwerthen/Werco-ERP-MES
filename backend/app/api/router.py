@@ -100,9 +100,7 @@ api_router.include_router(audit.router, prefix="/audit", tags=["Audit"])
 api_router.include_router(quote_calculator.router, prefix="/quote-calc", tags=["Quote Calculator"])
 api_router.include_router(dxf_parser.router, prefix="/dxf-parser", tags=["DXF Parser"])
 api_router.include_router(rfq_quotes.router, prefix="/rfq-packages", tags=["AI RFQ Quotes"])
-api_router.include_router(
-    estimate_workbench.router, prefix="/estimate-workbench", tags=["Estimate Workbench"]
-)
+api_router.include_router(estimate_workbench.router, prefix="/estimate-workbench", tags=["Estimate Workbench"])
 api_router.include_router(admin_settings.router, prefix="/admin/settings", tags=["Admin Settings"])
 api_router.include_router(integrations.router, prefix="/admin/settings", tags=["Carrier Integrations"])
 api_router.include_router(carrier_webhooks.router, prefix="/webhooks", tags=["Carrier Webhooks"])

@@ -175,9 +175,7 @@ def test_export_api_endpoints(client, admin_headers, db_session):
     assert pdf.content[:4] == b"%PDF"
 
     # Review blocks customer PDF
-    review_est = _seed_estimate(
-        db_session, confidence=ConfidenceLevel.REVIEW.value, rfq_suffix="api-rev"
-    )
+    review_est = _seed_estimate(db_session, confidence=ConfidenceLevel.REVIEW.value, rfq_suffix="api-rev")
     blocked = client.get(
         f"/api/v1/estimate-workbench/{review_est.id}/export/customer.pdf",
         headers=admin_headers,
