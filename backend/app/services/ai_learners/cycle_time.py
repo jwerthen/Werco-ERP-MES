@@ -35,12 +35,8 @@ def run_cycle_time_learner(db: Session, company_id: int) -> int:
                     0,
                 )
             ).label("avg_ratio"),
-            func.avg(WorkOrderOperation.actual_run_hours + WorkOrderOperation.actual_setup_hours).label(
-                "avg_actual"
-            ),
-            func.avg(WorkOrderOperation.setup_time_hours + WorkOrderOperation.run_time_hours).label(
-                "avg_standard"
-            ),
+            func.avg(WorkOrderOperation.actual_run_hours + WorkOrderOperation.actual_setup_hours).label("avg_actual"),
+            func.avg(WorkOrderOperation.setup_time_hours + WorkOrderOperation.run_time_hours).label("avg_standard"),
         )
         .filter(
             WorkOrderOperation.company_id == company_id,
@@ -97,7 +93,7 @@ def run_cycle_time_learner(db: Session, company_id: int) -> int:
                 "type": "review_time_standards",
                 "work_center_id": wc_id,
                 "suggested_factor": suggested_factor,
-                "href": f"/work-centers",
+                "href": "/work-centers",
                 "autonomy": "suggest_only",
                 "dedupe_key": f"standard_update:wc:{wc_id}",
             },

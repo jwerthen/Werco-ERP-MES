@@ -104,7 +104,10 @@ def run_estimate_calibration_learner(db: Session, company_id: int) -> int:
                     "suggested_factor": factor,
                 }
             ],
-            impact={"expected": "Improve quote win-rate and margin accuracy.", "magnitude": min(2.0, 1 + abs(variance))},
+            impact={
+                "expected": "Improve quote win-rate and margin accuracy.",
+                "magnitude": min(2.0, 1 + abs(variance)),
+            },
             confidence_score=min(0.92, 0.55 + min(job_count, 15) * 0.02),
             expires_days=45,
         )

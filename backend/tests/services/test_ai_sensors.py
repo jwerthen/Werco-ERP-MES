@@ -211,9 +211,7 @@ class TestDomainSensorFanout:
                 company_id=1,
             )
         )
-        db_session.add(
-            InventoryItem(part_id=part.id, location="B-1", quantity_on_hand=0, is_active=True, company_id=1)
-        )
+        db_session.add(InventoryItem(part_id=part.id, location="B-1", quantity_on_hand=0, is_active=True, company_id=1))
         db_session.commit()
 
         counts = run_domain_sensors(db_session, 1)
@@ -312,9 +310,7 @@ class TestOutcomeCapture:
         db_session.commit()
 
         outcome = (
-            db_session.query(AIOutcome)
-            .filter(AIOutcome.entity_type == "quote", AIOutcome.entity_id == quote.id)
-            .one()
+            db_session.query(AIOutcome).filter(AIOutcome.entity_type == "quote", AIOutcome.entity_id == quote.id).one()
         )
         assert outcome.outcome_type == "quote_result"
         assert outcome.metric_value == 1.0

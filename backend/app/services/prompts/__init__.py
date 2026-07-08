@@ -13,6 +13,7 @@ cacheable prefix for prompt caching.
 
 from typing import Dict
 
+from app.services.prompts.auto_execute import AUTO_EXECUTE_PROMPT
 from app.services.prompts.base import Prompt
 from app.services.prompts.copilot import COPILOT_CHAT_PROMPT, NL_SEARCH_INTENT_PROMPT
 from app.services.prompts.extraction import (
@@ -26,7 +27,6 @@ from app.services.prompts.laser_nest import (
     LASER_NEST_EXTRACTION_SCHEMA,
 )
 from app.services.prompts.qms import QMS_CLAUSE_EXTRACTION_PROMPT
-from app.services.prompts.auto_execute import AUTO_EXECUTE_PROMPT
 from app.services.prompts.routing import ROUTING_GENERATION_PROMPT
 
 PROMPT_REGISTRY: Dict[str, Prompt] = {

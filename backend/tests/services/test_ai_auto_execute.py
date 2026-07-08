@@ -1,6 +1,7 @@
 """Claude always-on auto-execute (existing run_llm_task stack)."""
 
 from datetime import date, timedelta
+from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -14,7 +15,6 @@ from app.services.ai_auto_execute_service import (
     resolve_system_actor,
 )
 from app.services.llm_client import LLMEgressDisabledError, LLMTaskResult
-from decimal import Decimal
 
 
 def _part(db: Session, number: str = "AE-1") -> Part:

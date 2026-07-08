@@ -118,9 +118,7 @@ def emit_work_order_completed_event(
             source_module=source_module or "production",
         )
     except Exception:  # pragma: no cover - signal failure must not fail completion
-        logger.exception(
-            "AI WO outcome capture failed for WO %s (company %s)", work_order.id, company_id
-        )
+        logger.exception("AI WO outcome capture failed for WO %s (company %s)", work_order.id, company_id)
 
 
 def record_parent_children_complete(

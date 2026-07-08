@@ -59,11 +59,7 @@ def record_work_order_completion_outcomes(
         otd: Optional[float] = None
         days_late: Optional[float] = None
         if work_order.due_date:
-            end_day = (
-                work_order.actual_end.date()
-                if isinstance(work_order.actual_end, datetime)
-                else date.today()
-            )
+            end_day = work_order.actual_end.date() if isinstance(work_order.actual_end, datetime) else date.today()
             days_late = float((end_day - work_order.due_date).days)
             otd = 1.0 if days_late <= 0 else 0.0
             learning.record_outcome(

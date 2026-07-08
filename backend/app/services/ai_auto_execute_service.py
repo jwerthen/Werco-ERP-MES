@@ -202,8 +202,7 @@ def _fallback_ids(candidates: Sequence[AIRecommendation]) -> Set[int]:
     return {
         r.id
         for r in candidates
-        if float(r.confidence_score or 0.0) >= FALLBACK_MIN_CONFIDENCE
-        and r.priority in {"high", "medium"}
+        if float(r.confidence_score or 0.0) >= FALLBACK_MIN_CONFIDENCE and r.priority in {"high", "medium"}
     }
 
 

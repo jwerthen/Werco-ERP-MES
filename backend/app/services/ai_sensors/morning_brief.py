@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 
 from sqlalchemy.orm import Session
 
@@ -64,9 +64,7 @@ def run_morning_brief_sensor(db: Session, company_id: int) -> int:
         db.query(WorkOrderBlocker)
         .filter(
             WorkOrderBlocker.company_id == company_id,
-            WorkOrderBlocker.status.in_(
-                [WorkOrderBlockerStatus.OPEN.value, WorkOrderBlockerStatus.ACKNOWLEDGED.value]
-            ),
+            WorkOrderBlocker.status.in_([WorkOrderBlockerStatus.OPEN.value, WorkOrderBlockerStatus.ACKNOWLEDGED.value]),
         )
         .count()
     )
@@ -90,9 +88,9 @@ def run_morning_brief_sensor(db: Session, company_id: int) -> int:
         .count()
     )
 
-    late_lines = [
-        f"• {wo.work_order_number} due {wo.due_date.isoformat()} (P{wo.priority})" for wo in late_wos
-    ] or ["• No late work orders"]
+    late_lines = [f"• {wo.work_order_number} due {wo.due_date.isoformat()} (P{wo.priority})" for wo in late_wos] or [
+        "• No late work orders"
+    ]
 
     summary = (
         f"Plant brief for {today_key}: {len(late_wos)} late WO(s), {at_risk} due within 3 days, "

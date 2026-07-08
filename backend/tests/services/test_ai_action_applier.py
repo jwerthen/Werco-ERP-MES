@@ -11,7 +11,8 @@ from app.models.ai_learning import AIRecommendation
 from app.models.part import Part
 from app.models.purchasing import PurchaseOrder, Vendor
 from app.models.quality import NonConformanceReport
-from app.models.work_order import WorkOrder, WorkOrderStatus
+from app.models.work_center import WorkCenter
+from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.models.work_order_blocker import (
     WorkOrderBlocker,
     WorkOrderBlockerCategory,
@@ -23,8 +24,6 @@ from app.services.ai_learners import run_domain_learners
 from app.services.ai_learners.cycle_time import run_cycle_time_learner
 from app.services.ai_learners.estimate_calibration import run_estimate_calibration_learner
 from app.services.ai_sensors.morning_brief import run_morning_brief_sensor
-from app.models.work_order import OperationStatus, WorkOrderOperation
-from app.models.work_center import WorkCenter
 
 
 def _part(db: Session, number: str = "AP-1", **kwargs) -> Part:

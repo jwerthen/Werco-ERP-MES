@@ -173,11 +173,7 @@ class AIActionApplier:
         # Bump linked WO priority toward expedite when still open
         wo_id = blocker.work_order_id
         if wo_id:
-            wo = (
-                self.db.query(WorkOrder)
-                .filter(WorkOrder.id == wo_id, WorkOrder.company_id == self.company_id)
-                .first()
-            )
+            wo = self.db.query(WorkOrder).filter(WorkOrder.id == wo_id, WorkOrder.company_id == self.company_id).first()
             if wo and wo.priority and wo.priority > 2:
                 old = wo.priority
                 wo.priority = 2
@@ -217,9 +213,7 @@ class AIActionApplier:
         new_priority = int(action.get("priority") or 2)
         new_priority = max(1, min(10, new_priority))
         wo = (
-            self.db.query(WorkOrder)
-            .filter(WorkOrder.id == int(wo_id), WorkOrder.company_id == self.company_id)
-            .first()
+            self.db.query(WorkOrder).filter(WorkOrder.id == int(wo_id), WorkOrder.company_id == self.company_id).first()
         )
         if not wo:
             raise AIActionApplyError("Work order not found")
@@ -235,9 +229,7 @@ class AIActionApplier:
                 resource_identifier=wo.work_order_number,
                 old_values={"priority": old},
                 new_values={"priority": new_priority},
-                description=(
-                    f"AI recommendation #{recommendation.id} set priority {old}→{new_priority}"
-                ),
+                description=(f"AI recommendation #{recommendation.id} set priority {old}→{new_priority}"),
             )
         return {
             "work_order_id": wo.id,
@@ -288,30 +280,21 @@ class AIActionApplier:
         )
         if not part_id:
             raise AIActionApplyError("create_draft_po requires part_id")
-        part = (
-            self.db.query(Part)
-            .filter(Part.id == int(part_id), Part.company_id == self.company_id)
-            .first()
-        )
+        part = self.db.query(Part).filter(Part.id == int(part_id), Part.company_id == self.company_id).first()
         if not part:
             raise AIActionApplyError("Part not found")
         vendor_id = action.get("vendor_id") or part.primary_supplier_id
         if not vendor_id:
             # Fall back to any active vendor for the tenant
             vendor = (
-                self.db.query(Vendor)
-                .filter(Vendor.company_id == self.company_id)
-                .order_by(Vendor.id.asc())
-                .first()
+                self.db.query(Vendor).filter(Vendor.company_id == self.company_id).order_by(Vendor.id.asc()).first()
             )
             if not vendor:
                 raise AIActionApplyError("No vendor available to create a draft PO")
             vendor_id = vendor.id
         else:
             vendor = (
-                self.db.query(Vendor)
-                .filter(Vendor.id == int(vendor_id), Vendor.company_id == self.company_id)
-                .first()
+                self.db.query(Vendor).filter(Vendor.id == int(vendor_id), Vendor.company_id == self.company_id).first()
             )
             if not vendor:
                 raise AIActionApplyError("Vendor not found for this company")

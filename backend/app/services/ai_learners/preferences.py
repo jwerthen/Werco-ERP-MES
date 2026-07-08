@@ -55,7 +55,11 @@ def run_correction_preference_learner(db: Session, company_id: int) -> int:
         # Recover one real final_value object matching the preferred repr
         preferred_value = None
         for c in corrections:
-            if c.source_module == source_module and c.field_path == field_path and _stable_value(c.final_value) == preferred_repr:
+            if (
+                c.source_module == source_module
+                and c.field_path == field_path
+                and _stable_value(c.final_value) == preferred_repr
+            ):
                 preferred_value = c.final_value
                 break
 
