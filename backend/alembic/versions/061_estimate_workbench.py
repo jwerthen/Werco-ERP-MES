@@ -275,6 +275,20 @@ def upgrade() -> None:
         if not _has_index("quote_machined_line_items", idx):
             op.create_index(idx, "quote_machined_line_items", cols)
 
+    # Deny-by-default RLS posture (docs/SUPABASE_SECURITY.md new-table
+    # convention): Postgres-only, like 059; app-layer tenancy stays the
+    # enforcement. Idempotent catalog flag flip.
+    if op.get_bind().dialect.name == "postgresql":
+        for table in (
+            "cut_bend_tables",
+            "cut_bend_rows",
+            "quote_assemblies",
+            "quote_fab_line_items",
+            "quote_buyout_line_items",
+            "quote_machined_line_items",
+        ):
+            op.execute(f'ALTER TABLE public."{table}" ENABLE ROW LEVEL SECURITY')
+
 
 def downgrade() -> None:
     for table in (

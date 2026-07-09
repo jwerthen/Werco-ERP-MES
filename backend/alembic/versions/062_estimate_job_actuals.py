@@ -84,6 +84,12 @@ def upgrade() -> None:
             ["work_order_id"],
         )
 
+    # Deny-by-default RLS posture (docs/SUPABASE_SECURITY.md new-table
+    # convention): Postgres-only, like 059; app-layer tenancy stays the
+    # enforcement. Idempotent catalog flag flip.
+    if op.get_bind().dialect.name == "postgresql":
+        op.execute('ALTER TABLE public."estimate_job_actuals" ENABLE ROW LEVEL SECURITY')
+
 
 def downgrade() -> None:
     if _has_table("estimate_job_actuals"):
