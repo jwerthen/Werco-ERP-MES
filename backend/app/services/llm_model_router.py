@@ -51,6 +51,7 @@ TASK_MODEL_ENV = {
     "routing_generation": "ANTHROPIC_ROUTING_MODEL",
     "qms_clause_extraction": "ANTHROPIC_QMS_MODEL",
     "laser_nest_extraction": "ANTHROPIC_LASER_NEST_MODEL",
+    "estimate_drawing_extraction": "ANTHROPIC_ESTIMATE_DRAWING_MODEL",
     "copilot_chat": "ANTHROPIC_COPILOT_MODEL",
     "nl_search": "ANTHROPIC_NL_SEARCH_MODEL",
     # Reuses the same Anthropic client; optional override only.
@@ -124,11 +125,12 @@ def select_anthropic_model(context: LLMTaskContext) -> LLMModelDecision:
             return model_decision_for_tier(LLMModelTier.REASONING, "complex manufacturing routing")
         return model_decision_for_tier(LLMModelTier.DEFAULT, "routing generation requires process judgment")
 
-    if task in {"po_extraction", "bom_extraction"}:
+    if task in {"po_extraction", "bom_extraction", "estimate_drawing_extraction"}:
         if complexity_score >= 5:
             return model_decision_for_tier(LLMModelTier.REASONING, "large or noisy extraction")
-        if complexity_score <= 1:
+        if complexity_score <= 1 and task != "estimate_drawing_extraction":
             return model_decision_for_tier(LLMModelTier.FAST, "short clean extraction")
+        # Drawing extraction needs reliable geometry/BOM reading — default tier.
         return model_decision_for_tier(LLMModelTier.DEFAULT, "standard extraction")
 
     if complexity_score >= 5:

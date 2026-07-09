@@ -60,6 +60,8 @@ export const routeTitles: Record<string, string> = {
   // Sales & Quoting
   '/rfq-packages/new': 'AI RFQ Quote',
   '/quote-calculator': 'Quote Calculator',
+  '/estimate-workbench': 'Estimate Workbench',
+  '/shop-data': 'Shop Data',
   '/quotes': 'Quotes',
   '/customers': 'Customers',
 
@@ -121,6 +123,11 @@ interface DetailRoute {
 }
 
 const detailRoutes: DetailRoute[] = [
+  {
+    pattern: /^\/estimate-workbench\/(?!new$)[^/]+$/,
+    title: 'Estimate Workbench',
+    parent: { label: 'Estimate Workbench', href: '/estimate-workbench' },
+  },
   {
     pattern: /^\/work-orders\/(?!new$)[^/]+$/,
     title: 'Work Order',
