@@ -4,35 +4,46 @@
  *
  * Replaces the stacked native prompt() dialogs that used to collect quantity
  * complete + quantity scrapped on WorkOrderDetail. It adds the missing piece
- * the backend now enforces (HTTP 422 otherwise): when scrap > 0, a non-blank
- * `scrap_reason` is required for AS9100D defect traceability. The reason field
- * only appears (and is only required) once scrap is greater than zero, and the
- * Complete button stays disabled until the form is valid — so the UI never
- * fires a request it knows the server will reject.
+ * the backend enforces (HTTP 422 otherwise): when scrap > 0, a scrap reason is
+ * required for AS9100D defect traceability. Lean Phase 1: when the company has
+ * ACTIVE scrap reason codes the reason is a REQUIRED code pick (+ optional
+ * free-text detail) and the submit carries scrapReasonCodeId; with zero codes
+ * the dialog keeps the legacy required SCRAP_REASONS picker. Either way the
+ * fields only appear (and are only required) once scrap is greater than zero,
+ * and the Complete button stays disabled until the form is valid — so the UI
+ * never fires a request it knows the server will reject.
  *
  * This is a SERVER-GATED completion: it is intentionally NON-optimistic. The
  * caller awaits the server, reflects only what comes back, and surfaces the
  * server's verbatim error on failure (see WorkOrderDetail handlers).
  *
- * The scrap-reason list reuses the canonical SCRAP_REASONS from kioskConstants
- * so a reason chosen here is stored in the same column, with the same labels,
- * as the kiosk and desktop shop-floor flows.
+ * `scrapReason` is ALWAYS non-blank when scrap > 0 — typed detail, else the
+ * chosen code's "CODE — Name" label, else the legacy reason — because the
+ * operation-level complete endpoint only understands free text; the WO-level
+ * endpoint additionally receives the structured code id.
  */
 
 import React, { useEffect, useMemo, useState } from 'react';
 import { CheckCircleIcon } from '@heroicons/react/24/outline';
 import { Modal } from '../ui/Modal';
 import { FormField } from '../ui/FormField';
-import { SelectField } from '../ui/SelectField';
 import { Button } from '../ui/Button';
 import { LoadingButton } from '../ui/LoadingButton';
-import { SCRAP_REASONS } from '../kiosk/kioskConstants';
+import {
+  EMPTY_SCRAP_SELECTION,
+  ScrapReasonFields,
+  isScrapSelectionComplete,
+  scrapSelectionText,
+} from '../quality/ScrapReasonFields';
+import { useScrapReasonCodes } from '../../hooks/useScrapReasonCodes';
 
 export interface CompleteWorkSubmit {
   quantityComplete: number;
   quantityScrapped: number;
   /** Non-blank only when quantityScrapped > 0; undefined otherwise. */
   scrapReason?: string;
+  /** Company scrap-code id, when one was chosen (codes mode only). */
+  scrapReasonCodeId?: number;
 }
 
 interface CompleteWorkModalProps {
@@ -50,8 +61,6 @@ interface CompleteWorkModalProps {
   defaultQuantityComplete: number;
 }
 
-const SCRAP_OPTIONS = SCRAP_REASONS.map((r) => ({ value: r.value, label: r.label }));
-
 export function CompleteWorkModal({
   open,
   onClose,
@@ -63,7 +72,9 @@ export function CompleteWorkModal({
 }: CompleteWorkModalProps) {
   const [qtyComplete, setQtyComplete] = useState<string>(String(defaultQuantityComplete));
   const [qtyScrapped, setQtyScrapped] = useState<string>('0');
-  const [scrapReason, setScrapReason] = useState<string>('');
+  const [scrap, setScrap] = useState(EMPTY_SCRAP_SELECTION);
+  // Company scrap codes ([] -> legacy SCRAP_REASONS fallback, fail-soft).
+  const { codes: scrapCodes } = useScrapReasonCodes();
 
   // Reset to defaults each time the dialog opens so a prior session's entries
   // never leak into the next completion.
@@ -71,7 +82,7 @@ export function CompleteWorkModal({
     if (open) {
       setQtyComplete(String(defaultQuantityComplete));
       setQtyScrapped('0');
-      setScrapReason('');
+      setScrap(EMPTY_SCRAP_SELECTION);
     }
   }, [open, defaultQuantityComplete]);
 
@@ -92,9 +103,9 @@ export function CompleteWorkModal({
   }, [qtyScrapped, scrappedNum]);
 
   const needsReason = Number.isFinite(scrappedNum) && scrappedNum > 0;
-  const reasonError = needsReason && !scrapReason ? 'Required when scrap is greater than zero.' : null;
+  const reasonMissing = needsReason && !isScrapSelectionComplete(scrapCodes, scrap);
 
-  const canSubmit = !submitting && !completeError && !scrappedError && !reasonError;
+  const canSubmit = !submitting && !completeError && !scrappedError && !reasonMissing;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -102,7 +113,8 @@ export function CompleteWorkModal({
     await onSubmit({
       quantityComplete: completeNum,
       quantityScrapped: Number.isFinite(scrappedNum) ? scrappedNum : 0,
-      scrapReason: needsReason ? scrapReason : undefined,
+      scrapReason: needsReason ? scrapSelectionText(scrapCodes, scrap) : undefined,
+      scrapReasonCodeId: needsReason && scrapCodes.length > 0 && scrap.codeId != null ? scrap.codeId : undefined,
     });
   };
 
@@ -151,23 +163,11 @@ export function CompleteWorkModal({
             )}
           </FormField>
 
-          {/* Scrap reason is required for defect traceability when scrap > 0
-              (reuses the shared SCRAP_REASONS — same column the kiosk writes). */}
+          {/* Scrap reason is required for defect traceability when scrap > 0 —
+              company scrap codes when defined, legacy SCRAP_REASONS fallback
+              otherwise (shared ScrapReasonFields fragment). */}
           {needsReason && (
-            // SelectField doesn't take native id/aria-* props, so it isn't wired
-            // via FormField's render-prop spread; its own ariaLabel carries the
-            // accessible name. FormField still renders the label/required/error
-            // chrome consistently with the rest of the form.
-            <FormField label="Scrap reason" required error={reasonError}>
-              <SelectField
-                value={scrapReason}
-                onChange={(value) => setScrapReason(String(value))}
-                options={SCRAP_OPTIONS}
-                placeholder="Select a scrap reason"
-                disabled={submitting}
-                ariaLabel="Scrap reason"
-              />
-            </FormField>
+            <ScrapReasonFields codes={scrapCodes} value={scrap} onChange={setScrap} disabled={submitting} />
           )}
         </div>
 

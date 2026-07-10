@@ -17,11 +17,14 @@ from app.db.database import get_db
 from app.models.analytics import ReportTemplate
 from app.models.user import User, UserRole
 from app.schemas.analytics import (
+    AdoptionMetricsResponse,
     CapacityForecastResponse,
     CostAnalysisResponse,
     CustomReportRequest,
     DateGranularity,
     DeliveryPrediction,
+    FlowMetricsResponse,
+    FPYResponse,
     InventoryAnalyticsResponse,
     InventoryDemandResponse,
     KPIDashboard,
@@ -30,9 +33,14 @@ from app.schemas.analytics import (
     QualityMetricsResponse,
     ReportTemplateCreate,
     ReportTemplateResponse,
+    ScrapParetoResponse,
+    WIPAgingResponse,
 )
+from app.services.adoption_metrics_service import get_adoption_metrics
 from app.services.analytics_service import AnalyticsService, get_date_range
+from app.services.flow_metrics_service import get_flow_metrics, get_wip_aging
 from app.services.prediction_service import PredictionService
+from app.services.quality_yield_service import get_fpy_rty, get_scrap_pareto
 
 router = APIRouter()
 
@@ -94,6 +102,88 @@ def get_production_trends(
     start, end = get_date_range(period, start_date, end_date)
     service = AnalyticsService(db, company_id)
     return service.get_production_trends(start, end, group_by, granularity)
+
+
+# ============ FLOW & QUALITY METRICS (Lean Phase 1, issue #88) ============
+
+
+@router.get("/flow", response_model=FlowMetricsResponse)
+def get_flow_metrics_endpoint(
+    period: str = Query("30d", description="Period: today, 7d, 30d, 90d, ytd, custom"),
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Measured flow: lead times, queue times, Little's Law throughput, PCE."""
+    start, end = get_date_range(period, start_date, end_date)
+    return get_flow_metrics(db, company_id, start, end)
+
+
+@router.get("/wip-aging", response_model=WIPAgingResponse)
+def get_wip_aging_endpoint(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
+):
+    """WIP aging snapshot: open WOs with days since release / in current operation."""
+    return get_wip_aging(db, company_id)
+
+
+@router.get("/fpy", response_model=FPYResponse)
+def get_fpy_endpoint(
+    period: str = Query("30d", description="Period: today, 7d, 30d, 90d, ytd, custom"),
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    work_center_id: Optional[int] = None,
+    part_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(
+        require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR, UserRole.QUALITY])
+    ),
+    company_id: int = Depends(get_current_company_id),
+):
+    """First-pass yield / rolled throughput yield per part and work center.
+
+    RTY is omitted when work_center_id is set (it is a full-route metric).
+    """
+    start, end = get_date_range(period, start_date, end_date)
+    return get_fpy_rty(db, company_id, start, end, work_center_id=work_center_id, part_id=part_id)
+
+
+@router.get("/scrap-pareto", response_model=ScrapParetoResponse)
+def get_scrap_pareto_endpoint(
+    period: str = Query("30d", description="Period: today, 7d, 30d, 90d, ytd, custom"),
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    work_center_id: Optional[int] = None,
+    part_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(
+        require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR, UserRole.QUALITY])
+    ),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Scrap quantity/cost Pareto by reason code (uncoded = 'unspecified')."""
+    start, end = get_date_range(period, start_date, end_date)
+    return get_scrap_pareto(db, company_id, start, end, work_center_id=work_center_id, part_id=part_id)
+
+
+@router.get("/adoption", response_model=AdoptionMetricsResponse)
+def get_adoption_endpoint(
+    period: str = Query("30d", description="Period: today, 7d, 30d, 90d, ytd, custom"),
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Digital adoption (completion channel, clock-in coverage, backfill rate,
+    weekly trend) + hidden-factory metrics (rework share, maintenance mix,
+    MTBF/MTTR per work center)."""
+    start, end = get_date_range(period, start_date, end_date)
+    return get_adoption_metrics(db, company_id, start, end)
 
 
 # ============ COST ANALYSIS ============

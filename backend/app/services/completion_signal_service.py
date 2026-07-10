@@ -66,6 +66,49 @@ def emit_operation_completed_event(
         logger.exception("operation_completed event emit failed for op %s (company %s)", operation.id, company_id)
 
 
+def emit_operation_ready_event(
+    db: Session,
+    *,
+    company_id: int,
+    work_order: WorkOrder,
+    operation: WorkOrderOperation,
+    user_id: Optional[int] = None,
+    source_module: str = "work_order_state",
+) -> None:
+    """Emit an ``operation_ready`` OperationalEvent (Lean Phase 1 / flow metrics).
+
+    Fired where an operation flips PENDING -> READY (WO release / successor
+    promotion), so queue time can be measured as ready -> actual_start instead of
+    being inferred from the predecessor's actual_end. In-process, tenant-scoped
+    (``emit`` validates the WO/op belong to ``company_id``) and best-effort: a
+    signal failure must never fail the release/completion that triggered it.
+
+    ``user_id`` is the acting user when the flip happened inside a request
+    (WO release); None for rule-driven successor promotion.
+    """
+    try:
+        OperationalEventService(db).emit(
+            company_id=company_id,
+            event_type="operation_ready",
+            source_module=source_module,
+            entity_type="work_order_operation",
+            entity_id=operation.id,
+            work_order_id=work_order.id,
+            operation_id=operation.id,
+            user_id=user_id,
+            severity="info",
+            event_payload={
+                "work_order_id": work_order.id,
+                "operation_id": operation.id,
+                "sequence": operation.sequence,
+                "work_order_number": work_order.work_order_number,
+                "operation_number": operation.operation_number,
+            },
+        )
+    except Exception:  # pragma: no cover - signal failure must not fail the transition
+        logger.exception("operation_ready event emit failed for op %s (company %s)", operation.id, company_id)
+
+
 def emit_work_order_completed_event(
     db: Session,
     *,

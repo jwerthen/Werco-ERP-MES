@@ -46,10 +46,24 @@ export interface WallboardBlockedWorkOrder {
   age_hours: number;
 }
 
+/**
+ * Lean Phase 1 (issue #88) KPI strip. Every figure is nullable (empty
+ * denominator → null → render "—"), and the whole block is optional so a
+ * board pointed at an older backend payload must not crash.
+ */
+export interface WallboardKpiStrip {
+  otd_ship_pct_30d: number | null;
+  fpy_pct_30d: number | null;
+  scrap_pct_30d: number | null;
+  open_wip_count: number | null;
+  avg_wip_age_days: number | null;
+}
+
 export interface WallboardResponse {
   work_centers: WallboardWorkCenter[];
   late_wos: WallboardLateWorkOrder[];
   blocked_wos: WallboardBlockedWorkOrder[];
+  kpi_strip?: WallboardKpiStrip | null;
   generated_at: string;
 }
 

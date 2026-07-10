@@ -17,16 +17,19 @@ import {
 } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { formatCentralDate } from '../utils/centralTime';
+import { usePermissions } from '../hooks/usePermissions';
 import type { FAIPrefillResult } from '../types/processSheet';
+import { ScrapReasonCode, SCRAP_CATEGORIES } from '../types/scrapReason';
 import {
   PlusIcon,
   ExclamationTriangleIcon,
   ClipboardDocumentCheckIcon,
   DocumentMagnifyingGlassIcon,
+  TagIcon,
   XMarkIcon,
 } from '@heroicons/react/24/outline';
 
-type TabType = 'ncr' | 'car' | 'fai';
+type TabType = 'ncr' | 'car' | 'fai' | 'scrap';
 
 interface NCR {
   id: number;
@@ -158,6 +161,23 @@ export default function QualityPage() {
     part_id: 0, fai_type: 'full', reason: 'new_part', customer_approval_required: false
   });
 
+  // Scrap reason codes (Lean Phase 1) — the company vocabulary behind every
+  // scrap picker. Loaded lazily when the tab first opens, isolated from the
+  // NCR/CAR/FAI loadData. Writes mirror the backend's SCRAP_REASON_WRITE_ROLES
+  // (ADMIN/MANAGER/QUALITY) via the quality:approve permission.
+  const { can } = usePermissions();
+  const canManageScrapCodes = can('quality:approve');
+  const [scrapCodes, setScrapCodes] = useState<ScrapReasonCode[]>([]);
+  const [scrapCodesLoading, setScrapCodesLoading] = useState(false);
+  const [scrapCodesError, setScrapCodesError] = useState(false);
+  const [scrapCodesLoaded, setScrapCodesLoaded] = useState(false);
+  const [scrapCodeModal, setScrapCodeModal] = useState<{ mode: 'create' } | { mode: 'edit'; code: ScrapReasonCode } | null>(null);
+  const [scrapCodeSaving, setScrapCodeSaving] = useState(false);
+  const [togglingCodeId, setTogglingCodeId] = useState<number | null>(null);
+  const [scrapCodeForm, setScrapCodeForm] = useState({
+    code: '', name: '', category: 'other', description: '', display_order: 0,
+  });
+
   useEffect(() => {
     loadData();
   }, []);
@@ -223,6 +243,91 @@ export default function QualityPage() {
       loadData();
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to create FAI');
+    }
+  };
+
+  // ---- Scrap reason codes (Lean Phase 1) ----
+
+  const loadScrapCodes = async () => {
+    setScrapCodesLoading(true);
+    setScrapCodesError(false);
+    try {
+      // include_inactive so retired codes stay visible (reactivation path).
+      const codes = await api.getScrapReasonCodes({ include_inactive: true });
+      setScrapCodes(codes);
+      setScrapCodesLoaded(true);
+    } catch {
+      setScrapCodesError(true);
+    } finally {
+      setScrapCodesLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'scrap' && !scrapCodesLoaded && !scrapCodesLoading && !scrapCodesError) {
+      void loadScrapCodes();
+    }
+  }, [activeTab, scrapCodesLoaded, scrapCodesLoading, scrapCodesError]);
+
+  const openScrapCodeCreate = () => {
+    setScrapCodeForm({ code: '', name: '', category: 'other', description: '', display_order: 0 });
+    setScrapCodeModal({ mode: 'create' });
+  };
+
+  const openScrapCodeEdit = (code: ScrapReasonCode) => {
+    setScrapCodeForm({
+      code: code.code,
+      name: code.name,
+      category: code.category,
+      description: code.description || '',
+      display_order: code.display_order,
+    });
+    setScrapCodeModal({ mode: 'edit', code });
+  };
+
+  const handleSaveScrapCode = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!scrapCodeModal || scrapCodeSaving) return;
+    setScrapCodeSaving(true);
+    const payload = {
+      code: scrapCodeForm.code.trim(),
+      name: scrapCodeForm.name.trim(),
+      category: scrapCodeForm.category,
+      description: scrapCodeForm.description.trim() || null,
+      display_order: Number(scrapCodeForm.display_order) || 0,
+    };
+    try {
+      if (scrapCodeModal.mode === 'create') {
+        await api.createScrapReasonCode(payload);
+        showToast('success', `Scrap code ${payload.code} created`);
+      } else {
+        await api.updateScrapReasonCode(scrapCodeModal.code.id, payload);
+        showToast('success', `Scrap code ${payload.code} updated`);
+      }
+      setScrapCodeModal(null);
+      await loadScrapCodes();
+    } catch (err: any) {
+      const detail = err.response?.data?.detail;
+      showToast('error', typeof detail === 'string' && detail ? detail : 'Failed to save scrap reason code');
+    } finally {
+      setScrapCodeSaving(false);
+    }
+  };
+
+  // Deactivate-not-delete: retirement is a flag so historical scrap rows keep
+  // their reference (traceability). Non-optimistic — reflect the server.
+  const handleToggleScrapCode = async (code: ScrapReasonCode) => {
+    if (togglingCodeId != null) return;
+    setTogglingCodeId(code.id);
+    try {
+      await api.updateScrapReasonCode(code.id, { is_active: !code.is_active });
+      showToast('success', `Scrap code ${code.code} ${code.is_active ? 'deactivated' : 'reactivated'}`);
+      await loadScrapCodes();
+    } catch (err: any) {
+      const detail = err.response?.data?.detail;
+      showToast('error', typeof detail === 'string' && detail ? detail : 'Failed to update scrap reason code');
+    } finally {
+      setTogglingCodeId(null);
     }
   };
 
@@ -458,6 +563,90 @@ export default function QualityPage() {
     },
   ], []);
 
+  const scrapCodeColumns = useMemo<Array<DataTableColumn<ScrapReasonCode>>>(() => [
+    {
+      key: 'code',
+      header: 'Code',
+      sortable: true,
+      className: 'font-mono font-medium',
+      accessor: (rc) => rc.code,
+    },
+    {
+      key: 'name',
+      header: 'Name',
+      sortable: true,
+      accessor: (rc) => rc.name,
+    },
+    {
+      key: 'category',
+      header: 'Category',
+      sortable: true,
+      accessor: (rc) => rc.category,
+      render: (rc) => <span className="capitalize">{rc.category}</span>,
+    },
+    {
+      key: 'description',
+      header: 'Description',
+      className: 'text-sm text-slate-400 max-w-[280px] truncate',
+      accessor: (rc) => rc.description ?? '',
+      render: (rc) => rc.description || '-',
+    },
+    {
+      key: 'display_order',
+      header: 'Order',
+      sortable: true,
+      align: 'center',
+      headerClassName: 'text-center',
+      accessor: (rc) => rc.display_order,
+    },
+    {
+      key: 'status',
+      header: 'Status',
+      sortable: true,
+      accessor: (rc) => (rc.is_active ? 'active' : 'inactive'),
+      render: (rc) => <StatusBadge status={rc.is_active ? 'active' : 'inactive'} />,
+    },
+    ...(canManageScrapCodes
+      ? [
+          {
+            key: 'actions',
+            header: 'Actions',
+            align: 'right',
+            headerClassName: 'text-right',
+            accessor: () => '',
+            csv: () => '',
+            render: (rc) => (
+              <div className="flex justify-end gap-2">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    openScrapCodeEdit(rc);
+                  }}
+                >
+                  Edit
+                </Button>
+                <Button
+                  type="button"
+                  variant={rc.is_active ? 'danger' : 'secondary'}
+                  size="sm"
+                  disabled={togglingCodeId === rc.id}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void handleToggleScrapCode(rc);
+                  }}
+                >
+                  {rc.is_active ? 'Deactivate' : 'Reactivate'}
+                </Button>
+              </div>
+            ),
+          } as DataTableColumn<ScrapReasonCode>,
+        ]
+      : []),
+  ], [canManageScrapCodes, togglingCodeId]);
+
   if (loadError) {
     return (
       <div className="space-y-6">
@@ -527,6 +716,7 @@ export default function QualityPage() {
             { id: 'ncr', label: 'NCR', icon: ExclamationTriangleIcon },
             { id: 'car', label: 'CAR', icon: ClipboardDocumentCheckIcon },
             { id: 'fai', label: 'FAI', icon: DocumentMagnifyingGlassIcon },
+            { id: 'scrap', label: 'Scrap Codes', icon: TagIcon },
           ].map((tab) => (
             <button
               key={tab.id}
@@ -719,7 +909,180 @@ export default function QualityPage() {
             />
           </>
         )}
+        {/* Scrap Codes Tab (Lean Phase 1) — the vocabulary behind every scrap
+            picker. Deactivate-not-delete; writes are ADMIN/MANAGER/QUALITY. */}
+        {activeTab === 'scrap' && (
+          <>
+            <div className="flex justify-between items-center mb-4 gap-4">
+              <div>
+                <h2 className="text-lg font-semibold">Scrap Reason Codes</h2>
+                <p className="text-sm text-slate-400 mt-0.5">
+                  Structured scrap categorization for kiosk and desktop scrap entry. With no active
+                  codes, scrap capture falls back to the built-in reason list.
+                </p>
+              </div>
+              {canManageScrapCodes && (
+                <Button onClick={openScrapCodeCreate} className="flex items-center flex-shrink-0">
+                  <PlusIcon className="h-5 w-5 mr-1" /> New Scrap Code
+                </Button>
+              )}
+            </div>
+            {scrapCodesError ? (
+              <ErrorState message="Could not load scrap reason codes." onRetry={loadScrapCodes} />
+            ) : (
+              <DataTable
+                columns={scrapCodeColumns}
+                data={scrapCodes}
+                rowKey={(rc) => rc.id}
+                loading={scrapCodesLoading && !scrapCodesLoaded}
+                defaultSort={{ key: 'display_order', dir: 'asc' }}
+                pageSize={25}
+                csvExport={{ filename: 'scrap-reason-codes' }}
+                empty={{
+                  icon: TagIcon,
+                  title: 'No scrap reason codes',
+                  description:
+                    'Define codes (e.g. OT — Out of tolerance) to categorize scrap for Pareto analysis. Until then, scrap entry uses the built-in reason list.',
+                  ...(canManageScrapCodes
+                    ? { action: { label: 'New Scrap Code', onClick: openScrapCodeCreate } }
+                    : {}),
+                }}
+                mobileCards={(rc) => (
+                  <MobileDataCard
+                    title={`${rc.code} — ${rc.name}`}
+                    subtitle={rc.description || undefined}
+                    badge={<StatusBadge status={rc.is_active ? 'active' : 'inactive'} />}
+                    fields={[
+                      { label: 'Category', value: <span className="capitalize">{rc.category}</span> },
+                      { label: 'Order', value: rc.display_order },
+                      ...(canManageScrapCodes
+                        ? [
+                            {
+                              label: 'Actions',
+                              value: (
+                                <div className="flex gap-2">
+                                  <Button type="button" variant="secondary" size="sm" onClick={() => openScrapCodeEdit(rc)}>
+                                    Edit
+                                  </Button>
+                                  <Button
+                                    type="button"
+                                    variant={rc.is_active ? 'danger' : 'secondary'}
+                                    size="sm"
+                                    disabled={togglingCodeId === rc.id}
+                                    onClick={() => void handleToggleScrapCode(rc)}
+                                  >
+                                    {rc.is_active ? 'Deactivate' : 'Reactivate'}
+                                  </Button>
+                                </div>
+                              ),
+                            },
+                          ]
+                        : []),
+                    ]}
+                  />
+                )}
+              />
+            )}
+          </>
+        )}
       </div>
+
+      {/* Scrap code create/edit modal (Lean Phase 1) */}
+      <Modal
+        open={scrapCodeModal !== null}
+        onClose={() => setScrapCodeModal(null)}
+        size="lg"
+        closeOnBackdrop={false}
+        ariaLabelledBy="scrap-code-modal-title"
+      >
+        <div className="flex justify-between items-center mb-4">
+          <h3 id="scrap-code-modal-title" className="text-lg font-semibold">
+            {scrapCodeModal?.mode === 'edit' ? `Edit Scrap Code ${scrapCodeModal.code.code}` : 'New Scrap Reason Code'}
+          </h3>
+          <button onClick={() => setScrapCodeModal(null)} aria-label="Close dialog">
+            <XMarkIcon className="h-6 w-6" aria-hidden="true" />
+          </button>
+        </div>
+        <form onSubmit={handleSaveScrapCode} className="space-y-4">
+          <div className="grid grid-cols-2 gap-4">
+            <FormField label="Code" required help="Short identifier, e.g. OT or TOOL-DMG.">
+              {(field) => (
+                <input
+                  {...field}
+                  type="text"
+                  maxLength={50}
+                  value={scrapCodeForm.code}
+                  onChange={(e) => setScrapCodeForm({ ...scrapCodeForm, code: e.target.value.toUpperCase() })}
+                  className="input font-mono"
+                  required
+                  disabled={scrapCodeSaving}
+                />
+              )}
+            </FormField>
+            <FormField label="Category">
+              {(field) => (
+                <select
+                  {...field}
+                  value={scrapCodeForm.category}
+                  onChange={(e) => setScrapCodeForm({ ...scrapCodeForm, category: e.target.value })}
+                  className="input capitalize"
+                  disabled={scrapCodeSaving}
+                >
+                  {SCRAP_CATEGORIES.map((cat) => (
+                    <option key={cat} value={cat}>{cat}</option>
+                  ))}
+                </select>
+              )}
+            </FormField>
+          </div>
+          <FormField label="Name" required>
+            {(field) => (
+              <input
+                {...field}
+                type="text"
+                maxLength={255}
+                value={scrapCodeForm.name}
+                onChange={(e) => setScrapCodeForm({ ...scrapCodeForm, name: e.target.value })}
+                className="input"
+                required
+                disabled={scrapCodeSaving}
+              />
+            )}
+          </FormField>
+          <FormField label="Description">
+            {(field) => (
+              <textarea
+                {...field}
+                value={scrapCodeForm.description}
+                onChange={(e) => setScrapCodeForm({ ...scrapCodeForm, description: e.target.value })}
+                className="input"
+                rows={2}
+                disabled={scrapCodeSaving}
+              />
+            )}
+          </FormField>
+          <FormField label="Display order" help="Lower numbers sort first in the pickers.">
+            {(field) => (
+              <input
+                {...field}
+                type="number"
+                value={scrapCodeForm.display_order}
+                onChange={(e) => setScrapCodeForm({ ...scrapCodeForm, display_order: Number(e.target.value) || 0 })}
+                className="input w-32"
+                disabled={scrapCodeSaving}
+              />
+            )}
+          </FormField>
+          <div className="flex justify-end gap-3">
+            <Button type="button" variant="secondary" onClick={() => setScrapCodeModal(null)} disabled={scrapCodeSaving}>
+              Cancel
+            </Button>
+            <LoadingButton type="submit" loading={scrapCodeSaving} loadingText="Saving...">
+              {scrapCodeModal?.mode === 'edit' ? 'Save Changes' : 'Create Code'}
+            </LoadingButton>
+          </div>
+        </form>
+      </Modal>
 
       {/* FAI detail — characteristics + prefill-from-steps (Process Sheets PR 4) */}
       <Modal open={faiDetailId != null} onClose={closeFaiDetail} size="3xl" ariaLabelledBy="fai-detail-title">

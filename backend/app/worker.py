@@ -175,6 +175,22 @@ async def print_receiving_label_job(ctx, *, company_id: int, receipt_id: int, us
     return await print_receiving_label_task(company_id=company_id, receipt_id=receipt_id, user_id=user_id)
 
 
+async def run_oee_auto_calc_job(ctx, company_id: int = None, record_date: str = None):
+    """Nightly OEE auto-calculation (Lean Phase 1).
+
+    Computes YESTERDAY's OEERecord per active company + active work center with
+    ``calculation_source='auto'``; never overwrites a 'manual' record. ARQ fires
+    cron coroutines with only ``ctx``, so the fan-out defaults live in the task.
+    ``record_date`` (ISO date string, manual enqueues only) re-runs a specific day.
+    """
+    from datetime import date as _date
+
+    from app.jobs.oee_jobs import run_oee_auto_calc_task
+
+    parsed_date = _date.fromisoformat(record_date) if record_date else None
+    return await run_oee_auto_calc_task(company_id=company_id, record_date=parsed_date)
+
+
 async def poll_tracking_job(ctx):
     """Cron fallback: refresh tracking for in-flight shipments, fanned out per tenant.
 
@@ -234,6 +250,7 @@ class WorkerSettings:
         dispatch_work_order_completion_signals_job,
         process_tracking_webhook_job,
         print_receiving_label_job,
+        run_oee_auto_calc_job,
     ]
 
     # Cron jobs (scheduled tasks)
@@ -245,6 +262,7 @@ class WorkerSettings:
         cron(check_low_stock_job, hour=7, minute=30),  # 7:30 AM daily
         cron(check_quote_expiring_job, hour=9, minute=0),  # 9 AM daily
         cron(aggregate_ai_learning_job, hour=5, minute=30),  # 5:30 AM daily
+        cron(run_oee_auto_calc_job, hour=2, minute=30),  # 2:30 AM daily (yesterday's OEE, Lean Phase 1)
         cron(cleanup_old_logs_job, weekday=0, hour=2, minute=0),  # Sunday 2 AM
         cron(archive_aged_audit_logs_job, day=1, hour=3, minute=0),  # 1st of month, 3 AM
         cron(poll_tracking_job, minute={0, 30}),  # every 30 min (tracking poll fallback)

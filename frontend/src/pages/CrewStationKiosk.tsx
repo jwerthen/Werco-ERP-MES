@@ -58,6 +58,7 @@ import {
   stepsIncompleteMessage,
 } from '../utils/processSheetErrors';
 import type { KioskStationSummary } from '../types/kioskStation';
+import type { ScrapReasonCodeOption } from '../types/scrapReason';
 import type { MissingStepInfo, QualityHoldResult } from '../types/processSheet';
 
 const POLL_INTERVAL_MS = 10_000;
@@ -96,9 +97,9 @@ type CrewView =
       operator: OperatorSession;
     }
   | { name: 'productionQty'; operationId: number }
-  | { name: 'productionSign'; operationId: number; good: number; scrap: number; reason: string | null }
+  | { name: 'productionSign'; operationId: number; good: number; scrap: number; reason: string | null; reasonCodeId: number | null }
   | { name: 'completeQty'; operationId: number }
-  | { name: 'completeConfirm'; operationId: number; good: number; scrap: number; reason: string | null }
+  | { name: 'completeConfirm'; operationId: number; good: number; scrap: number; reason: string | null; reasonCodeId: number | null }
   | { name: 'hold'; operationId: number }
   | { name: 'operatorSheet'; operator: OperatorSession; openJobs: OperatorOpenJob[] }
   // Process steps: a badge scan gates entry so every record is attributed to
@@ -157,6 +158,10 @@ export default function CrewStationKiosk() {
 
   // --- Live queue state ---------------------------------------------------------
   const [queue, setQueue] = useState<KioskCrewQueueItem[]>([]);
+  // Lean Phase 1: ACTIVE scrap reason codes, delivered ON the queue payload
+  // (the station/badge tokens cannot reach /quality/scrap-reason-codes — path
+  // fence). [] -> the legacy SCRAP_REASONS fallback inside KioskQuantityScreen.
+  const [scrapCodes, setScrapCodes] = useState<ScrapReasonCodeOption[]>([]);
   const [serverSkewMs, setServerSkewMs] = useState(0);
   const [online, setOnline] = useState(true);
   const [initialLoadDone, setInitialLoadDone] = useState(false);
@@ -187,6 +192,7 @@ export default function CrewStationKiosk() {
     setHasToken(false);
     setStation(null);
     setQueue([]);
+    setScrapCodes([]);
     setInitialLoadDone(false);
     setView({ name: 'board' });
     setPin('');
@@ -207,6 +213,9 @@ export default function CrewStationKiosk() {
       const res = await kioskClient.getQueue(workCenterId);
       if (gen !== generationRef.current) return; // stale poll — a mutation superseded it
       setQueue(res.queue || []);
+      // Active scrap codes ride every poll (absent on a pre-Lean backend -> []
+      // -> the legacy fallback grid, never a crash).
+      setScrapCodes(Array.isArray(res.scrap_reason_codes) ? res.scrap_reason_codes : []);
       const serverMs = res.server_time ? Date.parse(res.server_time) : NaN;
       if (Number.isFinite(serverMs)) setServerSkewMs(serverMs - Date.now());
       setOnline(true);
@@ -426,7 +435,7 @@ export default function CrewStationKiosk() {
 
   /** LEAVE — clock out the operator's own entry with quantities. */
   const handleLeaveConfirm = useCallback(
-    async (good: number, scrap: number, scrapReason: string | null) => {
+    async (good: number, scrap: number, scrapReason: string | null, scrapReasonCodeId: number | null) => {
       if (view.name !== 'leaveQty' || mutationsBlocked) return;
       setBusy(true);
       try {
@@ -434,6 +443,7 @@ export default function CrewStationKiosk() {
           quantity_produced: good,
           quantity_scrapped: scrap,
           scrap_reason: scrap > 0 && scrapReason ? scrapReason : undefined,
+          scrap_reason_code_id: scrap > 0 && scrapReasonCodeId != null ? scrapReasonCodeId : undefined,
           source: KIOSK_SOURCE,
         });
         // The clock-out succeeded but the server flagged missing required step
@@ -474,7 +484,7 @@ export default function CrewStationKiosk() {
     async (badgeId: string) => {
       const item = view.name === 'productionSign' ? findItem(view.operationId) : null;
       if (view.name !== 'productionSign' || !item || mutationsBlocked) return;
-      const { good, scrap, reason } = view;
+      const { good, scrap, reason, reasonCodeId } = view;
       setBusy(true);
       setBadgeError(null);
       try {
@@ -483,6 +493,7 @@ export default function CrewStationKiosk() {
           quantity_complete_delta: good,
           quantity_scrapped_delta: scrap,
           scrap_reason: scrap > 0 && reason ? reason : undefined,
+          scrap_reason_code_id: scrap > 0 && reasonCodeId != null ? reasonCodeId : undefined,
           source: KIOSK_SOURCE,
         });
         const newTally = formatCrewTally({
@@ -508,7 +519,7 @@ export default function CrewStationKiosk() {
     async (badgeId: string) => {
       const item = view.name === 'completeConfirm' ? findItem(view.operationId) : null;
       if (view.name !== 'completeConfirm' || !item || mutationsBlocked) return;
-      const { good, scrap, reason } = view;
+      const { good, scrap, reason, reasonCodeId } = view;
       setBusy(true);
       setBadgeError(null);
       let produced = false;
@@ -520,6 +531,7 @@ export default function CrewStationKiosk() {
             quantity_complete_delta: good,
             quantity_scrapped_delta: scrap,
             scrap_reason: scrap > 0 && reason ? reason : undefined,
+            scrap_reason_code_id: scrap > 0 && reasonCodeId != null ? reasonCodeId : undefined,
             source: KIOSK_SOURCE,
           });
           produced = true;
@@ -1032,7 +1044,10 @@ export default function CrewStationKiosk() {
           </section>
         )}
 
-        {/* LEAVE — quantities (0/0 allowed) */}
+        {/* LEAVE — quantities (0/0 allowed). scrapCodes come off the queue
+            payload (the scoped tokens can't reach /quality, so the server
+            rides the active codes on the station-authed poll); [] falls back
+            to the legacy SCRAP_REASONS grid. */}
         {view.name === 'leaveQty' && (
           <KioskQuantityScreen
             title={`Clock out — ${view.operator.user.full_name}`}
@@ -1044,8 +1059,9 @@ export default function CrewStationKiosk() {
                 ? `CREW TOTAL SO FAR: ${formatCrewTally(findItem(view.operationId) as KioskCrewQueueItem)} — enter only NEW pieces`
                 : undefined
             }
+            scrapCodes={scrapCodes}
             busy={mutationsBlocked}
-            onConfirm={(good, scrap, reason) => void handleLeaveConfirm(good, scrap, reason)}
+            onConfirm={(good, scrap, reason, codeId) => void handleLeaveConfirm(good, scrap, reason, codeId)}
             onCancel={() =>
               setView(view.operationId != null ? { name: 'job', operationId: view.operationId } : { name: 'board' })
             }
@@ -1060,10 +1076,11 @@ export default function CrewStationKiosk() {
             confirmLabel="Continue"
             requireTotalPositive
             tallyBanner={`CREW TOTAL SO FAR: ${formatCrewTally(viewItem)} — enter only NEW pieces`}
+            scrapCodes={scrapCodes}
             busy={mutationsBlocked}
-            onConfirm={(good, scrap, reason) => {
+            onConfirm={(good, scrap, reason, codeId) => {
               setBadgeError(null);
-              setView({ name: 'productionSign', operationId: viewItem.operation_id, good, scrap, reason });
+              setView({ name: 'productionSign', operationId: viewItem.operation_id, good, scrap, reason, reasonCodeId: codeId });
             }}
             onCancel={() => setView({ name: 'job', operationId: viewItem.operation_id })}
           />
@@ -1099,10 +1116,11 @@ export default function CrewStationKiosk() {
             initialGood={Math.max(0, Number(viewItem.quantity_ordered || 0) - Number(viewItem.quantity_complete || 0))}
             requireTotalPositive={false}
             tallyBanner={`CREW TOTAL SO FAR: ${formatCrewTally(viewItem)} — enter only NEW pieces`}
+            scrapCodes={scrapCodes}
             busy={mutationsBlocked}
-            onConfirm={(good, scrap, reason) => {
+            onConfirm={(good, scrap, reason, codeId) => {
               setBadgeError(null);
-              setView({ name: 'completeConfirm', operationId: viewItem.operation_id, good, scrap, reason });
+              setView({ name: 'completeConfirm', operationId: viewItem.operation_id, good, scrap, reason, reasonCodeId: codeId });
             }}
             onCancel={() => setView({ name: 'job', operationId: viewItem.operation_id })}
           />

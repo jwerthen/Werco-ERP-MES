@@ -29,7 +29,14 @@ import { FunnelIcon, QrCodeIcon } from '@heroicons/react/24/outline';
 import LaserNestOperatorPanel from '../components/laser/LaserNestOperatorPanel';
 import { Button, ConfirmDialog, Modal, SelectField, statusColor, statusVariant } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
-import { SCRAP_REASONS, HOLD_REASONS } from '../components/kiosk/kioskConstants';
+import { HOLD_REASONS } from '../components/kiosk/kioskConstants';
+import {
+  EMPTY_SCRAP_SELECTION,
+  ScrapReasonFields,
+  isScrapSelectionComplete,
+  scrapSelectionPayload,
+} from '../components/quality/ScrapReasonFields';
+import { useScrapReasonCodes } from '../hooks/useScrapReasonCodes';
 import { getKioskDept, getKioskWorkCenterCode, getKioskWorkCenterId } from '../utils/kiosk';
 import { ScanResolveResult } from '../types/scan';
 
@@ -122,8 +129,10 @@ export default function ShopFloorSimple() {
   const [completeConfirm, setCompleteConfirm] = useState<Operation | null>(null);
   const [productionModal, setProductionModal] = useState<{ operation: Operation; job: ActiveJob } | null>(null);
   const [detailsModal, setDetailsModal] = useState<any | null>(null);
-  const [checkOutData, setCheckOutData] = useState({ quantity_produced: 0, quantity_scrapped: 0, scrap_reason: '', notes: '' });
-  const [productionData, setProductionData] = useState({ quantity_complete_delta: 1, quantity_scrapped_delta: 0, scrap_reason: '', notes: '' });
+  const [checkOutData, setCheckOutData] = useState({ quantity_produced: 0, quantity_scrapped: 0, scrap: EMPTY_SCRAP_SELECTION, notes: '' });
+  const [productionData, setProductionData] = useState({ quantity_complete_delta: 1, quantity_scrapped_delta: 0, scrap: EMPTY_SCRAP_SELECTION, notes: '' });
+  // Lean Phase 1: company scrap reason codes ([] -> legacy SCRAP_REASONS fallback).
+  const { codes: scrapCodes } = useScrapReasonCodes();
   // Hold picker — desktop holds must file a structured WorkOrderBlocker
   // (category + optional note), mirroring the kiosk. The Hold button opens this
   // instead of holding immediately.
@@ -546,12 +555,12 @@ export default function ShopFloorSimple() {
 
   const handleOpenCheckOut = (operation: Operation, job: ActiveJob) => {
     setCheckOutModal({ operation, job });
-    setCheckOutData({ quantity_produced: 0, quantity_scrapped: 0, scrap_reason: '', notes: '' });
+    setCheckOutData({ quantity_produced: 0, quantity_scrapped: 0, scrap: EMPTY_SCRAP_SELECTION, notes: '' });
   };
 
   const handleOpenProductionModal = (operation: Operation, job: ActiveJob) => {
     setProductionModal({ operation, job });
-    setProductionData({ quantity_complete_delta: 1, quantity_scrapped_delta: 0, scrap_reason: '', notes: '' });
+    setProductionData({ quantity_complete_delta: 1, quantity_scrapped_delta: 0, scrap: EMPTY_SCRAP_SELECTION, notes: '' });
   };
 
   const getOperationForActiveJob = (job: ActiveJob): Operation => {
@@ -594,12 +603,12 @@ export default function ShopFloorSimple() {
 
   const closeCheckOutModal = () => {
     setCheckOutModal(null);
-    setCheckOutData({ quantity_produced: 0, quantity_scrapped: 0, scrap_reason: '', notes: '' });
+    setCheckOutData({ quantity_produced: 0, quantity_scrapped: 0, scrap: EMPTY_SCRAP_SELECTION, notes: '' });
   };
 
   const closeProductionModal = () => {
     setProductionModal(null);
-    setProductionData({ quantity_complete_delta: 1, quantity_scrapped_delta: 0, scrap_reason: '', notes: '' });
+    setProductionData({ quantity_complete_delta: 1, quantity_scrapped_delta: 0, scrap: EMPTY_SCRAP_SELECTION, notes: '' });
   };
 
   const adjustGoodQuantity = (delta: number) => {
@@ -622,7 +631,7 @@ export default function ShopFloorSimple() {
     quantityScrappedDelta = 0,
     notes?: string,
     closeModal = false,
-    scrapReason?: string
+    scrapFields?: { scrap_reason?: string; scrap_reason_code_id?: number }
   ) => {
     setActionLoading(operation.id);
     try {
@@ -630,9 +639,10 @@ export default function ShopFloorSimple() {
         quantity_complete_delta: quantityCompleteDelta,
         quantity_scrapped_delta: quantityScrappedDelta,
         notes: notes || undefined,
-        // Structured scrap reason required when scrap > 0 (compliance/traceability),
-        // mirroring the kiosk. Omitted entirely when nothing was scrapped.
-        scrap_reason: quantityScrappedDelta > 0 && scrapReason ? scrapReason : undefined,
+        // Structured scrap reason (company code id and/or free text) required
+        // when scrap > 0 (compliance/traceability), mirroring the kiosk.
+        // Omitted entirely when nothing was scrapped.
+        ...(quantityScrappedDelta > 0 && scrapFields ? scrapFields : {}),
       });
       const label = quantityCompleteDelta > 0
         ? `Added ${quantityCompleteDelta} complete part${quantityCompleteDelta === 1 ? '' : 's'}`
@@ -655,7 +665,7 @@ export default function ShopFloorSimple() {
       Number(productionData.quantity_scrapped_delta || 0),
       productionData.notes,
       true,
-      productionData.scrap_reason || undefined
+      scrapSelectionPayload(scrapCodes, productionData.scrap)
     );
   };
 
@@ -684,12 +694,12 @@ export default function ShopFloorSimple() {
         quantity_produced: Number(checkOutData.quantity_produced || 0),
         quantity_scrapped: Number(checkOutData.quantity_scrapped || 0),
         notes: checkOutData.notes || undefined,
-        // Structured scrap reason required when scrap > 0 (compliance/traceability),
-        // mirroring the kiosk. Omitted entirely when nothing was scrapped.
-        scrap_reason:
-          Number(checkOutData.quantity_scrapped || 0) > 0 && checkOutData.scrap_reason
-            ? checkOutData.scrap_reason
-            : undefined,
+        // Structured scrap reason (company code id and/or free text) required
+        // when scrap > 0 (compliance/traceability), mirroring the kiosk.
+        // Omitted entirely when nothing was scrapped.
+        ...(Number(checkOutData.quantity_scrapped || 0) > 0
+          ? scrapSelectionPayload(scrapCodes, checkOutData.scrap)
+          : {}),
       });
       showToast('success', `Checked out of ${checkOutModal.operation.work_order_number}`);
       closeCheckOutModal();
@@ -1830,24 +1840,15 @@ export default function ShopFloorSimple() {
                 />
               </div>
 
-              {/* Scrap reason is required for traceability when scrap > 0 (reuses
-                  the shared SCRAP_REASONS — same column the kiosk writes). */}
+              {/* Scrap reason is required for traceability when scrap > 0 —
+                  company scrap codes when defined, legacy SCRAP_REASONS
+                  fallback otherwise (same columns the kiosk writes). */}
               {Number(productionData.quantity_scrapped_delta || 0) > 0 && (
-                <div>
-                  <span className="label">
-                    Scrap reason <span className="text-red-400">*</span>
-                  </span>
-                  <SelectField
-                    value={productionData.scrap_reason}
-                    onChange={(value) => setProductionData({ ...productionData, scrap_reason: String(value) })}
-                    options={SCRAP_REASONS.map((r) => ({ value: r.value, label: r.label }))}
-                    placeholder="Select a scrap reason"
-                    ariaLabel="Scrap reason"
-                  />
-                  {!productionData.scrap_reason && (
-                    <p className="mt-1 text-xs text-red-400">Required when scrap is greater than zero.</p>
-                  )}
-                </div>
+                <ScrapReasonFields
+                  codes={scrapCodes}
+                  value={productionData.scrap}
+                  onChange={(scrap) => setProductionData({ ...productionData, scrap })}
+                />
               )}
 
               <div>
@@ -1874,7 +1875,8 @@ export default function ShopFloorSimple() {
                   actionLoading === productionModal.operation.id ||
                   (Number(productionData.quantity_complete_delta || 0) <= 0 &&
                     Number(productionData.quantity_scrapped_delta || 0) <= 0) ||
-                  (Number(productionData.quantity_scrapped_delta || 0) > 0 && !productionData.scrap_reason)
+                  (Number(productionData.quantity_scrapped_delta || 0) > 0 &&
+                    !isScrapSelectionComplete(scrapCodes, productionData.scrap))
                 }
                 className="btn-success disabled:opacity-50 disabled:cursor-not-allowed"
               >
@@ -1979,24 +1981,15 @@ export default function ShopFloorSimple() {
                 />
               </div>
 
-              {/* Scrap reason is required for traceability when scrap > 0 (reuses
-                  the shared SCRAP_REASONS — same column the kiosk writes). */}
+              {/* Scrap reason is required for traceability when scrap > 0 —
+                  company scrap codes when defined, legacy SCRAP_REASONS
+                  fallback otherwise (same columns the kiosk writes). */}
               {Number(checkOutData.quantity_scrapped || 0) > 0 && (
-                <div>
-                  <span className="label">
-                    Scrap reason <span className="text-red-400">*</span>
-                  </span>
-                  <SelectField
-                    value={checkOutData.scrap_reason}
-                    onChange={(value) => setCheckOutData({ ...checkOutData, scrap_reason: String(value) })}
-                    options={SCRAP_REASONS.map((r) => ({ value: r.value, label: r.label }))}
-                    placeholder="Select a scrap reason"
-                    ariaLabel="Scrap reason"
-                  />
-                  {!checkOutData.scrap_reason && (
-                    <p className="mt-1 text-xs text-red-400">Required when scrap is greater than zero.</p>
-                  )}
-                </div>
+                <ScrapReasonFields
+                  codes={scrapCodes}
+                  value={checkOutData.scrap}
+                  onChange={(scrap) => setCheckOutData({ ...checkOutData, scrap })}
+                />
               )}
 
               <div>
@@ -2023,7 +2016,8 @@ export default function ShopFloorSimple() {
                   actionLoading === checkOutModal.operation.id ||
                   checkOutData.quantity_produced < 0 ||
                   checkOutData.quantity_scrapped < 0 ||
-                  (Number(checkOutData.quantity_scrapped || 0) > 0 && !checkOutData.scrap_reason)
+                  (Number(checkOutData.quantity_scrapped || 0) > 0 &&
+                    !isScrapSelectionComplete(scrapCodes, checkOutData.scrap))
                 }
                 className="btn-success disabled:opacity-50 disabled:cursor-not-allowed"
               >

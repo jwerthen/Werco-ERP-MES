@@ -172,7 +172,18 @@ def has_incomplete_predecessors(
 
 def release_first_ready_operation(
     work_order: WorkOrder,
+    db: Optional[Session] = None,
+    user_id: Optional[int] = None,
 ) -> Optional[WorkOrderOperation]:
+    """Promote the lowest-sequence PENDING op to READY at WO release.
+
+    Lean Phase 1 (flow metrics): when ``db`` is provided, the flip also emits a
+    best-effort ``operation_ready`` OperationalEvent so queue time can be measured
+    as ready -> actual_start. ``db`` stays optional so the function remains usable
+    as a pure in-memory rule (and existing call sites/tests without a session keep
+    working); the emit helper lives in ``completion_signal_service`` (the
+    side-effects module) and is imported locally to preserve that layering.
+    """
     if not work_order.operations:
         return None
 
@@ -183,6 +194,16 @@ def release_first_ready_operation(
     )
     if first_pending:
         first_pending.status = OperationStatus.READY
+        if db is not None and first_pending.id is not None:
+            from app.services.completion_signal_service import emit_operation_ready_event
+
+            emit_operation_ready_event(
+                db,
+                company_id=work_order.company_id,
+                work_order=work_order,
+                operation=first_pending,
+                user_id=user_id,
+            )
     return first_pending
 
 
@@ -230,6 +251,18 @@ def release_next_ready_operation(
         blocked = any(op.sequence < candidate.sequence and op.id != candidate.id for op in incomplete)
         if not blocked:
             candidate.status = OperationStatus.READY
+            # Lean Phase 1 (flow metrics): record WHEN the op became ready so queue
+            # time = ready -> actual_start. Best-effort (never fails the completion);
+            # user_id is None -- this promotion is rule-driven, not a user action.
+            from app.services.completion_signal_service import emit_operation_ready_event
+
+            emit_operation_ready_event(
+                db,
+                company_id=work_order.company_id,
+                work_order=work_order,
+                operation=candidate,
+                user_id=None,
+            )
             return candidate
     return None
 

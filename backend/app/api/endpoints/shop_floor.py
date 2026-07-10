@@ -34,8 +34,10 @@ from app.core.websocket import (
     manager,
 )
 from app.db.database import get_db
+from app.db.tenant_filter import tenant_query
 from app.models.audit_log import AuditLog
 from app.models.laser_nest import LaserNest
+from app.models.scrap_reason import ScrapReasonCode
 from app.models.time_entry import TimeEntry, TimeEntrySource, TimeEntryType
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
@@ -101,6 +103,7 @@ from app.services.quality_gate_service import (
     record_reconcile_inspection_exception,
 )
 from app.services.scheduling_service import SchedulingService
+from app.services.scrap_reason_service import resolve_scrap_reason_code_or_http
 from app.services.wallboard_service import (
     LABOR_ENTRY_TYPES,
     build_wallboard_payload,
@@ -150,6 +153,14 @@ class ProductionReportRequest(BaseModel):
         description="Reason for scrapped parts; stored only when quantity_scrapped_delta > 0 "
         "and never cleared by a later reason-less report.",
     )
+    # Lean Phase 1: structured scrap categorization (validated: exists, active,
+    # belongs to the company). Either the code or free text satisfies the
+    # scrap-requires-a-reason rule; the code is preferred, text stays narrative.
+    scrap_reason_code_id: Optional[int] = Field(
+        None,
+        description="Id of a predefined scrap reason code (see /quality/scrap-reason-codes). "
+        "Applied only when quantity_scrapped_delta > 0; never cleared by a code-less report.",
+    )
     # A0.1 adoption telemetry: client channel (kiosk/desktop/scanner/import/backfill).
     source: Optional[TimeEntrySource] = Field(
         None,
@@ -161,11 +172,16 @@ class ProductionReportRequest(BaseModel):
     def _require_scrap_reason(self) -> "ProductionReportRequest":
         # AS9100D defect-traceability invariant (same rule as ClockOut): a scrap delta MUST
         # carry a reason. Enforced at the data boundary so a scripted/API client can't post
-        # reasonless scrap that the UIs already block. Blank/whitespace counts as missing;
-        # raised as a Pydantic ValueError -> 422. A zero scrap delta with no reason stays
-        # valid; negatives/NaN fall through to the handler's existing numeric guards.
-        if (self.quantity_scrapped_delta or 0) > 0 and not (self.scrap_reason and self.scrap_reason.strip()):
-            raise ValueError("scrap_reason is required when quantity_scrapped_delta is greater than 0")
+        # reasonless scrap that the UIs already block. Lean Phase 1: EITHER a structured
+        # scrap_reason_code_id OR non-blank free text satisfies the rule (old text-only
+        # clients keep working). Blank/whitespace counts as missing; raised as a Pydantic
+        # ValueError -> 422. A zero scrap delta with no reason stays valid; negatives/NaN
+        # fall through to the handler's existing numeric guards.
+        has_reason = (self.scrap_reason and self.scrap_reason.strip()) or self.scrap_reason_code_id is not None
+        if (self.quantity_scrapped_delta or 0) > 0 and not has_reason:
+            raise ValueError(
+                "scrap_reason or scrap_reason_code_id is required when quantity_scrapped_delta is greater than 0"
+            )
         return self
 
 
@@ -870,6 +886,11 @@ def clock_out(
     if clock_out_data.quantity_produced < 0 or clock_out_data.quantity_scrapped < 0:
         raise HTTPException(status_code=400, detail="Quantities cannot be negative")
 
+    # Lean Phase 1: resolve the structured scrap reason code BEFORE any mutation so
+    # an invalid id (404 unknown/cross-tenant, 422 inactive) leaves no half-updated
+    # row. None passes through untouched.
+    scrap_code = resolve_scrap_reason_code_or_http(db, company_id, clock_out_data.scrap_reason_code_id)
+
     # Look up related work order / operation BEFORE mutating the time entry
     # so we can return a clean 404 instead of leaving a half-updated row
     # in the session if the referenced work order was deleted.
@@ -946,6 +967,10 @@ def clock_out(
     # reason recorded by an in-shift /production report.
     if clock_out_data.scrap_reason:
         time_entry.scrap_reason = clock_out_data.scrap_reason
+    # Lean Phase 1: same never-clear semantics for the structured code -- persisted
+    # whenever the clock-out carries one, never nulled by a code-less clock-out.
+    if scrap_code is not None:
+        time_entry.scrap_reason_code_id = scrap_code.id
     time_entry.notes = clock_out_data.notes or time_entry.notes
     # A0.1 adoption telemetry: record the clock-out channel when the client sent one;
     # omitted -> keep whatever channel clock-in recorded (NULL stays NULL, never guessed).
@@ -973,6 +998,16 @@ def clock_out(
         operation.quantity_scrapped = float(operation.quantity_scrapped or 0) + float(
             clock_out_data.quantity_scrapped or 0
         )
+        # Lean Phase 1: categorize the operation's scrap when THIS write carries both
+        # scrap and a code (a code-less write never clears a recorded one).
+        if scrap_code is not None and float(clock_out_data.quantity_scrapped or 0) > 0:
+            operation.scrap_reason_code_id = scrap_code.id
+        # Lean Phase 1 (FPY): a REWORK entry booking produced quantity is re-processed
+        # work -- track it on the operation so FPY/RTY can subtract it from first-pass.
+        if time_entry.entry_type == TimeEntryType.REWORK and float(clock_out_data.quantity_produced or 0) > 0:
+            operation.quantity_reworked = float(operation.quantity_reworked or 0) + float(
+                clock_out_data.quantity_produced or 0
+            )
         sync_laser_nest_from_operation(operation)
 
     # G6-A: never accrue cost/hours onto a terminal WO.
@@ -1002,6 +1037,7 @@ def clock_out(
             "quantity_produced": clock_out_data.quantity_produced,
             "quantity_scrapped": clock_out_data.quantity_scrapped,
             "scrap_reason": clock_out_data.scrap_reason,
+            "scrap_reason_code_id": scrap_code.id if scrap_code else None,
             # G6-A: flag so AI/realtime consumers know this labor closed against a
             # terminal WO and was deliberately NOT rolled up into op/cost.
             "wo_terminal": wo_is_terminal,
@@ -1527,6 +1563,29 @@ def get_work_center_queue(
             }
         )
 
+    # Lean Phase 1 (issue #88): active scrap reason codes ride the queue payload
+    # so the crew station's scrap picker works WITHOUT widening any token scope —
+    # the station token is honored only by this read + badge mint, and the 5-min
+    # badge tokens are path-fenced to /shop-floor, so the kiosk cannot call
+    # GET /quality/scrap-reason-codes. This is tenant config data on an
+    # already-authorized, already-tenant-scoped read (the station's company from
+    # the DB row, never the client). One indexed query (company_id + code are
+    # indexed; per-tenant code lists are tiny) — no caching needed at the poll
+    # cadence. Optional field: old clients simply ignore the extra key.
+    scrap_reason_codes = [
+        {
+            "id": code.id,
+            "code": code.code,
+            "name": code.name,
+            "category": code.category,
+            "display_order": code.display_order,
+        }
+        for code in tenant_query(db, ScrapReasonCode, company_id)
+        .filter(ScrapReasonCode.is_active == True)  # noqa: E712
+        .order_by(ScrapReasonCode.display_order, ScrapReasonCode.code)
+        .all()
+    ]
+
     return {
         "queue": queue,
         # Timer skew correction: honest per-person timers are computed against
@@ -1536,6 +1595,8 @@ def get_work_center_queue(
         "station": (
             {"id": principal.station_id, "label": principal.station_label} if principal.kind == "station" else None
         ),
+        # Active scrap reason codes for the crew-station scrap picker (see above).
+        "scrap_reason_codes": scrap_reason_codes,
     }
 
 
@@ -2432,6 +2493,10 @@ def report_operation_production(
     if good_delta == 0 and scrap_delta == 0:
         raise HTTPException(status_code=400, detail="Enter a completed or scrap quantity")
 
+    # Lean Phase 1: resolve the structured scrap reason code BEFORE any mutation
+    # (404 unknown/cross-tenant, 422 inactive). None passes through untouched.
+    scrap_code = resolve_scrap_reason_code_or_http(db, company_id, production_data.scrap_reason_code_id)
+
     # SFI-1: lock the operation row before the over-completion read-modify-write
     # so concurrent producers serialize on quantity_complete instead of losing
     # updates. Re-read the freshest committed quantity off the locked row rather
@@ -2480,6 +2545,14 @@ def report_operation_production(
     # rejected a delta that would exceed target.
     operation.quantity_complete = floor_operation_quantity_at_evidence(db, operation, next_complete_qty, target_qty)
     operation.quantity_scrapped = float(operation.quantity_scrapped or 0) + scrap_delta
+    # Lean Phase 1: categorize the operation's scrap when THIS report carries both
+    # scrap and a code (a code-less report never clears a recorded one).
+    if scrap_code is not None and scrap_delta > 0:
+        operation.scrap_reason_code_id = scrap_code.id
+    # Lean Phase 1 (FPY): produced quantity reported while clocked into a REWORK
+    # entry is re-processed work -- track it for first-pass yield.
+    if active_entry.entry_type == TimeEntryType.REWORK and good_delta > 0:
+        operation.quantity_reworked = float(operation.quantity_reworked or 0) + good_delta
     operation.updated_at = datetime.utcnow()
     sync_laser_nest_from_operation(operation)
 
@@ -2495,6 +2568,9 @@ def report_operation_production(
     scrap_reason = production_data.scrap_reason if (production_data.scrap_reason and scrap_delta > 0) else None
     if scrap_reason:
         active_entry.scrap_reason = scrap_reason
+    # Lean Phase 1: same semantics for the structured code.
+    if scrap_code is not None and scrap_delta > 0:
+        active_entry.scrap_reason_code_id = scrap_code.id
     # A0.1 adoption telemetry: record the reporting channel when the client sent one;
     # omitted -> keep whatever channel the entry already carries (never guessed).
     if production_data.source:
@@ -2513,6 +2589,7 @@ def report_operation_production(
             f"Added good: {good_delta}, scrap: {scrap_delta}. "
             f"Qty: {operation.quantity_complete}/{target_qty}"
             + (f". Scrap reason: {scrap_reason}" if scrap_reason else "")
+            + (f". Scrap reason code: {scrap_code.code}" if (scrap_code and scrap_delta > 0) else "")
             + (f". Notes: {production_data.notes}" if production_data.notes else "")
         ),
     )

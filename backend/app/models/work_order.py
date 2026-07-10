@@ -50,6 +50,9 @@ class WorkOrder(Base, SoftDeleteMixin, TenantMixin):
     quantity_complete = Column(Float, default=0.0)
     quantity_scrapped = Column(Float, default=0.0)
     scrap_reason = Column(String(255), nullable=True)
+    # Lean Phase 1: structured scrap categorization. Nullable -- historical rows and
+    # scrap=0 writes have no code; the free-text scrap_reason stays as narrative detail.
+    scrap_reason_code_id = Column(Integer, ForeignKey("scrap_reason_codes.id"), nullable=True)
 
     # Status tracking
     status = Column(SQLEnum(WorkOrderStatus), default=WorkOrderStatus.DRAFT, index=True)
@@ -99,6 +102,7 @@ class WorkOrder(Base, SoftDeleteMixin, TenantMixin):
     parent_work_order = relationship("WorkOrder", remote_side=[id], backref="child_work_orders")
     operations = relationship("WorkOrderOperation", back_populates="work_order", order_by="WorkOrderOperation.sequence")
     time_entries = relationship("TimeEntry", back_populates="work_order")
+    scrap_reason_code = relationship("ScrapReasonCode", foreign_keys=[scrap_reason_code_id])
 
 
 class WorkOrderOperation(Base, TenantMixin):
@@ -158,7 +162,13 @@ class WorkOrderOperation(Base, TenantMixin):
     status = Column(SQLEnum(OperationStatus), default=OperationStatus.PENDING)
     quantity_complete = Column(Float, default=0.0)
     quantity_scrapped = Column(Float, default=0.0)
+    # Lean Phase 1: rework quantity alongside complete/scrapped. server_default so
+    # pre-existing rows read as 0 rather than NULL (migration 063 backfills via DEFAULT).
+    quantity_reworked = Column(Float, default=0.0, server_default="0")
     scrap_reason = Column(String(255), nullable=True)
+    # Lean Phase 1: structured scrap categorization. Nullable -- historical rows and
+    # scrap=0 writes have no code; the free-text scrap_reason stays as narrative detail.
+    scrap_reason_code_id = Column(Integer, ForeignKey("scrap_reason_codes.id"), nullable=True)
 
     # Scheduling
     scheduled_start = Column(DateTime, nullable=True)
@@ -183,3 +193,4 @@ class WorkOrderOperation(Base, TenantMixin):
     time_entries = relationship("TimeEntry", back_populates="operation")
     component_part = relationship("Part", foreign_keys=[component_part_id])
     laser_nest = relationship("LaserNest", back_populates="operation", uselist=False)
+    scrap_reason_code = relationship("ScrapReasonCode", foreign_keys=[scrap_reason_code_id])

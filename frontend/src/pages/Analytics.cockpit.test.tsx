@@ -23,6 +23,10 @@ global.ResizeObserver = class {
   disconnect() {}
 } as any;
 
+jest.mock('../hooks/usePermissions', () => ({
+  usePermissions: () => ({ can: () => true, canAny: () => true }),
+}));
+
 jest.mock('../services/api', () => ({
   __esModule: true,
   default: {

@@ -14,8 +14,30 @@ from app.models.quality import NonConformanceReport
 from app.models.time_entry import TimeEntry
 from app.models.user import User
 from app.models.work_order import WorkOrder, WorkOrderOperation, WorkOrderStatus
+from app.schemas.analytics import ShipOTDReportResponse
+from app.services.analytics_service import AnalyticsService, get_date_range
 
 router = APIRouter()
+
+
+@router.get("/ship-otd", response_model=ShipOTDReportResponse)
+def get_ship_otd_report(
+    period: str = Query("30d", description="Period: today, 7d, 30d, 90d, ytd, custom"),
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Ship-based OTD/OTIF detail report (Lean Phase 1 / issue #88).
+
+    Measures Shipment.ship_date against the promise (must_ship_by || due_date):
+    per-WO rows (promise used, last/full ship dates, on-time flag, days late),
+    a per-customer rollup, and a promise-hygiene list of shipped/open WOs with
+    NEITHER promise field set.
+    """
+    start, end = get_date_range(period, start_date, end_date)
+    return AnalyticsService(db, company_id).get_ship_otd_report(start, end)
 
 
 @router.get("/production-summary")

@@ -152,8 +152,9 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > is **opt-in on update**: `quantity_scrapped` is optional on both `/work-orders/{id}/complete` and
 > `/work-orders/operations/{id}/complete` — omit it to leave previously-recorded scrap untouched;
 > send an explicit value (including `0`) to overwrite it. When the value written is **> 0** a
-> `scrap_reason` is **required** (else **422**) — see "Scrap reason is required when scrap is reported"
-> below. Completing an **on-hold** operation is
+> scrap reason is **required** (else **422**) — free-text `scrap_reason`, or on
+> `/work-orders/{id}/complete` alternatively a structured `scrap_reason_code_id` — see "Scrap reason
+> is required when scrap is reported" below. Completing an **on-hold** operation is
 > rejected with **409 Conflict** (`{"detail": "Operation is on hold and cannot be completed"}`);
 > `/work-orders/{id}/complete` likewise returns **409** if any open operation is on hold
 > (`"…is on hold; resolve the hold first"`) — resolve the hold before completing. A work order that
@@ -254,14 +255,24 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 >   tamper-evident `audit_log` row** (`log_update`, resource type `work_order_operation`) on every
 >   update — previously it committed with no audit row at all (`GET /audit/`).
 > - **`POST /work-orders/{id}/complete`** — gained a `scrap_reason` **query parameter** (alongside
->   `quantity_complete` / `quantity_scrapped`).
+>   `quantity_complete` / `quantity_scrapped`), and (Lean Phase 1) an optional
+>   **`scrap_reason_code_id`** query parameter — a predefined code from
+>   `GET /quality/scrap-reason-codes` (see Quality). On this endpoint **either** the code **or**
+>   non-blank text satisfies the scrap-reason rule (the 422 detail reads `"scrap_reason or
+>   scrap_reason_code_id is required when quantity_scrapped is greater than 0"`). The id is
+>   validated **before any mutation** — unknown/cross-tenant → **404**, inactive → **422**. An
+>   explicit scrap write (`quantity_scrapped` sent) **replaces** the stored categorization wholly:
+>   `work_order.scrap_reason_code_id` is set to the sent code, or `null` when none was sent (unlike
+>   the shop-floor paths' never-clear semantics — this verb states the WO's final scrap facts). Old
+>   and new values ride the tamper-evident audit row.
 > - **`POST /work-orders/operations/{id}/complete`** — gained a `scrap_reason` **query parameter**;
 >   this path also now rejects a **negative** `quantity_scrapped` with **400 Bad Request**
 >   (`"quantity_scrapped cannot be negative"`), matching `/work-orders/{id}/complete`.
 >
 > The `422` is enforced at the data boundary (Pydantic body validator on the two `PUT` bodies; an
 > in-handler guard on the two query-param `complete` verbs), so a scripted/API client can no longer
-> record reasonless scrap that the office/admin UIs already block.
+> record reasonless scrap that the office/admin UIs already block. `scrap_reason_code_id` is accepted
+> **only** on `/work-orders/{id}/complete` — the other three office endpoints remain free-text-only.
 
 #### Work Order Schema
 
@@ -739,9 +750,13 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > screen. Signed-in users can call it too (their active company scopes the data). Payload:
 > `work_centers[]` (`{code, name, status, active_jobs[], queued_count, blocked_count, down}`, each
 > active job `{wo_number, part_number, op_name, operator_name, elapsed_minutes, qty_done,
-> qty_target}`), `late_wos[]`, `blocked_wos[]` (tickers capped at 25), `generated_at`. Token
-> issuance/revocation: see Authentication → Display tokens. Operating a TV: see
-> [docs/WALLBOARD.md](WALLBOARD.md).
+> qty_target}`), `late_wos[]`, `blocked_wos[]` (tickers capped at 25), an optional **`kpi_strip`**
+> block (trailing-30-day floor KPIs — `otd_ship_pct_30d`, `fpy_pct_30d`, `scrap_pct_30d`,
+> `open_wip_count`, `avg_wip_age_days`; company-wide, never narrowed by `?dept=`; values are
+> ~5-minute server-side cached and each nullable = insufficient data; the whole block is `null` only
+> when its computation failed — see [docs/WALLBOARD.md](WALLBOARD.md) → KPI strip), and
+> `generated_at`. Token issuance/revocation: see Authentication → Display tokens. Operating a TV:
+> see [docs/WALLBOARD.md](WALLBOARD.md).
 
 > **Crew roster on `GET /shop-floor/work-center-queue/{id}` (crew-station kiosk).** The queue read
 > accepts **either** a normal user access token **or** a crew-station kiosk token (the dedicated
@@ -755,9 +770,14 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > `{time_entry_id, user_id, operator_name, employee_id, entry_type, clock_in}` with
 > `operator_name` in the public-screen-safe "First L." form. The response adds top-level
 > `server_time` (UTC ISO — the kiosk anchors its per-person timers to the server clock) and
-> `station` (`{id, label}` for a station caller, `null` for users). Station lifecycle + PIN model:
-> see the `/shop-floor/kiosk-stations` rows above and [docs/KIOSK.md](KIOSK.md) → Crew station
-> mode.
+> `station` (`{id, label}` for a station caller, `null` for users). The response also carries a
+> top-level **`scrap_reason_codes`** array — the tenant's **active** scrap reason codes
+> (`{id, code, name, category, display_order}`, in display order) — so the crew station's scrap
+> picker works **without widening any token scope**: the station token is still honored only by
+> this read + the badge mint, and badge-minted kiosk tokens (path-fenced to `/shop-floor`) cannot
+> call `GET /quality/scrap-reason-codes`. Old clients ignore the extra key. Station lifecycle + PIN
+> model: see the `/shop-floor/kiosk-stations` rows above and [docs/KIOSK.md](KIOSK.md) → Crew
+> station mode.
 >
 > **`closed_time_entries` on `POST /shop-floor/operations/{id}/complete`.** When a completion is
 > fully complete it auto-closes **every** operator's open time entry on the operation (existing
@@ -833,17 +853,33 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > reason recorded by an earlier in-shift report. When stored, the reason is also appended to the
 > tamper-evident `REPORT_OPERATION_PRODUCTION` audit description.
 >
-> **Scrap reason is required when scrap is reported (AS9100D defect traceability).**
+> **Structured scrap reason CODE (Lean Phase 1).** Both `POST /shop-floor/clock-out/{id}`
+> (`ClockOut`) and `POST /shop-floor/operations/{id}/production` (`ProductionReportRequest`) also
+> accept an optional **`scrap_reason_code_id`** — the id of a predefined scrap reason code
+> (`GET /quality/scrap-reason-codes`, see Quality below); the free-text `scrap_reason` stays as
+> narrative detail alongside it. The id is validated **before any mutation**: an unknown **or
+> cross-tenant** id returns **404** (indistinguishable, so a foreign id discloses nothing), an
+> **inactive** code returns **422**. Persistence follows the same never-clear semantics as the text
+> field: the code is stored on the caller's time entry (`scrap_reason_code_id` on
+> `TimeEntryResponse`, `null` = uncoded/legacy row) whenever the write carries one, and onto the
+> operation's `scrap_reason_code_id` when the write also carries a positive scrap quantity; a
+> code-less write never clears a previously recorded code. A stored code is appended to the
+> tamper-evident `REPORT_OPERATION_PRODUCTION` audit description (`"Scrap reason code: <code>"`) and
+> rides the `labor_clock_out` event payload (`scrap_reason_code_id`).
+>
+> **A scrap reason is required when scrap is reported (AS9100D defect traceability).**
 > On both `POST /shop-floor/clock-out/{id}` (`ClockOut`) and
-> `POST /shop-floor/operations/{id}/production` (`ProductionReportRequest`), `scrap_reason` is
+> `POST /shop-floor/operations/{id}/production` (`ProductionReportRequest`), a reason is
 > **required whenever the request reports a positive scrap quantity** — `quantity_scrapped > 0` on
-> clock-out, `quantity_scrapped_delta > 0` on the production report. A missing, `null`, or
-> blank/whitespace-only reason in that case is rejected with **422 Unprocessable Entity**
-> (`"scrap_reason is required when quantity_scrapped is greater than 0"` / `"… quantity_scrapped_delta
-> is greater than 0"`). When the scrap quantity is **0**, `scrap_reason` stays **optional** and may
-> be omitted (e.g. the kiosk COMPLETE flow clocks out with zero scrap and no reason). This invariant
-> is now enforced at the data boundary, so a scripted/API client can no longer record reasonless
-> scrap that the kiosk/desktop UIs already block.
+> clock-out, `quantity_scrapped_delta > 0` on the production report. **Either** a
+> `scrap_reason_code_id` **or** a non-blank free-text `scrap_reason` satisfies the rule (the code is
+> preferred; text-only clients keep working unchanged). A request with neither — no code, and the
+> text missing, `null`, or blank/whitespace-only — is rejected with **422 Unprocessable Entity**
+> (`"scrap_reason or scrap_reason_code_id is required when quantity_scrapped is greater than 0"` /
+> `"… quantity_scrapped_delta is greater than 0"`). When the scrap quantity is **0**, both stay
+> **optional** and may be omitted (e.g. the kiosk COMPLETE flow clocks out with zero scrap and no
+> reason). This invariant is enforced at the data boundary, so a scripted/API client can no longer
+> record reasonless scrap that the kiosk/desktop UIs already block.
 >
 > **Completion contract.** The shop-floor `/operations/{id}/complete` shares the same finalizer as
 > the office endpoint (see "Completion contract" under Work Orders): the absolute verb stores
@@ -984,19 +1020,23 @@ let a supervisor sign off on shop-floor labor (G5-A). Approve sets `approved` (t
 
 #### Clock Out Schema
 
+`POST /shop-floor/clock-out/{time_entry_id}` body (`ClockOut`):
+
 ```json
 {
-  "time_entry_id": 1234,
-  "quantity_completed": 50,
-  "quantity_rejected": 2,
+  "quantity_produced": 50,
+  "quantity_scrapped": 2,
   "scrap_reason": "Drill bit broke",
+  "scrap_reason_code_id": 3,
   "notes": "Replaced drill bit, resumed operation"
 }
 ```
 
-> `scrap_reason` is **required when `quantity_scrapped` > 0** (a missing/blank reason then returns
-> **422**); it stays optional when no scrap is reported. See "Scrap reason is required when scrap is
-> reported" under the shop-floor notes above.
+> When `quantity_scrapped` > 0 a reason is **required** — either `scrap_reason_code_id` (a
+> predefined code from `GET /quality/scrap-reason-codes`) or a non-blank free-text `scrap_reason`;
+> neither present returns **422**. Both stay optional when no scrap is reported. See "A scrap reason
+> is required when scrap is reported" and "Structured scrap reason CODE" under the shop-floor notes
+> above.
 
 ### Scanner (QR / barcode)
 
@@ -1083,6 +1123,21 @@ let a supervisor sign off on shop-floor labor (G5-A). Approve sets `approved` (t
 | POST | `/quality/inspections/` | Create inspection | Yes |
 | GET | `/quality/inspections/{id}` | Get inspection by ID | Yes |
 | POST | `/quality/inspections/{id}/approve` | Approve inspection | Quality |
+| GET | `/quality/scrap-reason-codes` | List scrap reason codes (active only by default; `category` / `include_inactive` filters) | Yes |
+| POST | `/quality/scrap-reason-codes` | Create a scrap reason code | Admin / Manager / Quality |
+| PUT | `/quality/scrap-reason-codes/{reason_code_id}` | Update a scrap reason code (deactivate via `is_active: false`) | Admin / Manager / Quality |
+
+> **Scrap reason codes (Lean Phase 1).** The tenant's structured scrap vocabulary, referenced by the
+> optional `scrap_reason_code_id` accepted on the three scrap write paths —
+> `POST /shop-floor/clock-out/{id}`, `POST /shop-floor/operations/{id}/production`, and
+> `POST /work-orders/{id}/complete` (see those sections). Shape:
+> `{id, code, name, category, description, is_active, display_order}`; `category` is one of
+> `material | machine | tooling | operator | setup | programming | engineering | supplier | handling |
+> other`. `code` is unique **per tenant** — a duplicate returns **400** (`"Scrap reason code already
+> exists"`). Reads are open to any authenticated user (the kiosk/desktop scrap pickers); writes are
+> role-gated to **Admin / Manager / Quality** and write tamper-evident `audit_log` rows (resource type
+> `scrap_reason_code`). There is deliberately **no DELETE endpoint** — historical scrap rows reference
+> these ids (traceability), so retirement is `is_active: false`, never a row removal.
 
 ### QMS Standards & Audit Readiness
 
@@ -1448,7 +1503,21 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 | GET | `/reports/work-orders` | Work order report | Yes |
 | GET | `/reports/production` | Production report | Yes |
 | GET | `/reports/quality` | Quality report | Yes |
+| GET | `/reports/ship-otd` | Ship-based OTD/OTIF detail report (`period` today/7d/30d/90d/ytd/custom + `start_date`/`end_date`) | Yes |
 | POST | `/reports/custom` | Generate custom report | Yes |
+
+> **`GET /reports/ship-otd` (Lean Phase 1).** The customer-experienced delivery report: measures
+> `Shipment.ship_date` against the **promise** (`must_ship_by`, falling back to `due_date`), counting
+> only real shipments (dated, not soft-deleted, not CANCELLED); multiple partial shipments roll up
+> cumulatively, and the **full-ship date** is the shipment that crossed the ordered quantity.
+> Returns: headline `otd_ship_pct` (**fulfillment-anchored** — of WOs whose full quantity finished
+> shipping in the window, the share on/before promise) and `otif_pct` (**promise-anchored** — of WOs
+> promised in the window, the share fully shipped **by** the promise date, so an open WO past promise
+> counts as a miss immediately), both `null` on an empty denominator; per-WO `rows[]` (promise
+> source/date, first/last/full ship dates, `on_time`, `days_late` — for an open WO past promise, days
+> past so far); a `by_customer[]` rollup; and `promise_hygiene[]` — shipped/open WOs with **neither**
+> promise field set (unmeasurable). These are the same legs as the `on_time_delivery_ship` / `otif`
+> KPIs on `GET /analytics/kpis` (see Analytics).
 
 ### Analytics
 
@@ -1459,8 +1528,50 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 | GET | `/analytics/production-trends` | Production trends | Yes |
 | GET | `/analytics/quality-metrics` | Quality metrics | Yes |
 | GET | `/analytics/cost-analysis` | Job cost analysis (estimated vs. actual) | Yes |
+| GET | `/analytics/flow` | Measured flow: lead times, queue times, Little's Law, PCE | Admin / Manager / Supervisor |
+| GET | `/analytics/wip-aging` | WIP aging snapshot (open WOs, days since release / in current op) | Admin / Manager / Supervisor |
+| GET | `/analytics/fpy` | First-pass yield / rolled throughput yield by part and work center | Admin / Manager / Supervisor / Quality |
+| GET | `/analytics/scrap-pareto` | Scrap quantity/cost Pareto by reason code | Admin / Manager / Supervisor / Quality |
+| GET | `/analytics/adoption` | Digital-adoption + hidden-factory metrics | Admin / Manager / Supervisor |
 | POST | `/analytics/custom-report` | Run a custom-report query (returns rows) | Admin / Manager |
 | GET | `/analytics/custom-report/export` | Export a saved report template (csv / xlsx / pdf) | Admin / Manager |
+
+> **Flow & quality metrics (Lean Phase 1).** Five read-only, role-gated, tenant-scoped analytics
+> endpoints. All but `/wip-aging` (a point-in-time snapshot) take the same window parameters as
+> `/analytics/kpis`: `period` (`today` / `7d` / `30d` / `90d` / `ytd` / `custom`) plus
+> `start_date` / `end_date` for `custom`. As throughout Analytics, uncomputable values are `null`
+> ("n/a"), never a fake 0/100:
+> - **`/flow`** — per completed WO: lead time (release → `actual_end`), release→first/last-ship days,
+>   value-add RUN hours, and PCE (value-add ÷ lead time); summary adds median/avg lead time,
+>   Little's Law WIP/throughput, and per-work-center queue times (measured from `operation_ready`
+>   events where available, predecessor-end → start as fallback, with `from_ready_events` counting
+>   the former).
+> - **`/wip-aging`** — every open released WO with days since release, the current operation and days
+>   in it (since its `actual_start`, or since it became READY), and days to due (negative = past due).
+> - **`/fpy`** — quantity-weighted first-pass yield (`(complete − reworked − scrapped) ÷ attempted`)
+>   grouped by part and by work center; RTY (product of per-op FPYs) per part. Optional
+>   `work_center_id` / `part_id` filters; RTY is omitted when `work_center_id` is set (it is a
+>   full-route metric). Rework tracking feeds from produced quantity booked on REWORK time entries.
+> - **`/scrap-pareto`** — scrap quantity and cost (quantity × `standard_cost` where available) bucketed
+>   by scrap reason code with cumulative %, uncoded scrap in an `unspecified` bucket. Optional
+>   `work_center_id` / `part_id` filters.
+> - **`/adoption`** — the A0.1 paper-to-digital telemetry read side: digital completion % (live
+>   kiosk/desktop/scanner vs. backfill/import vs. unknown channel), clock-in coverage, backfill rate,
+>   a weekly trend, plus **hidden-factory** metrics — rework hours/quantity share, planned-vs-reactive
+>   maintenance mix, and per-work-center MTBF/MTTR.
+>
+> **Provenance rule.** Labor/scrap booked through the `backfill` / `import` channels is **excluded**
+> from the measured baselines (value-add hours, FPY-feeding rework, Pareto buckets, hidden-factory
+> hours) and reported separately on each response (`excluded_backfill_import_*`), so migrated history
+> can't masquerade as measured shop-floor data.
+>
+> **`GET /analytics/kpis` gained two ship-based delivery KPIs.** `on_time_delivery_ship`
+> (fulfillment-anchored ship OTD) and `otif` (promise-anchored on-time-in-full) now ride the KPI
+> dashboard alongside the existing completion-based `on_time_delivery`, as regular `KPIValue`s
+> (value / prior / change / sparkline, nullable per the "n/a" rule below). Semantics and the shared
+> promise precedence (`must_ship_by` || `due_date`) are documented under
+> `GET /reports/ship-otd` (Reports). The fields are optional-with-default in the schema so cached
+> consumers/fixtures keep validating; the live endpoint always populates both.
 
 > **Custom reports are tenant-scoped.** Both `POST /analytics/custom-report` and
 > `GET /analytics/custom-report/export` run the report through the shared `ReportBuilderService`, which
@@ -1564,7 +1675,30 @@ records, targets) require **Admin / Manager / Supervisor**.
 >
 > This endpoint previously referenced `TimeEntry.start_time` / `end_time` (which do not exist) and
 > returned **500** on every call; it now uses `clock_in` / `clock_out`. All queries are tenant-scoped;
-> a foreign `work_center_id` returns **404**.
+> a foreign `work_center_id` returns **404**. The calculation itself lives in
+> `app/services/oee_service.py` (`compute_oee_for_work_center`) — the nightly auto-calc cron runs the
+> **same code** (below), so a manual trigger and the cron can never disagree on the math.
+
+> **One OEE record per (work center, date, shift) — duplicates are 409 (Lean Phase 1).** A unique
+> index (`uq_oee_company_wc_date_shift`, migration `063`) enforces at most one `OEERecord` per
+> company + work center + `record_date` + shift, where a **`null` shift and an empty-string shift are
+> the same "no shift" key**. `POST /oee/records` for an existing key — and a `PUT /oee/records/{id}`
+> whose shift change collides with an existing record — return **409 Conflict** (`"An OEE record
+> already exists for this work center, date, and shift. Update the existing record instead …"`) instead
+> of silently creating a double-counting duplicate. `POST /oee/calculate/{work_center_id}` still
+> **upserts** (overwrites the existing record for the key); only a lost create race surfaces as 409.
+>
+> **`calculation_source` — manual vs. auto (Lean Phase 1).** Every OEE record response now carries
+> `calculation_source`: **`manual`** (hand-entered via `POST /oee/records`, or the on-demand
+> `POST /oee/calculate/{work_center_id}` trigger — a human asked for it; all pre-existing rows
+> backfill to it) or **`auto`** (minted only by the nightly ARQ cron, `run_oee_auto_calc_job` at
+> **02:30 UTC**, which computes **yesterday's** whole-day record per active company + active work
+> center). The cron **never overwrites a `manual` record** — a hand-entered record for that WC/day
+> (any shift) is authoritative and the cron skips the WC; `auto` records **are** recomputed by
+> re-runs (idempotent refresh). Idle work centers (no closed clocked entry and no unplanned downtime
+> that day) are skipped entirely — no staffed time is uncomputable, not an all-zero measurement.
+> Cron-written records are audited with the system as actor. See `docs/DOCKER_PRODUCTION.md` →
+> Background Jobs.
 
 ### Users (Admin)
 

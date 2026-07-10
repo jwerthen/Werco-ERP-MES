@@ -553,4 +553,114 @@ describe('CrewStationKiosk', () => {
       expect(mocked.clearStationToken).toHaveBeenCalled();
     });
   });
+  describe('scrap reason codes (Lean Phase 1)', () => {
+    // Active codes ride the station-authed queue payload (the kiosk's scoped
+    // tokens cannot reach /quality/scrap-reason-codes), so the scrap picker is
+    // codes-mode whenever the tenant has codes and the legacy SCRAP_REASONS
+    // grid otherwise. Server accepts code OR text.
+    const SCRAP_CODES = [
+      { id: 7, code: 'OT', name: 'Out of tolerance', category: 'operator', display_order: 1 },
+      { id: 9, code: 'MAT', name: 'Material defect', category: 'material', display_order: 2 },
+    ];
+
+    it('LEAVE with codes on the queue payload: CODE — Name tiles + optional detail, clock-out carries the code id', async () => {
+      unlockedStation();
+      mocked.getQueue.mockResolvedValue({ ...QUEUE_RES, scrap_reason_codes: SCRAP_CODES });
+      mocked.mintBadgeToken.mockResolvedValue(BOB_MINT);
+      mocked.clockOut.mockResolvedValue({});
+      renderKiosk();
+
+      await openJobDetail();
+      fireEvent.click(screen.getByRole('button', { name: /join \/ leave/i }));
+      scanBadge('E011');
+      expect(await screen.findByText(/clock out — bob t/i)).toBeInTheDocument();
+
+      // Enter 2 scrap — the reason grid is built from the company codes and the
+      // optional detail line appears; confirm stays blocked until a tile is tapped.
+      fireEvent.click(screen.getByTestId('kiosk-qty-scrap'));
+      fireEvent.click(screen.getByTestId('kiosk-key-2'));
+      expect(screen.getByRole('button', { name: 'OT — Out of tolerance' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'MAT — Material defect' })).toBeInTheDocument();
+      expect(screen.getByTestId('kiosk-qty-confirm')).toBeDisabled();
+
+      fireEvent.click(screen.getByRole('button', { name: 'OT — Out of tolerance' }));
+      fireEvent.change(screen.getByTestId('kiosk-scrap-detail'), { target: { value: 'porosity at weld' } });
+      fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
+
+      await waitFor(() =>
+        expect(mocked.clockOut).toHaveBeenCalledWith('op-token-bob', 501, {
+          quantity_produced: 0,
+          quantity_scrapped: 2,
+          scrap_reason: 'porosity at weld',
+          scrap_reason_code_id: 7,
+          source: 'kiosk',
+        })
+      );
+    });
+
+    it('REPORT PRODUCTION threads the code id through the badge-signature step (code-only, no text)', async () => {
+      unlockedStation();
+      mocked.getQueue.mockResolvedValue({ ...QUEUE_RES, scrap_reason_codes: SCRAP_CODES });
+      mocked.mintBadgeToken.mockResolvedValue(ALICE_MINT);
+      mocked.reportProduction.mockResolvedValue({});
+      renderKiosk();
+
+      await openJobDetail();
+      fireEvent.click(screen.getByRole('button', { name: /report production/i }));
+      await screen.findByTestId('kiosk-tally-banner');
+
+      fireEvent.click(screen.getByTestId('kiosk-key-3'));
+      fireEvent.click(screen.getByTestId('kiosk-qty-scrap'));
+      fireEvent.click(screen.getByTestId('kiosk-key-1'));
+      fireEvent.click(screen.getByRole('button', { name: 'MAT — Material defect' }));
+      fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
+
+      await screen.findByText(/scan badge to save/i);
+      scanBadge('E013');
+
+      // Code alone satisfies the scrap-requires-a-reason rule (no typed detail).
+      await waitFor(() =>
+        expect(mocked.reportProduction).toHaveBeenCalledWith('op-token-alice', 31, {
+          quantity_complete_delta: 3,
+          quantity_scrapped_delta: 1,
+          scrap_reason: undefined,
+          scrap_reason_code_id: 9,
+          source: 'kiosk',
+        })
+      );
+    });
+
+    it('empty scrap_reason_codes falls back to the legacy grid: text reason, no detail input, no code id', async () => {
+      unlockedStation();
+      mocked.getQueue.mockResolvedValue({ ...QUEUE_RES, scrap_reason_codes: [] });
+      mocked.mintBadgeToken.mockResolvedValue(BOB_MINT);
+      mocked.clockOut.mockResolvedValue({});
+      renderKiosk();
+
+      await openJobDetail();
+      fireEvent.click(screen.getByRole('button', { name: /join \/ leave/i }));
+      scanBadge('E011');
+      expect(await screen.findByText(/clock out — bob t/i)).toBeInTheDocument();
+
+      fireEvent.click(screen.getByTestId('kiosk-qty-scrap'));
+      fireEvent.click(screen.getByTestId('kiosk-key-2'));
+
+      // Legacy SCRAP_REASONS vocabulary, no optional-detail line.
+      expect(screen.getByRole('button', { name: 'Material defect' })).toBeInTheDocument();
+      expect(screen.queryByTestId('kiosk-scrap-detail')).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Material defect' }));
+      fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
+
+      await waitFor(() =>
+        expect(mocked.clockOut).toHaveBeenCalledWith('op-token-bob', 501, {
+          quantity_produced: 0,
+          quantity_scrapped: 2,
+          scrap_reason: 'Material defect',
+          scrap_reason_code_id: undefined,
+          source: 'kiosk',
+        })
+      );
+    });
+  });
 });

@@ -54,8 +54,27 @@ class WallboardBlockedWorkOrder(BaseModel):
     age_hours: float = 0
 
 
+class WallboardKPIStrip(BaseModel):
+    """Floor-visible trailing-30-day KPI strip (Lean Phase 1 / issue #88).
+
+    Aggregate numbers only -- nothing operator-identifying (public screen).
+    Percentages are 0-100; ``null`` = insufficient data in the window (the TV
+    renders an em dash), never a fake 0/100. Values may be up to ~5 minutes
+    stale (server-side TTL cache so the 30s poll doesn't recompute analytics).
+    """
+
+    otd_ship_pct_30d: Optional[float] = None  # ship-based OTD (full qty shipped on/before promise)
+    fpy_pct_30d: Optional[float] = None  # overall first-pass yield across completed ops
+    scrap_pct_30d: Optional[float] = None  # scrapped / (complete + scrapped) across completed ops
+    open_wip_count: int = 0  # open released WOs (released / in-progress / on-hold)
+    avg_wip_age_days: Optional[float] = None  # mean days since release of open WOs
+
+
 class WallboardResponse(UTCModel):
     work_centers: list[WallboardWorkCenter]
     late_wos: list[WallboardLateWorkOrder]
     blocked_wos: list[WallboardBlockedWorkOrder]
+    # Optional so pre-existing consumers/fixtures are unaffected; the live
+    # builder populates it (null only if the KPI computation itself failed).
+    kpi_strip: Optional[WallboardKPIStrip] = None
     generated_at: datetime

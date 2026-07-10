@@ -1,21 +1,58 @@
+import enum
 from datetime import datetime
 
-from sqlalchemy import Column, Date, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Column, Date, DateTime, Float, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.orm import relationship
 
 from app.db.database import Base
 from app.db.mixins import TenantMixin
 
 
+class CalculationSource(str, enum.Enum):
+    """Vocabulary for ``OEERecord.calculation_source`` (Lean Phase 1).
+
+    Stored as a plain ``String(20)`` (NOT a native SQLEnum) so adding a source
+    never needs an ``ALTER TYPE``. ``MANUAL`` covers hand-entered records and the
+    on-demand ``POST /oee/calculate/{work_center_id}`` trigger (a human asked for
+    it); ``AUTO`` is minted only by the nightly ARQ cron. The cron never
+    overwrites a ``MANUAL`` row; ``AUTO`` rows may be recomputed by re-runs.
+    """
+
+    MANUAL = "manual"
+    AUTO = "auto"
+
+
 class OEERecord(Base, TenantMixin):
     """Daily OEE snapshot per work center"""
 
     __tablename__ = "oee_records"
+    # Lean Phase 1 (migration 063): at most ONE record per (company, work center,
+    # date, shift). ``shift`` is nullable and Postgres unique constraints treat
+    # NULLs as distinct, so the key uses COALESCE(shift, '') -- a NULL shift and an
+    # empty-string shift are deliberately the same "no shift" key. Expression
+    # index (not UniqueConstraint) so both Postgres and the SQLite create_all
+    # path build the same rule; keep in lock-step with migration 063.
+    __table_args__ = (
+        Index(
+            "uq_oee_company_wc_date_shift",
+            "company_id",
+            "work_center_id",
+            "record_date",
+            text("COALESCE(shift, '')"),
+            unique=True,
+        ),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     work_center_id = Column(Integer, ForeignKey("work_centers.id"), nullable=False, index=True)
     record_date = Column(Date, nullable=False, index=True)
     shift = Column(String(50), nullable=True)
+
+    # Lean Phase 1: how this snapshot was produced. 'manual' = hand-entered (all
+    # pre-063 rows backfill to it via server_default); the Phase 1 auto-calculator
+    # will mint its own token when it ships. Plain String (not SQLEnum) so new
+    # sources never need an ALTER TYPE.
+    calculation_source = Column(String(20), nullable=False, default="manual", server_default="manual")
 
     # Availability inputs
     planned_production_time_minutes = Column(Float, nullable=False, default=0.0)

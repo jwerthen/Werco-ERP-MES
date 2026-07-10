@@ -18,8 +18,11 @@ public screen.
 handler so the two surfaces can't drift on what "active/queued" means.
 """
 
+import logging
+import threading
+import time
 from collections import defaultdict
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy import case, func
@@ -34,11 +37,14 @@ from app.schemas.wallboard import (
     WallboardActiveJob,
     WallboardBlockedWorkOrder,
     WallboardDowntime,
+    WallboardKPIStrip,
     WallboardLateWorkOrder,
     WallboardResponse,
     WallboardWorkCenter,
 )
 from app.services.work_order_state_service import operation_target_quantity
+
+logger = logging.getLogger(__name__)
 
 # Blocker states that still block (RESOLVED / DISMISSED do not).
 _UNRESOLVED_BLOCKER_STATUSES = [WorkOrderBlockerStatus.OPEN.value, WorkOrderBlockerStatus.ACKNOWLEDGED.value]
@@ -54,6 +60,76 @@ LABOR_ENTRY_TYPES = [TimeEntryType.SETUP, TimeEntryType.RUN, TimeEntryType.REWOR
 
 # Cap the tickers — a TV ticker cycling 500 rows is unreadable anyway.
 _TICKER_LIMIT = 25
+
+# ── KPI strip cache (Lean Phase 1 / issue #88) ──────────────────────────────
+# The trailing-30-day KPI legs (ship OTD, FPY, scrap rate, WIP aging) are far
+# heavier than the live board queries, and the TV polls every 30s. A coarse
+# per-company in-process TTL cache keeps the strip to ~one analytics pass per
+# 5 minutes per company per worker process — trailing-30-day numbers do not
+# meaningfully change faster than that. Successful computes only are cached; a
+# failed compute returns None (strip omitted) and is retried on the next poll.
+_KPI_STRIP_TTL_SECONDS = 300.0
+_kpi_strip_cache: dict[int, tuple[float, WallboardKPIStrip]] = {}
+_kpi_strip_lock = threading.Lock()
+
+
+def reset_kpi_strip_cache() -> None:
+    """Drop all cached KPI strips (test isolation helper)."""
+    with _kpi_strip_lock:
+        _kpi_strip_cache.clear()
+
+
+def _compute_kpi_strip(db: Session, company_id: int) -> WallboardKPIStrip:
+    """Trailing-30-day floor KPIs via the Lean Phase 1 metric services.
+
+    READ-ONLY like the rest of this builder (all three services only query).
+    Percentages are 0-100; None = insufficient data in the window ("n/a" on
+    the TV), never a fake 0/100. The provenance rule rides along wherever the
+    underlying data supports it (WIP/OTD/FPY are WO/op/shipment-anchored).
+    """
+    # Local imports keep this module cheap to import for its shared helpers
+    # (shop_floor imports LABOR_ENTRY_TYPES et al at startup).
+    from app.services.analytics_service import AnalyticsService
+    from app.services.flow_metrics_service import get_wip_aging
+    from app.services.quality_yield_service import get_fpy_rty, get_scrap_rate
+
+    end = date.today()
+    start = end - timedelta(days=30)
+
+    otd_ship = AnalyticsService(db, company_id).get_ship_otd_value(start, end)
+    fpy = get_fpy_rty(db, company_id, start, end).overall_fpy_pct
+    scrap = get_scrap_rate(db, company_id, start, end)
+    wip = get_wip_aging(db, company_id)
+    ages = [item.days_since_release for item in wip.items if item.days_since_release is not None]
+
+    return WallboardKPIStrip(
+        otd_ship_pct_30d=round(otd_ship, 1) if otd_ship is not None else None,
+        fpy_pct_30d=fpy,
+        scrap_pct_30d=scrap,
+        open_wip_count=wip.total_open,
+        avg_wip_age_days=round(sum(ages) / len(ages), 1) if ages else None,
+    )
+
+
+def get_kpi_strip(db: Session, company_id: int) -> Optional[WallboardKPIStrip]:
+    """Cached KPI strip for one company; None only when the compute failed.
+
+    Best-effort: an analytics failure must never take down the live board, so
+    errors are logged and the strip is simply omitted for that poll.
+    """
+    now_monotonic = time.monotonic()
+    with _kpi_strip_lock:
+        cached = _kpi_strip_cache.get(company_id)
+        if cached is not None and cached[0] > now_monotonic:
+            return cached[1]
+    try:
+        strip = _compute_kpi_strip(db, company_id)
+    except Exception:  # pragma: no cover - strip failure must not break the board
+        logger.exception("wallboard kpi_strip compute failed for company %s", company_id)
+        return None
+    with _kpi_strip_lock:
+        _kpi_strip_cache[company_id] = (now_monotonic + _KPI_STRIP_TTL_SECONDS, strip)
+    return strip
 
 
 def operator_display_name(first_name: Optional[str], last_name: Optional[str]) -> Optional[str]:
@@ -269,5 +345,8 @@ def build_wallboard_payload(db: Session, company_id: int, dept: Optional[str] = 
         work_centers=wc_cards,
         late_wos=late_wos,
         blocked_wos=blocked_wos,
+        # Trailing-30-day floor KPIs, company-wide (NOT narrowed by ``dept`` —
+        # the strip is the same on every TV), TTL-cached, best-effort.
+        kpi_strip=get_kpi_strip(db, company_id),
         generated_at=now,
     )

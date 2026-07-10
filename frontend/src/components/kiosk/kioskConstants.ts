@@ -4,11 +4,13 @@
  * Compliance notes:
  * - Every mutating call from the kiosk reports `source: "kiosk"` — the A0.1
  *   adoption-telemetry channel. Use KIOSK_SOURCE, never a string literal.
- * - Scrap ALWAYS requires an explicit reason chosen from SCRAP_REASONS
- *   (no default, no free text). The chosen label is stored verbatim in the
- *   TimeEntry.scrap_reason column (free string, 255 max) — clock-out and
- *   in-shift production reports both send it as the structured `scrap_reason`
- *   field on their respective endpoints.
+ * - Scrap ALWAYS requires an explicit reason. Lean Phase 1: when the company
+ *   has ACTIVE scrap reason codes (GET /quality/scrap-reason-codes) the kiosk
+ *   picker is built from those codes and sends `scrap_reason_code_id`
+ *   (+ optional free-text detail as `scrap_reason`). SCRAP_REASONS below is
+ *   the FALLBACK vocabulary for companies with zero active codes — the chosen
+ *   label is stored verbatim in the TimeEntry.scrap_reason column (free
+ *   string, 255 max) on clock-out and in-shift production reports.
  * - Hold reasons mirror the backend WorkOrderBlockerCategory enum
  *   (backend/app/models/work_order_blocker.py) so a kiosk hold files the same
  *   structured blocker a supervisor would. The backend only files a blocker
@@ -26,7 +28,11 @@ export interface KioskReason {
   label: string;
 }
 
-/** Shop-standard scrap reasons. Stored verbatim as TimeEntry.scrap_reason. */
+/**
+ * Shop-standard FALLBACK scrap reasons, stored verbatim as
+ * TimeEntry.scrap_reason. Used only when the company has no active scrap
+ * reason codes (Lean Phase 1) — codes take precedence everywhere.
+ */
 export const SCRAP_REASONS: KioskReason[] = [
   { value: 'Setup / first article', label: 'Setup / First article' },
   { value: 'Out of tolerance', label: 'Out of tolerance' },

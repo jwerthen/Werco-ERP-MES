@@ -24,6 +24,7 @@ import {
   getWallboardToken,
 } from '../services/wallboardClient';
 import type {
+  WallboardKpiStrip,
   WallboardResponse,
   WallboardWorkCenter,
 } from '../types/wallboard';
@@ -41,6 +42,74 @@ function formatElapsed(minutes: number): string {
 
 function blockerLabel(category: string): string {
   return category.replace(/_/g, ' ');
+}
+
+// ---- KPI strip (Lean Phase 1, issue #88) -----------------------------------
+// 30-day OTD (shipped) / FPY / scrap % plus live WIP figures. Every value is
+// nullable (empty denominator) and the whole block is optional on the payload
+// — an older backend simply doesn't render the strip.
+
+const KPI_GREEN = '#3fb950';
+const KPI_AMBER = '#d29922';
+const KPI_RED = '#f04438';
+const KPI_MUTE = '#8b98a9';
+
+function pctColor(value: number | null, goodHigh: boolean): string {
+  if (value === null) return KPI_MUTE;
+  if (goodHigh) return value >= 95 ? KPI_GREEN : value >= 85 ? KPI_AMBER : KPI_RED;
+  // Lower-is-better (scrap %).
+  return value <= 2 ? KPI_GREEN : value <= 5 ? KPI_AMBER : KPI_RED;
+}
+
+function kpiPct(value: number | null): string {
+  return value === null ? '—' : `${value.toFixed(1)}%`;
+}
+
+function kpiNum(value: number | null, digits = 0, suffix = ''): string {
+  return value === null ? '—' : `${value.toFixed(digits)}${suffix}`;
+}
+
+function KpiCell({ label, value, color }: { label: string; value: string; color?: string }) {
+  return (
+    // shrink-0: on a narrow screen the strip scrolls horizontally rather than
+    // letting the nowrap labels compress into each other.
+    <div className="flex flex-col items-center gap-1 px-6 py-3 shrink-0">
+      <span className="text-lg uppercase tracking-widest text-[#8b98a9] whitespace-nowrap">{label}</span>
+      <span
+        className="text-5xl font-bold tabular-nums whitespace-nowrap"
+        style={{ color: color ?? '#f0f4f9' }}
+      >
+        {value}
+      </span>
+    </div>
+  );
+}
+
+function WallboardKpiStripRow({ kpis }: { kpis: WallboardKpiStrip }) {
+  return (
+    <div
+      data-testid="wallboard-kpi-strip"
+      className="flex items-stretch justify-evenly border-b border-[#243042] bg-[#0d1117] divide-x divide-[#243042] shrink-0 overflow-x-auto"
+    >
+      <KpiCell
+        label="OTD 30d"
+        value={kpiPct(kpis.otd_ship_pct_30d ?? null)}
+        color={pctColor(kpis.otd_ship_pct_30d ?? null, true)}
+      />
+      <KpiCell
+        label="FPY 30d"
+        value={kpiPct(kpis.fpy_pct_30d ?? null)}
+        color={pctColor(kpis.fpy_pct_30d ?? null, true)}
+      />
+      <KpiCell
+        label="Scrap 30d"
+        value={kpiPct(kpis.scrap_pct_30d ?? null)}
+        color={pctColor(kpis.scrap_pct_30d ?? null, false)}
+      />
+      <KpiCell label="Open WOs" value={kpiNum(kpis.open_wip_count ?? null)} />
+      <KpiCell label="Avg WIP Age" value={kpiNum(kpis.avg_wip_age_days ?? null, 1, 'd')} />
+    </div>
+  );
 }
 
 export default function Wallboard() {
@@ -174,6 +243,10 @@ export default function Wallboard() {
           </span>
         </div>
       </header>
+
+      {/* KPI strip — only when the payload carries it (older backends omit
+          kpi_strip entirely; the board must render unchanged). */}
+      {data?.kpi_strip && <WallboardKpiStripRow kpis={data.kpi_strip} />}
 
       {/* Body */}
       <main className="flex-1 overflow-hidden p-6">

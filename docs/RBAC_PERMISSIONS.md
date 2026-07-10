@@ -284,6 +284,7 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 | Inspect | ✓ | ✓ | ✓ | | ✓ | | |
 | Approve | ✓ | ✓ | | | ✓ | | |
 | Calibration | ✓ | ✓ | | | ✓ | | |
+| Manage scrap reason codes | ✓ | ✓ | | | ✓ | | |
 
 > **Inspect — endpoint mapping.** The shop-floor inspection sign-off
 > `POST /api/v1/shop-floor/operations/{operation_id}/inspection` (which records
@@ -292,6 +293,16 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > `require_role([ADMIN, MANAGER, SUPERVISOR, QUALITY])` (`app/api/endpoints/shop_floor.py`,
 > `mark_operation_inspected`). The role set matches the matrix exactly — this repo has no separate
 > `INSPECTOR` role, so operation inspection is performed by Admin / Manager / Supervisor / Quality.
+>
+> **Scrap reason codes (Lean Phase 1) — read-broad / write-restricted.** Managing the tenant's
+> structured scrap vocabulary (`POST /api/v1/quality/scrap-reason-codes`,
+> `PUT /quality/scrap-reason-codes/{id}`) is a quality-system configuration task, enforced **in
+> code** via `require_role([ADMIN, MANAGER, QUALITY])` (`SCRAP_REASON_WRITE_ROLES` in
+> `app/api/endpoints/scrap_reasons.py`) — the same write set that owns the NCR/CAR vocabulary. The
+> **read** (`GET /quality/scrap-reason-codes`) depends on `get_current_user` only — any
+> authenticated user in the tenant, including Operators via the kiosk/desktop scrap pickers — so
+> the matrix row above reflects the server-enforced **write** control. There is no delete endpoint:
+> retirement is `is_active: false` (historical scrap rows reference these ids — traceability).
 
 ### Operator Certifications & Training
 
@@ -428,7 +439,24 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
 |------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
 | View | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Flow / WIP-aging / adoption (Lean Phase 1) | ✓ | ✓ | ✓ | | | | |
+| FPY / scrap Pareto (Lean Phase 1) | ✓ | ✓ | ✓ | | ✓ | | |
 | Export | ✓ | ✓ | | | | | |
+
+> **Lean Phase 1 analytics reads are role-gated in code.** `GET /api/v1/analytics/flow`,
+> `GET /analytics/wip-aging`, and `GET /analytics/adoption` require
+> `require_role([ADMIN, MANAGER, SUPERVISOR])`; `GET /analytics/fpy` and
+> `GET /analytics/scrap-pareto` additionally admit **Quality**
+> (`require_role([ADMIN, MANAGER, SUPERVISOR, QUALITY])`) — yield and scrap categorization are
+> quality-system reads. All five are read-only and tenant-scoped (`app/api/endpoints/analytics.py`).
+> The pre-existing View row (overview / KPIs / trends / quality metrics) remains any-authenticated.
+>
+> **`GET /reports/ship-otd` is any-authenticated (pre-existing reports posture).** The Lean Phase 1
+> ship-based OTD/OTIF detail report follows `reports.py`'s convention — `get_current_user` only, no
+> role gate, tenant-scoped. **Observation (compliance review, 2026-07-10):** this report exposes
+> customer-name delivery rollups (per-customer OTD %, late counts) to every role in the tenant,
+> including Operator/Viewer, under that pre-existing posture. If reports are later role-tiered,
+> this endpoint should be revisited with the rest of `/reports/*`.
 
 ### OEE
 

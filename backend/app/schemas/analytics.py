@@ -52,6 +52,14 @@ class KPIDashboard(UTCModel):
     quote_win_rate: KPIValue
     backlog_hours: KPIValue
     inventory_turnover: KPIValue
+    # Lean Phase 1 (issue #88): SHIP-based delivery KPIs alongside the completion-based
+    # on_time_delivery above. ``on_time_delivery_ship`` anchors on fulfillment (WOs whose
+    # FULL quantity finished shipping in the window, on/before promise = must_ship_by ||
+    # due_date); ``otif`` anchors on the promise date (WOs promised in the window that had
+    # shipped in full BY that date). Optional+defaulted so pre-existing consumers/fixtures
+    # of this payload keep validating; the live endpoint always populates both.
+    on_time_delivery_ship: Optional[KPIValue] = None
+    otif: Optional[KPIValue] = None
     period_start: date
     period_end: date
     generated_at: datetime
@@ -358,3 +366,261 @@ class InventoryDemandResponse(BaseModel):
     predictions: List[StockoutPrediction]
     critical_count: int
     warning_count: int
+
+
+# ============ SHIP-BASED OTD / OTIF (Lean Phase 1, issue #88) ============
+
+
+class ShipOTDRow(UTCModel):
+    """One work order's ship-vs-promise record for the detail report."""
+
+    work_order_id: int
+    work_order_number: str
+    customer_name: Optional[str] = None
+    part_number: Optional[str] = None
+    status: str
+    quantity_ordered: float
+    quantity_shipped: float  # cumulative shipped to date (all non-cancelled shipments)
+    promise_source: Optional[str] = None  # 'must_ship_by' | 'due_date' | None
+    promise_date: Optional[date] = None
+    first_ship_date: Optional[date] = None
+    last_ship_date: Optional[date] = None
+    # Date the cumulative shipped quantity first reached the ordered quantity.
+    full_ship_date: Optional[date] = None
+    fully_shipped: bool = False
+    # True/False once determinable; None while open with the promise still in the future.
+    on_time: Optional[bool] = None
+    # full_ship - promise (positive = late). For an open WO past promise: days past
+    # promise so far (grows daily until it ships).
+    days_late: Optional[int] = None
+
+
+class ShipOTDCustomerRollup(BaseModel):
+    customer_name: str
+    work_orders: int
+    on_time: int
+    late: int
+    otd_pct: Optional[float] = None
+    avg_days_late: Optional[float] = None
+
+
+class PromiseHygieneRow(UTCModel):
+    """WO shipped/open with NEITHER must_ship_by nor due_date -- unmeasurable."""
+
+    work_order_id: int
+    work_order_number: str
+    customer_name: Optional[str] = None
+    status: str
+    quantity_ordered: float
+    quantity_shipped: float
+    last_ship_date: Optional[date] = None
+
+
+class ShipOTDReportResponse(UTCModel):
+    period_start: date
+    period_end: date
+    # Headline values match the KPI dashboard legs: fulfillment-anchored OTD and
+    # promise-anchored OTIF. None = empty denominator ("n/a"), never a fake 100.
+    otd_ship_pct: Optional[float] = None
+    otif_pct: Optional[float] = None
+    rows: List[ShipOTDRow]
+    by_customer: List[ShipOTDCustomerRollup]
+    promise_hygiene: List[PromiseHygieneRow]
+    generated_at: datetime
+
+
+# ============ FLOW METRICS (Lean Phase 1, issue #88) ============
+
+
+class FlowWorkOrderDetail(UTCModel):
+    """Measured flow for one work order completed in the window."""
+
+    work_order_id: int
+    work_order_number: str
+    part_number: Optional[str] = None
+    customer_name: Optional[str] = None
+    released_at: Optional[datetime] = None
+    actual_end: Optional[datetime] = None
+    first_ship_date: Optional[date] = None
+    last_ship_date: Optional[date] = None
+    lead_time_days: Optional[float] = None  # released_at -> actual_end
+    release_to_first_ship_days: Optional[float] = None
+    release_to_last_ship_days: Optional[float] = None
+    # Value-add labor (RUN TimeEntry hours; backfill/import excluded per provenance rule).
+    value_add_hours: float = 0.0
+    pce_pct: Optional[float] = None  # value_add_hours / (lead_time_days * 24)
+
+
+class QueueTimeByWorkCenter(BaseModel):
+    work_center_id: int
+    work_center_code: Optional[str] = None
+    work_center_name: Optional[str] = None
+    avg_queue_hours: Optional[float] = None
+    max_queue_hours: Optional[float] = None
+    samples: int = 0
+    # How many samples were measured from an operation_ready event (vs the
+    # predecessor actual_end -> actual_start fallback).
+    from_ready_events: int = 0
+
+
+class FlowSummary(BaseModel):
+    work_orders_completed: int
+    avg_lead_time_days: Optional[float] = None
+    median_lead_time_days: Optional[float] = None
+    avg_release_to_last_ship_days: Optional[float] = None
+    avg_queue_hours: Optional[float] = None
+    # Little's Law: avg open-WO count / (completions per day) over the window.
+    avg_wip: Optional[float] = None
+    daily_completion_rate: Optional[float] = None
+    littles_law_throughput_days: Optional[float] = None
+    avg_pce_pct: Optional[float] = None
+    # Provenance rule: labor booked via backfill/import channels, excluded from the
+    # value-add baseline above and reported separately here.
+    excluded_backfill_import_hours: float = 0.0
+
+
+class FlowMetricsResponse(UTCModel):
+    period_start: date
+    period_end: date
+    summary: FlowSummary
+    work_orders: List[FlowWorkOrderDetail]
+    queue_by_work_center: List[QueueTimeByWorkCenter]
+    generated_at: datetime
+
+
+class WIPAgingItem(UTCModel):
+    work_order_id: int
+    work_order_number: str
+    part_number: Optional[str] = None
+    customer_name: Optional[str] = None
+    status: str
+    priority: Optional[int] = None
+    quantity_ordered: float
+    quantity_complete: float
+    released_at: Optional[datetime] = None
+    days_since_release: Optional[float] = None
+    current_operation_id: Optional[int] = None
+    current_operation_number: Optional[str] = None
+    current_operation_name: Optional[str] = None
+    current_work_center_name: Optional[str] = None
+    # Days since the current operation started (its actual_start) or, when it has
+    # not started, since it became READY (operation_ready event) -- None if neither.
+    days_in_current_operation: Optional[float] = None
+    due_date: Optional[date] = None
+    days_to_due: Optional[int] = None  # negative = past due
+
+
+class WIPAgingResponse(UTCModel):
+    items: List[WIPAgingItem]
+    total_open: int
+    generated_at: datetime
+
+
+# ============ FPY / RTY + SCRAP PARETO (Lean Phase 1, issue #88) ============
+
+
+class FPYGroup(BaseModel):
+    """Quantity-weighted FPY (and RTY where applicable) for one part/work center."""
+
+    key: str  # part_number or work-center code
+    name: Optional[str] = None
+    operations: int = 0
+    units_attempted: float = 0.0  # quantity_complete + quantity_scrapped
+    first_pass_units: float = 0.0  # complete - reworked - scrapped (clamped >= 0)
+    fpy_pct: Optional[float] = None
+    # Per part: mean of its window WOs' RTY (product of per-op FPYs). None for WC rows.
+    rty_pct: Optional[float] = None
+    work_orders: int = 0
+
+
+class FPYResponse(UTCModel):
+    period_start: date
+    period_end: date
+    overall_fpy_pct: Optional[float] = None
+    overall_rty_pct: Optional[float] = None
+    by_part: List[FPYGroup]
+    by_work_center: List[FPYGroup]
+    generated_at: datetime
+
+
+class ScrapParetoBucket(BaseModel):
+    scrap_reason_code_id: Optional[int] = None  # None = the 'unspecified' bucket
+    code: str  # reason code, or 'unspecified'
+    name: Optional[str] = None
+    category: Optional[str] = None
+    quantity: float = 0.0
+    cost: float = 0.0  # quantity x part.standard_cost where available
+    percentage: float = 0.0  # share of total quantity
+    cumulative_pct: float = 0.0
+
+
+class ScrapParetoResponse(UTCModel):
+    period_start: date
+    period_end: date
+    total_quantity: float
+    total_cost: float
+    buckets: List[ScrapParetoBucket]
+    # Provenance rule: scrap booked on backfill/import-sourced time entries,
+    # excluded from the buckets above and reported separately.
+    excluded_backfill_import_quantity: float = 0.0
+    generated_at: datetime
+
+
+# ============ ADOPTION + HIDDEN FACTORY (Lean Phase 1, issue #88) ============
+
+
+class AdoptionWeek(UTCModel):
+    week_start: date
+    operation_completions: int = 0
+    live_completions: int = 0  # event payload source in kiosk/desktop/scanner
+    backfill_completions: int = 0  # source in backfill/import
+    unknown_completions: int = 0  # no source reported
+    digital_completion_pct: Optional[float] = None  # live / all completions
+    clock_in_coverage_pct: Optional[float] = None  # completed ops with >=1 live labor entry
+    time_entries: int = 0
+    backfill_entries: int = 0
+    backfill_rate_pct: Optional[float] = None  # backfill+import entries / all entries
+
+
+class MaintenanceMixMetrics(BaseModel):
+    planned_count: int = 0  # preventive + predictive
+    reactive_count: int = 0  # corrective + emergency
+    planned_pct: Optional[float] = None
+
+
+class WorkCenterReliability(BaseModel):
+    work_center_id: int
+    work_center_code: Optional[str] = None
+    work_center_name: Optional[str] = None
+    unplanned_downtime_events: int = 0
+    unplanned_downtime_hours: float = 0.0
+    staffed_run_hours: float = 0.0  # clocked RUN+SETUP hours (provenance-filtered)
+    mtbf_hours: Optional[float] = None  # staffed run hours / unplanned event count
+    mttr_hours: Optional[float] = None  # mean unplanned event duration (full span)
+
+
+class HiddenFactoryMetrics(BaseModel):
+    rework_hours: float = 0.0
+    total_labor_hours: float = 0.0
+    rework_hours_pct: Optional[float] = None
+    rework_quantity: float = 0.0
+    total_quantity: float = 0.0
+    rework_quantity_pct: Optional[float] = None
+    maintenance: MaintenanceMixMetrics
+    reliability_by_work_center: List[WorkCenterReliability]
+    # Provenance rule: labor hours booked via backfill/import, excluded above.
+    excluded_backfill_import_hours: float = 0.0
+
+
+class AdoptionMetricsResponse(UTCModel):
+    period_start: date
+    period_end: date
+    digital_completion_pct: Optional[float] = None
+    clock_in_coverage_pct: Optional[float] = None
+    backfill_rate_pct: Optional[float] = None
+    live_completions: int = 0
+    backfill_completions: int = 0
+    unknown_completions: int = 0
+    weekly: List[AdoptionWeek]
+    hidden_factory: HiddenFactoryMetrics
+    generated_at: datetime

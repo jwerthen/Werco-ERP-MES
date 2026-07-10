@@ -11,6 +11,7 @@
  */
 
 import type { KioskCrewQueueItem } from '../components/kiosk/kioskConstants';
+import type { ScrapReasonCodeOption } from './scrapReason';
 
 // ---- Station tier (PIN → 24h scoped station token) ----
 
@@ -46,6 +47,14 @@ export interface KioskCrewQueueResponse {
   /** UTC ISO server clock at response time — anchor for honest elapsed timers. */
   server_time: string;
   station: KioskStationSummary;
+  /**
+   * ACTIVE scrap reason codes for the crew-station scrap picker (Lean Phase 1).
+   * Rides this station-authed read because the kiosk's scoped tokens cannot
+   * reach GET /quality/scrap-reason-codes (path fence). display_order-then-code
+   * sorted server-side; [] = tenant has no codes -> legacy SCRAP_REASONS
+   * fallback. Optional so a pre-Lean backend payload cannot crash the board.
+   */
+  scrap_reason_codes?: ScrapReasonCodeOption[];
 }
 
 // ---- Operator tier (badge → 5-minute scope:"kiosk" access token) ----

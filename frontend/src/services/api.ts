@@ -41,6 +41,15 @@ import {
 } from '../types/aiForward';
 import { AIUsageSummaryResponse } from '../types/aiUsage';
 import { DisplayToken, DisplayTokenCreateInput, DisplayTokenIssued } from '../types/wallboard';
+import { ScrapReasonCode } from '../types/scrapReason';
+import {
+  AdoptionMetricsResponse,
+  FlowMetricsResponse,
+  FpyResponse,
+  ScrapParetoResponse,
+  ShipOtdReportResponse,
+  WipAgingResponse,
+} from '../types/leanAnalytics';
 import {
   CopilotChatRequest,
   CopilotChatResponse,
@@ -816,17 +825,23 @@ class ApiService {
     id: number,
     quantityComplete: number,
     quantityScrapped = 0,
-    scrapReason?: string | null
+    scrapReason?: string | null,
+    scrapReasonCodeId?: number | null
   ) {
-    // scrap_reason is required by the backend (HTTP 422) when scrap > 0 — an
-    // AS9100D defect-traceability rule. Only send it when there is scrap so the
-    // signature stays backward-compatible for the no-scrap path.
+    // A scrap reason (code OR non-blank text) is required by the backend
+    // (HTTP 422) when scrap > 0 — an AS9100D defect-traceability rule. Only
+    // send the fields when there is scrap so the signature stays
+    // backward-compatible for the no-scrap path. Lean Phase 1: the structured
+    // scrap_reason_code_id rides along when a company-managed code was chosen.
     const params: Record<string, number | string> = {
       quantity_complete: quantityComplete,
       quantity_scrapped: quantityScrapped,
     };
     if (quantityScrapped > 0 && scrapReason) {
       params.scrap_reason = scrapReason;
+    }
+    if (quantityScrapped > 0 && scrapReasonCodeId != null) {
+      params.scrap_reason_code_id = scrapReasonCodeId;
     }
     const response = await this.api.post(`/work-orders/${id}/complete`, null, { params });
     this.invalidateDashboardCache();
@@ -1019,7 +1034,7 @@ class ApiService {
     return response.data;
   }
 
-  async clockOut(timeEntryId: number, data: { quantity_produced: number; quantity_scrapped?: number; scrap_reason?: string; notes?: string; source?: string }) {
+  async clockOut(timeEntryId: number, data: { quantity_produced: number; quantity_scrapped?: number; scrap_reason?: string; scrap_reason_code_id?: number; notes?: string; source?: string }) {
     const response = await this.api.post(`/shop-floor/clock-out/${timeEntryId}`, data);
     this.invalidateDashboardCache();
     return response.data;
@@ -1269,7 +1284,7 @@ class ApiService {
     return response.data;
   }
 
-  async reportOperationProduction(operationId: number, data: { quantity_complete_delta?: number; quantity_scrapped_delta?: number; notes?: string; scrap_reason?: string; source?: string }) {
+  async reportOperationProduction(operationId: number, data: { quantity_complete_delta?: number; quantity_scrapped_delta?: number; notes?: string; scrap_reason?: string; scrap_reason_code_id?: number; source?: string }) {
     const response = await this.api.post(`/shop-floor/operations/${operationId}/production`, data);
     this.invalidateDashboardCache();
     return response.data;
@@ -3062,6 +3077,75 @@ class ApiService {
 
   async getDataSources() {
     const response = await this.api.get('/analytics/data-sources');
+    return response.data;
+  }
+
+  // Lean Phase 1 (issue #88) — flow / yield / adoption analytics + ship OTD.
+  // Backend RBAC: flow, wip-aging, and adoption are ADMIN/MANAGER/SUPERVISOR;
+  // fpy and scrap-pareto additionally allow QUALITY; ship-otd is any user.
+  // Callers gate their UI accordingly (see Analytics flow view).
+  async getFlowMetrics(period = '30d'): Promise<FlowMetricsResponse> {
+    const response = await this.api.get<FlowMetricsResponse>('/analytics/flow', { params: { period } });
+    return response.data;
+  }
+
+  async getWipAging(): Promise<WipAgingResponse> {
+    const response = await this.api.get<WipAgingResponse>('/analytics/wip-aging');
+    return response.data;
+  }
+
+  async getFpyAnalytics(params?: { period?: string; work_center_id?: number; part_id?: number }): Promise<FpyResponse> {
+    const response = await this.api.get<FpyResponse>('/analytics/fpy', { params });
+    return response.data;
+  }
+
+  async getScrapPareto(params?: { period?: string; work_center_id?: number; part_id?: number }): Promise<ScrapParetoResponse> {
+    const response = await this.api.get<ScrapParetoResponse>('/analytics/scrap-pareto', { params });
+    return response.data;
+  }
+
+  async getAdoptionMetrics(period = '30d'): Promise<AdoptionMetricsResponse> {
+    const response = await this.api.get<AdoptionMetricsResponse>('/analytics/adoption', { params: { period } });
+    return response.data;
+  }
+
+  async getShipOtdReport(params?: { period?: string; start_date?: string; end_date?: string }): Promise<ShipOtdReportResponse> {
+    const response = await this.api.get<ShipOtdReportResponse>('/reports/ship-otd', { params });
+    return response.data;
+  }
+
+  // Scrap reason codes (Lean Phase 1) — company-managed scrap vocabulary.
+  // Reads are any authenticated user (the pickers); writes are
+  // ADMIN/MANAGER/QUALITY (mirrors backend SCRAP_REASON_WRITE_ROLES).
+  async getScrapReasonCodes(params?: { category?: string; include_inactive?: boolean }): Promise<ScrapReasonCode[]> {
+    const response = await this.api.get<ScrapReasonCode[]>('/quality/scrap-reason-codes', { params });
+    return response.data;
+  }
+
+  async createScrapReasonCode(data: {
+    code: string;
+    name: string;
+    category?: string;
+    description?: string | null;
+    is_active?: boolean;
+    display_order?: number;
+  }): Promise<ScrapReasonCode> {
+    const response = await this.api.post<ScrapReasonCode>('/quality/scrap-reason-codes', data);
+    return response.data;
+  }
+
+  async updateScrapReasonCode(
+    id: number,
+    data: {
+      code?: string;
+      name?: string;
+      category?: string;
+      description?: string | null;
+      is_active?: boolean;
+      display_order?: number;
+    }
+  ): Promise<ScrapReasonCode> {
+    const response = await this.api.put<ScrapReasonCode>(`/quality/scrap-reason-codes/${id}`, data);
     return response.data;
   }
 

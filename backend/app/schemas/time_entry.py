@@ -56,6 +56,14 @@ class ClockOut(BaseModel):
         description="Reason for scrapped parts; omit when nothing was scrapped -- an omitted "
         "reason never clears one recorded by an in-shift production report.",
     )
+    # Lean Phase 1: structured scrap categorization. Validated server-side (must
+    # exist, be active, and belong to the active company); free-text scrap_reason
+    # stays as narrative detail alongside it.
+    scrap_reason_code_id: Optional[int] = Field(
+        None,
+        description="Id of a predefined scrap reason code (see /quality/scrap-reason-codes). "
+        "Preferred over free text; either satisfies the scrap-requires-a-reason rule.",
+    )
     notes: Optional[str] = None
     # A0.1 adoption telemetry: channel of THIS clock-out write. Optional; when
     # omitted the entry keeps whatever channel clock-in recorded.
@@ -70,12 +78,17 @@ class ClockOut(BaseModel):
         # AS9100D defect-traceability invariant (compliance, not cosmetics): any scrapped
         # quantity MUST carry a reason. Enforced at the data boundary -- not just in the
         # kiosk/desktop UIs -- so a scripted/API client can't record reasonless scrap.
+        # Lean Phase 1: EITHER a structured scrap_reason_code_id OR non-blank free text
+        # satisfies the rule (code preferred; old clients sending only text keep working).
         # A blank/whitespace-only reason is treated as missing. Raised as a Pydantic
         # ValueError -> FastAPI returns 422. scrap == 0 with no reason stays valid (the
         # kiosk COMPLETE flow clocks out with zero scrap and no reason); negatives/NaN
         # fall through to the handler's existing numeric guards.
-        if (self.quantity_scrapped or 0) > 0 and not (self.scrap_reason and self.scrap_reason.strip()):
-            raise ValueError("scrap_reason is required when quantity_scrapped is greater than 0")
+        has_reason = (self.scrap_reason and self.scrap_reason.strip()) or self.scrap_reason_code_id is not None
+        if (self.quantity_scrapped or 0) > 0 and not has_reason:
+            raise ValueError(
+                "scrap_reason or scrap_reason_code_id is required when quantity_scrapped is greater than 0"
+            )
         return self
 
 
@@ -104,6 +117,8 @@ class TimeEntryResponse(TimeEntryBase):
     quantity_produced: float
     quantity_scrapped: float
     scrap_reason: Optional[str]
+    # Lean Phase 1: structured scrap categorization (null = uncoded/legacy row).
+    scrap_reason_code_id: Optional[int] = None
     downtime_reason: Optional[str]
     approved: Optional[datetime]
     approved_by: Optional[int]

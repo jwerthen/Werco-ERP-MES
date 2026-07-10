@@ -14,6 +14,10 @@ import QualityPage from './Quality';
 import api from '../services/api';
 import { ToastProvider } from '../components/ui/Toast';
 
+jest.mock('../hooks/usePermissions', () => ({
+  usePermissions: () => ({ can: () => true, canAny: () => true }),
+}));
+
 jest.mock('../services/api', () => ({
   __esModule: true,
   default: {

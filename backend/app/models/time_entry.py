@@ -36,6 +36,18 @@ class TimeEntrySource(str, enum.Enum):
     BACKFILL = "backfill"
 
 
+# Lean Phase 1 provenance rule, co-located with the vocabulary it partitions:
+# every flow/quality/adoption metric EXCLUDES rows whose source is a
+# backfill/bulk-import channel from its baseline and reports them separately --
+# paper catch-up and migration loads must never masquerade as live capture.
+# NULL source (unknown/legacy, or the office UI before A0.1) stays IN the
+# baseline: it is real contemporaneous work, just with an unreported channel.
+BASELINE_EXCLUDED_SOURCES = [TimeEntrySource.IMPORT.value, TimeEntrySource.BACKFILL.value]
+
+# The channels that count as LIVE digital capture for adoption metrics (A0.1).
+LIVE_CAPTURE_SOURCES = [TimeEntrySource.KIOSK.value, TimeEntrySource.DESKTOP.value, TimeEntrySource.SCANNER.value]
+
+
 class TimeEntry(Base, TenantMixin):
     """Time tracking for shop floor labor"""
 
@@ -90,6 +102,9 @@ class TimeEntry(Base, TenantMixin):
     # Notes and reason codes
     notes = Column(Text)
     scrap_reason = Column(String(255))
+    # Lean Phase 1: structured scrap categorization. Nullable -- historical rows and
+    # scrap=0 writes have no code; the free-text scrap_reason stays as narrative detail.
+    scrap_reason_code_id = Column(Integer, ForeignKey("scrap_reason_codes.id"), nullable=True)
     downtime_reason = Column(String(255))
 
     # Approval workflow
@@ -105,3 +120,4 @@ class TimeEntry(Base, TenantMixin):
     work_order = relationship("WorkOrder", back_populates="time_entries")
     operation = relationship("WorkOrderOperation", back_populates="time_entries")
     work_center = relationship("WorkCenter", back_populates="time_entries")
+    scrap_reason_code = relationship("ScrapReasonCode", foreign_keys=[scrap_reason_code_id])

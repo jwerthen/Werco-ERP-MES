@@ -151,8 +151,9 @@ describe('FEPERF-4: WorkOrderDetail Complete double-submit guard', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: /^Complete$/ }));
 
     await waitFor(() => {
-      // qty complete defaults to ordered (10), scrap 0, scrapReason undefined.
-      expect(mockedApi.completeWorkOrder).toHaveBeenCalledWith(42, 10, 0, undefined);
+      // qty complete defaults to ordered (10), scrap 0, scrapReason and
+      // scrapReasonCodeId (Lean Phase 1) both undefined.
+      expect(mockedApi.completeWorkOrder).toHaveBeenCalledWith(42, 10, 0, undefined, undefined);
     });
   });
 
@@ -182,7 +183,8 @@ describe('FEPERF-4: WorkOrderDetail Complete double-submit guard', () => {
     fireEvent.click(submit);
 
     await waitFor(() => {
-      expect(mockedApi.completeWorkOrder).toHaveBeenCalledWith(42, 10, 2, 'Out of tolerance');
+      // Legacy fallback (no company scrap codes): text reason, no code id.
+      expect(mockedApi.completeWorkOrder).toHaveBeenCalledWith(42, 10, 2, 'Out of tolerance', undefined);
     });
   });
 });
