@@ -119,8 +119,16 @@ class OperationalEventService:
         semantics of the ``emit_*_event`` helpers in
         ``services/completion_signal_service.py``: catch everything (tenant
         validation, event construction, the flush), log with context, and continue.
-        Like ``emit`` it only flushes -- never commits -- so the caller's unit of
-        work is unaffected and still commits.
+        Like ``emit`` it only flushes -- never commits.
+
+        Caveat (identical to the completion_signal_service guards): pre-flush
+        failures (tenant validation, construction, serialization) are the fully
+        protected class. If ``flush()`` itself fails at the DB, the swallowed
+        exception still deactivates the session's outer transaction, so the
+        caller's next flush/commit raises ``PendingRollbackError`` -- the true
+        cause survives only in this WARNING log. Wrapping the emit in
+        ``begin_nested()`` would close that residue (see
+        ``migration_import_service.py`` for the savepoint precedent).
 
         Use plain ``emit`` only where recording the event IS the operation (e.g.
         ``POST /operational-events``) and a failure should surface to the caller.
