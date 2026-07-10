@@ -740,6 +740,13 @@ function AppRoutes() {
           </Layout>
         </PrivateRoute>
       } />
+      <Route path="/analytics/flow" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><Analytics /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
       <Route path="/analytics/reports" element={
         <PrivateRoute>
           <Layout>

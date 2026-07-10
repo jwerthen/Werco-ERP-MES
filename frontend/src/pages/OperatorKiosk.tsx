@@ -39,6 +39,7 @@ import {
   stepsIncompleteMessage,
 } from '../utils/processSheetErrors';
 import type { MissingStepInfo, QualityHoldResult } from '../types/processSheet';
+import { useScrapReasonCodes } from '../hooks/useScrapReasonCodes';
 
 const POLL_INTERVAL_MS = 15_000;
 
@@ -109,6 +110,11 @@ export default function OperatorKiosk() {
   const [holdReason, setHoldReason] = useState<string | null>(null);
   const [toasts, setToasts] = useState<KioskToast[]>([]);
   const [nowMs, setNowMs] = useState(() => Date.now());
+
+  // Lean Phase 1: company scrap reason codes for the scrap picker (this kiosk
+  // runs on a normal user session, so the /quality read works). Fail-soft: an
+  // empty list falls back to the legacy SCRAP_REASONS tiles.
+  const { codes: scrapCodes } = useScrapReasonCodes(isAuthenticated);
 
   const showToast = useCallback((type: KioskToast['type'], message: string) => {
     const id = ++toastSeq;
@@ -213,7 +219,7 @@ export default function OperatorKiosk() {
   );
 
   const handleReportProduction = useCallback(
-    async (job: ActiveJob, good: number, scrap: number, scrapReason: string | null) => {
+    async (job: ActiveJob, good: number, scrap: number, scrapReason: string | null, scrapReasonCodeId: number | null) => {
       if (!job.operation_id) return;
       setBusy(true);
       try {
@@ -222,7 +228,9 @@ export default function OperatorKiosk() {
           quantity_scrapped_delta: scrap,
           // Structured scrap reason (same TimeEntry.scrap_reason column clock-out
           // writes). The kiosk has no free-text notes input, so `notes` is not sent.
+          // Lean Phase 1: the company scrap CODE id rides along when one was tapped.
           scrap_reason: scrap > 0 && scrapReason ? scrapReason : undefined,
+          scrap_reason_code_id: scrap > 0 && scrapReasonCodeId != null ? scrapReasonCodeId : undefined,
           source: KIOSK_SOURCE,
         });
         showToast('success', scrap > 0 ? `Saved ${good} good, ${scrap} scrap` : `Saved ${good} good`);
@@ -239,7 +247,7 @@ export default function OperatorKiosk() {
   );
 
   const handleComplete = useCallback(
-    async (job: ActiveJob, good: number, scrap: number, scrapReason: string | null) => {
+    async (job: ActiveJob, good: number, scrap: number, scrapReason: string | null, scrapReasonCodeId: number | null) => {
       if (!job.operation_id) return;
       setBusy(true);
       let clockedOut = false;
@@ -251,6 +259,7 @@ export default function OperatorKiosk() {
           quantity_produced: good,
           quantity_scrapped: scrap,
           scrap_reason: scrap > 0 && scrapReason ? scrapReason : undefined,
+          scrap_reason_code_id: scrap > 0 && scrapReasonCodeId != null ? scrapReasonCodeId : undefined,
           source: KIOSK_SOURCE,
         });
         clockedOut = true;
@@ -567,8 +576,9 @@ export default function OperatorKiosk() {
             jobLabel={jobLabel(view.job)}
             confirmLabel="Save"
             requireTotalPositive
+            scrapCodes={scrapCodes}
             busy={mutationsBlocked}
-            onConfirm={(good, scrap, reason) => void handleReportProduction(view.job, good, scrap, reason)}
+            onConfirm={(good, scrap, reason, codeId) => void handleReportProduction(view.job, good, scrap, reason, codeId)}
             onCancel={() => setView({ name: 'queue' })}
           />
         )}
@@ -580,8 +590,9 @@ export default function OperatorKiosk() {
             confirmLabel="Complete"
             initialGood={Math.max(0, Number(view.job.quantity_ordered || 0) - Number(view.job.quantity_complete || 0))}
             requireTotalPositive={false}
+            scrapCodes={scrapCodes}
             busy={mutationsBlocked}
-            onConfirm={(good, scrap, reason) => void handleComplete(view.job, good, scrap, reason)}
+            onConfirm={(good, scrap, reason, codeId) => void handleComplete(view.job, good, scrap, reason, codeId)}
             onCancel={() => setView({ name: 'queue' })}
           />
         )}

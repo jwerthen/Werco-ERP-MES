@@ -18,6 +18,10 @@ import { MemoryRouter } from 'react-router-dom';
 import api from '../services/api';
 import Quality from './Quality';
 
+jest.mock('../hooks/usePermissions', () => ({
+  usePermissions: () => ({ can: () => true, canAny: () => true }),
+}));
+
 jest.mock('../services/api', () => ({
   __esModule: true,
   default: {

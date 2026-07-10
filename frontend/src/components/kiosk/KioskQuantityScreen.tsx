@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import KioskKeypad from './KioskKeypad';
 import KioskReasonGrid from './KioskReasonGrid';
 import { SCRAP_REASONS } from './kioskConstants';
+import { ScrapReasonCodeOption, scrapCodeLabel } from '../../types/scrapReason';
 
 interface KioskQuantityScreenProps {
   title: string;
@@ -17,8 +18,22 @@ interface KioskQuantityScreenProps {
    * "CREW TOTAL SO FAR: 37 of 50 · 2 scrap — enter only NEW pieces".
    */
   tallyBanner?: string;
+  /**
+   * Company-managed scrap reason codes (Lean Phase 1). Non-empty -> the scrap
+   * reason grid is built from these ("CODE — Name" tiles, required) plus an
+   * OPTIONAL free-text detail line. Empty/null -> legacy hardcoded
+   * SCRAP_REASONS grid (companies without codes keep the old flow). The crew
+   * station feeds this from the queue payload's `scrap_reason_codes`; the
+   * operator kiosk from GET /quality/scrap-reason-codes.
+   */
+  scrapCodes?: ScrapReasonCodeOption[] | null;
   busy: boolean;
-  onConfirm: (good: number, scrap: number, scrapReason: string | null) => void;
+  /**
+   * scrapReason: free text stored in TimeEntry.scrap_reason (legacy tile value,
+   * or the typed detail in codes mode). scrapReasonCodeId: the structured code
+   * (codes mode only). Both null when scrap is 0.
+   */
+  onConfirm: (good: number, scrap: number, scrapReason: string | null, scrapReasonCodeId: number | null) => void;
   onCancel: () => void;
 }
 
@@ -26,7 +41,8 @@ interface KioskQuantityScreenProps {
  * Shared quantity-entry screen for REPORT PRODUCTION and COMPLETE.
  * Numbers come ONLY from the big keypad (no native inputs/spinners).
  * Any scrap quantity REQUIRES an explicit reason — the confirm button stays
- * disabled until one is chosen; there is no default and no free text.
+ * disabled until one is chosen. With company scrap codes the choice is a code
+ * tile (+ optional typed detail); without them it is the legacy reason tile.
  */
 export default function KioskQuantityScreen({
   title,
@@ -35,6 +51,7 @@ export default function KioskQuantityScreen({
   initialGood,
   requireTotalPositive,
   tallyBanner,
+  scrapCodes,
   busy,
   onConfirm,
   onCancel,
@@ -42,13 +59,42 @@ export default function KioskQuantityScreen({
   const [good, setGood] = useState(initialGood != null && initialGood > 0 ? String(initialGood) : '');
   const [scrap, setScrap] = useState('');
   const [activeField, setActiveField] = useState<'good' | 'scrap'>('good');
+  // Legacy mode: the chosen SCRAP_REASONS value. Codes mode: the chosen code id (as string).
   const [scrapReason, setScrapReason] = useState<string | null>(null);
+  const [scrapDetail, setScrapDetail] = useState('');
+
+  const codes = scrapCodes && scrapCodes.length > 0 ? scrapCodes : null;
+  const codesMode = codes != null;
+  const reasonTiles = useMemo(
+    () => (codes ? codes.map((code) => ({ value: String(code.id), label: scrapCodeLabel(code) })) : SCRAP_REASONS),
+    [codes]
+  );
+
+  // If the codes list settles AFTER a reason tile was already tapped (rare —
+  // codes are fetched at page mount), the stored value belongs to the other
+  // vocabulary; clear it rather than submit a mismatched reason/id.
+  useEffect(() => {
+    setScrapReason(null);
+  }, [codesMode]);
 
   const goodQty = Number(good || 0);
   const scrapQty = Number(scrap || 0);
   const needsReason = scrapQty > 0 && !scrapReason;
   const totalInvalid = requireTotalPositive && goodQty <= 0 && scrapQty <= 0;
   const confirmDisabled = busy || needsReason || totalInvalid;
+
+  const handleConfirm = () => {
+    if (scrapQty <= 0) {
+      onConfirm(goodQty, scrapQty, null, null);
+      return;
+    }
+    if (codes) {
+      const detail = scrapDetail.trim();
+      onConfirm(goodQty, scrapQty, detail || null, scrapReason != null ? Number(scrapReason) : null);
+      return;
+    }
+    onConfirm(goodQty, scrapQty, scrapReason, null);
+  };
 
   const fieldClasses = (field: 'good' | 'scrap', tone: 'green' | 'red') => {
     const active = activeField === field;
@@ -107,7 +153,25 @@ export default function KioskQuantityScreen({
       {scrapQty > 0 && (
         <div className="mt-5">
           <p className="mb-2 text-lg font-semibold text-fd-red">Scrap reason — required</p>
-          <KioskReasonGrid reasons={SCRAP_REASONS} selected={scrapReason} onSelect={setScrapReason} disabled={busy} tone="red" />
+          <KioskReasonGrid reasons={reasonTiles} selected={scrapReason} onSelect={setScrapReason} disabled={busy} tone="red" />
+          {codes && (
+            <div className="mt-3">
+              <label htmlFor="kiosk-scrap-detail" className="mb-1 block text-base font-semibold text-fd-mute">
+                Detail — optional
+              </label>
+              <input
+                id="kiosk-scrap-detail"
+                data-testid="kiosk-scrap-detail"
+                type="text"
+                maxLength={255}
+                disabled={busy}
+                value={scrapDetail}
+                onChange={(e) => setScrapDetail(e.target.value)}
+                placeholder="What happened?"
+                className="w-full rounded border border-fd-line bg-fd-sunken px-4 py-3 text-xl text-fd-ink placeholder:text-fd-mute focus:border-fd-red focus:outline-none disabled:opacity-40"
+              />
+            </div>
+          )}
         </div>
       )}
 
@@ -123,7 +187,7 @@ export default function KioskQuantityScreen({
         <button
           type="button"
           data-testid="kiosk-qty-confirm"
-          onClick={() => onConfirm(goodQty, scrapQty, scrapQty > 0 ? scrapReason : null)}
+          onClick={handleConfirm}
           disabled={confirmDisabled}
           className="min-h-20 rounded border border-fd-green bg-fd-green/15 text-xl font-bold uppercase tracking-wide text-fd-green transition-colors hover:bg-fd-green/25 disabled:cursor-not-allowed disabled:opacity-40"
         >

@@ -4,24 +4,34 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
-from app.models.downtime import DowntimeEvent, DowntimePlannedType
-from app.models.oee import OEERecord, OEETarget
-from app.models.time_entry import TimeEntry, TimeEntryType
+from app.models.oee import CalculationSource, OEERecord, OEETarget
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
-from app.models.work_order import WorkOrderOperation
 from app.services.audit_service import AuditService
 
-# Production-bearing time-entry types (OEE-5): pieces/scrap counted from these
-# uniformly across the auto-calc, matching ``analytics_service`` so a quantity logged
-# on a REWORK clock-out is never silently dropped.
-PRODUCTION_BEARING_ENTRY_TYPES = [TimeEntryType.RUN, TimeEntryType.REWORK]
-# RUN + SETUP are the productive-run portion of clocked time (availability numerator).
-PRODUCTIVE_RUN_ENTRY_TYPES = [TimeEntryType.RUN, TimeEntryType.SETUP]
+# Lean Phase 1: the ~220-line auto-calculation moved verbatim to
+# ``services/oee_service.py`` so the nightly cron shares the exact math; these
+# re-exports keep the long-standing import surface of this module intact
+# (tests and other modules import calculate_oee / the entry-type constants here).
+from app.services.oee_service import (  # noqa: F401  (re-exported)
+    PRODUCTION_BEARING_ENTRY_TYPES,
+    PRODUCTIVE_RUN_ENTRY_TYPES,
+    OEERecordConflictError,
+    calculate_oee,
+    compute_oee_for_work_center,
+)
+
+# Clear 409 detail shared by every writer that can trip the
+# uq_oee_company_wc_date_shift unique index (migration 063).
+_OEE_DUPLICATE_DETAIL = (
+    "An OEE record already exists for this work center, date, and shift. "
+    "Update the existing record instead (a blank shift and no shift are the same record)."
+)
 
 # RBAC: OEE WRITE/mutation endpoints (records, targets, auto-calculate) are gated to the
 # same role set as the sibling Analytics router — Operators/Viewers can VIEW dashboards
@@ -85,6 +95,9 @@ class OEERecordResponse(BaseModel):
     work_center_name: Optional[str] = None
     record_date: date
     shift: Optional[str] = None
+    # Lean Phase 1: 'manual' (hand-entered / on-demand trigger) vs 'auto' (nightly
+    # cron). Plain str on the read path so an unknown future token reads fine.
+    calculation_source: str = CalculationSource.MANUAL.value
     planned_production_time_minutes: float
     actual_run_time_minutes: float
     downtime_minutes: float
@@ -143,51 +156,7 @@ class OEETargetResponse(BaseModel):
 
 
 # ============== Helper Functions ==============
-
-
-def calculate_oee(
-    planned_production_time_minutes: float,
-    actual_run_time_minutes: float,
-    total_parts_produced: int,
-    ideal_cycle_time_seconds: float,
-    actual_operating_time_minutes: float,
-    good_parts: int,
-    total_parts: int,
-) -> dict:
-    """Calculate OEE = Availability x Performance x Quality"""
-    # Availability = actual_run_time / planned_production_time
-    if planned_production_time_minutes > 0:
-        availability = (actual_run_time_minutes / planned_production_time_minutes) * 100
-    else:
-        availability = 0.0
-
-    # Performance = (total_parts x ideal_cycle_time) / actual_operating_time
-    if actual_operating_time_minutes > 0:
-        ideal_run_time_minutes = (total_parts_produced * ideal_cycle_time_seconds) / 60.0
-        performance = (ideal_run_time_minutes / actual_operating_time_minutes) * 100
-    else:
-        performance = 0.0
-
-    # Quality = good_parts / total_parts
-    if total_parts > 0:
-        quality = (good_parts / total_parts) * 100
-    else:
-        quality = 0.0
-
-    # Cap at 100%
-    availability = min(availability, 100.0)
-    performance = min(performance, 100.0)
-    quality = min(quality, 100.0)
-
-    # OEE = A x P x Q (as percentages: divide by 100^2 to get the right result)
-    oee = (availability * performance * quality) / 10000.0
-
-    return {
-        "availability_pct": round(availability, 2),
-        "performance_pct": round(performance, 2),
-        "quality_pct": round(quality, 2),
-        "oee_pct": round(oee, 2),
-    }
+# (calculate_oee lives in app/services/oee_service.py and is re-exported above.)
 
 
 def _record_to_response(record: OEERecord) -> dict:
@@ -198,6 +167,7 @@ def _record_to_response(record: OEERecord) -> dict:
         "work_center_name": record.work_center.name if record.work_center else None,
         "record_date": record.record_date,
         "shift": record.shift,
+        "calculation_source": record.calculation_source or CalculationSource.MANUAL.value,
         "planned_production_time_minutes": record.planned_production_time_minutes,
         "actual_run_time_minutes": record.actual_run_time_minutes,
         "downtime_minutes": record.downtime_minutes,
@@ -324,6 +294,7 @@ def create_oee_record(
     record = OEERecord(
         **record_in.model_dump(),
         **oee_calcs,
+        calculation_source=CalculationSource.MANUAL.value,
         created_by=current_user.id,
     )
     record.company_id = company_id
@@ -331,7 +302,13 @@ def create_oee_record(
 
     # Audit (tamper-evident). Flush so the PK is populated, log BEFORE the terminal commit
     # so the audit row commits atomically with the OEE record (log() only flushes).
-    db.flush()
+    # Lean Phase 1: the uq_oee_company_wc_date_shift unique index (migration 063) makes a
+    # second record for the same (company, WC, date, shift) an IntegrityError -> clean 409.
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=_OEE_DUPLICATE_DETAIL) from exc
     audit.log_create(
         resource_type="oee_record",
         resource_id=record.id,
@@ -339,7 +316,11 @@ def create_oee_record(
         new_values=record,
         description=f"Created OEE record {record.id} for work center {wc.name}",
     )
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=_OEE_DUPLICATE_DETAIL) from exc
     db.refresh(record)
 
     # Reload with relationship
@@ -389,7 +370,13 @@ def update_oee_record(
         setattr(record, field, value)
 
     # Audit (tamper-evident) BEFORE the terminal commit so it commits atomically.
-    db.flush()
+    # Lean Phase 1: a shift change can collide with an existing (WC, date, shift)
+    # record under uq_oee_company_wc_date_shift -> clean 409, not a 500.
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=_OEE_DUPLICATE_DETAIL) from exc
     audit.log_update(
         resource_type="oee_record",
         resource_id=record.id,
@@ -398,7 +385,11 @@ def update_oee_record(
         new_values=record,
         description=f"Updated OEE record {record.id}",
     )
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=_OEE_DUPLICATE_DETAIL) from exc
     db.refresh(record)
     return _record_to_response(record)
 
@@ -448,20 +439,12 @@ def auto_calculate_oee(
 ):
     """Auto-calculate OEE for a work center on a given date from existing data.
 
-    Computes a real OEERecord from the day's clocked TimeEntries, the routing standard
-    cycle time, and reported DowntimeEvents — on the STAFFED-time convention (Batch 8 /
-    rank 11). Previously this endpoint referenced ``TimeEntry.start_time``/``end_time``
-    (which DO NOT EXIST) and 500'd on every call (OEE-1); it also hardcoded a 60 s ideal
-    cycle and assumed all parts good (OEE-7).
-
-    Convention (mirrors ``analytics_service``):
-      * Availability = productive run (clocked RUN+SETUP minus reported DowntimeEvent
-        time) ÷ STAFFED (clocked) minutes at the WC that day (OEE-4) — NOT the plant
-        calendar, so idle/un-clocked time is excluded and availability is not pinned ~1.
-      * Performance = ideal cycle (routing ``run_time_per_piece``) × pieces ÷ productive
-        run time, ideal cycle DERIVED, not assumed (OEE-7).
-      * Quality = good ÷ total, where scrap comes from ``TimeEntry.quantity_scrapped``
-        on the production-bearing entry types (OEE-7), not assumed all-good.
+    Thin delegate (Lean Phase 1): the calculation lives in
+    ``services/oee_service.compute_oee_for_work_center`` -- staffed-time
+    availability convention, derived ideal cycle, real scrap (OEE-1/4/5/7); the
+    nightly cron runs the same code. A manual trigger stamps
+    ``calculation_source='manual'`` and overwrites whatever record exists for the
+    (WC, date, shift) key; a lost create race surfaces as 409.
     """
     if record_date is None:
         record_date = date.today()
@@ -470,200 +453,19 @@ def auto_calculate_oee(
     if not wc:
         raise HTTPException(status_code=404, detail="Work center not found")
 
-    # Gather the day's CLOSED clocked entries for this WC (tenant-scoped). Use clock_in/
-    # clock_out (OEE-1 fix: there is no start_time/end_time on TimeEntry).
-    time_entries = (
-        db.query(TimeEntry)
-        .filter(
-            TimeEntry.company_id == company_id,
-            TimeEntry.work_center_id == work_center_id,
-            func.date(TimeEntry.clock_in) == record_date,
-            TimeEntry.clock_out.isnot(None),
+    try:
+        record = compute_oee_for_work_center(
+            db,
+            company_id,
+            wc,
+            record_date,
+            shift,
+            calculation_source=CalculationSource.MANUAL,
+            created_by_user_id=current_user.id,
+            audit=audit,
         )
-        .all()
-    )
-
-    def _entry_minutes(te: TimeEntry) -> float:
-        # Prefer the stored duration_hours; fall back to the clock span.
-        if te.duration_hours is not None:
-            return float(te.duration_hours) * 60.0
-        if te.clock_in and te.clock_out:
-            return (te.clock_out - te.clock_in).total_seconds() / 60.0
-        return 0.0
-
-    staffed_minutes = 0.0  # ALL clocked entries -> availability denominator (OEE-4)
-    run_minutes = 0.0  # RUN+SETUP -> productive run (availability numerator)
-    good_count = 0  # production-bearing good pieces (quantity_produced, OEE-5)
-    scrap_count = 0  # production-bearing scrapped pieces (OEE-7)
-    for te in time_entries:
-        minutes = _entry_minutes(te)
-        staffed_minutes += minutes
-        if te.entry_type in PRODUCTIVE_RUN_ENTRY_TYPES:
-            run_minutes += minutes
-        if te.entry_type in PRODUCTION_BEARING_ENTRY_TYPES:
-            good_count += int(te.quantity_produced or 0)
-            scrap_count += int(te.quantity_scrapped or 0)
-
-    # quantity_produced is the GOOD count (it increments quantity_complete on clock-out),
-    # so total pieces cycled = good + scrap. Quality = good / (good + scrap) (OEE-7).
-    total_parts = good_count + scrap_count  # all pieces cycled (perf + quality denom)
-
-    # Reported machine downtime for this WC/day (OEE-7) — DowntimeEvent was never read
-    # by this endpoint before despite the docstring's claim.
-    downtime_minutes = float(
-        db.query(func.coalesce(func.sum(DowntimeEvent.duration_minutes), 0.0))
-        .filter(
-            DowntimeEvent.company_id == company_id,
-            DowntimeEvent.work_center_id == work_center_id,
-            func.date(DowntimeEvent.start_time) == record_date,
-            DowntimeEvent.planned_type == DowntimePlannedType.UNPLANNED,
-        )
-        .scalar()
-        or 0.0
-    )
-
-    # Productive run = clocked RUN+SETUP minus reported downtime.
-    productive_run_minutes = max(0.0, run_minutes - downtime_minutes)
-
-    # Ideal cycle DERIVED from routing run_time_per_piece (OEE-7), quantity-weighted
-    # over the production-bearing pieces (good + scrap) cycled at this WC today; every
-    # piece run consumes a standard cycle, so weight by (produced + scrapped).
-    # run_time_per_piece is stored in hours alongside run_time_hours.
-    ideal_run_hours = float(
-        db.query(
-            func.coalesce(
-                func.sum(
-                    (TimeEntry.quantity_produced + TimeEntry.quantity_scrapped) * WorkOrderOperation.run_time_per_piece
-                ),
-                0.0,
-            )
-        )
-        .select_from(TimeEntry)
-        .join(WorkOrderOperation, TimeEntry.operation_id == WorkOrderOperation.id)
-        .filter(
-            TimeEntry.company_id == company_id,
-            TimeEntry.work_center_id == work_center_id,
-            func.date(TimeEntry.clock_in) == record_date,
-            TimeEntry.clock_out.isnot(None),
-            TimeEntry.entry_type.in_(PRODUCTION_BEARING_ENTRY_TYPES),
-        )
-        .scalar()
-        or 0.0
-    )
-    # Per-piece ideal cycle in seconds for the stored OEERecord (0 when no standard/no
-    # parts -> performance leg degrades to 0, not a misleading 60 s assumption).
-    ideal_cycle_time_seconds = (ideal_run_hours * 3600.0 / total_parts) if total_parts > 0 else 0.0
-
-    # Quality from real scrap (OEE-7): good = produced (good count); defect = scrapped.
-    good_parts = good_count
-    defect_parts = scrap_count
-    rework_parts = 0
-
-    # Availability basis = STAFFED minutes (OEE-4): feed calculate_oee planned=staffed,
-    # actual_run=productive_run so availability = productive_run / staffed.
-    planned_time = staffed_minutes
-
-    # Calculate OEE on the staffed-time basis. Performance basis = productive run.
-    oee_calcs = calculate_oee(
-        planned_production_time_minutes=planned_time,
-        actual_run_time_minutes=productive_run_minutes,
-        total_parts_produced=total_parts,
-        ideal_cycle_time_seconds=ideal_cycle_time_seconds,
-        actual_operating_time_minutes=productive_run_minutes,
-        good_parts=good_parts,
-        total_parts=total_parts,
-    )
-    # Stored on the record as the availability denominator / numerator and the loss split.
-    actual_run_minutes = productive_run_minutes
-    downtime = downtime_minutes
-
-    # Check for existing record
-    existing = (
-        db.query(OEERecord)
-        .filter(
-            OEERecord.company_id == company_id,
-            OEERecord.work_center_id == work_center_id,
-            OEERecord.record_date == record_date,
-            OEERecord.shift == shift,
-        )
-        .first()
-    )
-
-    if existing:
-        # Snapshot pre-mutation values for the audit diff (the live model is mutated below).
-        old_values = {c.key: getattr(existing, c.key) for c in existing.__table__.columns}
-        existing.planned_production_time_minutes = planned_time
-        existing.actual_run_time_minutes = actual_run_minutes
-        existing.downtime_minutes = downtime
-        existing.total_parts_produced = total_parts
-        existing.ideal_cycle_time_seconds = ideal_cycle_time_seconds
-        existing.actual_operating_time_minutes = actual_run_minutes
-        existing.good_parts = good_parts
-        existing.total_parts = total_parts
-        existing.defect_parts = defect_parts
-        existing.rework_parts = rework_parts
-        # Six-big-losses: reported machine downtime is an unplanned-stop loss; scrap is a
-        # production reject (so the loss/dashboard breakdown reflects real data, OEE-7).
-        existing.unplanned_stop_minutes = downtime
-        existing.production_reject_count = defect_parts
-        for field, value in oee_calcs.items():
-            setattr(existing, field, value)
-        # Audit (tamper-evident) the recomputed overwrite BEFORE the terminal commit so it
-        # commits atomically with the record. A single representative row per call.
-        db.flush()
-        audit.log_update(
-            resource_type="oee_record",
-            resource_id=existing.id,
-            resource_identifier=str(existing.id),
-            old_values=old_values,
-            new_values=existing,
-            description=f"Auto-calculated OEE record {existing.id} for work center {wc.name}",
-        )
-        db.commit()
-        db.refresh(existing)
-        record = existing
-    else:
-        record = OEERecord(
-            work_center_id=work_center_id,
-            record_date=record_date,
-            shift=shift,
-            planned_production_time_minutes=planned_time,
-            actual_run_time_minutes=actual_run_minutes,
-            downtime_minutes=downtime,
-            total_parts_produced=total_parts,
-            ideal_cycle_time_seconds=ideal_cycle_time_seconds,
-            actual_operating_time_minutes=actual_run_minutes,
-            good_parts=good_parts,
-            total_parts=total_parts,
-            defect_parts=defect_parts,
-            rework_parts=rework_parts,
-            unplanned_stop_minutes=downtime,
-            production_reject_count=defect_parts,
-            **oee_calcs,
-            created_by=current_user.id,
-        )
-        record.company_id = company_id
-        db.add(record)
-        # Audit (tamper-evident) the freshly created record BEFORE the terminal commit so it
-        # commits atomically. Flush so the PK is populated. A single representative row.
-        db.flush()
-        audit.log_create(
-            resource_type="oee_record",
-            resource_id=record.id,
-            resource_identifier=str(record.id),
-            new_values=record,
-            description=f"Auto-calculated OEE record {record.id} for work center {wc.name}",
-        )
-        db.commit()
-        db.refresh(record)
-
-    # Reload with relationship
-    record = (
-        db.query(OEERecord)
-        .options(joinedload(OEERecord.work_center))
-        .filter(OEERecord.id == record.id, OEERecord.company_id == company_id)
-        .first()
-    )
+    except OEERecordConflictError as exc:
+        raise HTTPException(status_code=409, detail=_OEE_DUPLICATE_DETAIL) from exc
 
     return _record_to_response(record)
 

@@ -16,6 +16,7 @@ from app.models.part import Part
 from app.models.purchasing import InspectionStatus, POReceipt, Vendor
 from app.models.quality import NCRStatus, NonConformanceReport
 from app.models.quote import Quote, QuoteStatus
+from app.models.shipping import Shipment, ShipmentStatus
 from app.models.time_entry import TimeEntry, TimeEntryType
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
@@ -34,7 +35,11 @@ from app.schemas.analytics import (
     OEEResponse,
     ProductionDataPoint,
     ProductionTrendsResponse,
+    PromiseHygieneRow,
     QualityMetricsResponse,
+    ShipOTDCustomerRollup,
+    ShipOTDReportResponse,
+    ShipOTDRow,
     TrendDirection,
     VendorQuality,
 )
@@ -139,6 +144,8 @@ class AnalyticsService:
         return KPIDashboard(
             oee=self._calculate_oee_kpi(start_date, end_date, prior_start, prior_end, work_center_id),
             on_time_delivery=self._calculate_otd_kpi(start_date, end_date, prior_start, prior_end),
+            on_time_delivery_ship=self._calculate_ship_otd_kpi(start_date, end_date, prior_start, prior_end),
+            otif=self._calculate_otif_kpi(start_date, end_date, prior_start, prior_end),
             first_pass_yield=self._calculate_fpy_kpi(start_date, end_date, prior_start, prior_end),
             scrap_rate=self._calculate_scrap_kpi(start_date, end_date, prior_start, prior_end),
             open_ncrs=self._calculate_ncr_kpi(start_date, end_date, prior_start, prior_end),
@@ -579,6 +586,364 @@ class AnalyticsService:
             sparkline.append(round(weekly_otd, 1) if weekly_otd is not None else 0.0)
             current = week_end + timedelta(days=1)
         return sparkline[-7:] if len(sparkline) > 7 else sparkline
+
+    # ── Ship-based OTD / OTIF (Lean Phase 1, issue #88) ─────────────────────────
+    # The completion-based OTD above measures when a WO finished PRODUCTION; the
+    # customer experiences when it SHIPPED. These legs measure Shipment.ship_date
+    # against the promise, with precedence must_ship_by || due_date:
+    #   * OTD (fulfillment-anchored): of the WOs whose FULL ordered quantity
+    #     finished shipping in the window, the share whose full-ship date was
+    #     on/before the promise. Multiple partial shipments roll up cumulatively;
+    #     the full-ship date is the ship_date of the shipment that crossed the
+    #     ordered quantity.
+    #   * OTIF (promise-anchored): of the WOs PROMISED in the window, the share
+    #     that had shipped IN FULL by their promise date — so an open WO past its
+    #     promise counts as a miss the moment the promise passes, not never.
+    # Only real shipments count: ship_date NOT NULL, not soft-deleted, not a
+    # CANCELLED shipment. Both values return None ("n/a") on an empty denominator.
+
+    def _work_order_promise(self, wo: WorkOrder) -> Tuple[Optional[str], Optional[date]]:
+        """Promise precedence: must_ship_by || due_date. Returns (source, date)."""
+        if wo.must_ship_by is not None:
+            return "must_ship_by", wo.must_ship_by
+        if wo.due_date is not None:
+            return "due_date", wo.due_date
+        return None, None
+
+    def _shipment_facts(self, work_order_ids: List[int]) -> Dict[int, Dict]:
+        """Cumulative shipment facts per WO id, from all its counted shipments.
+
+        Facts: first_ship_date, last_ship_date, total_shipped, and full_ship(qty)
+        support via the ordered (ship_date, quantity) list. Tenant-scoped.
+        """
+        facts: Dict[int, Dict] = {}
+        if not work_order_ids:
+            return facts
+        rows = (
+            self.db.query(Shipment.work_order_id, Shipment.ship_date, Shipment.quantity_shipped)
+            .filter(
+                Shipment.company_id == self.company_id,
+                Shipment.is_deleted == False,  # noqa: E712
+                Shipment.status != ShipmentStatus.CANCELLED,
+                Shipment.ship_date.isnot(None),
+                Shipment.work_order_id.in_(work_order_ids),
+            )
+            .order_by(Shipment.work_order_id, Shipment.ship_date)
+            .all()
+        )
+        for wo_id, ship_date, qty in rows:
+            entry = facts.setdefault(
+                wo_id,
+                {"shipments": [], "total_shipped": 0.0, "first_ship_date": None, "last_ship_date": None},
+            )
+            qty = float(qty or 0)
+            entry["shipments"].append((ship_date, qty))
+            entry["total_shipped"] += qty
+            if entry["first_ship_date"] is None or ship_date < entry["first_ship_date"]:
+                entry["first_ship_date"] = ship_date
+            if entry["last_ship_date"] is None or ship_date > entry["last_ship_date"]:
+                entry["last_ship_date"] = ship_date
+        return facts
+
+    @staticmethod
+    def _full_ship_date(fact: Optional[Dict], ordered_qty: float) -> Optional[date]:
+        """Date the cumulative shipped quantity first reached ``ordered_qty``."""
+        if not fact or ordered_qty <= 0:
+            return None
+        running = 0.0
+        for ship_date, qty in fact["shipments"]:  # already ordered by ship_date
+            running += qty
+            if running >= ordered_qty:
+                return ship_date
+        return None
+
+    @staticmethod
+    def _shipped_by(fact: Optional[Dict], cutoff: date) -> float:
+        """Cumulative quantity shipped on/before ``cutoff``."""
+        if not fact:
+            return 0.0
+        return sum(qty for ship_date, qty in fact["shipments"] if ship_date <= cutoff)
+
+    def _ship_otd_candidates(self, start: date, end: date) -> List[WorkOrder]:
+        """WOs with at least one counted shipment in the window (tenant-scoped).
+
+        Any WO whose FULL-ship date lands in the window necessarily has the
+        crossing shipment's ship_date in the window, so this prefilter is exact
+        for the fulfillment-anchored OTD population. CANCELLED WOs are excluded
+        exactly as in ``_get_otif_value`` (a cancelled order is not a delivery
+        hit OR miss), so the two ship legs agree on the population rule.
+        """
+        return (
+            self.db.query(WorkOrder)
+            .join(Shipment, Shipment.work_order_id == WorkOrder.id)
+            .filter(
+                WorkOrder.company_id == self.company_id,
+                WorkOrder.is_deleted == False,  # noqa: E712
+                WorkOrder.status != WorkOrderStatus.CANCELLED,
+                Shipment.company_id == self.company_id,
+                Shipment.is_deleted == False,  # noqa: E712
+                Shipment.status != ShipmentStatus.CANCELLED,
+                Shipment.ship_date.isnot(None),
+                Shipment.ship_date >= start,
+                Shipment.ship_date <= end,
+            )
+            .distinct()
+            .all()
+        )
+
+    def get_ship_otd_value(self, start: date, end: date) -> Optional[float]:
+        """Public accessor for the ship-based OTD percentage (0-100, or None).
+
+        Exists so external consumers (the wallboard KPI strip) don't reach into
+        the underscore-private KPI helpers.
+        """
+        return self._get_ship_otd_value(start, end)
+
+    def _get_ship_otd_value(self, start: date, end: date) -> Optional[float]:
+        """Fulfillment-anchored ship OTD. None ('n/a') on an empty denominator."""
+        candidates = self._ship_otd_candidates(start, end)
+        if not candidates:
+            return None
+        facts = self._shipment_facts([wo.id for wo in candidates])
+        measured = 0
+        on_time = 0
+        for wo in candidates:
+            _, promise = self._work_order_promise(wo)
+            ordered = float(wo.quantity_ordered or 0)
+            if promise is None or ordered <= 0:
+                continue
+            full_ship = self._full_ship_date(facts.get(wo.id), ordered)
+            if full_ship is None or not (start <= full_ship <= end):
+                continue
+            measured += 1
+            if full_ship <= promise:
+                on_time += 1
+        if measured == 0:
+            return None
+        return (on_time / measured) * 100
+
+    def _get_otif_value(self, start: date, end: date) -> Optional[float]:
+        """Promise-anchored OTIF. None ('n/a') on an empty denominator.
+
+        CANCELLED WOs are excluded (a cancelled order is not a delivery miss).
+        """
+        promise = func.coalesce(WorkOrder.must_ship_by, WorkOrder.due_date)
+        promised = (
+            self.db.query(WorkOrder)
+            .filter(
+                WorkOrder.company_id == self.company_id,
+                WorkOrder.is_deleted == False,  # noqa: E712
+                WorkOrder.status != WorkOrderStatus.CANCELLED,
+                WorkOrder.quantity_ordered > 0,
+                promise.isnot(None),
+                promise >= start,
+                promise <= end,
+            )
+            .all()
+        )
+        if not promised:
+            return None
+        facts = self._shipment_facts([wo.id for wo in promised])
+        in_full = 0
+        for wo in promised:
+            _, promise_date = self._work_order_promise(wo)
+            shipped = self._shipped_by(facts.get(wo.id), promise_date)
+            if shipped >= float(wo.quantity_ordered or 0):
+                in_full += 1
+        return (in_full / len(promised)) * 100
+
+    def _weekly_sparkline(self, start: date, end: date, value_fn) -> List[float]:
+        """Weekly sparkline over ``value_fn(week_start, week_end)`` (0.0 for n/a weeks)."""
+        sparkline = []
+        current = start
+        while current <= end:
+            week_end = min(current + timedelta(days=6), end)
+            weekly = value_fn(current, week_end)
+            sparkline.append(round(weekly, 1) if weekly is not None else 0.0)
+            current = week_end + timedelta(days=1)
+        return sparkline[-7:] if len(sparkline) > 7 else sparkline
+
+    def _calculate_ship_otd_kpi(self, start: date, end: date, prior_start: date, prior_end: date) -> KPIValue:
+        """Ship-based OTD KPI (same target as the completion-based leg)."""
+        current = self._get_ship_otd_value(start, end)
+        prior = self._get_ship_otd_value(prior_start, prior_end)
+        if current is None or prior is None:
+            trend, change_pct = TrendDirection.FLAT, None
+        else:
+            trend, change_pct = calculate_trend(current, prior)
+        return KPIValue(
+            value=round(current, 1) if current is not None else None,
+            target=DEFAULT_TARGETS["on_time_delivery"],
+            prior_value=round(prior, 1) if prior is not None else None,
+            change_pct=round(change_pct, 1) if change_pct is not None else None,
+            trend=trend,
+            sparkline=self._weekly_sparkline(start, end, self._get_ship_otd_value),
+        )
+
+    def _calculate_otif_kpi(self, start: date, end: date, prior_start: date, prior_end: date) -> KPIValue:
+        """OTIF KPI (promise-anchored on-time-in-full)."""
+        current = self._get_otif_value(start, end)
+        prior = self._get_otif_value(prior_start, prior_end)
+        if current is None or prior is None:
+            trend, change_pct = TrendDirection.FLAT, None
+        else:
+            trend, change_pct = calculate_trend(current, prior)
+        return KPIValue(
+            value=round(current, 1) if current is not None else None,
+            target=DEFAULT_TARGETS["on_time_delivery"],
+            prior_value=round(prior, 1) if prior is not None else None,
+            change_pct=round(change_pct, 1) if change_pct is not None else None,
+            trend=trend,
+            sparkline=self._weekly_sparkline(start, end, self._get_otif_value),
+        )
+
+    def get_ship_otd_report(self, start: date, end: date) -> ShipOTDReportResponse:
+        """Per-WO ship-vs-promise detail + per-customer rollup + promise hygiene.
+
+        Population: WOs with a counted shipment in the window UNION WOs promised
+        in the window (so unshipped-past-promise WOs surface as misses). The
+        hygiene section lists WOs shipped in the window or still open that carry
+        NEITHER must_ship_by nor due_date -- they are unmeasurable and poison the
+        denominator until someone enters a promise.
+        """
+        today = date.today()
+        shipped_in_window = self._ship_otd_candidates(start, end)
+
+        promise = func.coalesce(WorkOrder.must_ship_by, WorkOrder.due_date)
+        promised_in_window = (
+            self.db.query(WorkOrder)
+            .options(joinedload(WorkOrder.part))
+            .filter(
+                WorkOrder.company_id == self.company_id,
+                WorkOrder.is_deleted == False,  # noqa: E712
+                WorkOrder.status != WorkOrderStatus.CANCELLED,
+                promise.isnot(None),
+                promise >= start,
+                promise <= end,
+            )
+            .all()
+        )
+
+        by_id: Dict[int, WorkOrder] = {wo.id: wo for wo in shipped_in_window}
+        for wo in promised_in_window:
+            by_id.setdefault(wo.id, wo)
+        work_orders = list(by_id.values())
+        facts = self._shipment_facts(list(by_id.keys()))
+
+        rows: List[ShipOTDRow] = []
+        for wo in work_orders:
+            source, promise_date = self._work_order_promise(wo)
+            ordered = float(wo.quantity_ordered or 0)
+            fact = facts.get(wo.id)
+            total_shipped = float(fact["total_shipped"]) if fact else 0.0
+            full_ship = self._full_ship_date(fact, ordered)
+            fully_shipped = full_ship is not None
+
+            on_time: Optional[bool] = None
+            days_late: Optional[int] = None
+            if promise_date is not None:
+                if fully_shipped:
+                    on_time = full_ship <= promise_date
+                    days_late = (full_ship - promise_date).days
+                elif promise_date < today:
+                    # Promise passed with the order not fully shipped: a live miss.
+                    on_time = False
+                    days_late = (today - promise_date).days
+
+            rows.append(
+                ShipOTDRow(
+                    work_order_id=wo.id,
+                    work_order_number=wo.work_order_number,
+                    customer_name=wo.customer_name,
+                    part_number=wo.part.part_number if wo.part else None,
+                    status=wo.status.value if hasattr(wo.status, "value") else str(wo.status),
+                    quantity_ordered=ordered,
+                    quantity_shipped=total_shipped,
+                    promise_source=source,
+                    promise_date=promise_date,
+                    first_ship_date=fact["first_ship_date"] if fact else None,
+                    last_ship_date=fact["last_ship_date"] if fact else None,
+                    full_ship_date=full_ship,
+                    fully_shipped=fully_shipped,
+                    on_time=on_time,
+                    days_late=days_late,
+                )
+            )
+        rows.sort(key=lambda r: (r.promise_date or date.max, r.work_order_number))
+
+        # Per-customer rollup over the DETERMINABLE rows (on_time is not None).
+        rollup: Dict[str, Dict] = defaultdict(lambda: {"work_orders": 0, "on_time": 0, "late": 0, "late_days": []})
+        for row in rows:
+            if row.on_time is None:
+                continue
+            bucket = rollup[row.customer_name or "Unknown"]
+            bucket["work_orders"] += 1
+            if row.on_time:
+                bucket["on_time"] += 1
+            else:
+                bucket["late"] += 1
+                if row.days_late is not None:
+                    bucket["late_days"].append(row.days_late)
+        by_customer = [
+            ShipOTDCustomerRollup(
+                customer_name=name,
+                work_orders=b["work_orders"],
+                on_time=b["on_time"],
+                late=b["late"],
+                otd_pct=round(b["on_time"] / b["work_orders"] * 100, 1) if b["work_orders"] else None,
+                avg_days_late=(round(sum(b["late_days"]) / len(b["late_days"]), 1) if b["late_days"] else None),
+            )
+            for name, b in sorted(rollup.items(), key=lambda kv: kv[1]["work_orders"], reverse=True)
+        ]
+
+        # Promise hygiene: shipped-in-window or open WOs with NEITHER promise field.
+        open_statuses = [
+            WorkOrderStatus.DRAFT,
+            WorkOrderStatus.RELEASED,
+            WorkOrderStatus.IN_PROGRESS,
+            WorkOrderStatus.ON_HOLD,
+        ]
+        promiseless_conditions = [WorkOrder.status.in_(open_statuses)]
+        shipped_ids = [wo.id for wo in shipped_in_window]
+        if shipped_ids:
+            promiseless_conditions.append(WorkOrder.id.in_(shipped_ids))
+        promiseless = (
+            self.db.query(WorkOrder)
+            .filter(
+                WorkOrder.company_id == self.company_id,
+                WorkOrder.is_deleted == False,  # noqa: E712
+                WorkOrder.must_ship_by.is_(None),
+                WorkOrder.due_date.is_(None),
+                or_(*promiseless_conditions),
+            )
+            .all()
+        )
+        hygiene_facts = self._shipment_facts([wo.id for wo in promiseless])
+        promise_hygiene = [
+            PromiseHygieneRow(
+                work_order_id=wo.id,
+                work_order_number=wo.work_order_number,
+                customer_name=wo.customer_name,
+                status=wo.status.value if hasattr(wo.status, "value") else str(wo.status),
+                quantity_ordered=float(wo.quantity_ordered or 0),
+                quantity_shipped=float(hygiene_facts[wo.id]["total_shipped"]) if wo.id in hygiene_facts else 0.0,
+                last_ship_date=hygiene_facts[wo.id]["last_ship_date"] if wo.id in hygiene_facts else None,
+            )
+            for wo in sorted(promiseless, key=lambda w: w.work_order_number)
+        ]
+
+        otd_ship = self._get_ship_otd_value(start, end)
+        otif = self._get_otif_value(start, end)
+        return ShipOTDReportResponse(
+            period_start=start,
+            period_end=end,
+            otd_ship_pct=round(otd_ship, 1) if otd_ship is not None else None,
+            otif_pct=round(otif, 1) if otif is not None else None,
+            rows=rows,
+            by_customer=by_customer,
+            promise_hygiene=promise_hygiene,
+            generated_at=datetime.utcnow(),
+        )
 
     def _calculate_fpy_kpi(self, start: date, end: date, prior_start: date, prior_end: date) -> KPIValue:
         """Calculate First Pass Yield."""

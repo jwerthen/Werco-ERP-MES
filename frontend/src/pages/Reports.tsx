@@ -1,8 +1,10 @@
 import React, { useEffect, useState, useCallback } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import api from '../services/api';
 import { formatCentralDate } from '../utils/centralTime';
 import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
 import { EmptyState, ErrorState } from '../components/ui';
+import ShipOtdReport from '../components/reports/ShipOtdReport';
 import {
   ClockIcon,
   CurrencyDollarIcon,
@@ -107,10 +109,23 @@ interface EmployeeTime {
   }>;
 }
 
-type TabType = 'dashboard' | 'costing' | 'timesheets';
+type TabType = 'dashboard' | 'ship-otd' | 'costing' | 'timesheets';
+
+const TAB_IDS: TabType[] = ['dashboard', 'ship-otd', 'costing', 'timesheets'];
 
 export default function Reports() {
-  const [activeTab, setActiveTab] = useState<TabType>('dashboard');
+  // Active tab lives in the URL (?tab=) so deep links (e.g. the Analytics
+  // "OTD (shipped)" tile) and reloads land on the right report.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [activeTab, setActiveTabState] = useState<TabType>(() => {
+    const fromUrl = searchParams.get('tab') as TabType | null;
+    return fromUrl && TAB_IDS.includes(fromUrl) ? fromUrl : 'dashboard';
+  });
+  const setActiveTab = (tab: TabType) => {
+    setActiveTabState(tab);
+    if (tab === 'dashboard') setSearchParams({});
+    else setSearchParams({ tab });
+  };
   const [production, setProduction] = useState<ProductionSummary | null>(null);
   const [quality, setQuality] = useState<QualityMetrics | null>(null);
   const [inventory, setInventory] = useState<InventoryValue | null>(null);
@@ -184,6 +199,7 @@ export default function Reports() {
         <nav className="flex space-x-8">
           {[
             { id: 'dashboard', label: 'Dashboard' },
+            { id: 'ship-otd', label: 'Ship OTD' },
             { id: 'costing', label: 'Work Order Costing' },
             { id: 'timesheets', label: 'Employee Time' }
           ].map(tab => (
@@ -429,6 +445,10 @@ export default function Reports() {
       </div>
       </>
       )}
+
+      {/* Ship OTD Tab (Lean Phase 1) — owns its own load/error state, so it
+          renders independently of the dashboard fetch above. */}
+      {activeTab === 'ship-otd' && <ShipOtdReport periodDays={period} />}
 
       {/* Costing Tab */}
       {!loadError && activeTab === 'costing' && (

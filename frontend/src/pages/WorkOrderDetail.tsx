@@ -614,15 +614,19 @@ export default function WorkOrderDetail() {
 
   const handleCompleteSubmit = async (values: CompleteWorkSubmit) => {
     if (!completeTarget) return;
-    const { quantityComplete, quantityScrapped, scrapReason } = values;
+    const { quantityComplete, quantityScrapped, scrapReason, scrapReasonCodeId } = values;
     if (completeTarget.kind === 'work_order') {
       setCompleting(true);
       try {
+        // The WO-level endpoint understands the structured scrap code id; the
+        // operation-level endpoint below is text-only (the modal guarantees a
+        // non-blank scrapReason whenever scrap > 0, so both stay valid).
         const completeRes: unknown = await api.completeWorkOrder(
           workOrder!.id,
           quantityComplete,
           quantityScrapped,
-          scrapReason
+          scrapReason,
+          scrapReasonCodeId
         );
         setCompleteTarget(null);
         // Force-complete override summary: an authorized user completed the WO

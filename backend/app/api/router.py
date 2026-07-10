@@ -50,6 +50,7 @@ from app.api.endpoints import (
     routing,
     scanner,
     scheduling,
+    scrap_reasons,
     search,
     setup,
     shipping,
@@ -80,6 +81,8 @@ api_router.include_router(process_sheets.router, prefix="/process-sheets", tags=
 api_router.include_router(inventory.router, prefix="/inventory", tags=["Inventory"])
 api_router.include_router(mrp.router, prefix="/mrp", tags=["Material Requirements Planning"])
 api_router.include_router(quality.router, prefix="/quality", tags=["Quality Management"])
+# Sibling router under the same /quality prefix (quality.py is crowded with NCR/CAR/FAI).
+api_router.include_router(scrap_reasons.router, prefix="/quality", tags=["Quality Management"])
 api_router.include_router(custom_fields.router, prefix="/custom-fields", tags=["Custom Fields"])
 api_router.include_router(work_orders.router, prefix="/work-orders", tags=["Work Orders"])
 api_router.include_router(laser_nests.router, prefix="/laser-nests", tags=["Laser Nests"])

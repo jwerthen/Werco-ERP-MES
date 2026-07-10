@@ -138,6 +138,7 @@ from .routing_learning import (
     RoutingOperationPattern,
     RoutingWorkCenterPreference,
 )
+from .scrap_reason import ScrapCategory, ScrapReasonCode
 from .shipping import (
     CertificateOfConformance,
     Shipment,
@@ -248,6 +249,8 @@ __all__ = [
     "DowntimeReasonCode",
     "DowntimeCategory",
     "DowntimePlannedType",
+    "ScrapReasonCode",
+    "ScrapCategory",
     "JobCost",
     "CostEntry",
     "JobCostStatus",

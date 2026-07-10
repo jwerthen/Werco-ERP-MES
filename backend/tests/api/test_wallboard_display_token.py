@@ -34,6 +34,18 @@ DISPLAY_TOKEN_URL = "/api/v1/auth/display-token"
 WALLBOARD_URL = "/api/v1/shop-floor/wallboard"
 
 
+@pytest.fixture(autouse=True)
+def _reset_kpi_strip_cache():
+    """The Lean Phase 1 kpi_strip rides the wallboard payload behind a module-level
+    per-company TTL cache (~5 min) that outlives a test's dropped tables; reset it
+    around every test so no assertion ever sees another test's cached strip."""
+    from app.services.wallboard_service import reset_kpi_strip_cache
+
+    reset_kpi_strip_cache()
+    yield
+    reset_kpi_strip_cache()
+
+
 def _issue_token(client: TestClient, headers: dict, label: str = "North wall TV", **body) -> dict:
     response = client.post(DISPLAY_TOKEN_URL, json={"label": label, **body}, headers=headers)
     assert response.status_code == 200, response.text
@@ -202,7 +214,8 @@ def test_display_token_authenticates_wallboard(client: TestClient, admin_headers
     response = client.get(WALLBOARD_URL, headers=_display_headers(data["token"]))
     assert response.status_code == 200
     payload = response.json()
-    assert set(payload.keys()) == {"work_centers", "late_wos", "blocked_wos", "generated_at"}
+    # Lean Phase 1: the trailing-30d kpi_strip rides the same payload.
+    assert set(payload.keys()) == {"work_centers", "late_wos", "blocked_wos", "kpi_strip", "generated_at"}
 
 
 def test_user_token_still_works_on_wallboard_and_dashboard(client: TestClient, auth_headers: dict):

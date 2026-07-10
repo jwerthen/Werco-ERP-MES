@@ -23,6 +23,8 @@ import {
 } from 'recharts';
 import { formatCentralDate } from '../utils/centralTime';
 import { MiniStatStrip, CockpitPanel } from '../components/cockpit';
+import FlowAnalytics from '../components/analytics/FlowAnalytics';
+import { usePermissions } from '../hooks/usePermissions';
 
 interface KPIValue {
   // null when the KPI is genuinely uncomputable (Batch 8 / OEE-4/OEE-6: no staffed time
@@ -44,6 +46,11 @@ interface KPIDashboard {
   quote_win_rate: KPIValue;
   backlog_hours: KPIValue;
   inventory_turnover: KPIValue;
+  // Lean Phase 1 (issue #88): SHIP-based delivery legs alongside the
+  // completion-based on_time_delivery. Optional — older payloads omit them,
+  // so the tiles are null-guarded.
+  on_time_delivery_ship?: KPIValue | null;
+  otif?: KPIValue | null;
   period_start: string;
   period_end: string;
 }
@@ -234,6 +241,11 @@ const formatChartDate = (value: string) =>
 export default function Analytics() {
   const navigate = useNavigate();
   const location = useLocation();
+  const { canAny } = usePermissions();
+  // Flow view mirrors the backend gates: flow/wip/adoption need
+  // work_orders:release (admin/manager/supervisor); fpy/scrap-pareto also
+  // allow quality:approve. Anyone in either set gets the section link.
+  const canSeeFlow = canAny(['work_orders:release', 'quality:approve']);
   const [period, setPeriod] = useState('30d');
   const [loading, setLoading] = useState(true);
   const [kpis, setKpis] = useState<KPIDashboard | null>(null);
@@ -260,6 +272,7 @@ export default function Analytics() {
       case 'inventory':
       case 'forecasting':
       case 'costs':
+      case 'flow':
       case 'reports':
         return section;
       default:
@@ -277,6 +290,12 @@ export default function Analytics() {
     }
     setError('');
     try {
+      // The Flow view owns its data loading (FlowAnalytics fetches per-section
+      // with independent error states) — nothing to load at the page level.
+      if (view === 'flow') {
+        return;
+      }
+
       if (view === 'overview') {
         const [kpiRes, capacityRes, productionRes] = await Promise.all([
           api.getKPIDashboard({ period }),
@@ -522,6 +541,8 @@ export default function Analytics() {
         return { title: 'Forecasting', subtitle: 'Capacity outlook and inventory risk' };
       case 'costs':
         return { title: 'Cost Analytics', subtitle: 'Job cost variance and margins' };
+      case 'flow':
+        return { title: 'Flow Analytics', subtitle: 'Lead time, WIP aging, yield, scrap Pareto, and adoption' };
       case 'reports':
         return { title: 'Custom Reports', subtitle: 'Report templates and data sources' };
       default:
@@ -566,6 +587,36 @@ export default function Analytics() {
         </div>
       </div>
 
+      {/* Section nav — the path-based analytics views, as tabs (Flow is
+          role-gated to the set that can load its endpoints). */}
+      <div className="border-b border-fd-line">
+        <nav className="-mb-px flex flex-wrap gap-x-6">
+          {[
+            { id: 'overview', label: 'Overview', href: '/analytics' },
+            { id: 'production', label: 'Production', href: '/analytics/production' },
+            { id: 'quality', label: 'Quality', href: '/analytics/quality' },
+            { id: 'inventory', label: 'Inventory', href: '/analytics/inventory' },
+            { id: 'forecasting', label: 'Forecasting', href: '/analytics/forecasting' },
+            { id: 'costs', label: 'Costs', href: '/analytics/costs' },
+            ...(canSeeFlow ? [{ id: 'flow', label: 'Flow', href: '/analytics/flow' }] : []),
+            { id: 'reports', label: 'Custom Reports', href: '/analytics/reports' },
+          ].map((section) => (
+            <button
+              key={section.id}
+              type="button"
+              onClick={() => navigate(section.href)}
+              className={`py-2 px-1 border-b-2 font-medium text-sm ${
+                view === section.id
+                  ? 'border-werco-primary text-werco-primary'
+                  : 'border-transparent text-slate-400 hover:text-slate-300'
+              }`}
+            >
+              {section.label}
+            </button>
+          ))}
+        </nav>
+      </div>
+
       {error && (
         <div className="bg-red-500/10 border border-red-500/30 rounded-sm p-2.5 flex items-center gap-2">
           <ExclamationTriangleIcon className="h-4 w-4 text-red-600 flex-shrink-0" />
@@ -590,6 +641,27 @@ export default function Analytics() {
               type="percent"
               icon={CalendarDaysIcon}
             />
+            {/* Lean Phase 1 ship-based delivery legs — null-guarded so an older
+                payload without them renders the strip unchanged. Both click
+                through to the ship-OTD detail report. */}
+            {kpis.on_time_delivery_ship && (
+              <KPICard
+                title="OTD (shipped)"
+                kpi={kpis.on_time_delivery_ship}
+                type="percent"
+                icon={CalendarDaysIcon}
+                onClick={() => navigate('/reports?tab=ship-otd')}
+              />
+            )}
+            {kpis.otif && (
+              <KPICard
+                title="OTIF"
+                kpi={kpis.otif}
+                type="percent"
+                icon={CalendarDaysIcon}
+                onClick={() => navigate('/reports?tab=ship-otd')}
+              />
+            )}
             <KPICard
               title="First Pass Yield"
               kpi={kpis.first_pass_yield}
@@ -1123,6 +1195,9 @@ export default function Analytics() {
           )}
         </div>
       )}
+
+      {/* Flow view (Lean Phase 1) — owns its data loading + per-section errors. */}
+      {view === 'flow' && <FlowAnalytics period={period} />}
 
       {view === 'reports' && (
         <div className="space-y-6">

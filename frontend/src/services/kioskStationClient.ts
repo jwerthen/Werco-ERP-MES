@@ -181,7 +181,9 @@ export async function stationLogin(stationId: number, pin: string): Promise<Kios
 
 /**
  * GET /shop-floor/work-center-queue/{id} — auth: station token. Returns the
- * queue enriched with per-item rosters + `server_time` + station identity.
+ * queue enriched with per-item rosters + `server_time` + station identity +
+ * the tenant's ACTIVE `scrap_reason_codes` (Lean Phase 1 — delivered here
+ * because the kiosk's scoped tokens cannot reach /quality/scrap-reason-codes).
  * A 401 clears the stored token (revoked/expired station → PIN screen).
  */
 export async function getQueue(workCenterId: number): Promise<KioskCrewQueueResponse> {
@@ -254,7 +256,13 @@ export async function clockIn(
 export async function clockOut(
   operatorToken: string,
   timeEntryId: number,
-  data: { quantity_produced: number; quantity_scrapped?: number; scrap_reason?: string; source: string }
+  data: {
+    quantity_produced: number;
+    quantity_scrapped?: number;
+    scrap_reason?: string;
+    scrap_reason_code_id?: number;
+    source: string;
+  }
 ): Promise<unknown> {
   return operatorFetch(operatorToken, 'POST', `/shop-floor/clock-out/${timeEntryId}`, data);
 }
@@ -267,6 +275,7 @@ export async function reportProduction(
     quantity_complete_delta?: number;
     quantity_scrapped_delta?: number;
     scrap_reason?: string;
+    scrap_reason_code_id?: number;
     source: string;
   }
 ): Promise<unknown> {

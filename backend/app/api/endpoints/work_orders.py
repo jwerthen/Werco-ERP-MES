@@ -98,6 +98,7 @@ from app.services.quality_gate_service import (
     record_reconcile_inspection_exception,
 )
 from app.services.scheduling_service import SchedulingService
+from app.services.scrap_reason_service import resolve_scrap_reason_code_or_http
 from app.services.storage_service import delete_ref
 from app.services.work_order_state_service import (
     TERMINAL_WO_STATUSES,
@@ -2400,7 +2401,8 @@ def release_work_order(
         except Exception:  # pragma: no cover - an estimate must never fail a release
             logger.exception("estimated_cost compute failed on release of WO %s", work_order.id)
 
-    release_first_ready_operation(work_order)
+    # Lean Phase 1: pass db/user so the PENDING->READY flip emits operation_ready.
+    release_first_ready_operation(work_order, db=db, user_id=current_user.id)
     _emit_work_order_event(
         db,
         company_id=company_id,
@@ -2607,6 +2609,7 @@ def complete_work_order(
     quantity_complete: float,
     quantity_scrapped: Optional[float] = None,
     scrap_reason: Optional[str] = None,
+    scrap_reason_code_id: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(
         require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR, UserRole.QUALITY])
@@ -2686,14 +2689,20 @@ def complete_work_order(
     if quantity_scrapped is not None and quantity_scrapped < 0:
         raise HTTPException(status_code=400, detail="quantity_scrapped cannot be negative")
     # AS9100D defect-traceability invariant (same rule as ClockOut/ProductionReportRequest):
-    # any positive scrap MUST carry a non-blank reason. Query-param path, so the guard lives
-    # in the handler (no Pydantic body validator). 422 matches the scrap-reason enforcement
+    # any positive scrap MUST carry a reason. Lean Phase 1: EITHER a structured
+    # scrap_reason_code_id OR non-blank free text satisfies the rule (code preferred;
+    # text-only clients keep working). Query-param path, so the guard lives in the
+    # handler (no Pydantic body validator). 422 matches the scrap-reason enforcement
     # semantics established this session; blank/whitespace counts as missing.
-    if quantity_scrapped is not None and quantity_scrapped > 0 and not (scrap_reason and scrap_reason.strip()):
+    has_scrap_reason = bool(scrap_reason and scrap_reason.strip()) or scrap_reason_code_id is not None
+    if quantity_scrapped is not None and quantity_scrapped > 0 and not has_scrap_reason:
         raise HTTPException(
             status_code=422,
-            detail="scrap_reason is required when quantity_scrapped is greater than 0",
+            detail="scrap_reason or scrap_reason_code_id is required when quantity_scrapped is greater than 0",
         )
+    # Lean Phase 1: resolve+validate the structured code BEFORE any mutation
+    # (404 unknown/cross-tenant, 422 inactive). None passes through untouched.
+    scrap_code = resolve_scrap_reason_code_or_http(db, company_id, scrap_reason_code_id)
     if ordered_qty > 0 and quantity_complete > ordered_qty:
         raise HTTPException(
             status_code=400,
@@ -2748,6 +2757,7 @@ def complete_work_order(
     old_quantity_complete = float(work_order.quantity_complete or 0)
     old_quantity_scrapped = float(work_order.quantity_scrapped or 0)
     old_scrap_reason = work_order.scrap_reason
+    old_scrap_reason_code_id = work_order.scrap_reason_code_id
 
     db.flush()
     audit = AuditService(db, current_user, request)
@@ -2816,6 +2826,9 @@ def complete_work_order(
     if quantity_scrapped is not None:
         work_order.quantity_scrapped = quantity_scrapped
         work_order.scrap_reason = scrap_reason
+        # Lean Phase 1: the structured code rides the same explicit-scrap-write
+        # semantics -- an explicit scrap write replaces the categorization wholly.
+        work_order.scrap_reason_code_id = scrap_code.id if scrap_code else None
     work_order.updated_at = now
     # The effective scrap actually persisted (the existing value when omitted), used
     # in the event + audit payloads so they reflect what was stored, not the raw arg.
@@ -2884,11 +2897,13 @@ def complete_work_order(
             "quantity_complete": old_quantity_complete,
             "quantity_scrapped": old_quantity_scrapped,
             "scrap_reason": old_scrap_reason,
+            "scrap_reason_code_id": old_scrap_reason_code_id,
         },
         new_values={
             "quantity_complete": work_order.quantity_complete,
             "quantity_scrapped": effective_quantity_scrapped,
             "scrap_reason": work_order.scrap_reason,
+            "scrap_reason_code_id": work_order.scrap_reason_code_id,
         },
         description=f"Recorded completion quantities for work order {work_order.work_order_number}",
     )

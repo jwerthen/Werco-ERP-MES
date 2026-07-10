@@ -70,6 +70,12 @@ TEST_PASSWORD_HASH = "$2b$12$abcdefghijklmnopqrstuv"
 _seq = {"n": 0}
 
 SCRAP_REASON_DETAIL = "scrap_reason is required when quantity_scrapped is greater than 0"
+# Lean Phase 1: POST /work-orders/{id}/complete accepts EITHER free text OR a
+# structured scrap_reason_code_id, so its 422 detail names both. The other three
+# office paths (PUT op / PUT WO / op-complete) are still text-only.
+SCRAP_REASON_OR_CODE_DETAIL = (
+    "scrap_reason or scrap_reason_code_id is required when quantity_scrapped is greater than 0"
+)
 
 
 def _next() -> int:
@@ -524,7 +530,7 @@ def test_complete_work_order_scrap_without_reason_is_422_and_persists_nothing(cl
         headers=headers_for(operator),
     )
     assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
-    assert resp.json()["detail"] == SCRAP_REASON_DETAIL
+    assert resp.json()["detail"] == SCRAP_REASON_OR_CODE_DETAIL
 
     db_session.expire_all()
     wo = db_session.get(WorkOrder, wo_id)

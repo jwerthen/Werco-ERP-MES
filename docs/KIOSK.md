@@ -76,13 +76,13 @@ URL is all the station setup there is.
 2. **Active-job banner** (pinned while clocked in), with three verbs — plus a
    **PROCESS STEPS · 2/6 RECORDED** button when the operation carries steps:
    - **REPORT PRODUCTION** — `POST /shop-floor/operations/{id}/production` with good/scrap
-     deltas. Any scrap quantity **requires** a structured reason picked from the shop-standard
-     grid (no default, no free text); the reason is sent as the endpoint's `scrap_reason`
-     field and stored on the operator's time entry. This is no longer a kiosk-only guardrail:
-     the server now rejects a positive scrap delta with no reason (and the same rule on
-     clock-out) with **422**, so reasonless scrap can't be posted around the UI.
+     deltas. Any scrap quantity **requires** an explicit reason picked from the scrap grid
+     (no default; see "Scrap reason picker" below for what the grid contains and what is
+     sent). This is no longer a kiosk-only guardrail: the server rejects a positive scrap
+     delta with no reason (and the same rule on clock-out) with **422**, so reasonless scrap
+     can't be posted around the UI.
    - **COMPLETE** — clock-out first (`POST /shop-floor/clock-out/{id}` with final counts and,
-     when any scrap is entered, the same structured-grid scrap reason), then
+     when any scrap is entered, the same scrap-grid reason), then
      `POST /shop-floor/operations/{id}/complete` at the target quantity. If the clock-out
      lands but the completion is refused, the kiosk says so — labor is closed either way.
      A completion refused with **409 `STEPS_INCOMPLETE`** (required process-sheet steps
@@ -91,6 +91,23 @@ URL is all the station setup there is.
    - **HOLD** — a required blocker-category grid (material missing, machine down, tooling
      missing, quality hold, …), then `PUT /shop-floor/operations/{id}/hold` at `medium`
      severity. A kiosk hold files the same structured `WorkOrderBlocker` a supervisor would.
+
+**Scrap reason picker — company codes vs. legacy grid (Lean Phase 1).** What the required
+scrap grid contains depends on whether the company has **active scrap reason codes** (the
+tenant vocabulary behind `GET /quality/scrap-reason-codes` — see `docs/API.md` → Quality):
+- **Codes mode** (one or more active codes): the grid renders the company's codes as
+  "CODE — Name" tiles in display order; the tapped code is sent as the write's
+  **`scrap_reason_code_id`**, plus an **optional** free-text "Detail" line sent as
+  `scrap_reason` (narrative alongside the code).
+- **Legacy fallback** (no active codes): the grid is the old hardcoded shop-standard reason
+  list (no free text), sent as `scrap_reason` — companies that haven't adopted codes keep
+  the pre-existing flow unchanged.
+
+The single-operator kiosk fetches the codes at badge login (`GET /quality/scrap-reason-codes`,
+**fail-soft**: a fetch error falls back to the legacy grid rather than ever blocking scrap
+entry on the floor); the crew station gets them off its queue payload instead (see
+[Crew station mode](#crew-station-mode-kioskkiosk1stationid)). Either a code or non-blank
+text satisfies the server's scrap-requires-a-reason rule.
 
 **What operators cannot do.** No overrides: backend gating (operation sequence /
 predecessor not complete, on-hold, optimistic-lock 409s, qualification warnings) is
@@ -375,6 +392,16 @@ the operation-level tally and a roster chip strip of everyone clocked in, each w
 per-person timer (computed against the server clock via the queue's `server_time`, so a
 fast/slow tablet can't lie). The queue polls every **10 s** and refetches immediately after
 every successful action.
+
+Scrap entry on every crew flow (LEAVE clock-out, REPORT PRODUCTION, COMPLETE) uses the same
+codes-or-legacy picker as the single-operator mode (see "Scrap reason picker" under
+[What operators can do](#what-operators-can-do)) — but the station gets the company's active
+codes off the **queue payload itself** (the top-level `scrap_reason_codes` array on
+`GET /shop-floor/work-center-queue/{id}`), not a separate read. Deliberately so: badge-minted
+kiosk tokens are path-fenced to `/shop-floor` and cannot call
+`GET /quality/scrap-reason-codes`, and the station token stays honored by exactly the same two
+things (its own queue read + the badge mint) — the two-capability invariant is intact and no
+token scope was widened. An empty array means no active codes → the legacy grid.
 
 - **JOIN / LEAVE (badge decides).** Tap a job → "scan badge to join or leave". If the badge's
   user is already on the roster, it's a **LEAVE**: the quantity screen closes their own entry
