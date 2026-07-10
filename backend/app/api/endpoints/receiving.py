@@ -404,7 +404,7 @@ def receive_material(
 
     # Operational-event parity with the (now-removed) purchasing.py receive path so
     # existing AI/real-time consumers keep working. Emit before commit.
-    OperationalEventService(db).emit(
+    OperationalEventService(db).emit_best_effort(
         company_id=company_id,
         event_type="purchase_order_received",
         source_module="purchasing",
@@ -704,7 +704,7 @@ def inspect_receipt(
 
     # Operational-event parity with the (now-removed) purchasing.py inspect path so
     # existing AI/real-time consumers keep working. Emit before commit.
-    OperationalEventService(db).emit(
+    OperationalEventService(db).emit_best_effort(
         company_id=company_id,
         event_type="purchase_receipt_inspected",
         source_module="purchasing",

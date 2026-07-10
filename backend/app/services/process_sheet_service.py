@@ -1470,7 +1470,7 @@ def create_quality_hold(
             "equipment_code": equipment.equipment_id if equipment else None,
         },
     )
-    OperationalEventService(db).emit(
+    OperationalEventService(db).emit_best_effort(
         company_id=company_id,
         event_type="ncr_created",
         source_module="shop_floor",

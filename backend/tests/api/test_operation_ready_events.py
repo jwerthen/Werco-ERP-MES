@@ -107,9 +107,10 @@ def test_emission_failure_never_fails_the_release(client: TestClient, db_session
     """Best-effort contract: the operation_ready emit blowing up must not turn a
     valid release into an error -- the flip itself still lands.
 
-    The failure is scoped to event_type == 'operation_ready': the release
-    endpoint's own work_order_released emit (_emit_work_order_event) is a
-    separate, pre-existing UNGUARDED emitter, deliberately left out of scope."""
+    The failure is scoped to event_type == 'operation_ready' so this pins the
+    completion_signal_service guard specifically; the every-emitter-raises case
+    (including the endpoint's own work_order_released emit) is covered by
+    tests/api/test_operational_event_best_effort.py."""
     import app.services.operational_event_service as oes
 
     real_emit = oes.OperationalEventService.emit

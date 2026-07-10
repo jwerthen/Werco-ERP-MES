@@ -120,7 +120,7 @@ class AIActionApplier:
             raise AIActionApplyError(f"No applier registered for '{action_type}'")
 
         result = handler(recommendation, action)
-        OperationalEventService(self.db).emit(
+        OperationalEventService(self.db).emit_best_effort(
             company_id=self.company_id,
             event_type="ai_recommendation_applied",
             source_module=recommendation.source_module,

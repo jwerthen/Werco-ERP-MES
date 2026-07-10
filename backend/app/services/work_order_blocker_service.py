@@ -138,7 +138,7 @@ class WorkOrderBlockerService:
             operation.status = OperationStatus.ON_HOLD
             operation.updated_at = datetime.utcnow()
 
-        OperationalEventService(self.db).emit(
+        OperationalEventService(self.db).emit_best_effort(
             company_id=company_id,
             event_type="work_order_blocker_created",
             source_module="work_orders",
@@ -217,7 +217,7 @@ class WorkOrderBlockerService:
             resumed_operation, resumed_operation_previous_status = self._resume_operation_if_no_open_blockers(blocker)
         blocker.updated_at = datetime.utcnow()
 
-        OperationalEventService(self.db).emit(
+        OperationalEventService(self.db).emit_best_effort(
             company_id=company_id,
             event_type="work_order_blocker_updated",
             source_module="work_orders",

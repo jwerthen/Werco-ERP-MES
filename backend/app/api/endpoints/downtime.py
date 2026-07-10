@@ -441,7 +441,7 @@ def create_downtime_event(
     event.company_id = company_id
     db.add(event)
     db.flush()
-    OperationalEventService(db).emit(
+    OperationalEventService(db).emit_best_effort(
         company_id=company_id,
         event_type="downtime_started",
         source_module="downtime",
@@ -537,7 +537,7 @@ def resolve_downtime_event(
     if data.resolution:
         event.resolution = data.resolution
 
-    OperationalEventService(db).emit(
+    OperationalEventService(db).emit_best_effort(
         company_id=company_id,
         event_type="downtime_resolved",
         source_module="downtime",

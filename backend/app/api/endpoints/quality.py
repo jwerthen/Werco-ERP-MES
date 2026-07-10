@@ -116,7 +116,7 @@ def create_ncr(
     ncr.company_id = company_id
     db.add(ncr)
     db.flush()
-    OperationalEventService(db).emit(
+    OperationalEventService(db).emit_best_effort(
         company_id=company_id,
         event_type="ncr_created",
         source_module="quality",
@@ -189,7 +189,7 @@ def update_ncr(
     for field, value in update_data.items():
         setattr(ncr, field, value)
 
-    OperationalEventService(db).emit(
+    OperationalEventService(db).emit_best_effort(
         company_id=company_id,
         event_type="ncr_updated",
         source_module="quality",
@@ -241,7 +241,7 @@ def create_car_from_ncr(
     ncr.car_required = True
     ncr.car_id = car.id
 
-    OperationalEventService(db).emit(
+    OperationalEventService(db).emit_best_effort(
         company_id=company_id,
         event_type="car_created_from_ncr",
         source_module="quality",
@@ -314,7 +314,7 @@ def create_car(
     car.company_id = company_id
     db.add(car)
     db.flush()
-    OperationalEventService(db).emit(
+    OperationalEventService(db).emit_best_effort(
         company_id=company_id,
         event_type="car_created",
         source_module="quality",
@@ -384,7 +384,7 @@ def update_car(
     for field, value in update_data.items():
         setattr(car, field, value)
 
-    OperationalEventService(db).emit(
+    OperationalEventService(db).emit_best_effort(
         company_id=company_id,
         event_type="car_updated",
         source_module="quality",
@@ -462,7 +462,7 @@ def create_fai(
     fai.company_id = company_id
     db.add(fai)
     db.flush()
-    OperationalEventService(db).emit(
+    OperationalEventService(db).emit_best_effort(
         company_id=company_id,
         event_type="fai_created",
         source_module="quality",
@@ -533,7 +533,7 @@ def update_fai(
     for field, value in update_data.items():
         setattr(fai, field, value)
 
-    OperationalEventService(db).emit(
+    OperationalEventService(db).emit_best_effort(
         company_id=company_id,
         event_type="fai_updated",
         source_module="quality",
@@ -660,7 +660,7 @@ def update_fai_characteristic(
                 fai.characteristics_failed += 1
 
     if "is_conforming" in update_data:
-        OperationalEventService(db).emit(
+        OperationalEventService(db).emit_best_effort(
             company_id=company_id,
             event_type="fai_characteristic_recorded",
             source_module="quality",

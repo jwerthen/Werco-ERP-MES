@@ -555,7 +555,7 @@ def schedule_work_order(
         scheduled_start=schedule.scheduled_start,
         forward_schedule=schedule.forward_schedule,
     )
-    OperationalEventService(db).emit(
+    OperationalEventService(db).emit_best_effort(
         company_id=company_id,
         event_type="work_order_scheduled",
         source_module="scheduling",
@@ -633,7 +633,7 @@ def schedule_work_order_earliest(
         scheduled_start=earliest_start,
         forward_schedule=request.forward_schedule,
     )
-    OperationalEventService(db).emit(
+    OperationalEventService(db).emit_best_effort(
         company_id=company_id,
         event_type="work_order_scheduled_earliest",
         source_module="scheduling",
@@ -1046,7 +1046,7 @@ def run_scheduling(
         horizon_days=request.horizon_days,
         optimize_setup=request.optimize_setup,
     )
-    OperationalEventService(db).emit(
+    OperationalEventService(db).emit_best_effort(
         company_id=company_id,
         event_type="scheduling_run",
         source_module="scheduling",
@@ -1312,7 +1312,7 @@ def bulk_schedule_earliest(
                 scheduled_start=earliest_start,
                 forward_schedule=request.forward_schedule,
             )
-            OperationalEventService(db).emit(
+            OperationalEventService(db).emit_best_effort(
                 company_id=company_id,
                 event_type="work_order_scheduled_earliest",
                 source_module="scheduling",
