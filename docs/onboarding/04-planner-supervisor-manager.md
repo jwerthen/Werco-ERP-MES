@@ -12,7 +12,7 @@ Planners, buyers, supervisors, shop managers, and quality leads — anyone who s
 - Schedule and dispatch jobs, set priority (with a reason on the record), and rebalance overloaded machines.
 - Create purchase orders, send them to vendors, and run MRP to catch shortages.
 - Turn customer RFQs into quotes and quotes into work orders.
-- Oversee quality: NCRs, CARs, FAIs, calibration, traceability, and complaints.
+- Oversee quality: NCRs, CARs, FAIs, scrap reason codes, calibration, traceability, and complaints.
 - Read the analytics and reports that tell you how the shop is doing.
 
 > Tip: Read **01 — Getting Started** first if you haven't. It covers signing in, the side menu, the Dashboard, and search — this guide assumes you know those.
@@ -212,14 +212,17 @@ Quoting is how new work gets priced before it becomes a job. There are two paths
 
 Quality records are correctness requirements here, not paperwork. Everything is tracked and time-stamped.
 
-1. **Quality** (the **Quality Management** screen) has three tabs:
+1. **Quality** (the **Quality Management** screen) has four tabs:
    - **NCR** (Non-Conformance Reports) — raised when a part or material doesn't meet the requirement. Click **New NCR** to open one.
    - **CAR** (Corrective Action Requests) — opened to fix the root cause of a recurring or serious problem. Click **New CAR**.
    - **FAI** (First Article Inspections) — a full documented inspection of the first piece off a new or changed job. Click **New FAI**.
+   - **Scrap Codes** — your company's scrap-reason vocabulary (for example "OT — Out of tolerance"). These codes are what operators pick from when they record scrap at the kiosk or on the desktop, and they're what the scrap Pareto in Analytics counts by. Click **New Scrap Code** to add one (code, name, category, description, and display order), **Edit** to change one, and **Deactivate** to retire one. Retired codes stay in the list marked inactive and can be **Reactivate**d — codes are never deleted, because historical scrap records point at them. Adding and editing codes takes an admin, manager, or quality role; if your company has no active codes, scrap entry falls back to a built-in reason list.
    - Summary cards across the top show open NCRs, open CARs, and pending FAIs.
 
    ![Quality Management screen on the NCR tab with summary cards](images/quality-ncr.png)
    *Track NCRs, CARs, and FAIs from one screen — open counts are right at the top.*
+
+   <!-- TODO(screenshot): quality-ncr.png predates the Scrap Codes tab (its tab strip shows only NCR/CAR/FAI). Recapture it, and ideally add a Scrap Codes tab shot (images/quality-scrap-codes.png). -->
 
 2. **Calibration** — register measuring equipment, track due dates and status, and record calibration events.
 3. **Traceability** — search by lot or serial number and trace a lot's genealogy and where-used history.
@@ -233,13 +236,32 @@ Quality records are correctness requirements here, not paperwork. Everything is 
 When you want the numbers behind the floor:
 
 1. **Analytics** opens to the **Analytics Dashboard** with real-time KPI cards — OEE, on-time delivery, first-pass yield, scrap rate, open NCRs, quote win rate, backlog hours, and inventory turnover — plus production trends. Use the period selector (**Today**, **7 Days**, **30 Days**, **90 Days**, **Year to Date**) to change the window.
-2. Switch to focused views for **Production**, **Quality**, **Inventory**, **Forecasting** (capacity outlook and inventory risk), and **Cost** analytics, plus **Custom Reports**.
+   - Two shipping-based delivery cards sit alongside the completion-based on-time delivery: **OTD (shipped)** — of the jobs that finished shipping in the period, the share whose full quantity shipped on or before the promise date — and **OTIF** ("on time, in full") — of the jobs promised in the period, the share delivered in full by the promise, so a job still open past its promise counts against it. The **promise date** is the work order's must-ship-by date, or its due date if no ship-by is set. Click either card to jump to the **Ship OTD** report (below).
+2. Tabs across the top switch to focused views for **Production**, **Quality**, **Inventory**, **Forecasting** (capacity outlook and inventory risk), and **Costs**, plus **Flow** and **Custom Reports**.
 
    ![Analytics dashboard with KPI cards and production trend charts](images/analytics.png)
-   *The Analytics dashboard is the shop's scoreboard — switch views for the detail behind each number.*
+   *The Analytics dashboard is the shop's scoreboard — switch tabs for the detail behind each number.*
 
-3. **Reports** holds the standard report set, including daily output, work-center utilization, work-order costing, production summary, quality metrics, vendor performance, inventory value, and employee time.
-4. **Job Costing** breaks down cost by job.
+   <!-- TODO(screenshot): analytics.png predates the tab strip and the OTD (shipped)/OTIF cards. Recapture the Analytics Dashboard from a current build. -->
+
+3. The **Flow** tab is the lean view — how work moves through the shop, not just how much came out. (Admins, managers, and supervisors see everything; quality roles see its yield and scrap sections. Other roles don't get the tab.) It shows:
+   - a KPI strip — average and median **lead time** (release to completion), **Little's Law** (the days a job should take at today's WIP and throughput), **Avg PCE** (the share of lead time that was value-add work), **Avg Queue** hours, and **Avg WIP**;
+   - **WIP Aging** — open work orders, oldest first, so long-stuck jobs surface;
+   - **Queue Time by Work Center** — hours jobs sit waiting before an operation starts;
+   - **First Pass Yield by Part** and **FPY by Work Center**, with the period's overall FPY and RTY;
+   - **Scrap Pareto** — scrap share by reason code with a cumulative % line, counted by the codes you manage in **Quality → Scrap Codes** (see Quality oversight above);
+   - **Adoption** — digital completion, clock-in coverage, and backfill rate with a weekly trend, plus hidden-factory measures: rework hours, the planned-vs-reactive maintenance mix, and per-work-center **MTBF/MTTR** (mean time between failures / mean time to repair).
+
+   <!-- TODO(screenshot): add images/analytics-flow.png — the Analytics Flow tab (KPI strip, WIP Aging, Scrap Pareto) captured from a seeded app. -->
+
+4. **Reports** holds the standard report set across four tabs: **Dashboard** (daily output, work-center utilization, vendor performance, and the quality and inventory summaries), **Ship OTD**, **Work Order Costing**, and **Employee Time**.
+   - The **Ship OTD** tab is the delivery detail behind the OTD (shipped) and OTIF cards: summary stats up top (including **WOs Measured**, **Fully Shipped**, and **Missing Promise**), an **OTD by Customer** table, a per-work-order table of promise vs. ship dates, and a **Promise Hygiene** panel listing shipped or open jobs with **neither** a ship-by nor a due date — those jobs can't be measured at all, so give them real dates. The tab has its own address (`/reports?tab=ship-otd`), so you can bookmark it or share the link; the Analytics delivery cards land here.
+
+   <!-- TODO(screenshot): add images/reports-ship-otd.png — the Reports Ship OTD tab (summary strip, OTD by Customer, Promise Hygiene). -->
+
+5. **Job Costing** breaks down cost by job.
+
+> Tip: The floor sees the headline numbers too — the shop-TV **Wallboard** carries a KPI strip of trailing-30-day **OTD** (ship-based), **FPY**, and **Scrap %**, plus live **Open WOs** and **Avg WIP Age**. If a number on the board looks off, the Flow tab and the Ship OTD report are where you drill in.
 
 ---
 
@@ -254,6 +276,8 @@ When you want the numbers behind the floor:
 | The readiness panel blocks the work order | It's telling you what's missing (usually a released routing or BOM). Fix the engineering data, or add the operations manually if appropriate. |
 | A machine shows red on the capacity heatmap | It's booked past capacity for that day. Drag a job off it, shift dates, or move work to another work center to rebalance. |
 | Receiving inspection won't complete | Confirm the accepted and rejected quantities are valid and that any required reject notes are filled in (see the Warehouse guide). |
+| The Flow tab doesn't show on Analytics | It's role-gated. Admins, managers, and supervisors get the full view; quality roles get its yield and scrap sections; other roles don't see the tab. |
+| OTD (shipped) or OTIF shows n/a | Nothing was measurable in the period — usually jobs with no promise date. Open **Reports → Ship OTD** and clear the **Promise Hygiene** list by giving those jobs a due date. |
 
 ## Where to get help
 
