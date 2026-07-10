@@ -293,7 +293,7 @@ def create_shipment(
     shipment.company_id = company_id
     db.add(shipment)
     db.flush()
-    OperationalEventService(db).emit(
+    OperationalEventService(db).emit_best_effort(
         company_id=company_id,
         event_type="shipment_created",
         source_module="shipping",
@@ -393,7 +393,7 @@ def mark_shipped(
         wo_previous_status = wo.status.value if hasattr(wo.status, "value") else wo.status
         wo.status = WorkOrderStatus.CLOSED
 
-    OperationalEventService(db).emit(
+    OperationalEventService(db).emit_best_effort(
         company_id=company_id,
         event_type="shipment_shipped",
         source_module="shipping",
@@ -557,7 +557,7 @@ def update_shipment(
         else:
             setattr(shipment, field, value)
 
-    OperationalEventService(db).emit(
+    OperationalEventService(db).emit_best_effort(
         company_id=company_id,
         event_type="shipment_updated",
         source_module="shipping",

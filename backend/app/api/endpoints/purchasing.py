@@ -402,7 +402,7 @@ def create_purchase_order(
     po.total = subtotal + po.tax + po.shipping
 
     db.flush()
-    OperationalEventService(db).emit(
+    OperationalEventService(db).emit_best_effort(
         company_id=company_id,
         event_type="purchase_order_created",
         source_module="purchasing",
@@ -517,7 +517,7 @@ def update_purchase_order(
         else:
             setattr(po, field, value)
 
-    OperationalEventService(db).emit(
+    OperationalEventService(db).emit_best_effort(
         company_id=company_id,
         event_type="purchase_order_updated",
         source_module="purchasing",
@@ -555,7 +555,7 @@ def send_purchase_order(
 
     po.status = POStatus.SENT
     po.order_date = date.today()
-    OperationalEventService(db).emit(
+    OperationalEventService(db).emit_best_effort(
         company_id=company_id,
         event_type="purchase_order_sent",
         source_module="purchasing",
@@ -619,7 +619,7 @@ def add_po_line(
     po.total = po.subtotal + po.tax + po.shipping
 
     db.flush()
-    OperationalEventService(db).emit(
+    OperationalEventService(db).emit_best_effort(
         company_id=company_id,
         event_type="purchase_order_line_added",
         source_module="purchasing",

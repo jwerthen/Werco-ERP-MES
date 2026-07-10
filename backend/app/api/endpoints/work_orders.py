@@ -456,7 +456,14 @@ def _emit_work_order_event(
     severity: str = "info",
     payload: Optional[dict] = None,
 ) -> None:
-    OperationalEventService(db).emit(
+    """Emit a WO-lifecycle OperationalEvent (released/started/completed/...).
+
+    BEST-EFFORT: these events are telemetry attached to the status change, not the
+    status change itself -- an event-store failure must never fail the release/
+    start/complete that triggered it, so this routes through ``emit_best_effort``
+    (which logs the failure with event type / WO id / company id and continues).
+    """
+    OperationalEventService(db).emit_best_effort(
         company_id=company_id,
         event_type=event_type,
         source_module="work_orders",

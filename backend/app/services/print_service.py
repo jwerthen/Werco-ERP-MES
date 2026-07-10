@@ -206,7 +206,7 @@ class PrintService:
                 ),
             )
 
-        self.events.emit(
+        self.events.emit_best_effort(
             company_id=company_id,
             event_type="receiving_label_printed",
             source_module="receiving",

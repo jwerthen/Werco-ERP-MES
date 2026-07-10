@@ -767,7 +767,7 @@ def clock_in(
         source="clock_in",
     )
 
-    OperationalEventService(db).emit(
+    OperationalEventService(db).emit_best_effort(
         company_id=company_id,
         event_type="labor_clock_in",
         source_module="shop_floor",
@@ -1021,7 +1021,7 @@ def clock_out(
             work_order.work_order_number,
             work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
         )
-    OperationalEventService(db).emit(
+    OperationalEventService(db).emit_best_effort(
         company_id=company_id,
         event_type="labor_clock_out",
         source_module="shop_floor",
@@ -3298,7 +3298,7 @@ def put_operation_on_hold(
                 source=hold_source,
             )
         else:
-            OperationalEventService(db).emit(
+            OperationalEventService(db).emit_best_effort(
                 company_id=company_id,
                 event_type="operation_hold",
                 source_module="shop_floor",
@@ -3403,7 +3403,7 @@ def resume_operation(
         extra_data=({"open_blocker_ids": [b.id for b in open_blockers]} if open_blockers else None),
     )
     if operation.work_order:
-        OperationalEventService(db).emit(
+        OperationalEventService(db).emit_best_effort(
             company_id=company_id,
             event_type="operation_resumed",
             source_module="shop_floor",

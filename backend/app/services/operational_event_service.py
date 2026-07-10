@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -7,6 +8,8 @@ from sqlalchemy.orm import Session
 
 from app.models.operational_event import OperationalEvent
 from app.models.work_order import WorkOrder, WorkOrderOperation
+
+logger = logging.getLogger(__name__)
 
 SENSITIVE_EVENT_KEYS = {
     "api_key",
@@ -92,6 +95,71 @@ class OperationalEventService:
         self.db.add(event)
         self.db.flush()
         return event
+
+    def emit_best_effort(
+        self,
+        *,
+        company_id: int,
+        event_type: str,
+        source_module: str,
+        entity_type: Optional[str] = None,
+        entity_id: Optional[int] = None,
+        work_order_id: Optional[int] = None,
+        operation_id: Optional[int] = None,
+        user_id: Optional[int] = None,
+        severity: str = "info",
+        event_payload: Optional[Dict[str, Any]] = None,
+        occurred_at: Optional[datetime] = None,
+    ) -> Optional[OperationalEvent]:
+        """``emit``, but a failure can never propagate to the caller.
+
+        Operational events are telemetry, not audit data: when an event is emitted
+        as a side signal of a business operation (WO release, ship, clock-in, ...),
+        an event-store failure must not fail that operation. This mirrors the guard
+        semantics of the ``emit_*_event`` helpers in
+        ``services/completion_signal_service.py``: catch everything (tenant
+        validation, event construction, the flush), log with context, and continue.
+        Like ``emit`` it only flushes -- never commits.
+
+        Caveat (identical to the completion_signal_service guards): pre-flush
+        failures (tenant validation, construction, serialization) are the fully
+        protected class. If ``flush()`` itself fails at the DB, the swallowed
+        exception still deactivates the session's outer transaction, so the
+        caller's next flush/commit raises ``PendingRollbackError`` -- the true
+        cause survives only in this WARNING log. Wrapping the emit in
+        ``begin_nested()`` would close that residue (see
+        ``migration_import_service.py`` for the savepoint precedent).
+
+        Use plain ``emit`` only where recording the event IS the operation (e.g.
+        ``POST /operational-events``) and a failure should surface to the caller.
+        """
+        try:
+            return self.emit(
+                company_id=company_id,
+                event_type=event_type,
+                source_module=source_module,
+                entity_type=entity_type,
+                entity_id=entity_id,
+                work_order_id=work_order_id,
+                operation_id=operation_id,
+                user_id=user_id,
+                severity=severity,
+                event_payload=event_payload,
+                occurred_at=occurred_at,
+            )
+        except Exception:  # noqa: BLE001 - telemetry must never fail the business operation
+            logger.warning(
+                "operational event emit failed (best-effort, continuing): "
+                "event_type=%s source_module=%s work_order_id=%s entity=%s/%s company_id=%s",
+                event_type,
+                source_module,
+                work_order_id,
+                entity_type,
+                entity_id,
+                company_id,
+                exc_info=True,
+            )
+            return None
 
     def list_events(
         self,

@@ -430,7 +430,7 @@ class ShippingService:
 
         # Operational event -- NO secrets, only carrier/cost summary.
         cheapest = min((q.amount for q in quotes), default=None)
-        self.events.emit(
+        self.events.emit_best_effort(
             company_id=company_id,
             event_type="shipment_rates_fetched",
             source_module="shipping",
@@ -522,7 +522,7 @@ class ShippingService:
         self.db.flush()
 
         # Operational event -- carrier/cost only, NO secrets.
-        self.events.emit(
+        self.events.emit_best_effort(
             company_id=company_id,
             event_type="shipment_label_purchased",
             source_module="shipping",
@@ -646,7 +646,7 @@ class ShippingService:
         self._mark_selected_quote(company_id, shipment.id, rate_id)
         self.db.flush()
 
-        self.events.emit(
+        self.events.emit_best_effort(
             company_id=company_id,
             event_type="shipment_bol_purchased",
             source_module="shipping",
@@ -727,7 +727,7 @@ class ShippingService:
             window_end=window_end,
         )
 
-        self.events.emit(
+        self.events.emit_best_effort(
             company_id=company_id,
             event_type="shipment_pickup_scheduled",
             source_module="shipping",
@@ -773,7 +773,7 @@ class ShippingService:
         shipment.refund_status = refund_status or "submitted"
         self.db.flush()
 
-        self.events.emit(
+        self.events.emit_best_effort(
             company_id=company_id,
             event_type="shipment_label_voided",
             source_module="shipping",

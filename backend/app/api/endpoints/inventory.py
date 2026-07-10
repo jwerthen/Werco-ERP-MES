@@ -335,7 +335,7 @@ def receive_inventory(
         )
         db.add(txn)
         db.flush()
-        OperationalEventService(db).emit(
+        OperationalEventService(db).emit_best_effort(
             company_id=company_id,
             event_type="inventory_received",
             source_module="inventory",
@@ -422,7 +422,7 @@ def issue_inventory(
         )
         db.add(txn)
         db.flush()
-        OperationalEventService(db).emit(
+        OperationalEventService(db).emit_best_effort(
             company_id=company_id,
             event_type="inventory_issued",
             source_module="inventory",
@@ -539,7 +539,7 @@ def transfer_inventory(
         )
         db.add(txn)
         db.flush()
-        OperationalEventService(db).emit(
+        OperationalEventService(db).emit_best_effort(
             company_id=company_id,
             event_type="inventory_transferred",
             source_module="inventory",
@@ -627,7 +627,7 @@ def adjust_inventory(
         )
         db.add(txn)
         db.flush()
-        OperationalEventService(db).emit(
+        OperationalEventService(db).emit_best_effort(
             company_id=company_id,
             event_type="inventory_adjusted",
             source_module="inventory",
