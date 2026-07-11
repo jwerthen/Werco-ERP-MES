@@ -383,7 +383,10 @@ def create_purchase_order(
         if not part:
             raise HTTPException(status_code=404, detail=f"Part {line_data.part_id} not found")
 
-        line_total = line_data.quantity_ordered * line_data.unit_price
+        # quantity_ordered/unit_price parse as Decimal (Money schema types) but the
+        # PO money columns are Float — coerce so `subtotal += line_total` and the
+        # `subtotal + po.tax + po.shipping` total below don't mix Decimal with float.
+        line_total = float(line_data.quantity_ordered) * float(line_data.unit_price)
         line = PurchaseOrderLine(
             purchase_order_id=po.id,
             line_number=idx,
