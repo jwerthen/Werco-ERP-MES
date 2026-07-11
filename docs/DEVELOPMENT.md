@@ -286,6 +286,34 @@ Werco-ERP/
 └── docs/                     # Documentation
 ```
 
+## Frontend API error handling
+
+FastAPI **422** (validation) responses return `detail` as an **array** of
+`{loc, msg, type}` objects. Rendering that array as a React child throws
+"Objects are not valid as a React child" — and because a toast renders **above** the
+router's page-level error boundary, that throw once unmounted the entire SPA to a
+blank `#root` (the user lost all form input). Two layers prevent it now; keep them in
+mind when adding forms:
+
+1. **The Axios interceptor normalizes it for you.** `services/api.ts` calls
+   `normalizeAxiosErrorDetail` (`utils/apiError.ts`) on every rejection, so by the time
+   a `.catch` runs, `error.response.data.detail` is a **string** (the 422 items joined
+   as `field: message; …`). The raw items are preserved under `response.data.detailItems`
+   if you need field-level errors. Structured 409 refusals (OBJECT `detail` with a
+   `code`, e.g. Process Sheets — see `utils/processSheetErrors.ts`) and plain-string
+   details are left untouched. **You can safely `showToast('error', err.response.data.detail)`.**
+   Never render a raw `detail` you fetched with bare `axios`/`fetch` (bypassing the
+   interceptor) — run it through `toDisplayString()` first.
+
+2. **A global error boundary is the backstop.** `App.tsx` wraps the whole tree —
+   *outside every provider, including `ToastProvider`* — in `<ErrorBoundary level="global">`.
+   Any render error that still slips through shows a friendly full-page reload screen
+   instead of a blank page. Do not mount new providers outside this boundary.
+
+Regression coverage: `utils/apiError.test.ts`, `components/ui/Toast.test.tsx`
+(a raw 422 array in a toast renders a readable string and does not unmount), and
+`components/ErrorBoundary/ErrorBoundary.test.tsx`.
+
 ## Database Migrations
 
 > Postgres only. On local SQLite the schema comes from `create_all` (see "Create

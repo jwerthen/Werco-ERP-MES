@@ -863,20 +863,26 @@ function AppRoutes() {
 
 function App() {
   return (
-    <AuthProvider>
-      <CompanyProvider>
-        <ToastProvider>
-          <TourProvider>
-            <Router>
-              <KeyboardShortcutsProvider>
-                <AppRoutes />
-                <TourHighlight />
-              </KeyboardShortcutsProvider>
-            </Router>
-          </TourProvider>
-        </ToastProvider>
-      </CompanyProvider>
-    </AuthProvider>
+    // Global boundary OUTSIDE every provider — including ToastProvider, whose toast
+    // list renders above the router's page-level boundary. Without this, a render
+    // error there (e.g. a raw 422 detail array in a toast) unmounts the whole SPA to
+    // a blank #root; now it falls back to a friendly full-page reload screen instead.
+    <ErrorBoundary level="global" name="App">
+      <AuthProvider>
+        <CompanyProvider>
+          <ToastProvider>
+            <TourProvider>
+              <Router>
+                <KeyboardShortcutsProvider>
+                  <AppRoutes />
+                  <TourHighlight />
+                </KeyboardShortcutsProvider>
+              </Router>
+            </TourProvider>
+          </ToastProvider>
+        </CompanyProvider>
+      </AuthProvider>
+    </ErrorBoundary>
   );
 }
 

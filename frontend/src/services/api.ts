@@ -1,4 +1,5 @@
 import axios, { AxiosInstance, AxiosError, AxiosRequestConfig } from 'axios';
+import { normalizeAxiosErrorDetail } from '../utils/apiError';
 import {
   LoginResponse,
   UserCreate,
@@ -215,6 +216,13 @@ class ApiService {
     this.api.interceptors.response.use(
       (response) => response,
       async (error: AxiosError) => {
+        // Collapse FastAPI 422 `detail` arrays into a readable string up front, so
+        // every consumer that displays `error.response.data.detail` gets a string —
+        // rendering the raw array as a React child (esp. in a toast, which mounts
+        // above the router's error boundary) unmounts the whole SPA. No-op for the
+        // string / structured-object detail shapes. See utils/apiErrors.ts.
+        normalizeAxiosErrorDetail(error);
+
         const originalRequest = error.config as AxiosRequestConfig & { _retry?: boolean };
 
         // The login/refresh endpoints authenticate the request themselves, so a
