@@ -211,6 +211,19 @@ def _parse_period(period: str) -> date:
         return today - timedelta(days=30)
 
 
+def _resolve_window(period: str, date_from: Optional[date], date_to: Optional[date]) -> tuple[date, Optional[date]]:
+    """Resolve the ``[start, end]`` reporting window for the dashboard/trends reads.
+
+    An explicit ``date_from`` takes precedence over the ``period`` preset; ``date_to`` is the
+    inclusive upper bound (``None`` means "through today", i.e. no upper bound). This lets the
+    UI's From/To range scope the plant strip, work-center tiles, and trend chart the same way
+    it already scopes the records table, instead of those staying pinned to the period preset.
+    Passing neither date preserves the legacy behavior (period-derived start, open end).
+    """
+    start = date_from if date_from is not None else _parse_period(period)
+    return start, date_to
+
+
 # ============== OEE Record Endpoints ==============
 
 
@@ -476,12 +489,19 @@ def auto_calculate_oee(
 @router.get("/dashboard")
 def get_oee_dashboard(
     period: str = "30d",
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Get OEE dashboard: current OEE per work center, plant-wide OEE, and targets."""
-    start_date = _parse_period(period)
+    """Get OEE dashboard: current OEE per work center, plant-wide OEE, and targets.
+
+    The window is ``date_from``..``date_to`` when provided (the UI's From/To range), else the
+    ``period`` preset. This keeps the plant strip / tiles / comparison scoped to the same window
+    as the records table rather than pinned to the last 30 days.
+    """
+    start_date, end_date = _resolve_window(period, date_from, date_to)
 
     # Get all active work centers
     work_centers = db.query(WorkCenter).filter(WorkCenter.company_id == company_id, WorkCenter.is_active == True).all()
@@ -491,16 +511,14 @@ def get_oee_dashboard(
     all_oee_values = []
 
     for wc in work_centers:
-        latest = (
-            db.query(OEERecord)
-            .filter(
-                OEERecord.company_id == company_id,
-                OEERecord.work_center_id == wc.id,
-                OEERecord.record_date >= start_date,
-            )
-            .order_by(OEERecord.record_date.desc())
-            .first()
+        latest_query = db.query(OEERecord).filter(
+            OEERecord.company_id == company_id,
+            OEERecord.work_center_id == wc.id,
+            OEERecord.record_date >= start_date,
         )
+        if end_date is not None:
+            latest_query = latest_query.filter(OEERecord.record_date <= end_date)
+        latest = latest_query.order_by(OEERecord.record_date.desc()).first()
 
         # Get target for this work center
         target = (
@@ -528,18 +546,17 @@ def get_oee_dashboard(
     # Calculate plant-wide OEE (average of all work centers)
     plant_oee = round(sum(all_oee_values) / len(all_oee_values), 2) if all_oee_values else 0.0
 
-    # Get average OEE per work center over the period for comparison chart
+    # Get average OEE per work center over the window for comparison chart
     comparison = []
     for wc in work_centers:
-        avg = (
-            db.query(func.avg(OEERecord.oee_pct))
-            .filter(
-                OEERecord.company_id == company_id,
-                OEERecord.work_center_id == wc.id,
-                OEERecord.record_date >= start_date,
-            )
-            .scalar()
+        avg_query = db.query(func.avg(OEERecord.oee_pct)).filter(
+            OEERecord.company_id == company_id,
+            OEERecord.work_center_id == wc.id,
+            OEERecord.record_date >= start_date,
         )
+        if end_date is not None:
+            avg_query = avg_query.filter(OEERecord.record_date <= end_date)
+        avg = avg_query.scalar()
 
         target = (
             db.query(OEETarget).filter(OEETarget.company_id == company_id, OEETarget.work_center_id == wc.id).first()
@@ -569,18 +586,26 @@ def get_oee_dashboard(
 def get_oee_trends(
     work_center_id: Optional[int] = None,
     period: str = "30d",
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Get OEE trend data over time for charts."""
-    start_date = _parse_period(period)
+    """Get OEE trend data over time for charts.
+
+    Honors the ``date_from``..``date_to`` range (falling back to the ``period`` preset) so the
+    chart follows the UI's From/To filter rather than always showing the last 30 days.
+    """
+    start_date, end_date = _resolve_window(period, date_from, date_to)
 
     query = (
         db.query(OEERecord)
         .options(joinedload(OEERecord.work_center))
         .filter(OEERecord.company_id == company_id, OEERecord.record_date >= start_date)
     )
+    if end_date is not None:
+        query = query.filter(OEERecord.record_date <= end_date)
 
     if work_center_id:
         query = query.filter(OEERecord.work_center_id == work_center_id)

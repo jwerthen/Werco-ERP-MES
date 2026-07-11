@@ -190,19 +190,24 @@ export default function OEE() {
   const loadData = useCallback(async () => {
     setLoadError(false);
     try {
-      const params: Record<string, any> = {};
-      if (selectedWorkCenter) params.work_center_id = parseInt(selectedWorkCenter);
-      if (dateFrom) params.date_from = dateFrom;
-      if (dateTo) params.date_to = dateTo;
+      // The From/To range scopes the WHOLE dashboard (plant strip, tiles, trends, records).
+      // The work-center selection is a drill-in that scopes only the detail views (trends +
+      // records); it deliberately does NOT filter the plant strip or the tile grid, which stay
+      // a plant-wide overview (the selected WC is highlighted + expanded client-side instead).
+      const dateParams: Record<string, any> = {};
+      if (dateFrom) dateParams.date_from = dateFrom;
+      if (dateTo) dateParams.date_to = dateTo;
+      const detailParams: Record<string, any> = { ...dateParams };
+      if (selectedWorkCenter) detailParams.work_center_id = parseInt(selectedWorkCenter);
 
       // allSettled (not all): the work-centers call only feeds the filter dropdown, so
       // its failure must not blank the whole dashboard. Only a failed core /oee/dashboard
       // call sets loadError (which the render gate pairs with `!dashboard`).
       const [wcRes, dashRes, trendsRes, recordsRes] = await Promise.allSettled([
         api.get('/work-centers/', { params: { active_only: true } }),
-        api.get('/oee/dashboard', { params }),
-        api.get('/oee/trends', { params: { ...params, days: 30 } }),
-        api.get('/oee/records', { params }),
+        api.get('/oee/dashboard', { params: dateParams }),
+        api.get('/oee/trends', { params: detailParams }),
+        api.get('/oee/records', { params: detailParams }),
       ]);
 
       if (wcRes.status === 'fulfilled') {
@@ -324,6 +329,12 @@ export default function OEE() {
   const plantA = meanOrNull(wcList.map((wc) => wc.availability_pct));
   const plantP = meanOrNull(wcList.map((wc) => wc.performance_pct));
   const plantQ = meanOrNull(wcList.map((wc) => wc.quality_pct));
+
+  // Trends now honor the From/To range, so the chart title must reflect the actual window
+  // rather than a hard-coded "30 Days" (the default range is 30 days, preserving that label).
+  const trendDays =
+    dateFrom && dateTo ? Math.max(1, Math.round((Date.parse(dateTo) - Date.parse(dateFrom)) / 86400000)) : null;
+  const trendTitle = trendDays ? `OEE Trends (${trendDays} Days)` : 'OEE Trends';
 
   return (
     <div className="p-3 space-y-3">
@@ -568,7 +579,7 @@ export default function OEE() {
       {/* Trend Chart */}
       {trends.length > 0 && (
         <CockpitPanel
-          title="OEE Trends (30 Days)"
+          title={trendTitle}
           headerExtra={<CalendarDaysIcon className="h-5 w-5 text-fd-mute" />}
           bodyClassName="lg:max-h-none"
         >

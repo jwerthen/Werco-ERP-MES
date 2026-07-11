@@ -957,3 +957,88 @@ def test_oee_read_endpoints_open_to_operator(client, db_session):
     ):
         resp = client.get(path, headers=h)
         assert resp.status_code == status.HTTP_200_OK, f"{path} -> {resp.status_code}: {resp.text}"
+
+
+# ---------------------------------------------------------------------------
+# Dashboard/trends date-range scoping: the From/To range must scope the plant
+# strip / tiles / comparison / trend chart, not just the records table (the
+# range was previously silently dropped by these two endpoints). An explicit
+# date_from/date_to takes precedence over the period preset.
+# ---------------------------------------------------------------------------
+
+
+def make_oee_record(db: Session, wc: WorkCenter, record_date: date, oee_pct: float, company_id: int = COMPANY_A):
+    """Insert a minimal OEERecord on a specific date with a given OEE (a/p/q mirror it)."""
+    rec = OEERecord(
+        company_id=company_id,
+        work_center_id=wc.id,
+        record_date=record_date,
+        oee_pct=oee_pct,
+        availability_pct=oee_pct,
+        performance_pct=oee_pct,
+        quality_pct=oee_pct,
+    )
+    db.add(rec)
+    db.commit()
+    db.refresh(rec)
+    return rec
+
+
+def test_dashboard_honors_date_from_date_to_window(client, db_session):
+    """The dashboard's current-OEE-per-WC follows the From/To range: the latest record WITHIN
+    the window is used, and a window with no records yields null (renders '--'), not a stale value."""
+    admin = make_user(db_session)
+    wc = make_work_center(db_session)
+    make_oee_record(db_session, wc, date(2021, 1, 10), 40.0)
+    make_oee_record(db_session, wc, date(2021, 2, 20), 80.0)
+    h = headers_for(admin)
+
+    # Window covering only the January record.
+    resp = client.get("/api/v1/oee/dashboard?date_from=2021-01-01&date_to=2021-01-31", headers=h)
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    wcs = {w["work_center_id"]: w for w in resp.json()["work_centers"]}
+    assert wcs[wc.id]["current_oee_pct"] == 40.0
+    assert wcs[wc.id]["record_date"] == "2021-01-10"
+
+    # Window covering only the February record -> latest-in-window is the Feb value.
+    resp = client.get("/api/v1/oee/dashboard?date_from=2021-02-01&date_to=2021-02-28", headers=h)
+    wcs = {w["work_center_id"]: w for w in resp.json()["work_centers"]}
+    assert wcs[wc.id]["current_oee_pct"] == 80.0
+    assert wcs[wc.id]["record_date"] == "2021-02-20"
+
+    # Window before both records -> no data in window -> null, not a fabricated/stale value.
+    resp = client.get("/api/v1/oee/dashboard?date_from=2020-01-01&date_to=2020-12-31", headers=h)
+    wcs = {w["work_center_id"]: w for w in resp.json()["work_centers"]}
+    assert wcs[wc.id]["current_oee_pct"] is None
+    assert wcs[wc.id]["record_date"] is None
+
+
+def test_trends_honors_date_from_date_to_window(client, db_session):
+    """The trend series is bounded by the From/To range (previously it always used the period preset)."""
+    admin = make_user(db_session)
+    wc = make_work_center(db_session)
+    make_oee_record(db_session, wc, date(2021, 1, 10), 40.0)
+    make_oee_record(db_session, wc, date(2021, 2, 20), 80.0)
+    make_oee_record(db_session, wc, date(2021, 3, 30), 60.0)
+    h = headers_for(admin)
+
+    resp = client.get(
+        f"/api/v1/oee/trends?work_center_id={wc.id}&date_from=2021-02-01&date_to=2021-02-28",
+        headers=h,
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    dates = [p["date"] for p in resp.json()["time_series"]]
+    assert dates == ["2021-02-20"]  # only the in-window record, not the Jan/Mar ones
+
+
+def test_dashboard_period_fallback_when_no_date_range(client, db_session):
+    """Backward compatible: with no date_from/date_to the period preset still governs the window."""
+    admin = make_user(db_session)
+    wc = make_work_center(db_session)
+    make_oee_record(db_session, wc, date.today(), 75.0)
+    h = headers_for(admin)
+
+    resp = client.get("/api/v1/oee/dashboard?period=7d", headers=h)
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    wcs = {w["work_center_id"]: w for w in resp.json()["work_centers"]}
+    assert wcs[wc.id]["current_oee_pct"] == 75.0
