@@ -355,18 +355,21 @@ jobs:
 
       - name: Create GitHub Release
         if: success()
-        uses: actions/create-release@v1
+        # The archived actions/create-release@v1 stopped working when GitHub
+        # runners flipped the default action runtime Node 20 -> Node 24
+        # (2026-07-10, run 29124478242: healthy deploy marked red by this step
+        # alone). Use the preinstalled gh CLI instead. Release bookkeeping is
+        # best-effort: continue-on-error so it can never fail a successful
+        # deploy. --target pins the tag to the deployed commit even if main
+        # has advanced by the time the deploy finishes.
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: deploy-${{ github.run_number }}
-          release_name: Production Deploy #${{ github.run_number }}
-          body: |
-            Automated production deployment
-            Commit: ${{ github.sha }}
-            Deployed by: ${{ github.actor }}
-          draft: false
-          prerelease: false
+        run: |
+          gh release create "deploy-${{ github.run_number }}" \
+            --target "${{ github.sha }}" \
+            --title "Production Deploy" \
+            --notes "$(printf 'Automated production deployment\nCommit: %s\nDeployed by: %s' "${{ github.sha }}" "${{ github.actor }}")"
 
   notify:
     name: Notify Results
