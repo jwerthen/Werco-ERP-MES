@@ -262,8 +262,33 @@ test('renders without crashing when all metrics are null (real prod state), show
 test('unwraps the trends time_series object and renders the trend chart', async () => {
   renderOEE();
   // The chart panel only renders when trends.length > 0, which requires the object
-  // to have been unwrapped into its time_series array.
-  expect(await screen.findByText('OEE Trends (30 Days)')).toBeInTheDocument();
+  // to have been unwrapped into its time_series array. Title day-count is derived from
+  // the (default 30-day) From/To range, so match loosely.
+  expect(await screen.findByText(/OEE Trends/)).toBeInTheDocument();
+});
+
+// The From/To range scopes the WHOLE dashboard; the dead `days` param is gone; and the
+// work-center selection is a detail-only filter (dashboard tiles stay plant-wide).
+test('scopes the dashboard and trends by the From/To date range, not the ignored days param', async () => {
+  renderOEE();
+  await screen.findByText('Plant-wide OEE');
+
+  const calls = mockedApi.get.mock.calls;
+  const paramsOf = (url: string) => (calls.find((c) => c[0] === url)?.[1] as any)?.params;
+
+  // Dashboard is scoped by the date range (so the plant strip follows the filter)...
+  expect(paramsOf('/oee/dashboard')).toHaveProperty('date_from');
+  expect(paramsOf('/oee/dashboard')).toHaveProperty('date_to');
+  // ...but NOT by work_center_id (the tile grid stays a plant-wide overview)...
+  expect(paramsOf('/oee/dashboard')).not.toHaveProperty('work_center_id');
+  // ...and never the dead `days` key the endpoint ignores.
+  expect(paramsOf('/oee/dashboard')).not.toHaveProperty('days');
+
+  // Trends + records are scoped by the range too (trends no longer sends `days`).
+  expect(paramsOf('/oee/trends')).toHaveProperty('date_from');
+  expect(paramsOf('/oee/trends')).toHaveProperty('date_to');
+  expect(paramsOf('/oee/trends')).not.toHaveProperty('days');
+  expect(paramsOf('/oee/records')).toHaveProperty('date_from');
 });
 
 test('renders OEE records using the real *_pct / *_parts fields', async () => {

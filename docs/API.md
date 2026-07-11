@@ -1633,8 +1633,8 @@ records, targets) require **Admin / Manager / Supervisor**.
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| GET | `/oee/dashboard` | OEE per work center, plant-wide OEE, targets (`period` 7d/30d/90d/365d) | Yes |
-| GET | `/oee/trends` | OEE time-series for charts (`work_center_id`, `period`) | Yes |
+| GET | `/oee/dashboard` | OEE per work center, plant-wide OEE, targets (`period` 7d/30d/90d/365d, or explicit `date_from`/`date_to` which take precedence) | Yes |
+| GET | `/oee/trends` | OEE time-series for charts (`work_center_id`, `period`, or explicit `date_from`/`date_to`) | Yes |
 | GET | `/oee/six-big-losses/{work_center_id}` | Six-big-losses breakdown | Yes |
 | GET | `/oee/records` | List OEE records (filters: WC, date range, shift) | Yes |
 | GET | `/oee/records/{record_id}` | Get one OEE record | Yes |
