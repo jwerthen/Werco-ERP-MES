@@ -305,11 +305,15 @@ emits an `http://` `Location`. A browser on an `https` page refuses to follow th
 so the request fails with **status 0** — this silently broke the OEE dashboard.
 
 The launch commands (`backend/Dockerfile`, `nixpacks.toml`, `start.sh`) therefore pass
-`--proxy-headers --forwarded-allow-ips="*"`, and the gunicorn image (`Dockerfile.prod`) sets
-`FORWARDED_ALLOW_IPS=*` (UvicornWorker reads it from the env). `"*"` is acceptable because
-the container is only reachable through the proxy; pin it to the proxy's IP/CIDR if the app
-is ever directly reachable. A regression guard lives in
-`backend/tests/test_deploy_proxy_headers.py`.
+`--proxy-headers --forwarded-allow-ips="*"`. In addition, both `backend/Dockerfile` and the
+gunicorn image (`Dockerfile.prod`) set `FORWARDED_ALLOW_IPS=*` in the environment (uvicorn —
+and gunicorn's UvicornWorker — read it independently of the start command). The env var is
+belt-and-suspenders: **Railway can override the container start command**, in which case the
+`--forwarded-allow-ips=*` CLI flag never applies and the `http://` trailing-slash redirect
+re-breaks — so trusting the proxy via the environment keeps the fix in force regardless of
+how the container is launched. `"*"` is acceptable because the container is only reachable
+through the proxy; pin it to the proxy's IP/CIDR if the app is ever directly reachable. A
+regression guard lives in `backend/tests/test_deploy_proxy_headers.py`.
 
 ## SSL Certificates (Let's Encrypt)
 

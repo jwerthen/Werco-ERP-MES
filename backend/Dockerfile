@@ -28,6 +28,15 @@ COPY --chown=appuser:appgroup . .
 # (matches the mkdir/chown done in Dockerfile.prod).
 RUN mkdir -p /app/uploads /app/logs && chown appuser:appgroup /app /app/uploads /app/logs
 
+# Trust the reverse proxy's X-Forwarded-Proto regardless of how the container is
+# launched. The CMD below also passes --forwarded-allow-ips=*, but Railway can
+# override the container start command, in which case that CLI flag never applies
+# (this is why the trailing-slash 307 kept building an http:// Location in prod).
+# uvicorn reads FORWARDED_ALLOW_IPS from the environment independently of the
+# start command, so setting it here restores the proxy-header trust as
+# defense-in-depth. Mirrors Dockerfile.prod. See test_deploy_proxy_headers.py.
+ENV FORWARDED_ALLOW_IPS=*
+
 # Expose port (Railway sets PORT env var)
 EXPOSE 8000
 

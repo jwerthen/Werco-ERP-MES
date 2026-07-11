@@ -35,61 +35,91 @@ interface WorkCenter {
   is_active: boolean;
 }
 
-interface OEEDashboard {
-  plant_oee: number;
-  plant_availability: number;
-  plant_performance: number;
-  plant_quality: number;
-  work_centers: WorkCenterOEE[];
-}
-
+// NOTE: these mirror the REAL response shapes built in backend/app/api/endpoints/oee.py
+// (dashboard ~L557, records _record_to_response ~L162, trends ~L616). The metric fields
+// are `*_pct`, and the per-work-center dashboard metrics are legitimately `null` until an
+// OEE record exists for that work center in the window — render them null-safe.
 interface WorkCenterOEE {
   work_center_id: number;
   work_center_code: string;
   work_center_name: string;
-  oee: number;
-  availability: number;
-  performance: number;
-  quality: number;
+  current_oee_pct: number | null;
+  availability_pct: number | null;
+  performance_pct: number | null;
+  quality_pct: number | null;
+  record_date: string | null;
+  target_oee_pct: number;
+  target_availability_pct: number;
+  target_performance_pct: number;
+  target_quality_pct: number;
 }
 
+interface OEEDashboard {
+  // Only plant_oee_pct is returned at the top level (no plant A/P/Q); the plant A/P/Q
+  // shown in the strip are derived from work_centers (see meanOrNull below).
+  plant_oee_pct: number;
+  work_centers: WorkCenterOEE[];
+  comparison: Array<{
+    work_center_id: number;
+    work_center_name: string;
+    avg_oee_pct: number;
+    target_oee_pct: number;
+  }>;
+  period: string;
+}
+
+// One point of the trends time series. GET /oee/trends returns an OBJECT
+// ({ time_series: [...], target_*_pct, period }), not a bare array — unwrap time_series.
 interface OEETrend {
   date: string;
-  oee: number;
-  availability: number;
-  performance: number;
-  quality: number;
+  oee_pct: number;
+  availability_pct: number;
+  performance_pct: number;
+  quality_pct: number;
 }
 
 interface OEERecord {
   id: number;
   work_center_id: number;
-  work_center?: { id: number; code: string; name: string };
+  work_center_name?: string | null;
   record_date: string;
-  shift?: string;
-  planned_production_time: number;
-  actual_run_time: number;
-  ideal_cycle_time: number;
-  total_pieces: number;
-  good_pieces: number;
-  rejected_pieces: number;
-  availability: number;
-  performance: number;
-  quality: number;
-  oee: number;
-  notes?: string;
-  created_at: string;
+  shift?: string | null;
+  availability_pct: number;
+  performance_pct: number;
+  quality_pct: number;
+  oee_pct: number;
+  total_parts: number;
+  good_parts: number;
+  defect_parts: number;
+  notes?: string | null;
+  created_at?: string | null;
 }
 
 // ============== Helpers ==============
 
-function oeeColor(value: number): string {
+/** Format a percentage metric, showing `--` when there's no data (null/undefined/NaN)
+ *  so an empty metric reads as "no data yet", not a measured 0% OEE. */
+function fmtPct(value: number | null | undefined, digits = 1): string {
+  return value == null || !Number.isFinite(value) ? '--' : `${value.toFixed(digits)}%`;
+}
+
+/** Mean of the finite values, or null when none are present. Mirrors the backend's
+ *  plant_oee_pct derivation (average across the work centers that actually have data),
+ *  so a plant metric with no underlying records shows `--` rather than a fabricated 0%. */
+function meanOrNull(values: Array<number | null | undefined>): number | null {
+  const nums = values.filter((v): v is number => v != null && Number.isFinite(v));
+  return nums.length ? nums.reduce((a, b) => a + b, 0) / nums.length : null;
+}
+
+function oeeColor(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return 'text-fd-mute';
   if (value >= 85) return 'text-green-600';
   if (value >= 65) return 'text-yellow-600';
   return 'text-red-600';
 }
 
-function oeeBgColor(value: number): string {
+function oeeBgColor(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return 'bg-fd-raised border-fd-line';
   if (value >= 85) return 'bg-green-500/20 border-green-500/40';
   if (value >= 65) return 'bg-yellow-500/20 border-yellow-500/40';
   return 'bg-red-500/20 border-red-500/40';
@@ -109,7 +139,8 @@ function gaugeArc(pct: number): string {
   return `M ${cx - r} ${cy} A ${r} ${r} 0 ${large} 1 ${x} ${y}`;
 }
 
-function gaugeColor(value: number): string {
+function gaugeColor(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return '#64748b'; // slate-500 — no data
   if (value >= 85) return '#22c55e';
   if (value >= 65) return '#eab308';
   return '#ef4444';
@@ -189,7 +220,11 @@ export default function OEE() {
       }
 
       if (trendsRes.status === 'fulfilled') {
-        setTrends(Array.isArray(trendsRes.value.data) ? trendsRes.value.data : []);
+        // /oee/trends returns { time_series: [...] }, not a bare array — unwrap it
+        // (tolerate a bare array too in case the contract is ever simplified).
+        const td = trendsRes.value.data;
+        const series = Array.isArray(td) ? td : td?.time_series;
+        setTrends(Array.isArray(series) ? series : []);
       } else {
         console.error('Failed to load OEE trends:', trendsRes.reason);
       }
@@ -223,12 +258,18 @@ export default function OEE() {
         work_center_id: addForm.work_center_id,
         record_date: addForm.record_date,
         shift: addForm.shift || null,
-        planned_production_time: addForm.planned_production_time,
-        actual_run_time: addForm.actual_run_time,
-        ideal_cycle_time: addForm.ideal_cycle_time,
-        total_pieces: addForm.total_pieces,
-        good_pieces: addForm.good_pieces,
-        rejected_pieces: addForm.rejected_pieces,
+        // Backend OEERecordCreate field names (endpoints/oee.py ~L48). The old body sent
+        // planned_production_time/total_pieces/... which Pydantic silently ignored, so every
+        // "Add Record" created an all-zero record. actual_run_time doubles as the performance
+        // operating-time denominator so the saved metrics match the live preview above.
+        planned_production_time_minutes: addForm.planned_production_time,
+        actual_run_time_minutes: addForm.actual_run_time,
+        actual_operating_time_minutes: addForm.actual_run_time,
+        ideal_cycle_time_seconds: addForm.ideal_cycle_time,
+        total_parts_produced: addForm.total_pieces,
+        total_parts: addForm.total_pieces,
+        good_parts: addForm.good_pieces,
+        defect_parts: addForm.rejected_pieces,
         notes: addForm.notes || null,
       });
       setShowAddModal(false);
@@ -275,10 +316,14 @@ export default function OEE() {
     );
   }
 
-  const plantOEE = dashboard?.plant_oee ?? 0;
-  const plantA = dashboard?.plant_availability ?? 0;
-  const plantP = dashboard?.plant_performance ?? 0;
-  const plantQ = dashboard?.plant_quality ?? 0;
+  const wcList = dashboard?.work_centers ?? [];
+  // The API returns only plant_oee_pct (no plant A/P/Q). Derive all four plant metrics
+  // the same way the backend derives OEE — average across the work centers that actually
+  // have data — so a plant with no records yet shows `--` instead of a fabricated 0%.
+  const plantOEE = meanOrNull(wcList.map((wc) => wc.current_oee_pct));
+  const plantA = meanOrNull(wcList.map((wc) => wc.availability_pct));
+  const plantP = meanOrNull(wcList.map((wc) => wc.performance_pct));
+  const plantQ = meanOrNull(wcList.map((wc) => wc.quality_pct));
 
   return (
     <div className="p-3 space-y-3">
@@ -379,7 +424,7 @@ export default function OEE() {
           iconBg="bg-fd-blue/15"
           iconColor="text-fd-blue"
           label="Plant-wide OEE"
-          value={`${plantOEE.toFixed(1)}%`}
+          value={fmtPct(plantOEE)}
           valueColor={oeeColor(plantOEE)}
           subtitle="Target: 85%"
         />
@@ -388,7 +433,7 @@ export default function OEE() {
           iconBg="bg-fd-blue/15"
           iconColor="text-fd-blue"
           label="Availability"
-          value={`${plantA.toFixed(1)}%`}
+          value={fmtPct(plantA)}
           valueColor={oeeColor(plantA)}
         />
         <MiniStat
@@ -396,7 +441,7 @@ export default function OEE() {
           iconBg="bg-fd-amber/15"
           iconColor="text-fd-amber"
           label="Performance"
-          value={`${plantP.toFixed(1)}%`}
+          value={fmtPct(plantP)}
           valueColor={oeeColor(plantP)}
         />
         <MiniStat
@@ -404,7 +449,7 @@ export default function OEE() {
           iconBg="bg-fd-green/15"
           iconColor="text-fd-green"
           label="Quality"
-          value={`${plantQ.toFixed(1)}%`}
+          value={fmtPct(plantQ)}
           valueColor={oeeColor(plantQ)}
         />
       </MiniStatStrip>
@@ -423,27 +468,27 @@ export default function OEE() {
                 type="button"
                 key={wc.work_center_id}
                 onClick={() => setSelectedWorkCenter(String(wc.work_center_id))}
-                className={`text-left rounded-sm p-2.5 border cursor-pointer transition-colors min-w-0 ${oeeBgColor(wc.oee)} ${
+                className={`text-left rounded-sm p-2.5 border cursor-pointer transition-colors min-w-0 ${oeeBgColor(wc.current_oee_pct)} ${
                   selectedWorkCenter === String(wc.work_center_id) ? 'ring-1 ring-fd-blue' : ''
                 }`}
               >
                 <div className="font-bold text-sm text-fd-ink truncate">{wc.work_center_code}</div>
                 <div className="text-[10px] text-fd-mute truncate mb-1.5">{wc.work_center_name}</div>
-                <div className={`text-xl font-bold tabular-nums ${oeeColor(wc.oee)}`}>
-                  {wc.oee.toFixed(1)}%
+                <div className={`text-xl font-bold tabular-nums ${oeeColor(wc.current_oee_pct)}`}>
+                  {fmtPct(wc.current_oee_pct)}
                 </div>
                 <div className="mt-1 space-y-0.5">
                   <div className="flex justify-between text-[10px] text-fd-mute tabular-nums">
                     <span>A</span>
-                    <span>{wc.availability.toFixed(0)}%</span>
+                    <span>{fmtPct(wc.availability_pct, 0)}</span>
                   </div>
                   <div className="flex justify-between text-[10px] text-fd-mute tabular-nums">
                     <span>P</span>
-                    <span>{wc.performance.toFixed(0)}%</span>
+                    <span>{fmtPct(wc.performance_pct, 0)}</span>
                   </div>
                   <div className="flex justify-between text-[10px] text-fd-mute tabular-nums">
                     <span>Q</span>
-                    <span>{wc.quality.toFixed(0)}%</span>
+                    <span>{fmtPct(wc.quality_pct, 0)}</span>
                   </div>
                 </div>
               </button>
@@ -470,9 +515,9 @@ export default function OEE() {
           >
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               {[
-                { label: 'Availability', value: selectedWcData.availability, target: 90 },
-                { label: 'Performance', value: selectedWcData.performance, target: 95 },
-                { label: 'Quality', value: selectedWcData.quality, target: 99 },
+                { label: 'Availability', value: selectedWcData.availability_pct, target: 90 },
+                { label: 'Performance', value: selectedWcData.performance_pct, target: 95 },
+                { label: 'Quality', value: selectedWcData.quality_pct, target: 99 },
               ].map((metric) => (
                 <div key={metric.label} className="flex flex-col items-center p-2.5 rounded-sm border border-fd-line min-w-0">
                   <svg width="140" height="80" viewBox="0 0 140 80">
@@ -486,20 +531,32 @@ export default function OEE() {
                     />
                     {/* Value arc */}
                     <path
-                      d={gaugeArc(metric.value)}
+                      d={gaugeArc(metric.value ?? 0)}
                       fill="none"
                       stroke={gaugeColor(metric.value)}
                       strokeWidth="12"
                       strokeLinecap="round"
                     />
                     <text x="70" y="70" textAnchor="middle" className="text-xl font-bold" fill={gaugeColor(metric.value)}>
-                      {metric.value.toFixed(1)}%
+                      {fmtPct(metric.value)}
                     </text>
                   </svg>
                   <div className="text-sm font-medium text-fd-body mt-1">{metric.label}</div>
                   <div className="text-[10px] text-fd-mute">Target: {metric.target}%</div>
-                  <div className={`text-[10px] mt-1 font-medium ${metric.value >= metric.target ? 'text-green-600' : 'text-red-600'}`}>
-                    {metric.value >= metric.target ? 'On Target' : `${(metric.target - metric.value).toFixed(1)}% below target`}
+                  <div
+                    className={`text-[10px] mt-1 font-medium ${
+                      metric.value == null
+                        ? 'text-fd-mute'
+                        : metric.value >= metric.target
+                          ? 'text-green-600'
+                          : 'text-red-600'
+                    }`}
+                  >
+                    {metric.value == null
+                      ? 'No data'
+                      : metric.value >= metric.target
+                        ? 'On Target'
+                        : `${(metric.target - metric.value).toFixed(1)}% below target`}
                   </div>
                 </div>
               ))}
@@ -533,10 +590,10 @@ export default function OEE() {
               />
               <Legend />
               <ReferenceLine y={85} stroke="#9ca3af" strokeDasharray="5 5" label={{ value: '85% Target', position: 'right', fontSize: 10 }} />
-              <Line type="monotone" dataKey="oee" stroke="#2563eb" strokeWidth={2} name="OEE" dot={false} />
-              <Line type="monotone" dataKey="availability" stroke="#3b82f6" strokeWidth={1} name="Availability" dot={false} strokeDasharray="4 2" />
-              <Line type="monotone" dataKey="performance" stroke="#8b5cf6" strokeWidth={1} name="Performance" dot={false} strokeDasharray="4 2" />
-              <Line type="monotone" dataKey="quality" stroke="#14b8a6" strokeWidth={1} name="Quality" dot={false} strokeDasharray="4 2" />
+              <Line type="monotone" dataKey="oee_pct" stroke="#2563eb" strokeWidth={2} name="OEE" dot={false} />
+              <Line type="monotone" dataKey="availability_pct" stroke="#3b82f6" strokeWidth={1} name="Availability" dot={false} strokeDasharray="4 2" />
+              <Line type="monotone" dataKey="performance_pct" stroke="#8b5cf6" strokeWidth={1} name="Performance" dot={false} strokeDasharray="4 2" />
+              <Line type="monotone" dataKey="quality_pct" stroke="#14b8a6" strokeWidth={1} name="Quality" dot={false} strokeDasharray="4 2" />
             </LineChart>
           </ResponsiveContainer>
         </CockpitPanel>
@@ -578,20 +635,20 @@ export default function OEE() {
                   <tr key={rec.id} className="hover">
                     <td className="text-sm tabular-nums">{rec.record_date}</td>
                     <td className="font-medium text-sm">
-                      {rec.work_center?.code || `WC-${rec.work_center_id}`}
+                      {rec.work_center_name || `WC-${rec.work_center_id}`}
                     </td>
                     <td className="text-sm">{rec.shift || '-'}</td>
                     <td>
-                      <span className={`font-bold text-sm tabular-nums ${oeeColor(rec.oee)}`}>
-                        {rec.oee.toFixed(1)}%
+                      <span className={`font-bold text-sm tabular-nums ${oeeColor(rec.oee_pct)}`}>
+                        {fmtPct(rec.oee_pct)}
                       </span>
                     </td>
-                    <td className="text-sm tabular-nums">{rec.availability.toFixed(1)}%</td>
-                    <td className="text-sm tabular-nums">{rec.performance.toFixed(1)}%</td>
-                    <td className="text-sm tabular-nums">{rec.quality.toFixed(1)}%</td>
-                    <td className="text-sm tabular-nums">{rec.total_pieces}</td>
-                    <td className="text-sm tabular-nums">{rec.good_pieces}</td>
-                    <td className="text-sm tabular-nums">{rec.rejected_pieces}</td>
+                    <td className="text-sm tabular-nums">{fmtPct(rec.availability_pct)}</td>
+                    <td className="text-sm tabular-nums">{fmtPct(rec.performance_pct)}</td>
+                    <td className="text-sm tabular-nums">{fmtPct(rec.quality_pct)}</td>
+                    <td className="text-sm tabular-nums">{rec.total_parts}</td>
+                    <td className="text-sm tabular-nums">{rec.good_parts}</td>
+                    <td className="text-sm tabular-nums">{rec.defect_parts}</td>
                     <td className="text-sm text-fd-mute max-w-[200px] truncate">{rec.notes || '-'}</td>
                   </tr>
                 ))
@@ -764,15 +821,18 @@ export default function OEE() {
                   <div className="text-xs font-medium text-slate-400 mb-2">Calculated OEE Preview</div>
                   <div className="grid grid-cols-4 gap-3 text-center">
                     {(() => {
-                      const a = addForm.planned_production_time > 0
+                      // Cap each factor at 100% to mirror the backend (calculate_oee applies
+                      // min(x, 100) before multiplying), so the preview never shows a value the
+                      // saved record can't hold.
+                      const a = Math.min(100, addForm.planned_production_time > 0
                         ? (addForm.actual_run_time / addForm.planned_production_time) * 100
-                        : 0;
-                      const p = addForm.actual_run_time > 0 && addForm.ideal_cycle_time > 0
+                        : 0);
+                      const p = Math.min(100, addForm.actual_run_time > 0 && addForm.ideal_cycle_time > 0
                         ? ((addForm.ideal_cycle_time * addForm.total_pieces) / (addForm.actual_run_time * 60)) * 100
-                        : 0;
-                      const q = addForm.total_pieces > 0
+                        : 0);
+                      const q = Math.min(100, addForm.total_pieces > 0
                         ? (addForm.good_pieces / addForm.total_pieces) * 100
-                        : 0;
+                        : 0);
                       const oee = (a / 100) * (p / 100) * (q / 100) * 100;
                       return (
                         <>

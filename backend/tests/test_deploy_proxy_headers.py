@@ -34,6 +34,15 @@ def test_dockerfile_uvicorn_trusts_forwarded_headers():
     assert "--forwarded-allow-ips=*" in text
 
 
+def test_dockerfile_sets_forwarded_allow_ips_env():
+    """Railway can override the container start command, so the CMD's --forwarded-allow-ips=*
+    may never apply. uvicorn also reads FORWARDED_ALLOW_IPS from the environment regardless of
+    how it's launched, so the Dockerfile must set it as env-level defense-in-depth (this is why
+    prod still 307-redirected to an http:// Location even after the CMD flag was added)."""
+    text = _read("Dockerfile")
+    assert "FORWARDED_ALLOW_IPS=*" in text
+
+
 def test_railway_builds_from_the_hardened_dockerfile():
     """Guard the assumption these tests rely on: railway.toml builds from ``Dockerfile``."""
     text = _read("railway.toml")
