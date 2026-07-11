@@ -126,3 +126,65 @@ test('clicking a Work Center tile selects it and opens the detail panel', async 
   const panel = detail.closest('div');
   expect(panel).not.toBeNull();
 });
+
+// Regression: the work-centers request must use the TRAILING-SLASH collection path
+// (`/work-centers/`) with params. Calling `/work-centers?active_only=true` (no slash)
+// triggered a FastAPI 307 redirect whose cross-origin response carried no CORS header,
+// so the browser failed it with status 0 and the whole dashboard blanked.
+test('requests work-centers with a trailing slash (not the redirect-prone slashless path)', async () => {
+  renderOEE();
+  await screen.findByText('Plant-wide OEE');
+
+  const calledUrls = mockedApi.get.mock.calls.map((c) => c[0] as string);
+  expect(calledUrls).toContain('/work-centers/');
+  // Guard against the exact regression: no slashless / query-in-path variant.
+  expect(calledUrls.some((u) => u.startsWith('/work-centers?'))).toBe(false);
+  expect(calledUrls.some((u) => u === '/work-centers')).toBe(false);
+
+  // active_only is passed as a param, not baked into the path.
+  const wcCall = mockedApi.get.mock.calls.find((c) => (c[0] as string) === '/work-centers/');
+  expect(wcCall?.[1]).toEqual({ params: { active_only: true } });
+});
+
+// Resilience: a failed work-centers call (its only job is the filter dropdown) must
+// NOT blank the dashboard. Promise.allSettled lets the core /oee/dashboard render.
+test('still renders the dashboard when the work-centers request fails', async () => {
+  const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+  mockedApi.get.mockImplementation((url: string) => {
+    if (url.startsWith('/work-centers')) return Promise.reject(new Error('status 0 (CORS redirect)'));
+    if (url === '/oee/dashboard') return Promise.resolve({ data: dashboard } as any);
+    if (url === '/oee/trends') return Promise.resolve({ data: [] } as any);
+    if (url === '/oee/records') return Promise.resolve({ data: [] } as any);
+    return Promise.resolve({ data: [] } as any);
+  });
+
+  renderOEE();
+
+  // Core dashboard content still renders...
+  expect(await screen.findByText('Plant-wide OEE')).toBeInTheDocument();
+  expect(screen.getByText('78.4%')).toBeInTheDocument();
+  // ...and the full-page error state is NOT shown.
+  expect(screen.queryByText('Could not load the OEE dashboard. Check your connection and try again.')).toBeNull();
+
+  errorSpy.mockRestore();
+});
+
+// The inverse guard: if the CORE /oee/dashboard call fails, the error state DOES show.
+test('shows the error state when the core dashboard request fails', async () => {
+  const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+  mockedApi.get.mockImplementation((url: string) => {
+    if (url.startsWith('/work-centers')) return Promise.resolve({ data: workCenters } as any);
+    if (url === '/oee/dashboard') return Promise.reject(new Error('500'));
+    if (url === '/oee/trends') return Promise.resolve({ data: [] } as any);
+    if (url === '/oee/records') return Promise.resolve({ data: [] } as any);
+    return Promise.resolve({ data: [] } as any);
+  });
+
+  renderOEE();
+
+  expect(
+    await screen.findByText('Could not load the OEE dashboard. Check your connection and try again.'),
+  ).toBeInTheDocument();
+
+  errorSpy.mockRestore();
+});
