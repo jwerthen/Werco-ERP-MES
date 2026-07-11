@@ -44,6 +44,11 @@ RUN mkdir -p /app/logs /app/uploads && chown -R werco:werco /app
 ENV PATH=/home/werco/.local/bin:$PATH
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
+# Trust the TLS proxy's forwarded headers. gunicorn's UvicornWorker has proxy_headers
+# on by default but trusts only 127.0.0.1 unless FORWARDED_ALLOW_IPS is set; behind
+# Railway/any proxy the peer isn't localhost, so without this request.url.scheme stays
+# http and trailing-slash 307 redirects downgrade to http:// (browser blocks them).
+ENV FORWARDED_ALLOW_IPS=*
 
 # Switch to non-root user
 USER werco

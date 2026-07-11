@@ -164,17 +164,42 @@ export default function OEE() {
       if (dateFrom) params.date_from = dateFrom;
       if (dateTo) params.date_to = dateTo;
 
-      const [wcRes, dashRes, trendsRes, recordsRes] = await Promise.all([
-        api.get('/work-centers?active_only=true'),
+      // allSettled (not all): the work-centers call only feeds the filter dropdown, so
+      // its failure must not blank the whole dashboard. Only a failed core /oee/dashboard
+      // call sets loadError (which the render gate pairs with `!dashboard`).
+      const [wcRes, dashRes, trendsRes, recordsRes] = await Promise.allSettled([
+        api.get('/work-centers/', { params: { active_only: true } }),
         api.get('/oee/dashboard', { params }),
         api.get('/oee/trends', { params: { ...params, days: 30 } }),
         api.get('/oee/records', { params }),
       ]);
 
-      setWorkCenters(Array.isArray(wcRes.data) ? wcRes.data : wcRes.data?.items || []);
-      setDashboard(dashRes.data);
-      setTrends(Array.isArray(trendsRes.data) ? trendsRes.data : []);
-      setRecords(Array.isArray(recordsRes.data) ? recordsRes.data : recordsRes.data?.items || []);
+      if (wcRes.status === 'fulfilled') {
+        const wcData = wcRes.value.data;
+        setWorkCenters(Array.isArray(wcData) ? wcData : wcData?.items || []);
+      } else {
+        console.error('Failed to load work centers:', wcRes.reason);
+      }
+
+      if (dashRes.status === 'fulfilled') {
+        setDashboard(dashRes.value.data);
+      } else {
+        console.error('Failed to load OEE dashboard:', dashRes.reason);
+        setLoadError(true);
+      }
+
+      if (trendsRes.status === 'fulfilled') {
+        setTrends(Array.isArray(trendsRes.value.data) ? trendsRes.value.data : []);
+      } else {
+        console.error('Failed to load OEE trends:', trendsRes.reason);
+      }
+
+      if (recordsRes.status === 'fulfilled') {
+        const recData = recordsRes.value.data;
+        setRecords(Array.isArray(recData) ? recData : recData?.items || []);
+      } else {
+        console.error('Failed to load OEE records:', recordsRes.reason);
+      }
     } catch (err) {
       console.error('Failed to load OEE data:', err);
       setLoadError(true);

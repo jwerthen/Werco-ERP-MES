@@ -39,5 +39,9 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:${PORT:-8000}/health')" || exit 1
 
 # Start command - Railway provides PORT environment variable
-# Run Alembic migrations, then start the server
-CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers ${WEB_CONCURRENCY:-2} --proxy-headers"]
+# Run Alembic migrations, then start the server.
+# --forwarded-allow-ips="*" is required with --proxy-headers: behind Railway's TLS
+# proxy the peer is not 127.0.0.1, so without it uvicorn ignores X-Forwarded-Proto,
+# request.url.scheme stays "http", and FastAPI's trailing-slash 307 redirects build
+# an http:// Location the browser refuses to follow from an https page (status 0).
+CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers ${WEB_CONCURRENCY:-2} --proxy-headers --forwarded-allow-ips=*"]

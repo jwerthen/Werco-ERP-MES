@@ -293,6 +293,24 @@ sudo nginx -t
 sudo systemctl reload nginx
 ```
 
+### Trusting forwarded headers (required behind any TLS proxy)
+
+Setting `X-Forwarded-Proto` at the proxy (above) is only half of it — the ASGI server must
+also be told to **trust** that header, or it ignores it. Uvicorn honors the forwarded scheme
+only when the immediate peer is in `forwarded_allow_ips` (default `127.0.0.1`); a proxy
+(nginx, Railway's edge, a load balancer) is almost never localhost, so the default drops it.
+When the scheme is dropped, `request.url.scheme` stays `http` and FastAPI's automatic
+trailing-slash **307 redirect** (e.g. `GET /api/v1/work-centers` → `/api/v1/work-centers/`)
+emits an `http://` `Location`. A browser on an `https` page refuses to follow the downgrade,
+so the request fails with **status 0** — this silently broke the OEE dashboard.
+
+The launch commands (`backend/Dockerfile`, `nixpacks.toml`, `start.sh`) therefore pass
+`--proxy-headers --forwarded-allow-ips="*"`, and the gunicorn image (`Dockerfile.prod`) sets
+`FORWARDED_ALLOW_IPS=*` (UvicornWorker reads it from the env). `"*"` is acceptable because
+the container is only reachable through the proxy; pin it to the proxy's IP/CIDR if the app
+is ever directly reachable. A regression guard lives in
+`backend/tests/test_deploy_proxy_headers.py`.
+
 ## SSL Certificates (Let's Encrypt)
 
 ```bash
