@@ -1,18 +1,22 @@
 /**
- * OEE cockpit overhaul — instrument-panel regression.
+ * OEE cockpit — contract + regression guard.
  *
- * The OEE Dashboard was rebuilt into a cockpit layout: a 4-up MiniStat strip
- * surfaces plant-wide OEE / Availability / Performance / Quality, and a
- * "Work Center OEE" panel renders one tappable tile per work center. Tapping a
- * tile selects that work center, which surfaces its detail panel. This guards
- * that strip, the tiles, and the click-to-select behavior.
+ * CRITICAL: the mocks below mirror the REAL response shapes built in
+ * backend/app/api/endpoints/oee.py — metric fields are `*_pct`, per-work-center
+ * dashboard metrics are `current_oee_pct` / `availability_pct` / ... and are
+ * legitimately `null` until a record exists, and GET /oee/trends returns an
+ * OBJECT ({ time_series: [...] }), not a bare array. The previous version of this
+ * test mocked invented field names (`plant_oee`, `work_centers:[{oee, ...}]`), so
+ * it stayed green while the page threw `undefined.toFixed()` in production. A test
+ * that does not mirror the real contract is worthless here — keep these in sync
+ * with the endpoint.
  *
  * The page renders a recharts LineChart (trends) via ResponsiveContainer, which
  * needs ResizeObserver — jsdom doesn't provide one and setupTests doesn't mock
  * it, so we install a no-op here.
  */
 import React from 'react';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, within, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import api from '../services/api';
 import OEE from './OEE';
@@ -31,45 +35,157 @@ jest.mock('../services/api', () => ({
 
 const mockedApi = api as jest.Mocked<typeof api>;
 
+// Real GET /oee/dashboard shape (oee.py ~L557). Plant A/P/Q are NOT in the response —
+// the page derives them from work_centers (average of the WCs that have data), so with
+// these values the strip shows OEE 71.8%, A 80.0%, P 90.0%, Q 98.0%.
 const dashboard = {
-  plant_oee: 78.4,
-  plant_availability: 88.2,
-  plant_performance: 91.5,
-  plant_quality: 97.3,
+  plant_oee_pct: 71.8,
   work_centers: [
     {
       work_center_id: 1,
       work_center_code: 'LASER-1',
       work_center_name: 'Laser cell 1',
-      oee: 82.1,
-      availability: 89.0,
-      performance: 92.0,
-      quality: 99.0,
+      current_oee_pct: 82.1,
+      availability_pct: 89.0,
+      performance_pct: 92.0,
+      quality_pct: 99.0,
+      record_date: '2026-07-01',
+      target_oee_pct: 85,
+      target_availability_pct: 90,
+      target_performance_pct: 95,
+      target_quality_pct: 99,
     },
     {
       work_center_id: 2,
       work_center_code: 'BRAKE-2',
       work_center_name: 'Press brake 2',
-      oee: 61.5,
-      availability: 70.0,
-      performance: 88.0,
-      quality: 99.0,
+      current_oee_pct: 61.5,
+      availability_pct: 71.0,
+      performance_pct: 88.0,
+      quality_pct: 97.0,
+      record_date: '2026-07-01',
+      target_oee_pct: 85,
+      target_availability_pct: 90,
+      target_performance_pct: 95,
+      target_quality_pct: 99,
     },
   ],
+  comparison: [],
+  period: '30d',
 };
+
+// Real current prod state: 20 work centers, EVERY metric null (no OEE records yet).
+// This is exactly the payload that crashed the page before the fix.
+const nullMetricDashboard = {
+  plant_oee_pct: 0.0,
+  work_centers: [
+    {
+      work_center_id: 1,
+      work_center_code: 'LASER-1',
+      work_center_name: 'Laser cell 1',
+      current_oee_pct: null,
+      availability_pct: null,
+      performance_pct: null,
+      quality_pct: null,
+      record_date: null,
+      target_oee_pct: 85,
+      target_availability_pct: 90,
+      target_performance_pct: 95,
+      target_quality_pct: 99,
+    },
+    {
+      work_center_id: 2,
+      work_center_code: 'BRAKE-2',
+      work_center_name: 'Press brake 2',
+      current_oee_pct: null,
+      availability_pct: null,
+      performance_pct: null,
+      quality_pct: null,
+      record_date: null,
+      target_oee_pct: 85,
+      target_availability_pct: 90,
+      target_performance_pct: 95,
+      target_quality_pct: 99,
+    },
+  ],
+  comparison: [],
+  period: '30d',
+};
+
+// Real GET /oee/trends shape (oee.py ~L616): an object with time_series, not an array.
+const trends = {
+  time_series: [
+    {
+      date: '2026-07-01',
+      work_center_id: 1,
+      work_center_name: 'Laser cell 1',
+      oee_pct: 80.0,
+      availability_pct: 90.0,
+      performance_pct: 92.0,
+      quality_pct: 98.0,
+      total_parts: 100,
+      good_parts: 98,
+      defect_parts: 2,
+    },
+    {
+      date: '2026-07-02',
+      work_center_id: 1,
+      work_center_name: 'Laser cell 1',
+      oee_pct: 82.0,
+      availability_pct: 91.0,
+      performance_pct: 93.0,
+      quality_pct: 97.0,
+      total_parts: 110,
+      good_parts: 107,
+      defect_parts: 3,
+    },
+  ],
+  target_oee_pct: 85,
+  target_availability_pct: 90,
+  target_performance_pct: 95,
+  target_quality_pct: 99,
+  period: '30d',
+};
+
+// Real GET /oee/records shape (oee.py _record_to_response ~L162): `*_pct` metrics,
+// `total_parts` / `good_parts` / `defect_parts`, and `work_center_name` (no nested object).
+const records = [
+  {
+    id: 10,
+    work_center_id: 1,
+    work_center_name: 'Laser cell 1',
+    record_date: '2026-07-01',
+    shift: '1st',
+    availability_pct: 89.0,
+    performance_pct: 92.0,
+    quality_pct: 99.0,
+    oee_pct: 81.1,
+    total_parts: 100,
+    good_parts: 98,
+    defect_parts: 2,
+    notes: null,
+    created_at: null,
+  },
+];
 
 const workCenters = [
   { id: 1, code: 'LASER-1', name: 'Laser cell 1', is_active: true },
   { id: 2, code: 'BRAKE-2', name: 'Press brake 2', is_active: true },
 ];
 
-// Route api.get responses by URL so each of the four mount calls is satisfied.
-function mockApiGet() {
+// Route api.get responses by URL. Overrides let a test swap a single payload.
+function mockApiGet(overrides: Partial<Record<string, any>> = {}) {
+  const byUrl: Record<string, any> = {
+    dashboard: overrides.dashboard ?? dashboard,
+    trends: overrides.trends ?? trends,
+    records: overrides.records ?? [],
+    workCenters: overrides.workCenters ?? workCenters,
+  };
   mockedApi.get.mockImplementation((url: string) => {
-    if (url.startsWith('/work-centers')) return Promise.resolve({ data: workCenters } as any);
-    if (url === '/oee/dashboard') return Promise.resolve({ data: dashboard } as any);
-    if (url === '/oee/trends') return Promise.resolve({ data: [] } as any);
-    if (url === '/oee/records') return Promise.resolve({ data: [] } as any);
+    if (url.startsWith('/work-centers')) return Promise.resolve({ data: byUrl.workCenters } as any);
+    if (url === '/oee/dashboard') return Promise.resolve({ data: byUrl.dashboard } as any);
+    if (url === '/oee/trends') return Promise.resolve({ data: byUrl.trends } as any);
+    if (url === '/oee/records') return Promise.resolve({ data: byUrl.records } as any);
     return Promise.resolve({ data: [] } as any);
   });
 }
@@ -79,24 +195,23 @@ const renderOEE = () => render(<MemoryRouter><OEE /></MemoryRouter>);
 beforeEach(() => {
   jest.clearAllMocks();
   mockApiGet();
+  mockedApi.post.mockResolvedValue({ data: {} } as any);
 });
 
-test('renders the 4-up plant MiniStat strip after load', async () => {
+test('renders the 4-up plant MiniStat strip (plant A/P/Q derived from work centers)', async () => {
   renderOEE();
 
   // Plant-wide OEE MiniStat is the canonical "loaded" marker (unique label).
   expect(await screen.findByText('Plant-wide OEE')).toBeInTheDocument();
-  // Availability / Performance / Quality also appear as records-table headers,
-  // so assert they're present at least once (the MiniStat strip is one of them).
   expect(screen.getAllByText('Availability').length).toBeGreaterThan(0);
   expect(screen.getAllByText('Performance').length).toBeGreaterThan(0);
   expect(screen.getAllByText('Quality').length).toBeGreaterThan(0);
 
-  // Plant values come through formatted to one decimal place.
-  expect(screen.getByText('78.4%')).toBeInTheDocument();
-  expect(screen.getByText('88.2%')).toBeInTheDocument();
-  expect(screen.getByText('91.5%')).toBeInTheDocument();
-  expect(screen.getByText('97.3%')).toBeInTheDocument();
+  // Plant OEE is average of the WC current_oee_pct (82.1, 61.5) => 71.8; A/P/Q likewise.
+  expect(screen.getByText('71.8%')).toBeInTheDocument();
+  expect(screen.getByText('80.0%')).toBeInTheDocument(); // (89.0 + 71.0) / 2
+  expect(screen.getByText('90.0%')).toBeInTheDocument(); // (92.0 + 88.0) / 2
+  expect(screen.getByText('98.0%')).toBeInTheDocument(); // (99.0 + 97.0) / 2
 });
 
 test('renders a Work Center OEE tile per work center', async () => {
@@ -106,6 +221,9 @@ test('renders a Work Center OEE tile per work center', async () => {
   // Each work center is a tappable tile (button) carrying its code.
   expect(screen.getByRole('button', { name: /LASER-1/i })).toBeInTheDocument();
   expect(screen.getByRole('button', { name: /BRAKE-2/i })).toBeInTheDocument();
+  // The tile shows the WC's current OEE (current_oee_pct), formatted.
+  expect(screen.getByText('82.1%')).toBeInTheDocument();
+  expect(screen.getByText('61.5%')).toBeInTheDocument();
 });
 
 test('clicking a Work Center tile selects it and opens the detail panel', async () => {
@@ -121,10 +239,95 @@ test('clicking a Work Center tile selects it and opens the detail panel', async 
   const detail = await screen.findByText('Selected work center detail');
   expect(detail).toBeInTheDocument();
   expect(screen.getByText('LASER-1 — Laser cell 1')).toBeInTheDocument();
+});
 
-  // The detail panel exposes the canonical per-WC A/P/Q gauges.
-  const panel = detail.closest('div');
-  expect(panel).not.toBeNull();
+// THE regression guard: the real current prod payload has every metric `null`.
+// Before the fix the page did `wc.oee.toFixed(1)` / `plantOEE.toFixed(1)` on
+// undefined and threw, tripping the "Something went wrong" error boundary.
+test('renders without crashing when all metrics are null (real prod state), showing --', async () => {
+  mockApiGet({ dashboard: nullMetricDashboard });
+  renderOEE();
+
+  // Page renders (a throw during render would fail this findByText).
+  expect(await screen.findByText('Plant-wide OEE')).toBeInTheDocument();
+  // The work-center tiles still render (20 WCs in prod; 2 here).
+  expect(screen.getByRole('button', { name: /LASER-1/i })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: /BRAKE-2/i })).toBeInTheDocument();
+  // Null metrics read as "no data" (`--`), not a fabricated 0.0%.
+  expect(screen.getAllByText('--').length).toBeGreaterThan(0);
+  expect(screen.queryByText('0.0%')).toBeNull();
+});
+
+// GET /oee/trends returns an OBJECT; the page must unwrap time_series so the chart shows.
+test('unwraps the trends time_series object and renders the trend chart', async () => {
+  renderOEE();
+  // The chart panel only renders when trends.length > 0, which requires the object
+  // to have been unwrapped into its time_series array.
+  expect(await screen.findByText('OEE Trends (30 Days)')).toBeInTheDocument();
+});
+
+test('renders OEE records using the real *_pct / *_parts fields', async () => {
+  mockApiGet({ records });
+  renderOEE();
+
+  await screen.findByText('Plant-wide OEE');
+  // Scope to the records table (the only <table>) to disambiguate 'Laser cell 1',
+  // which also appears as a work-center tile subtitle.
+  const table = within(screen.getByRole('table'));
+  // work_center_name (not the old nested work_center.code, which would render 'WC-1').
+  expect(table.getByText('Laser cell 1')).toBeInTheDocument();
+  expect(table.queryByText('WC-1')).toBeNull();
+  // The record's OEE via oee_pct.
+  expect(table.getByText('81.1%')).toBeInTheDocument();
+});
+
+// The "Add Record" POST must use the backend OEERecordCreate field names. The old body
+// sent planned_production_time/total_pieces/... which Pydantic silently ignored, so every
+// submit created an all-zero record. Records is non-empty here so the empty-state's own
+// "Add Record" action button doesn't collide with the header button.
+test('Add Record posts the backend contract field names, not the ignored *_pieces names', async () => {
+  mockApiGet({ records });
+  renderOEE();
+  await screen.findByText('Plant-wide OEE');
+
+  // Open the modal (only the header "Add Record" exists while records are present).
+  fireEvent.click(screen.getByRole('button', { name: /add record/i }));
+  const modal = (await screen.findByText('Add OEE Record')).closest('.modal-box') as HTMLElement;
+  const modalUtils = within(modal);
+
+  // Select a work center (the only field the submit handler requires)...
+  fireEvent.change(modalUtils.getByRole('combobox', { name: /work center/i }), {
+    target: { value: '1' },
+  });
+  // ...and set a NONZERO Actual Run Time so the double-mapping is genuinely pinned:
+  // actual_run_time must feed BOTH actual_run_time_minutes (availability numerator) and
+  // actual_operating_time_minutes (performance denominator). All-zero inputs couldn't tell
+  // a correct mapping from a regression that pointed both at some other zero source.
+  fireEvent.change(modalUtils.getByRole('spinbutton', { name: /actual run time/i }), {
+    target: { value: '300' },
+  });
+  fireEvent.click(modalUtils.getByRole('button', { name: /add record/i }));
+
+  await waitFor(() => expect(mockedApi.post).toHaveBeenCalled());
+  const [url, body] = mockedApi.post.mock.calls[0] as [string, Record<string, any>];
+  expect(url).toBe('/oee/records');
+  expect(body).toMatchObject({
+    work_center_id: 1,
+    planned_production_time_minutes: 480,
+    actual_run_time_minutes: 300,
+    actual_operating_time_minutes: 300,
+    ideal_cycle_time_seconds: 0,
+    total_parts_produced: 0,
+    total_parts: 0,
+    good_parts: 0,
+    defect_parts: 0,
+  });
+  // The performance operating-time denominator must equal actual_run_time_minutes.
+  expect(body.actual_operating_time_minutes).toBe(body.actual_run_time_minutes);
+  // Guard against the exact regression: the silently-ignored legacy keys must be gone.
+  expect(body).not.toHaveProperty('total_pieces');
+  expect(body).not.toHaveProperty('good_pieces');
+  expect(body).not.toHaveProperty('planned_production_time');
 });
 
 // Regression: the work-centers request must use the TRAILING-SLASH collection path
@@ -153,7 +356,7 @@ test('still renders the dashboard when the work-centers request fails', async ()
   mockedApi.get.mockImplementation((url: string) => {
     if (url.startsWith('/work-centers')) return Promise.reject(new Error('status 0 (CORS redirect)'));
     if (url === '/oee/dashboard') return Promise.resolve({ data: dashboard } as any);
-    if (url === '/oee/trends') return Promise.resolve({ data: [] } as any);
+    if (url === '/oee/trends') return Promise.resolve({ data: trends } as any);
     if (url === '/oee/records') return Promise.resolve({ data: [] } as any);
     return Promise.resolve({ data: [] } as any);
   });
@@ -162,7 +365,7 @@ test('still renders the dashboard when the work-centers request fails', async ()
 
   // Core dashboard content still renders...
   expect(await screen.findByText('Plant-wide OEE')).toBeInTheDocument();
-  expect(screen.getByText('78.4%')).toBeInTheDocument();
+  expect(screen.getByText('71.8%')).toBeInTheDocument();
   // ...and the full-page error state is NOT shown.
   expect(screen.queryByText('Could not load the OEE dashboard. Check your connection and try again.')).toBeNull();
 
@@ -175,7 +378,7 @@ test('shows the error state when the core dashboard request fails', async () => 
   mockedApi.get.mockImplementation((url: string) => {
     if (url.startsWith('/work-centers')) return Promise.resolve({ data: workCenters } as any);
     if (url === '/oee/dashboard') return Promise.reject(new Error('500'));
-    if (url === '/oee/trends') return Promise.resolve({ data: [] } as any);
+    if (url === '/oee/trends') return Promise.resolve({ data: trends } as any);
     if (url === '/oee/records') return Promise.resolve({ data: [] } as any);
     return Promise.resolve({ data: [] } as any);
   });
