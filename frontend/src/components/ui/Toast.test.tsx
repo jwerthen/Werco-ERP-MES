@@ -67,3 +67,49 @@ describe('Toast a11y', () => {
     expect(screen.queryByText('Dismiss me')).not.toBeInTheDocument();
   });
 });
+
+// Regression: a FastAPI 422 `detail` array must never reach the DOM as a raw object.
+// The toast list mounts above the router's error boundary, so rendering an array of
+// {loc,msg} objects threw "Objects are not valid as a React child" and blanked the
+// whole SPA. showToast now coerces via toDisplayString, so it can't.
+describe('Toast crash-safety on non-string messages', () => {
+  // Harness that intentionally passes a non-string (what a mis-normalized 422 handler did).
+  function BadHarness({ message }: { message: unknown }) {
+    const { showToast } = useToast();
+    return (
+      <button type="button" onClick={() => showToast('error', message as string)}>
+        fire
+      </button>
+    );
+  }
+
+  function fireRaw(message: unknown) {
+    render(
+      <ToastProvider>
+        <BadHarness message={message} />
+      </ToastProvider>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'fire' }));
+  }
+
+  it('renders a raw 422 detail ARRAY as a readable joined string, without unmounting', () => {
+    const detail = [
+      { loc: ['body', 'required_date'], msg: 'Input should be a valid date' },
+      { loc: ['body', 'lines', 0, 'part_id'], msg: 'Input should be greater than 0' },
+    ];
+
+    expect(() => fireRaw(detail)).not.toThrow();
+
+    // The joined message renders (not "[object Object]" / not a crash)...
+    expect(
+      screen.getByText('required_date: Input should be a valid date; lines.0.part_id: Input should be greater than 0'),
+    ).toBeInTheDocument();
+    // ...and the harness (the app tree) is still mounted — no white-screen unmount.
+    expect(screen.getByRole('button', { name: 'fire' })).toBeInTheDocument();
+  });
+
+  it('renders a bare error object by preferring its message field', () => {
+    expect(() => fireRaw({ message: 'Something broke' })).not.toThrow();
+    expect(screen.getByText('Something broke')).toBeInTheDocument();
+  });
+});

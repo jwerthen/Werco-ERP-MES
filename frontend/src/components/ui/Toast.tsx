@@ -1,5 +1,6 @@
 import React, { createContext, useCallback, useContext, useState } from 'react';
 import { CheckCircleIcon, ExclamationTriangleIcon, InformationCircleIcon, XMarkIcon } from '@heroicons/react/24/outline';
+import { toDisplayString } from '../../utils/apiError';
 
 interface Toast {
   id: number;
@@ -27,7 +28,11 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
 
   const showToast = useCallback((type: Toast['type'], message: string) => {
     const id = ++nextToastId;
-    setToasts(prev => [...prev, { id, type, message }]);
+    // Defensive: the toast list renders above the router error boundary, so a
+    // non-string message (e.g. a raw 422 detail array slipping past normalization)
+    // would blank the whole app. Coerce to a renderable string here so it can't.
+    const text = toDisplayString(message);
+    setToasts(prev => [...prev, { id, type, message: text }]);
     setTimeout(() => {
       setToasts(prev => prev.filter(t => t.id !== id));
     }, 4000);
