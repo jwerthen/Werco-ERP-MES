@@ -107,11 +107,15 @@ def create_ncr(
 ):
     """Create a new NCR"""
     _validate_work_order_reference(db, company_id, ncr_in.work_order_id)
+    # detected_date is a field on NCRCreate, so it is already in model_dump() — resolve
+    # its default in place rather than passing it a second time (which raised
+    # "got multiple values for keyword argument 'detected_date'").
+    ncr_data = ncr_in.model_dump()
+    ncr_data["detected_date"] = ncr_data.get("detected_date") or date.today()
     ncr = NonConformanceReport(
         ncr_number=generate_ncr_number(db, company_id),
-        **ncr_in.model_dump(),
+        **ncr_data,
         detected_by=current_user.id,
-        detected_date=ncr_in.detected_date or date.today(),
     )
     ncr.company_id = company_id
     db.add(ncr)

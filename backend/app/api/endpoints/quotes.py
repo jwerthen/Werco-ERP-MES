@@ -307,6 +307,7 @@ def create_quote(
         line_total = line_data.quantity * line_data.unit_price
         line = QuoteLine(
             quote_id=quote.id,
+            company_id=company_id,
             line_number=idx,
             part_id=line_data.part_id if line_data.part_id and line_data.part_id > 0 else None,
             description=line_data.description,
@@ -633,6 +634,7 @@ def add_quote_line(
     line_total = line_in.quantity * line_in.unit_price
     line = QuoteLine(
         quote_id=quote_id,
+        company_id=company_id,
         line_number=max_line + 1,
         part_id=line_in.part_id if line_in.part_id and line_in.part_id > 0 else None,
         description=line_in.description,
