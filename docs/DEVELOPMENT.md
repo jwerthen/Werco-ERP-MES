@@ -6,7 +6,7 @@ This guide covers development practices, testing, and contribution guidelines fo
 
 ### Prerequisites
 - Python 3.11+
-- Node.js 18+
+- Node.js 22+ (LTS; see frontend/.nvmrc)
 - PostgreSQL 15+ (only for the Postgres/Supabase path; local dev defaults to SQLite)
 - Docker & Docker Compose (optional but recommended)
 - Git
