@@ -1288,6 +1288,10 @@ the public paths are `/eco/eco/…`.
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
+| GET | `/purchasing/vendors` | List vendors (`active_only` default true; `approved_only` default false) | Yes |
+| POST | `/purchasing/vendors` | Create vendor | Admin / Manager |
+| GET | `/purchasing/vendors/{vendor_id}` | Get vendor by ID | Yes |
+| PUT | `/purchasing/vendors/{vendor_id}` | Update vendor — `code` is editable (see note) | Admin / Manager |
 | GET | `/purchasing/pos/` | List purchase orders | Yes |
 | POST | `/purchasing/pos/` | Create purchase order | Yes |
 | GET | `/purchasing/pos/{id}` | Get PO by ID | Yes |
@@ -1295,6 +1299,14 @@ the public paths are `/eco/eco/…`.
 
 > Material receiving and incoming inspection are **not** under `/purchasing`. They live under
 > `/receiving` (see below). The duplicate `/purchasing/receiving*` endpoints were removed.
+>
+> **Vendor `code` is editable on update.** `PUT /purchasing/vendors/{vendor_id}` accepts an optional
+> `code` (2–20 chars: letters, digits, hyphens; lowercase input is normalized to uppercase). The new
+> code must stay unique within the company (**400** "Vendor code already exists") and cannot be
+> blanked: an explicit JSON `null` returns **400** "Vendor code cannot be blank", while an empty or
+> whitespace-only string fails schema validation (**422**, min length checked after strip). Vendor
+> **updates** now write to the tamper-evident `audit_log` (`GET /audit/`), joining the per-row audit
+> of CSV/XLSX-imported vendor creates.
 
 ### Receiving & Inspection
 

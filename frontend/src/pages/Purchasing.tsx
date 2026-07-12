@@ -124,6 +124,7 @@ export default function Purchasing() {
   });
 
   const [editVendorForm, setEditVendorForm] = useState({
+    code: '',
     name: '',
     contact_name: '',
     email: '',
@@ -225,6 +226,7 @@ export default function Purchasing() {
   const openEditVendorModal = (vendor: Vendor) => {
     setSelectedVendor(vendor);
     setEditVendorForm({
+      code: vendor.code || '',
       name: vendor.name || '',
       contact_name: vendor.contact_name || '',
       email: vendor.email || '',
@@ -259,6 +261,7 @@ export default function Purchasing() {
     try {
       const cleanedForm = {
         ...editVendorForm,
+        code: editVendorForm.code.trim() || undefined,
         contact_name: editVendorForm.contact_name.trim() || undefined,
         email: editVendorForm.email.trim() || undefined,
         phone: editVendorForm.phone.trim() || undefined,
@@ -998,6 +1001,19 @@ export default function Purchasing() {
 
             <form onSubmit={handleUpdateVendor} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
+                <FormField label="Vendor Code" required>
+                  {(field) => (
+                  <input
+                    {...field}
+                    type="text"
+                    value={editVendorForm.code}
+                    onChange={(e) => setEditVendorForm({ ...editVendorForm, code: e.target.value })}
+                    className="input"
+                    placeholder="VND-001"
+                    required
+                  />
+                  )}
+                </FormField>
                 <FormField label="Vendor Name" required>
                   {(field) => (
                   <input

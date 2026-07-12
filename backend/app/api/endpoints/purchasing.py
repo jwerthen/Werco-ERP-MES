@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Upl
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
@@ -117,7 +118,13 @@ def create_vendor(
     if vendor.is_approved:
         vendor.approval_date = date.today()
     db.add(vendor)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        # TOCTOU backstop: a concurrent create can slip past the pre-insert probe;
+        # uq_vendors_company_code catches it at commit -- surface the same 400.
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Vendor code already exists") from exc
     db.refresh(vendor)
     return vendor
 
@@ -258,12 +265,43 @@ def update_vendor(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
+    """Update a vendor. `code` is editable: normalized to uppercase, must stay unique within the
+    company (400 "Vendor code already exists"), and cannot be blanked (explicit JSON null -> 400,
+    empty/whitespace string -> 422 at the schema). An update that changes fields writes an
+    audit_log row; a no-change PUT writes none."""
     vendor = db.query(Vendor).filter(Vendor.id == vendor_id, Vendor.company_id == company_id).first()
     if not vendor:
         raise HTTPException(status_code=404, detail="Vendor not found")
 
     update_data = vendor_in.model_dump(exclude_unset=True)
+
+    # Vendor code is editable but never blankable: normalize like the CSV import path,
+    # reject an explicit null/blank, and enforce per-company uniqueness on change.
+    if "code" in update_data:
+        new_code = (update_data["code"] or "").strip().upper()
+        if not new_code:
+            raise HTTPException(status_code=400, detail="Vendor code cannot be blank")
+        update_data["code"] = new_code
+        if new_code != vendor.code:
+            # Case-insensitive probe: a legacy lowercase row must also block a rename to its
+            # uppercase twin (the PO-import vendor matcher resolves codes case-insensitively).
+            duplicate = (
+                db.query(Vendor)
+                .filter(
+                    Vendor.company_id == company_id,
+                    func.upper(Vendor.code) == new_code,
+                    Vendor.id != vendor_id,
+                )
+                .first()
+            )
+            if duplicate:
+                raise HTTPException(status_code=400, detail="Vendor code already exists")
+
+    # Snapshot BEFORE mutating; column-only, so the vestigial VendorUpdate.version
+    # (Vendor has no version column) never enters the audited changes diff.
+    old_values = {c.key: getattr(vendor, c.key) for c in vendor.__table__.columns}
 
     # Set approval date if being approved
     if update_data.get("is_approved") and not vendor.is_approved:
@@ -272,7 +310,14 @@ def update_vendor(
     for field, value in update_data.items():
         setattr(vendor, field, value)
 
-    db.commit()
+    audit.log_update("vendor", vendor.id, vendor.code, old_values=old_values, new_values=vendor)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        # TOCTOU backstop: a concurrent writer can slip a duplicate code past the probe;
+        # uq_vendors_company_code catches it at commit -- surface the same 400 as the probe.
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Vendor code already exists") from exc
     db.refresh(vendor)
     return vendor
 
