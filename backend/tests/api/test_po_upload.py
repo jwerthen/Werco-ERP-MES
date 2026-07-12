@@ -57,7 +57,7 @@ class TestMatchingService:
     def test_match_vendor_exact(self, db_session, vendor_factory):
         """Test exact vendor match."""
         vendor = vendor_factory("ACME Corporation", "ACME-001")
-        result = match_vendor("ACME Corporation", db_session)
+        result = match_vendor("ACME Corporation", db_session, company_id=vendor.company_id)
 
         assert result.matched is True
         assert result.match_id == vendor.id
@@ -66,7 +66,7 @@ class TestMatchingService:
     def test_match_vendor_case_insensitive(self, db_session, vendor_factory):
         """Test case-insensitive vendor match."""
         vendor = vendor_factory("Test Vendor Inc", "TV-001")
-        result = match_vendor("TEST VENDOR INC", db_session)
+        result = match_vendor("TEST VENDOR INC", db_session, company_id=vendor.company_id)
 
         assert result.matched is True
         assert result.match_id == vendor.id
@@ -74,7 +74,7 @@ class TestMatchingService:
     def test_match_vendor_fuzzy(self, db_session, vendor_factory):
         """Test fuzzy vendor match."""
         vendor = vendor_factory("McMaster-Carr Supply", "MC-001")
-        result = match_vendor("Mcmaster Carr", db_session, threshold=70)
+        result = match_vendor("Mcmaster Carr", db_session, company_id=vendor.company_id, threshold=70)
 
         assert result.matched is True
         assert result.match_id == vendor.id
@@ -83,25 +83,25 @@ class TestMatchingService:
     def test_match_vendor_no_match(self, db_session, vendor_factory):
         """Test vendor with no match."""
         vendor_factory("Completely Different Company", "CD-001")
-        result = match_vendor("XYZ Totally Unrelated", db_session)
+        result = match_vendor("XYZ Totally Unrelated", db_session, company_id=1)
 
         assert result.matched is False
         assert result.suggestions is not None
 
     def test_match_vendor_empty_name(self, db_session):
         """Test vendor match with empty name."""
-        result = match_vendor("", db_session)
+        result = match_vendor("", db_session, company_id=1)
         assert result.matched is False
 
     def test_match_vendor_none_name(self, db_session):
         """Test vendor match with None name."""
-        result = match_vendor(None, db_session)
+        result = match_vendor(None, db_session, company_id=1)
         assert result.matched is False
 
     def test_match_part_exact(self, db_session, part_factory):
         """Test exact part match."""
         part = part_factory("P-12345-A")
-        result = match_part("P-12345-A", db_session)
+        result = match_part("P-12345-A", db_session, company_id=part.company_id)
 
         assert result.matched is True
         assert result.match_id == part.id
@@ -110,7 +110,7 @@ class TestMatchingService:
     def test_match_part_case_insensitive(self, db_session, part_factory):
         """Test case-insensitive part match."""
         part = part_factory("WIDGET-100")
-        result = match_part("widget-100", db_session)
+        result = match_part("widget-100", db_session, company_id=part.company_id)
 
         assert result.matched is True
         assert result.match_id == part.id
@@ -118,7 +118,7 @@ class TestMatchingService:
     def test_match_part_with_dashes_spaces(self, db_session, part_factory):
         """Test part match ignoring dashes and spaces."""
         part = part_factory("ABC-123-DEF")
-        result = match_part("ABC123DEF", db_session)
+        result = match_part("ABC123DEF", db_session, company_id=part.company_id)
 
         assert result.matched is True
         assert result.match_id == part.id
@@ -126,14 +126,14 @@ class TestMatchingService:
     def test_match_part_no_match(self, db_session, part_factory):
         """Test part with no match."""
         part_factory("EXISTING-PART-001")
-        result = match_part("TOTALLY-DIFFERENT-999", db_session)
+        result = match_part("TOTALLY-DIFFERENT-999", db_session, company_id=1)
 
         assert result.matched is False
         assert result.suggestions is not None
 
     def test_match_part_empty_number(self, db_session):
         """Test part match with empty number."""
-        result = match_part("", db_session)
+        result = match_part("", db_session, company_id=1)
         assert result.matched is False
 
     def test_match_po_line_items(self, db_session, part_factory):
@@ -147,7 +147,7 @@ class TestMatchingService:
             {"part_number": "UNKNOWN-PART", "qty_ordered": 5},
         ]
 
-        result = match_po_line_items(line_items, db_session)
+        result = match_po_line_items(line_items, db_session, company_id=part1.company_id)
 
         assert len(result) == 3
         assert result[0]["matched_part_id"] == part1.id
@@ -165,22 +165,22 @@ class TestMatchingService:
         db_session.add(po)
         db_session.commit()
 
-        result = check_po_number_exists("PO-TEST-EXISTS", db_session)
+        result = check_po_number_exists("PO-TEST-EXISTS", db_session, company_id=1)
         assert result is True
 
     def test_check_po_number_exists_false(self, db_session):
         """Test checking if PO number exists (false case)."""
-        result = check_po_number_exists("PO-DOES-NOT-EXIST-999", db_session)
+        result = check_po_number_exists("PO-DOES-NOT-EXIST-999", db_session, company_id=1)
         assert result is False
 
     def test_check_po_number_exists_empty(self, db_session):
         """Test checking if PO number exists with empty string."""
-        result = check_po_number_exists("", db_session)
+        result = check_po_number_exists("", db_session, company_id=1)
         assert result is False
 
     def test_check_po_number_exists_none(self, db_session):
         """Test checking if PO number exists with None."""
-        result = check_po_number_exists(None, db_session)
+        result = check_po_number_exists(None, db_session, company_id=1)
         assert result is False
 
 

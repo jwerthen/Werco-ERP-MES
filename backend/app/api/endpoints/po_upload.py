@@ -52,11 +52,11 @@ def log_audit(db: Session, user: Optional[User], action: str, resource_type: str
     AuditService(db, user).log(action=action, resource_type=resource_type, resource_id=resource_id, description=details)
 
 
-def _generate_quote_po_number(db: Session) -> str:
+def _generate_quote_po_number(db: Session, company_id: int) -> str:
     today = datetime.now().strftime("%Y%m%d")
     prefix = f"QTE-{today}-"
     last_po = (
-        db.query(PurchaseOrder)
+        tenant_query(db, PurchaseOrder, company_id)
         .filter(PurchaseOrder.po_number.like(f"{prefix}%"))
         .order_by(PurchaseOrder.po_number.desc())
         .first()
@@ -69,7 +69,9 @@ def _generate_quote_po_number(db: Session) -> str:
     return f"{prefix}{new_num:03d}"
 
 
-def _find_existing_part_number_by_description(db: Session, description: str, part_type: str) -> Optional[str]:
+def _find_existing_part_number_by_description(
+    db: Session, description: str, part_type: str, company_id: int
+) -> Optional[str]:
     if not description or not part_type:
         return None
     normalized = " ".join(normalize_description(description).lower().split())
@@ -78,7 +80,7 @@ def _find_existing_part_number_by_description(db: Session, description: str, par
     except Exception:
         return None
     part = (
-        db.query(Part)
+        tenant_query(db, Part, company_id)
         .filter(Part.part_type == part_type_enum, func.lower(func.trim(Part.description)) == normalized)
         .first()
     )
@@ -88,7 +90,7 @@ def _find_existing_part_number_by_description(db: Session, description: str, par
 
 
 async def _upload_and_extract_document(
-    document_type: str, file: UploadFile, db: Session, current_user: User, company_id: Optional[int] = None
+    document_type: str, file: UploadFile, db: Session, current_user: User, company_id: int
 ) -> POExtractionResult:
     """
     Upload a PO/Quote PDF or Word document and extract data using AI.
@@ -165,19 +167,19 @@ async def _upload_and_extract_document(
             if quote_number:
                 llm_result["po_number"] = f"QTE-{quote_number}"
             else:
-                llm_result["po_number"] = _generate_quote_po_number(db)
+                llm_result["po_number"] = _generate_quote_po_number(db, company_id)
 
         # Match vendor
         vendor_name = llm_result.get("vendor", {}).get("name", "")
-        vendor_match = match_vendor(vendor_name, db)
+        vendor_match = match_vendor(vendor_name, db, company_id)
 
         # Match line items to parts
         line_items = llm_result.get("line_items", [])
-        matched_items = match_po_line_items(line_items, db)
+        matched_items = match_po_line_items(line_items, db, company_id)
 
         # Check if PO number already exists
         po_number = llm_result.get("po_number", "")
-        po_exists = check_po_number_exists(po_number, db) if po_number else False
+        po_exists = check_po_number_exists(po_number, db, company_id) if po_number else False
 
         # Validate extracted data
         validation_issues = validate_extracted_data(llm_result)
@@ -215,7 +217,9 @@ async def _upload_and_extract_document(
                     raw_part_number = None
             suggested_number = None
             if not raw_part_number and suggested_type in ["raw_material", "hardware", "consumable"]:
-                suggested_number = _find_existing_part_number_by_description(db, description, suggested_type)
+                suggested_number = _find_existing_part_number_by_description(
+                    db, description, suggested_type, company_id
+                )
                 if not suggested_number:
                     suggested_number = generate_werco_part_number(description, suggested_type)
 
@@ -338,7 +342,7 @@ def create_po_from_upload(
     parts_created = 0
 
     # Check PO number doesn't exist
-    if check_po_number_exists(data.po_number, db):
+    if check_po_number_exists(data.po_number, db, company_id):
         raise HTTPException(status_code=400, detail=f"PO number '{data.po_number}' already exists")
 
     # Create vendor if needed
@@ -350,7 +354,7 @@ def create_po_from_upload(
             # Ensure unique
             base_code = vendor_code
             counter = 1
-            while db.query(Vendor).filter(Vendor.code == vendor_code).first():
+            while tenant_query(db, Vendor, company_id).filter(Vendor.code == vendor_code).first():
                 vendor_code = f"{base_code}-{counter}"
                 counter += 1
 
@@ -368,7 +372,7 @@ def create_po_from_upload(
         vendor_created = True
 
     # Verify vendor exists
-    vendor = db.query(Vendor).filter(Vendor.id == vendor_id).first()
+    vendor = tenant_query(db, Vendor, company_id).filter(Vendor.id == vendor_id).first()
     if not vendor:
         raise HTTPException(status_code=400, detail="Vendor not found")
 
@@ -382,7 +386,7 @@ def create_po_from_upload(
         part_number = part_data.get("part_number")
 
         if not part_number and part_type_str in ["raw_material", "hardware"] and part_description:
-            part_number = _find_existing_part_number_by_description(db, part_description, part_type_str)
+            part_number = _find_existing_part_number_by_description(db, part_description, part_type_str, company_id)
             if not part_number:
                 part_number = generate_werco_part_number(part_description, part_type_str)
             part_data["part_number"] = part_number
@@ -390,8 +394,9 @@ def create_po_from_upload(
         if not part_number:
             raise HTTPException(status_code=400, detail="Part number is required for new parts")
 
-        if db.query(Part).filter(Part.part_number == part_number).first():
-            part_id_map[part_number] = db.query(Part).filter(Part.part_number == part_number).first().id
+        existing_part = tenant_query(db, Part, company_id).filter(Part.part_number == part_number).first()
+        if existing_part:
+            part_id_map[part_number] = existing_part.id
             continue
 
         if part_type_str == "raw_material":
@@ -416,6 +421,14 @@ def create_po_from_upload(
         db.flush()
         part_id_map[part_number] = new_part.id
         parts_created += 1
+
+    # Client-supplied part ids must resolve within this tenant.
+    client_part_ids = {item.part_id for item in data.line_items if item.part_id}
+    if client_part_ids:
+        found_ids = {p.id for p in tenant_query(db, Part, company_id).filter(Part.id.in_(client_part_ids)).all()}
+        missing = sorted(client_part_ids - found_ids)
+        if missing:
+            raise HTTPException(status_code=400, detail=f"Part id {missing[0]} not found")
 
     # Validate all line items have valid part_ids
     for item in data.line_items:
@@ -579,9 +592,15 @@ def search_parts(
     limit: int = Query(10, le=50),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Search parts for matching during PO review."""
-    parts = db.query(Part).filter(Part.is_active == True, Part.part_number.ilike(f"%{q}%")).limit(limit).all()
+    parts = (
+        tenant_query(db, Part, company_id)
+        .filter(Part.is_active == True, Part.part_number.ilike(f"%{q}%"))
+        .limit(limit)
+        .all()
+    )
 
     return [{"id": p.id, "part_number": p.part_number, "name": p.name, "description": p.description} for p in parts]
 
@@ -592,8 +611,14 @@ def search_vendors(
     limit: int = Query(10, le=50),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Search vendors for matching during PO review."""
-    vendors = db.query(Vendor).filter(Vendor.is_active == True, Vendor.name.ilike(f"%{q}%")).limit(limit).all()
+    vendors = (
+        tenant_query(db, Vendor, company_id)
+        .filter(Vendor.is_active == True, Vendor.name.ilike(f"%{q}%"))
+        .limit(limit)
+        .all()
+    )
 
     return [{"id": v.id, "code": v.code, "name": v.name} for v in vendors]

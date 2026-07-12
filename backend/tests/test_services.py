@@ -52,18 +52,18 @@ class TestMatchVendor:
 
     def test_match_vendor_empty_string(self, db_session: Session):
         """Test matching with empty vendor name."""
-        result = match_vendor("", db_session)
+        result = match_vendor("", db_session, company_id=1)
         assert result.matched is False
         assert result.match_id is None
 
     def test_match_vendor_none_string(self, db_session: Session):
         """Test matching with None vendor name."""
-        result = match_vendor(None, db_session)
+        result = match_vendor(None, db_session, company_id=1)
         assert result.matched is False
 
     def test_match_vendor_exact_match(self, db_session: Session, test_vendor: Vendor):
         """Test exact vendor match."""
-        result = match_vendor(test_vendor.name, db_session)
+        result = match_vendor(test_vendor.name, db_session, company_id=test_vendor.company_id)
         assert result.matched is True
         assert result.match_id == test_vendor.id
         assert result.match_name == test_vendor.name
@@ -71,18 +71,18 @@ class TestMatchVendor:
 
     def test_match_vendor_case_insensitive(self, db_session: Session, test_vendor: Vendor):
         """Test case-insensitive vendor matching."""
-        result = match_vendor(test_vendor.name.lower(), db_session)
+        result = match_vendor(test_vendor.name.lower(), db_session, company_id=test_vendor.company_id)
         assert result.matched is True
         assert result.match_id == test_vendor.id
 
     def test_match_vendor_trimmed_whitespace(self, db_session: Session, test_vendor: Vendor):
         """Test whitespace handling in vendor names."""
-        result = match_vendor(f"  {test_vendor.name}  ", db_session)
+        result = match_vendor(f"  {test_vendor.name}  ", db_session, company_id=test_vendor.company_id)
         assert result.matched is True
 
     def test_match_vendor_no_match(self, db_session: Session):
         """Test with no valid vendor."""
-        result = match_vendor("Non-existent Vendor XYZ123", db_session, threshold=95)
+        result = match_vendor("Non-existent Vendor XYZ123", db_session, company_id=1, threshold=95)
         assert result.matched is False
         assert result.match_id is None
 
@@ -93,18 +93,18 @@ class TestMatchPart:
 
     def test_match_part_empty_string(self, db_session: Session):
         """Test matching with empty part number."""
-        result = match_part("", db_session)
+        result = match_part("", db_session, company_id=1)
         assert result.matched is False
         assert result.match_id is None
 
     def test_match_part_none_string(self, db_session: Session):
         """Test matching with None part number."""
-        result = match_part(None, db_session)
+        result = match_part(None, db_session, company_id=1)
         assert result.matched is False
 
     def test_match_part_exact_match(self, db_session: Session, test_part: Part):
         """Test exact part match."""
-        result = match_part(test_part.part_number, db_session)
+        result = match_part(test_part.part_number, db_session, company_id=test_part.company_id)
         assert result.matched is True
         assert result.match_id == test_part.id
         assert result.match_name == test_part.part_number
@@ -112,7 +112,7 @@ class TestMatchPart:
 
     def test_match_part_case_insensitive(self, db_session: Session, test_part: Part):
         """Test case-insensitive part matching."""
-        result = match_part(test_part.part_number.lower(), db_session)
+        result = match_part(test_part.part_number.lower(), db_session, company_id=test_part.company_id)
         assert result.matched is True
         assert result.match_id == test_part.id
 
@@ -132,7 +132,7 @@ class TestMatchPart:
         db_session.commit()
 
         # Test matching with different formats
-        result = match_part("P-12345", db_session)
+        result = match_part("P-12345", db_session, company_id=1)
         assert result.matched is True
 
 
@@ -142,13 +142,13 @@ class TestMatchPOLineItems:
 
     def test_match_po_line_items_empty_list(self, db_session: Session):
         """Test with empty line items list."""
-        result = match_po_line_items([], db_session)
+        result = match_po_line_items([], db_session, company_id=1)
         assert result == []
 
     def test_match_po_line_items_single_item(self, db_session: Session, test_part: Part):
         """Test matching single line item."""
         line_items = [{"part_number": test_part.part_number, "quantity": 10}]
-        result = match_po_line_items(line_items, db_session)
+        result = match_po_line_items(line_items, db_session, company_id=test_part.company_id)
 
         assert len(result) == 1
         assert result[0]["part_match"]["matched"] is True
@@ -161,7 +161,7 @@ class TestMatchPOLineItems:
             {"part_number": "P-INVALID-001", "quantity": 5},
             {"part_number": test_part.part_number.upper(), "quantity": 20},
         ]
-        result = match_po_line_items(line_items, db_session)
+        result = match_po_line_items(line_items, db_session, company_id=test_part.company_id)
 
         assert len(result) == 3
         assert result[0]["matched_part_id"] == test_part.id
@@ -171,7 +171,7 @@ class TestMatchPOLineItems:
     def test_match_po_line_items_preserves_data(self, db_session: Session):
         """Test that original line item data is preserved."""
         line_items = [{"part_number": "P-001", "quantity": 10, "desc": "Test"}]
-        result = match_po_line_items(line_items, db_session)
+        result = match_po_line_items(line_items, db_session, company_id=1)
 
         assert result[0]["quantity"] == 10
         assert result[0]["desc"] == "Test"
@@ -185,22 +185,22 @@ class TestCheckPONumberExists:
 
     def test_check_po_number_exists_empty_string(self, db_session: Session):
         """Test with empty PO number."""
-        result = check_po_number_exists("", db_session)
+        result = check_po_number_exists("", db_session, company_id=1)
         assert result is False
 
     def test_check_po_number_exists_none_string(self, db_session: Session):
         """Test with None PO number."""
-        result = check_po_number_exists(None, db_session)
+        result = check_po_number_exists(None, db_session, company_id=1)
         assert result is False
 
     def test_check_po_number_exists_whitespace(self, db_session: Session):
         """Test with whitespace-only PO number."""
-        result = check_po_number_exists("   ", db_session)
+        result = check_po_number_exists("   ", db_session, company_id=1)
         assert result is False
 
     def test_check_po_number_exists_not_found(self, db_session: Session):
         """Test with non-existent PO number."""
-        result = check_po_number_exists("PO-99999", db_session)
+        result = check_po_number_exists("PO-99999", db_session, company_id=1)
         assert result is False
 
 
@@ -217,7 +217,7 @@ class TestMatchingIntegration:
         vendor_factory("Acme Supplies", "ACM003")
 
         # Try to match similar name
-        result = match_vendor("Acme Corp", db_session, threshold=60)
+        result = match_vendor("Acme Corp", db_session, company_id=1, threshold=60)
         assert result.matched is True
         assert len(result.suggestions) > 0
 
@@ -226,10 +226,10 @@ class TestMatchingIntegration:
         part_factory("P-12345", "Part 12345")
 
         # High threshold - might not match
-        result_high = match_part("P-1234", db_session, threshold=95)
+        result_high = match_part("P-1234", db_session, company_id=1, threshold=95)
 
         # Low threshold - should match fuzzy
-        result_low = match_part("P-1234", db_session, threshold=60)
+        result_low = match_part("P-1234", db_session, company_id=1, threshold=60)
 
         # Results will depend on fuzzy matching algorithm
         assert isinstance(result_high, MatchResult)

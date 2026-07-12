@@ -10,6 +10,8 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
+from app.db.tenant_filter import tenant_query
+
 logger = logging.getLogger(__name__)
 
 # Try rapidfuzz first (faster), fall back to fuzzywuzzy
@@ -52,7 +54,7 @@ class MatchResult:
         }
 
 
-def match_vendor(vendor_name: str, db: Session, threshold: int = 70) -> MatchResult:
+def match_vendor(vendor_name: str, db: Session, company_id: int, threshold: int = 70) -> MatchResult:
     """
     Match extracted vendor name to existing vendors.
     Returns best match or suggestions if no confident match found.
@@ -66,13 +68,15 @@ def match_vendor(vendor_name: str, db: Session, threshold: int = 70) -> MatchRes
     normalized_vendor_name = re.sub(r"[^A-Z0-9]", "", vendor_name)
 
     # First try exact match (case-insensitive)
-    exact = db.query(Vendor).filter(Vendor.is_active == True, Vendor.name.ilike(vendor_name)).first()
+    exact = (
+        tenant_query(db, Vendor, company_id).filter(Vendor.is_active == True, Vendor.name.ilike(vendor_name)).first()
+    )
 
     if exact:
         return MatchResult(matched=True, match_id=exact.id, match_name=exact.name, confidence=100.0)
 
     # Get all active vendors for fuzzy matching
-    vendors = db.query(Vendor).filter(Vendor.is_active == True).all()
+    vendors = tenant_query(db, Vendor, company_id).filter(Vendor.is_active == True).all()
 
     if not vendors:
         return MatchResult(matched=False)
@@ -121,7 +125,7 @@ def match_vendor(vendor_name: str, db: Session, threshold: int = 70) -> MatchRes
     return MatchResult(matched=False, suggestions=suggestions)
 
 
-def match_part(part_number: str, db: Session, threshold: int = 80) -> MatchResult:
+def match_part(part_number: str, db: Session, company_id: int, threshold: int = 80) -> MatchResult:
     """
     Match extracted part number to existing parts.
     Part numbers require higher confidence threshold.
@@ -138,7 +142,7 @@ def match_part(part_number: str, db: Session, threshold: int = 80) -> MatchResul
 
     # First try exact match
     exact = (
-        db.query(Part)
+        tenant_query(db, Part, company_id)
         .filter(Part.is_active == True, or_(Part.part_number.ilike(part_number), Part.part_number.ilike(clean_pn)))
         .first()
     )
@@ -147,7 +151,7 @@ def match_part(part_number: str, db: Session, threshold: int = 80) -> MatchResul
         return MatchResult(matched=True, match_id=exact.id, match_name=exact.part_number, confidence=100.0)
 
     # Get all active parts for fuzzy matching
-    parts = db.query(Part).filter(Part.is_active == True).limit(1000).all()
+    parts = tenant_query(db, Part, company_id).filter(Part.is_active == True).limit(1000).all()
 
     if not parts:
         return MatchResult(matched=False)
@@ -191,7 +195,7 @@ def match_part(part_number: str, db: Session, threshold: int = 80) -> MatchResul
     return MatchResult(matched=False, suggestions=suggestions)
 
 
-def match_part_by_description(description: str, db: Session, threshold: int = 75) -> MatchResult:
+def match_part_by_description(description: str, db: Session, company_id: int, threshold: int = 75) -> MatchResult:
     """
     Match line item description to existing parts by name/description.
     """
@@ -202,7 +206,7 @@ def match_part_by_description(description: str, db: Session, threshold: int = 75
 
     desc = re.sub(r"\s+", " ", description.strip().upper())
 
-    parts = db.query(Part).filter(Part.is_active == True).limit(1000).all()
+    parts = tenant_query(db, Part, company_id).filter(Part.is_active == True).limit(1000).all()
     if not parts:
         return MatchResult(matched=False)
 
@@ -240,7 +244,7 @@ def match_part_by_description(description: str, db: Session, threshold: int = 75
     return MatchResult(matched=False, suggestions=suggestions)
 
 
-def match_po_line_items(line_items: List[Dict[str, Any]], db: Session) -> List[Dict[str, Any]]:
+def match_po_line_items(line_items: List[Dict[str, Any]], db: Session, company_id: int) -> List[Dict[str, Any]]:
     """
     Match all line items to existing parts.
     Returns line items with match info added.
@@ -250,9 +254,9 @@ def match_po_line_items(line_items: List[Dict[str, Any]], db: Session) -> List[D
     for item in line_items:
         part_number = item.get("part_number", "")
         description = item.get("description", "")
-        match_result = match_part(part_number, db)
+        match_result = match_part(part_number, db, company_id)
         if not match_result.matched and description:
-            match_result = match_part_by_description(description, db)
+            match_result = match_part_by_description(description, db, company_id)
 
         enhanced_item = {
             **item,
@@ -350,13 +354,13 @@ def suggest_part_type(description: str, uom: str = "") -> str:
     return "purchased"
 
 
-def check_po_number_exists(po_number: str, db: Session) -> bool:
+def check_po_number_exists(po_number: str, db: Session, company_id: int) -> bool:
     """Check if PO number already exists in database."""
     from app.models.purchasing import PurchaseOrder
 
     if not po_number:
         return False
 
-    existing = db.query(PurchaseOrder).filter(PurchaseOrder.po_number == po_number.strip()).first()
+    existing = tenant_query(db, PurchaseOrder, company_id).filter(PurchaseOrder.po_number == po_number.strip()).first()
 
     return existing is not None
