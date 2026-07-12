@@ -13,6 +13,9 @@ Locks in the fix on branch fix/po-upload-tenant-scope that scoped
 - create-from-upload treats a part_number that exists only in another company
   as NEW for this company: it creates a fresh Part here instead of linking the
   foreign part id onto the PO line.
+- create-from-upload rejects a client-supplied line-item part_id belonging to
+  another company with 400 "Part id N not found" BEFORE any PO is created
+  (the in-tenant probe added after the compliance audit).
 - matching_service's match_vendor / match_part / match_po_line_items /
   check_po_number_exists take a REQUIRED company_id and never match, suggest,
   or report rows from another company.
@@ -214,7 +217,8 @@ def test_search_vendors_foreign_only_vendor_yields_empty(client: TestClient, db_
 
 
 # ---------------------------------------------------------------------------
-# 3. POST /po-upload/create-from-upload rejects a foreign vendor_id
+# 3. POST /po-upload/create-from-upload rejects foreign ids
+#    (vendor_id and client-supplied line-item part_id)
 # ---------------------------------------------------------------------------
 
 
@@ -237,6 +241,58 @@ def test_create_from_upload_foreign_vendor_id_is_400(client: TestClient, db_sess
     assert resp.json()["detail"] == "Vendor not found"
     # Unscoped check: no PurchaseOrder row exists with this number in ANY company.
     assert db_session.query(PurchaseOrder).filter(PurchaseOrder.po_number == po_number).count() == 0
+
+
+def test_create_from_upload_foreign_part_id_is_400(client: TestClient, db_session: Session):
+    """A line item carrying company B's REAL part id is rejected with 400
+    "Part id N not found" before any PO row is created; the identical payload
+    with company A's own part id succeeds (happy-path control)."""
+    part_b = make_part(db_session, company_id=COMPANY_B, part_number=f"BPID-{_next():05d}")
+    part_a = make_part(db_session, company_id=COMPANY_A, part_number=f"APID-{_next():05d}")
+    vendor_a = make_vendor(db_session, company_id=COMPANY_A, name=f"Own Vendor {_next():05d}")
+    manager_a = make_user(db_session, role=UserRole.MANAGER, company_id=COMPANY_A)
+    # The id is real -- only tenancy makes it invisible to company A.
+    assert db_session.query(Part).filter(Part.id == part_b.id).first() is not None
+
+    def payload_with(part, po_number: str) -> dict:
+        return _create_payload(
+            po_number,
+            vendor_a.id,
+            line_items=[
+                {
+                    "part_id": part.id,
+                    "part_number": part.part_number,
+                    "description": "Client-supplied part id",
+                    "quantity_ordered": 2,
+                    "unit_price": 4.0,
+                }
+            ],
+        )
+
+    po_number_foreign = f"PO-XT-{_next():05d}"
+    resp = client.post(
+        "/api/v1/po-upload/create-from-upload",
+        headers=headers_for(manager_a),
+        json=payload_with(part_b, po_number_foreign),
+    )
+    assert resp.status_code == status.HTTP_400_BAD_REQUEST, resp.text
+    assert resp.json()["detail"] == f"Part id {part_b.id} not found"
+    # Unscoped check: no PurchaseOrder row exists with this number in ANY company.
+    assert db_session.query(PurchaseOrder).filter(PurchaseOrder.po_number == po_number_foreign).count() == 0
+
+    # Happy-path control: same payload shape with A's own part id succeeds.
+    po_number_own = f"PO-XT-{_next():05d}"
+    resp_ok = client.post(
+        "/api/v1/po-upload/create-from-upload",
+        headers=headers_for(manager_a),
+        json=payload_with(part_a, po_number_own),
+    )
+    assert resp_ok.status_code == status.HTTP_200_OK, resp_ok.text
+    assert resp_ok.json()["success"] is True
+    po = db_session.query(PurchaseOrder).filter(PurchaseOrder.po_number == po_number_own).one()
+    assert po.company_id == COMPANY_A
+    lines = db_session.query(PurchaseOrderLine).filter(PurchaseOrderLine.purchase_order_id == po.id).all()
+    assert [line.part_id for line in lines] == [part_a.id]
 
 
 # ---------------------------------------------------------------------------
