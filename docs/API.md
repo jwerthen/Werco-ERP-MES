@@ -1292,9 +1292,12 @@ the public paths are `/eco/eco/…`.
 | POST | `/purchasing/vendors` | Create vendor | Admin / Manager |
 | GET | `/purchasing/vendors/{vendor_id}` | Get vendor by ID | Yes |
 | PUT | `/purchasing/vendors/{vendor_id}` | Update vendor — `code` is editable (see note) | Admin / Manager |
-| GET | `/purchasing/pos/` | List purchase orders | Yes |
-| POST | `/purchasing/pos/` | Create purchase order | Yes |
-| GET | `/purchasing/pos/{id}` | Get PO by ID | Yes |
+| GET | `/purchasing/purchase-orders` | List purchase orders (filters: `status`, `vendor_id`) | Yes |
+| POST | `/purchasing/purchase-orders` | Create purchase order with its lines | Admin / Manager / Supervisor |
+| GET | `/purchasing/purchase-orders/{po_id}` | Get PO by ID | Yes |
+| PUT | `/purchasing/purchase-orders/{po_id}` | Update purchase order | Admin / Manager / Supervisor |
+| POST | `/purchasing/purchase-orders/{po_id}/send` | Issue a PO to the vendor — status → `sent`, stamps `order_date`; only `draft`/`approved` POs (else **400**) | Admin / Manager |
+| POST | `/purchasing/purchase-orders/{po_id}/lines` | Add a line to a `draft` PO (else **400**) and roll the PO subtotal/total | Admin / Manager / Supervisor |
 | POST | `/purchasing/po-upload` | Upload PO from PDF | Yes |
 
 > Material receiving and incoming inspection are **not** under `/purchasing`. They live under
@@ -1307,6 +1310,16 @@ the public paths are `/eco/eco/…`.
 > whitespace-only string fails schema validation (**422**, min length checked after strip). Vendor
 > **creates and updates** both write to the tamper-evident `audit_log` (`GET /audit/`) — the direct
 > `POST` create, `PUT` updates, and the per-row audit of CSV/XLSX-imported vendor creates.
+>
+> **PO writes are audited.** The interactive purchase-order write endpoints record to the
+> tamper-evident `audit_log` (`GET /audit/`): create writes one CREATE row for the PO (resource type
+> `purchase_order`; vendor code + line count in `extra_data`, no per-line rows at document creation);
+> `PUT` writes an UPDATE row with the changes diff (a no-change PUT writes none); `/send` writes a
+> STATUS_CHANGE row (`draft`/`approved` → `sent`, stamped `order_date` in `extra_data`); `/lines`
+> writes two rows — a CREATE for the new line (resource type `purchase_order_line`) and an UPDATE on
+> the PO recording the subtotal/total roll (`extra_data.cause = "po_line_added"`). Audit rows are
+> flushed before the terminal commit so they commit atomically with the change. (These endpoints
+> were RBAC-gated but unaudited prior to 2026-07-12; the import loader was already per-row audited.)
 
 ### Receiving & Inspection
 

@@ -404,7 +404,10 @@ def create_purchase_order(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
+    """Create a purchase order with its lines. Writes one tamper-evident audit_log CREATE
+    row for the PO (line_count in extra_data; no per-line rows for document creation)."""
     # Verify vendor
     vendor = db.query(Vendor).filter(Vendor.id == po_in.vendor_id, Vendor.company_id == company_id).first()
     if not vendor:
@@ -455,6 +458,13 @@ def create_purchase_order(
     po.total = subtotal + po.tax + po.shipping
 
     db.flush()
+    audit.log_create(
+        "purchase_order",
+        po.id,
+        po.po_number,
+        new_values=po,
+        extra_data={"vendor_code": vendor.code, "line_count": len(po_in.lines)},
+    )
     OperationalEventService(db).emit_best_effort(
         company_id=company_id,
         event_type="purchase_order_created",
@@ -557,10 +567,17 @@ def update_purchase_order(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
+    """Update a purchase order. Writes a tamper-evident audit_log UPDATE row with the
+    changes diff (a status change shows up in the diff; no row when nothing changed)."""
     po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id, PurchaseOrder.company_id == company_id).first()
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found")
+
+    # Snapshot BEFORE mutating; column-only, so the vestigial POUpdate.version
+    # (PurchaseOrder has no version column) never enters the audited changes diff.
+    old_values = {c.key: getattr(po, c.key) for c in po.__table__.columns}
 
     previous_status = po.status
     update_data = po_in.model_dump(exclude_unset=True)
@@ -587,6 +604,10 @@ def update_purchase_order(
             "expected_date": po.expected_date.isoformat() if po.expected_date else None,
         },
     )
+    # Audit BEFORE the terminal commit so the audit row commits atomically with the
+    # change -- AuditService.log() only flushes; the session never commits on teardown.
+    db.flush()
+    audit.log_update("purchase_order", po.id, po.po_number, old_values=old_values, new_values=po)
     db.commit()
     db.refresh(po)
     return po
@@ -598,7 +619,10 @@ def send_purchase_order(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
+    """Issue a draft/approved PO to the vendor (status -> sent, stamps order_date).
+    Writes a tamper-evident audit_log STATUS_CHANGE row."""
     po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id, PurchaseOrder.company_id == company_id).first()
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found")
@@ -606,6 +630,7 @@ def send_purchase_order(
     if po.status not in [POStatus.DRAFT, POStatus.APPROVED]:
         raise HTTPException(status_code=400, detail="Can only send draft or approved POs")
 
+    old_status = po.status.value if hasattr(po.status, "value") else po.status
     po.status = POStatus.SENT
     po.order_date = date.today()
     OperationalEventService(db).emit_best_effort(
@@ -623,6 +648,15 @@ def send_purchase_order(
             "required_date": po.required_date.isoformat() if po.required_date else None,
         },
     )
+    db.flush()
+    audit.log_status_change(
+        "purchase_order",
+        po.id,
+        po.po_number,
+        old_status=old_status,
+        new_status=POStatus.SENT.value,
+        extra_data={"order_date": po.order_date.isoformat()},
+    )
     db.commit()
 
     return {"message": "PO sent", "po_number": po.po_number}
@@ -635,7 +669,10 @@ def add_po_line(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
+    """Add a line to a draft PO and roll the PO subtotal/total. Writes two tamper-evident
+    audit_log rows: a CREATE for the new line and an UPDATE for the PO-totals change."""
     po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id, PurchaseOrder.company_id == company_id).first()
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found")
@@ -653,7 +690,10 @@ def add_po_line(
         or 0
     )
 
-    line_total = line_in.quantity_ordered * line_in.unit_price
+    # quantity_ordered/unit_price parse as Decimal (Money schema types) but the PO
+    # money columns are Float — coerce so the `po.subtotal += line_total` roll below
+    # doesn't mix Decimal with float (mirrors create_purchase_order).
+    line_total = float(line_in.quantity_ordered) * float(line_in.unit_price)
     line = PurchaseOrderLine(
         purchase_order_id=po_id,
         line_number=max_line + 1,
@@ -667,11 +707,30 @@ def add_po_line(
     line.company_id = company_id
     db.add(line)
 
+    # Snapshot the PO columns BEFORE the totals mutation so the audited UPDATE diff
+    # below captures the subtotal/total roll.
+    old_po_values = {c.key: getattr(po, c.key) for c in po.__table__.columns}
+
     # Update PO totals
     po.subtotal += line_total
     po.total = po.subtotal + po.tax + po.shipping
 
     db.flush()
+    audit.log_create(
+        "purchase_order_line",
+        line.id,
+        f"{po.po_number}-L{line.line_number}",
+        new_values=line,
+        extra_data={"po_id": po.id, "po_number": po.po_number},
+    )
+    audit.log_update(
+        "purchase_order",
+        po.id,
+        po.po_number,
+        old_values=old_po_values,
+        new_values=po,
+        extra_data={"cause": "po_line_added", "line_id": line.id, "line_number": line.line_number},
+    )
     OperationalEventService(db).emit_best_effort(
         company_id=company_id,
         event_type="purchase_order_line_added",
