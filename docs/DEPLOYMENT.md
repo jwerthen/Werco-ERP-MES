@@ -6,7 +6,7 @@ This guide covers deploying Werco ERP to production environments.
 
 - Production server with:
   - Python 3.11+
-  - Node.js 18+
+  - Node.js 22+ (LTS; see frontend/.nvmrc)
   - Supabase project with Postgres database access
   - Redis (recommended for caching)
   - Nginx or similar reverse proxy

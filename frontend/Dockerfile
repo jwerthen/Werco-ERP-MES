@@ -1,5 +1,5 @@
 # Build stage
-FROM node:20.19-alpine AS build
+FROM node:22.23-alpine AS build
 
 WORKDIR /app
 
@@ -22,7 +22,7 @@ RUN if [ -z "$REACT_APP_API_URL" ]; then echo "REACT_APP_API_URL is required at 
 RUN npm run build
 
 # Production stage
-FROM node:20.19-alpine
+FROM node:22.23-alpine
 
 WORKDIR /app
 
