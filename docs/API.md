@@ -1305,8 +1305,8 @@ the public paths are `/eco/eco/…`.
 > code must stay unique within the company (**400** "Vendor code already exists") and cannot be
 > blanked: an explicit JSON `null` returns **400** "Vendor code cannot be blank", while an empty or
 > whitespace-only string fails schema validation (**422**, min length checked after strip). Vendor
-> **updates** now write to the tamper-evident `audit_log` (`GET /audit/`), joining the per-row audit
-> of CSV/XLSX-imported vendor creates.
+> **creates and updates** both write to the tamper-evident `audit_log` (`GET /audit/`) — the direct
+> `POST` create, `PUT` updates, and the per-row audit of CSV/XLSX-imported vendor creates.
 
 ### Receiving & Inspection
 

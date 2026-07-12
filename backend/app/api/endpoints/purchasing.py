@@ -108,7 +108,10 @@ def create_vendor(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
+    """Create a vendor. `code` must be unique within the company (400 "Vendor code already exists").
+    Writes a tamper-evident audit_log CREATE row for the new vendor."""
     existing = db.query(Vendor).filter(Vendor.code == vendor_in.code, Vendor.company_id == company_id).first()
     if existing:
         raise HTTPException(status_code=400, detail="Vendor code already exists")
@@ -119,6 +122,8 @@ def create_vendor(
         vendor.approval_date = date.today()
     db.add(vendor)
     try:
+        db.flush()
+        audit.log_create("vendor", vendor.id, vendor.code, new_values=vendor)
         db.commit()
     except IntegrityError as exc:
         # TOCTOU backstop: a concurrent create can slip past the pre-insert probe;
