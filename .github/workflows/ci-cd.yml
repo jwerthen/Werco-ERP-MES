@@ -208,7 +208,7 @@ jobs:
           output: 'backend-trivy-results.sarif'
 
       - name: Upload Trivy results to GitHub Security
-        uses: github/codeql-action/upload-sarif@v2
+        uses: github/codeql-action/upload-sarif@v4
         # Non-fatal: the SARIF upload needs code scanning (GitHub Advanced Security),
         # which fails on push if unavailable. The Trivy scan still runs (informational);
         # npm audit remains the hard security gate.
