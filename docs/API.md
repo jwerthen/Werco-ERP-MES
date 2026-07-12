@@ -1298,10 +1298,11 @@ the public paths are `/eco/eco/…`.
 | PUT | `/purchasing/purchase-orders/{po_id}` | Update purchase order | Admin / Manager / Supervisor |
 | POST | `/purchasing/purchase-orders/{po_id}/send` | Issue a PO to the vendor — status → `sent`, stamps `order_date`; only `draft`/`approved` POs (else **400**) | Admin / Manager |
 | POST | `/purchasing/purchase-orders/{po_id}/lines` | Add a line to a `draft` PO (else **400**) and roll the PO subtotal/total | Admin / Manager / Supervisor |
-| POST | `/purchasing/po-upload` | Upload PO from PDF | Yes |
 
 > Material receiving and incoming inspection are **not** under `/purchasing`. They live under
 > `/receiving` (see below). The duplicate `/purchasing/receiving*` endpoints were removed.
+> The AI PO/quote document-upload flow is likewise not under `/purchasing` — it lives at
+> `/po-upload` (see **PO Upload** below).
 >
 > **Vendor `code` is editable on update.** `PUT /purchasing/vendors/{vendor_id}` accepts an optional
 > `code` (2–20 chars: letters, digits, hyphens; lowercase input is normalized to uppercase). The new
@@ -1320,6 +1321,25 @@ the public paths are `/eco/eco/…`.
 > the PO recording the subtotal/total roll (`extra_data.cause = "po_line_added"`). Audit rows are
 > flushed before the terminal commit so they commit atomically with the change. (These endpoints
 > were RBAC-gated but unaudited prior to 2026-07-12; the import loader was already per-row audited.)
+
+### PO Upload (AI document extraction)
+
+Upload a vendor PO or quote document, AI-extract its data for human review, then create the PO
+from the reviewed result (`app/api/endpoints/po_upload.py`, mounted at `/po-upload`). Extraction
+runs through the shared `run_llm_task` pipeline (prompt `po_extraction` 1.0.0,
+`feature="po_upload"`, one tenant-scoped `ai_usage_events` row per call — telemetry, not audit)
+and is covered by the per-company `allow_ai_egress` kill switch (see **Company (self-service)**
+below).
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| POST | `/po-upload/upload-po` | Upload a PO document (`.pdf`/`.doc`/`.docx`, 10 MB cap; else **400**) — AI-extracts data for review before commit | Yes |
+| POST | `/po-upload/upload-quote` | Upload a vendor quote document — AI-extracts data to build a PO | Yes |
+| POST | `/po-upload/upload-invoice` | Legacy alias of `upload-quote` (same extraction behavior) | Yes |
+| POST | `/po-upload/create-from-upload` | Create the PO from the reviewed extraction — can create the vendor and missing parts; **400** if the PO number already exists | Admin / Manager / Supervisor |
+| GET | `/po-upload/pdf/{path}` | Serve the uploaded source document for preview (`s3://` refs and local paths) | Yes |
+| GET | `/po-upload/search-parts` | Part typeahead for extraction-review matching (`q`, `limit` ≤ 50) | Yes |
+| GET | `/po-upload/search-vendors` | Vendor typeahead for extraction-review matching (`q`, `limit` ≤ 50) | Yes |
 
 ### Receiving & Inspection
 
