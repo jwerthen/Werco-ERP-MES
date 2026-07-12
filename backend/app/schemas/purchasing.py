@@ -51,6 +51,9 @@ class VendorCreate(VendorBase):
 
 class VendorUpdate(BaseModel):
     version: int = Field(..., ge=0, description="Version for optimistic locking")
+    code: Optional[str] = Field(
+        None, min_length=2, max_length=20, pattern=r'^[A-Z0-9\-]+$', description="Vendor code (unique)"
+    )
     name: Optional[str] = Field(None, min_length=2, max_length=200)
     contact_name: Optional[str] = Field(None, max_length=100)
     email: Optional[str] = Field(None, max_length=255)
@@ -68,6 +71,12 @@ class VendorUpdate(BaseModel):
     is_iso9001_certified: Optional[bool] = None
     is_active: Optional[bool] = None
     notes: Optional[str] = Field(None, max_length=2000)
+
+    @field_validator('code', mode='before')
+    @classmethod
+    def uppercase_code(cls, v: Optional[str]) -> Optional[str]:
+        """Ensure vendor code is uppercase (mirrors VendorBase; None passes through)"""
+        return v.upper().strip() if isinstance(v, str) else v
 
 
 class VendorResponse(VendorBase):
