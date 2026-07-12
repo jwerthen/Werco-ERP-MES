@@ -1336,7 +1336,7 @@ below).
 | POST | `/po-upload/upload-po` | Upload a PO document (`.pdf`/`.doc`/`.docx`, 10 MB cap; else **400**) — AI-extracts data for review before commit | Yes |
 | POST | `/po-upload/upload-quote` | Upload a vendor quote document — AI-extracts data to build a PO | Yes |
 | POST | `/po-upload/upload-invoice` | Legacy alias of `upload-quote` (same extraction behavior) | Yes |
-| POST | `/po-upload/create-from-upload` | Create the PO from the reviewed extraction — can create the vendor and missing parts; **400** if the PO number already exists or a supplied `vendor_id` / line `part_id` doesn't exist in the active company | Admin / Manager / Supervisor |
+| POST | `/po-upload/create-from-upload` | Create the PO from the reviewed extraction — can create the vendor and missing parts (an active part already holding the number is reused); **400** if the PO number already exists, a supplied `vendor_id` / line `part_id` doesn't exist in the active company **or is soft-deleted**, or a new part's number belongs to a **soft-deleted** part (restore it via `POST /parts/{id}/restore` or use a different number) | Admin / Manager / Supervisor |
 | GET | `/po-upload/pdf/{path}` | Serve the uploaded source document for preview (`s3://` refs and local paths) | Yes |
 | GET | `/po-upload/search-parts` | Part typeahead for extraction-review matching (`q`, `limit` ≤ 50) | Yes |
 | GET | `/po-upload/search-vendors` | Vendor typeahead for extraction-review matching (`q`, `limit` ≤ 50) | Yes |
