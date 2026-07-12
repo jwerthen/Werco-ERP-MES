@@ -9,6 +9,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_company_id, get_current_user, require_role
@@ -81,7 +82,11 @@ def _find_existing_part_number_by_description(
         return None
     part = (
         tenant_query(db, Part, company_id)
-        .filter(Part.part_type == part_type_enum, func.lower(func.trim(Part.description)) == normalized)
+        .filter(
+            Part.part_type == part_type_enum,
+            Part.is_deleted == False,
+            func.lower(func.trim(Part.description)) == normalized,
+        )
         .first()
     )
     if part:
@@ -336,6 +341,7 @@ def create_po_from_upload(
 ):
     """
     Create a purchase order from extracted and reviewed data.
+    Part numbers held by a soft-deleted part are rejected with 400 (restore the part or use a new number).
     """
     vendor_id = data.vendor_id
     vendor_created = False
@@ -394,10 +400,21 @@ def create_po_from_upload(
         if not part_number:
             raise HTTPException(status_code=400, detail="Part number is required for new parts")
 
-        existing_part = tenant_query(db, Part, company_id).filter(Part.part_number == part_number).first()
+        existing_part = (
+            tenant_query(db, Part, company_id).filter(Part.part_number == part_number, Part.is_deleted == False).first()
+        )
         if existing_part:
             part_id_map[part_number] = existing_part.id
             continue
+
+        # Creating this number: a soft-deleted part may still hold it (uq_parts_company_part_number
+        # spans deleted rows), so reject like POST /parts does instead of 500ing on the constraint.
+        deleted_holder = (
+            tenant_query(db, Part, company_id).filter(Part.part_number == part_number, Part.is_deleted == True).first()
+        )
+        if deleted_holder:
+            msg = f"Part number '{part_number}' belongs to a deleted part - restore it or use a different part number"
+            raise HTTPException(status_code=400, detail=msg)
 
         if part_type_str == "raw_material":
             part_type = PartType.RAW_MATERIAL
@@ -418,14 +435,26 @@ def create_po_from_upload(
         )
         new_part.company_id = company_id
         db.add(new_part)
-        db.flush()
+        try:
+            db.flush()
+        except IntegrityError as exc:
+            # TOCTOU backstop (create_vendor precedent): a concurrent create can slip past
+            # the probes above; uq_parts_company_part_number catches it at this flush.
+            db.rollback()
+            raise HTTPException(status_code=400, detail="Part number already exists") from exc
         part_id_map[part_number] = new_part.id
         parts_created += 1
 
-    # Client-supplied part ids must resolve within this tenant.
+    # Client-supplied part ids must resolve within this tenant, to a live (not
+    # soft-deleted) part -- a deleted id gets the same 400 as a nonexistent one.
     client_part_ids = {item.part_id for item in data.line_items if item.part_id}
     if client_part_ids:
-        found_ids = {p.id for p in tenant_query(db, Part, company_id).filter(Part.id.in_(client_part_ids)).all()}
+        found_ids = {
+            p.id
+            for p in tenant_query(db, Part, company_id)
+            .filter(Part.id.in_(client_part_ids), Part.is_deleted == False)
+            .all()
+        }
         missing = sorted(client_part_ids - found_ids)
         if missing:
             raise HTTPException(status_code=400, detail=f"Part id {missing[0]} not found")
@@ -501,7 +530,13 @@ def create_po_from_upload(
         f"Created PO {po.po_number} from uploaded PDF with {len(data.line_items)} lines",
     )
 
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        # Same TOCTOU backstop at the terminal commit; the audit row above rides this
+        # transaction and rolls back with it.
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Part number already exists") from exc
 
     return POUploadResponse(
         success=True,
