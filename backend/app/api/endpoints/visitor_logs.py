@@ -42,6 +42,7 @@ from app.schemas.signin_station import (
 from app.schemas.visitor_log import (
     VisitorLogListResponse,
     VisitorLogResponse,
+    VisitorManualEntryRequest,
     VisitorSignInRequest,
     VisitorSignOutRequest,
 )
@@ -155,6 +156,36 @@ def sign_out(
     return row
 
 
+# ============== Staff back-entry (staff-only, NOT the station token) ==============
+
+
+@router.post("/manual", response_model=VisitorLogResponse, status_code=status.HTTP_201_CREATED)
+def manual_entry(
+    payload: VisitorManualEntryRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(_MANAGE_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Staff back-entry of an offline visit with its ACTUAL times (ADMIN/MANAGER).
+
+    For recording a paper-logged visit after a lobby-tablet outage. Unlike
+    ``/sign-in`` (station OR staff, stamps ``utcnow()``), this is staff-only RBAC
+    — the station token is NOT accepted — and takes the real past sign-in/out
+    times. The row is marked staff-entered (``signin_station_id`` NULL +
+    ``entered_by_user_id`` set), tenant-scoped, and audited.
+    """
+    audit = AuditService(db, user=current_user, request=request, company_id=company_id)
+    row = visitor_log_service.manual_entry(
+        db,
+        company_id=company_id,
+        payload=payload,
+        entered_by_user_id=current_user.id,
+        audit=audit,
+    )
+    return row
+
+
 # ============== Admin visitor-log views (staff-only) ==============
 
 
@@ -226,9 +257,16 @@ def export_visitors_csv(
             "signed_in_at",
             "signed_out_at",
             "station_label",
+            "entry_type",
         ]
     )
     for r in items:
+        if r.entered_by_user_id is not None:
+            entry_type = "staff_back_entry"
+        elif r.signin_station_id is not None:
+            entry_type = "station"
+        else:
+            entry_type = "staff_live"
         writer.writerow(
             [
                 r.id,
@@ -243,6 +281,7 @@ def export_visitors_csv(
                 to_utc_iso(r.signed_in_at) or "",
                 to_utc_iso(r.signed_out_at) or "",
                 r.station_label or "",
+                entry_type,
             ]
         )
 

@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+import { centralWallClockToUtcISO } from '../utils/centralTime';
+
 // ============================================================================
 // ENUMS
 // ============================================================================
@@ -485,6 +487,90 @@ export const processSheetStepSchema = z
   });
 
 // ============================================================================
+// VISITOR LOG (admin back-entry)
+// ============================================================================
+
+/**
+ * Visitor purpose values — mirror the backend `VisitorPurpose` enum and the
+ * lobby tablet's PURPOSE_TILES (components/visitor/visitorConstants.ts). Kept as
+ * a const array (not an enum) so parsed `purpose` is exactly the
+ * `VisitorPurpose` string-literal union in types/visitor.ts.
+ */
+export const VISITOR_PURPOSES = ['meeting', 'delivery', 'contractor', 'interview', 'audit', 'other'] as const;
+
+/**
+ * Staff back-entry ("Add visit") form schema. Datetime fields are held as the
+ * naive Central wall-clock strings a `<input type="datetime-local">` yields and
+ * are converted to UTC on submit — here they are only range-checked. This
+ * mirrors the backend VisitorManualEntryRequest rules (purpose_note required for
+ * 'other', acknowledgment required, signed_in_at required + in the past,
+ * signed_out_at on/after signed_in_at + in the past) client-side, while the
+ * server stays the source of truth (its 422 detail is surfaced verbatim).
+ */
+export const visitorManualEntrySchema = z
+  .object({
+    visitor_name: z
+      .string()
+      .trim()
+      .min(1, 'Visitor name is required')
+      .max(120, 'Must be at most 120 characters'),
+    visitor_company: optionalTrimmed(120),
+    host_name: optionalTrimmed(120),
+    purpose: z.enum(VISITOR_PURPOSES, { error: 'Select a purpose' }),
+    purpose_note: z.string().max(255, 'Must be at most 255 characters').optional(),
+    safety_acknowledged: z.boolean(),
+    signed_in_at: z.string().min(1, 'Sign-in date and time is required'),
+    signed_out_at: z.string().optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (!data.safety_acknowledged) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['safety_acknowledged'],
+        message: 'The safety/NDA acknowledgment is required',
+      });
+    }
+
+    if (data.purpose === 'other' && !(data.purpose_note ?? '').trim()) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['purpose_note'],
+        message: 'A note is required when the purpose is “Other”',
+      });
+    }
+
+    const now = Date.now();
+
+    const signedInIso = centralWallClockToUtcISO(data.signed_in_at);
+    const signedInMs = signedInIso ? Date.parse(signedInIso) : Number.NaN;
+    if (data.signed_in_at && Number.isNaN(signedInMs)) {
+      ctx.addIssue({ code: 'custom', path: ['signed_in_at'], message: 'Enter a valid date and time' });
+    } else if (!Number.isNaN(signedInMs) && signedInMs > now) {
+      ctx.addIssue({ code: 'custom', path: ['signed_in_at'], message: 'Sign-in time must be in the past' });
+    }
+
+    const signedOutRaw = (data.signed_out_at ?? '').trim();
+    if (signedOutRaw) {
+      const signedOutIso = centralWallClockToUtcISO(signedOutRaw);
+      const signedOutMs = signedOutIso ? Date.parse(signedOutIso) : Number.NaN;
+      if (Number.isNaN(signedOutMs)) {
+        ctx.addIssue({ code: 'custom', path: ['signed_out_at'], message: 'Enter a valid date and time' });
+      } else {
+        if (signedOutMs > now) {
+          ctx.addIssue({ code: 'custom', path: ['signed_out_at'], message: 'Sign-out time must be in the past' });
+        }
+        if (!Number.isNaN(signedInMs) && signedOutMs < signedInMs) {
+          ctx.addIssue({
+            code: 'custom',
+            path: ['signed_out_at'],
+            message: 'Sign-out must be on or after the sign-in time',
+          });
+        }
+      }
+    }
+  });
+
+// ============================================================================
 // TYPES
 // ============================================================================
 
@@ -502,3 +588,7 @@ export type WorkOrderOperationFormData = z.infer<typeof workOrderOperationSchema
 export type UserFormData = z.infer<typeof userSchema>;
 export type UserLoginFormData = z.infer<typeof userLoginSchema>;
 export type VendorFormData = z.infer<typeof vendorSchema>;
+// Output (post-superRefine) vs input (raw datetime-local + optional strings the
+// form fields hold before validation).
+export type VisitorManualEntryFormData = z.output<typeof visitorManualEntrySchema>;
+export type VisitorManualEntryFormInput = z.input<typeof visitorManualEntrySchema>;
