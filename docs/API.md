@@ -1775,20 +1775,27 @@ records, targets) require **Admin / Manager / Supervisor**.
 > from a tenant path (matching the import and `POST /users/{id}/approve` guards) — and on
 > `PUT /users/{id}` an Admin cannot change **their own** role (**400**, `"You cannot change your own
 > role"`; editing one's own other fields stays allowed). Every user mutation (create, update,
-> approve, password-reset, deactivate, activate) is recorded in the tamper-evident audit log. See
+> approve, password-reset, deactivate, activate) is recorded in the tamper-evident audit log; the
+> self-service `POST /users/change-password` likewise records a `PASSWORD_CHANGE` audit event
+> (`extra_data.source = "self_service"`, mirroring the admin `reset-password` path — the
+> password/hash is never included). See
 > [docs/RBAC_PERMISSIONS.md](RBAC_PERMISSIONS.md) → Users.
 
-> **Password-strength policy — enforced server-side on every user-write path.** A password set
+> **Password-strength policy — enforced server-side on every password-set path.** A password set
 > through `POST /users/` (create), `POST /users/{id}/reset-password`, or the self-service
 > `POST /users/change-password` must be **≥ 12 characters** and contain an **uppercase**, a
 > **lowercase**, a **number**, and a **special** character, and must not contain a common weak
 > substring (`password`, `123456`, `qwerty`, `admin`, `letmein`, `welcome`); a violation returns
-> **422**. This is the **same policy** enforced on `POST /auth/register`, applied via the shared
-> `validate_password_strength` (`app/schemas/user.py`) — previously only self-registration enforced
-> it. The user CSV import (`POST /users/import-csv`) applies the same check to **user-supplied**
-> passwords **per row** (a weak password fails only that row, `reason` = `"Weak password: …"`);
-> operator **auto-generated** passwords (for badge/employee-ID logins) satisfy the policy by
-> construction and are **exempt**.
+> **422**. The **same policy** — the shared `validate_password_strength` (`app/schemas/user.py`) —
+> also governs `POST /auth/register` (admin create), public self-registration
+> `POST /auth/register-public`, and the **first-admin `admin_password`** on the two company-creation
+> paths: the **unauthenticated** `POST /companies/register` (company self-registration) and
+> platform-admin `POST /platform/companies`. (`POST /companies/register` previously skipped the
+> common-substring check and `POST /platform/companies` had **no** complexity check at all — both now
+> enforce the full policy, so no first-admin can be seeded with a weak password.) The user CSV import
+> (`POST /users/import-csv`) applies the same check to **user-supplied** passwords **per row** (a weak
+> password fails only that row, `reason` = `"Weak password: …"`); operator **auto-generated**
+> passwords (for badge/employee-ID logins) satisfy the policy by construction and are **exempt**.
 
 ### Admin Settings (Admin)
 
@@ -1804,6 +1811,13 @@ records, targets) require **Admin / Manager / Supervisor**.
 > platform admin's changes attribute to the company they have switched into — matching the
 > `/audit/*` (`AuditLog`) attribution. This is a separate trail from `/audit/*` and is **not** part
 > of the tamper-evident hash chain.
+
+> **`POST /admin/settings/seed-database` ships no default credentials (Admin-only).** The one-time
+> bootstrap seed **no-ops once any user exists** (returns `{"status": "already_seeded"}`); on an
+> empty instance it creates the initial admin + sample users with **strong, per-user passwords
+> generated at runtime** (policy-compliant by construction) and returns them **once** in the response
+> `credentials` map for the calling admin to distribute and rotate. No `admin123` / `password123` or
+> other hardcoded/default password is used anywhere on this path.
 
 ### Company (self-service)
 

@@ -621,13 +621,30 @@ def reset_user_password(
 
 @router.post("/change-password")
 def change_own_password(
-    password_data: PasswordChange, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+    password_data: PasswordChange,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Change own password"""
+    """Change own password.
+
+    CMMC AU-family event: the self-service change is recorded in the tamper-evident
+    audit log, mirroring the admin reset path. The new password/hash is deliberately
+    NEVER included in the record.
+    """
     if not verify_password(password_data.current_password, current_user.hashed_password):
         raise HTTPException(status_code=400, detail="Current password is incorrect")
 
     current_user.hashed_password = get_password_hash(password_data.new_password)
+    # No old/new values: the password hash must never enter the audit log.
+    audit.log(
+        action=AuditService.ACTIONS["PASSWORD_CHANGE"],
+        resource_type="user",
+        resource_id=current_user.id,
+        resource_identifier=current_user.employee_id,
+        description=f"Changed own password for user {current_user.employee_id}",
+        extra_data={"source": "self_service"},
+    )
     db.commit()
 
     return {"message": "Password changed successfully"}

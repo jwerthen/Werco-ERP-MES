@@ -670,6 +670,46 @@ class TestUserAuditLogging:
         assert stored_hash not in value_blob
         assert "hashed_password" not in value_blob
 
+    def test_change_own_password_emits_audit_without_any_secret(
+        self, client: TestClient, auth_headers, test_user, test_user_credentials, db_session
+    ):
+        """POST /users/change-password (self-service) emits a committed
+        PASSWORD_CHANGE row tagged source=self_service, and neither the new
+        password nor its hash appears ANYWHERE in the row's value fields.
+
+        Mirrors ``test_reset_password_emits_audit_without_any_secret`` for the
+        admin-reset path; this pins the NEW self-service audit event."""
+        new_password = "BrandNewP@ssw0rd!42"
+        response = client.post(
+            "/api/v1/users/change-password",
+            headers=auth_headers,
+            json={"current_password": test_user_credentials["password"], "new_password": new_password},
+        )
+        assert response.status_code == status.HTTP_200_OK, response.text
+
+        rows = _committed_user_audit_rows(db_session, resource_id=test_user.id, action="PASSWORD_CHANGE")
+        assert len(rows) == 1, "expected exactly one committed PASSWORD_CHANGE audit row"
+        row = rows[0]
+        assert row.resource_type == "user"
+        assert row.company_id == 1
+        # The self-service source tag distinguishes this from the admin reset path.
+        assert (row.extra_data or {}).get("source") == "self_service"
+
+        # The new hash is durable after the endpoint's commit; grab it to assert it
+        # is NOT in the audit row.
+        stored_hash = db_session.query(User).filter(User.id == test_user.id).first().hashed_password
+
+        # old_values / new_values / changes / extra_data must ALL be clear of the
+        # plaintext password AND its hash.
+        assert row.old_values in (None, {})
+        assert row.new_values in (None, {})
+        assert "changes" not in (row.extra_data or {})
+        value_blob = json.dumps({"old": row.old_values, "new": row.new_values, "extra": row.extra_data})
+        assert new_password not in value_blob
+        assert test_user_credentials["password"] not in value_blob
+        assert stored_hash not in value_blob
+        assert "hashed_password" not in value_blob
+
     def test_deactivate_user_emits_status_change_audit(
         self, client: TestClient, admin_headers, created_user, db_session
     ):
