@@ -5,13 +5,14 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, field_validator
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.core.security import get_password_hash, verify_password
 from app.db.database import get_db
 from app.models.user import User, UserRole
+from app.schemas.user import validate_password_strength
 from app.services.audit_service import AuditService
 from app.services.import_service import ImportFileError, parse_import_file
 
@@ -27,6 +28,13 @@ class UserCreate(BaseModel):
     role: UserRole = UserRole.OPERATOR
     department: Optional[str] = None
     phone: Optional[str] = None
+
+    @field_validator("password")
+    @classmethod
+    def _validate_password(cls, v: str) -> str:
+        # Reuse the canonical AS9100D/CMMC strength policy (schemas.user) so the
+        # admin create path can't accept a weaker password than /auth/register.
+        return validate_password_strength(v)
 
 
 class UserUpdate(BaseModel):
@@ -51,10 +59,25 @@ class PendingApprovalSummary(BaseModel):
 class PasswordReset(BaseModel):
     new_password: str
 
+    @field_validator("new_password")
+    @classmethod
+    def _validate_password(cls, v: str) -> str:
+        # Admin-driven reset must meet the same strength policy as registration;
+        # a weak password here would otherwise bypass /auth/register enforcement.
+        return validate_password_strength(v)
+
 
 class PasswordChange(BaseModel):
     current_password: str
     new_password: str
+
+    @field_validator("new_password")
+    @classmethod
+    def _validate_password(cls, v: str) -> str:
+        # Self-service password change must meet the same strength policy as the
+        # admin create/reset and registration paths; a weak new password here
+        # would otherwise bypass the enforced /auth/register policy.
+        return validate_password_strength(v)
 
 
 class UserResponse(BaseModel):
@@ -359,6 +382,23 @@ async def import_users_csv(
                             employee_id=employee_id,
                             email=email or None,
                             reason="password is required for non-operator roles (CSV column or default_password form value)",
+                        )
+                    )
+                    continue
+            else:
+                # A user-supplied password (CSV column or default_password) must meet
+                # the same strength policy as the admin create/reset paths. The
+                # operator auto-generated password above is policy-compliant by
+                # construction and is intentionally not re-validated here.
+                try:
+                    validate_password_strength(password)
+                except ValueError as exc:
+                    errors.append(
+                        UserCsvImportError(
+                            row=row_number,
+                            employee_id=employee_id,
+                            email=email or None,
+                            reason=f"Weak password: {exc}",
                         )
                     )
                     continue

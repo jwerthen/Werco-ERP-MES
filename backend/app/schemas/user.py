@@ -7,6 +7,38 @@ from pydantic import BaseModel, EmailStr, Field, field_validator
 from app.models.user import UserRole
 from app.schemas.base import UTCModel
 
+# Common weak substrings rejected by the password-strength policy.
+_COMMON_PASSWORD_PATTERNS = ("password", "123456", "qwerty", "admin", "letmein", "welcome")
+
+
+def validate_password_strength(value: str) -> str:
+    """Canonical AS9100D/CMMC password-strength policy.
+
+    Single source of truth reused by public registration, the admin-driven user
+    create/reset paths, and CSV import so a weak password cannot enter through any
+    path. Rules: at least 12 characters, at least one uppercase, lowercase, digit,
+    and special character, and no common weak substring. Raises ``ValueError`` with
+    every failure joined (Pydantic surfaces it as HTTP 422); returns the value
+    unchanged on success.
+    """
+    errors = []
+    if len(value) < 12:
+        errors.append("Password must be at least 12 characters")
+    if not re.search(r'[A-Z]', value):
+        errors.append("Password must contain at least one uppercase letter")
+    if not re.search(r'[a-z]', value):
+        errors.append("Password must contain at least one lowercase letter")
+    if not re.search(r'[0-9]', value):
+        errors.append("Password must contain at least one number")
+    if not re.search(r'[!@#$%^&*()_+\-=\[\]{};\':"\\|,.<>\/?]', value):
+        errors.append("Password must contain at least one special character (!@#$%^&*()_+-=[]{};\':\"\\|,.<>/?)")
+    # Check for common patterns
+    if any(pattern in value.lower() for pattern in _COMMON_PASSWORD_PATTERNS):
+        errors.append("Password contains a common pattern that is not allowed")
+    if errors:
+        raise ValueError("; ".join(errors))
+    return value
+
 
 class UserBase(UTCModel):
     email: EmailStr = Field(..., max_length=255, description="Email address")
@@ -28,24 +60,7 @@ class UserCreate(UserBase):
     @classmethod
     def validate_password(cls, v: str) -> str:
         """Validate password strength - AS9100D compliant"""
-        errors = []
-        if len(v) < 12:
-            errors.append("Password must be at least 12 characters")
-        if not re.search(r'[A-Z]', v):
-            errors.append("Password must contain at least one uppercase letter")
-        if not re.search(r'[a-z]', v):
-            errors.append("Password must contain at least one lowercase letter")
-        if not re.search(r'[0-9]', v):
-            errors.append("Password must contain at least one number")
-        if not re.search(r'[!@#$%^&*()_+\-=\[\]{};\':"\\|,.<>\/?]', v):
-            errors.append("Password must contain at least one special character (!@#$%^&*()_+-=[]{};\':\"\\|,.<>/?)")
-        # Check for common patterns
-        common_patterns = ['password', '123456', 'qwerty', 'admin', 'letmein', 'welcome']
-        if any(pattern in v.lower() for pattern in common_patterns):
-            errors.append("Password contains a common pattern that is not allowed")
-        if errors:
-            raise ValueError("; ".join(errors))
-        return v
+        return validate_password_strength(v)
 
     @field_validator('first_name', 'last_name', mode='before')
     @classmethod
@@ -71,24 +86,7 @@ class PublicRegister(BaseModel):
     @classmethod
     def validate_password(cls, v: str) -> str:
         """Validate password strength - AS9100D compliant"""
-        errors = []
-        if len(v) < 12:
-            errors.append("Password must be at least 12 characters")
-        if not re.search(r'[A-Z]', v):
-            errors.append("Password must contain at least one uppercase letter")
-        if not re.search(r'[a-z]', v):
-            errors.append("Password must contain at least one lowercase letter")
-        if not re.search(r'[0-9]', v):
-            errors.append("Password must contain at least one number")
-        if not re.search(r'[!@#$%^&*()_+\-=\[\]{};\':"\\|,.<>\/?]', v):
-            errors.append("Password must contain at least one special character (!@#$%^&*()_+-=[]{};\':\"\\|,.<>/?)")
-        # Check for common patterns
-        common_patterns = ['password', '123456', 'qwerty', 'admin', 'letmein', 'welcome']
-        if any(pattern in v.lower() for pattern in common_patterns):
-            errors.append("Password contains a common pattern that is not allowed")
-        if errors:
-            raise ValueError("; ".join(errors))
-        return v
+        return validate_password_strength(v)
 
     @field_validator('first_name', 'last_name', mode='before')
     @classmethod
