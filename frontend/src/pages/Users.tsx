@@ -119,8 +119,11 @@ const getApiErrorMessage = (err: any, fallback: string) => {
 export default function Users() {
   const [searchParams, setSearchParams] = useSearchParams();
   const { user: currentUser } = useAuth();
-  // Badge printing is admin/manager-only: /print/badges loads GET /users, which is
-  // server-enforced to ADMIN/MANAGER, so the button mirrors canManageUsers.
+  // Badge printing (and all user write-actions) are admin-only in the UI: canManageUsers
+  // now resolves to admin/platform_admin only, since manager holds users:view (read-only
+  // list) but no users:create/edit. Managers keep the read-only list; the Print Badges
+  // button, selection column, and row actions all mirror canManageUsers. (The badge data
+  // source GET /users still permits MANAGER server-side — the UI gate is just stricter.)
   const { canManageUsers } = usePermissions();
   const { showToast } = useToast();
   const approvalMode = searchParams.get('approvals') === 'pending';
@@ -163,8 +166,8 @@ export default function Users() {
   // A0.4: badge-print selection backed by DataTable's selection prop (Set-based).
   const selectedKeySet = React.useMemo(() => new Set<number>(selectedUserIds), [selectedUserIds]);
 
-  const userColumns: Array<DataTableColumn<UserData>> = React.useMemo(
-    () => [
+  const userColumns: Array<DataTableColumn<UserData>> = React.useMemo(() => {
+    const cols: Array<DataTableColumn<UserData>> = [
       {
         key: 'employee',
         header: 'Employee',
@@ -215,7 +218,13 @@ export default function Users() {
           </span>
         ),
       },
-      {
+    ];
+
+    // User provisioning is Admin-only on the backend (every write in users.py is
+    // require_role([ADMIN])). Only surface the row write-actions to viewers who can
+    // actually perform them; managers keep the read-only list (users:view).
+    if (canManageUsers) {
+      cols.push({
         key: 'actions',
         header: 'Actions',
         align: 'center',
@@ -256,10 +265,11 @@ export default function Users() {
             </button>
           </div>
         ),
-      },
-    ],
-    []
-  );
+      });
+    }
+
+    return cols;
+  }, [canManageUsers]);
 
   const loadUsers = useCallback(async () => {
     setLoadError(false);
@@ -494,20 +504,24 @@ export default function Users() {
               Print Badges{selectedUserIds.length > 0 ? ` (${selectedUserIds.length})` : ''}
             </button>
           )}
-          <button
-            onClick={() => setShowImportModal(true)}
-            className="btn-secondary flex items-center"
-          >
-            <ArrowUpTrayIcon className="h-5 w-5 mr-2" />
-            Import CSV
-          </button>
-          <button
-            onClick={() => { resetForm(); setShowModal(true); }}
-            className="btn-primary flex items-center"
-          >
-            <PlusIcon className="h-5 w-5 mr-2" />
-            Add User
-          </button>
+          {canManageUsers && (
+            <button
+              onClick={() => setShowImportModal(true)}
+              className="btn-secondary flex items-center"
+            >
+              <ArrowUpTrayIcon className="h-5 w-5 mr-2" />
+              Import CSV
+            </button>
+          )}
+          {canManageUsers && (
+            <button
+              onClick={() => { resetForm(); setShowModal(true); }}
+              className="btn-primary flex items-center"
+            >
+              <PlusIcon className="h-5 w-5 mr-2" />
+              Add User
+            </button>
+          )}
         </div>
       </div>
 
@@ -618,10 +632,14 @@ export default function Users() {
         defaultSort={{ key: 'employee', dir: 'asc' }}
         pageSize={25}
         csvExport={{ filename: 'users' }}
-        selection={{
-          selectedKeys: selectedKeySet as Set<string | number>,
-          onChange: (keys) => setSelectedUserIds(Array.from(keys).map((k) => Number(k))),
-        }}
+        selection={
+          canManageUsers
+            ? {
+                selectedKeys: selectedKeySet as Set<string | number>,
+                onChange: (keys) => setSelectedUserIds(Array.from(keys).map((k) => Number(k))),
+              }
+            : undefined
+        }
         empty={{
           icon: UsersIcon,
           title: 'No users found',
@@ -659,44 +677,50 @@ export default function Users() {
             ]}
             actions={
               <>
-                <label className="flex items-center gap-1.5 text-xs text-slate-300 mr-auto cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={selectedUserIds.includes(user.id)}
-                    onChange={() => toggleBadgeSelection(user.id)}
-                    className="rounded border-slate-600"
-                    aria-label={`Select ${user.first_name} ${user.last_name} for badge printing`}
-                  />
-                  Badge
-                </label>
-                <button
-                  onClick={() => handleEdit(user)}
-                  className="text-slate-400 hover:text-slate-200"
-                  title="Edit"
-                  aria-label="Edit user"
-                >
-                  <PencilIcon className="h-5 w-5" aria-hidden="true" />
-                </button>
-                <button
-                  onClick={() => openPasswordReset(user.id)}
-                  className="text-slate-400 hover:text-blue-600"
-                  title="Reset Password"
-                  aria-label="Reset Password"
-                >
-                  <KeyIcon className="h-5 w-5" aria-hidden="true" />
-                </button>
-                <button
-                  onClick={() => handleToggleActive(user)}
-                  className={user.is_active ? 'text-slate-400 hover:text-red-600' : 'text-slate-400 hover:text-green-600'}
-                  title={user.is_active ? 'Deactivate' : 'Activate'}
-                  aria-label={user.is_active ? 'Deactivate user' : 'Activate user'}
-                >
-                  {user.is_active ? (
-                    <UserMinusIcon className="h-5 w-5" aria-hidden="true" />
-                  ) : (
-                    <UserPlusIcon className="h-5 w-5" aria-hidden="true" />
-                  )}
-                </button>
+                {canManageUsers && (
+                  <label className="flex items-center gap-1.5 text-xs text-slate-300 mr-auto cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={selectedUserIds.includes(user.id)}
+                      onChange={() => toggleBadgeSelection(user.id)}
+                      className="rounded border-slate-600"
+                      aria-label={`Select ${user.first_name} ${user.last_name} for badge printing`}
+                    />
+                    Badge
+                  </label>
+                )}
+                {canManageUsers && (
+                  <>
+                    <button
+                      onClick={() => handleEdit(user)}
+                      className="text-slate-400 hover:text-slate-200"
+                      title="Edit"
+                      aria-label="Edit user"
+                    >
+                      <PencilIcon className="h-5 w-5" aria-hidden="true" />
+                    </button>
+                    <button
+                      onClick={() => openPasswordReset(user.id)}
+                      className="text-slate-400 hover:text-blue-600"
+                      title="Reset Password"
+                      aria-label="Reset Password"
+                    >
+                      <KeyIcon className="h-5 w-5" aria-hidden="true" />
+                    </button>
+                    <button
+                      onClick={() => handleToggleActive(user)}
+                      className={user.is_active ? 'text-slate-400 hover:text-red-600' : 'text-slate-400 hover:text-green-600'}
+                      title={user.is_active ? 'Deactivate' : 'Activate'}
+                      aria-label={user.is_active ? 'Deactivate user' : 'Activate user'}
+                    >
+                      {user.is_active ? (
+                        <UserMinusIcon className="h-5 w-5" aria-hidden="true" />
+                      ) : (
+                        <UserPlusIcon className="h-5 w-5" aria-hidden="true" />
+                      )}
+                    </button>
+                  </>
+                )}
               </>
             }
           />

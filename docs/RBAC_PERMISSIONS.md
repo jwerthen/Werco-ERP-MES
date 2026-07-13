@@ -370,22 +370,49 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
 |------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
-| View | ✓ | ✓ | ✓ | | | | |
-| Create | ✓ | ✓ | | | | | |
-| Edit | ✓ | ✓ | | | | | |
+| View | ✓ | ✓ | | | | | |
+| Create | ✓ | | | | | | |
+| Edit | ✓ | | | | | | |
 | Delete | ✓ | | | | | | |
 | Roles | ✓ | | | | | | |
 
+> **User writes are Admin-only, and both `require_role([ADMIN])`** — `POST /users/` (create),
+> `PUT /users/{id}` (edit, incl. role assignment), and `DELETE /users/{id}` (deactivate) all gate to
+> **Admin** (`app/api/endpoints/users.py`). The **View** rows are the governance-read exception noted
+> above: `GET /users/` (list) and `GET /users/{id}` are `require_role([ADMIN, MANAGER])`, so a
+> **Supervisor** gets a **failed load** (403), not a read — user records are *not* on the read-broad
+> domain default. Superuser / Platform Admin bypass role checks, as elsewhere.
+>
+> **`platform_admin` is never assignable from a tenant path, and admins cannot self-elevate.** Both
+> user-write endpoints now enforce the same guards as user import (below, under Bulk Imports):
+> - **`POST /users/` and `PUT /users/{id}` reject `role = platform_admin` with 400**
+>   (`"Platform admin role cannot be assigned"`). `platform_admin` is the cross-company Werco
+>   oversight role and can never be minted from a tenant-scoped path — not by create, update,
+>   approval (`POST /users/{id}/approve`, `"…cannot be assigned through approval"`), or import — even
+>   by a company Admin.
+> - **Self role-escalation guard:** on `PUT /users/{id}`, an Admin editing **their own** record cannot
+>   change **their own** role (**400**, `"You cannot change your own role"`); editing their own
+>   name/email/other fields stays allowed. This mirrors the delete endpoint's "cannot deactivate
+>   yourself" self-guard, so an Admin cannot self-elevate and a role change to one's own account must
+>   be made by a different Admin.
+>
+> Every user mutation — create, update (including any role change), approve, password-reset,
+> deactivate, and activate — is recorded in the tamper-evident audit log.
+>
 > **Badge printing (A0.4).** The badge print sheet `/print/badges` (opened from the Users page via
-> multi-select → "Print Badges") is **frontend-gated to Admin / Manager** — the route requires
-> `users:create`/`users:edit` (route map in `frontend/src/App.tsx`) and the Users-page button is
-> gated by `canManageUsers` (`frontend/src/utils/permissions.ts`), so a Supervisor (who holds only
-> `users:view`) never sees the button or reaches the route. No new endpoint or permission string
-> was added: badges are client-rendered QR codes of `users.employee_id`, and the page loads its
-> data from the existing `GET /api/v1/users/`, which is server-enforced to
-> `require_role([ADMIN, MANAGER])` (see the access-enforcement note above) — the frontend gate
-> matches that server-side split (plus Platform Admin / superuser), the same one the Users page
-> itself has.
+> multi-select → "Print Badges") is **frontend-gated by `canManageUsers`** (=
+> `users:create` OR `users:edit`) — both the Users-page button
+> (`frontend/src/utils/permissions.ts`) and the `/print/badges` route (route map in
+> `frontend/src/App.tsx`) require it. After user management was aligned to Admin-only, only **Admin**
+> holds those permission strings (plus Platform Admin / superuser), so badge printing is now
+> **effectively Admin-only**: a **Manager** (who holds `users:view` — the read-only list) and a
+> **Supervisor** (who holds no `users:*` permission) never see the Print Badges control or reach the
+> route. No new endpoint or permission string was added: badges are client-rendered QR codes of
+> `users.employee_id`, and the page loads its data from the existing `GET /api/v1/users/`, which is
+> server-enforced to `require_role([ADMIN, MANAGER])` (see the access-enforcement note above). The
+> badge gate is therefore **narrower than** that read split — a Manager can open the Users page and
+> read the list but cannot print badges — consistent with the Admin-only user-write posture in the
+> note directly above.
 
 ### Bulk Imports (Import Center / Excel Migration Kit)
 
