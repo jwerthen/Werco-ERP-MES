@@ -136,12 +136,12 @@ const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'receiving:view', 'receiving:create', 'receiving:inspect',
     'shipping:view', 'shipping:create', 'shipping:complete',
     'quality:view', 'quality:inspect', 'quality:approve', 'quality:calibration',
-    'users:view', 'users:create', 'users:edit',
+    'users:view',
     'analytics:view', 'analytics:export',
     'admin:audit_logs',
     'visitor_logs:view',
   ],
-  
+
   supervisor: [
     'work_orders:view', 'work_orders:create', 'work_orders:edit', 'work_orders:release', 'work_orders:complete',
     'parts:view', 'parts:create', 'parts:edit',
@@ -153,11 +153,10 @@ const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'receiving:view', 'receiving:create',
     'shipping:view', 'shipping:create', 'shipping:complete',
     'quality:view', 'quality:inspect',
-    'users:view',
     'analytics:view',
     'visitor_logs:view',
   ],
-  
+
   operator: [
     'work_orders:view', 'work_orders:complete',
     'parts:view',

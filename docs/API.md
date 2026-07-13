@@ -1762,10 +1762,21 @@ records, targets) require **Admin / Manager / Supervisor**.
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| GET | `/users/` | List all users | Admin |
+| GET | `/users/` | List all users | Admin / Manager |
 | POST | `/users/` | Create user | Admin |
 | PUT | `/users/{id}` | Update user | Admin |
-| DELETE | `/users/{id}` | Delete user | Admin |
+| DELETE | `/users/{id}` | Deactivate user (sets `is_active=false`; cannot deactivate yourself) | Admin |
+
+> **User writes are Admin-only; the list read is Admin / Manager.** `GET /users/` (and
+> `GET /users/{id}`) are `require_role([ADMIN, MANAGER])`; `POST` / `PUT` / `DELETE` are
+> `require_role([ADMIN])`. Two guards apply to role assignment on the write paths:
+> `role = platform_admin` is rejected with **400** (`"Platform admin role cannot be assigned"`) on
+> both `POST /users/` and `PUT /users/{id}` — the cross-company oversight role is never assignable
+> from a tenant path (matching the import and `POST /users/{id}/approve` guards) — and on
+> `PUT /users/{id}` an Admin cannot change **their own** role (**400**, `"You cannot change your own
+> role"`; editing one's own other fields stays allowed). Every user mutation (create, update,
+> approve, password-reset, deactivate, activate) is recorded in the tamper-evident audit log. See
+> [docs/RBAC_PERMISSIONS.md](RBAC_PERMISSIONS.md) → Users.
 
 ### Admin Settings (Admin)
 
