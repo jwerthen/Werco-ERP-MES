@@ -157,7 +157,10 @@ const routeAccessRequirements: RouteAccessRequirement[] = [
   { prefix: '/maintenance', permission: 'work_orders:view' },
   { prefix: '/oee', permission: 'analytics:view' },
   { prefix: '/tool-management', permission: 'inventory:view' },
-  { prefix: '/certifications', permission: 'users:view' },
+  // Operator Certifications View is open to ALL authenticated roles (RBAC doc); the
+  // backend read endpoints (operator_certifications.py) use get_current_user and only
+  // skill-matrix WRITES require SUPERVISOR. No routeAccessRequirements entry → falls
+  // through to auth-only, so it must NOT depend on users:view (which is admin+manager).
   { prefix: '/analytics', permission: 'analytics:view' },
   { prefix: '/reports', permission: 'analytics:view' },
   { prefix: '/job-costing', permission: 'analytics:view' },
