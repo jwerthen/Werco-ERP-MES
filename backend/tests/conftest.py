@@ -254,6 +254,30 @@ def operator_user(db_session: Session) -> User:
 
 
 @pytest.fixture
+def supervisor_user(db_session: Session) -> User:
+    """Create a supervisor user.
+
+    Distinct from the manager ``test_user`` so RBAC tests can pin the
+    SUPERVISOR role explicitly (supervisors have no ``users:*`` access on the
+    backend). Mirrors ``operator_user``/``admin_user``.
+    """
+    user = User(
+        email="supervisor@werco.com",
+        employee_id="EMP-SUP-001",
+        first_name="Supervisor",
+        last_name="User",
+        hashed_password=TEST_PASSWORD_HASH,
+        role=UserRole.SUPERVISOR,
+        is_active=True,
+        company_id=1,
+    )
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+    return user
+
+
+@pytest.fixture
 def inactive_user(db_session: Session) -> User:
     """Create an inactive user."""
     user = User(
@@ -303,6 +327,13 @@ def manager_headers(test_user: User) -> dict:
 def operator_headers(operator_user: User) -> dict:
     """Return authentication headers with operator user token."""
     access_token = create_access_token(subject=operator_user.id, company_id=operator_user.company_id)
+    return {"Authorization": f"Bearer {access_token}", "X-Requested-With": "XMLHttpRequest"}
+
+
+@pytest.fixture
+def supervisor_headers(supervisor_user: User) -> dict:
+    """Return authentication headers with supervisor user token."""
+    access_token = create_access_token(subject=supervisor_user.id, company_id=supervisor_user.company_id)
     return {"Authorization": f"Bearer {access_token}", "X-Requested-With": "XMLHttpRequest"}
 
 

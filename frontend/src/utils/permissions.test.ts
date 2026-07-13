@@ -71,6 +71,26 @@ describe('permissions utility', () => {
     });
   });
 
+  describe('users:* permission matrix (RBAC user-management scope)', () => {
+    it('admin has full users:* access', () => {
+      expect(hasPermission('admin', 'users:view')).toBe(true);
+      expect(hasPermission('admin', 'users:create')).toBe(true);
+      expect(hasPermission('admin', 'users:edit')).toBe(true);
+    });
+
+    it('manager keeps users:view but not create/edit', () => {
+      expect(hasPermission('manager', 'users:view')).toBe(true);
+      expect(hasPermission('manager', 'users:create')).toBe(false);
+      expect(hasPermission('manager', 'users:edit')).toBe(false);
+    });
+
+    it('supervisor has no users:* access', () => {
+      expect(hasPermission('supervisor', 'users:view')).toBe(false);
+      expect(hasPermission('supervisor', 'users:create')).toBe(false);
+      expect(hasPermission('supervisor', 'users:edit')).toBe(false);
+    });
+  });
+
   describe('hasAnyPermission', () => {
     it('returns true if user has at least one permission', () => {
       expect(hasAnyPermission('operator', ['work_orders:view', 'users:create'])).toBe(true);
@@ -139,16 +159,30 @@ describe('permissions utility', () => {
   });
 
   describe('canManageUsers', () => {
+    // User provisioning (create/edit) is Admin-only on the backend
+    // (require_role([ADMIN]) on every write in users.py). Manager keeps the
+    // read-only list (users:view) but no longer has users:create/users:edit,
+    // and supervisor has no users:* at all — so canManageUsers is false for both.
     it('returns true for admin', () => {
       expect(canManageUsers('admin')).toBe(true);
     });
 
-    it('returns true for manager', () => {
-      expect(canManageUsers('manager')).toBe(true);
+    it('returns true for platform_admin', () => {
+      expect(canManageUsers('platform_admin')).toBe(true);
+    });
+
+    it('returns false for manager (view-only; no create/edit)', () => {
+      expect(canManageUsers('manager')).toBe(false);
+    });
+
+    it('returns false for supervisor (no users:* access)', () => {
+      expect(canManageUsers('supervisor')).toBe(false);
     });
 
     it('returns false for other roles', () => {
       expect(canManageUsers('operator')).toBe(false);
+      expect(canManageUsers('quality')).toBe(false);
+      expect(canManageUsers('shipping')).toBe(false);
       expect(canManageUsers('viewer')).toBe(false);
     });
 

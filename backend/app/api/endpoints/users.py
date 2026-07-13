@@ -8,7 +8,7 @@ from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_company_id, get_current_user, require_role
+from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.core.security import get_password_hash, verify_password
 from app.db.database import get_db
 from app.models.user import User, UserRole
@@ -115,6 +115,17 @@ def _generate_system_password() -> str:
     return f"Auto!{token}1aA"
 
 
+def _reject_platform_admin_assignment(role: Optional[UserRole]) -> None:
+    """Reject assigning ``platform_admin`` from a tenant-scoped user endpoint.
+
+    ``platform_admin`` is Werco's cross-company oversight role; it must never be
+    mintable from a tenant path (create/update). Mirrors the inline guards in
+    approve/import (which keep their own distinct wording).
+    """
+    if role == UserRole.PLATFORM_ADMIN:
+        raise HTTPException(status_code=400, detail="Platform admin role cannot be assigned")
+
+
 @router.get("/", response_model=List[UserResponse])
 def list_users(
     include_inactive: bool = False,
@@ -184,8 +195,19 @@ def create_user(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Create a new user (Admin only)"""
+    """Create a new user (Admin only).
+
+    ``platform_admin`` is the cross-company Werco oversight role and can never be
+    assigned from this tenant-scoped path. A company admin assigning ``admin``
+    stays allowed per the RBAC matrix. The creation is recorded in the
+    tamper-evident audit log.
+    """
+    # platform_admin is the cross-company oversight role; a tenant admin must not
+    # be able to mint one here (mirrors the approve/import guards).
+    _reject_platform_admin_assignment(user_in.role)
+
     # Check if email exists
     if db.query(User).filter(User.email == user_in.email, User.company_id == company_id).first():
         raise HTTPException(status_code=400, detail="Email already registered")
@@ -205,6 +227,16 @@ def create_user(
     )
     user.company_id = company_id
     db.add(user)
+    db.flush()
+    audit.log_create(
+        "user",
+        user.id,
+        user.employee_id,
+        # Deliberately not passing new_values: the model carries hashed_password
+        # and secrets must never land in the audit log.
+        description=f"Created user {user.employee_id}",
+        extra_data={"source": "admin", "role": user.role.value, "email": user.email},
+    )
     db.commit()
     db.refresh(user)
     return user
@@ -423,22 +455,44 @@ def update_user(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Update a user (Admin only)"""
+    """Update a user (Admin only).
+
+    ``platform_admin`` can never be assigned from this tenant-scoped path, and an
+    admin cannot change their OWN role (self role-escalation guard) — editing
+    one's own name/email/other fields stays allowed. The change (including any
+    role escalation) is recorded in the tamper-evident audit log.
+    """
     user = db.query(User).filter(User.id == user_id, User.company_id == company_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
     update_data = user_in.model_dump(exclude_unset=True)
 
+    # platform_admin is the cross-company oversight role; a tenant admin must not
+    # be able to promote anyone (incl. themselves) to it (mirrors approve/import).
+    _reject_platform_admin_assignment(update_data.get("role"))
+
+    # Self role-escalation guard (mirrors deactivate's self-guard): an admin must
+    # not change their OWN role. Editing one's own other fields stays allowed.
+    if user_id == current_user.id and "role" in update_data and update_data["role"] != user.role:
+        raise HTTPException(status_code=400, detail="You cannot change your own role")
+
     # Check email uniqueness if changing
     if "email" in update_data and update_data["email"] != user.email:
         if db.query(User).filter(User.email == update_data["email"], User.company_id == company_id).first():
             raise HTTPException(status_code=400, detail="Email already registered")
 
+    # Snapshot before mutating so the audit diff (e.g. a role change) is visible.
+    # log_update runs both sides through _model_to_dict, which drops
+    # hashed_password/password, so no secret reaches the audit log.
+    old_values = {c.key: getattr(user, c.key) for c in user.__table__.columns}
+
     for field, value in update_data.items():
         setattr(user, field, value)
 
+    audit.log_update("user", user.id, user.employee_id, old_values=old_values, new_values=user)
     db.commit()
     db.refresh(user)
     return user
@@ -451,8 +505,13 @@ def approve_user(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Approve a self-registered user and assign their operational role."""
+    """Approve a self-registered user and assign their operational role.
+
+    Grants a role and activates the account, so the role + is_active transition is
+    recorded in the tamper-evident audit log.
+    """
     if approval.role == UserRole.PLATFORM_ADMIN:
         raise HTTPException(status_code=400, detail="Platform admin role cannot be assigned through approval")
 
@@ -464,10 +523,24 @@ def approve_user(
     if user.role != UserRole.VIEWER:
         raise HTTPException(status_code=400, detail="Only pending self-registered users can be approved")
 
+    # Snapshot before mutating so the audit diff captures the role grant +
+    # activation. _model_to_dict drops hashed_password/password from the diff.
+    old_values = {c.key: getattr(user, c.key) for c in user.__table__.columns}
+
     user.role = approval.role
     if approval.department is not None:
         user.department = approval.department
     user.is_active = True
+
+    audit.log_update(
+        "user",
+        user.id,
+        user.employee_id,
+        old_values=old_values,
+        new_values=user,
+        action="approve",
+        description=f"Approved user {user.employee_id} as {user.role.value}",
+    )
     db.commit()
     db.refresh(user)
     return user
@@ -480,13 +553,27 @@ def reset_user_password(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Reset a user's password (Admin only)"""
+    """Reset a user's password (Admin only).
+
+    CMMC AU-family event: the reset is recorded in the tamper-evident audit log.
+    The new password/hash is deliberately NEVER included in the record.
+    """
     user = db.query(User).filter(User.id == user_id, User.company_id == company_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
     user.hashed_password = get_password_hash(password_data.new_password)
+    # No old/new values: the password hash must never enter the audit log.
+    audit.log(
+        action=AuditService.ACTIONS["PASSWORD_CHANGE"],
+        resource_type="user",
+        resource_id=user.id,
+        resource_identifier=user.employee_id,
+        description=f"Reset password for user {user.employee_id}",
+        extra_data={"source": "admin_reset"},
+    )
     db.commit()
 
     return {"message": "Password reset successfully"}
@@ -512,8 +599,9 @@ def deactivate_user(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Deactivate a user (Admin only)"""
+    """Deactivate a user (Admin only). The is_active change is audit-logged."""
     if user_id == current_user.id:
         raise HTTPException(status_code=400, detail="Cannot deactivate yourself")
 
@@ -522,6 +610,14 @@ def deactivate_user(
         raise HTTPException(status_code=404, detail="User not found")
 
     user.is_active = False
+    audit.log_status_change(
+        "user",
+        user.id,
+        user.employee_id,
+        "active",
+        "inactive",
+        description=f"Deactivated user {user.employee_id}",
+    )
     db.commit()
 
     return {"message": "User deactivated"}
@@ -533,13 +629,22 @@ def activate_user(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Reactivate a user (Admin only)"""
+    """Reactivate a user (Admin only). The is_active change is audit-logged."""
     user = db.query(User).filter(User.id == user_id, User.company_id == company_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
     user.is_active = True
+    audit.log_status_change(
+        "user",
+        user.id,
+        user.employee_id,
+        "inactive",
+        "active",
+        description=f"Activated user {user.employee_id}",
+    )
     db.commit()
 
     return {"message": "User activated"}

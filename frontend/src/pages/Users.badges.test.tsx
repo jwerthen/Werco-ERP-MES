@@ -5,9 +5,11 @@
  * 1. The select-all checkbox is MEMBERSHIP-based (checked iff every visible user
  *    is selected) and selections are PRUNED when the users list refetches, so a
  *    stale id can never reach the badge sheet.
- * 2. The "Print Badges" button is admin/manager-only (canManageUsers) — the badge
- *    sheet's GET /users fetch is server-enforced to ADMIN/MANAGER, so supervisors
- *    (users:view) must not be offered a guaranteed-403 flow.
+ * 2. The "Print Badges" button (like the badge-selection checkboxes it depends on)
+ *    is gated behind canManageUsers, which is now Admin-only. Managers keep the
+ *    read-only user list (users:view) but lost users:create/users:edit, so
+ *    canManageUsers is false for them — the badge print/select affordances are
+ *    admin-only, and managers/supervisors do not see the button.
  */
 
 import React from 'react';
@@ -135,8 +137,8 @@ describe('Users badge printing', () => {
     expect(screen.getByRole('button', { name: /Print Badges \(1\)/ })).toBeInTheDocument();
   });
 
-  it.each(['admin', 'manager'])('shows the Print Badges button for %s', async (role) => {
-    mockAuthUser = { id: 99, role, is_superuser: false };
+  it('shows the Print Badges button for admin', async () => {
+    mockAuthUser = { id: 99, role: 'admin', is_superuser: false };
 
     renderUsers();
     // The user list renders both a desktop <table> and a parallel mobile-card
@@ -147,8 +149,11 @@ describe('Users badge printing', () => {
     expect(screen.getByRole('button', { name: /Print Badges/ })).toBeInTheDocument();
   });
 
-  it('hides the Print Badges button for supervisors (server-side GET /users is ADMIN/MANAGER-only)', async () => {
-    mockAuthUser = { id: 99, role: 'supervisor', is_superuser: false };
+  // Badge print/select is admin-only now (canManageUsers). Managers keep the
+  // read-only list but lost users:create/users:edit, so they no longer see the
+  // Print Badges button; supervisors never had users:* access.
+  it.each(['manager', 'supervisor'])('hides the Print Badges button for %s', async (role) => {
+    mockAuthUser = { id: 99, role, is_superuser: false };
 
     renderUsers();
     // The user list renders both a desktop <table> and a parallel mobile-card

@@ -9,8 +9,9 @@ import { ErrorState } from '../components/ui';
  * A0.4 badge print sheet — /print/badges?user_ids=1,2,3
  *
  * Prints CR80-sized (3.375in x 2.125in) employee badges, two per row, for the
- * users selected on the Users admin page. RBAC mirrors the Users page
- * (users:view route requirement in App.tsx).
+ * users selected on the Users admin page. RBAC: the /print/badges route requires
+ * `anyOf: ['users:create', 'users:edit']` (App.tsx), i.e. admin-only after user
+ * management was aligned to Admin-only.
  *
  * Symbology decision: the badge encodes `users.employee_id` as a QR code via
  * the qrcode dependency the traveler already uses — zero new dependencies.
