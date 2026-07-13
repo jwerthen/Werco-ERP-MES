@@ -359,7 +359,7 @@ def get_work_order_costing(
     for wo in work_orders:
         # Get part info for material cost estimate
         part = db.query(Part).filter(Part.id == wo.part_id).first()
-        material_cost = (part.unit_cost or 0) * wo.quantity_ordered if part else 0
+        material_cost = (part.material_cost or 0) * wo.quantity_ordered if part else 0
 
         # Calculate labor cost from time entries (assume $50/hr standard rate)
         labor_hours = (

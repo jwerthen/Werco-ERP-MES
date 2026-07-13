@@ -1275,7 +1275,7 @@ export default function WorkOrderNew() {
                           <td>
                             <input
                               type="number"
-                              step="0.1"
+                              step="any"
                               min={0}
                               value={hoursToMinutes(op.setup_time_hours)}
                               onChange={(e) => updateOperation(index, 'setup_time_hours', minutesToHours(parseFloat(e.target.value) || 0))}
@@ -1286,7 +1286,7 @@ export default function WorkOrderNew() {
                           <td>
                             <input
                               type="number"
-                              step="0.1"
+                              step="any"
                               min={0}
                               value={hoursToMinutes(op.run_time_hours)}
                               onChange={(e) => updateOperation(index, 'run_time_hours', minutesToHours(parseFloat(e.target.value) || 0))}
@@ -1426,7 +1426,7 @@ export default function WorkOrderNew() {
                             <td>
                               <input
                                 type="number"
-                                step="0.1"
+                                step="any"
                                 min={0}
                                 value={hoursToMinutes(op.setup_time_hours)}
                                 onChange={(e) => updateOperation(index, 'setup_time_hours', minutesToHours(parseFloat(e.target.value) || 0))}
@@ -1437,7 +1437,7 @@ export default function WorkOrderNew() {
                             <td>
                               <input
                                 type="number"
-                                step="0.1"
+                                step="any"
                                 min={0}
                                 value={hoursToMinutes(op.run_time_hours)}
                                 onChange={(e) => updateOperation(index, 'run_time_hours', minutesToHours(parseFloat(e.target.value) || 0))}

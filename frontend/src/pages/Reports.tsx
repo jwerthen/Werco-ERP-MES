@@ -113,6 +113,47 @@ type TabType = 'dashboard' | 'ship-otd' | 'costing' | 'timesheets';
 
 const TAB_IDS: TabType[] = ['dashboard', 'ship-otd', 'costing', 'timesheets'];
 
+// Each report section fetches independently. A failure in one endpoint must not
+// blank the others, so we track load failures per report key and surface an
+// inline <ErrorState> only for the affected section (defense-in-depth: a single
+// bad report endpoint can never take down the whole page).
+type ReportKey =
+  | 'production'
+  | 'quality'
+  | 'inventory'
+  | 'vendors'
+  | 'utilization'
+  | 'dailyOutput'
+  | 'costing'
+  | 'timesheets';
+
+const makeEmptyErrors = (): Record<ReportKey, boolean> => ({
+  production: false,
+  quality: false,
+  inventory: false,
+  vendors: false,
+  utilization: false,
+  dailyOutput: false,
+  costing: false,
+  timesheets: false,
+});
+
+// Apply one settled result: hydrate its state on success, or flag its key on
+// failure so only that section renders an error.
+function applyResult<T>(
+  result: PromiseSettledResult<T>,
+  key: ReportKey,
+  setter: (value: T) => void,
+  errors: Record<ReportKey, boolean>,
+): void {
+  if (result.status === 'fulfilled') {
+    setter(result.value);
+  } else {
+    errors[key] = true;
+    console.error(`Failed to load ${key} report:`, result.reason);
+  }
+}
+
 export default function Reports() {
   // Active tab lives in the URL (?tab=) so deep links (e.g. the Analytics
   // "OTD (shipped)" tile) and reloads land on the right report.
@@ -135,13 +176,14 @@ export default function Reports() {
   const [costing, setCosting] = useState<WorkOrderCost[]>([]);
   const [timesheets, setTimesheets] = useState<EmployeeTime[]>([]);
   const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState(false);
+  const [errors, setErrors] = useState<Record<ReportKey, boolean>>(makeEmptyErrors);
   const [period, setPeriod] = useState(30);
 
   const loadData = useCallback(async () => {
-    setLoadError(false);
-    try {
-      const [prodRes, qualRes, invRes, vendRes, utilRes, dailyRes, costRes, timeRes] = await Promise.all([
+    // allSettled (not all): every report resolves independently, so one failing
+    // endpoint only flags its own section instead of rejecting the whole batch.
+    const [prodRes, qualRes, invRes, vendRes, utilRes, dailyRes, costRes, timeRes] =
+      await Promise.allSettled([
         api.getProductionSummary(period),
         api.getQualityMetrics(period),
         api.getInventoryValue(),
@@ -149,22 +191,20 @@ export default function Reports() {
         api.getWorkCenterUtilization(period),
         api.getDailyOutput(14),
         api.getWorkOrderCosting(undefined, period),
-        api.getEmployeeTimeReport()
+        api.getEmployeeTimeReport(),
       ]);
-      setProduction(prodRes);
-      setQuality(qualRes);
-      setInventory(invRes);
-      setVendors(vendRes);
-      setUtilization(utilRes);
-      setDailyOutput(dailyRes);
-      setCosting(costRes);
-      setTimesheets(timeRes);
-    } catch (err) {
-      console.error('Failed to load reports:', err);
-      setLoadError(true);
-    } finally {
-      setLoading(false);
-    }
+
+    const nextErrors = makeEmptyErrors();
+    applyResult(prodRes, 'production', setProduction, nextErrors);
+    applyResult(qualRes, 'quality', setQuality, nextErrors);
+    applyResult(invRes, 'inventory', setInventory, nextErrors);
+    applyResult(vendRes, 'vendors', setVendors, nextErrors);
+    applyResult(utilRes, 'utilization', setUtilization, nextErrors);
+    applyResult(dailyRes, 'dailyOutput', setDailyOutput, nextErrors);
+    applyResult(costRes, 'costing', setCosting, nextErrors);
+    applyResult(timeRes, 'timesheets', setTimesheets, nextErrors);
+    setErrors(nextErrors);
+    setLoading(false);
   }, [period]);
 
   useEffect(() => {
@@ -218,75 +258,79 @@ export default function Reports() {
         </nav>
       </div>
 
-      {loadError && (
-        <ErrorState
-          message="Could not load reports & analytics data."
-          onRetry={loadData}
-        />
-      )}
-
-      {!loadError && activeTab === 'dashboard' && (
+      {activeTab === 'dashboard' && (
       <>
       {/* KPI strip — production + quality + inventory headline metrics.
           Scrap is shown here as the aggregate rate; the per-day scrapped
-          counts are rendered canonically in the Daily Output panel below. */}
+          counts are rendered canonically in the Daily Output panel below.
+          When a source endpoint fails, its tiles render an em dash "—" (not a
+          fabricated $0 / 0.0% that reads as real data) and the strip shows one
+          compact retry affordance. */}
+      {(errors.production || errors.inventory || errors.quality) && (
+        <ErrorState
+          className="mb-2"
+          title="Some headline metrics couldn't load"
+          message="Tiles showing — are unavailable."
+          onRetry={loadData}
+        />
+      )}
       <MiniStatStrip className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7 gap-2">
         <MiniStat
           icon={CheckCircleIcon}
           iconBg="bg-fd-blue/15"
           iconColor="text-fd-blue"
           label="On-Time Delivery"
-          value={`${production?.on_time_delivery_pct.toFixed(1) ?? '0.0'}%`}
-          subtitle={`${production?.on_time_delivery_count ?? 0} of ${production?.total_completed ?? 0}`}
+          value={errors.production ? '—' : `${production?.on_time_delivery_pct.toFixed(1) ?? '0.0'}%`}
+          subtitle={errors.production ? 'Unavailable' : `${production?.on_time_delivery_count ?? 0} of ${production?.total_completed ?? 0}`}
         />
         <MiniStat
           icon={ClockIcon}
           iconBg="bg-fd-green/15"
           iconColor="text-fd-green"
           label="Hours Worked"
-          value={production?.total_hours_worked ?? 0}
-          subtitle={`Last ${period} days`}
+          value={errors.production ? '—' : (production?.total_hours_worked ?? 0)}
+          subtitle={errors.production ? 'Unavailable' : `Last ${period} days`}
         />
         <MiniStat
           icon={ExclamationTriangleIcon}
           iconBg="bg-fd-amber/15"
           iconColor="text-fd-amber"
           label="Scrap Rate"
-          value={`${production?.scrap_rate_pct.toFixed(2) ?? '0.00'}%`}
-          subtitle="see Daily Output"
+          value={errors.production ? '—' : `${production?.scrap_rate_pct.toFixed(2) ?? '0.00'}%`}
+          subtitle={errors.production ? 'Unavailable' : 'see Daily Output'}
         />
         <MiniStat
           icon={CurrencyDollarIcon}
           iconBg="bg-fd-cyan/15"
           iconColor="text-fd-cyan"
           label="Inventory Value"
-          value={`$${(inventory?.total_value || 0).toLocaleString()}`}
-          subtitle={`${inventory?.unique_parts ?? 0} parts`}
+          value={errors.inventory ? '—' : `$${(inventory?.total_value || 0).toLocaleString()}`}
+          subtitle={errors.inventory ? 'Unavailable' : `${inventory?.unique_parts ?? 0} parts`}
         />
         <MiniStat
           icon={ExclamationTriangleIcon}
           iconBg="bg-fd-red/15"
           iconColor="text-fd-red"
           label="Total NCRs"
-          value={quality?.total_ncrs ?? 0}
+          value={errors.quality ? '—' : (quality?.total_ncrs ?? 0)}
           valueColor="text-fd-red"
-          subtitle={`${quality?.open_ncrs ?? 0} open`}
+          subtitle={errors.quality ? 'Unavailable' : `${quality?.open_ncrs ?? 0} open`}
         />
         <MiniStat
           icon={InboxArrowDownIcon}
           iconBg="bg-fd-blue/15"
           iconColor="text-fd-blue"
           label="Qty Received"
-          value={quality?.receiving_total_qty ?? 0}
-          subtitle={`${quality?.receiving_rejected_qty ?? 0} rejected`}
+          value={errors.quality ? '—' : (quality?.receiving_total_qty ?? 0)}
+          subtitle={errors.quality ? 'Unavailable' : `${quality?.receiving_rejected_qty ?? 0} rejected`}
         />
         <MiniStat
           icon={ScaleIcon}
           iconBg="bg-fd-cyan/15"
           iconColor="text-fd-cyan"
           label="Recv Reject Rate"
-          value={`${quality?.receiving_reject_rate_pct.toFixed(2) ?? '0.00'}%`}
-          subtitle="receiving"
+          value={errors.quality ? '—' : `${quality?.receiving_reject_rate_pct.toFixed(2) ?? '0.00'}%`}
+          subtitle={errors.quality ? 'Unavailable' : 'receiving'}
         />
       </MiniStatStrip>
 
@@ -299,6 +343,10 @@ export default function Reports() {
           className="xl:col-span-7"
           bodyClassName="lg:max-h-none"
         >
+          {errors.dailyOutput ? (
+            <ErrorState title="Couldn't load daily output" onRetry={loadData} />
+          ) : (
+          <>
           <div className="h-64 flex items-end gap-1">
             {dailyOutput.map((day, idx) => {
               const maxVal = Math.max(...dailyOutput.map(d => d.completed + d.scrapped), 1);
@@ -334,6 +382,8 @@ export default function Reports() {
               <span className="w-3 h-3 bg-fd-red rounded-sm"></span> Scrapped
             </span>
           </div>
+          </>
+          )}
         </CockpitPanel>
 
         {/* Work Center Utilization */}
@@ -342,6 +392,9 @@ export default function Reports() {
           subtitle="Top 8 by hours"
           className="xl:col-span-5"
         >
+          {errors.utilization ? (
+            <ErrorState title="Couldn't load utilization" onRetry={loadData} />
+          ) : (
           <div className="space-y-3">
             {utilization.slice(0, 8).map((wc) => (
               <div key={wc.work_center_id} className="min-w-0">
@@ -363,6 +416,7 @@ export default function Reports() {
               </div>
             ))}
           </div>
+          )}
         </CockpitPanel>
 
         {/* Top Vendor Performance */}
@@ -371,6 +425,9 @@ export default function Reports() {
           subtitle="Last 90 days"
           className="xl:col-span-7"
         >
+          {errors.vendors ? (
+            <ErrorState title="Couldn't load vendor performance" onRetry={loadData} />
+          ) : (
           <div className="overflow-x-auto">
             <table className="min-w-full text-sm">
               <thead>
@@ -408,6 +465,7 @@ export default function Reports() {
               />
             )}
           </div>
+          )}
         </CockpitPanel>
 
         {/* Quality breakdown — NCRs by source + Work Orders by status.
@@ -418,6 +476,10 @@ export default function Reports() {
           subtitle="By source / status"
           className="xl:col-span-5"
         >
+          {errors.quality || errors.production ? (
+            <ErrorState title="Couldn't load quality & work orders" onRetry={loadData} />
+          ) : (
+          <>
           {quality && Object.keys(quality.ncr_by_source).length > 0 && (
             <div className="mb-3">
               <h3 className="text-[10px] font-medium uppercase tracking-wide text-slate-500 mb-2">NCRs by Source</h3>
@@ -441,6 +503,8 @@ export default function Reports() {
               ))}
             </div>
           </div>
+          </>
+          )}
         </CockpitPanel>
       </div>
       </>
@@ -451,8 +515,12 @@ export default function Reports() {
       {activeTab === 'ship-otd' && <ShipOtdReport periodDays={period} />}
 
       {/* Costing Tab */}
-      {!loadError && activeTab === 'costing' && (
+      {activeTab === 'costing' && (
         <div className="space-y-4">
+          {errors.costing ? (
+            <ErrorState title="Couldn't load work order costing" onRetry={loadData} />
+          ) : (
+          <>
           {/* Cost Summary — collapsed into a MiniStat row above the table. */}
           {costing.length > 0 && (() => {
             const totalEst = costing.reduce((sum, wo) => sum + wo.estimated_total, 0);
@@ -549,12 +617,17 @@ export default function Reports() {
               )}
             </div>
           </CockpitPanel>
+          </>
+          )}
         </div>
       )}
 
       {/* Timesheets Tab */}
-      {!loadError && activeTab === 'timesheets' && (
+      {activeTab === 'timesheets' && (
         <div className="space-y-6">
+          {errors.timesheets ? (
+            <ErrorState title="Couldn't load employee time" onRetry={loadData} />
+          ) : (
           <div className="card">
             <h2 className="text-lg font-semibold mb-4">Employee Time Report (Last 7 Days)</h2>
 
@@ -609,6 +682,7 @@ export default function Reports() {
               />
             )}
           </div>
+          )}
         </div>
       )}
     </div>
