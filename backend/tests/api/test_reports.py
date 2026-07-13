@@ -159,6 +159,110 @@ class TestReportsAPI:
         assert data[0]["completed_operations"] == 1
         assert data[0]["entries"][0]["source"] == "time_entry"
 
+    def test_work_order_costing_returns_200_for_wo_with_part(self, client: TestClient, auth_headers: dict, db_session):
+        """Regression: the costing report read the nonexistent ``part.unit_cost``
+        column, raising AttributeError -> HTTP 500 and dark-screening Reports.
+
+        This is the exact previously-500ing path: a work order whose part has
+        costs. Must now return 200 with a sane shape.
+        """
+        part = Part(
+            part_number="COST-200-001",
+            name="Costing 200 Part",
+            part_type="manufactured",
+            unit_of_measure="each",
+            standard_cost=18.0,
+            material_cost=10.0,
+            labor_cost=5.0,
+            overhead_cost=3.0,
+            is_active=True,
+            company_id=1,
+        )
+        db_session.add(part)
+        db_session.flush()
+
+        work_order = WorkOrder(
+            work_order_number="WO-COST-200",
+            part_id=part.id,
+            quantity_ordered=7,
+            status=WorkOrderStatus.IN_PROGRESS,
+            priority=5,
+            company_id=1,
+        )
+        db_session.add(work_order)
+        db_session.commit()
+
+        response = client.get(
+            "/api/v1/reports/work-order-costing",
+            headers=auth_headers,
+            params={"work_order_id": work_order.id},
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert isinstance(data, list)
+        row = next(item for item in data if item["work_order_number"] == "WO-COST-200")
+        assert row["work_order_id"] == work_order.id
+        assert row["part_number"] == "COST-200-001"
+        assert row["quantity"] == 7
+        # Shape sanity: the cost roll-up fields are present and total is consistent.
+        for field in ("estimated_material", "actual_material", "actual_labor", "actual_overhead", "actual_total"):
+            assert field in row
+        assert row["actual_total"] == row["actual_material"] + row["actual_labor"] + row["actual_overhead"]
+
+    def test_work_order_costing_uses_material_component_not_standard_cost(
+        self, client: TestClient, auth_headers: dict, db_session
+    ):
+        """Pin the no-double-count fix: the material line uses the MATERIAL
+        component (``part.material_cost``), NOT the fully-loaded
+        ``standard_cost`` (which already bundles labor + overhead). Using
+        standard_cost here would double-count labor/overhead, since the report
+        adds those separately.
+        """
+        part = Part(
+            part_number="COST-MAT-001",
+            name="Material Component Part",
+            part_type="manufactured",
+            unit_of_measure="each",
+            # Distinct values so material vs standard can't be confused.
+            material_cost=10.0,
+            labor_cost=5.0,
+            overhead_cost=3.0,
+            standard_cost=18.0,
+            is_active=True,
+            company_id=1,
+        )
+        db_session.add(part)
+        db_session.flush()
+
+        quantity = 7
+        work_order = WorkOrder(
+            work_order_number="WO-COST-MAT",
+            part_id=part.id,
+            quantity_ordered=quantity,
+            status=WorkOrderStatus.IN_PROGRESS,
+            priority=5,
+            company_id=1,
+        )
+        db_session.add(work_order)
+        db_session.commit()
+
+        response = client.get(
+            "/api/v1/reports/work-order-costing",
+            headers=auth_headers,
+            params={"work_order_id": work_order.id},
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        row = next(item for item in response.json() if item["work_order_number"] == "WO-COST-MAT")
+
+        expected_material = part.material_cost * quantity  # 10 * 7 = 70
+        double_counted = part.standard_cost * quantity  # 18 * 7 = 126 (the bug)
+
+        assert row["actual_material"] == expected_material
+        assert row["estimated_material"] == expected_material
+        assert row["actual_material"] != double_counted
+
     def test_shop_floor_dashboard_recent_completions_uses_completed_operations(
         self, client: TestClient, auth_headers: dict, operator_user: User, db_session
     ):
@@ -216,3 +320,17 @@ class TestReportsAPI:
             and item["operator_name"] == operator_user.full_name
             for item in completions
         )
+
+
+@pytest.mark.unit
+def test_part_model_has_no_unit_cost_column():
+    """Regression guard for the costing-report 500.
+
+    The costing report used to read ``part.unit_cost`` -- a column that never
+    existed on ``Part`` -- which raised AttributeError -> HTTP 500. The Part
+    cost model is {standard_cost, material_cost, labor_cost, overhead_cost}.
+    A future edit that reintroduces ``part.unit_cost`` should fail here.
+    """
+    assert not hasattr(Part, "unit_cost")
+    cost_columns = {c.name for c in Part.__table__.columns if c.name.endswith("_cost")}
+    assert cost_columns == {"standard_cost", "material_cost", "labor_cost", "overhead_cost"}

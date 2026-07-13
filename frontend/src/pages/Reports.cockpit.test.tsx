@@ -13,7 +13,7 @@
  * ResizeObserver defensively so jsdom never trips on a charting container.
  */
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import api from '../services/api';
 import Reports from './Reports';
@@ -138,4 +138,66 @@ test('renders the CockpitPanel report sections', async () => {
   // Panel content from the loaded data renders too.
   expect(screen.getByText('LASER-1')).toBeInTheDocument();
   expect(screen.getByText('Acme Metals')).toBeInTheDocument();
+});
+
+// Resilience regression (go-live blocker FIX 3): the loader was changed from
+// Promise.all to Promise.allSettled with per-section error state. ONE failing
+// report endpoint must scope its error to that section (an ErrorState with a
+// Retry) and MUST NOT dark-screen the rest of the page — the other sections
+// keep rendering their own data.
+test('a single failing report scopes its error and leaves the other sections intact', async () => {
+  // Only the work-center utilization endpoint fails; everything else resolves.
+  mockedApi.getWorkCenterUtilization.mockRejectedValue(new Error('boom: utilization 500'));
+
+  renderReports();
+
+  // The failed section renders a scoped ErrorState WITH a Retry affordance…
+  expect(await screen.findByText("Couldn't load utilization")).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument();
+  // …and does NOT render its (never-loaded) data.
+  expect(screen.queryByText('LASER-1')).not.toBeInTheDocument();
+
+  // The page did NOT blank: sibling sections still render their loaded data,
+  // and the headline KPI strip is intact.
+  expect(screen.getByText('Acme Metals')).toBeInTheDocument(); // vendor panel
+  expect(screen.getByText('On-Time Delivery')).toBeInTheDocument(); // KPI strip
+  expect(screen.getByRole('heading', { name: 'Reports & Analytics' })).toBeInTheDocument();
+
+  // Only the one failing section shows an error — no other Retry buttons.
+  expect(screen.getAllByRole('button', { name: /retry/i })).toHaveLength(1);
+});
+
+// KPI-strip resilience (follow-up to FIX 3): when a headline source errors, its
+// tile must render an em dash "—" + "Unavailable" (NOT a fabricated $0 / 0.0%
+// that reads as real data), a strip-level ErrorState appears above the strip
+// with a Retry that re-runs loadData, and the rest of the page stays intact.
+test('a failed KPI source renders — / Unavailable (not a fabricated $0) and a retryable strip error', async () => {
+  // Only the inventory source (the Inventory Value tile) fails.
+  mockedApi.getInventoryValue.mockRejectedValue(new Error('boom: inventory 500'));
+
+  renderReports();
+
+  // Strip-level ErrorState appears above the KPI strip.
+  expect(await screen.findByText("Some headline metrics couldn't load")).toBeInTheDocument();
+
+  // The Inventory Value tile shows the em dash + "Unavailable", never a fake $0.
+  const invTile = screen.getByText('Inventory Value').closest('.card') as HTMLElement;
+  expect(invTile).not.toBeNull();
+  expect(within(invTile).getByText('—')).toBeInTheDocument(); // "—"
+  expect(within(invTile).getByText('Unavailable')).toBeInTheDocument();
+  expect(within(invTile).queryByText(/\$/)).not.toBeInTheDocument(); // no $0 / $ amount fabricated
+
+  // The page did NOT blank: production KPIs (real values) and sibling panels render.
+  expect(screen.getByText('On-Time Delivery')).toBeInTheDocument();
+  expect(screen.getByText('85.7%')).toBeInTheDocument(); // real, loaded production value
+  expect(screen.getByText('LASER-1')).toBeInTheDocument(); // utilization panel
+  expect(screen.getByText('Acme Metals')).toBeInTheDocument(); // vendor panel
+
+  // Inventory is a strip-only metric (no dedicated panel), so exactly one Retry
+  // exists — the strip-level one — and clicking it re-runs the full loadData.
+  const retryButtons = screen.getAllByRole('button', { name: /retry/i });
+  expect(retryButtons).toHaveLength(1);
+  expect(mockedApi.getInventoryValue).toHaveBeenCalledTimes(1);
+  fireEvent.click(retryButtons[0]);
+  await waitFor(() => expect(mockedApi.getInventoryValue).toHaveBeenCalledTimes(2));
 });
