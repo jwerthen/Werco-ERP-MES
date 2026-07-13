@@ -40,7 +40,9 @@ class ClockIn(BaseModel):
     source: Optional[TimeEntrySource] = Field(
         None,
         description="Adoption-telemetry channel that produced this clock-in "
-        "(kiosk | desktop | scanner | import | backfill). Omit when unknown -- stored NULL, never guessed.",
+        "(kiosk | desktop | scanner | backfill). Omit when unknown -- stored NULL, never guessed. "
+        "'import' is rejected (422) here -- it is reserved for the bulk-migration loaders that write "
+        "TimeEntry directly; a kiosk-scoped operator token forces 'kiosk' regardless of this hint.",
     )
 
 
@@ -70,7 +72,9 @@ class ClockOut(BaseModel):
     source: Optional[TimeEntrySource] = Field(
         None,
         description="Adoption-telemetry channel of this clock-out write "
-        "(kiosk | desktop | scanner | import | backfill). Omit to keep the channel recorded at clock-in.",
+        "(kiosk | desktop | scanner | backfill). Omit to keep the channel recorded at clock-in. "
+        "'import' is rejected (422) here -- it is reserved for the bulk-migration loaders; a "
+        "kiosk-scoped operator token forces 'kiosk' regardless of this hint.",
     )
 
     @model_validator(mode="after")

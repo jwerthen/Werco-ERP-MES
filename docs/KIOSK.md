@@ -292,11 +292,17 @@ when the part's released routing changed after the WO was released/created.
 Every kiosk mutation — clock-in, clock-out, production report, complete, hold — sends
 `source: "kiosk"` (the A0.1 adoption-telemetry channel; see `docs/API.md` → Shop Floor).
 Kiosk activity is therefore fully distinguishable from desktop, scanner, import, and
-backfill writes on the adoption dashboard.
+backfill writes on the adoption dashboard. On the server these labor endpoints resolve the
+`source` under a trust model: a **kiosk-scoped operator token** (the crew station's
+badge-minted `scope="kiosk"` token) is authoritative and now **forces `kiosk`** regardless
+of the client hint — previously these endpoints trusted the reported hint — while `import`
+is **rejected (422)** as reserved for the bulk-migration loaders; the remaining channels
+(kiosk/desktop/scanner/backfill) are stored as declared, or NULL when omitted.
 
 **Process-step records follow the same model.** Step writes (record, correct/supersede,
-quality-hold) use **TimeEntry's exact trust model**: the client-reported `source` hint is
-stored verbatim — or NULL when omitted; the server never guesses a channel — EXCEPT where
+quality-hold) share the labor endpoints' trust model (the labor endpoints' `import`-rejection
+guard aside — a step write stores any declared channel verbatim): the client-reported `source`
+hint is stored verbatim — or NULL when omitted; the server never guesses a channel — EXCEPT where
 the credential is authoritative: a badge-minted `scope="kiosk"` operator token (crew
 station) **always records `kiosk`** regardless of any hint. The single-operator kiosk runs
 on a normal employee-login session, so it sends `source: "kiosk"` on every step write,

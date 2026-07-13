@@ -94,6 +94,10 @@ export default function ShopFloor() {
   const [reportingBlockerOperationId, setReportingBlockerOperationId] = useState<number | null>(null);
   const [clockingInOperationId, setClockingInOperationId] = useState<number | null>(null);
   const [clockingOut, setClockingOut] = useState(false);
+  // Back-entry (offline paper catch-up) mode. When on, clock-in/clock-out send
+  // source='backfill' so the rows are excluded from live shop metrics + audited.
+  // Ephemeral state on purpose (clears on reload) so it can't be silently left on.
+  const [backEntry, setBackEntry] = useState(false);
   const [priorityReason, setPriorityReason] = useState('');
   const [notice, setNotice] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
   const realtimeRefreshRef = useRef<NodeJS.Timeout | null>(null);
@@ -113,6 +117,11 @@ export default function ShopFloor() {
     return buildWsUrl(`/ws/shop-floor/${selectedWorkCenter}`, { token });
   }, [selectedWorkCenter]);
   const canEditPriority = can('work_orders:edit');
+  // Back-entry is a supervisor+ (back-entry owner) capability. work_orders:edit is
+  // held by supervisor/manager/admin/platform_admin (and superuser short-circuits
+  // can()) but NOT operators — so operators can't tag their own live work as
+  // backfill to dodge the live-capture metrics.
+  const canBackEntry = can('work_orders:edit');
 
   const notify = useCallback((type: 'success' | 'error' | 'info', message: string) => {
     setNotice({ type, message });
@@ -289,7 +298,9 @@ export default function ShopFloor() {
         work_order_id: item.work_order_id,
         operation_id: item.operation_id,
         work_center_id: selectedWorkCenter,
-        entry_type: 'run'
+        entry_type: 'run',
+        // Only tag when back-entry mode is on; otherwise send no source (NULL default).
+        ...(backEntry ? { source: 'backfill' } : {}),
       });
       await checkActiveJob();
       await loadQueue(selectedWorkCenter);
@@ -309,7 +320,9 @@ export default function ShopFloor() {
       await api.clockOut(clockOutJob.time_entry_id, {
         quantity_produced: clockOutData.quantity_produced,
         quantity_scrapped: clockOutData.quantity_scrapped,
-        notes: clockOutData.notes
+        notes: clockOutData.notes,
+        // Only tag when back-entry mode is on; otherwise send no source (NULL default).
+        ...(backEntry ? { source: 'backfill' } : {}),
       });
       await checkActiveJob();
       setClockOutJob(null);
@@ -493,6 +506,37 @@ export default function ShopFloor() {
           <p className="page-subtitle">Clock in/out and manage work center queues</p>
         </div>
         <div className="page-actions">
+          {canBackEntry && (
+            <label
+              className={`flex items-center gap-2.5 rounded-sm border px-3 py-1.5 cursor-pointer transition-colors ${
+                backEntry
+                  ? 'border-amber-500/60 bg-amber-500/15 text-amber-200'
+                  : 'border-fd-line bg-fd-panel text-surface-400 hover:border-amber-400/40 hover:text-surface-200'
+              }`}
+              title="Marks this entry as offline paper catch-up — excluded from live shop metrics."
+            >
+              <input
+                type="checkbox"
+                checked={backEntry}
+                onChange={(e) => setBackEntry(e.target.checked)}
+                className="checkbox"
+                aria-label="Back-entry mode (offline paper catch-up — excluded from live shop metrics)"
+              />
+              <span className="flex flex-col leading-tight">
+                <span className="text-sm font-semibold flex items-center gap-1.5">
+                  Back-entry (offline catch-up)
+                  {backEntry && (
+                    <span className="rounded-sm bg-amber-500/30 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-amber-100">
+                      On
+                    </span>
+                  )}
+                </span>
+                <span className="text-[11px] font-normal opacity-80">
+                  Excluded from live shop metrics
+                </span>
+              </span>
+            </label>
+          )}
           <Button
             variant="secondary"
             onClick={handleRefresh}

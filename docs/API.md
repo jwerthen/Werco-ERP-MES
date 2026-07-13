@@ -827,8 +827,13 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > `POST /shop-floor/clock-out/{id}`, `POST /shop-floor/operations/{id}/production`,
 > `POST /shop-floor/operations/{id}/complete`, and `PUT /shop-floor/operations/{id}/hold` (as of
 > A0.3) accept an **optional** `source` field naming the client
-> channel that produced the write: `kiosk` | `desktop` | `scanner` | `import` | `backfill` (any other
-> value is a **422**). It is persisted on the time entry (`time_entries.source`, nullable; migration
+> channel that produced the write: `kiosk` | `desktop` | `scanner` | `backfill` (any other value is a
+> **422**). **`import` is rejected with 422 on these interactive endpoints** — it is reserved for the
+> bulk-migration loaders, which write `TimeEntry` rows directly (never through these HTTP endpoints), so
+> a normal request can never claim it. A **kiosk-scoped operator token** (the badge-minted crew-station
+> `scope="kiosk"` token) is **authoritative and forces `source = "kiosk"`** on any of these writes
+> regardless of the client hint, so a crew station can't be tricked into stamping another channel onto
+> its labor. It is persisted on the time entry (`time_entries.source`, nullable; migration
 > `048_time_entry_source`; returned as `source` on `TimeEntryResponse`) for adoption analytics during
 > the paper-to-digital transition (clock-in coverage, digital completion %, backfill rate). Semantics:
 > **omitted → stored `NULL`** — the server never guesses a channel; `NULL` means unknown/legacy (all
@@ -844,6 +849,14 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > (`null` when not reported — e.g. office-endpoint or reconcile-on-read completions, which take no
 > `source` input), and so do the hold-path events: `operation_hold` (emitted when the hold carries no
 > blocker data) and `work_order_blocker_created` (emitted when the hold files a structured blocker).
+>
+> **Back-entry (`source = "backfill"`) is audited.** A `backfill` write is a manual, after-the-fact
+> labor record (a supervisor-gated desktop back-entry / offline paper catch-up — the ShopFloor page's
+> **Back-entry (offline catch-up)** toggle, gated on `work_orders:edit`), so when a `clock-in` or
+> `clock-out` resolves to `backfill` it additionally writes a tamper-evident `audit_log` row
+> (`time_entry` create / update, `source=backfill`) with an explicit who/when — a live capture is
+> self-evidenced by its `labor_clock_in` / `labor_clock_out` `OperationalEvent`, but a back-fill needs
+> its own audit trail.
 >
 > **Structured scrap reason on in-shift production reports (A0.3).**
 > `POST /shop-floor/operations/{id}/production` accepts a `scrap_reason` string — the

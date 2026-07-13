@@ -43,6 +43,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from app.core.security import create_access_token
+from app.models.audit_log import AuditLog
 from app.models.company import Company
 from app.models.operational_event import OperationalEvent
 from app.models.part import Part
@@ -50,6 +51,7 @@ from app.models.time_entry import TimeEntry, TimeEntryType
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
+from tests.api import kiosk_test_helpers as kiosk
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
 
@@ -640,3 +642,260 @@ def test_complete_without_source_never_fills_or_guesses(client: TestClient, db_s
     wo_event = latest_event(db_session, "work_order_completed", work_order_id=wo.id)
     assert wo_event is not None
     assert wo_event.event_payload.get("source") is None
+
+
+# ===========================================================================
+# Import guard: source='import' is loader-reserved (backfill-source branch)
+# ===========================================================================
+#
+# ``import`` is a VALID TimeEntrySource enum value, so it clears Pydantic and
+# reaches the shared ``_resolve_labor_source`` helper, which rejects it on any
+# interactive labor write with an app-level 422 (distinct from the enum-validation
+# 422 that ``fax`` trips). It is reserved for the bulk-migration loaders, which
+# write TimeEntry rows directly -- an operator/desktop request claiming it would
+# corrupt import provenance. The 422 is raised BEFORE any mutation, so nothing is
+# written / advanced / closed.
+
+
+def test_import_source_rejected_on_clock_in_creates_no_row(client: TestClient, db_session: Session):
+    """clock-in with the loader-reserved ``import`` channel is a 422 and creates
+    no TimeEntry (a valid enum value, but rejected at the app layer)."""
+    operator = make_user(db_session)
+    wo, op, wc = make_wo_op(db_session)
+
+    resp = client.post(
+        "/api/v1/shop-floor/clock-in",
+        json=clock_in_payload(wo, op, wc, source="import"),
+        headers=headers_for(operator),
+    )
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+
+    db_session.expire_all()
+    rows = db_session.query(TimeEntry).filter(TimeEntry.operation_id == op.id).all()
+    assert rows == [], "a rejected import clock-in must create no labor row"
+
+
+def test_import_source_rejected_on_clock_out_production_and_complete(client: TestClient, db_session: Session):
+    """The three post-clock-in labor writes each reject a loader-reserved ``import``
+    channel with an app-level 422, and a rejected write mutates nothing."""
+    operator = make_user(db_session)
+    supervisor = make_user(db_session, role=UserRole.SUPERVISOR)
+    wo, op, wc = make_wo_op(db_session)
+    entry = make_open_entry(db_session, operator, wo, op)
+    entry_id, op_id = entry.id, op.id
+
+    resp = client.post(
+        f"/api/v1/shop-floor/clock-out/{entry_id}",
+        json={"quantity_produced": 0, "quantity_scrapped": 0, "source": "import"},
+        headers=headers_for(operator),
+    )
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+
+    resp = client.post(
+        f"/api/v1/shop-floor/operations/{op_id}/production",
+        json={"quantity_complete_delta": 1.0, "quantity_scrapped_delta": 0.0, "source": "import"},
+        headers=headers_for(operator),
+    )
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+
+    resp = client.post(
+        f"/api/v1/shop-floor/operations/{op_id}/complete",
+        json={"quantity_complete": 10, "source": "import"},
+        headers=headers_for(supervisor),
+    )
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+
+    db_session.expire_all()
+    entry = db_session.get(TimeEntry, entry_id)
+    op = db_session.get(WorkOrderOperation, op_id)
+    assert entry.clock_out is None and entry.source is None, "a 422 import write must not touch the entry"
+    assert op.status == OperationStatus.IN_PROGRESS, "a 422 import write must not advance the operation"
+
+
+def test_import_source_rejected_on_hold(client: TestClient, db_session: Session):
+    """PUT /hold also routes its channel through ``_resolve_labor_source``: the
+    loader-reserved ``import`` is a 422 and the hold mutates nothing."""
+    operator = make_user(db_session)
+    wo, op, wc = make_wo_op(db_session)
+    entry = make_open_entry(db_session, operator, wo, op)
+    entry_id, op_id = entry.id, op.id
+
+    resp = client.put(
+        f"/api/v1/shop-floor/operations/{op_id}/hold",
+        json={"source": "import"},
+        headers=headers_for(operator),
+    )
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+
+    db_session.expire_all()
+    assert db_session.get(WorkOrderOperation, op_id).status == OperationStatus.IN_PROGRESS
+    entry = db_session.get(TimeEntry, entry_id)
+    assert entry.clock_out is None and entry.source is None, "a 422 import hold must not touch the entry"
+
+
+# ===========================================================================
+# Kiosk-scope forcing: a kiosk-scoped credential is authoritative
+# ===========================================================================
+#
+# A badge-minted crew-station operator token carries ``scope == "kiosk"``, so
+# ``_resolve_labor_source`` FORCES source=KIOSK regardless of any client hint --
+# a crew station can never be tricked into stamping ``backfill``/``desktop`` (or
+# ``import``) onto its labor. The token is minted through the real HTTP badge flow
+# (kiosk_test_helpers), the same way test_kiosk_crew_flow.py does.
+
+
+def test_kiosk_token_forces_kiosk_source_over_client_hint(client: TestClient, db_session: Session):
+    """A kiosk-scoped badge token that DECLARES ``backfill`` on clock-in and
+    ``desktop`` on clock-out is stored as KIOSK both times: the credential wins,
+    not the client hint."""
+    wc = kiosk.make_work_center(db_session, company_id=COMPANY_A)
+    station = kiosk.make_kiosk_station(db_session, company_id=COMPANY_A, work_center=wc)
+    wo, op = kiosk.make_wo_with_operation(db_session, company_id=COMPANY_A, work_center=wc, quantity_ordered=10)
+    station_token = kiosk.kiosk_token_for(station)
+    operator = kiosk.make_user(db_session, company_id=COMPANY_A)
+    minted = kiosk.mint_badge_token(client, station_token, operator.employee_id)
+    assert minted.status_code == status.HTTP_200_OK, minted.text
+    op_token = minted.json()["access_token"]
+
+    # Clock in DECLARING 'backfill' -- kiosk scope must override to KIOSK.
+    resp = client.post(
+        "/api/v1/shop-floor/clock-in",
+        headers=kiosk.bearer(op_token),
+        json={
+            "work_order_id": wo.id,
+            "operation_id": op.id,
+            "work_center_id": wc.id,
+            "entry_type": "run",
+            "source": "backfill",
+        },
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    assert resp.json()["source"] == "kiosk", "a kiosk-scoped token must record KIOSK, not the declared backfill"
+    entry_id = resp.json()["id"]
+
+    db_session.expire_all()
+    assert db_session.get(TimeEntry, entry_id).source == "kiosk"
+
+    # Clock out DECLARING 'desktop' -- still forced to KIOSK (self-scoped LEAVE).
+    resp = client.post(
+        f"/api/v1/shop-floor/clock-out/{entry_id}",
+        headers=kiosk.bearer(op_token),
+        json={"quantity_produced": 0, "quantity_scrapped": 0, "source": "desktop"},
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    assert resp.json()["source"] == "kiosk", "a kiosk-scoped token must record KIOSK, not the declared desktop"
+
+    db_session.expire_all()
+    assert db_session.get(TimeEntry, entry_id).source == "kiosk"
+
+
+# ===========================================================================
+# Back-entry audit trail: source='backfill' is on the tamper-evident chain
+# ===========================================================================
+#
+# A paper back-entry (source=backfill) is a manual, after-the-fact labor record,
+# so AS9100D traceability puts it on the tamper-evident audit chain like any other
+# state change: clock-in writes a CREATE row, clock-out an UPDATE row, both on
+# resource_type=time_entry, committed atomically with the labor write. A live
+# (desktop/omitted) write is self-evidenced by its OperationalEvent and adds NO
+# such audit row -- the audit is specific to backfill.
+
+
+def _committed_time_entry_audit_rows(db: Session, *, resource_id: int, action: str = None):
+    """AuditLog rows on ``time_entry`` that were actually COMMITTED, not merely
+    flushed (the guard from test_work_orders_audit_persistence.py).
+
+    The ``client`` fixture yields ONE shared, never-closed session, so a
+    flushed-but-uncommitted row is still visible to a naive query. ``db.rollback()``
+    before reading discards a flush-only row while a committed row survives -- so
+    this proves the backfill audit is durable, not that it was merely staged.
+    """
+    db.rollback()
+    db.expire_all()
+    q = db.query(AuditLog).filter(
+        AuditLog.resource_type == "time_entry",
+        AuditLog.resource_id == resource_id,
+    )
+    if action is not None:
+        q = q.filter(AuditLog.action == action)
+    return q.order_by(AuditLog.sequence_number.desc()).all()
+
+
+def test_backfill_clock_in_writes_committed_audit(client: TestClient, db_session: Session):
+    """A back-entry clock-in (source=backfill) persists a COMMITTED CREATE audit
+    row on the created time_entry."""
+    operator = make_user(db_session)
+    wo, op, wc = make_wo_op(db_session)
+
+    resp = client.post(
+        "/api/v1/shop-floor/clock-in",
+        json=clock_in_payload(wo, op, wc, source="backfill"),
+        headers=headers_for(operator),
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    assert resp.json()["source"] == "backfill"
+    entry_id = resp.json()["id"]
+
+    rows = _committed_time_entry_audit_rows(db_session, resource_id=entry_id, action="CREATE")
+    assert len(rows) == 1, "a backfill clock-in must persist exactly one COMMITTED CREATE audit row"
+    assert rows[0].resource_type == "time_entry"
+    assert rows[0].resource_id == entry_id
+    assert rows[0].company_id == COMPANY_A
+    assert rows[0].extra_data.get("source") == "backfill"
+
+
+def test_backfill_clock_out_writes_committed_audit(client: TestClient, db_session: Session):
+    """A back-entry clock-out (source=backfill) persists a COMMITTED UPDATE audit
+    row on the closed time_entry."""
+    operator = make_user(db_session)
+    wo, op, wc = make_wo_op(db_session)
+    entry = make_open_entry(db_session, operator, wo, op)
+    entry_id = entry.id
+
+    resp = client.post(
+        f"/api/v1/shop-floor/clock-out/{entry_id}",
+        json={"quantity_produced": 0, "quantity_scrapped": 0, "source": "backfill"},
+        headers=headers_for(operator),
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    assert resp.json()["source"] == "backfill"
+
+    rows = _committed_time_entry_audit_rows(db_session, resource_id=entry_id, action="UPDATE")
+    assert len(rows) == 1, "a backfill clock-out must persist exactly one COMMITTED UPDATE audit row"
+    assert rows[0].resource_type == "time_entry"
+    assert rows[0].resource_id == entry_id
+    assert rows[0].company_id == COMPANY_A
+    assert rows[0].extra_data.get("source") == "backfill"
+
+
+def test_live_clock_in_writes_no_backfill_audit(client: TestClient, db_session: Session):
+    """The backfill audit is SPECIFIC to backfill: a normal desktop clock-in (and
+    an omitted-source clock-in) add NO time_entry audit row -- the live labor is
+    self-evidenced by its labor_clock_in OperationalEvent instead."""
+    operator = make_user(db_session)
+    wo, op, wc = make_wo_op(db_session)
+
+    resp = client.post(
+        "/api/v1/shop-floor/clock-in",
+        json=clock_in_payload(wo, op, wc, source="desktop"),
+        headers=headers_for(operator),
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    desktop_entry_id = resp.json()["id"]
+
+    other = make_user(db_session)
+    wo2, op2, wc2 = make_wo_op(db_session)
+    resp = client.post(
+        "/api/v1/shop-floor/clock-in",
+        json=clock_in_payload(wo2, op2, wc2),  # source omitted
+        headers=headers_for(other),
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    omitted_entry_id = resp.json()["id"]
+
+    assert (
+        _committed_time_entry_audit_rows(db_session, resource_id=desktop_entry_id) == []
+    ), "a desktop clock-in must not add a backfill audit row"
+    assert (
+        _committed_time_entry_audit_rows(db_session, resource_id=omitted_entry_id) == []
+    ), "an omitted-source clock-in must not add a backfill audit row"

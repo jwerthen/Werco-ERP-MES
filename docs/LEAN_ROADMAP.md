@@ -137,7 +137,7 @@ These definitions are the contract for every implementation above — dashboards
 | **Changeover time** | **Last good part of run A → first good part of run B** (not "setup labor booked") |
 | **Takt** | Available time ÷ demand — runners only, recalculated monthly/quarterly (Phase 3+ only) |
 | **Schedule adherence** | Planned (`scheduled_start/end`) vs actual, per WC per day |
-| **Provenance rule** | Every metric segments by capture source; **`backfill` and `import` `source` values are excluded from metric baselines** — force-complete/one-shot paths backfill `actual_*` timestamps and would poison flow numbers |
+| **Provenance rule** | Every metric segments by capture source; **`backfill` and `import` `source` values are excluded from metric baselines** — force-complete/one-shot paths backfill `actual_*` timestamps and would poison flow numbers. The **desktop ShopFloor** now feeds this rule directly: a supervisor-gated (`work_orders:edit`) **Back-entry (offline catch-up)** toggle tags its clock-in/clock-out `source='backfill'` (previously desktop back-entry landed a NULL source and wrongly counted as live capture), so offline paper catch-up is excluded from the live baselines and audited on the tamper-evident chain. `import` is now also rejected (422) on the interactive labor endpoints — reserved for the bulk loaders — while a kiosk-scoped token forces `kiosk`. |
 
 ## Verification approach (when phases are built)
 
