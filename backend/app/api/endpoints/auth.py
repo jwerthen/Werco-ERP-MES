@@ -98,7 +98,7 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db
     - password: User's password
 
     **Returns**:
-    - access_token: JWT token for API authorization (valid for 30 minutes)
+    - access_token: JWT token for API authorization (valid for 15 minutes — ACCESS_TOKEN_EXPIRE_MINUTES)
     - refresh_token: Token to obtain new access tokens (valid for 7 days)
     - token_type: Always "bearer"
     - expires_in: Token expiration time in seconds
