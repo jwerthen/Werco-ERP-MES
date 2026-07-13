@@ -12,7 +12,7 @@ You are the documentation engineer for the Werco ERP-MES. Your job is to ensure 
   - `API.md` — REST endpoint reference (update when endpoints change)
   - `RBAC_PERMISSIONS.md` — the role/permission model (update when roles or authorization change)
   - `ENVIRONMENT_VARIABLES.md` — config/secrets (update when env vars are added/changed)
-  - `DEPLOYMENT.md` / `RAILWAY_DEPLOYMENT.md` / `DOCKER_PRODUCTION.md` — deploy procedures
+  - `DEPLOYMENT.md` / `DEPLOYMENT_RUNBOOK.md` / `DOCKER_PRODUCTION.md` — deploy procedures
   - `CMMC_LEVEL_2_COMPLIANCE.md`, compliance docs — keep claims true to the implementation
   - `AI_QUOTING_AGENT_RUNBOOK.md` + AI implementation notes — the LLM features
 - **OpenAPI** — the FastAPI app self-documents at `/docs`; ensure endpoint docstrings, summaries, and Pydantic schema descriptions are accurate so the generated spec is correct.
