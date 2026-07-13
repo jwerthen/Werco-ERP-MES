@@ -399,6 +399,13 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > Every user mutation — create, update (including any role change), approve, password-reset,
 > deactivate, and activate — is recorded in the tamper-evident audit log.
 >
+> **Password-strength policy.** A password set on any of these paths — `POST /users/` (create),
+> `POST /users/{id}/reset-password`, and self-service `POST /users/change-password` — must satisfy
+> the server-side strength policy (≥ 12 chars; uppercase, lowercase, number, and special char; no
+> common weak substring), the **same policy** as `POST /auth/register`. The user CSV import applies
+> it per row to user-supplied passwords; operator auto-generated (badge) passwords are exempt. See
+> `docs/API.md` → Users.
+>
 > **Badge printing (A0.4).** The badge print sheet `/print/badges` (opened from the Users page via
 > multi-select → "Print Badges") is **frontend-gated by `canManageUsers`** (=
 > `users:create` OR `users:edit`) — both the Users-page button

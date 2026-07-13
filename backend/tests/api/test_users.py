@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.core.security import get_password_hash
 from app.models.audit_log import AuditLog
 from app.models.user import User, UserRole
+from app.schemas.user import validate_password_strength
 
 
 def _committed_user_audit_rows(db: Session, *, resource_id: int, action: str):
@@ -698,3 +699,175 @@ class TestUserAuditLogging:
         assert row.company_id == 1
         assert row.old_values == {"status": "inactive"}
         assert row.new_values == {"status": "active"}
+
+
+# A password satisfying every rule: >= 12 chars, upper + lower + digit + special,
+# and no common weak substring. Reused across the strength-policy tests below.
+STRONG_PASSWORD = "Zephyr9!Quill"
+
+
+@pytest.mark.unit
+class TestPasswordStrengthPolicy:
+    """Unit coverage for the canonical ``validate_password_strength`` policy.
+
+    One assertion per rule: a strong password is accepted (returned unchanged)
+    and each individual failure mode is rejected with its own message. Every
+    violator string breaks EXACTLY one rule, so the asserted message is the sole
+    cause and not an incidental co-failure.
+    """
+
+    def test_accepts_strong_password(self):
+        """A compliant password passes and is returned unchanged."""
+        assert validate_password_strength(STRONG_PASSWORD) == STRONG_PASSWORD
+
+    def test_rejects_too_short(self):
+        """< 12 characters is rejected (all other rules satisfied)."""
+        with pytest.raises(ValueError, match="at least 12 characters"):
+            validate_password_strength("Ab1!xyz")
+
+    def test_rejects_no_uppercase(self):
+        """Missing an uppercase letter is rejected."""
+        with pytest.raises(ValueError, match="uppercase"):
+            validate_password_strength("zephyr9!quill")
+
+    def test_rejects_no_lowercase(self):
+        """Missing a lowercase letter is rejected."""
+        with pytest.raises(ValueError, match="lowercase"):
+            validate_password_strength("ZEPHYR9!QUILL")
+
+    def test_rejects_no_digit(self):
+        """Missing a digit is rejected."""
+        with pytest.raises(ValueError, match="number"):
+            validate_password_strength("Zephyr!Quills")
+
+    def test_rejects_no_special(self):
+        """Missing a special character is rejected."""
+        with pytest.raises(ValueError, match="special character"):
+            validate_password_strength("Zephyr9Quills")
+
+    def test_rejects_common_pattern(self):
+        """A common weak substring (e.g. 'password') is rejected."""
+        with pytest.raises(ValueError, match="common pattern"):
+            validate_password_strength("Password1234!")
+
+
+@pytest.mark.api
+class TestPasswordPolicyEnforcement:
+    """The strength policy is enforced on every password-accepting endpoint.
+
+    Each write path (admin create, admin reset, self-service change, and the
+    user-supplied CSV-import password) must reject a weak password and accept a
+    strong one — so a weak credential cannot enter through any door.
+    """
+
+    # --- POST /users/ (create, Admin-only) ---------------------------------
+
+    def test_create_user_weak_password_rejected(self, client: TestClient, admin_headers, db_session):
+        """A weak password on create is a 422 and writes NO user row."""
+        response = client.post(
+            "/api/v1/users/",
+            headers=admin_headers,
+            json=_valid_user_payload(email="weak-create@werco.com", employee_id="EMP-WEAK-CR", password="weak"),
+        )
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        assert db_session.query(User).filter_by(employee_id="EMP-WEAK-CR").count() == 0
+
+    def test_create_user_strong_password_succeeds(self, client: TestClient, admin_headers):
+        """A compliant password on create succeeds (secret never echoed)."""
+        response = client.post(
+            "/api/v1/users/",
+            headers=admin_headers,
+            json=_valid_user_payload(
+                email="strong-create@werco.com", employee_id="EMP-STRONG-CR", password=STRONG_PASSWORD
+            ),
+        )
+        assert response.status_code == status.HTTP_200_OK, response.text
+        assert "hashed_password" not in response.json()
+
+    # --- POST /users/{id}/reset-password (Admin-only) ----------------------
+
+    def test_reset_password_weak_rejected(self, client: TestClient, admin_headers, created_user):
+        """Admin reset must meet the same policy — a weak new password is 422."""
+        response = client.post(
+            f"/api/v1/users/{created_user['id']}/reset-password",
+            headers=admin_headers,
+            json={"new_password": "weak"},
+        )
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+
+    def test_reset_password_strong_succeeds(self, client: TestClient, admin_headers, created_user):
+        """A compliant new password resets successfully."""
+        response = client.post(
+            f"/api/v1/users/{created_user['id']}/reset-password",
+            headers=admin_headers,
+            json={"new_password": STRONG_PASSWORD},
+        )
+        assert response.status_code == status.HTTP_200_OK, response.text
+
+    # --- POST /users/change-password (self-service, any authed user) -------
+
+    def test_change_password_weak_rejected(self, client: TestClient, auth_headers, test_user_credentials):
+        """Self-service change with a weak new password is 422 even when the
+        current password is correct (strength is validated before the endpoint
+        verifies the current password)."""
+        response = client.post(
+            "/api/v1/users/change-password",
+            headers=auth_headers,
+            json={"current_password": test_user_credentials["password"], "new_password": "weak"},
+        )
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+
+    def test_change_password_strong_succeeds(self, client: TestClient, auth_headers, test_user_credentials):
+        """Correct current password + a compliant new password succeeds."""
+        response = client.post(
+            "/api/v1/users/change-password",
+            headers=auth_headers,
+            json={"current_password": test_user_credentials["password"], "new_password": STRONG_PASSWORD},
+        )
+        assert response.status_code == status.HTTP_200_OK, response.text
+
+    # --- CSV import (POST /users/import-csv, Admin-only) --------------------
+
+    def test_import_users_csv_weak_password_row_rejected(self, client: TestClient, admin_headers, db_session):
+        """A user-SUPPLIED weak password fails per-row (row skipped), while an
+        operator row with NO password still imports — its password is
+        auto-generated and policy-compliant by construction, so it is exempt from
+        re-validation."""
+        csv_content = (
+            "employee_id,first_name,last_name,role,password\n"
+            "EMP-WEAK-Q1,Quality,Weak,quality,weak\n"
+            "EMP-OP-NOPW,Floor,Operator,operator,\n"
+        )
+        response = client.post(
+            "/api/v1/users/import-csv",
+            headers=admin_headers,
+            files={"file": ("users.csv", csv_content, "text/csv")},
+        )
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert data["created_count"] == 1  # only the auto-generated operator row
+        assert len(data["errors"]) == 1
+        err = data["errors"][0]
+        assert err["employee_id"] == "EMP-WEAK-Q1"
+        assert "Weak password" in err["reason"]
+        # The weak non-operator row is NOT created; the operator row IS.
+        assert db_session.query(User).filter_by(employee_id="EMP-WEAK-Q1").count() == 0
+        assert db_session.query(User).filter_by(employee_id="EMP-OP-NOPW").count() == 1
+
+    def test_import_users_csv_weak_password_rejected_in_dry_run(self, client: TestClient, admin_headers, db_session):
+        """Weak user-supplied passwords are caught in dry_run too — flagged as a
+        per-row error, and nothing is written."""
+        csv_content = "employee_id,first_name,last_name,role,password\n" "EMP-WEAK-Q2,Quality,Weak,quality,weak\n"
+        response = client.post(
+            "/api/v1/users/import-csv?dry_run=true",
+            headers=admin_headers,
+            files={"file": ("users.csv", csv_content, "text/csv")},
+        )
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert data["dry_run"] is True
+        assert data["created_count"] == 0
+        assert data["created_ids"] == []
+        assert len(data["errors"]) == 1
+        assert "Weak password" in data["errors"][0]["reason"]
+        assert db_session.query(User).filter_by(employee_id="EMP-WEAK-Q2").count() == 0

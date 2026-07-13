@@ -376,9 +376,21 @@
 - [ ] **IA-3.5.3 - Multi-Factor Authentication** 🔴 CRITICAL
   - Need: MFA for all users accessing CUI
   - Effort: 2-3 weeks
-- [ ] **IA-3.5.7 - Password Complexity** 🔴 CRITICAL
-  - Need: Minimum 12 chars, uppercase, lowercase, numbers, special chars
-  - Effort: 3-5 days
+- [x] **IA-3.5.7 - Password Complexity** ✅ COMPLETE
+  - Implemented: Minimum 12 chars, plus at least one uppercase, lowercase, number, and special
+    char, and a common-weak-substring blocklist (`password`, `123456`, `qwerty`, `admin`,
+    `letmein`, `welcome`). A violation is rejected with HTTP 422.
+  - Single source of truth: `validate_password_strength` in `app/schemas/user.py`, enforced
+    server-side on **every** user-creation and password-change path — `POST /auth/register`,
+    `POST /users/` (admin create), `POST /users/{id}/reset-password` (admin reset), and
+    `POST /users/change-password` (self-service) — and on **user-supplied** passwords in the user
+    CSV import (`POST /users/import-csv`, rejected per row). Operator auto-generated passwords
+    (badge/employee-ID logins) satisfy the policy by construction and are exempt. This closes a
+    prior gap where only self-registration enforced the policy while the admin-driven and
+    self-service paths accepted weak passwords.
+  - Residual (tracked separately, **not** part of this control): NIST 800-171 3.5.7's
+    "change of characters when new passwords are created", plus password history (IA-3.5.8) and
+    expiration (IA-3.5.9), remain open — see the GAPS below and the Priority Remediation Roadmap.
 - [ ] **IA-3.5.8 - Password History** ⚠️ HIGH
   - Need: Prevent reuse of last 12 passwords
   - Effort: 3-5 days
@@ -677,7 +689,7 @@
 | Item | Effort | Owner | Status |
 |------|--------|-------|--------|
 | Multi-Factor Authentication (TOTP) | 2-3 weeks | | ⬜ Not Started |
-| Password Policy Enforcement | 1 week | | ⬜ Not Started |
+| Password Policy Enforcement | 1 week | | 🟡 Partial — complexity enforced server-side on all password-set paths (IA-3.5.7 ✅); history/expiration/min-age pending (IA-3.5.8/3.5.9) |
 | Encryption at Rest | 2-4 weeks | | ⬜ Not Started |
 | System Security Plan (SSP) | 2-4 weeks | | ⬜ Not Started |
 
@@ -727,10 +739,17 @@ Frontend:
 ```
 
 ### Password Policy Implementation
+
+**Status:** the complexity portion is **implemented** — `validate_password_strength`
+(`app/schemas/user.py`, not `core/security.py`) enforces length + character classes + a
+common-weak-substring blocklist on every user-creation and password-change path (see IA-3.5.7
+above). Password history, expiration, and minimum age remain outstanding (the plan below).
+
 ```
-Backend (app/core/security.py):
+Backend (app/schemas/user.py — validate_password_strength, DONE):
 - Minimum length: 12 characters
 - Require: uppercase, lowercase, number, special char
+Remaining:
 - Password history: store last 12 hashes
 - Expiration: 90 days
 - Minimum age: 1 day

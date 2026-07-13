@@ -1765,6 +1765,18 @@ records, targets) require **Admin / Manager / Supervisor**.
 > approve, password-reset, deactivate, activate) is recorded in the tamper-evident audit log. See
 > [docs/RBAC_PERMISSIONS.md](RBAC_PERMISSIONS.md) → Users.
 
+> **Password-strength policy — enforced server-side on every user-write path.** A password set
+> through `POST /users/` (create), `POST /users/{id}/reset-password`, or the self-service
+> `POST /users/change-password` must be **≥ 12 characters** and contain an **uppercase**, a
+> **lowercase**, a **number**, and a **special** character, and must not contain a common weak
+> substring (`password`, `123456`, `qwerty`, `admin`, `letmein`, `welcome`); a violation returns
+> **422**. This is the **same policy** enforced on `POST /auth/register`, applied via the shared
+> `validate_password_strength` (`app/schemas/user.py`) — previously only self-registration enforced
+> it. The user CSV import (`POST /users/import-csv`) applies the same check to **user-supplied**
+> passwords **per row** (a weak password fails only that row, `reason` = `"Weak password: …"`);
+> operator **auto-generated** passwords (for badge/employee-ID logins) satisfy the policy by
+> construction and are **exempt**.
+
 ### Admin Settings (Admin)
 
 | Method | Endpoint | Description | Auth Required |
@@ -2070,7 +2082,9 @@ every created row):
 > logging). The **user import never logs `new_values`** — the model carries `hashed_password` and
 > secrets must not land in the audit log. The user import also **rejects `role = platform_admin`**
 > per row: a tenant spreadsheet must not mint the cross-company oversight role (see
-> `docs/RBAC_PERMISSIONS.md` → Bulk Imports).
+> `docs/RBAC_PERMISSIONS.md` → Bulk Imports). It likewise **rejects a weak user-supplied password
+> per row** (`reason` = `"Weak password: …"`), applying the same strength policy as `POST /users/`
+> (see [Users](#users-admin) above); operator auto-generated passwords are exempt.
 >
 > **`POST /work-orders/import` — open (in-flight) work orders.** Optional columns: `wo_number`
 > (generated when blank; uniqueness checked **case-insensitively**, in-file and against the DB),
