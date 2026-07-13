@@ -12,7 +12,13 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { UserGroupIcon, ArrowRightOnRectangleIcon, TrashIcon, Cog6ToothIcon } from '@heroicons/react/24/outline';
+import {
+  UserGroupIcon,
+  ArrowRightOnRectangleIcon,
+  TrashIcon,
+  Cog6ToothIcon,
+  PlusIcon,
+} from '@heroicons/react/24/outline';
 import api from '../services/api';
 import { usePermissions } from '../hooks/usePermissions';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
@@ -29,8 +35,19 @@ import {
   useToast,
 } from '../components/ui';
 import { purposeLabel, VISITOR_STATUS_COLORS } from '../components/visitor/visitorConstants';
+import VisitorManualEntryModal from '../components/visitor/VisitorManualEntryModal';
 import { formatCentralDateTime } from '../utils/centralTime';
 import type { VisitorLogResponse, SigninStationResponse } from '../types/visitor';
+
+// Small instrument-panel chip marking a row that staff back-entered after the
+// fact (entered_by_user_id set) rather than a live tablet capture.
+function StaffEntryChip() {
+  return (
+    <span className="inline-flex items-center rounded-sm border border-fd-blue/40 bg-fd-blue/10 px-1.5 py-0.5 text-[10px] font-mono uppercase tracking-wider text-fd-blue">
+      Staff entry
+    </span>
+  );
+}
 
 // Shop-local Central date+time; em-dash for an empty timestamp (matches the
 // prior local formatter's fallback rather than centralTime's default '-').
@@ -67,6 +84,7 @@ export default function VisitorLog() {
   const [deleteTarget, setDeleteTarget] = useState<VisitorLogResponse | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [stationsOpen, setStationsOpen] = useState(false);
+  const [addOpen, setAddOpen] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -191,9 +209,13 @@ export default function VisitorLog() {
         key: 'station_label',
         header: 'Station',
         sortable: true,
-        accessor: r => r.station_label ?? '',
-        render: r => r.station_label || <span className="text-fd-mute">Staff</span>,
-        csv: r => r.station_label ?? 'Staff',
+        accessor: r => r.station_label ?? (r.entered_by_user_id != null ? 'Staff entry' : ''),
+        render: r => {
+          if (r.station_label) return r.station_label;
+          if (r.entered_by_user_id != null) return <StaffEntryChip />;
+          return <span className="text-fd-mute">Staff</span>;
+        },
+        csv: r => r.station_label ?? (r.entered_by_user_id != null ? 'Staff entry' : 'Staff'),
       },
       {
         key: 'status',
@@ -254,10 +276,16 @@ export default function VisitorLog() {
           </p>
         </div>
         {canManage && (
-          <Button variant="secondary" size="sm" onClick={() => setStationsOpen(true)}>
-            <Cog6ToothIcon className="mr-1.5 inline h-4 w-4" aria-hidden="true" />
-            Stations
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button variant="secondary" size="sm" onClick={() => setStationsOpen(true)}>
+              <Cog6ToothIcon className="mr-1.5 inline h-4 w-4" aria-hidden="true" />
+              Stations
+            </Button>
+            <Button variant="primary" size="sm" onClick={() => setAddOpen(true)}>
+              <PlusIcon className="mr-1.5 inline h-4 w-4" aria-hidden="true" />
+              Add visit
+            </Button>
+          </div>
         )}
       </div>
 
@@ -330,7 +358,10 @@ export default function VisitorLog() {
           mobileCards={r => (
             <div className="rounded-sm border border-slate-700 bg-fd-panel p-4">
               <div className="flex items-center justify-between gap-2">
-                <span className="font-semibold text-fd-ink">{r.visitor_name}</span>
+                <span className="flex items-center gap-2">
+                  <span className="font-semibold text-fd-ink">{r.visitor_name}</span>
+                  {r.entered_by_user_id != null && <StaffEntryChip />}
+                </span>
                 <StatusBadge status={r.status} colorMap={VISITOR_STATUS_COLORS} />
               </div>
               <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-xs text-fd-body">
@@ -401,6 +432,11 @@ export default function VisitorLog() {
 
       {/* Station management */}
       {stationsOpen && canManage && <StationManagementModal onClose={() => setStationsOpen(false)} />}
+
+      {/* Staff back-entry (ADMIN/MANAGER) */}
+      {canManage && (
+        <VisitorManualEntryModal open={addOpen} onClose={() => setAddOpen(false)} onSaved={() => void load()} />
+      )}
     </div>
   );
 }

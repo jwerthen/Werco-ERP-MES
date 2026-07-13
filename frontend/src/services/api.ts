@@ -96,6 +96,7 @@ import {
   SigninStationResponse,
   VisitorLogListResponse,
   VisitorLogResponse,
+  VisitorManualEntryRequest,
 } from '../types/visitor';
 import {
   KioskStationCreate,
@@ -2145,6 +2146,14 @@ class ApiService {
 
   async signOutVisitor(visitorLogId: number): Promise<VisitorLogResponse> {
     const response = await this.api.post('/visitor-logs/sign-out', { visitor_log_id: visitorLogId });
+    return response.data;
+  }
+
+  // Staff back-entry of an offline visit (ADMIN/MANAGER). Server rejects future /
+  // out-of-order times with 422 — the interceptor normalizes that detail so the
+  // caller can surface it verbatim.
+  async addManualVisit(payload: VisitorManualEntryRequest): Promise<VisitorLogResponse> {
+    const response = await this.api.post('/visitor-logs/manual', payload);
     return response.data;
   }
 

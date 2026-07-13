@@ -74,5 +74,15 @@ class VisitorLog(Base, SoftDeleteMixin, TenantMixin):
     signin_station_id = Column(Integer, ForeignKey("signin_stations.id"), nullable=True)
     station_label = Column(String(100), nullable=True)  # denormalized actor label at sign-in
 
+    # Staff back-entry attribution — NULL for live station/tablet captures; set to
+    # the ADMIN/MANAGER who recorded an offline (paper-logged) visit after a
+    # lobby-tablet outage, with its ACTUAL times. Its presence is the positive
+    # "staff back-entry" flag: such a row never masquerades as a live lobby
+    # capture. Unlike a bare ``signin_station_id IS NULL`` (which also holds for a
+    # live staff sign-in via the tablet endpoint), this column distinguishes a
+    # back-dated entry from a live capture.
+    entered_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+
     host = relationship("User", foreign_keys=[host_user_id])
     station = relationship("SigninStation", foreign_keys=[signin_station_id])
+    entered_by = relationship("User", foreign_keys=[entered_by_user_id])

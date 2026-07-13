@@ -167,6 +167,105 @@ export const getCentralMinutesOfDay = (value: DateInput = new Date()): number =>
   return hour * 60 + minute;
 };
 
+const DATE_TIME_LOCAL_REGEX = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/;
+
+/**
+ * The Central-time UTC offset (in ms; negative — Central is behind UTC) that is
+ * in effect at a given UTC instant. Reads the zone's wall clock for the instant
+ * via Intl and diffs it against the instant, so DST (CST −6 / CDT −5) is handled
+ * by the platform rather than hard-coded.
+ */
+const getCentralOffsetMs = (utcMs: number): number => {
+  const parts = getFormatter({
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).formatToParts(new Date(utcMs));
+
+  const lookup = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  const asUtc = Date.UTC(
+    parseInt(lookup.year, 10),
+    parseInt(lookup.month, 10) - 1,
+    parseInt(lookup.day, 10),
+    // en-US with hour12:false can emit '24' for midnight — normalize to 0.
+    parseInt(lookup.hour, 10) % 24,
+    parseInt(lookup.minute, 10),
+    parseInt(lookup.second, 10)
+  );
+  return asUtc - utcMs;
+};
+
+/**
+ * Convert a naive shop-local (Central) wall-clock value from an
+ * `<input type="datetime-local">` ("YYYY-MM-DDTHH:mm", no zone) into a UTC
+ * ISO-8601 string with a trailing 'Z', ready to send to the API.
+ *
+ * A datetime-local input is timezone-agnostic; the shop operates in Central, so
+ * the entered wall clock is interpreted as America/Chicago and resolved to the
+ * correct UTC instant — honoring whichever offset (CST −6 / CDT −5) applies on
+ * that date, regardless of the viewer's browser timezone. Returns null for an
+ * empty or unparseable input.
+ */
+export const centralWallClockToUtcISO = (value: string | null | undefined): string | null => {
+  if (!value) {
+    return null;
+  }
+  const match = DATE_TIME_LOCAL_REGEX.exec(value.trim());
+  if (!match) {
+    return null;
+  }
+  const [, year, month, day, hour, minute, second] = match;
+
+  // Treat the wall clock as if it were UTC to get a first-guess instant, then
+  // subtract the Central offset in effect at that instant. One correction pass
+  // handles the rare case where the guess and the true instant straddle a DST
+  // transition and would otherwise resolve different offsets.
+  const wallAsUtcMs = Date.UTC(
+    parseInt(year, 10),
+    parseInt(month, 10) - 1,
+    parseInt(day, 10),
+    parseInt(hour, 10),
+    parseInt(minute, 10),
+    second ? parseInt(second, 10) : 0
+  );
+  if (Number.isNaN(wallAsUtcMs)) {
+    return null;
+  }
+  let instant = wallAsUtcMs - getCentralOffsetMs(wallAsUtcMs);
+  instant = wallAsUtcMs - getCentralOffsetMs(instant);
+
+  const result = new Date(instant);
+  return Number.isNaN(result.getTime()) ? null : result.toISOString();
+};
+
+/**
+ * The current shop-local (Central) wall clock as a "YYYY-MM-DDTHH:mm" string,
+ * for seeding or bounding an `<input type="datetime-local">` (e.g. its `max`).
+ * Reflects Central regardless of the viewer's browser timezone.
+ */
+export const getCentralNowDateTimeLocal = (value: DateInput = new Date()): string => {
+  const date = toDate(value);
+  if (!date) {
+    return '';
+  }
+  const parts = getFormatter({
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(date);
+
+  const lookup = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  const hour = String(parseInt(lookup.hour, 10) % 24).padStart(2, '0');
+  return `${lookup.year}-${lookup.month}-${lookup.day}T${hour}:${lookup.minute}`;
+};
+
 export const getCentralDateStamp = (value: DateInput = new Date()) => getNormalizedDateStamp(value);
 
 export const getCentralTodayISODate = () => getCentralDateStamp(new Date());

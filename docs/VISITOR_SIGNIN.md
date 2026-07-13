@@ -153,10 +153,49 @@ are CUI).
 | Purpose | **Yes** | one of `meeting` · `delivery` · `contractor` · `interview` · `audit` · `other` |
 | Purpose note | **When `other`** | server- and client-validated as required when purpose is `other` |
 | Safety/NDA acknowledgment | **Yes** | must be `true` to sign in (server-validated) |
-| Time in / time out | auto | `signed_in_at` set on sign-in; `signed_out_at` set on sign-out (NULL = still on-site) |
+| Time in / time out | auto | `signed_in_at` set on sign-in; `signed_out_at` set on sign-out (NULL = still on-site). On a **staff back-entry** these are the operator-supplied *actual* past times (see below) |
 | Station | auto | `station_label` denormalized at sign-in (the audit actor); `signin_station_id` NULL if staff-created |
+| Entered by | auto | `entered_by_user_id` set (non-NULL) **only** on a staff **back-entry** (`/manual`), naming the ADMIN/MANAGER who recorded it; NULL for every live tablet or staff capture (see *Staff back-entry* below) |
 
 No drawn signature, no photo, no citizenship/escort fields are captured.
+
+## Staff back-entry — the "Add visit" flow
+
+When the lobby tablet is unavailable (offline, powered down, or not yet set up), reception falls back
+to a **paper log**. Once things are back to normal, an ADMIN/MANAGER **back-enters** those visits from
+the admin page so the electronic record is complete for audit — recorded with the visit's **actual**
+past times, not the wall-clock at data-entry. This is the offline-recovery path for the tablet.
+
+- **Trigger.** An **"Add visit"** button (ADMIN/MANAGER only) in the Visitor Log page header — next to
+  **Stations** — opens the `VisitorManualEntryModal`.
+- **Endpoint & role gate.** `POST /visitor-logs/manual`, gated `require_role([ADMIN, MANAGER])` with
+  the company from `get_current_company_id`. Unlike `/sign-in` and `/sign-out` (which flow through
+  `get_signin_principal` and accept the station token *or* any staff user), this endpoint takes a
+  **staff access token only — the PIN-minted station token is rejected** (a `type="signin"` token is
+  401 everywhere except the two tablet writes). Supervisors can view the log but cannot back-enter.
+- **Actual times, past-only.** The request is the sign-in body (`VisitorManualEntryRequest` extends
+  `VisitorSignInRequest`) **plus two timestamps**: **`signed_in_at` (required)** and **`signed_out_at`
+  (optional)**. Both are server-validated to be **in the past**, and when `signed_out_at` is given it
+  must be **on or after** `signed_in_at`. `signed_out_at` omitted → the visitor is still on-site
+  (**SIGNED_IN**); given → the visit is closed (**SIGNED_OUT**). Future or out-of-order times are
+  **422**. Times arrive UTC and are stored as naive UTC (the modal collects shop-local Central via a
+  `datetime-local` picker and converts on submit). The same visitor-field rules as the tablet still
+  apply (`visitor_name` required, `purpose_note` required when purpose is `other`, `safety_acknowledged`
+  must be `true`).
+- **`entered_by_user_id` staff-entry marker.** A back-entered row leaves `signin_station_id` /
+  `station_label` **NULL** and sets **`entered_by_user_id`** to the creating staff member (migration
+  `064`, nullable FK to `users.id`). Its presence is the positive "staff back-entry" flag, and it is
+  what cleanly separates the three capture paths — a bare `signin_station_id IS NULL` would *not*:
+  - **live station capture** — `signin_station_id` set, `entered_by_user_id` NULL;
+  - **live staff sign-in** (a staff user hitting `/sign-in`) — **both** NULL;
+  - **staff back-entry** (`/manual`) — `signin_station_id` NULL, `entered_by_user_id` set.
+  The Visitor Log badges back-entered rows with a **"Staff entry"** chip.
+- **No host email.** Unlike a live sign-in, a back-entry sends **no** host check-in notification — the
+  visit already happened, so a "visitor arrived" email would be misleading. (The host is still
+  best-effort matched to link `host_user_id`; only the email is suppressed.)
+- **Audited.** The create is recorded through `AuditService.log_create` (`"Visitor visit back-entered
+  by staff: <name>"`), attributed to the acting staff user — the same tamper-evident chain as every
+  other visitor state change, committed atomically with the row.
 
 ## Admin Visitor Log page (`/visitor-log`)
 
@@ -172,7 +211,13 @@ the **normal `api` client**, not the tablet's `signinClient`.
   (`Z`) and render in shop-local **Central** time via `utils/centralTime.ts` (`formatCentralDateTime`),
   the same as the sign-out disambiguation picker on the tablet — not the viewer's browser timezone.
 - **CSV export.** Built into the DataTable; the server also exposes `GET /visitor-logs/export.csv`
-  (ADMIN/MANAGER), which **audits an `EXPORT` action**.
+  (ADMIN/MANAGER), which **audits an `EXPORT` action**. The export carries an **`entry_type`** column so
+  a reviewer can distinguish provenance: `station` (lobby tablet capture), `staff_back_entry` (an offline
+  visit back-entered by staff via **Add visit**), or `staff_live` (a live staff-token sign-in).
+- **Add visit (staff back-entry).** ADMIN/MANAGER get an **"Add visit"** button (in the page header,
+  beside **Stations**) that opens a modal to back-enter an offline visit with its real past times —
+  see *Staff back-entry* above (`POST /visitor-logs/manual`). Back-entered rows show a **"Staff
+  entry"** chip in the Station column.
 - **Staff sign-out.** ADMIN/MANAGER can sign out an on-site visitor directly from a row (`POST
   /sign-out` with `{visitor_log_id}`).
 - **Soft-delete.** ADMIN/MANAGER can remove a row via a `<Modal>` confirm — the record is
@@ -187,7 +232,8 @@ the **normal `api` client**, not the tablet's `signinClient`.
   company-scoped only.
 - **Full audit trail.** Every state change is recorded through `AuditService` (after the
   PK-assigning flush, before the terminal commit, so the row and its tamper-evident audit entry
-  commit atomically): sign-in → `log_create`, sign-out → `log_status_change`, delete → `log_delete`,
+  commit atomically): sign-in → `log_create`, staff back-entry (`/manual`) → `log_create`, sign-out →
+  `log_status_change`, delete → `log_delete`,
   CSV → an explicit `EXPORT` action, station create → `log_create`, revoke → `log_status_change`,
   reset-PIN → `log_update`, and a **failed PIN attempt** → a `LOGIN_FAILED` operational event. On the
   station path the audit row is written with `user=None` + the explicit `company_id`, and the
@@ -195,8 +241,10 @@ the **normal `api` client**, not the tablet's `signinClient`.
 - **Soft-delete only** on VisitorLog (the attendance record survives for audit). Stations use the
   `revoked` flag, never a row delete, so the issuance trail survives.
 - **RBAC, server-side and fail-closed.** Viewing the log is SUPERVISOR+ (`require_role`); export,
-  delete, and all station administration are ADMIN/MANAGER; the two visitor writes accept a station
-  token *or* any authenticated user. The frontend's `PermissionGate` / route gating is UX only.
+  delete, **staff back-entry (`/manual`)**, and all station administration are ADMIN/MANAGER; the two
+  visitor writes (`/sign-in`, `/sign-out`) accept a station token *or* any authenticated user, while
+  `/manual` takes a staff access token only (the station token is rejected). The frontend's
+  `PermissionGate` / route gating is UX only.
 - **No new unauthenticated write surface** beyond the PIN-gated `station-login` → scoped-token path.
   `verify_token` still fences `type != "access"` everywhere else.
 

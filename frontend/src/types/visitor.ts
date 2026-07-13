@@ -31,6 +31,12 @@ export interface VisitorLogResponse {
   signed_out_at: string | null;
   signin_station_id: number | null;
   station_label: string | null;
+  /**
+   * Non-null iff this row was back-entered by staff after the fact (via the
+   * admin "Add visit" flow), rather than captured live at the lobby tablet.
+   * Lets the log badge staff-entered rows.
+   */
+  entered_by_user_id: number | null;
 }
 
 export interface VisitorLogListResponse {
@@ -49,6 +55,26 @@ export interface VisitorSignInRequest {
   purpose_note?: string | null;
   /** The safety/NDA acknowledgment checkbox — must be true to submit. */
   safety_acknowledged: boolean;
+}
+
+/**
+ * Body for POST /manual — staff back-entry of an offline visit with its ACTUAL
+ * past times (ADMIN/MANAGER; NOT the station token). Times are UTC ISO-8601 with
+ * a trailing 'Z'. Server enforces: signed_in_at required + in the past;
+ * signed_out_at (if given) on/after signed_in_at + in the past; purpose_note
+ * required when purpose === 'other'; safety_acknowledged must be true.
+ */
+export interface VisitorManualEntryRequest {
+  visitor_name: string;
+  visitor_company?: string | null;
+  host_name?: string | null;
+  purpose: VisitorPurpose;
+  purpose_note?: string | null;
+  safety_acknowledged: boolean;
+  /** Actual sign-in time (UTC ISO 'Z', must be in the past). */
+  signed_in_at: string;
+  /** Actual sign-out time (UTC ISO 'Z'); omit if still on-site. */
+  signed_out_at?: string | null;
 }
 
 /**

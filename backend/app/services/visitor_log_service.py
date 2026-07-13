@@ -21,7 +21,7 @@ from app.core.time_utils import to_utc_iso
 from app.models.notification import NotificationPreference
 from app.models.user import User
 from app.models.visitor_log import VisitorLog, VisitorStatus
-from app.schemas.visitor_log import VisitorSignInRequest
+from app.schemas.visitor_log import VisitorManualEntryRequest, VisitorSignInRequest
 from app.services.audit_service import AuditService
 from app.services.notification_service import NotificationEvent
 
@@ -120,6 +120,63 @@ def sign_in(
     if host:
         _notify_host_best_effort(db, host=host, row=row)
 
+    return row
+
+
+def manual_entry(
+    db: Session,
+    *,
+    company_id: int,
+    payload: VisitorManualEntryRequest,
+    entered_by_user_id: int,
+    audit: AuditService,
+) -> VisitorLog:
+    """Staff back-entry of an offline visit with its ACTUAL times (tenant-scoped, audited).
+
+    Unlike ``sign_in`` — which stamps ``signed_in_at = utcnow()`` from a live
+    tablet/station — this records the real, past sign-in/out times an
+    ADMIN/MANAGER supplies for a paper-logged visit after a lobby-tablet outage.
+    The row is positively marked staff-entered: ``signin_station_id`` /
+    ``station_label`` stay NULL and ``entered_by_user_id`` attributes the
+    creating staff member, so it never masquerades as a live lobby capture. A
+    supplied ``signed_out_at`` closes the visit (status SIGNED_OUT); otherwise the
+    visitor is still on-site (SIGNED_IN).
+
+    No host check-in email is sent: the visit already happened, so a live
+    "visitor arrived" notification would be misleading (contrast ``sign_in``).
+    """
+    host = _match_host_user(db, company_id=company_id, host_name=payload.host_name)
+
+    closed = payload.signed_out_at is not None
+    row = VisitorLog(
+        company_id=company_id,
+        visitor_name=payload.visitor_name,
+        visitor_company=payload.visitor_company,
+        visitor_phone=payload.visitor_phone,
+        host_name=payload.host_name,
+        host_user_id=host.id if host else None,
+        purpose=payload.purpose,
+        purpose_note=payload.purpose_note,
+        safety_acknowledged=payload.safety_acknowledged,
+        status=VisitorStatus.SIGNED_OUT if closed else VisitorStatus.SIGNED_IN,
+        signed_in_at=payload.signed_in_at,
+        signed_out_at=payload.signed_out_at,
+        signin_station_id=None,  # staff back-entry — never a station capture
+        station_label=None,
+        entered_by_user_id=entered_by_user_id,
+    )
+    db.add(row)
+    db.flush()  # assign PK so the audit row carries resource_id
+
+    audit.log_create(
+        resource_type="visitor_log",
+        resource_id=row.id,
+        resource_identifier=row.visitor_name,
+        new_values=row,
+        description=f"Visitor visit back-entered by staff: {row.visitor_name}",
+    )
+    db.commit()
+    db.refresh(row)
     return row
 
 

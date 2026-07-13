@@ -2160,6 +2160,7 @@ See [docs/VISITOR_SIGNIN.md](VISITOR_SIGNIN.md).
 | POST | `/visitor-logs/station-login` | Unlock a tablet with the shared station PIN. Body `{"station_id", "pin"}` (PIN 4–8 digits) → `{"token", "station_label", "expires_in"}` (24 h scoped `type="signin"` JWT, returned once). Bad/revoked station or wrong PIN → **401** (indistinguishable; failed attempt audited) | **Public** (PIN-gated)¹ |
 | POST | `/visitor-logs/sign-in` | Record a visitor sign-in → **201** `VisitorLogResponse`. Best-effort host email on a matched internal host | Station token **or** any authenticated user |
 | POST | `/visitor-logs/sign-out` | Sign out an open visit by `{"visitor_log_id"}` or `{"name"}` → `VisitorLogResponse`. Name with >1 open match → **409** disambiguation; no open match → **404** | Station token **or** any authenticated user |
+| POST | `/visitor-logs/manual` | **Staff back-entry** of an offline visit with its ACTUAL past times → **201** `VisitorLogResponse`. Marks the row staff-entered (`signin_station_id` NULL + `entered_by_user_id` set); sends **no** host email. Body = sign-in body + `signed_in_at` (required, past) + `signed_out_at` (optional, ≥ `signed_in_at`, past) | Admin / Manager (staff token only — station token **rejected**) |
 | GET | `/visitor-logs/` | List visitor records for the active company (filters + offset paging) → `{"items", "total"}` | Admin / Manager / Supervisor |
 | GET | `/visitor-logs/export.csv` | Stream the visitor log as CSV (audits an `EXPORT` action) | Admin / Manager |
 | DELETE | `/visitor-logs/{id}` | Soft-delete a visitor record → **204** | Admin / Manager |
@@ -2195,6 +2196,31 @@ overrides `status`), `skip` (default 0), `limit` (default 50, **max 200**). Newe
 - `purpose_note` is **required when `purpose == "other"`** (server-validated); `safety_acknowledged`
   **must be `true`** to sign in. `visitor_company` / `visitor_phone` / `host_name` are optional.
 
+#### Staff back-entry request (`POST /visitor-logs/manual`)
+
+```json
+{
+  "visitor_name": "Jane Smith",
+  "visitor_company": "Acme Corp",
+  "host_name": "John Doe",
+  "purpose": "meeting",
+  "purpose_note": null,
+  "safety_acknowledged": true,
+  "signed_in_at": "2026-07-11T14:05:00Z",
+  "signed_out_at": "2026-07-11T15:30:00Z"
+}
+```
+
+`VisitorManualEntryRequest` extends the sign-in body, so all the same visitor-field rules apply
+(`visitor_name` required; `purpose_note` required when `purpose == "other"`; `safety_acknowledged`
+must be `true`; `visitor_company` / `visitor_phone` / `host_name` optional). It adds the visit's
+**actual** times: **`signed_in_at` is required and must be in the past**; **`signed_out_at` is
+optional** and, when given, must be **on or after `signed_in_at` and in the past** (omit it if the
+visitor is still on-site → `SIGNED_IN`; give it to close the visit → `SIGNED_OUT`). Future or
+out-of-order times return **422**. The created row is marked staff-entered — `signin_station_id` /
+`station_label` stay `null` and `entered_by_user_id` is set to the acting staff user — and **no host
+check-in email is sent** (the visit already happened). The create is audited.
+
 #### Visitor log schema (`VisitorLogResponse`)
 
 ```json
@@ -2212,13 +2238,17 @@ overrides `status`), `skip` (default 0), `limit` (default 50, **max 200**). Newe
   "signed_in_at": "2026-06-30T14:05:00Z",
   "signed_out_at": null,
   "signin_station_id": 1,
-  "station_label": "Lobby Tablet"
+  "station_label": "Lobby Tablet",
+  "entered_by_user_id": null
 }
 ```
 
 `signed_out_at: null` means the visitor is **still on-site**. `signin_station_id` / `station_label`
-are `null` for a staff-created row. `host_user_id` is set only when the typed host best-effort-matched
-exactly one active internal user in the company.
+are `null` for a staff-created row. **`entered_by_user_id`** is non-null **only** on a staff
+**back-entry** (`POST /visitor-logs/manual`) and names the staff user who recorded it — it stays
+`null` for every live tablet or staff sign-in, so it positively distinguishes a back-dated row from a
+live capture. `host_user_id` is set only when the typed host best-effort-matched exactly one active
+internal user in the company.
 
 #### Sign-out 409 disambiguation
 
