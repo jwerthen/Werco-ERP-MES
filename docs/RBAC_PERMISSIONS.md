@@ -397,14 +397,18 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 >   be made by a different Admin.
 >
 > Every user mutation — create, update (including any role change), approve, password-reset,
-> deactivate, and activate — is recorded in the tamper-evident audit log.
+> deactivate, and activate — is recorded in the tamper-evident audit log; the self-service
+> `POST /users/change-password` likewise records a `PASSWORD_CHANGE` audit event (mirroring
+> `reset-password`; the password/hash is never included).
 >
 > **Password-strength policy.** A password set on any of these paths — `POST /users/` (create),
 > `POST /users/{id}/reset-password`, and self-service `POST /users/change-password` — must satisfy
 > the server-side strength policy (≥ 12 chars; uppercase, lowercase, number, and special char; no
-> common weak substring), the **same policy** as `POST /auth/register`. The user CSV import applies
-> it per row to user-supplied passwords; operator auto-generated (badge) passwords are exempt. See
-> `docs/API.md` → Users.
+> common weak substring), the **same policy** as `POST /auth/register`. The same policy also governs
+> the **first-admin `admin_password`** on the two company-creation paths — the unauthenticated
+> `POST /companies/register` (company self-registration) and platform-admin `POST /platform/companies`.
+> The user CSV import applies it per row to user-supplied passwords; operator auto-generated (badge)
+> passwords are exempt. See `docs/API.md` → Users.
 >
 > **Badge printing (A0.4).** The badge print sheet `/print/badges` (opened from the Users page via
 > multi-select → "Print Badges") is **frontend-gated by `canManageUsers`** (=
