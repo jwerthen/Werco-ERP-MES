@@ -31,9 +31,19 @@ and the build spec:
 6. **RBAC (fail-closed)** — view roles vs manage roles enforced server-side;
    export writes an EXPORT audit; soft-delete drops the row from later lists;
    revoke is idempotent; reset-pin re-hashes (old PIN dies, new PIN works).
+7. **Staff back-entry (``POST /manual``)** — an ADMIN/MANAGER records an offline
+   (paper-logged) visit with its ACTUAL past times. It is staff-only RBAC (the
+   station ``signin`` token is REJECTED — the exact opposite fence from /sign-in
+   and /sign-out), validates the supplied times server-side, marks the row
+   staff-entered (``signin_station_id`` NULL + ``entered_by_user_id`` set),
+   stores the SUPPLIED times (never ``utcnow()``), emits a committed ``CREATE``
+   audit row, scopes to the caller's active company, and — unlike /sign-in —
+   sends NO host check-in email (the visit already happened).
 
 The multi-company fixture shape mirrors tests/api/test_qms_standards_tenant_isolation.py.
 """
+
+from datetime import datetime, timedelta
 
 import pytest
 from fastapi import status
@@ -158,6 +168,9 @@ def _make_visitor(
     status_: VisitorStatus = VisitorStatus.SIGNED_IN,
     visitor_company: str = None,
     is_deleted: bool = False,
+    signin_station_id: int = None,
+    station_label: str = None,
+    entered_by_user_id: int = None,
 ) -> VisitorLog:
     from datetime import datetime
 
@@ -172,6 +185,9 @@ def _make_visitor(
         status=status_,
         signed_in_at=datetime.utcnow(),
         is_deleted=is_deleted,
+        signin_station_id=signin_station_id,
+        station_label=station_label,
+        entered_by_user_id=entered_by_user_id,
     )
     db.add(row)
     db.commit()
@@ -923,6 +939,36 @@ def test_export_writes_audit_export_action(client: TestClient, db_session: Sessi
     assert len(exports) >= 1, "expected an EXPORT audit row"
 
 
+def test_export_entry_type_column_marks_staff_back_entry(client: TestClient, db_session: Session):
+    """The CSV export's entry_type column positively distinguishes a staff back-entry
+    from a station capture so an auditor reading the export can tell them apart."""
+    import csv as _csv
+    import io as _io
+
+    admin = _make_user(db_session, company_id=COMPANY_A, role=UserRole.ADMIN)
+    # A station-captured visit (signin_station_id set) vs a staff back-entry (entered_by set).
+    _make_visitor(
+        db_session,
+        company_id=COMPANY_A,
+        visitor_name="Station Visitor",
+        signin_station_id=999,
+        station_label="Lobby Tablet",
+    )
+    _make_visitor(
+        db_session,
+        company_id=COMPANY_A,
+        visitor_name="Back Entered Visitor",
+        entered_by_user_id=admin.id,
+    )
+
+    resp = client.get("/api/v1/visitor-logs/export.csv", headers=_headers_for(admin))
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    rows = {r["visitor_name"]: r for r in _csv.DictReader(_io.StringIO(resp.text))}
+    assert "entry_type" in rows["Station Visitor"], "export must carry an entry_type column"
+    assert rows["Station Visitor"]["entry_type"] == "station"
+    assert rows["Back Entered Visitor"]["entry_type"] == "staff_back_entry"
+
+
 def test_soft_delete_drops_row_from_list(client: TestClient, db_session: Session):
     """Soft-delete sets is_deleted and the row drops out of subsequent lists
     (no physical delete)."""
@@ -1008,3 +1054,282 @@ def test_create_station_does_not_echo_pin(client: TestClient, db_session: Sessio
     row = db_session.query(SigninStation).filter(SigninStation.id == body["id"]).first()
     assert row.company_id == COMPANY_A
     assert row.pin_hash and row.pin_hash != "4321"
+
+
+# ===========================================================================
+# 7. Staff back-entry — POST /manual (staff-only, ACTUAL past times)
+# ===========================================================================
+
+
+def _valid_manual_payload(**overrides) -> dict:
+    """A valid back-entry body: a paper-logged visit 3h ago, still on-site.
+
+    ``signed_in_at`` is a genuinely-past ISO timestamp (schema requires it be in
+    the past); tests override it to exercise the validation branches.
+    """
+    signed_in = (datetime.utcnow() - timedelta(hours=3)).replace(microsecond=0)
+    payload = {
+        "visitor_name": "Paper Logged",
+        "visitor_company": "Offline Co",
+        "visitor_phone": None,
+        "host_name": None,
+        "purpose": "meeting",
+        "purpose_note": None,
+        "safety_acknowledged": True,
+        "signed_in_at": signed_in.isoformat(),
+    }
+    payload.update(overrides)
+    return payload
+
+
+# --- 7a. RBAC: staff-only; station token rejected -------------------------
+
+
+@pytest.mark.parametrize("role", [UserRole.ADMIN, UserRole.MANAGER])
+def test_manual_entry_allowed_for_manage_roles(client: TestClient, db_session: Session, role):
+    """ADMIN and MANAGER can back-enter an offline visit."""
+    user = _make_user(db_session, company_id=COMPANY_A, role=role)
+    resp = client.post(
+        "/api/v1/visitor-logs/manual",
+        headers=_headers_for(user),
+        json=_valid_manual_payload(),
+    )
+    assert resp.status_code == status.HTTP_201_CREATED, resp.text
+
+
+@pytest.mark.parametrize("role", [UserRole.SUPERVISOR, UserRole.OPERATOR, UserRole.QUALITY, UserRole.VIEWER])
+def test_manual_entry_denied_for_lower_roles(client: TestClient, db_session: Session, role):
+    """Back-entry is ADMIN/MANAGER only — a SUPERVISOR (a VIEW role) and every
+    role below it is 403 (fail-closed). SUPERVISOR can *view* the log but must
+    NOT be able to inject back-dated attendance records."""
+    user = _make_user(db_session, company_id=COMPANY_A, role=role)
+    resp = client.post(
+        "/api/v1/visitor-logs/manual",
+        headers=_headers_for(user),
+        json=_valid_manual_payload(),
+    )
+    assert resp.status_code == status.HTTP_403_FORBIDDEN, resp.text
+
+
+def test_manual_entry_rejects_station_signin_token(client: TestClient, db_session: Session):
+    """THE FENCE (inverse of /sign-in): a station ``signin`` token must NOT reach
+    the staff back-entry endpoint. Unlike /sign-in and /sign-out (which accept a
+    station token via ``get_signin_principal``), /manual flows through the normal
+    ``get_current_user`` → ``require_role`` chain, so a type=='signin' token
+    fails the type=='access' fence and is rejected (never a 201 that would let an
+    unattended tablet forge back-dated visits)."""
+    station = _make_station(db_session, company_id=COMPANY_A)
+    token = _signin_token_for(station)
+
+    resp = client.post(
+        "/api/v1/visitor-logs/manual",
+        headers=_station_headers(token),
+        json=_valid_manual_payload(),
+    )
+    assert resp.status_code in (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN), resp.text
+    # And nothing was written.
+    assert db_session.query(VisitorLog).filter(VisitorLog.visitor_name == "Paper Logged").count() == 0
+
+
+# --- 7b. Validation → 422 --------------------------------------------------
+
+
+def test_manual_entry_future_signed_in_at_is_422(client: TestClient, db_session: Session):
+    """A ``signed_in_at`` in the future is rejected (the visit must have happened)."""
+    admin = _make_user(db_session, company_id=COMPANY_A, role=UserRole.ADMIN)
+    future = (datetime.utcnow() + timedelta(hours=2)).replace(microsecond=0)
+    resp = client.post(
+        "/api/v1/visitor-logs/manual",
+        headers=_headers_for(admin),
+        json=_valid_manual_payload(signed_in_at=future.isoformat()),
+    )
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+
+
+def test_manual_entry_signed_out_before_signed_in_is_422(client: TestClient, db_session: Session):
+    """``signed_out_at`` earlier than ``signed_in_at`` is rejected."""
+    admin = _make_user(db_session, company_id=COMPANY_A, role=UserRole.ADMIN)
+    signed_in = (datetime.utcnow() - timedelta(hours=2)).replace(microsecond=0)
+    signed_out = (datetime.utcnow() - timedelta(hours=3)).replace(microsecond=0)  # before sign-in
+    resp = client.post(
+        "/api/v1/visitor-logs/manual",
+        headers=_headers_for(admin),
+        json=_valid_manual_payload(signed_in_at=signed_in.isoformat(), signed_out_at=signed_out.isoformat()),
+    )
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+
+
+def test_manual_entry_future_signed_out_at_is_422(client: TestClient, db_session: Session):
+    """A ``signed_out_at`` in the future is rejected even when sign-in is past."""
+    admin = _make_user(db_session, company_id=COMPANY_A, role=UserRole.ADMIN)
+    signed_in = (datetime.utcnow() - timedelta(hours=2)).replace(microsecond=0)
+    signed_out = (datetime.utcnow() + timedelta(hours=1)).replace(microsecond=0)  # future
+    resp = client.post(
+        "/api/v1/visitor-logs/manual",
+        headers=_headers_for(admin),
+        json=_valid_manual_payload(signed_in_at=signed_in.isoformat(), signed_out_at=signed_out.isoformat()),
+    )
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+
+
+def test_manual_entry_purpose_other_requires_note(client: TestClient, db_session: Session):
+    """purpose=OTHER without a note is rejected (inherited from VisitorSignInRequest)."""
+    admin = _make_user(db_session, company_id=COMPANY_A, role=UserRole.ADMIN)
+    resp = client.post(
+        "/api/v1/visitor-logs/manual",
+        headers=_headers_for(admin),
+        json=_valid_manual_payload(purpose="other", purpose_note=None),
+    )
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+
+
+def test_manual_entry_requires_safety_acknowledgment(client: TestClient, db_session: Session):
+    """safety_acknowledged=false is rejected (must be acknowledged)."""
+    admin = _make_user(db_session, company_id=COMPANY_A, role=UserRole.ADMIN)
+    resp = client.post(
+        "/api/v1/visitor-logs/manual",
+        headers=_headers_for(admin),
+        json=_valid_manual_payload(safety_acknowledged=False),
+    )
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+
+
+def test_manual_entry_missing_signed_in_at_is_422(client: TestClient, db_session: Session):
+    """``signed_in_at`` is REQUIRED (unlike /sign-in, which stamps utcnow())."""
+    admin = _make_user(db_session, company_id=COMPANY_A, role=UserRole.ADMIN)
+    payload = _valid_manual_payload()
+    payload.pop("signed_in_at")
+    resp = client.post(
+        "/api/v1/visitor-logs/manual",
+        headers=_headers_for(admin),
+        json=payload,
+    )
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+
+
+# --- 7c. Success: staff-entered, supplied times, audited, no email ---------
+
+
+def test_manual_entry_signed_out_row_uses_supplied_times_and_is_audited(client: TestClient, db_session: Session):
+    """A back-entry WITH a sign-out time creates a SIGNED_OUT row that is:
+    - attributed to the caller (``entered_by_user_id``),
+    - positively marked staff-entered (``signin_station_id`` / ``station_label`` NULL),
+    - stamped with the SUPPLIED past times (NOT ``utcnow()``),
+    and writes a committed CREATE audit row."""
+    admin = _make_user(db_session, company_id=COMPANY_A, role=UserRole.ADMIN)
+    signed_in = (datetime.utcnow() - timedelta(hours=4)).replace(microsecond=0)
+    signed_out = (datetime.utcnow() - timedelta(hours=1)).replace(microsecond=0)
+
+    resp = client.post(
+        "/api/v1/visitor-logs/manual",
+        headers=_headers_for(admin),
+        json=_valid_manual_payload(
+            visitor_name="Backdated Visitor",
+            signed_in_at=signed_in.isoformat(),
+            signed_out_at=signed_out.isoformat(),
+        ),
+    )
+    assert resp.status_code == status.HTTP_201_CREATED, resp.text
+    body = resp.json()
+    new_id = body["id"]
+    assert body["status"] == VisitorStatus.SIGNED_OUT.value
+    # The response exposes the staff-entry attribution.
+    assert body["entered_by_user_id"] == admin.id
+    assert body["signin_station_id"] is None
+    assert body["station_label"] is None
+
+    row = db_session.query(VisitorLog).filter(VisitorLog.id == new_id).first()
+    assert row is not None
+    assert row.company_id == COMPANY_A
+    assert row.status == VisitorStatus.SIGNED_OUT
+    assert row.entered_by_user_id == admin.id
+    assert row.signin_station_id is None
+    assert row.station_label is None
+    # SUPPLIED times persisted, not utcnow(): within a couple seconds of the
+    # values we sent, and clearly hours in the past (never "now").
+    assert abs((row.signed_in_at - signed_in).total_seconds()) < 2
+    assert abs((row.signed_out_at - signed_out).total_seconds()) < 2
+    assert (datetime.utcnow() - row.signed_in_at) > timedelta(hours=3)
+
+    # Committed, tenant-attributed CREATE audit row for the back-entry.
+    db_session.expire_all()
+    creates = _audit_rows(db_session, action="CREATE", company_id=COMPANY_A)
+    assert any(r.resource_id == new_id for r in creates), "expected a committed CREATE audit row for the back-entry"
+
+
+def test_manual_entry_without_sign_out_is_signed_in(client: TestClient, db_session: Session):
+    """A back-entry with NO sign-out time records a still-on-site (SIGNED_IN) visit."""
+    admin = _make_user(db_session, company_id=COMPANY_A, role=UserRole.ADMIN)
+    resp = client.post(
+        "/api/v1/visitor-logs/manual",
+        headers=_headers_for(admin),
+        json=_valid_manual_payload(visitor_name="Still Onsite"),  # no signed_out_at
+    )
+    assert resp.status_code == status.HTTP_201_CREATED, resp.text
+    body = resp.json()
+    assert body["status"] == VisitorStatus.SIGNED_IN.value
+    assert body["signed_out_at"] is None
+    row = db_session.query(VisitorLog).filter(VisitorLog.id == body["id"]).first()
+    assert row.status == VisitorStatus.SIGNED_IN
+    assert row.signed_out_at is None
+    assert row.entered_by_user_id == admin.id
+
+
+def test_manual_entry_sends_no_host_check_in_email(client: TestClient, db_session: Session, monkeypatch):
+    """Unlike /sign-in, a back-entry NEVER enqueues a "visitor arrived" email —
+    the visit already happened, so a live check-in notification would be
+    misleading. Proven by matching a real host (so the host-match path runs) yet
+    asserting the best-effort email enqueue is never called."""
+    import app.services.visitor_log_service as svc
+
+    calls = []
+    monkeypatch.setattr(svc, "enqueue_job_best_effort", lambda *a, **k: calls.append((a, k)))
+
+    host = _make_user(
+        db_session,
+        company_id=COMPANY_A,
+        role=UserRole.MANAGER,
+        first_name="Dana",
+        last_name="Host",
+        email="dana.host@co1.test",
+    )
+    admin = _make_user(db_session, company_id=COMPANY_A, role=UserRole.ADMIN)
+
+    resp = client.post(
+        "/api/v1/visitor-logs/manual",
+        headers=_headers_for(admin),
+        json=_valid_manual_payload(host_name="dana host"),  # case-insensitive host match
+    )
+    assert resp.status_code == status.HTTP_201_CREATED, resp.text
+    row = db_session.query(VisitorLog).filter(VisitorLog.id == resp.json()["id"]).first()
+    # The host WAS matched (so the /sign-in path would have emailed) ...
+    assert row.host_user_id == host.id
+    # ... but the back-entry enqueued NOTHING.
+    assert calls == [], f"back-entry must not enqueue a host email, got {calls}"
+
+
+# --- 7d. Tenant scope ------------------------------------------------------
+
+
+def test_manual_entry_scoped_to_callers_active_company(client: TestClient, db_session: Session):
+    """A back-entry is written to the caller's active company only — it can never
+    land in another tenant. A company-A admin's entry is company A, and does not
+    appear in company B's list."""
+    admin_a = _make_user(db_session, company_id=COMPANY_A, role=UserRole.ADMIN)
+    admin_b = _make_user(db_session, company_id=COMPANY_B, role=UserRole.ADMIN)
+
+    resp = client.post(
+        "/api/v1/visitor-logs/manual",
+        headers=_headers_for(admin_a),
+        json=_valid_manual_payload(visitor_name="Company A Only"),
+    )
+    assert resp.status_code == status.HTTP_201_CREATED, resp.text
+    new_id = resp.json()["id"]
+
+    row = db_session.query(VisitorLog).filter(VisitorLog.id == new_id).first()
+    assert row.company_id == COMPANY_A
+
+    # Company B never sees it.
+    list_b = client.get("/api/v1/visitor-logs/", headers=_headers_for(admin_b))
+    assert list_b.status_code == status.HTTP_200_OK, list_b.text
+    assert new_id not in {r["id"] for r in list_b.json()["items"]}

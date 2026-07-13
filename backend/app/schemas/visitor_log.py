@@ -9,6 +9,7 @@ from typing import List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.core.time_utils import ensure_utc
 from app.models.visitor_log import VisitorPurpose, VisitorStatus
 from app.schemas.base import UTCModel
 
@@ -51,6 +52,47 @@ class VisitorSignInRequest(BaseModel):
         return self
 
 
+class VisitorManualEntryRequest(VisitorSignInRequest):
+    """Staff back-entry of an offline visit, recorded with its ACTUAL times.
+
+    Inherits every visitor-field rule from ``VisitorSignInRequest`` (strip,
+    ``visitor_name`` required, ``safety_acknowledged`` must be true,
+    ``purpose_note`` required when purpose is 'other') and adds the real sign-in
+    / sign-out timestamps. Unlike the tablet sign-in (which stamps ``utcnow()``),
+    an ADMIN/MANAGER supplies the true times for a paper-logged visit after a
+    lobby-tablet outage — so ``signed_in_at`` is REQUIRED and both times must be
+    in the PAST, and ``signed_out_at`` (if given) must be on or after
+    ``signed_in_at``. Times are normalized to naive UTC to match the stored
+    columns.
+    """
+
+    signed_in_at: datetime = Field(..., description="Actual sign-in time (UTC; must be in the past)")
+    signed_out_at: Optional[datetime] = Field(
+        None,
+        description="Actual sign-out time (UTC; >= signed_in_at and in the past). Omit if still on-site.",
+    )
+
+    @field_validator("signed_in_at", "signed_out_at")
+    @classmethod
+    def _normalize_to_naive_utc(cls, v: Optional[datetime]) -> Optional[datetime]:
+        # Store naive UTC to match the DB columns and datetime.utcnow() used
+        # throughout the service. ensure_utc treats a zone-less value as UTC.
+        dt = ensure_utc(v)
+        return dt.replace(tzinfo=None) if dt is not None else None
+
+    @model_validator(mode="after")
+    def _validate_times(self) -> "VisitorManualEntryRequest":
+        now = datetime.utcnow()
+        if self.signed_in_at > now:
+            raise ValueError("signed_in_at must be in the past")
+        if self.signed_out_at is not None:
+            if self.signed_out_at > now:
+                raise ValueError("signed_out_at must be in the past")
+            if self.signed_out_at < self.signed_in_at:
+                raise ValueError("signed_out_at must be on or after signed_in_at")
+        return self
+
+
 class VisitorSignOutRequest(BaseModel):
     """Sign out by exact visitor_log_id (preferred, staff) OR by visitor name (tablet)."""
 
@@ -89,6 +131,9 @@ class VisitorLogResponse(UTCModel):
     signed_out_at: Optional[datetime] = None
     signin_station_id: Optional[int] = None
     station_label: Optional[str] = None
+    # Present (non-null) iff this row was back-entered by staff after the fact,
+    # not captured live at the tablet — lets the UI badge it as such.
+    entered_by_user_id: Optional[int] = None
 
 
 class VisitorLogListResponse(BaseModel):

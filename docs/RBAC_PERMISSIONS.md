@@ -399,6 +399,13 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > Every user mutation — create, update (including any role change), approve, password-reset,
 > deactivate, and activate — is recorded in the tamper-evident audit log.
 >
+> **Password-strength policy.** A password set on any of these paths — `POST /users/` (create),
+> `POST /users/{id}/reset-password`, and self-service `POST /users/change-password` — must satisfy
+> the server-side strength policy (≥ 12 chars; uppercase, lowercase, number, and special char; no
+> common weak substring), the **same policy** as `POST /auth/register`. The user CSV import applies
+> it per row to user-supplied passwords; operator auto-generated (badge) passwords are exempt. See
+> `docs/API.md` → Users.
+>
 > **Badge printing (A0.4).** The badge print sheet `/print/badges` (opened from the Users page via
 > multi-select → "Print Badges") is **frontend-gated by `canManageUsers`** (=
 > `users:create` OR `users:edit`) — both the Users-page button
@@ -538,6 +545,7 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 | View / search log (`visitor_logs:view`) | ✓ | ✓ | ✓ | | | | |
 | Sign in / sign out a visitor | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Export log (CSV) | ✓ | ✓ | | | | | |
+| Back-enter an offline visit (`POST /manual`) | ✓ | ✓ | | | | | |
 | Delete (soft) a visitor record | ✓ | ✓ | | | | | |
 | Manage sign-in stations (create / reset-PIN / revoke) | ✓ | ✓ | | | | | |
 
@@ -550,8 +558,10 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > `require_role([ADMIN, MANAGER, SUPERVISOR])` (this is the server-enforced read gate the
 > `visitor_logs:view` permission and the `/visitor-log` route mirror — visitor PII is *not* on the
 > read-broad domain default). **Export** (`GET /export.csv`, audits an `EXPORT` action), **soft-delete**
-> (`DELETE /{id}`), and **all station administration** (`POST /stations`, `GET /stations`,
-> `POST /stations/{id}/revoke`, `POST /stations/{id}/reset-pin`) are `require_role([ADMIN, MANAGER])`.
+> (`DELETE /{id}`), **staff back-entry** (`POST /manual` — records an offline visit with its actual
+> past times; a staff access token only, the PIN-minted station token is **rejected**), and **all
+> station administration** (`POST /stations`, `GET /stations`, `POST /stations/{id}/revoke`,
+> `POST /stations/{id}/reset-pin`) are `require_role([ADMIN, MANAGER])`.
 > Every query is tenant-scoped (staff via `get_current_company_id`; the tablet via the authoritative
 > `signin_stations` row, never the client `cid`); visitor records are soft-deleted, never
 > hard-deleted; and every state change is tamper-evidently audited (station writes record the station
