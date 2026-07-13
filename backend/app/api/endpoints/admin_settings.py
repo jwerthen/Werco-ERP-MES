@@ -1,4 +1,5 @@
 import json
+import secrets
 from datetime import datetime, timedelta
 from typing import List, Optional
 
@@ -862,9 +863,24 @@ def seed_labor_rates(
     return {"status": "ok", "created": created}
 
 
+def _generate_bootstrap_password() -> str:
+    """Generate a strong, policy-compliant one-time bootstrap password.
+
+    Compliant by construction (upper + lower + digit + special) and unique per
+    call — never a hardcoded/well-known value. Mirrors the operator auto-password
+    convention in the users router.
+    """
+    return f"Seed!{secrets.token_urlsafe(18)}1aZ"
+
+
 @router.post("/seed-database")
 async def seed_database(db: Session = Depends(get_db), current_user: User = Depends(admin_only)):
-    """Seed database with initial data. Requires admin authentication."""
+    """Seed database with initial data. Requires admin authentication.
+
+    Bootstrap credentials are GENERATED at runtime (never hardcoded) and returned
+    exactly once in the response so the calling admin can distribute and rotate
+    them. They satisfy the AS9100D/CMMC password-strength policy by construction.
+    """
 
     from app.core.security import get_password_hash
 
@@ -872,11 +888,16 @@ async def seed_database(db: Session = Depends(get_db), current_user: User = Depe
     if db.query(User).first():
         return {"status": "already_seeded", "message": "Database already has users"}
 
+    # One-time credentials surfaced to the calling admin. Each user gets a distinct
+    # generated password; the plaintext exists only in this response, never in source.
+    generated_credentials: dict = {}
+
     # Create admin user
+    admin_password = _generate_bootstrap_password()
     admin = User(
         employee_id="EMP001",
         email="admin@werco.com",
-        hashed_password=get_password_hash("admin123"),
+        hashed_password=get_password_hash(admin_password),
         first_name="System",
         last_name="Administrator",
         role=UserRole.ADMIN,
@@ -884,6 +905,7 @@ async def seed_database(db: Session = Depends(get_db), current_user: User = Depe
         is_superuser=True,
     )
     db.add(admin)
+    generated_credentials["admin@werco.com"] = admin_password
 
     # Create sample users
     users_data = [
@@ -894,19 +916,28 @@ async def seed_database(db: Session = Depends(get_db), current_user: User = Depe
     ]
 
     for emp_id, email, first, last, role, dept in users_data:
+        user_password = _generate_bootstrap_password()
         user = User(
             employee_id=emp_id,
             email=email,
-            hashed_password=get_password_hash("password123"),
+            hashed_password=get_password_hash(user_password),
             first_name=first,
             last_name=last,
             role=role,
             department=dept,
         )
         db.add(user)
+        generated_credentials[email] = user_password
 
     db.commit()
-    return {"status": "success", "message": "Database seeded with admin and sample users"}
+    return {
+        "status": "success",
+        "message": (
+            "Database seeded with admin and sample users. Store these one-time "
+            "credentials securely and rotate them immediately after first login."
+        ),
+        "credentials": generated_credentials,
+    }
 
 
 @router.post("/seed-outside-services")

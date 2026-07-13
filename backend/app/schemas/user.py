@@ -157,25 +157,3 @@ class TokenRefresh(BaseModel):
 
 class RefreshTokenRequest(BaseModel):
     refresh_token: str
-
-
-class PasswordChange(BaseModel):
-    current_password: str = Field(..., min_length=1, description="Current password")
-    new_password: str = Field(..., min_length=12, max_length=128, description="New password")
-
-    @field_validator('new_password')
-    @classmethod
-    def validate_new_password(cls, v: str) -> str:
-        """Validate new password strength"""
-        errors = []
-        if not re.search(r'[A-Z]', v):
-            errors.append("Password must contain uppercase letter")
-        if not re.search(r'[a-z]', v):
-            errors.append("Password must contain lowercase letter")
-        if not re.search(r'[0-9]', v):
-            errors.append("Password must contain number")
-        if not re.search(r'[^A-Za-z0-9]', v):
-            errors.append("Password must contain special character")
-        if errors:
-            raise ValueError("; ".join(errors))
-        return v
