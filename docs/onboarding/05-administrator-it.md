@@ -4,7 +4,7 @@
 
 **What you'll be able to do:** Add and manage users, assign roles, set up work centers and cost settings, load starter data in bulk, provision shop-floor badge logins, and read the audit log when an auditor or a customer asks "who changed this, and when?"
 
-> Heads up: Most of what you do here changes other people's access or the numbers behind quotes and costs. Take your time. Most operational changes across the system are recorded in the audit log — but note that user-management actions on the Users screen (create, edit, activate/deactivate, role change, password reset) are **not** currently audited. See [Security & compliance](#security--compliance-what-to-tell-auditors).
+> Heads up: Most of what you do here changes other people's access or the numbers behind quotes and costs. Take your time. Most changes across the system — including your user-management actions on the Users screen (create, edit, activate/deactivate, role change, password reset) — are recorded in the tamper-evident audit log, so you can always show an auditor who changed an account and when. See [Security & compliance](#security--compliance-what-to-tell-auditors).
 
 ---
 
@@ -195,7 +195,7 @@ At the top, summary cards show **Total Events (30 days)**, **Failed Actions**, t
 3. Click **Apply Filters**.
 4. Click any row to open the detail, including the timestamp, user, IP address, and the **Previous Values** / **New Values** for the change.
 
-Use this for internal audits, customer audits, and incident response. Because operational state changes are recorded, you can reconstruct what happened to a job, a part, or a shipment. (See the audit-coverage note under [Security & compliance](#security--compliance-what-to-tell-auditors) for what isn't captured yet.)
+Use this for internal audits, customer audits, and incident response. Because operational state changes and user-account changes are recorded, you can reconstruct what happened to a job, a part, a shipment, or a user account. (See the audit-coverage note under [Security & compliance](#security--compliance-what-to-tell-auditors) for the one area not captured yet.)
 
 > Heads up: The audit log is read-only by design and protected by a tamper-evident hash chain. No one — not even an administrator — edits or deletes entries from the app. That's what makes it trustworthy in an audit.
 
@@ -210,9 +210,9 @@ The system is built for **AS9100D, ISO 9001, and CMMC Level 2**. Here are the co
 - **Session limits.** Sign-ins refresh silently in the background but are capped — users are forced to re-authenticate after the session limit (24 hours), so a walk-away session can't stay open indefinitely.
 - **Tenant isolation.** Every company's data is completely separated; users only ever see their own company's records.
 - **Role-based access.** Sensitive actions are restricted to the right roles and enforced on the server, not just hidden in the screen.
-- **Tamper-evident audit trail.** Operational state changes — work order release/start/complete, BOM and routing releases, receiving and inspection, shipments, OEE, operator certifications, and the like — are recorded in a tamper-evident log with before/after values, the user, and the time.
+- **Tamper-evident audit trail.** Operational state changes — work order release/start/complete, BOM and routing releases, receiving and inspection, shipments, OEE, operator certifications, and the like — and user-account changes (create, edit, activate/deactivate, role change, password reset) are recorded in a tamper-evident log with before/after values, the user, and the time. A password reset records that a reset happened and by whom; the new password itself is never stored.
 
-> Heads up: Not every action is in the audit log yet. **User-management actions performed on the Users screen — creating, editing, activating/deactivating, role changes, and password resets — are not currently written to the audit log.** Don't tell an auditor that password resets or role changes are tracked there; they are not. If you need a record of who changed an account, capture it outside the system until this gap is closed.
+> Heads up: **User-management actions on the Users screen — creating, editing, activating/deactivating, role changes, and password resets — are now written to the tamper-evident audit log**, each with the acting admin, the affected account, before/after values (the password itself is never recorded), and the time. You can point an auditor straight to those entries. One gap remains: changes made on the **Work Centers** screen — creating a work center, editing it, or changing its status — are not yet written to the audit log. (Work centers loaded through **Import CSV** are recorded; interactive changes on the screen are not.)
 
 > Tip: For the exact role-by-action permission tables, hand the auditor [../RBAC_PERMISSIONS.md](../RBAC_PERMISSIONS.md) and the [CMMC compliance doc](../CMMC_LEVEL_2_COMPLIANCE.md).
 
@@ -262,5 +262,5 @@ A 10-minute drill to get comfortable:
 2. **Reset** its password, then **deactivate** it. Confirm it shows as Inactive when you check **Show inactive users**.
 3. Go to **Admin Settings → Employees** and add a test employee with a 4-digit ID. Note how the ID gets padded with zeros.
 4. Go to **Work Centers**, create a test work center, then set its status to **Maintenance** and back to **Available**.
-5. Open the **Audit Log** and practice the filters: set **Action** to **Create** and pick a **Resource Type** (such as work order or shipment), click **Apply Filters**, then open a row to see the before/after detail. (Heads up: user-management and work-center changes aren't written to the audit log yet, so you won't find the test account or work center here — see the audit-coverage note above.)
+5. Open the **Audit Log** and practice the filters: set **Action** to **Create** and pick a **Resource Type** — try **User** to find the test account you created in step 1, or work order or shipment — click **Apply Filters**, then open a row to see the before/after detail. (Heads up: changes made on the **Work Centers** screen aren't written to the audit log yet, so you won't find the test work center from step 4 here — see the audit-coverage note above.)
 6. Clean up: deactivate your test work center and test accounts.
