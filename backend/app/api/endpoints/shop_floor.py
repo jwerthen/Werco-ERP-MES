@@ -135,9 +135,10 @@ class OperationCompleteRequest(BaseModel):
     # Optional -- omitted means unknown; unknown values are rejected with a 422.
     source: Optional[TimeEntrySource] = Field(
         None,
-        description="Adoption-telemetry channel of this completion (kiosk | desktop | scanner | import | "
+        description="Adoption-telemetry channel of this completion (kiosk | desktop | scanner | "
         "backfill). Also fills the channel on auto-closed open entries that have none; never overwrites "
-        "a recorded channel. Omit when unknown.",
+        "a recorded channel. Omit when unknown. 'import' is rejected (422) here (reserved for the "
+        "bulk-migration loaders); a kiosk-scoped operator token forces 'kiosk' regardless of this hint.",
     )
 
 
@@ -165,7 +166,9 @@ class ProductionReportRequest(BaseModel):
     source: Optional[TimeEntrySource] = Field(
         None,
         description="Adoption-telemetry channel of this production report (kiosk | desktop | scanner | "
-        "import | backfill). Omit to keep the active entry's existing channel.",
+        "backfill). Omit to keep the active entry's existing channel. 'import' is rejected (422) here "
+        "(reserved for the bulk-migration loaders); a kiosk-scoped operator token forces 'kiosk' "
+        "regardless of this hint.",
     )
 
     @model_validator(mode="after")
@@ -192,9 +195,11 @@ class OperationHoldRequest(BaseModel):
     # A0.1 adoption telemetry: client channel (kiosk/desktop/scanner/import/backfill).
     source: Optional[TimeEntrySource] = Field(
         None,
-        description="Adoption-telemetry channel of this hold (kiosk | desktop | scanner | import | backfill). "
+        description="Adoption-telemetry channel of this hold (kiosk | desktop | scanner | backfill). "
         "Also fills the channel on the open entries the hold auto-closes when they have none; never "
-        "overwrites a recorded channel. Omit when unknown.",
+        "overwrites a recorded channel. Omit when unknown. 'import' is rejected (422) here (reserved "
+        "for the bulk-migration loaders); a kiosk-scoped operator token forces 'kiosk' regardless of "
+        "this hint.",
     )
 
 
@@ -560,6 +565,44 @@ def _is_open_time_entry_violation(exc: IntegrityError) -> bool:
     return "uq_open_time_entry" in haystack
 
 
+# Adoption-telemetry channels a client may NOT self-assert on an interactive labor
+# write. IMPORT is reserved for the bulk-migration loaders, which write TimeEntry
+# rows directly (never through these HTTP endpoints); an operator/desktop request
+# claiming it would corrupt import provenance -- so the loaders' channel can only
+# ever come from the loaders. Rejected with 422. (KIOSK/DESKTOP/SCANNER/BACKFILL
+# stay client-settable: A0.1's contract is "store the declared channel, never
+# guess", and the shipped /kiosk OperatorKiosk station self-reports "kiosk" on a
+# normal session -- see the A0.1 source-tagging tests.)
+_FORBIDDEN_CLIENT_LABOR_SOURCES = frozenset({TimeEntrySource.IMPORT})
+
+
+def _resolve_labor_source(current_user: User, client_source: Optional[TimeEntrySource]) -> Optional[str]:
+    """Resolve the adoption-telemetry channel to record on a labor write.
+
+    Trust model (labor twin of ``_record_source`` for process-sheet records):
+
+    * A kiosk-scoped credential (a badge-minted crew-station operator token,
+      ``_token_scope == "kiosk"``) is AUTHORITATIVE -- it always records KIOSK
+      regardless of any client hint, so a crew station can never be tricked into
+      stamping ``backfill``/``import`` (or anything else) onto its labor.
+    * Otherwise the client's declared channel is stored verbatim, EXCEPT the
+      loader-reserved channels (``IMPORT``), which a normal request may never
+      claim -- rejected with HTTP 422 so the write mutates nothing.
+    * Omitted -> ``None`` (NULL): the server never guesses a channel.
+    """
+    if getattr(current_user, "_token_scope", None) == "kiosk":
+        return TimeEntrySource.KIOSK.value
+    if client_source in _FORBIDDEN_CLIENT_LABOR_SOURCES:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"source '{client_source.value}' cannot be set on an interactive labor entry; "
+                "it is reserved for the bulk-import loaders"
+            ),
+        )
+    return client_source.value if client_source else None
+
+
 def _operation_check_in_state(db: Session, operation: WorkOrderOperation) -> dict:
     blocked = operation_blocked_by_predecessors(db, operation)
     can_check_in = (
@@ -724,6 +767,11 @@ def clock_in(
     if operation_blocked_by_predecessors(db, operation):
         raise HTTPException(status_code=400, detail="Previous operations must be completed first")
 
+    # A0.1 adoption-telemetry channel for this labor write, with the kiosk-token
+    # forcing + import guard applied centrally. Resolved before any mutation so a
+    # disallowed 'import' 422s without touching the operation/WO.
+    recorded_source = _resolve_labor_source(current_user, clock_in_data.source)
+
     # Update operation status
     if operation.status in [OperationStatus.PENDING, OperationStatus.READY]:
         operation.status = OperationStatus.IN_PROGRESS
@@ -745,8 +793,9 @@ def clock_in(
         entry_type=clock_in_data.entry_type,
         clock_in=datetime.utcnow(),
         notes=clock_in_data.notes,
-        # A0.1 adoption telemetry: channel the client reported, or NULL (never guessed).
-        source=clock_in_data.source.value if clock_in_data.source else None,
+        # A0.1 adoption telemetry: resolved channel (client value, kiosk-forced for a
+        # kiosk token, or NULL -- never guessed).
+        source=recorded_source,
         company_id=company_id,
     )
 
@@ -785,11 +834,30 @@ def clock_in(
                 if hasattr(clock_in_data.entry_type, "value")
                 else clock_in_data.entry_type
             ),
-            # A0.1 adoption telemetry: client channel (None = not reported).
-            "source": clock_in_data.source.value if clock_in_data.source else None,
+            # A0.1 adoption telemetry: resolved channel (None = not reported).
+            "source": recorded_source,
         },
     )
+    # AS9100D traceability: a paper back-entry (source=backfill) is a manual,
+    # after-the-fact labor record, so put it on the tamper-evident audit chain like
+    # any other state change (a live clock-in is self-evidenced by the labor_clock_in
+    # OperationalEvent above; a back-fill needs an explicit who/when audit row). The
+    # flush assigns time_entry.id for the audit row, and both commit ATOMICALLY with
+    # the clock-in inside the existing try so a duplicate-open-entry IntegrityError is
+    # still translated to the 400 below and the audit row rolls back with it.
     try:
+        if recorded_source == TimeEntrySource.BACKFILL.value:
+            db.flush()
+            audit.log_create(
+                resource_type="time_entry",
+                resource_id=time_entry.id,
+                resource_identifier=f"WO {work_order.work_order_number} / OP {operation.operation_number}",
+                description=(
+                    f"Back-filled labor clock-in on operation {operation.operation_number} "
+                    f"of work order {work_order.work_order_number} (source=backfill)"
+                ),
+                extra_data={"source": TimeEntrySource.BACKFILL.value},
+            )
         db.commit()
     except IntegrityError as exc:
         # The pre-check above handles the common case, but a concurrent clock-in
@@ -858,6 +926,7 @@ def clock_out(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Clock out from a work order operation"""
     time_entry = (
@@ -885,6 +954,10 @@ def clock_out(
 
     if clock_out_data.quantity_produced < 0 or clock_out_data.quantity_scrapped < 0:
         raise HTTPException(status_code=400, detail="Quantities cannot be negative")
+
+    # A0.1 adoption-telemetry channel for this write (kiosk-token forcing + import
+    # guard). Resolved before any mutation so a disallowed 'import' 422s untouched.
+    recorded_source = _resolve_labor_source(current_user, clock_out_data.source)
 
     # Lean Phase 1: resolve the structured scrap reason code BEFORE any mutation so
     # an invalid id (404 unknown/cross-tenant, 422 inactive) leaves no half-updated
@@ -972,10 +1045,11 @@ def clock_out(
     if scrap_code is not None:
         time_entry.scrap_reason_code_id = scrap_code.id
     time_entry.notes = clock_out_data.notes or time_entry.notes
-    # A0.1 adoption telemetry: record the clock-out channel when the client sent one;
-    # omitted -> keep whatever channel clock-in recorded (NULL stays NULL, never guessed).
-    if clock_out_data.source:
-        time_entry.source = clock_out_data.source.value
+    # A0.1 adoption telemetry: record the clock-out channel when this write carries one
+    # (a kiosk-scoped token always resolves to KIOSK); omitted on a normal session ->
+    # keep whatever channel clock-in recorded (NULL stays NULL, never guessed).
+    if recorded_source:
+        time_entry.source = recorded_source
 
     # G6-A: terminal WO -> close the labor entry (above) but never roll its hours /
     # produced / scrapped quantities up onto the operation. The TimeEntry remains the
@@ -1041,8 +1115,8 @@ def clock_out(
             # G6-A: flag so AI/realtime consumers know this labor closed against a
             # terminal WO and was deliberately NOT rolled up into op/cost.
             "wo_terminal": wo_is_terminal,
-            # A0.1 adoption telemetry: client channel (None = not reported).
-            "source": clock_out_data.source.value if clock_out_data.source else None,
+            # A0.1 adoption telemetry: resolved channel (None = not reported).
+            "source": recorded_source,
         },
     )
 
@@ -1173,7 +1247,7 @@ def clock_out(
                 operation=operation,
                 user_id=current_user.id,
                 source_module="shop_floor",
-                source=clock_out_data.source.value if clock_out_data.source else None,
+                source=recorded_source,
             )
         if work_order_completed:
             emit_work_order_completed_event(
@@ -1182,7 +1256,7 @@ def clock_out(
                 work_order=work_order,
                 user_id=current_user.id,
                 source_module="shop_floor",
-                source=clock_out_data.source.value if clock_out_data.source else None,
+                source=recorded_source,
             )
             # Batch 6 / rank 9 (INV-1/INV-2/INV-3/TRACE-2/TRACE-3): on WO COMPLETE,
             # receive the finished good into inventory (ALWAYS, lot-only, idempotent)
@@ -1244,6 +1318,24 @@ def clock_out(
                     audit=audit,
                     source="completion",
                 )
+
+    # AS9100D traceability: a paper back-entry clock-out (source=backfill) is a manual,
+    # after-the-fact labor record -- audit it on the tamper-evident chain, atomic with
+    # this commit, via the request-scoped AuditService so the row captures ip_address /
+    # user_agent (matching the clock-in backfill path). (The labor_clock_out
+    # OperationalEvent above is an AI/realtime signal, not the audit hash chain; any
+    # completion status change is audited separately.)
+    if recorded_source == TimeEntrySource.BACKFILL.value:
+        audit.log(
+            action="UPDATE",
+            resource_type="time_entry",
+            resource_id=time_entry.id,
+            resource_identifier=(
+                f"WO {work_order.work_order_number} / OP {operation.operation_number if operation else '-'}"
+            ),
+            description=f"Back-filled labor clock-out on work order {work_order.work_order_number} (source=backfill)",
+            extra_data={"source": TimeEntrySource.BACKFILL.value},
+        )
 
     try:
         db.commit()
@@ -2493,6 +2585,10 @@ def report_operation_production(
     if good_delta == 0 and scrap_delta == 0:
         raise HTTPException(status_code=400, detail="Enter a completed or scrap quantity")
 
+    # A0.1 adoption-telemetry channel (kiosk-token forcing + import guard) resolved
+    # before any mutation so a disallowed 'import' 422s without touching the entry.
+    recorded_source = _resolve_labor_source(current_user, production_data.source)
+
     # Lean Phase 1: resolve the structured scrap reason code BEFORE any mutation
     # (404 unknown/cross-tenant, 422 inactive). None passes through untouched.
     scrap_code = resolve_scrap_reason_code_or_http(db, company_id, production_data.scrap_reason_code_id)
@@ -2571,10 +2667,11 @@ def report_operation_production(
     # Lean Phase 1: same semantics for the structured code.
     if scrap_code is not None and scrap_delta > 0:
         active_entry.scrap_reason_code_id = scrap_code.id
-    # A0.1 adoption telemetry: record the reporting channel when the client sent one;
-    # omitted -> keep whatever channel the entry already carries (never guessed).
-    if production_data.source:
-        active_entry.source = production_data.source.value
+    # A0.1 adoption telemetry: record the reporting channel when this write carries one
+    # (a kiosk-scoped token always resolves to KIOSK); omitted on a normal session ->
+    # keep whatever channel the entry already carries (never guessed).
+    if recorded_source:
+        active_entry.source = recorded_source
     active_entry.updated_at = datetime.utcnow()
 
     sync_work_order_quantity_complete(work_order, operation, all_operations_complete=False)
@@ -2768,6 +2865,11 @@ def complete_operation(
     ):
         raise HTTPException(status_code=400, detail="Previous operations must be completed first")
 
+    # A0.1 adoption-telemetry channel of THIS completing write (kiosk-token forcing +
+    # import guard). Resolved before any mutation so a disallowed 'import' 422s without
+    # advancing the operation or auto-closing any open entry.
+    recorded_source = _resolve_labor_source(current_user, completion_data.source)
+
     # Process-sheet completion gate (PR 3): when THIS request would FULLY complete the
     # operation, every required (non-INSTRUCTION) snapshot step must carry a live
     # (non-superseded) conforming record — per serial on a serialized WO. Evaluated
@@ -2875,8 +2977,8 @@ def complete_operation(
             # A0.1 adoption telemetry: this completion auto-closes OTHER operators'
             # open entries too, so only FILL a missing channel -- never overwrite an
             # entry's own recorded clock-in channel with the completer's channel.
-            if completion_data.source and entry.source is None:
-                entry.source = completion_data.source.value
+            if recorded_source and entry.source is None:
+                entry.source = recorded_source
         if open_entries and completion_delta > 0:
             open_entries[0].quantity_produced = float(open_entries[0].quantity_produced or 0) + completion_delta
         # Crew-station kiosk: surface WHO this completion auto-clocked-out so the
@@ -2928,7 +3030,7 @@ def complete_operation(
             operation=operation,
             user_id=current_user.id,
             source_module="shop_floor",
-            source=completion_data.source.value if completion_data.source else None,
+            source=recorded_source,
         )
     if work_order_completed:
         emit_work_order_completed_event(
@@ -2937,7 +3039,7 @@ def complete_operation(
             work_order=work_order,
             user_id=current_user.id,
             source_module="shop_floor",
-            source=completion_data.source.value if completion_data.source else None,
+            source=recorded_source,
         )
         # Batch 6 / rank 9 (INV-1/INV-2/INV-3/TRACE-2/TRACE-3): FG receipt (always,
         # lot-only, idempotent) + gated backflush, atomic with this completion.
@@ -3230,9 +3332,11 @@ def put_operation_on_hold(
     The body is optional and backward-compatible. When present it carries the
     structured hold details -- ``category`` / ``severity`` / ``note`` (a note or a
     non-OTHER category also files a WorkOrderBlocker) -- plus the optional
-    ``source`` adoption-telemetry channel (kiosk | desktop | scanner | import |
-    backfill) that tags the emitted event and fills the channel on any open time
-    entries the hold auto-closes (never overwriting a recorded one).
+    ``source`` adoption-telemetry channel (kiosk | desktop | scanner | backfill;
+    ``import`` is rejected with 422 -- reserved for the bulk-migration loaders -- and a
+    kiosk-scoped operator token forces ``kiosk``) that tags the emitted event and fills
+    the channel on any open time entries the hold auto-closes (never overwriting a
+    recorded one).
     """
     operation = (
         db.query(WorkOrderOperation)
@@ -3246,6 +3350,11 @@ def put_operation_on_hold(
 
     if operation.status == OperationStatus.COMPLETE:
         raise HTTPException(status_code=400, detail="Cannot put completed operation on hold")
+
+    # A0.1 adoption-telemetry channel of THIS hold write (kiosk-token forcing + import
+    # guard). Resolved before any mutation so a disallowed 'import' 422s without changing
+    # operation state or closing any entry.
+    hold_source = _resolve_labor_source(current_user, hold_data.source if hold_data else None)
 
     operation.status = OperationStatus.ON_HOLD
     operation.updated_at = datetime.utcnow()
@@ -3263,8 +3372,6 @@ def put_operation_on_hold(
         .all()
     )
     now = datetime.utcnow()
-    # A0.1 adoption telemetry: channel of THIS hold write (None = not reported).
-    hold_source = hold_data.source.value if hold_data and hold_data.source else None
     for entry in open_entries:
         entry.clock_out = now
         if entry.clock_in:
