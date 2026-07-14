@@ -1,116 +1,68 @@
 /**
- * /wallboard — full-screen, read-only shop-floor TV board (A0.5).
+ * /wallboard — full-screen, read-only shop-floor TV board ("ANDON WALL").
  *
- * Designed for an unattended TV at ~5m viewing distance:
+ * Designed for an unattended TV at ~4–5m viewing distance:
  *  - NO Layout chrome, NO PrivateRoute. Auth comes from a scoped display
- *    token passed once as ?token=<jwt> (captured to sessionStorage and
+ *    token passed once as #token=<jwt> (captured to sessionStorage and
  *    scrubbed from the URL) or a logged-in user's session token.
  *  - All requests go through services/wallboardClient — the display token is
  *    never placed in the global axios client.
- *  - 30s polling (deliberately no WebSocket in v1 — reliability first).
- *  - On fetch failure: OFFLINE banner, keep showing the last good data.
+ *  - 30s polling (deliberately no WebSocket — reliability first).
+ *  - On fetch failure: keep showing the last good data; a STEADY amber chip
+ *    after 1 failed poll escalates to a steady red fill chip after 4
+ *    (~2 min). Never flashing — flashing is reserved for newly-raised events.
  *  - ?dept=<work_center_type> narrows the board to one department's centers.
  *
- * Visual language: dark instrument panel, hairline borders, sharp corners.
- * Red flash = blocked or down. Amber = running a late work order.
+ * Layout (spec): Z1 header 9% / Z2 floor wall 72.5%w + Z3 exception rail
+ * 27.5%w at 82%h / Z4 today+30d band 9%. NO scroll containers anywhere —
+ * every zone has computed capacity, a "+N more" overflow, and a designed
+ * empty state. Fixed geography: panels keep their slots at all data values.
+ *
+ * Scaling: the root sets fontSize calc(100vh / 67.5) → 1rem = 16px @1080p,
+ * 32px @4K (identical angular size). EVERY size in this tree is rem. NOTE:
+ * rem resolves against the <html> element, not this container, so a mount
+ * effect mirrors the same calc() onto document.documentElement (restored on
+ * unmount) — the inline container fontSize alone would not scale rem units.
  */
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import ExceptionRail from '../components/wallboard/ExceptionRail';
+import FloorGrid from '../components/wallboard/FloorGrid';
+import TodayBand from '../components/wallboard/TodayBand';
+import WallboardHeader from '../components/wallboard/WallboardHeader';
+import { useNewEventFlash } from '../hooks/useNewEventFlash';
 import {
   captureWallboardTokenFromUrl,
   clearWallboardToken,
   fetchWallboard,
   getWallboardToken,
 } from '../services/wallboardClient';
-import type {
-  WallboardKpiStrip,
-  WallboardResponse,
-  WallboardWorkCenter,
-} from '../types/wallboard';
-import { formatCentralTime } from '../utils/centralTime';
+import type { WallboardResponse } from '../types/wallboard';
+import { getCentralMinutesOfDay } from '../utils/centralTime';
 
 const POLL_INTERVAL_MS = 30_000;
-const TICKER_ROTATE_MS = 6_000;
+/** Failed polls before the offline chip escalates amber → red fill (~2 min). */
+const OFFLINE_RED_THRESHOLD = 4;
+const ROOT_FONT_SIZE = 'calc(100vh / 67.5)';
 
-function formatElapsed(minutes: number): string {
-  if (minutes < 60) return `${minutes}m`;
-  const h = Math.floor(minutes / 60);
-  const m = minutes % 60;
-  return `${h}h ${String(m).padStart(2, '0')}m`;
-}
-
-function blockerLabel(category: string): string {
-  return category.replace(/_/g, ' ');
-}
-
-// ---- KPI strip (Lean Phase 1, issue #88) -----------------------------------
-// 30-day OTD (shipped) / FPY / scrap % plus live WIP figures. Every value is
-// nullable (empty denominator) and the whole block is optional on the payload
-// — an older backend simply doesn't render the strip.
-
-const KPI_GREEN = '#3fb950';
-const KPI_AMBER = '#d29922';
-const KPI_RED = '#f04438';
-const KPI_MUTE = '#8b98a9';
-
-function pctColor(value: number | null, goodHigh: boolean): string {
-  if (value === null) return KPI_MUTE;
-  if (goodHigh) return value >= 95 ? KPI_GREEN : value >= 85 ? KPI_AMBER : KPI_RED;
-  // Lower-is-better (scrap %).
-  return value <= 2 ? KPI_GREEN : value <= 5 ? KPI_AMBER : KPI_RED;
-}
-
-function kpiPct(value: number | null): string {
-  return value === null ? '—' : `${value.toFixed(1)}%`;
-}
-
-function kpiNum(value: number | null, digits = 0, suffix = ''): string {
-  return value === null ? '—' : `${value.toFixed(digits)}${suffix}`;
-}
-
-function KpiCell({ label, value, color }: { label: string; value: string; color?: string }) {
-  return (
-    // shrink-0: on a narrow screen the strip scrolls horizontally rather than
-    // letting the nowrap labels compress into each other.
-    <div className="flex flex-col items-center gap-1 px-6 py-3 shrink-0">
-      <span className="text-lg uppercase tracking-widest text-[#8b98a9] whitespace-nowrap">{label}</span>
-      <span
-        className="text-5xl font-bold tabular-nums whitespace-nowrap"
-        style={{ color: color ?? '#f0f4f9' }}
-      >
-        {value}
-      </span>
-    </div>
-  );
-}
-
-function WallboardKpiStripRow({ kpis }: { kpis: WallboardKpiStrip }) {
-  return (
-    <div
-      data-testid="wallboard-kpi-strip"
-      className="flex items-stretch justify-evenly border-b border-[#243042] bg-[#0d1117] divide-x divide-[#243042] shrink-0 overflow-x-auto"
-    >
-      <KpiCell
-        label="OTD 30d"
-        value={kpiPct(kpis.otd_ship_pct_30d ?? null)}
-        color={pctColor(kpis.otd_ship_pct_30d ?? null, true)}
-      />
-      <KpiCell
-        label="FPY 30d"
-        value={kpiPct(kpis.fpy_pct_30d ?? null)}
-        color={pctColor(kpis.fpy_pct_30d ?? null, true)}
-      />
-      <KpiCell
-        label="Scrap 30d"
-        value={kpiPct(kpis.scrap_pct_30d ?? null)}
-        color={pctColor(kpis.scrap_pct_30d ?? null, false)}
-      />
-      <KpiCell label="Open WOs" value={kpiNum(kpis.open_wip_count ?? null)} />
-      <KpiCell label="Avg WIP Age" value={kpiNum(kpis.avg_wip_age_days ?? null, 1, 'd')} />
-    </div>
-  );
-}
+/**
+ * Motion budget (spec §7) — the exhaustive list; anything not here does not move:
+ * 1s wall clock · minute counters between polls · 2s heartbeat (frozen offline)
+ * · 600ms numeral/bar transitions + 200ms payload-swap fade at poll boundaries
+ * · ~10s new-event flash (1.2s steps ×8) · instant tile resort on class change.
+ * No marquees, no tickers, no rotation, no ambient motion.
+ */
+const WALLBOARD_CSS = `
+  @keyframes wb-heartbeat { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
+  .wb-heartbeat { animation: wb-heartbeat 2s ease-in-out infinite; }
+  .wb-heartbeat-frozen { animation-play-state: paused; }
+  @keyframes wb-flash-new { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+  .wb-flash-new { animation: wb-flash-new 1.2s steps(1, end) 8; }
+  @keyframes wb-swap { from { opacity: 0.6; } to { opacity: 1; } }
+  .wb-swap { animation: wb-swap 200ms ease; }
+  .wb-num { transition: color 600ms ease; }
+`;
 
 export default function Wallboard() {
   const [searchParams] = useSearchParams();
@@ -118,29 +70,43 @@ export default function Wallboard() {
 
   const [data, setData] = useState<WallboardResponse | null>(null);
   const [offline, setOffline] = useState(false);
+  const [consecutiveFailures, setConsecutiveFailures] = useState(0);
   const [noToken, setNoToken] = useState(false);
   const [revoked, setRevoked] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [now, setNow] = useState<Date>(new Date());
-  const [tickerIndex, setTickerIndex] = useState(0);
-  const mountedRef = useRef(true);
+  const [swapping, setSwapping] = useState(false);
 
-  // Capture ?token= BEFORE the first fetch (and scrub it from the URL).
+  // rem units resolve against <html>, so the vh-based scale must live there
+  // for the whole tree's rem sizing to track the TV's resolution.
+  useEffect(() => {
+    const el = document.documentElement;
+    const previous = el.style.fontSize;
+    el.style.fontSize = ROOT_FONT_SIZE;
+    return () => {
+      el.style.fontSize = previous;
+    };
+  }, []);
+
+  // Capture ?token= / #token= BEFORE the first fetch (and scrub it from the URL).
   useEffect(() => {
     captureWallboardTokenFromUrl();
     if (!getWallboardToken()) setNoToken(true);
   }, []);
 
-  const load = useCallback(async () => {
+  // `stale` is the owning effect's cancellation probe — a fetch that resolves
+  // after a dept change (or unmount) must not paint the old dept's data.
+  const load = useCallback(async (stale: () => boolean = () => false) => {
     try {
       const payload = await fetchWallboard(dept);
-      if (!mountedRef.current) return;
+      if (stale()) return;
       setData(payload);
       setLastUpdated(new Date());
       setOffline(false);
+      setConsecutiveFailures(0);
       setNoToken(false);
     } catch (err: any) {
-      if (!mountedRef.current) return;
+      if (stale()) return;
       if (err?.message === 'NO_TOKEN') {
         setNoToken(true);
       } else if (err?.message === 'UNAUTHORIZED') {
@@ -151,8 +117,10 @@ export default function Wallboard() {
         setRevoked(true);
         setOffline(false);
       } else {
-        // Keep the last good board on screen; just flag it.
+        // Keep the last good board on screen; just flag it (steady chip,
+        // amber → red fill after OFFLINE_RED_THRESHOLD consecutive misses).
         setOffline(true);
+        setConsecutiveFailures(count => count + 1);
       }
     }
   }, [dept]);
@@ -161,11 +129,12 @@ export default function Wallboard() {
   // poll would just 401 again until someone provisions a new link).
   useEffect(() => {
     if (revoked) return undefined;
-    mountedRef.current = true;
-    load();
-    const id = setInterval(load, POLL_INTERVAL_MS);
+    let cancelled = false;
+    const run = () => load(() => cancelled);
+    run();
+    const id = setInterval(run, POLL_INTERVAL_MS);
     return () => {
-      mountedRef.current = false;
+      cancelled = true;
       clearInterval(id);
     };
   }, [load, revoked]);
@@ -176,216 +145,137 @@ export default function Wallboard() {
     return () => clearInterval(id);
   }, []);
 
-  // Ticker rotation.
-  const tickerItems = useMemo(() => {
-    if (!data) return [];
-    return [
-      ...data.late_wos.map((wo) => ({
-        kind: 'late' as const,
-        text: `LATE  ${wo.wo_number}  ${wo.part_number ?? ''}  — ${wo.days_late}d past due`,
-      })),
-      ...data.blocked_wos.map((wo) => ({
-        kind: 'blocked' as const,
-        text: `BLOCKED  ${wo.wo_number}  — ${blockerLabel(wo.category)} (${Math.round(wo.age_hours)}h)`,
-      })),
-    ];
+  // 200ms opacity fade at each payload swap (motion budget item 4).
+  useEffect(() => {
+    if (!data) return undefined;
+    setSwapping(true);
+    const id = setTimeout(() => setSwapping(false), 250);
+    return () => clearTimeout(id);
   }, [data]);
 
-  useEffect(() => {
-    if (tickerItems.length < 2) return;
-    const id = setInterval(() => setTickerIndex((i) => i + 1), TICKER_ROTATE_MS);
-    return () => clearInterval(id);
-  }, [tickerItems.length]);
+  // New-event flash: diffed by stable ids, suppressed on first paint and on
+  // ?dept= change (a token re-mint is a fresh page load = first paint).
+  const flashKeys = useNewEventFlash(data, dept ?? '');
 
-  const lateWoNumbers = useMemo(
-    () => new Set((data?.late_wos ?? []).map((wo) => wo.wo_number)),
-    [data],
-  );
+  // Minute counters tick client-side between polls (downtime, job elapsed).
+  // Derived directly from lastUpdated (not a ref) so the render where a fresh
+  // payload lands can never pair new server minutes with a stale baseline.
+  const extraMinutes = lastUpdated ? Math.max(0, Math.floor((now.getTime() - lastUpdated.getTime()) / 60_000)) : 0;
 
-  const tickerItem = tickerItems.length > 0 ? tickerItems[tickerIndex % tickerItems.length] : null;
+  // True uncapped totals for the hero + rail; fallback to list lengths /
+  // derived counts against an old backend (degraded but rendering).
+  const totals = useMemo(() => {
+    if (!data) return { down: 0, blocked: 0, late: 0 };
+    const downFromCenters = data.work_centers.filter(wc => wc.down !== null).length;
+    return {
+      down: data.down_total ?? downFromCenters,
+      blocked: data.blocked_total ?? data.blocked_wos.length,
+      late: data.late_total ?? data.late_wos.length,
+    };
+  }, [data]);
+
+  const offShift = useMemo(() => {
+    if (!data) return false;
+    return data.today?.operators_on_clock === 0 && data.work_centers.every(wc => wc.active_jobs.length === 0);
+  }, [data]);
+
+  // days_late by WO number, for the tile job rows' "LATE Nd" suffix chips.
+  const lateDaysByWo = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const wo of data?.late_wos ?? []) map.set(wo.wo_number, wo.days_late);
+    return map;
+  }, [data]);
+
+  const offlineLevel: 0 | 1 | 2 = !offline ? 0 : consecutiveFailures >= OFFLINE_RED_THRESHOLD ? 2 : 1;
 
   return (
-    <div className="fixed inset-0 flex flex-col bg-[#070a0f] text-[#f0f4f9] overflow-hidden font-sans">
-      <style>{`
-        @keyframes wallboard-flash {
-          0%, 100% { border-color: #f04438; box-shadow: inset 0 0 0 1px #f04438; }
-          50% { border-color: #7a1d16; box-shadow: inset 0 0 0 1px transparent; }
-        }
-        .wallboard-flash { animation: wallboard-flash 1.2s steps(1, end) infinite; }
-      `}</style>
+    <div
+      className="fixed inset-0 flex flex-col overflow-hidden bg-[#070a0f] font-sans text-[#f0f4f9]"
+      style={{ fontSize: ROOT_FONT_SIZE, padding: '2%' }}
+    >
+      <style>{WALLBOARD_CSS}</style>
 
-      {/* Header: title / dept, clock, last-updated */}
-      <header className="flex items-center justify-between px-8 py-4 border-b border-[#243042] shrink-0">
-        <div className="flex items-baseline gap-4">
-          <span className="text-3xl font-bold tracking-widest text-white uppercase">
-            Werco<span className="text-[#C8352B]">.</span> Floor
-          </span>
-          {dept && (
-            <span className="text-2xl uppercase tracking-wider text-[#8b98a9]" data-testid="dept-label">
-              {dept}
-            </span>
-          )}
+      {/* Z1 HEADER — 9%h */}
+      <div className="min-h-0 shrink-0 grow-0 basis-[9%]">
+        <WallboardHeader
+          dept={dept}
+          totals={totals}
+          offShift={offShift}
+          hasData={data !== null}
+          offline={offline}
+          offlineLevel={offlineLevel}
+          lastUpdated={lastUpdated}
+          now={now}
+        />
+      </div>
+
+      {revoked ? (
+        <div
+          className="flex flex-1 flex-col items-center justify-center gap-[1rem] text-center"
+          data-testid="revoked-screen"
+        >
+          <p className="text-[2.5rem] font-bold text-[#f04438]">Display access revoked or expired</p>
+          <p className="max-w-[48rem] text-[1.5rem] text-[#8b98a9]">
+            Create a new display link in Admin Settings → Wallboard Displays and open it on this TV.
+          </p>
         </div>
-        <div className="flex items-center gap-8">
-          {offline && (
-            <span
-              data-testid="offline-banner"
-              className="px-4 py-1.5 bg-[#C8352B] text-white text-xl font-bold uppercase tracking-widest wallboard-flash border"
-            >
-              Offline — showing last data
-            </span>
-          )}
-          <span className="text-xl text-[#8b98a9] tabular-nums" data-testid="last-updated">
-            {lastUpdated ? `Updated ${formatCentralTime(lastUpdated)}` : 'Loading…'}
-          </span>
-          <span className="text-5xl font-bold tabular-nums" data-testid="wall-clock">
-            {formatCentralTime(now)}
-          </span>
+      ) : noToken && !data ? (
+        <div className="flex flex-1 flex-col items-center justify-center gap-[1rem] text-center">
+          <p className="text-[2.5rem] font-bold">No display token</p>
+          <p className="max-w-[48rem] text-[1.5rem] text-[#8b98a9]">
+            Open this screen using the wallboard link from Admin Settings → Wallboard Displays (it includes a one-time
+            #token=… fragment), or sign in first.
+          </p>
         </div>
-      </header>
-
-      {/* KPI strip — only when the payload carries it (older backends omit
-          kpi_strip entirely; the board must render unchanged). */}
-      {data?.kpi_strip && <WallboardKpiStripRow kpis={data.kpi_strip} />}
-
-      {/* Body */}
-      <main className="flex-1 overflow-hidden p-6">
-        {revoked ? (
+      ) : !data ? (
+        <div className="flex flex-1 items-center justify-center">
+          <p className="text-[1.875rem] text-[#8b98a9]" data-testid="wallboard-loading">
+            Loading board…
+          </p>
+        </div>
+      ) : (
+        <>
+          {/* Z2 FLOOR WALL 72.5%w + Z3 EXCEPTION RAIL 27.5%w — 82%h */}
           <div
-            className="h-full flex flex-col items-center justify-center text-center gap-4"
-            data-testid="revoked-screen"
-          >
-            <p className="text-4xl font-bold text-[#f04438]">Display access revoked or expired</p>
-            <p className="text-2xl text-[#8b98a9] max-w-3xl">
-              Create a new display link in Admin Settings → Wallboard Displays and open it on this TV.
-            </p>
-          </div>
-        ) : noToken && !data ? (
-          <div className="h-full flex flex-col items-center justify-center text-center gap-4">
-            <p className="text-4xl font-bold">No display token</p>
-            <p className="text-2xl text-[#8b98a9] max-w-3xl">
-              Open this screen using the wallboard link from Admin Settings → Wallboard Displays
-              (it includes a one-time #token=… fragment), or sign in first.
-            </p>
-          </div>
-        ) : !data ? (
-          <div className="h-full flex items-center justify-center">
-            <p className="text-3xl text-[#8b98a9]" data-testid="wallboard-loading">Loading board…</p>
-          </div>
-        ) : data.work_centers.length === 0 ? (
-          <div className="h-full flex items-center justify-center">
-            <p className="text-3xl text-[#8b98a9]">No active work centers{dept ? ` for "${dept}"` : ''}</p>
-          </div>
-        ) : (
-          <div
-            className="grid gap-4 h-full content-start overflow-y-auto"
-            style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(420px, 1fr))' }}
-            data-testid="wallboard-grid"
-          >
-            {data.work_centers.map((wc) => (
-              <WorkCenterCard key={wc.id} wc={wc} lateWoNumbers={lateWoNumbers} />
-            ))}
-          </div>
-        )}
-      </main>
-
-      {/* Bottom ticker: cycles late + blocked WOs */}
-      <footer className="shrink-0 border-t border-[#243042] bg-[#0d1117] px-8 py-3 flex items-center gap-6 min-h-[64px]">
-        {tickerItem ? (
-          <p
-            data-testid="ticker"
-            className={`text-3xl font-bold tracking-wide uppercase tabular-nums truncate ${
-              tickerItem.kind === 'late' ? 'text-[#d29922]' : 'text-[#f04438]'
+            className={`flex min-h-0 shrink-0 grow-0 basis-[82%] gap-[0.75rem] py-[0.75rem] ${
+              swapping ? 'wb-swap' : ''
             }`}
           >
-            {tickerItem.text}
-          </p>
-        ) : (
-          <p className="text-3xl font-bold tracking-wide uppercase text-[#3fb950]" data-testid="ticker">
-            All clear — nothing late or blocked
-          </p>
-        )}
-        {tickerItems.length > 1 && (
-          <span className="ml-auto text-xl text-[#8b98a9] tabular-nums shrink-0">
-            {(tickerIndex % tickerItems.length) + 1}/{tickerItems.length}
-          </span>
-        )}
-      </footer>
-    </div>
-  );
-}
-
-function WorkCenterCard({
-  wc,
-  lateWoNumbers,
-}: {
-  wc: WallboardWorkCenter;
-  lateWoNumbers: Set<string>;
-}) {
-  const isDown = wc.down !== null;
-  const isBlocked = wc.blocked_count > 0;
-  const runningLate = wc.active_jobs.some((j) => j.wo_number && lateWoNumbers.has(j.wo_number));
-  const alarm = isDown || isBlocked;
-
-  return (
-    <section
-      data-testid={`wc-card-${wc.code ?? wc.id}`}
-      className={`border bg-[#141b26] flex flex-col ${
-        alarm
-          ? 'wallboard-flash border-[#f04438]'
-          : runningLate
-            ? 'border-[#d29922]'
-            : 'border-[#243042]'
-      }`}
-    >
-      {/* Card header */}
-      <div className="flex items-center justify-between px-5 py-3 border-b border-[#243042]">
-        <h2 className="text-3xl font-bold uppercase tracking-wide truncate">{wc.name}</h2>
-        <div className="flex items-center gap-3 shrink-0">
-          {isDown && (
-            <span className="px-3 py-1 bg-[#f04438] text-black text-xl font-bold uppercase">
-              Down · {blockerLabel(wc.down!.category)}
-            </span>
-          )}
-          {isBlocked && (
-            <span className="px-3 py-1 bg-[#7a1d16] text-[#ffb4ab] text-xl font-bold uppercase">
-              {wc.blocked_count} blocked
-            </span>
-          )}
-          {runningLate && !alarm && (
-            <span className="px-3 py-1 bg-[#d29922] text-black text-xl font-bold uppercase">Late</span>
-          )}
-          <span className="text-xl text-[#8b98a9] tabular-nums uppercase">Queue {wc.queued_count}</span>
-        </div>
-      </div>
-
-      {/* Jobs */}
-      <div className="flex-1 px-5 py-3 space-y-3">
-        {wc.active_jobs.length === 0 ? (
-          <p className="text-2xl text-[#5b6878] uppercase tracking-wider py-2">Idle</p>
-        ) : (
-          wc.active_jobs.map((job, idx) => (
-            <div key={`${job.wo_number}-${idx}`} className="flex items-baseline justify-between gap-4">
-              <div className="min-w-0">
-                <p className="text-3xl font-bold tabular-nums truncate">
-                  {job.wo_number}
-                  <span className="text-[#8b98a9] font-normal"> · {job.part_number}</span>
-                </p>
-                <p className="text-2xl text-[#aab6c5] truncate">
-                  {job.op_name}
-                  {job.operator_name ? ` — ${job.operator_name}` : ''}
-                </p>
-              </div>
-              <div className="text-right shrink-0">
-                <p className="text-3xl font-bold tabular-nums">{formatElapsed(job.elapsed_minutes)}</p>
-                <p className="text-2xl text-[#8b98a9] tabular-nums">
-                  {job.qty_done}/{job.qty_target}
-                </p>
-              </div>
+            <div className="min-w-0 basis-[72.5%]">
+              <FloorGrid
+                key={dept ?? 'all'}
+                workCenters={data.work_centers}
+                pollKey={data.generated_at}
+                dept={dept}
+                flashKeys={flashKeys}
+                extraMinutes={extraMinutes}
+                lateDaysByWo={lateDaysByWo}
+              />
             </div>
-          ))
-        )}
-      </div>
-    </section>
+            <div className="min-w-0 basis-[27.5%]">
+              <ExceptionRail
+                workCenters={data.work_centers}
+                lateWos={data.late_wos}
+                blockedWos={data.blocked_wos}
+                ship={data.ship ?? null}
+                quality={data.quality ?? null}
+                lateTotal={totals.late}
+                blockedTotal={totals.blocked}
+                downTotal={totals.down}
+                hasDept={!!dept}
+                centralMinutes={getCentralMinutesOfDay(now)}
+                flashKeys={flashKeys}
+                extraMinutes={extraMinutes}
+              />
+            </div>
+          </div>
+
+          {/* Z4 TODAY / 30-DAY BAND — 9%h */}
+          <div className={`min-h-0 shrink-0 grow-0 basis-[9%] ${swapping ? 'wb-swap' : ''}`}>
+            <TodayBand today={data.today ?? null} kpis={data.kpi_strip ?? null} />
+          </div>
+        </>
+      )}
+    </div>
   );
 }

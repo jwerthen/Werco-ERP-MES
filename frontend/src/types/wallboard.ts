@@ -8,11 +8,48 @@ export interface WallboardActiveJob {
   wo_number: string | null;
   part_number: string | null;
   op_name: string | null;
-  /** Public-screen safe: first name + last initial ("Jon W."). */
+  /** Public-screen safe: "First L.". BACK-COMPAT alias of crew[0]. */
   operator_name: string | null;
+  /** Crew-station grouping: all operators on this operation, "First L.", max 3. */
+  crew?: string[];
+  crew_count?: number;
   elapsed_minutes: number;
   qty_done: number;
   qty_target: number;
+  /** Server-computed; replaces the capped lateWoNumbers client derivation. */
+  is_late?: boolean;
+}
+
+export interface WallboardShipRow {
+  wo_number: string;
+  part_number: string | null;
+  promise_date: string | null;
+  qty_remaining: number;
+}
+
+export interface WallboardShip {
+  due_today: number;
+  shipped_today: number;
+  due_this_week: number;
+  due_today_rows: WallboardShipRow[];
+  next_due_date: string | null;
+  next_due_count: number;
+}
+
+export interface WallboardToday {
+  ops_completed: number;
+  pieces_completed: number;
+  wos_completed: number;
+  operators_on_clock: number;
+  hours_logged: number | null;
+  receipts: number;
+  scrap_events: number;
+}
+
+export interface WallboardQuality {
+  open_ncr_count: number;
+  newest_ncr_age_days: number | null;
+  wos_on_hold: number;
 }
 
 export interface WallboardDowntime {
@@ -64,6 +101,14 @@ export interface WallboardResponse {
   late_wos: WallboardLateWorkOrder[];
   blocked_wos: WallboardBlockedWorkOrder[];
   kpi_strip?: WallboardKpiStrip | null;
+  /** True uncapped totals (dept-scoped under ?dept=). undefined = old backend
+   *  → hero/rail fall back to list lengths (degraded but rendering). */
+  late_total?: number | null;
+  blocked_total?: number | null;
+  down_total?: number | null;
+  ship?: WallboardShip | null;
+  today?: WallboardToday | null;
+  quality?: WallboardQuality | null;
   generated_at: string;
 }
 

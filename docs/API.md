@@ -729,7 +729,7 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 | POST | `/shop-floor/time-entries/{id}/approve` | Approve a TimeEntry (sets `approved` / `approved_by`) | Admin / Manager / Supervisor / Quality |
 | POST | `/shop-floor/time-entries/{id}/unapprove` | Clear approval on a TimeEntry | Admin / Manager / Supervisor / Quality |
 | GET | `/shop-floor/work-center-queue/{id}` | Get work center queue, each row carrying the live crew `roster` (see note below) | User **or** kiosk station token |
-| GET | `/shop-floor/wallboard` | Read-only TV wallboard snapshot (`?dept=` narrows to one work-center type, case-insensitive) | User **or** display token |
+| GET | `/shop-floor/wallboard` | Read-only TV wallboard snapshot (`?dept=` narrows to one work-center type, case-insensitive — scopes the work centers **and** the late/blocked lists + totals; ship/today/quality/kpi_strip stay plant-wide) | User **or** display token |
 | POST | `/shop-floor/kiosk-stations/station-login` | Unlock a crew tablet with the shared station PIN. Body `{"station_id", "pin"}` (PIN 4–8 digits) → `{"access_token", "token_type", "expires_in", "station": {"id", "label", "work_center_id", "work_center_code", "work_center_name"}}` (24 h scoped `type="kiosk"` JWT). Bad/revoked station or wrong PIN → **401** (indistinguishable; failed attempt audited) | **Public** (PIN-gated, 5/minute per IP) |
 | POST | `/shop-floor/kiosk-stations` | Create a PIN-protected crew-station kiosk bound to a work center. Body `{"label", "work_center_id", "pin"}` → **201** `KioskStationResponse` (PIN hashed, never echoed; a work center outside the active company → **404**) | Admin / Manager |
 | GET | `/shop-floor/kiosk-stations` | List this company's kiosk stations (no PIN/`pin_hash`) → `{"stations"}` | Admin / Manager |
@@ -745,17 +745,44 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > comes from the **DB row, never client input**, so revocation/expiry hold for already-minted JWTs
 > and a forged claim cannot widen scope. The endpoint is a **zero-write read**: deliberately no
 > reconcile-on-read, no audit rows, no events — an unattended TV polling every 30s must never
-> mutate state, and a display token has no user identity to attribute writes to. Operator names in
-> the payload are truncated to "First L." (`operator_name`) because the board renders on a public
-> screen. Signed-in users can call it too (their active company scopes the data). Payload:
-> `work_centers[]` (`{code, name, status, active_jobs[], queued_count, blocked_count, down}`, each
-> active job `{wo_number, part_number, op_name, operator_name, elapsed_minutes, qty_done,
-> qty_target}`), `late_wos[]`, `blocked_wos[]` (tickers capped at 25), an optional **`kpi_strip`**
-> block (trailing-30-day floor KPIs — `otd_ship_pct_30d`, `fpy_pct_30d`, `scrap_pct_30d`,
-> `open_wip_count`, `avg_wip_age_days`; company-wide, never narrowed by `?dept=`; values are
-> ~5-minute server-side cached and each nullable = insufficient data; the whole block is `null` only
-> when its computation failed — see [docs/WALLBOARD.md](WALLBOARD.md) → KPI strip), and
-> `generated_at`. Token issuance/revocation: see Authentication → Display tokens. Operating a TV:
+> mutate state, and a display token has no user identity to attribute writes to. The payload is
+> built for a public screen: operator identity is truncated to "First L." (`crew` / `operator_name`),
+> and the ship/today/quality blocks carry counts, ages, WO/part numbers and dates only — **no
+> customer names, no ship-to addresses, no dollar figures, no NCR titles/descriptions**. Signed-in
+> users can call it too (their active company scopes the data). Payload:
+> - `work_centers[]` (`{code, name, status, active_jobs[], queued_count, blocked_count, down}`).
+>   Each active job is **one row per operation** (crew-station grouping): `{wo_number, part_number,
+>   op_name, crew[]` (up to 3 "First L." names)`, crew_count` (true headcount)`, operator_name`
+>   (back-compat alias of `crew[0]`)`, elapsed_minutes` (earliest open clock-in)`, qty_done,
+>   qty_target, is_late}`. `is_late` is server-computed: promise (`coalesce(must_ship_by,
+>   due_date)`, the OTD precedence) before today's Central date on a live, non-terminal WO — the
+>   same predicate as `late_wos` / `late_total`.
+> - `late_wos[]` (worst-first), `blocked_wos[]` (oldest-first) — capped at **12**; `late_wos[].due_date`
+>   carries the promise date under the original field name. **Dept-scoped** when `?dept=` is passed
+>   (late via any open op routed to a dept work center; blocked via the blocker's operation's work
+>   center — a blocker with no operation appears only on the unfiltered board).
+> - `late_total` / `blocked_total` / `down_total` — true **uncapped** counts (dept-scoped with the
+>   lists); `down_total` = active work centers with an open downtime event.
+> - **`ship`** (plant-wide, Central-day window): `due_today` = all WOs promised today via
+>   `must_ship_by || due_date` (one population), `shipped_today` = of those, fully shipped (the
+>   analytics counted-shipment rules), `due_this_week` (promised today..+6, not fully shipped),
+>   `due_today_rows[]` (top 2 open by qty remaining — `{wo_number, part_number, promise_date,
+>   qty_remaining}` only), `next_due_date` / `next_due_count` when nothing is promised today.
+> - **`today`** (plant-wide, Central-midnight window): `ops_completed`, `pieces_completed`
+>   (RUN+REWORK, provenance-excluded), `wos_completed`, `operators_on_clock` (distinct users with
+>   an open time entry, any entry type), `hours_logged`, `receipts`, `scrap_events`
+>   (provenance-excluded). Aggregates only.
+> - **`quality`** (plant-wide): `open_ncr_count`, `newest_ncr_age_days`, `wos_on_hold` — counts and
+>   ages only, never NCR text.
+> - **`kpi_strip`** (trailing-30-day floor KPIs — `otd_ship_pct_30d`, `fpy_pct_30d`,
+>   `scrap_pct_30d`, `open_wip_count`, `avg_wip_age_days`; company-wide, never narrowed by
+>   `?dept=`; values are ~5-minute server-side cached and each nullable = insufficient data — see
+>   [docs/WALLBOARD.md](WALLBOARD.md) → KPI strip), and `generated_at`.
+>
+> Every block/field added after A0.5 v1 is **optional** (old TVs ignore them; a new TV against an
+> old backend renders em-dashes), and `ship` / `today` / `quality` / `kpi_strip` are each
+> independently best-effort — a failed block is `null` on that poll, never a failed payload.
+> Token issuance/revocation: see Authentication → Display tokens. Operating a TV:
 > see [docs/WALLBOARD.md](WALLBOARD.md).
 
 > **Crew roster on `GET /shop-floor/work-center-queue/{id}` (crew-station kiosk).** The queue read

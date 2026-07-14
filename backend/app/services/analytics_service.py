@@ -699,6 +699,18 @@ class AnalyticsService:
         """
         return self._get_ship_otd_value(start, end)
 
+    def get_total_shipped(self, work_order_ids: List[int]) -> Dict[int, float]:
+        """Public accessor: cumulative COUNTED shipped quantity per WO id.
+
+        "Counted" is the ship-OTD rule (``_shipment_facts``): ship_date NOT
+        NULL, not soft-deleted, not a CANCELLED shipment. WOs with no counted
+        shipments are simply absent from the dict. Exists so the wallboard
+        ship panel doesn't reach into the underscore-private helpers (the
+        ``get_ship_otd_value`` precedent).
+        """
+        facts = self._shipment_facts(work_order_ids)
+        return {wo_id: float(fact["total_shipped"]) for wo_id, fact in facts.items()}
+
     def _get_ship_otd_value(self, start: date, end: date) -> Optional[float]:
         """Fulfillment-anchored ship OTD. None ('n/a') on an empty denominator."""
         candidates = self._ship_otd_candidates(start, end)

@@ -50,14 +50,21 @@ def ensure_company(db: Session, company_id: int) -> Company:
     return company
 
 
-def make_user(db: Session, *, role: UserRole = UserRole.MANAGER, company_id: int = COMPANY_A) -> User:
+def make_user(
+    db: Session,
+    *,
+    role: UserRole = UserRole.MANAGER,
+    company_id: int = COMPANY_A,
+    first_name: str = "Lean",
+    last_name: Optional[str] = None,
+) -> User:
     ensure_company(db, company_id)
     n = _next()
     user = User(
         email=f"lean1-{n}@co{company_id}.test",
         employee_id=f"LEAN1-{n:05d}",
-        first_name="Lean",
-        last_name=f"User{n}",
+        first_name=first_name,
+        last_name=last_name or f"User{n}",
         hashed_password=TEST_PASSWORD_HASH,
         role=role,
         is_active=True,
@@ -94,13 +101,13 @@ def make_part(db: Session, *, company_id: int = COMPANY_A, standard_cost: float 
     return part
 
 
-def make_work_center(db: Session, *, company_id: int = COMPANY_A) -> WorkCenter:
+def make_work_center(db: Session, *, company_id: int = COMPANY_A, work_center_type: str = "machining") -> WorkCenter:
     ensure_company(db, company_id)
     n = _next()
     wc = WorkCenter(
         name=f"LEAN1-WC-{n}",
         code=f"LEAN1-WC-{n:04d}",
-        work_center_type="machining",
+        work_center_type=work_center_type,
         description="lean phase 1 fixture work center",
         hourly_rate=100.0,
         is_active=True,

@@ -2145,7 +2145,14 @@ def shop_floor_dashboard(
 
 @router.get("/wallboard", response_model=WallboardResponse)
 def shop_floor_wallboard(
-    dept: Optional[str] = Query(None, max_length=50, description="Filter to one work-center type (case-insensitive)"),
+    dept: Optional[str] = Query(
+        None,
+        max_length=50,
+        description=(
+            "Scope to one work-center type (case-insensitive): filters the work centers "
+            "AND the late/blocked lists + totals; ship/today/quality/kpi_strip stay plant-wide"
+        ),
+    ),
     db: Session = Depends(get_db),
     principal: WallboardPrincipal = Depends(get_display_or_user),
 ):
