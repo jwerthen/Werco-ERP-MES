@@ -734,6 +734,10 @@ if settings.RATE_LIMIT_ENABLED:
             # Badge → 5-min kiosk-scoped operator token. Generous (a whole crew
             # taps one terminal) but safe: the endpoint is station-token-gated.
             "/api/v1/auth/kiosk-badge-token": "30/minute",
+            # One-time TV setup-code claim (public, no credentials). Codes are
+            # 8 chars over a 31-symbol alphabet, single-use, 15-min TTL — this
+            # cap keeps online guessing negligible.
+            "/api/v1/auth/display-token/claim": "10/minute",
         }
         # Per-route limits for non-auth hot paths, same path -> limit shape as the
         # auth map above. A0.4: wedge scanners hammer the scan resolver; ~1 scan/sec
@@ -848,7 +852,7 @@ if settings.RATE_LIMIT_ENABLED:
         logger.info(
             "Auth rate limits enforced: login=5/min, register=3/min, register-public=3/min, "
             "refresh=30/min, employee-login=3/min, station-login=5/min, "
-            "kiosk-station-login=5/min, kiosk-badge-token=30/min"
+            "kiosk-station-login=5/min, kiosk-badge-token=30/min, display-token-claim=10/min"
         )
         logger.info("Per-route rate limits enforced: scanner resolve-action=60/min")
     except ImportError:

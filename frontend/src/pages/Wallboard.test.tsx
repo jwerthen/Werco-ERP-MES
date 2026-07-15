@@ -354,7 +354,9 @@ describe('Wallboard', () => {
       // Distinct full-screen state — NOT the generic offline chip over stale data.
       expect(await screen.findByTestId('revoked-screen')).toBeInTheDocument();
       expect(screen.getByText(/Display access revoked or expired/i)).toBeInTheDocument();
-      expect(screen.getByText(/new display link in Admin Settings/i)).toBeInTheDocument();
+      // Copy points at the TV pairing flow — no more typing a #token= URL on a remote.
+      expect(screen.getByText(/new display link or setup code in Admin Settings/i)).toBeInTheDocument();
+      expect(screen.getByText(/open \/tv on this screen and enter the code/i)).toBeInTheDocument();
       expect(screen.queryByTestId('wallboard-grid')).not.toBeInTheDocument();
       expect(screen.queryByTestId('offline-banner')).not.toBeInTheDocument();
 

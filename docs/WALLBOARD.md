@@ -13,31 +13,55 @@ it authenticates with a **scoped display token** instead of a user session.
 
 ## Setting up a TV
 
-1. **Issue a token** — Admin Settings → **Wallboard Displays** tab → New display. Give it a label
-   naming the physical screen ("North wall TV") and a lifetime (default 90 days, max 365). The UI
-   is on the Admin Settings page (admin-gated); the API also allows Manager
+1. **Issue a display** — Admin Settings → **Wallboard Displays** tab → New display. Give it a
+   label naming the physical screen ("North wall TV"), a lifetime (default 90 days, max 365), and
+   — for a one-department TV — an optional **department preset** (a work-center type, e.g.
+   `machining`). The UI is on the Admin Settings page (admin-gated); the API also allows Manager
    (`require_role([ADMIN, MANAGER])`).
-2. **Copy the one-time URL.** The token JWT and a ready-made
-   `https://<your-host>/wallboard#token=<jwt>` URL are shown **exactly once**, with copy buttons.
-   The server never returns the token again — if you lose it, revoke and issue a new one. (The
-   token rides in the URL **fragment** so it never leaves the browser in requests or server logs;
-   legacy `?token=<jwt>` query-param URLs from earlier issuances still work.)
-3. **Open the URL on the TV's browser.** On first load the page moves the token from the URL into
-   `sessionStorage` and scrubs it from the address bar (so it doesn't linger in screenshots or
-   over-the-shoulder photos). Because it lives in `sessionStorage`, closing the browser drops it —
-   bookmark/relaunch with the full `#token=` URL, or keep the browser session alive.
-4. **Kiosk mode.** Run the TV's browser in kiosk/full-screen mode with sleep disabled (e.g.
-   `chromium --kiosk 'https://<host>/wallboard#token=<jwt>'`, or the smart-TV browser's full-screen
-   setting). The page is self-contained — no app chrome, no login screen. Everything is sized in
+2. **Copy the 8-char setup code.** Issuance shows a one-time **setup code** (grouped `XXXX-XXXX`;
+   valid **15 minutes**, **single use**) alongside the fallback `#token=` URL (below). Both are
+   shown **exactly once** — but unlike the URL, a lost or expired code is cheap to replace (step
+   4).
+3. **On the TV, open `https://<your-host>/tv` and type the code.** Codes are case-insensitive,
+   dashes/spaces are ignored, and the alphabet excludes `0/O/1/I/L` so nothing is ambiguous read
+   off a screen; `/tv/<code>` also works as a deep link. The page claims the code, stores the
+   minted display token in `localStorage`, and lands on `/wallboard` — with `?dept=` applied
+   automatically when the display carries a department preset. **TV reboots and browser restarts
+   don't need re-pairing**: the credential persists on the device until the display is revoked or
+   expires (or the browser's storage is wiped).
+4. **Re-pairing after a repair or browser wipe:** click **New setup code** on the display's row,
+   walk to the TV, open `/tv`, type the fresh code. Reissuing invalidates the previous code
+   immediately (used or not) and doesn't touch the display's lifetime or revocation state. The
+   action is disabled for revoked/expired displays — issue a new display for those.
+5. **Kiosk mode.** Run the TV's browser in kiosk/full-screen mode with sleep disabled — `/tv` is
+   safe as the browser homepage (an already-paired display bounces straight to the board), e.g.
+   `chromium --kiosk 'https://<host>/tv'`, or the smart-TV browser's full-screen setting. The page
+   is self-contained — no app chrome, no login screen. Everything is sized in
    `rem` off a viewport-scaled root (1rem = 16px at 1080p, 32px at 4K — identical angular size),
    with a 2% safe-area pad for TV overscan; verify legibility on the actual hardware at viewing
    distance, especially the orange (BLOCKED) vs amber (LATE) discrimination.
 
+### Fallback: the one-time `#token=` URL
+
+Issuance still returns the raw display JWT and a ready-made
+`https://<your-host>/wallboard#token=<jwt>` URL (shown once with the setup code; the server never
+returns the token again — if it's lost, reissue a setup code or revoke and issue a new display).
+The token rides in the URL **fragment** so it never leaves the browser in requests or server logs;
+legacy `?token=<jwt>` query-param URLs from earlier issuances still work. On first load the page
+moves the token from the URL into `sessionStorage` and scrubs it from the address bar (so it
+doesn't linger in screenshots or over-the-shoulder photos). Because URL-pasted tokens live in
+`sessionStorage`, closing the browser drops them — bookmark/relaunch with the full `#token=` URL,
+or keep the browser session alive. Pairing via `/tv` has neither problem (the claimed token
+persists in `localStorage` and never rides in a URL) — prefer the setup code for anything
+permanent.
+
 ### One TV per department
 
-Append `dept=<work_center_type>` as a query param (before the `#token=` fragment) to narrow the
-board to one department, e.g. `/wallboard?dept=machining#token=<jwt>`. `dept` matches the
-work-center type case-insensitively; the header chip renders it title-cased.
+Set the **department preset** on the display at issuance and a TV paired via `/tv` lands on
+`/wallboard?dept=<type>` automatically. For URL-based setups, append `dept=<work_center_type>` as
+a query param (before the `#token=` fragment) to narrow the board to one department, e.g.
+`/wallboard?dept=machining#token=<jwt>`. `dept` matches the work-center type case-insensitively;
+the header chip renders it title-cased.
 
 **What `dept` scopes — and what it never scopes:**
 
@@ -197,8 +221,9 @@ no customer names, no ship-to addresses, no dollar figures, no NCR text, operato
   `+N more` count, so anything hidden is by definition less severe than everything shown.
 - **No token:** without a valid token (or signed-in session) the page shows guidance instead of
   data — it never redirects to login.
-- **Revoked/expired token:** full-screen notice; the stored display credential is dropped and
-  polling stops.
+- **Revoked/expired token:** full-screen notice directing to a fresh setup code + `/tv`
+  re-pairing; every stored display credential (the `sessionStorage` URL capture and the
+  `localStorage` `/tv` claim) is dropped and polling stops.
 - **Privacy:** operator names are truncated server-side to "First L." — the payload is built for
   a public screen. A signed-in user can also open `/wallboard` (scoped to their active company).
 
@@ -240,8 +265,23 @@ carries no user identity, and can write nothing. Still:
 - **If a TV is lost, stolen, or replaced, revoke its token** from Admin Settings → Wallboard
   Displays. Revocation is checked server-side on every request (the DB row, not the JWT, is
   authoritative), so the screen goes dark within one ~30s poll.
-- Issuance and revocation are tamper-evidently audit-logged; label tokens clearly so the audit
-  trail names the physical screen.
+- **Treat setup codes like one-time passwords** — that is what they are: 8 chars of CSPRNG output
+  (~40 bits over an unambiguous 31-symbol alphabet), **15-minute TTL, single use**, stored only as
+  a SHA-256 hash (the plaintext is never persisted or logged). The claim endpoint
+  (`POST /auth/display-token/claim`) is public by design (a pairing TV has no credential yet) but
+  rate-limited (**10/minute per IP**) and answers **every** failure — unknown, used, or expired
+  code, revoked or expired display — with the same generic 404, so it can't be probed as an
+  oracle. Reissuing a code kills the previous one immediately. Same short-credential posture as
+  the kiosk/visitor station PINs (`docs/KIOSK.md`, `docs/VISITOR_SIGNIN.md`): a short secret typed
+  at the device mints a scoped token, and the DB row — never the JWT — stays the authority.
+- **The claimed JWT is revocable exactly like before.** The claim re-mints the JWT from the
+  `display_tokens` row (same `jti` / company / expiry as the issuance JWT), so the row remains the
+  single revocation anchor — revoke the display and the TV goes dark within one ~30s poll no
+  matter how it was paired.
+- Issuance, revocation, setup-code reissue, and each successful claim are tamper-evidently
+  audit-logged (the claim as a `CLAIM` event on the display's company, with the caller's
+  IP/user-agent and no user identity — it's a TV, not a person; the code value and its hash never
+  land on the audit chain). Label tokens clearly so the audit trail names the physical screen.
 - Tokens expire (≤365 days). Re-issue and re-point the TV before expiry — expired tokens are
   rejected the same way as revoked ones.
 
@@ -251,7 +291,9 @@ carries no user identity, and can write nothing. Still:
   wallboard callout.
 - Role gating: `docs/RBAC_PERMISSIONS.md` → Admin.
 - Implementation: `backend/app/api/deps.py` (`get_display_or_user`),
+  `backend/app/services/display_token_service.py` (issue / setup-code reissue / public claim),
   `backend/app/services/wallboard_service.py` (payload builder + the shared lateness predicate),
-  `frontend/src/pages/Wallboard.tsx`, `frontend/src/components/wallboard/` (zone components),
+  `frontend/src/pages/Wallboard.tsx`, `frontend/src/pages/TvPair.tsx` (the `/tv` pairing screen),
+  `frontend/src/components/wallboard/` (zone components),
   `frontend/src/utils/wallboardLayout.ts` (grid math / sort / tier hysteresis),
   `frontend/src/hooks/useNewEventFlash.ts`, `frontend/src/services/wallboardClient.ts`.

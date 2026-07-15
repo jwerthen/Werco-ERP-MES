@@ -23,6 +23,11 @@ class DisplayTokenCreate(BaseModel):
         le=365,
         description="Token lifetime in days (default 90, capped at 365).",
     )
+    dept: Optional[str] = Field(
+        None,
+        max_length=50,
+        description="Optional work-center-type preset the TV opens with (e.g. 'machining').",
+    )
 
 
 class DisplayTokenResponse(UTCModel):
@@ -30,6 +35,7 @@ class DisplayTokenResponse(UTCModel):
 
     id: int
     label: str
+    dept: Optional[str] = None
     expires_at: datetime
     revoked: bool
     revoked_at: Optional[datetime] = None
@@ -38,10 +44,46 @@ class DisplayTokenResponse(UTCModel):
 
 
 class DisplayTokenIssueResponse(DisplayTokenResponse):
-    """Returned ONLY from POST /auth/display-token — carries the one-time JWT."""
+    """Returned ONLY from POST /auth/display-token — carries the one-time JWT
+    plus the short one-time TV setup code (15-min TTL, single-use)."""
 
     token: str
+    setup_code: str
+    setup_code_expires_at: datetime
 
 
 class DisplayTokenListResponse(BaseModel):
     display_tokens: list[DisplayTokenResponse]
+
+
+class SetupCodeReissueResponse(UTCModel):
+    """POST /auth/display-token/{id}/setup-code — a fresh one-time pairing code.
+
+    Shown once, like the issuance JWT; the previous code is dead the moment
+    this response exists.
+    """
+
+    id: int
+    label: str
+    dept: Optional[str] = None
+    setup_code: str
+    setup_code_expires_at: datetime
+
+
+class DisplayTokenClaimRequest(BaseModel):
+    code: str = Field(
+        ...,
+        min_length=1,
+        max_length=20,
+        description="The 8-char setup code shown at issuance (case-, space- and dash-insensitive).",
+    )
+
+
+class DisplayTokenClaimResponse(UTCModel):
+    """Returned from the PUBLIC POST /auth/display-token/claim — the wallboard
+    display JWT (re-minted from the row; same revocation anchor)."""
+
+    token: str
+    label: str
+    dept: Optional[str] = None
+    expires_at: datetime

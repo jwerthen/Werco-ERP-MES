@@ -2,14 +2,19 @@
  * Admin > Wallboard Displays tab (A0.5).
  *
  * Manage scoped display tokens for unattended shop-floor TVs:
- *  - create (label + expiry) — the JWT and ready-made /wallboard URL are
- *    shown exactly ONCE with copy buttons (the server never returns the
- *    token again);
- *  - list (label / created / expiry / status);
+ *  - create (label + expiry + optional department) — the 8-char TV SETUP CODE
+ *    is the primary hand-off (enter it at /tv on the TV; 15 minutes, single
+ *    use), with the raw JWT + ready-made /wallboard URL as the fallback. All
+ *    of it is shown exactly ONCE (the server never returns them again);
+ *  - list (label / dept / created / expiry / status);
+ *  - "New setup code" per row — re-issues a fresh one-time pairing code for
+ *    an existing display (disabled for revoked/expired rows);
  *  - revoke (the TV loses access on its next 30s poll).
  *
  * Rendered inside AdminSettings (AdminRoute-gated); the backend additionally
- * enforces ADMIN/MANAGER on every display-token endpoint.
+ * enforces ADMIN/MANAGER on every display-token endpoint (the TV-side claim
+ * of a setup code is the one PUBLIC endpoint, and it lives in
+ * services/wallboardClient, not here).
  */
 
 import React, { useCallback, useEffect, useState } from 'react';
@@ -19,21 +24,46 @@ import {
   ExclamationTriangleIcon,
   NoSymbolIcon,
   PlusIcon,
+  QrCodeIcon,
   TvIcon,
 } from '@heroicons/react/24/outline';
 import api from '../../services/api';
-import type { DisplayToken, DisplayTokenIssued } from '../../types/wallboard';
+import type { DisplayToken, SetupCodeResponse } from '../../types/wallboard';
+import { FormField } from '../ui/FormField';
+import { LoadingButton } from '../ui/LoadingButton';
+import { useToast } from '../ui/Toast';
 import { formatCentralDateTime, toDate } from '../../utils/centralTime';
 
+/** Group the 8-char code as XXXX-XXXX — how it's read out and typed on the TV. */
+function formatSetupCode(code: string): string {
+  return code.length === 8 ? `${code.slice(0, 4)}-${code.slice(4)}` : code;
+}
+
+/**
+ * The one-time reveal panel's payload — from create (token + code) or from a
+ * per-row "New setup code" re-issue (code only). `setupCode` stays defensive
+ * against an older backend that doesn't return codes yet.
+ */
+interface OneTimeReveal {
+  label: string;
+  setupCode: string | null;
+  dept: string | null;
+  /** Present only on create — the raw JWT for the legacy #token= URL hand-off. */
+  token: string | null;
+}
+
 export default function DisplayTokensTab() {
+  const { showToast } = useToast();
   const [tokens, setTokens] = useState<DisplayToken[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [label, setLabel] = useState('');
+  const [dept, setDept] = useState('');
   const [expiresDays, setExpiresDays] = useState(90);
-  const [issued, setIssued] = useState<DisplayTokenIssued | null>(null);
-  const [copied, setCopied] = useState<'token' | 'url' | null>(null);
+  const [reveal, setReveal] = useState<OneTimeReveal | null>(null);
+  const [reissuingId, setReissuingId] = useState<number | null>(null);
+  const [copied, setCopied] = useState<'token' | 'url' | 'code' | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -57,14 +87,41 @@ export default function DisplayTokensTab() {
     setCreating(true);
     setError(null);
     try {
-      const result = await api.createDisplayToken({ label: label.trim(), expires_days: expiresDays });
-      setIssued(result);
+      const result = await api.createDisplayToken({
+        label: label.trim(),
+        expires_days: expiresDays,
+        ...(dept.trim() ? { dept: dept.trim() } : {}),
+      });
+      setReveal({
+        label: result.label,
+        setupCode: result.setup_code ?? null,
+        dept: result.dept ?? null,
+        token: result.token,
+      });
       setLabel('');
+      setDept('');
       await load();
     } catch (err: any) {
       setError(err?.response?.data?.detail || err?.message || 'Failed to create display token');
     } finally {
       setCreating(false);
+    }
+  };
+
+  const handleNewSetupCode = async (token: DisplayToken) => {
+    setReissuingId(token.id);
+    try {
+      const result: SetupCodeResponse = await api.issueDisplaySetupCode(token.id);
+      setReveal({
+        label: result.label,
+        setupCode: result.setup_code,
+        dept: result.dept,
+        token: null,
+      });
+    } catch (err: any) {
+      showToast('error', err?.response?.data?.detail || err?.message || 'Failed to issue setup code');
+    } finally {
+      setReissuingId(null);
     }
   };
 
@@ -81,9 +138,10 @@ export default function DisplayTokensTab() {
   // Token goes in the URL FRAGMENT, never the query string: fragments stay in
   // the browser, so the long-lived display credential can't land in server
   // access logs. wallboardClient still accepts legacy ?token= URLs.
-  const wallboardUrl = issued ? `${window.location.origin}/wallboard#token=${issued.token}` : '';
+  const wallboardUrl = reveal?.token ? `${window.location.origin}/wallboard#token=${reveal.token}` : '';
+  const tvUrl = `${window.location.origin}/tv`;
 
-  const copy = async (text: string, which: 'token' | 'url') => {
+  const copy = async (text: string, which: 'token' | 'url' | 'code') => {
     try {
       await navigator.clipboard.writeText(text);
       setCopied(which);
@@ -131,6 +189,20 @@ export default function DisplayTokensTab() {
               data-testid="display-token-label"
             />
           </label>
+          <FormField label="Department (optional)" labelClassName="text-xs text-surface-500 font-normal">
+            {(field) => (
+              <input
+                {...field}
+                type="text"
+                value={dept}
+                onChange={(e) => setDept(e.target.value)}
+                placeholder="e.g. weld"
+                maxLength={50}
+                className="input input-bordered w-44"
+                data-testid="display-token-dept"
+              />
+            )}
+          </FormField>
           <label className="flex flex-col text-xs text-surface-500 gap-1">
             Expires (days)
             <input
@@ -151,46 +223,88 @@ export default function DisplayTokensTab() {
         </div>
       </form>
 
-      {/* One-time token reveal */}
-      {issued && (
-        <div className="border border-amber-500/50 bg-amber-500/5 px-4 py-4 space-y-3" data-testid="issued-panel">
+      {/* One-time reveal: setup code (primary) + raw token/URL fallback on create */}
+      {reveal && (
+        <div className="border border-amber-500/50 bg-amber-500/5 px-4 py-4 space-y-4" data-testid="issued-panel">
           <p className="text-sm font-semibold text-amber-600">
-            Token for “{issued.label}” — copy it now. It will not be shown again.
+            {reveal.token ? 'Token' : 'Setup code'} for “{reveal.label}” — copy it now. It will not be shown again.
           </p>
-          <div className="flex items-center gap-2">
-            <input
-              readOnly
-              aria-label="Wallboard URL"
-              value={wallboardUrl}
-              className="input input-bordered flex-1 font-mono text-xs"
-              onFocus={(e) => e.target.select()}
-              data-testid="issued-url"
-            />
-            <button type="button" className="btn-secondary btn-sm" onClick={() => copy(wallboardUrl, 'url')}>
-              <ClipboardDocumentIcon className="h-4 w-4 mr-1" />
-              {copied === 'url' ? 'Copied!' : 'Copy URL'}
-            </button>
-          </div>
-          <div className="flex items-center gap-2">
-            <input
-              readOnly
-              aria-label="Display token"
-              value={issued.token}
-              className="input input-bordered flex-1 font-mono text-xs"
-              onFocus={(e) => e.target.select()}
-              data-testid="issued-token"
-            />
-            <button type="button" className="btn-secondary btn-sm" onClick={() => copy(issued.token, 'token')}>
-              <ClipboardDocumentIcon className="h-4 w-4 mr-1" />
-              {copied === 'token' ? 'Copied!' : 'Copy token'}
-            </button>
-          </div>
-          <p className="text-xs text-surface-500">
-            Open the URL on the TV's browser — the token is stored on the device and stripped from the
-            address bar. Add <span className="font-mono">?dept=&lt;work center type&gt;</span> before the{' '}
-            <span className="font-mono">#token</span> part to show one department only.
-          </p>
-          <button type="button" className="btn-secondary btn-sm" onClick={() => setIssued(null)}>
+
+          {reveal.setupCode && (
+            <div className="space-y-2 border border-surface-200 bg-fd-panel/40 px-4 py-3">
+              <p className="text-sm font-semibold text-surface-700">
+                On the TV: go to <span className="font-mono">{tvUrl}</span> and enter code
+              </p>
+              <div className="flex items-center gap-3">
+                <span
+                  className="font-mono text-3xl font-bold tracking-[0.25em] tabular-nums"
+                  data-testid="issued-setup-code"
+                >
+                  {formatSetupCode(reveal.setupCode)}
+                </span>
+                <button
+                  type="button"
+                  className="btn-secondary btn-sm"
+                  onClick={() => copy(formatSetupCode(reveal.setupCode ?? ''), 'code')}
+                >
+                  <ClipboardDocumentIcon className="h-4 w-4 mr-1" />
+                  {copied === 'code' ? 'Copied!' : 'Copy code'}
+                </button>
+              </div>
+              <p className="text-xs text-surface-500">
+                Valid 15 minutes, single use.
+                {reveal.dept ? (
+                  <>
+                    {' '}
+                    Pinned to department <span className="font-mono">{reveal.dept}</span>.
+                  </>
+                ) : null}
+              </p>
+            </div>
+          )}
+
+          {reveal.token && (
+            <div className="space-y-3">
+              <p className="text-xs font-semibold uppercase tracking-wide text-surface-500">
+                Fallback: one-time direct link
+              </p>
+              <div className="flex items-center gap-2">
+                <input
+                  readOnly
+                  aria-label="Wallboard URL"
+                  value={wallboardUrl}
+                  className="input input-bordered flex-1 font-mono text-xs"
+                  onFocus={(e) => e.target.select()}
+                  data-testid="issued-url"
+                />
+                <button type="button" className="btn-secondary btn-sm" onClick={() => copy(wallboardUrl, 'url')}>
+                  <ClipboardDocumentIcon className="h-4 w-4 mr-1" />
+                  {copied === 'url' ? 'Copied!' : 'Copy URL'}
+                </button>
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  readOnly
+                  aria-label="Display token"
+                  value={reveal.token}
+                  className="input input-bordered flex-1 font-mono text-xs"
+                  onFocus={(e) => e.target.select()}
+                  data-testid="issued-token"
+                />
+                <button type="button" className="btn-secondary btn-sm" onClick={() => copy(reveal.token ?? '', 'token')}>
+                  <ClipboardDocumentIcon className="h-4 w-4 mr-1" />
+                  {copied === 'token' ? 'Copied!' : 'Copy token'}
+                </button>
+              </div>
+              <p className="text-xs text-surface-500">
+                Opening the URL on the TV's browser stores the token on the device and strips it from the
+                address bar. Add <span className="font-mono">?dept=&lt;work center type&gt;</span> before the{' '}
+                <span className="font-mono">#token</span> part to show one department only.
+              </p>
+            </div>
+          )}
+
+          <button type="button" className="btn-secondary btn-sm" onClick={() => setReveal(null)}>
             Done — I copied it
           </button>
         </div>
@@ -213,11 +327,12 @@ export default function DisplayTokensTab() {
             <thead>
               <tr>
                 <th>Label</th>
+                <th>Dept</th>
                 <th>Created</th>
                 <th>Expires</th>
                 <th>Status</th>
                 <th className="text-right">
-                  <button type="button" onClick={load} className="btn-ghost btn-xs" title="Refresh">
+                  <button type="button" onClick={load} className="btn-ghost btn-xs" title="Refresh" aria-label="Refresh">
                     <ArrowPathIcon className="h-4 w-4" />
                   </button>
                 </th>
@@ -230,9 +345,11 @@ export default function DisplayTokensTab() {
                 // disagree with the server by the UTC offset.
                 const expiresAt = toDate(token.expires_at);
                 const expired = expiresAt !== null && expiresAt.getTime() <= Date.now();
+                const unusable = token.revoked || expired;
                 return (
                   <tr key={token.id}>
                     <td className="font-medium">{token.label}</td>
+                    <td className="font-mono text-sm">{token.dept || '—'}</td>
                     <td className="font-mono text-sm">{formatCentralDateTime(token.created_at)}</td>
                     <td className="font-mono text-sm">{formatCentralDateTime(token.expires_at)}</td>
                     <td>
@@ -245,6 +362,19 @@ export default function DisplayTokensTab() {
                       )}
                     </td>
                     <td className="text-right">
+                      <LoadingButton
+                        variant="ghost"
+                        size="sm"
+                        className="btn-xs"
+                        loading={reissuingId === token.id}
+                        disabled={unusable || reissuingId !== null}
+                        title={unusable ? 'Revoked/expired displays cannot be paired' : 'Issue a fresh TV pairing code'}
+                        onClick={() => handleNewSetupCode(token)}
+                        data-testid={`new-code-${token.id}`}
+                      >
+                        <QrCodeIcon className="h-4 w-4 mr-1" />
+                        New setup code
+                      </LoadingButton>
                       {!token.revoked && (
                         <button
                           type="button"

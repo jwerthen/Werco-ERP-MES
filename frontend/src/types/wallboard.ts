@@ -120,14 +120,46 @@ export interface DisplayToken {
   revoked_at: string | null;
   created_by: number;
   created_at: string;
+  /** Department the display is pinned to (wallboard ?dept=). Optional so a
+   *  list payload from an older backend can't break the tab. */
+  dept?: string | null;
 }
 
-/** POST /auth/display-token response — `token` is shown exactly once. */
+/**
+ * POST /auth/display-token response — `token` AND `setup_code` are shown
+ * exactly once. The setup code is the TV-friendly pairing path: enter it at
+ * /tv within 15 minutes (single use) instead of typing the full #token= URL.
+ */
 export interface DisplayTokenIssued extends DisplayToken {
   token: string;
+  setup_code: string;
+  setup_code_expires_at: string;
+  dept: string | null;
+}
+
+/** POST /auth/display-token/{id}/setup-code — re-issued pairing code (shown once). */
+export interface SetupCodeResponse {
+  id: number;
+  label: string;
+  dept: string | null;
+  setup_code: string;
+  setup_code_expires_at: string;
+}
+
+/**
+ * POST /auth/display-token/claim response (PUBLIC endpoint — consumed by
+ * services/wallboardClient, never the axios client). Any failure is a generic
+ * 404: expired / used / unknown codes are indistinguishable by design.
+ */
+export interface DisplayCodeClaim {
+  token: string;
+  dept: string | null;
+  label: string;
+  expires_at: string;
 }
 
 export interface DisplayTokenCreateInput {
   label: string;
   expires_days?: number;
+  dept?: string;
 }

@@ -216,7 +216,8 @@ export default function Wallboard() {
         >
           <p className="text-[2.5rem] font-bold text-[#f04438]">Display access revoked or expired</p>
           <p className="max-w-[48rem] text-[1.5rem] text-[#8b98a9]">
-            Create a new display link in Admin Settings → Wallboard Displays and open it on this TV.
+            Create a new display link or setup code in Admin Settings → Wallboard Displays, then open /tv on this
+            screen and enter the code.
           </p>
         </div>
       ) : noToken && !data ? (

@@ -15,6 +15,10 @@ Security properties (compliance-relevant):
 - The JWT itself is never stored — only its ``jti``. Issuance and revocation
   are audit-logged through ``AuditService`` (see
   ``app.services.display_token_service``).
+- TV pairing uses a short-lived one-time setup code: only its SHA-256 hex
+  (``setup_code_hash``) is stored — never the plaintext code — alongside its
+  own expiry (``setup_code_expires_at``, ~15 minutes) and a single-use marker
+  (``setup_code_used_at``).
 """
 
 from datetime import datetime
@@ -46,6 +50,24 @@ class DisplayToken(Base, TenantMixin):
     revoked = Column(Boolean, nullable=False, default=False, server_default='false')
     revoked_at = Column(DateTime, nullable=True)
     revoked_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+    # One-time TV pairing (setup code). SHA-256 hex of the NORMALIZED code —
+    # the plaintext code is NEVER stored; the claim endpoint hashes what the
+    # TV types and looks the row up by this column.
+    setup_code_hash = Column(String(64), nullable=True, index=True)
+
+    # Setup-code expiry — codes live ~15 minutes, independent of the token's
+    # own ``expires_at``. Naive UTC, like ``expires_at``.
+    setup_code_expires_at = Column(DateTime, nullable=True)
+
+    # Single-use marker — set on first successful claim; a set value means the
+    # code can never be redeemed again.
+    setup_code_used_at = Column(DateTime, nullable=True)
+
+    # Optional per-TV work-center-type preset ("machining", "welding", ...).
+    # The claim response hands it back so the person at the TV never types a
+    # query param.
+    dept = Column(String(50), nullable=True)
 
     created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)

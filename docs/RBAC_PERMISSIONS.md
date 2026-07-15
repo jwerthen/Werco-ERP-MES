@@ -617,7 +617,7 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 | Audit Logs | ✓ | ✓ | | | | | |
 | AI usage & cost summary (`/ai-usage/summary`) | ✓ | ✓ | | | | | |
 | AI egress kill switch (`PUT /companies/me/ai-egress`) | ✓ | | | | | | |
-| Wallboard display tokens (`/auth/display-token` issue/list/revoke) | ✓ | ✓ | | | | | |
+| Wallboard display tokens (`/auth/display-token` issue/list/revoke + setup-code reissue) | ✓ | ✓ | | | | | |
 | Visitor sign-in stations (`/visitor-logs/stations` create/list/revoke/reset-pin) | ✓ | ✓ | | | | | |
 | Crew kiosk stations (`/shop-floor/kiosk-stations` create/list/revoke/reset-pin) | ✓ | ✓ | | | | | |
 | System | ✓ | | | | | | |
@@ -641,12 +641,15 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > (`Shipment.aggregator_shipment_id`), never from caller input. A request that matches no secret or no
 > shipment is dropped with **204** (no existence oracle). It is therefore not on this permission matrix.
 >
-> **Intentionally-unauthenticated endpoints (the full set).** Four write/verify surfaces establish trust
+> **Intentionally-unauthenticated endpoints (the full set).** Five write/verify surfaces establish trust
 > *without* a user role — and so none appears on the role matrix: the **carrier webhook** above (HMAC
 > signature), the visitor **`station-login`** (a shared station PIN mints a scoped `signin` token — see
 > Visitor Logs above), the crew-kiosk **`station-login`** (`POST /shop-floor/kiosk-stations/station-login`,
-> a shared station PIN mints a scoped `kiosk` token — see Crew-Station Kiosk above), and the wallboard
-> **display-token** verification (a scoped `display` JWT — see below). Each binds the request to a
+> a shared station PIN mints a scoped `kiosk` token — see Crew-Station Kiosk above), the wallboard
+> **display-token** verification (a scoped `display` JWT — see below), and the wallboard
+> **setup-code claim** (`POST /auth/display-token/claim`, a single-use 15-minute pairing code —
+> stored only as a SHA-256 hash — exchanged for the display JWT; rate-limited 10/minute per IP,
+> uniform 404 for every failure — see below). Each binds the request to a
 > tenant through stored server-side state, never caller-supplied identity.
 
 > **Audit-log access (tenant-scoped).** The **Audit Logs** row above covers audit *retrieval*:
@@ -694,9 +697,14 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > other roles. See [docs/API.md](API.md) →
 > Company (self-service) and [docs/AI_QUOTING_AGENT_RUNBOOK.md](AI_QUOTING_AGENT_RUNBOOK.md).
 
-> **Wallboard display tokens (`/auth/display-token`, A0.5).** Issue / list / revoke are enforced
+> **Wallboard display tokens (`/auth/display-token`, A0.5).** Issue / list / revoke / setup-code
+> reissue (`POST /auth/display-token/{id}/setup-code`) are enforced
 > **in code** via `require_role([ADMIN, MANAGER])` and tenant-scoped to the active company;
-> issuance and revocation write tamper-evident `audit_log` rows. **A display token is not a role
+> issuance, revocation, setup-code reissue, and each successful TV claim write tamper-evident
+> `audit_log` rows. The TV-side **claim** (`POST /auth/display-token/claim`) is the one **public**
+> display-token endpoint (see the intentionally-unauthenticated set above): a single-use,
+> 15-minute setup code — hashed at rest — is exchanged for the display JWT, re-minted from the
+> `display_tokens` row so revocation semantics are unchanged. **A display token is not a role
 > and carries no user identity** — it is a single-endpoint credential for an unattended TV. What it
 > **can** do: authenticate the read-only `GET /shop-floor/wallboard` (via the dedicated
 > `get_display_or_user` dependency), scoped to the issuing company (taken from the `display_tokens`

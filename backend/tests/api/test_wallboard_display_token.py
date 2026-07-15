@@ -10,8 +10,12 @@ Compliance assertions covered here:
 - Tenant isolation: a company-A display token can never read company B's
   board; management endpoints are tenant-scoped too.
 - Operator names on the public wallboard are truncated to "First L.".
+- One-time TV setup codes: 8-char/15-min/single-use, hash-only at rest,
+  never on the audit chain, claimed via a PUBLIC no-oracle endpoint whose
+  re-minted JWT stays anchored to (and revocable through) the same row.
 """
 
+import hashlib
 import re
 from datetime import datetime, timedelta, timezone
 
@@ -19,6 +23,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
+import app.main as app_main
 from app.core.security import create_display_token, get_current_user_from_token, verify_token
 from app.core.time_utils import CENTRAL_TIME_ZONE
 from app.models.audit_log import AuditLog
@@ -32,6 +37,7 @@ from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.models.work_order_blocker import WorkOrderBlocker, WorkOrderBlockerCategory, WorkOrderBlockerStatus
+from app.services.display_token_service import SETUP_CODE_TTL_MINUTES
 from app.services.wallboard_service import central_day_window_utc
 from tests.conftest import TEST_PASSWORD_HASH
 from tests.lean_phase1_helpers import (
@@ -1176,3 +1182,303 @@ def test_payload_privacy_no_identities_costs_or_customers(client: TestClient, db
     assert names, "expected at least one crew name on the seeded board"
     for name in names:
         assert name_shape.match(name), f"operator name {name!r} is not 'First L.'-shaped"
+
+
+# ---------------------------------------------------------------------------
+# One-time TV setup codes (pair by typing 8 chars, not a 355-char #token= URL)
+# ---------------------------------------------------------------------------
+
+CLAIM_URL = f"{DISPLAY_TOKEN_URL}/claim"
+SETUP_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+GENERIC_CLAIM_DETAIL = "Setup code not recognized"
+
+_RATE_LIMITING_ON = getattr(app_main, "AUTH_RATE_LIMITS", None) is not None
+
+
+def _claim(client: TestClient, code: str):
+    """POST the claim with NO auth headers — the endpoint is public by design;
+    every use of this helper is also proof no credential is required."""
+    return client.post(CLAIM_URL, json={"code": code})
+
+
+def _reissue(client: TestClient, token_id: int, headers: dict):
+    return client.post(f"{DISPLAY_TOKEN_URL}/{token_id}/setup-code", headers=headers)
+
+
+def test_issue_returns_setup_code_with_15_minute_expiry(client: TestClient, admin_headers: dict):
+    data = _issue_token(client, admin_headers, label="Paired TV", dept="machining")
+
+    code = data["setup_code"]
+    assert len(code) == 8
+    assert set(code) <= set(SETUP_CODE_ALPHABET), f"code {code!r} uses ambiguous characters"
+    assert data["dept"] == "machining"
+
+    expires = datetime.fromisoformat(data["setup_code_expires_at"])
+    minutes_left = (expires - datetime.now(timezone.utc)).total_seconds() / 60
+    assert SETUP_CODE_TTL_MINUTES - 2 <= minutes_left <= SETUP_CODE_TTL_MINUTES + 1
+
+
+def test_setup_code_never_in_list_response_or_audit_trail(client: TestClient, admin_headers: dict, db_session: Session):
+    data = _issue_token(client, admin_headers, label="Secret code TV")
+    code = data["setup_code"]
+    code_hash = hashlib.sha256(code.encode("utf-8")).hexdigest()
+
+    listing = client.get(DISPLAY_TOKEN_URL, headers=admin_headers)
+    assert listing.status_code == 200
+    assert code not in listing.text
+    assert code_hash not in listing.text
+    for row in listing.json()["display_tokens"]:
+        assert "setup_code" not in row and "setup_code_hash" not in row
+
+    audit_row = (
+        db_session.query(AuditLog)
+        .filter(
+            AuditLog.resource_type == "display_token",
+            AuditLog.action == "CREATE",
+            AuditLog.resource_id == data["id"],
+        )
+        .first()
+    )
+    assert audit_row is not None
+    serialized = f"{audit_row.new_values}{audit_row.extra_data}{audit_row.description}"
+    assert code not in serialized, "plaintext setup code leaked onto the audit chain"
+    assert code_hash not in serialized, "setup code hash (the lookup credential) leaked onto the audit chain"
+    # ...but the auditable facts (dept + the code's expiry) ARE recorded.
+    assert "setup_code_expires_at" in str(audit_row.new_values)
+    assert "dept" in str(audit_row.new_values)
+
+
+@pytest.mark.parametrize(
+    "transform",
+    [
+        pytest.param(lambda c: c, id="verbatim"),
+        pytest.param(lambda c: c.lower(), id="lowercase"),
+        pytest.param(lambda c: f"{c[:4]}-{c[4:]}", id="dashed"),
+    ],
+)
+def test_claim_setup_code_happy_path(client: TestClient, admin_headers: dict, db_session: Session, transform):
+    """An unauthenticated TV types the code (any case, optional dash) and gets
+    a working display JWT + the dept preset; the code burns; the claim is
+    audited on the right company with no acting user."""
+    data = _issue_token(client, admin_headers, label="Lobby TV", dept="welding")
+
+    response = _claim(client, transform(data["setup_code"]))
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["label"] == "Lobby TV"
+    assert body["dept"] == "welding"
+    assert body["expires_at"] == data["expires_at"]  # the row's expiry, not the code's
+
+    # The minted JWT authenticates the wallboard (same row-anchored shape the
+    # fencing matrix above already proves is wallboard-only).
+    assert client.get(WALLBOARD_URL, headers=_display_headers(body["token"])).status_code == 200
+
+    # The code is burned on the row...
+    db_session.expire_all()
+    record = db_session.query(DisplayToken).filter(DisplayToken.id == data["id"]).first()
+    assert record.setup_code_used_at is not None
+
+    # ...and the pairing is audited: right company, user_id None (a TV, not a person).
+    audit_row = (
+        db_session.query(AuditLog)
+        .filter(
+            AuditLog.resource_type == "display_token",
+            AuditLog.action == "CLAIM",
+            AuditLog.resource_id == data["id"],
+        )
+        .first()
+    )
+    assert audit_row is not None
+    assert audit_row.user_id is None
+    assert audit_row.company_id == 1
+    assert audit_row.success == "true"
+
+
+def test_setup_code_is_single_use(client: TestClient, admin_headers: dict):
+    data = _issue_token(client, admin_headers, label="One-shot TV")
+    assert _claim(client, data["setup_code"]).status_code == 200
+
+    second = _claim(client, data["setup_code"])
+    assert second.status_code == 404
+    assert second.json()["detail"] == GENERIC_CLAIM_DETAIL
+
+
+def test_expired_setup_code_rejected(client: TestClient, admin_headers: dict, db_session: Session):
+    data = _issue_token(client, admin_headers, label="Slow TV")
+    record = db_session.query(DisplayToken).filter(DisplayToken.id == data["id"]).first()
+    record.setup_code_expires_at = datetime.utcnow() - timedelta(minutes=1)
+    db_session.commit()
+
+    response = _claim(client, data["setup_code"])
+    assert response.status_code == 404
+    assert response.json()["detail"] == GENERIC_CLAIM_DETAIL
+
+
+def test_revoked_display_setup_code_rejected(client: TestClient, admin_headers: dict):
+    data = _issue_token(client, admin_headers, label="Dead TV")
+    assert client.delete(f"{DISPLAY_TOKEN_URL}/{data['id']}", headers=admin_headers).status_code == 200
+
+    response = _claim(client, data["setup_code"])
+    assert response.status_code == 404
+    assert response.json()["detail"] == GENERIC_CLAIM_DETAIL
+
+
+def test_expired_display_setup_code_rejected(client: TestClient, admin_headers: dict, db_session: Session):
+    """A fresh (unexpired, unused) CODE on an EXPIRED display still 404s — the
+    claim can never mint a JWT the wallboard dependency would reject."""
+    data = _issue_token(client, admin_headers, label="Expired TV")
+    record = db_session.query(DisplayToken).filter(DisplayToken.id == data["id"]).first()
+    record.expires_at = datetime.utcnow() - timedelta(minutes=1)
+    db_session.commit()
+
+    response = _claim(client, data["setup_code"])
+    assert response.status_code == 404
+    assert response.json()["detail"] == GENERIC_CLAIM_DETAIL
+
+
+def test_unknown_setup_code_rejected_with_same_generic_detail(client: TestClient, db_session: Session):
+    """Unknown / used / expired / revoked all read identically to a caller —
+    the pairs above each assert the SAME string this one does."""
+    response = _claim(client, "ZZZZ9999")
+    assert response.status_code == 404
+    assert response.json()["detail"] == GENERIC_CLAIM_DETAIL
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param({}, id="missing-code"),
+        pytest.param({"code": ""}, id="empty-code"),
+        pytest.param({"code": None}, id="null-code"),
+        pytest.param({"code": "A" * 21}, id="over-max-length"),
+    ],
+)
+def test_claim_malformed_body_is_422_not_500(client: TestClient, body: dict):
+    """The PUBLIC claim endpoint must shrug off garbage input with Pydantic
+    422s — an unauthenticated 500 here would be both an outage lever and an
+    oracle that something differs server-side."""
+    response = client.post(CLAIM_URL, json=body)
+    assert response.status_code == 422, response.text
+
+
+def test_reissue_rotates_code_and_resets_single_use(client: TestClient, admin_headers: dict, db_session: Session):
+    data = _issue_token(client, admin_headers, label="Rotating TV", dept="machining")
+    old_code = data["setup_code"]
+    # Burn the original code so the reset of setup_code_used_at is observable.
+    assert _claim(client, old_code).status_code == 200
+
+    response = _reissue(client, data["id"], admin_headers)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["id"] == data["id"]
+    assert body["label"] == "Rotating TV"
+    assert body["dept"] == "machining"
+    new_code = body["setup_code"]
+    assert len(new_code) == 8 and set(new_code) <= set(SETUP_CODE_ALPHABET)
+    assert new_code != old_code
+    expires = datetime.fromisoformat(body["setup_code_expires_at"])
+    minutes_left = (expires - datetime.now(timezone.utc)).total_seconds() / 60
+    assert SETUP_CODE_TTL_MINUTES - 2 <= minutes_left <= SETUP_CODE_TTL_MINUTES + 1
+
+    # used_at reset -> the NEW code is claimable exactly once...
+    db_session.expire_all()
+    record = db_session.query(DisplayToken).filter(DisplayToken.id == data["id"]).first()
+    assert record.setup_code_used_at is None
+
+    # ...the OLD code is dead, the new one works.
+    old = _claim(client, old_code)
+    assert old.status_code == 404
+    assert old.json()["detail"] == GENERIC_CLAIM_DETAIL
+    assert _claim(client, new_code).status_code == 200
+
+    # The rotation landed on the audit chain — without either code value.
+    audit_row = (
+        db_session.query(AuditLog)
+        .filter(
+            AuditLog.resource_type == "display_token",
+            AuditLog.action == "UPDATE",
+            AuditLog.resource_id == data["id"],
+        )
+        .order_by(AuditLog.id.desc())
+        .first()
+    )
+    assert audit_row is not None
+    serialized = f"{audit_row.old_values}{audit_row.new_values}{audit_row.extra_data}{audit_row.description}"
+    assert old_code not in serialized and new_code not in serialized
+
+
+def test_reissue_after_code_expiry_succeeds(client: TestClient, admin_headers: dict, db_session: Session):
+    """The everyday recovery path: the 15-minute CODE lapsed before anyone
+    walked to the TV, but the display token itself is alive — reissue must
+    mint a fresh claimable code (no need to revoke and recreate the display)."""
+    data = _issue_token(client, admin_headers, label="Slow walker TV")
+    record = db_session.query(DisplayToken).filter(DisplayToken.id == data["id"]).first()
+    record.setup_code_expires_at = datetime.utcnow() - timedelta(minutes=1)
+    db_session.commit()
+
+    # The lapsed code is dead...
+    assert _claim(client, data["setup_code"]).status_code == 404
+
+    # ...but reissue on the LIVE display succeeds and the new code claims.
+    response = _reissue(client, data["id"], admin_headers)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    expires = datetime.fromisoformat(body["setup_code_expires_at"])
+    assert (expires - datetime.now(timezone.utc)).total_seconds() > 0  # fresh 15-min window
+    assert _claim(client, body["setup_code"]).status_code == 200
+
+
+def test_reissue_expired_token_400(client: TestClient, admin_headers: dict, db_session: Session):
+    """Reissue refuses an EXPIRED display outright (400, like revoked): a code
+    for a dead display could only mint a JWT the wallboard would reject."""
+    data = _issue_token(client, admin_headers, label="Expired display TV")
+    record = db_session.query(DisplayToken).filter(DisplayToken.id == data["id"]).first()
+    record.expires_at = datetime.utcnow() - timedelta(minutes=1)
+    db_session.commit()
+
+    response = _reissue(client, data["id"], admin_headers)
+    assert response.status_code == 400
+
+
+def test_reissue_is_tenant_scoped(client: TestClient, admin_headers: dict, db_session: Session):
+    company_b, admin_b = _make_company_b(db_session)
+    _company_b_display_token(client, db_session, admin_b)
+    record_b = db_session.query(DisplayToken).filter(DisplayToken.company_id == company_b.id).first()
+
+    # Company-A admin cannot mint a pairing code for company B's display.
+    response = _reissue(client, record_b.id, admin_headers)
+    assert response.status_code == 404
+
+
+def test_reissue_revoked_token_400(client: TestClient, admin_headers: dict):
+    data = _issue_token(client, admin_headers, label="Revoked TV")
+    assert client.delete(f"{DISPLAY_TOKEN_URL}/{data['id']}", headers=admin_headers).status_code == 200
+
+    response = _reissue(client, data["id"], admin_headers)
+    assert response.status_code == 400
+
+
+def test_operator_cannot_reissue_setup_code(client: TestClient, admin_headers: dict, operator_headers: dict):
+    data = _issue_token(client, admin_headers, label="RBAC TV")
+    response = _reissue(client, data["id"], operator_headers)
+    assert response.status_code == 403
+
+
+@pytest.mark.skipif(not _RATE_LIMITING_ON, reason="Rate limiting disabled in this environment")
+def test_claim_endpoint_registered_in_auth_rate_limits():
+    """The public claim path carries a strict per-path limit, registered the
+    same way station-login's is (main.py AUTH_RATE_LIMITS)."""
+    assert app_main.AUTH_RATE_LIMITS.get(CLAIM_URL) == "10/minute"
+
+
+def test_claimed_jwt_is_revocable(client: TestClient, admin_headers: dict):
+    """The re-minted JWT stays anchored to the SAME display_tokens row:
+    revoking the display kills the claimed token on the TV's next poll."""
+    data = _issue_token(client, admin_headers, label="Revocable claimed TV")
+    claimed = _claim(client, data["setup_code"])
+    assert claimed.status_code == 200
+    headers = _display_headers(claimed.json()["token"])
+    assert client.get(WALLBOARD_URL, headers=headers).status_code == 200
+
+    assert client.delete(f"{DISPLAY_TOKEN_URL}/{data['id']}", headers=admin_headers).status_code == 200
+    assert client.get(WALLBOARD_URL, headers=headers).status_code == 401

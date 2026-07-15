@@ -46,20 +46,36 @@ long-lived JWT with `type="display"` that authenticates **only** `GET /shop-floo
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| POST | `/auth/display-token` | Issue a display token. Body: `{"label", "expires_days"}` (label 1–100 chars; lifetime default **90** days, capped at **365**) | Admin / Manager |
-| GET | `/auth/display-token` | List this company's display tokens (metadata only — the JWTs are never returned) | Admin / Manager |
+| POST | `/auth/display-token` | Issue a display token. Body: `{"label", "expires_days", "dept"?}` (label 1–100 chars; lifetime default **90** days, capped at **365**; optional `dept` ≤ 50 chars — the work-center-type preset the TV opens with). Response carries the one-time `token` **plus** the one-time `setup_code` + `setup_code_expires_at` (15-min TTL — see callouts) | Admin / Manager |
+| GET | `/auth/display-token` | List this company's display tokens (metadata only, incl. `dept` — the JWTs and setup codes are never returned) | Admin / Manager |
+| POST | `/auth/display-token/{id}/setup-code` | Reissue the one-time TV setup code for an existing display → `{"id", "label", "dept", "setup_code", "setup_code_expires_at"}`. The previous code — used or not — is invalidated immediately; the new code is shown once and expires in **15 minutes**. Revoked/expired token → **400**; cross-tenant id → **404** | Admin / Manager |
+| POST | `/auth/display-token/claim` | Exchange a one-time setup code for the display JWT. Body `{"code"}` (case-, space- and dash-insensitive) → `{"token", "label", "dept", "expires_at"}`. **Every** failure mode (unknown / used / expired code, revoked / expired display) → the same generic **404** | **Public** (rate-limited **10/minute** per IP) |
 | DELETE | `/auth/display-token/{id}` | Revoke a display token (status flip, idempotent; cross-tenant id → 404) | Admin / Manager |
 
-> **One-time reveal.** The raw JWT is returned exactly **once** — the `token` field on the POST
-> response. It is never stored server-side (only its `jti` lands in the `display_tokens` row) and
-> never appears in the list response, so a lost token cannot be recovered — revoke it and issue a
-> new one.
+> **One-time reveal.** The raw JWT **and the 8-char setup code** are returned exactly **once** —
+> the `token` / `setup_code` fields on the POST response. Neither is stored server-side (only the
+> JWT's `jti` and the code's **SHA-256 hash** land in the `display_tokens` row) and neither appears
+> in the list response. A lost token cannot be recovered — but a lost or expired setup code can be
+> **reissued** via `POST /auth/display-token/{id}/setup-code`.
+>
+> **Setup-code claim (TV pairing).** `POST /auth/display-token/claim` is deliberately **public** —
+> a TV pairing itself has no credential yet; the high-entropy single-use code (8 chars of CSPRNG
+> output over a 31-symbol alphabet excluding `0/O/1/I/L`, **15-minute TTL**) *is* the credential,
+> and the matched `display_tokens` row is the company-binding authority. The endpoint is
+> rate-limited (**10/minute per IP**, see Rate Limiting) and returns the **same generic 404 for
+> every failure mode**, so it cannot be used as an oracle for why a code failed. On success the
+> code is burned (single use), the pairing is audit-logged (a `CLAIM` event on the row's company —
+> no user identity; it's a TV), and the JWT is **re-minted from the row** (same `jti` / company /
+> `expires_at` as the issuance JWT), so the revocation semantics below are unchanged. See
+> [docs/WALLBOARD.md](WALLBOARD.md) → Setting up a TV.
 >
 > **Revocation is DB-authoritative.** `DELETE` flips the row's `revoked` flag (the row is kept as
-> the issuance record, not deleted). Issuance and revocation both write tamper-evident `audit_log`
-> rows. The wallboard auth dependency re-checks the `display_tokens` row (exists / not revoked /
+> the issuance record, not deleted). Issuance, revocation, setup-code reissue, and each successful
+> claim all write tamper-evident `audit_log` rows (never the code value or its hash). The
+> wallboard auth dependency re-checks the `display_tokens` row (exists / not revoked /
 > not past its DB `expires_at`) on **every** request, so a revoked or expired token stops working
-> on the TV's next poll (~30s) even though the JWT itself is still signature-valid.
+> on the TV's next poll (~30s) even though the JWT itself is still signature-valid — regardless of
+> whether the TV was paired via URL or setup code.
 
 ### Station signin tokens (visitor sign-in tablet)
 
@@ -2525,6 +2541,7 @@ the global default applied):
 | `POST /auth/refresh` | 30/minute |
 | `POST /auth/employee-login` | 3/minute |
 | `POST /auth/kiosk-badge-token` | 30/minute |
+| `POST /auth/display-token/claim` | 10/minute |
 | `POST /visitor-logs/station-login` | 5/minute |
 | `POST /shop-floor/kiosk-stations/station-login` | 5/minute |
 | `POST /scanner/resolve-action` | 60/minute |
