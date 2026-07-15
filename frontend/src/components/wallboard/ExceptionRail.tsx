@@ -41,7 +41,9 @@ function ZeroLine({ text, large }: { text: string; large: boolean }) {
     <div className="flex flex-1 items-center justify-center overflow-hidden">
       <p
         data-testid="all-clear-line"
-        className={`truncate text-center font-bold uppercase tracking-wide text-[#3fb950] ${
+        // Wrap, never truncate — a clean-day line that reads "NOTHING BLO…"
+        // defeats its own purpose.
+        className={`text-center font-bold uppercase leading-tight tracking-wide text-[#3fb950] ${
           large ? 'text-[2.5rem]' : 'text-[1.5rem]'
         }`}
       >
