@@ -122,12 +122,11 @@ class WallboardQuality(BaseModel):
 
 
 class WallboardKPIStrip(BaseModel):
-    """Floor-visible trailing-30-day KPI strip (Lean Phase 1 / issue #88).
+    """DEPRECATED (2026-07-15 Job Wall redesign — owner dropped the 30d strip).
 
-    Aggregate numbers only -- nothing operator-identifying (public screen).
-    Percentages are 0-100; ``null`` = insufficient data in the window (the TV
-    renders an em dash), never a fake 0/100. Values may be up to ~5 minutes
-    stale (server-side TTL cache so the 30s poll doesn't recompute analytics).
+    The server no longer computes this block; ``WallboardResponse.kpi_strip``
+    is always ``None``. The class stays only so the field keeps its wire type
+    for old TV bundles (which render an em-dash panel on ``null``).
     """
 
     otd_ship_pct_30d: Optional[float] = None  # ship-based OTD (full qty shipped on/before promise)
@@ -137,15 +136,58 @@ class WallboardKPIStrip(BaseModel):
     avg_wip_age_days: Optional[float] = None  # mean days since release of open WOs
 
 
+class WallboardJobOp(BaseModel):
+    """Current operation of a WO on the job wall. NO customer data."""
+
+    sequence: Optional[int] = None
+    name: Optional[str] = None
+    work_center_code: Optional[str] = None
+    work_center_name: Optional[str] = None
+    status: Optional[str] = None  # ready | in_progress | pending
+    qty_done: float = 0  # operation quantity_complete
+    qty_target: float = 0  # operation_target_quantity(op, wo)
+    crew: list[str] = []  # "First L." via operator_display_name, max 3
+    crew_count: int = 0  # true headcount of open labor entries
+    elapsed_minutes: int = 0  # from earliest open labor clock_in on this op
+
+
+class WallboardJob(BaseModel):
+    """One open work order tile. NO customer_name, NO dollars, NO notes."""
+
+    wo_number: str
+    part_number: Optional[str] = None
+    status: str  # released | in_progress
+    qty_complete: float = 0  # WO-level
+    qty_ordered: float = 0
+    promise_date: Optional[date] = None  # coalesce(must_ship_by, due_date)
+    is_late: bool = False  # via the shared _late_wo_filters predicate
+    days_late: int = 0  # 0 when not late
+    blocked: bool = False  # any OPEN/ACKNOWLEDGED blocker on the WO
+    down: bool = False  # current op's WC has an open DowntimeEvent
+    running: bool = False  # current op has >=1 open labor entry
+    current_op: Optional[WallboardJobOp] = None  # None when all ops complete
+    ops_completed: int = 0  # for "Op 3 of 5"
+    ops_total: int = 0
+
+
 class WallboardResponse(UTCModel):
     work_centers: list[WallboardWorkCenter]
     # Server-side ranked (late: worst-first; blocked: oldest-first), capped at
     # 12, and DEPT-SCOPED when ``dept`` is passed (as are the totals below).
     late_wos: list[WallboardLateWorkOrder]
     blocked_wos: list[WallboardBlockedWorkOrder]
-    # Optional so pre-existing consumers/fixtures are unaffected; the live
-    # builder populates it (null only if the KPI computation itself failed).
+    # DEPRECATED (2026-07-15 Job Wall redesign): the trailing-30d KPI strip is
+    # gone from the TV. The field stays for wire back-compat but the server no
+    # longer computes it — ALWAYS None (old bundles render an em-dash panel).
     kpi_strip: Optional[WallboardKPIStrip] = None
+    # Job Wall (owner feedback 2026-07-15): the main wall renders WORK ORDERS
+    # with their current operation. Priority-sorted server-side (blocked/down,
+    # then late worst-first, then running, then promise asc), capped at 24;
+    # jobs_total carries the true uncapped (dept-scoped) count for "+N more".
+    # Optional -> an old backend omits it and the TV falls back to the
+    # machine wall.
+    jobs: Optional[list[WallboardJob]] = None
+    jobs_total: Optional[int] = None
     # True uncapped totals for the rail headlines / hero sentence.
     # Dept-scoped when ?dept= is set; None (not 0) when omitted by an old backend.
     late_total: Optional[int] = None

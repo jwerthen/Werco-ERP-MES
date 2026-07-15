@@ -84,9 +84,61 @@ export interface WallboardBlockedWorkOrder {
 }
 
 /**
- * Lean Phase 1 (issue #88) KPI strip. Every figure is nullable (empty
- * denominator → null → render "—"), and the whole block is optional so a
- * board pointed at an older backend payload must not crash.
+ * Current operation of a work order on the job wall. NO customer data.
+ * Every field is optional-safe: a sparse payload must never crash the board.
+ */
+export interface WallboardJobOp {
+  sequence?: number | null;
+  name?: string | null;
+  work_center_code?: string | null;
+  work_center_name?: string | null;
+  /** ready | in_progress | pending */
+  status?: string | null;
+  /** Operation quantity_complete. */
+  qty_done?: number;
+  qty_target?: number;
+  /** Public-screen safe crew names, "First L.", max 3. */
+  crew?: string[];
+  /** True headcount of open labor entries. */
+  crew_count?: number;
+  /** From earliest open labor clock_in on this op — ticks client-side. */
+  elapsed_minutes?: number;
+}
+
+/**
+ * One open work order tile on the job wall (owner feedback 2026-07-15: the
+ * main wall shows WORK ORDERS with their CURRENT OPERATION, not machines).
+ * NO customer_name, NO dollars, NO notes.
+ */
+export interface WallboardJob {
+  wo_number: string;
+  part_number?: string | null;
+  /** released | in_progress */
+  status?: string;
+  /** WO-level quantities (the tile progress bar). */
+  qty_complete?: number;
+  qty_ordered?: number;
+  /** coalesce(must_ship_by, due_date). */
+  promise_date?: string | null;
+  is_late?: boolean;
+  /** 0 when not late. */
+  days_late?: number;
+  /** Any OPEN/ACKNOWLEDGED blocker on the WO. */
+  blocked?: boolean;
+  /** Current op's work center has an open DowntimeEvent. */
+  down?: boolean;
+  /** Current op has >=1 open labor entry. */
+  running?: boolean;
+  current_op?: WallboardJobOp | null;
+  /** For "Op 3 of 5". */
+  ops_completed?: number;
+  ops_total?: number;
+}
+
+/**
+ * @deprecated The PLANT 30d strip was removed from the board (owner feedback
+ * 2026-07-15). The field stays on the schema as Optional for old bundles; new
+ * backends always send null and the frontend no longer renders it.
  */
 export interface WallboardKpiStrip {
   otd_ship_pct_30d: number | null;
@@ -109,6 +161,11 @@ export interface WallboardResponse {
   ship?: WallboardShip | null;
   today?: WallboardToday | null;
   quality?: WallboardQuality | null;
+  /** Priority-sorted open WOs (cap 24), server order. undefined/null = old
+   *  backend → the page falls back to the machine-tile FloorGrid. */
+  jobs?: WallboardJob[] | null;
+  /** Uncapped open-WO count for the "+N more" line. */
+  jobs_total?: number | null;
   generated_at: string;
 }
 

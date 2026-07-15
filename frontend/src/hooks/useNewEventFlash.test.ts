@@ -54,6 +54,23 @@ describe('collectEventKeys', () => {
       new Set(['wc-down:1', 'down:1:mechanical', 'wc-blocked:2', 'late:WO-9', 'blocked:WO-8'])
     );
   });
+
+  it('keys only DOWN/BLOCKED jobs on the job wall — late/running/waiting never flash', () => {
+    const payload = makePayload({
+      work_centers: [],
+      jobs: [
+        { wo_number: 'WO-1', down: true },
+        { wo_number: 'WO-2', blocked: true },
+        { wo_number: 'WO-3', is_late: true, running: true },
+        { wo_number: 'WO-4' },
+      ],
+    });
+    expect(collectEventKeys(payload)).toEqual(new Set(['job:WO-1:down', 'job:WO-2:blocked']));
+  });
+
+  it('an old payload without a jobs block yields no job keys (back-compat)', () => {
+    expect(collectEventKeys(makePayload({ work_centers: [] }))).toEqual(new Set());
+  });
 });
 
 describe('useNewEventFlash', () => {

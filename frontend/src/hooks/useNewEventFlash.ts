@@ -23,6 +23,12 @@ export function collectEventKeys(payload: WallboardResponse): Set<string> {
   for (const wc of payload.work_centers) {
     if (wc.down !== null) keys.add(`down:${wc.id}:${wc.down.category}`);
   }
+  // Job wall: only newly BLOCKED/DOWN jobs flash (late/running/waiting never
+  // do) — same alarm-only discipline as the work-center tiles.
+  for (const job of payload.jobs ?? []) {
+    if (job.down) keys.add(`job:${job.wo_number}:down`);
+    if (job.blocked) keys.add(`job:${job.wo_number}:blocked`);
+  }
   return keys;
 }
 

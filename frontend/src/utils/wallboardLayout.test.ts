@@ -4,9 +4,10 @@
  * magnitude formatting, and the title-cased dept chip.
  */
 
-import type { WallboardWorkCenter } from '../types/wallboard';
+import type { WallboardJob, WallboardWorkCenter } from '../types/wallboard';
 import {
   blockerLabel,
+  classifyJob,
   classifyWorkCenter,
   computeGridShape,
   formatAgeHours,
@@ -176,6 +177,22 @@ describe('classification, idle partition, and alarm-first sort', () => {
       'Lathe 1', // running-late
       'Mill 1', // running
     ]);
+  });
+});
+
+describe('classifyJob (job wall state class)', () => {
+  const base: WallboardJob = { wo_number: 'WO-1' };
+
+  it('applies strict precedence DOWN > BLOCKED > LATE > RUNNING > WAITING', () => {
+    expect(classifyJob({ ...base, down: true, blocked: true, is_late: true, running: true })).toBe('down');
+    expect(classifyJob({ ...base, blocked: true, is_late: true, running: true })).toBe('blocked');
+    expect(classifyJob({ ...base, is_late: true, running: true })).toBe('late');
+    expect(classifyJob({ ...base, running: true })).toBe('running');
+    expect(classifyJob(base)).toBe('waiting');
+  });
+
+  it('a sparse job (all flags absent) classifies as waiting', () => {
+    expect(classifyJob({ wo_number: 'WO-SPARSE' })).toBe('waiting');
   });
 });
 

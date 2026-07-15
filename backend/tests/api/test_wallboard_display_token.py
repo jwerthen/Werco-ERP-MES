@@ -57,18 +57,6 @@ DISPLAY_TOKEN_URL = "/api/v1/auth/display-token"
 WALLBOARD_URL = "/api/v1/shop-floor/wallboard"
 
 
-@pytest.fixture(autouse=True)
-def _reset_kpi_strip_cache():
-    """The Lean Phase 1 kpi_strip rides the wallboard payload behind a module-level
-    per-company TTL cache (~5 min) that outlives a test's dropped tables; reset it
-    around every test so no assertion ever sees another test's cached strip."""
-    from app.services.wallboard_service import reset_kpi_strip_cache
-
-    reset_kpi_strip_cache()
-    yield
-    reset_kpi_strip_cache()
-
-
 def _issue_token(client: TestClient, headers: dict, label: str = "North wall TV", **body) -> dict:
     response = client.post(DISPLAY_TOKEN_URL, json={"label": label, **body}, headers=headers)
     assert response.status_code == 200, response.text
@@ -237,13 +225,17 @@ def test_display_token_authenticates_wallboard(client: TestClient, admin_headers
     response = client.get(WALLBOARD_URL, headers=_display_headers(data["token"]))
     assert response.status_code == 200
     payload = response.json()
-    # Lean Phase 1 added kpi_strip; the TV redesign added the true totals and
-    # the ship/today/quality blocks — all on the same single payload.
+    # The TV redesign added the true totals + ship/today/quality blocks; the
+    # Job Wall redesign added jobs/jobs_total and DEPRECATED kpi_strip (the
+    # key survives for wire back-compat but is always null) — all on the same
+    # single payload.
     assert set(payload.keys()) == {
         "work_centers",
         "late_wos",
         "blocked_wos",
         "kpi_strip",
+        "jobs",
+        "jobs_total",
         "late_total",
         "blocked_total",
         "down_total",
@@ -252,6 +244,9 @@ def test_display_token_authenticates_wallboard(client: TestClient, admin_headers
         "quality",
         "generated_at",
     }
+    assert payload["kpi_strip"] is None  # deprecated: never computed anymore
+    assert payload["jobs"] == []  # core block: a real list even on an empty shop
+    assert payload["jobs_total"] == 0
 
 
 def test_user_token_still_works_on_wallboard_and_dashboard(client: TestClient, auth_headers: dict):
@@ -369,7 +364,7 @@ def test_new_blocks_are_tenant_isolated(client: TestClient, admin_headers: dict,
     # Late + promised-today + on-hold WOs, downtime, blocker, NCR, receipt,
     # open + completed labor — one of everything the new blocks count.
     late_b = make_wo(db_session, part_b, company_id=b, due_date=central_today - timedelta(days=4))
-    make_wo(db_session, part_b, company_id=b, due_date=central_today)  # ship due today
+    ship_today_b = make_wo(db_session, part_b, company_id=b, due_date=central_today)  # ship due today
     make_wo(db_session, part_b, company_id=b, status_=WorkOrderStatus.ON_HOLD)
     make_wo(
         db_session, part_b, company_id=b, status_=WorkOrderStatus.COMPLETE, actual_end=now_utc
@@ -414,6 +409,12 @@ def test_new_blocks_are_tenant_isolated(client: TestClient, admin_headers: dict,
     assert payload_b["quality"] == {"open_ncr_count": 1, "newest_ncr_age_days": 0, "wos_on_hold": 1}
     assert payload_b["ship"]["due_today"] >= 1
     assert payload_b["today"]["operators_on_clock"] == 1
+    # ...including its own JOB WALL (the two open WOs; ON_HOLD/COMPLETE are off it).
+    assert payload_b["jobs_total"] == 2
+    assert {job["wo_number"] for job in payload_b["jobs"]} == {
+        late_b.work_order_number,
+        ship_today_b.work_order_number,
+    }
 
     # ...and company A's board stays all-zero across every new block.
     token_a = _issue_token(client, admin_headers)["token"]
@@ -423,6 +424,8 @@ def test_new_blocks_are_tenant_isolated(client: TestClient, admin_headers: dict,
     assert payload_a["down_total"] == 0
     assert payload_a["late_wos"] == []
     assert payload_a["blocked_wos"] == []
+    assert payload_a["jobs"] == []
+    assert payload_a["jobs_total"] == 0
     assert payload_a["ship"]["due_today"] == 0
     assert payload_a["ship"]["shipped_today"] == 0
     assert payload_a["ship"]["due_this_week"] == 0
@@ -1073,7 +1076,7 @@ def test_new_blocks_zero_state_on_empty_db(client: TestClient, db_session: Sessi
 
 
 def test_block_failure_nulls_that_block_only(client: TestClient, db_session: Session, monkeypatch):
-    """The get_kpi_strip best-effort pattern: one panel's compute blowing up
+    """The best-effort panel pattern: one panel's compute blowing up
     nulls THAT panel, never the payload."""
     import app.services.wallboard_service as wallboard_service
 
@@ -1112,6 +1115,7 @@ def test_wallboard_build_is_zero_write(db_session: Session):
 
     payload = build_wallboard_payload(db_session, 1)
     assert payload.late_total == 1  # the build really ran against the seeded data
+    assert payload.jobs_total == 1  # ...including the JOB WALL block
 
     assert not db_session.new
     assert not db_session.dirty
@@ -1120,9 +1124,11 @@ def test_wallboard_build_is_zero_write(db_session: Session):
 
 
 def test_payload_privacy_no_identities_costs_or_customers(client: TestClient, db_session: Session):
-    """Serialize a fully-populated payload and prove the public-TV contract:
-    no customer identity, no ship-to, no dollars, no NCR narrative, no full
-    last names — every rendered name is 'First L.'-shaped."""
+    """Serialize a fully-populated payload — including a JOB WALL tile built
+    from a WO that carries a customer_name, notes, and dollars — and prove the
+    public-TV contract: no customer identity, no ship-to, no dollars, no
+    notes, no NCR narrative, no full last names — every rendered name is
+    'First L.'-shaped."""
     viewer = make_user(db_session)
     part = make_part(db_session)
     wc = make_work_center(db_session)
@@ -1139,6 +1145,9 @@ def test_payload_privacy_no_identities_costs_or_customers(client: TestClient, db
     )
     wo.estimated_cost = 1234.56
     wo.actual_cost = 789.01
+    wo.notes = "NOTES-SECRET margin is thin"
+    wo.special_instructions = "INSTRUCTIONS-SECRET call the customer"
+    wo.customer_po = "PO-SECRET-4711"  # customer identifiers never reach the TV
     op = make_op(db_session, wo, wc, status_=OperationStatus.IN_PROGRESS)
     operator = make_user(db_session, role=UserRole.OPERATOR, first_name="Priya", last_name="Rockefeller")
     make_entry(db_session, operator, wo, op, wc, open_entry=True)
@@ -1161,17 +1170,24 @@ def test_payload_privacy_no_identities_costs_or_customers(client: TestClient, db
     for forbidden in (
         "Sensitive Customer",  # customer identity is OMITTED (product ruling)
         "customer_name",
+        "customer_po",
         "ship_to",
         "estimated_cost",
         "actual_cost",
         "hourly_rate",
         "employee_id",
         "Rockefeller",  # full last names never leave the server
-        "SECRET",  # NCR narrative
+        "SECRET",  # NCR narrative + WO notes/special_instructions
+        "notes",
     ):
         assert forbidden not in raw, f"public wallboard payload leaked {forbidden!r}"
 
     payload = response.json()
+    # The seeded WO really rendered a JOB WALL tile — so the scan above ran
+    # against a payload where the customer_name-carrying row was serialized.
+    tile = next(job for job in payload["jobs"] if job["wo_number"] == wo.work_order_number)
+    assert tile["part_number"] == part.part_number
+
     name_shape = re.compile(r"^\S+ [A-Z]\.$")
     names = []
     for card in payload["work_centers"]:
@@ -1179,6 +1195,10 @@ def test_payload_privacy_no_identities_costs_or_customers(client: TestClient, db
             if job["operator_name"]:
                 names.append(job["operator_name"])
             names.extend(job["crew"])
+    for job in payload["jobs"]:
+        if job["current_op"]:
+            names.extend(job["current_op"]["crew"])
+    assert tile["current_op"]["crew"], "expected the job tile's current op to carry the seeded crew"
     assert names, "expected at least one crew name on the seeded board"
     for name in names:
         assert name_shape.match(name), f"operator name {name!r} is not 'First L.'-shaped"
