@@ -341,8 +341,15 @@ def create_po_from_upload(
 ):
     """
     Create a purchase order from extracted and reviewed data.
+    Part numbers are matched case-insensitively, ignoring surrounding whitespace; the same part number
+    on multiple lines creates the part once and attaches all lines to it. A line item without a part_id
+    whose number matches an existing live part resolves to that part even when it isn't in create_parts.
     Part numbers held by a soft-deleted part are rejected with 400 (restore the part or use a new number).
+    Requires at least one line item (400 otherwise).
     """
+    if not data.line_items:
+        raise HTTPException(status_code=400, detail="At least one line item is required")
+
     vendor_id = data.vendor_id
     vendor_created = False
     parts_created = 0
@@ -385,7 +392,7 @@ def create_po_from_upload(
     # Create any new parts
     from app.models.part import PartType
 
-    part_id_map = {}  # Maps part_number to part_id for new parts
+    part_id_map = {}  # Maps stripped-lowercase part_number to part_id for new/reused parts
     for part_data in data.create_parts:
         part_type_str = (part_data.get("part_type") or "purchased").lower()
         part_description = part_data.get("description") or ""
@@ -397,20 +404,35 @@ def create_po_from_upload(
                 part_number = generate_werco_part_number(part_description, part_type_str)
             part_data["part_number"] = part_number
 
+        # Canonical stored form is the stripped number; matching key is its lowercase form.
+        if part_number:
+            part_number = part_number.strip()
+
         if not part_number:
             raise HTTPException(status_code=400, detail="Part number is required for new parts")
 
+        key = part_number.lower()
+        if key in part_id_map:
+            # Same part number repeated in create_parts (possibly as a case/whitespace variant).
+            continue
+
         existing_part = (
-            tenant_query(db, Part, company_id).filter(Part.part_number == part_number, Part.is_deleted == False).first()
+            tenant_query(db, Part, company_id)
+            .filter(func.lower(Part.part_number) == key, Part.is_deleted == False)
+            .order_by(Part.id)
+            .first()
         )
         if existing_part:
-            part_id_map[part_number] = existing_part.id
+            part_id_map[key] = existing_part.id
             continue
 
         # Creating this number: a soft-deleted part may still hold it (uq_parts_company_part_number
         # spans deleted rows), so reject like POST /parts does instead of 500ing on the constraint.
         deleted_holder = (
-            tenant_query(db, Part, company_id).filter(Part.part_number == part_number, Part.is_deleted == True).first()
+            tenant_query(db, Part, company_id)
+            .filter(func.lower(Part.part_number) == key, Part.is_deleted == True)
+            .order_by(Part.id)
+            .first()
         )
         if deleted_holder:
             msg = f"Part number '{part_number}' belongs to a deleted part - restore it or use a different part number"
@@ -442,7 +464,7 @@ def create_po_from_upload(
             # the probes above; uq_parts_company_part_number catches it at this flush.
             db.rollback()
             raise HTTPException(status_code=400, detail="Part number already exists") from exc
-        part_id_map[part_number] = new_part.id
+        part_id_map[key] = new_part.id
         parts_created += 1
 
     # Client-supplied part ids must resolve within this tenant, to a live (not
@@ -459,16 +481,29 @@ def create_po_from_upload(
         if missing:
             raise HTTPException(status_code=400, detail=f"Part id {missing[0]} not found")
 
-    # Validate all line items have valid part_ids
+    # Validate all line items have valid part_ids (matching is case-insensitive on the stripped number)
     for item in data.line_items:
         if not item.part_id:
-            # Check if we created this part
-            if item.part_number in part_id_map:
-                item.part_id = part_id_map[item.part_number]
+            key = (item.part_number or "").strip().lower()
+            # Check if we created (or reused) this part above
+            if key in part_id_map:
+                item.part_id = part_id_map[key]
             else:
-                raise HTTPException(
-                    status_code=400, detail=f"Part '{item.part_number}' not found and not in create list"
+                # Fall back to an existing live part with this number. Soft-deleted holders are
+                # deliberately excluded (PR #112 policy): they get the same generic 400 below.
+                existing = (
+                    tenant_query(db, Part, company_id)
+                    .filter(func.lower(Part.part_number) == key, Part.is_deleted == False)
+                    .order_by(Part.id)
+                    .first()
                 )
+                if existing:
+                    part_id_map[key] = existing.id
+                    item.part_id = existing.id
+                else:
+                    raise HTTPException(
+                        status_code=400, detail=f"Part '{item.part_number}' not found and not in create list"
+                    )
 
     # Create PO
     po = PurchaseOrder(

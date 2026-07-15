@@ -7,10 +7,19 @@ import {
   DocumentIcon,
   CheckCircleIcon,
   ExclamationTriangleIcon,
+  InformationCircleIcon,
   XMarkIcon,
   ArrowPathIcon,
   DocumentCheckIcon,
+  TrashIcon,
 } from '@heroicons/react/24/outline';
+import {
+  partNumberKey,
+  effectivePartNumber,
+  newPartCoverageKeys,
+  dedupePartsToCreate,
+  buildLineItemsPayload,
+} from '../utils/poUploadReview';
 
 interface VendorMatch {
   matched: boolean;
@@ -29,6 +38,9 @@ interface PartMatch {
 }
 
 interface LineItem {
+  // Stable per-line identity for index-independent state (search boxes survive
+  // line removal; async search results can't land on the wrong line).
+  uid: number;
   line_number: number;
   part_number: string;
   description: string;
@@ -220,7 +232,7 @@ export default function POUpload() {
       });
 
       // Initialize line items with match info
-      setLineItems(result.line_items.map((item: any) => {
+      setLineItems(result.line_items.map((item: any, itemIdx: number) => {
         const desc = (item.description || '').trim().toLowerCase();
         const pnRaw = item.part_number || '';
         const pn = pnRaw.trim().toLowerCase();
@@ -229,6 +241,7 @@ export default function POUpload() {
         const shouldUseSuggested = Boolean(suggested) && (!pn || (desc && pn === desc) || looksLikeDescription);
         return {
           ...item,
+          uid: itemIdx,
           part_number: shouldUseSuggested ? suggested : item.part_number,
           selected_part_id: item.matched_part_id,
           create_new_part: false,
@@ -260,35 +273,37 @@ export default function POUpload() {
     }
   }, [vendorSearch]);
 
-  // Search parts for a specific line
-  const searchParts = async (lineIndex: number, query: string) => {
-    setPartSearches(prev => ({ ...prev, [lineIndex]: query }));
+  // Search parts for a specific line. Keyed by the line's stable uid, not its
+  // array index, so an in-flight response can never land on a different line
+  // after a removal re-indexes the list.
+  const searchParts = async (lineUid: number, query: string) => {
+    setPartSearches(prev => ({ ...prev, [lineUid]: query }));
 
     if (query.length >= 2) {
       try {
         const results = await api.searchPartsForPO(query);
-        setPartResults(prev => ({ ...prev, [lineIndex]: results }));
+        setPartResults(prev => ({ ...prev, [lineUid]: results }));
       } catch (err) {
         console.error('Part search failed:', err);
       }
     } else {
-      setPartResults(prev => ({ ...prev, [lineIndex]: [] }));
+      setPartResults(prev => ({ ...prev, [lineUid]: [] }));
     }
   };
 
-  const selectPartForLine = (lineIndex: number, partId: number, partNumber: string) => {
-    setLineItems(prev => prev.map((item, idx) =>
-      idx === lineIndex
+  const selectPartForLine = (lineUid: number, partId: number, partNumber: string) => {
+    setLineItems(prev => prev.map(item =>
+      item.uid === lineUid
         ? { ...item, selected_part_id: partId, part_number: partNumber, create_new_part: false }
         : item
     ));
-    setPartResults(prev => ({ ...prev, [lineIndex]: [] }));
-    setPartSearches(prev => ({ ...prev, [lineIndex]: '' }));
+    setPartResults(prev => ({ ...prev, [lineUid]: [] }));
+    setPartSearches(prev => ({ ...prev, [lineUid]: '' }));
   };
 
-  const toggleCreatePart = (lineIndex: number) => {
-    setLineItems(prev => prev.map((item, idx) =>
-      idx === lineIndex
+  const toggleCreatePart = (lineUid: number) => {
+    setLineItems(prev => prev.map(item =>
+      item.uid === lineUid
         ? {
             ...item,
             create_new_part: !item.create_new_part,
@@ -300,9 +315,25 @@ export default function POUpload() {
     ));
   };
 
-  const setPartType = (lineIndex: number, partType: LineItem['new_part_type']) => {
-    setLineItems(prev => prev.map((item, idx) =>
-      idx === lineIndex
+  const removeLine = (lineUid: number) => {
+    setLineItems(prev => prev.filter(item => item.uid !== lineUid));
+    // Search state is uid-keyed, so only this line's entries need to go;
+    // other lines keep their in-progress searches.
+    setPartSearches(prev => {
+      const rest = { ...prev };
+      delete rest[lineUid];
+      return rest;
+    });
+    setPartResults(prev => {
+      const rest = { ...prev };
+      delete rest[lineUid];
+      return rest;
+    });
+  };
+
+  const setPartType = (lineUid: number, partType: LineItem['new_part_type']) => {
+    setLineItems(prev => prev.map(item =>
+      item.uid === lineUid
         ? { ...item, new_part_type: partType }
         : item
     ));
@@ -322,15 +353,24 @@ export default function POUpload() {
       return;
     }
 
-    // Check all line items have parts
-    const unmatchedLines = lineItems.filter(item => !item.selected_part_id && !item.create_new_part);
+    // Check all line items have parts. A line without its own assignment is
+    // still covered when another line with the same part-number key is marked
+    // "create new part" — the backend creates the part once for both lines.
+    const coveredKeys = newPartCoverageKeys(lineItems);
+    const unmatchedLines = lineItems.filter(item => {
+      if (item.selected_part_id || item.create_new_part) return false;
+      const key = partNumberKey(item);
+      return !key || !coveredKeys.has(key);
+    });
     if (unmatchedLines.length > 0) {
       setError(`${unmatchedLines.length} line(s) need part assignment`);
       return;
     }
 
+    // Trimmed check: a whitespace-only part number is as missing as an empty one
+    // (the payload builders trim, so it would otherwise reach the server as '').
     const missingNewPartNumbers = lineItems.filter(
-      item => item.create_new_part && !item.part_number && !item.suggested_part_number
+      item => item.create_new_part && !effectivePartNumber(item)
     );
     if (missingNewPartNumbers.length > 0) {
       setError('All new parts must have a part number or a suggested Werco number.');
@@ -338,17 +378,6 @@ export default function POUpload() {
     }
 
     try {
-      const partsToCreate = lineItems
-        .filter(item => item.create_new_part)
-        .map(item => ({
-          part_number: item.part_number || item.suggested_part_number,
-          description: item.description,
-          part_type: item.new_part_type
-        }))
-        .filter((item): item is { part_number: string; description: string; part_type: LineItem['new_part_type'] } =>
-          Boolean(item.part_number)
-        );
-
       const result = await api.createPOFromUpload({
         po_number: formData.po_number,
         vendor_id: formData.vendor_id || 0,
@@ -362,15 +391,8 @@ export default function POUpload() {
         shipping_method: formData.shipping_method || undefined,
         ship_to: formData.ship_to || undefined,
         notes: formData.notes || undefined,
-        line_items: lineItems.map(item => ({
-          part_id: item.selected_part_id || 0,
-          part_number: item.part_number,
-          description: item.description,
-          quantity_ordered: item.qty_ordered,
-          unit_price: item.unit_price,
-          line_total: item.line_total,
-        })),
-        create_parts: partsToCreate,
+        line_items: buildLineItemsPayload(lineItems),
+        create_parts: dedupePartsToCreate(lineItems),
         pdf_path: extractionResult?.pdf_path || '',
       });
 
@@ -544,6 +566,10 @@ export default function POUpload() {
   }
 
   // REVIEW STEP
+  // Keys of lines marked "create new part" — an unassigned line whose key is
+  // in this set shares that new part instead of blocking submission.
+  const coverageKeys = newPartCoverageKeys(lineItems);
+
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
@@ -831,11 +857,29 @@ export default function POUpload() {
                         {item.confidence}
                       </span>
                     </div>
-                    <div className="text-right">
-                      <p className="font-semibold">${item.line_total?.toFixed(2) || '0.00'}</p>
-                      <p className="text-xs text-slate-400">
-                        {item.qty_ordered} x ${item.unit_price?.toFixed(2) || '0.00'}
-                      </p>
+                    <div className="flex items-start gap-3">
+                      <div className="text-right">
+                        <p className="font-semibold">
+                          ${(item.line_total || item.qty_ordered * item.unit_price || 0).toFixed(2)}
+                        </p>
+                        <p className="text-xs text-slate-400">
+                          {item.qty_ordered} x ${item.unit_price?.toFixed(2) || '0.00'}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => removeLine(item.uid)}
+                        disabled={lineItems.length === 1}
+                        aria-label={`Remove line ${item.line_number}`}
+                        title={
+                          lineItems.length === 1
+                            ? 'A purchase order needs at least one line item'
+                            : `Remove line ${item.line_number}`
+                        }
+                        className="text-slate-400 hover:text-red-400 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-slate-400"
+                      >
+                        <TrashIcon className="h-4 w-4" />
+                      </button>
                     </div>
                   </div>
 
@@ -918,10 +962,10 @@ export default function POUpload() {
                       <div className="space-y-2">
                         <div className="flex justify-between items-center">
                           <span className="text-sm text-blue-600">
-                            Will create new part: {item.part_number}
+                            Will create new part: {effectivePartNumber(item)}
                           </span>
                           <button
-                            onClick={() => toggleCreatePart(idx)}
+                            onClick={() => toggleCreatePart(item.uid)}
                             className="text-xs text-slate-400 hover:underline"
                           >
                             Cancel
@@ -949,7 +993,7 @@ export default function POUpload() {
                               aria-label="Purchased Part"
                               name={`part-type-${idx}`}
                               checked={item.new_part_type === 'purchased'}
-                              onChange={() => setPartType(idx, 'purchased')}
+                              onChange={() => setPartType(item.uid, 'purchased')}
                               className="text-werco-navy-600"
                             />
                             <span className="text-sm">Purchased Part</span>
@@ -960,7 +1004,7 @@ export default function POUpload() {
                               aria-label="Raw Material"
                               name={`part-type-${idx}`}
                               checked={item.new_part_type === 'raw_material'}
-                              onChange={() => setPartType(idx, 'raw_material')}
+                              onChange={() => setPartType(item.uid, 'raw_material')}
                               className="text-werco-navy-600"
                             />
                             <span className="text-sm">Raw Material</span>
@@ -971,7 +1015,7 @@ export default function POUpload() {
                               aria-label="Hardware"
                               name={`part-type-${idx}`}
                               checked={item.new_part_type === 'hardware'}
-                              onChange={() => setPartType(idx, 'hardware')}
+                              onChange={() => setPartType(item.uid, 'hardware')}
                               className="text-werco-navy-600"
                             />
                             <span className="text-sm">Hardware</span>
@@ -982,7 +1026,7 @@ export default function POUpload() {
                               aria-label="Consumable"
                               name={`part-type-${idx}`}
                               checked={item.new_part_type === 'consumable'}
-                              onChange={() => setPartType(idx, 'consumable')}
+                              onChange={() => setPartType(item.uid, 'consumable')}
                               className="text-werco-navy-600"
                             />
                             <span className="text-sm">Consumable</span>
@@ -991,10 +1035,29 @@ export default function POUpload() {
                       </div>
                     ) : (
                       <div className="space-y-2">
-                        <div className="flex items-center gap-2">
-                          <ExclamationTriangleIcon className="h-4 w-4 text-amber-500" />
-                          <span className="text-sm text-amber-600">Part not matched</span>
-                        </div>
+                        {coverageKeys.has(partNumberKey(item)) ? (
+                          <div className="flex items-center gap-2">
+                            <InformationCircleIcon className="h-4 w-4 text-blue-500" />
+                            <span className="text-sm text-blue-600">
+                              Same part as another line — will use new part{' '}
+                              {(() => {
+                                // Show the creator line's number verbatim — that exact
+                                // form (first occurrence) is what gets created.
+                                const key = partNumberKey(item);
+                                const creator = lineItems.find(
+                                  it => it.create_new_part && partNumberKey(it) === key
+                                );
+                                return effectivePartNumber(creator || item);
+                              })()}{' '}
+                              (created once)
+                            </span>
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-2">
+                            <ExclamationTriangleIcon className="h-4 w-4 text-amber-500" />
+                            <span className="text-sm text-amber-600">Part not matched</span>
+                          </div>
+                        )}
 
                         {/* Suggestions */}
                         {item.part_match?.suggestions && item.part_match.suggestions.length > 0 && (
@@ -1002,7 +1065,7 @@ export default function POUpload() {
                             {item.part_match.suggestions.slice(0, 3).map((sug) => (
                               <button
                                 key={sug.id}
-                                onClick={() => selectPartForLine(idx, sug.id, sug.part_number)}
+                                onClick={() => selectPartForLine(item.uid, sug.id, sug.part_number)}
                                 className="text-xs px-2 py-1 rounded bg-fd-panel border hover:bg-slate-800"
                               >
                                 {sug.part_number} ({sug.score}%)
@@ -1016,17 +1079,17 @@ export default function POUpload() {
                           <input
                             type="text"
                             aria-label="Search parts"
-                            value={partSearches[idx] || ''}
-                            onChange={(e) => searchParts(idx, e.target.value)}
+                            value={partSearches[item.uid] || ''}
+                            onChange={(e) => searchParts(item.uid, e.target.value)}
                             placeholder="Search parts..."
                             className="input w-full text-sm"
                           />
-                          {partResults[idx]?.length > 0 && (
+                          {partResults[item.uid]?.length > 0 && (
                             <div className="absolute z-10 w-full mt-1 bg-fd-panel border rounded-lg shadow-lg max-h-32 overflow-y-auto">
-                              {partResults[idx].map((p: any) => (
+                              {partResults[item.uid].map((p: any) => (
                                 <button
                                   key={p.id}
-                                  onClick={() => selectPartForLine(idx, p.id, p.part_number)}
+                                  onClick={() => selectPartForLine(item.uid, p.id, p.part_number)}
                                   className="block w-full text-left px-3 py-2 text-sm hover:bg-slate-800"
                                 >
                                   {p.part_number} - {p.name}
@@ -1037,7 +1100,7 @@ export default function POUpload() {
                         </div>
 
                         <button
-                          onClick={() => toggleCreatePart(idx)}
+                          onClick={() => toggleCreatePart(item.uid)}
                           className="text-xs text-werco-primary hover:underline"
                         >
                           + Create as new part
@@ -1055,7 +1118,14 @@ export default function POUpload() {
                 <div className="w-64 space-y-2">
                   <div className="flex justify-between text-sm">
                     <span>Subtotal:</span>
-                    <span>${lineItems.reduce((sum, item) => sum + (item.line_total || 0), 0).toFixed(2)}</span>
+                    {/* Mirror the backend's per-line fallback (line_total or qty x price)
+                        so the reviewed number matches the PO that gets created. */}
+                    <span>
+                      $
+                      {lineItems
+                        .reduce((sum, item) => sum + (item.line_total || item.qty_ordered * item.unit_price || 0), 0)
+                        .toFixed(2)}
+                    </span>
                   </div>
                   {extractionResult?.tax && (
                     <div className="flex justify-between text-sm">
@@ -1065,7 +1135,17 @@ export default function POUpload() {
                   )}
                   <div className="flex justify-between font-semibold">
                     <span>Total:</span>
-                    <span>${extractionResult?.total_amount?.toFixed(2) || '0.00'}</span>
+                    <span>
+                      $
+                      {(
+                        lineItems.reduce(
+                          (sum, item) => sum + (item.line_total || item.qty_ordered * item.unit_price || 0),
+                          0
+                        ) +
+                        (extractionResult?.tax || 0) +
+                        (extractionResult?.shipping_cost || 0)
+                      ).toFixed(2)}
+                    </span>
                   </div>
                 </div>
               </div>
