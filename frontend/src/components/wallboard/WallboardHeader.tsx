@@ -1,5 +1,5 @@
 /**
- * Z1 HEADER (9%h) — wordmark + dept chip | computed shop-state hero | updated/clock.
+ * Z1 HEADER (9%h) — company logo + dept chip | computed shop-state hero | updated/clock.
  *
  * The hero is the board's single headline truth: one computed sentence at
  * 4.5rem with a heartbeat status dot. The dot's 2s ease pulse is the liveness
@@ -60,11 +60,16 @@ export default function WallboardHeader({
     // Side tracks are content-sized and the hero owns the shrinkable middle
     // (minmax(0,1fr) + truncate) — the offline chip can never overlap it.
     <header className="grid h-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-[1.5rem] border-b-[0.0625rem] border-[#243042] px-[0.5rem]">
-      {/* Left cluster: wordmark + title-cased dept chip */}
+      {/* Left cluster: company logo + title-cased dept chip. The logo uses
+          the app's white-on-dark treatment (brightness-0 invert, the sidebar/
+          login pattern) and rem sizing so it scales with the TV like all
+          wallboard type. */}
       <div className="flex min-w-0 items-center gap-[1rem]">
-        <span className="whitespace-nowrap text-[1.25rem] font-bold uppercase tracking-widest text-[#f0f4f9]">
-          Werco<span className="text-[#C8352B]">·</span>Floor
-        </span>
+        <img
+          src="/Werco_Logo-PNG.png"
+          alt="Werco Manufacturing"
+          className="h-[3.5rem] w-auto shrink-0 brightness-0 invert"
+        />
         {dept && (
           <span
             data-testid="dept-label"
