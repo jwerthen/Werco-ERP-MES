@@ -224,8 +224,8 @@ export default function Wallboard() {
         <div className="flex flex-1 flex-col items-center justify-center gap-[1rem] text-center">
           <p className="text-[2.5rem] font-bold">No display token</p>
           <p className="max-w-[48rem] text-[1.5rem] text-[#8b98a9]">
-            Open this screen using the wallboard link from Admin Settings → Wallboard Displays (it includes a one-time
-            #token=… fragment), or sign in first.
+            Get a setup code from Admin Settings → Wallboard Displays and enter it at /tv on this screen. (Or use the
+            one-time wallboard link from the same page, or sign in first.)
           </p>
         </div>
       ) : !data ? (

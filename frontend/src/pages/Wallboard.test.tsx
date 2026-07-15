@@ -392,7 +392,8 @@ describe('Wallboard', () => {
     renderWallboard();
 
     expect(await screen.findByText('No display token')).toBeInTheDocument();
-    expect(screen.getByText(/Admin Settings/)).toBeInTheDocument();
+    // Leads with the /tv setup-code pairing flow; link + sign-in are fallbacks.
+    expect(screen.getByText(/setup code from Admin Settings .* enter it at \/tv/i)).toBeInTheDocument();
   });
 
   it('renders correctly against the OLD payload shape (back-compat, degraded mode)', async () => {
