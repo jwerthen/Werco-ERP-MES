@@ -1,9 +1,10 @@
 # Shop-Floor TV Wallboard
 
 Read-only, full-screen status board (`/wallboard`) for unattended shop TVs (A0.5) — the "Andon
-Wall". Four fixed zones: a computed shop-state headline, an alarm-first grid of work-center tiles
-with an idle strip, a four-panel exception rail (SHIP / LATE / BLOCKED·DOWN / QUALITY), and a
-TODAY + trailing-30-day band. Nothing on the board scrolls, rotates, or requires interaction —
+Wall". Four fixed zones: a computed shop-state headline, a priority-sorted **job wall** of open
+work-order tiles (each showing its current operation; the pre-redesign machine wall remains as
+the old-backend fallback), a four-panel exception rail (SHIP / LATE / BLOCKED·DOWN / QUALITY),
+and a TODAY band. Nothing on the board scrolls, rotates, or requires interaction —
 every zone has a fixed capacity, a `+N more` overflow, and a designed empty state, and every panel
 keeps its slot at all data values so a habitual glance lands on a memorized coordinate.
 
@@ -65,22 +66,28 @@ the header chip renders it title-cased.
 
 **What `dept` scopes — and what it never scopes:**
 
-- **Dept-scoped:** the work-center tiles, the LATE and BLOCKED·DOWN rail panels — both their
-  visible rows **and** their true totals (`late_total` / `blocked_total` / `down_total`) — and
-  therefore the Z1 hero headline (a machining TV headlines machining's truth). Attribution rules:
-  a WO is *late for a dept* when it has ≥1 open (non-complete) operation routed to a work center
-  of that type; a blocker belongs to a dept via **its operation's** work center; a work center is
-  *down for a dept* by its own type.
+- **Dept-scoped:** the **job wall** — a work order belongs to a dept TV via its **current
+  operation's** work-center type (a WO whose ops are all complete has no current op and drops off
+  dept boards) — the work-center tiles (fallback wall), and the LATE and BLOCKED·DOWN rail panels
+  — both their visible rows **and** their true totals (`late_total` / `blocked_total` /
+  `down_total`) — and therefore the Z1 hero headline (a machining TV headlines machining's
+  truth). Rail attribution rules: a WO is *late for a dept* when it has ≥1 open (non-complete)
+  operation routed to a work center of that type; a blocker belongs to a dept via **its
+  operation's** work center; a work center is *down for a dept* by its own type.
 - **Consequences:** a late WO with open operations in two departments appears on **both** dept
-  TVs; a blocker filed without an operation (and a late WO with no routed open operations) cannot
-  be dept-attributed and shows only on the **unfiltered** board.
-- **Always plant-wide:** the SHIP panel, the QUALITY panel, the TODAY cells, and the 30-day KPI
-  cluster. The SHIP and QUALITY panels render a small `PLANT` tag whenever `dept` is set so a
-  dept TV never mislabels company-wide numbers as departmental.
+  TVs' LATE rails, but its job tile shows only where its *current* op lives; a blocker filed
+  without an operation (and a late WO with no routed open operations) cannot be dept-attributed
+  and shows only on the **unfiltered** board. A job tile's BLOCKED band is **WO-level**
+  (any unresolved blocker, wherever it's routed), so a dept TV can legitimately show a BLOCKED
+  tile while its dept-scoped hero/rail count blockers routed elsewhere — the tile answers
+  "can this job proceed?", the rail answers "what's stuck in *this* department?".
+- **Always plant-wide:** the SHIP panel, the QUALITY panel, and the TODAY cells. The SHIP and
+  QUALITY panels render a small `PLANT` tag whenever `dept` is set so a dept TV never mislabels
+  company-wide numbers as departmental.
 
 ## Layout — the four zones
 
-Fixed geography (1080p-relative): header 9% / body 82% (floor wall 72.5% wide + exception rail
+Fixed geography (1080p-relative): header 9% / body 82% (job wall 72.5% wide + exception rail
 27.5%) / bottom band 9%. Layout never reflows on data — zero-value panels dim in place.
 
 ### Z1 — Header
@@ -96,32 +103,44 @@ Fixed geography (1080p-relative): header 9% / body 82% (floor wall 72.5% wide + 
   **freezes when offline** — a stopped heartbeat is the staleness cue.
 - **Right:** `Updated <time>` + a Central wall clock (1s tick), and the offline chip (below).
 
-### Z2 — Floor wall
+### Z2 — Job wall
 
-A deterministic grid of **non-idle** work centers (idle = no active jobs, no downtime, nothing
-blocked). Grid shape always exactly fills: `rows = max(1, round(sqrt(N/1.6)))`,
-`cols = ceil(N/rows)`; trailing empty cells render as plain background, bottom-right.
+A deterministic grid of **open work-order tiles** (owner feedback 2026-07-15: the main wall shows
+work orders with their current operation, not machines). Population: every **RELEASED /
+IN_PROGRESS** WO — **ON_HOLD is deliberately excluded** from the wall (the QUALITY rail panel
+already counts holds); DRAFT and terminal statuses are off the board as everywhere else. Grid
+shape always exactly fills: `rows = max(1, round(sqrt(N/1.6)))`, `cols = ceil(N/rows)`; trailing
+empty cells render as plain background, bottom-right.
 
-- **Alarm-first sort:** DOWN → BLOCKED → RUNNING-LATE → RUNNING, alphabetical within class. A
-  tile only moves when its state *class* changes (instant reposition at a poll boundary).
-- **Tile anatomy:** the header is a **solid filled color band** — the andon signal (green
-  RUNNING, red DOWN, orange `N BLOCKED`, amber LATE; black text on fills; state is never a
-  hairline border) — with a queue chip that escalates (hidden at 0, plain 1–4, amber-filled ≥5,
-  red-outline ≥10). A down tile shows its blocker category + live downtime duration (minutes tick
-  client-side between polls). Job rows are **one row per operation** (server crew-grouped): part
-  number leads (amber + `LATE Nd` chip when the WO is late), qty done/target right; secondary
-  line `WO · op · First L. +N` crew label with elapsed time right; a thin progress bar underneath
-  (green, amber when late).
-- **Density tiers** (per-tile job-row budget by active-tile count): ≤6 → 3 rows, 7–12 → 2 rows,
-  13–20 → 1 row; the rest collapse into `+N more`. Tier switches are damped with 2-poll
-  hysteresis so a center flapping in/out of idle can't thrash the wall. Above 20 active centers
-  the documented answer is one `?dept=` TV per department (the spec's last-resort pagination is
-  deliberately not implemented).
-- **Idle strip** (bottom of the wall, hidden when nothing is idle): idle centers collapse into
-  dim slate chips with their queue counts — `IDLE 3 — SAW-2 Q1 · DEBURR Q0 …`, capped + `+N more`.
-- **All centers idle:** the wall renders a single large dim `FLOOR IDLE` panel (with the hero
-  reading `OFF SHIFT` when nobody is on the clock). A dark, calm screen is the designed reward.
-- **Zero work centers** (bad `dept` value): full-zone "No active work centers" empty state.
+- **Server-side priority sort** (the client never re-sorts): blocked/down first, then late —
+  worst `days_late` first — then running, then everything else by promise date ascending (no
+  promise sorts last); WO number breaks every tie. The server caps the wall at **24** tiles;
+  `jobs_total` carries the true uncapped count for the `+N more work orders` line.
+- **Current operation** = the WO's lowest-sequence IN_PROGRESS op, else its lowest READY op, else
+  its lowest PENDING op — none when all ops are complete.
+- **Tile anatomy:** the header is a **solid filled color band** — the andon signal (state is
+  never a hairline border) — carrying the WO number and a state word, strict precedence red
+  DOWN > orange BLOCKED > amber LATE > green RUNNING > slate WAITING (black text on fills).
+  DOWN = the current op's work center has an open downtime event (the body then leads with red
+  `MACHINE DOWN · <work center>`); BLOCKED = any unresolved blocker on the WO, routed or not;
+  RUNNING = the current op has open labor. Body: the part number leads (amber + `LATE Nd` chip
+  when the WO is late), WO-level `done/ordered` qty right; the second line answers "what op is it
+  on?" — `Op n/total · <op name> · <work center>` with a `First L. +N` crew suffix when someone
+  is clocked in — with live elapsed time right while running (minutes tick client-side between
+  polls); a thin WO-level progress bar underneath (green, amber when late). A tile newly entering
+  DOWN/BLOCKED flashes its fill for ~10s, then settles steady.
+- **Density tiers** (by tile count, header height only in job mode) are damped with the same
+  2-poll hysteresis as before, so a WO flapping on/off the wall can't thrash the grid. **No idle
+  strip in job mode** — idle machines surface only through the exception rail.
+- **Empty state:** nothing released or in progress → a calm full-zone `No open work orders`
+  panel, not an error.
+
+**Machine-wall fallback (old backends).** When the payload has no `jobs` field (a backend that
+predates the job wall), the page renders the previous machine wall unchanged — the alarm-first
+grid of non-idle work-center tiles with per-operation crew-grouped job rows, queue chips, the
+3/2/1 job-row density tiers, the idle-chip strip, and the `FLOOR IDLE` all-idle state. The
+`work_centers` block still ships in full on every payload, so old TV bundles pointed at a new
+backend keep rendering the machine wall too.
 
 ### Z3 — Exception rail
 
@@ -152,15 +171,13 @@ rewards a clean day without any layout reflow.
   titles or free text (which can name customers/suppliers). Amber-filled value chips when >0, dim
   slate zeros. Plant-wide; `PLANT` tag under `?dept=`.
 
-### Z4 — TODAY / 30-day band
+### Z4 — TODAY band
 
-- **Left ~60% — `TODAY`** (live, resets at **Central midnight**, from the `today` block): six
-  cells — `OPS DONE`, `PIECES`, `ON CLOCK`, `HRS`, `RECEIPTS`, `SCRAP EVT`. Semantics in the
-  payload section below. Missing block (old backend) → `—` values; the band never disappears.
-- **Right ~40% — `PLANT 30d`** behind a heavier double rule and an explicit scope label (it stays
-  company-wide even on a dept TV): the trailing-30-day OTD / FPY / Scrap percentages with small
-  threshold swatches beside each value (color banding lives on the swatch, never the value), plus
-  `WIP N · N.Nd avg`. Same `kpi_strip` block and null discipline as before (see KPI strip below).
+Six full-width hairline-divided cells — `OPS DONE`, `PIECES`, `ON CLOCK`, `HRS`, `RECEIPTS`,
+`SCRAP EVT` — live, resetting at **Central midnight**, from the `today` block. Semantics in the
+payload section below. Missing block (old backend) → `—` values; the band never disappears. (The
+`PLANT 30d` KPI cluster that used to occupy the right ~40% of this band was removed on owner
+feedback 2026-07-15 — see the KPI-strip deprecation note below.)
 
 ## Payload
 
@@ -170,7 +187,26 @@ TV against an old backend renders `—` values and falls back to list lengths fo
 blocks below share the payload's privacy posture: counts, ages, WO/part numbers and dates only —
 no customer names, no ship-to addresses, no dollar figures, no NCR text, operators as "First L.".
 
-- **`work_centers[].active_jobs[]`** — now **one row per operation** (crew-station grouping), not
+- **`jobs[]` / `jobs_total`** — the Z2 job wall. Population: open (**RELEASED / IN_PROGRESS**)
+  WOs only — **ON_HOLD is deliberately excluded** (the QUALITY rail counts holds). Server-side
+  priority sort (blocked/down → most-late → running → promise date asc, WO number tiebreak),
+  capped at **24**; `jobs_total` is the true uncapped count for `+N more`. Both are
+  **dept-scoped** when `dept` is passed — a job belongs to a dept via its **current op's**
+  work-center type. Each job carries `wo_number`, `part_number`, `status`, WO-level
+  `qty_complete` / `qty_ordered`, `promise_date` (`must_ship_by || due_date`), `is_late` /
+  `days_late` (the same shared lateness predicate as the rail — the tile and the LATE panel
+  cannot disagree), `blocked` (any unresolved blocker on the WO), `down` (current op's work
+  center has an open downtime event), `running` (current op has ≥1 open labor entry),
+  `ops_completed` / `ops_total`, and `current_op` — chosen by the IN_PROGRESS > READY > PENDING
+  lowest-sequence precedence, `null` when all ops are complete — with `sequence`, `name`,
+  `work_center_code` / `work_center_name`, `status`, `qty_done` / `qty_target`, `crew` (up to 3
+  "First L." names), `crew_count` (true headcount), `elapsed_minutes` (earliest open clock-in).
+  **Privacy:** a job tile carries WO/part/op identifiers, dates, quantities, and "First L." crew
+  names only — never customer names, dollar figures, or notes. `jobs` is absent (`null`) only
+  from a pre-job-wall backend, which makes the TV fall back to the machine wall.
+- **`work_centers[].active_jobs[]`** (the machine wall — still shipped in full: old TV bundles
+  render it, and a new TV renders it as the fallback when `jobs` is absent) — **one row per
+  operation** (crew-station grouping), not
   one per time entry: `crew` (up to 3 "First L." names), `crew_count` (true headcount for the
   `+N` suffix), `elapsed_minutes` (from the crew's earliest open clock-in), and server-computed
   `is_late`. `operator_name` is kept as a back-compat alias of `crew[0]`.
@@ -198,10 +234,11 @@ no customer names, no ship-to addresses, no dollar figures, no NCR text, operato
   provenance-excluded). Aggregates only — nothing per-person.
 - **`quality`** (plant-wide) — `open_ncr_count` (not closed/void), `newest_ncr_age_days`,
   `wos_on_hold`. Counts and ages only.
-- **`kpi_strip`** — unchanged (see below).
-- **Best-effort blocks:** `ship` / `today` / `quality` / `kpi_strip` are each computed
-  independently; a failed block is `null` on that poll (and logged) — a broken panel never blanks
-  the whole TV, and the endpoint stays a zero-write read.
+- **`kpi_strip`** — **deprecated, always `null`** (see the deprecation note below).
+- **Best-effort blocks:** `ship` / `today` / `quality` are each computed independently; a failed
+  block is `null` on that poll (and logged) — a broken panel never blanks the whole TV, and the
+  endpoint stays a zero-write read. The job wall is **core** like `work_centers` — computed
+  inline, not best-effort.
 
 ## Behavior
 
@@ -227,33 +264,15 @@ no customer names, no ship-to addresses, no dollar figures, no NCR text, operato
 - **Privacy:** operator names are truncated server-side to "First L." — the payload is built for
   a public screen. A signed-in user can also open `/wallboard` (scoped to their active company).
 
-## KPI strip (Lean Phase 1)
+## KPI strip — deprecated
 
-The trailing-30-day floor KPIs, from the optional `kpi_strip` block — now rendered as the
-**PLANT 30d** cluster on the right of the Z4 band (v1 rendered it as a strip across the top):
-
-| Tile | Field | Meaning |
-|------|-------|---------|
-| OTD | `otd_ship_pct_30d` | Ship-based on-time delivery — full ordered quantity shipped on/before promise |
-| FPY | `fpy_pct_30d` | Overall first-pass yield across completed operations |
-| Scrap | `scrap_pct_30d` | Scrapped ÷ (complete + scrapped) across completed operations |
-| WIP | `open_wip_count` | Open released WOs (released / in-progress / on-hold) — live, not windowed |
-| avg | `avg_wip_age_days` | Mean days since release of those open WOs — live, not windowed |
-
-- **Trailing 30 days.** The three percentages cover the last 30 days ending today; the two WIP
-  figures are a live snapshot.
-- **Nulls render as "—".** A percentage is `null` when the window has insufficient data (empty
-  denominator) — the board shows an em dash, never a fake 0% or 100%.
-- **~5-minute staleness is by design.** The strip is server-side cached per company (~5-min TTL) so
-  the 30 s poll doesn't recompute analytics; trailing-30-day numbers don't move faster than that.
-  The live board panels are unaffected — only the strip is cached.
-- **Company-wide, not per-department.** `&dept=` narrows the work-center tiles and the late/blocked
-  rail but **not** this cluster — every TV shows the same plant-level KPIs, labeled `PLANT 30d`.
-- **Best-effort.** Aggregate numbers only (nothing operator-identifying). If the KPI computation
-  fails, `kpi_strip` is `null` on that poll and the board renders `—` values — an analytics
-  error never takes down the live board (the block is also optional on the payload, so a board
-  pointed at an older backend renders unchanged). The endpoint stays a zero-write read and the
-  display-token model below is unchanged.
+The trailing-30-day floor KPI cluster (ship OTD / FPY / scrap / WIP count / WIP age — Lean
+Phase 1, rendered as the `PLANT 30d` block in Z4) was **removed from the TV entirely** on owner
+feedback (2026-07-15 job-wall redesign). The server no longer computes it — the compute path and
+its ~5-minute per-company cache were deleted — and the payload's `kpi_strip` field is
+**deprecated: always `null`**, kept only for wire back-compat (an old TV bundle renders its
+em-dash empty cluster on `null`; the current board reads nothing from it). The underlying Lean
+Phase 1 metric services are untouched — only the TV stopped consuming them.
 
 ## Security — treat the token like a password
 
@@ -294,6 +313,8 @@ carries no user identity, and can write nothing. Still:
   `backend/app/services/display_token_service.py` (issue / setup-code reissue / public claim),
   `backend/app/services/wallboard_service.py` (payload builder + the shared lateness predicate),
   `frontend/src/pages/Wallboard.tsx`, `frontend/src/pages/TvPair.tsx` (the `/tv` pairing screen),
-  `frontend/src/components/wallboard/` (zone components),
-  `frontend/src/utils/wallboardLayout.ts` (grid math / sort / tier hysteresis),
+  `frontend/src/components/wallboard/` (zone components — `JobWall.tsx` / `JobTile.tsx` for Z2,
+  `FloorGrid.tsx` for the machine-wall fallback),
+  `frontend/src/utils/wallboardLayout.ts` (grid math / job-state classification / machine-wall
+  sort / tier hysteresis),
   `frontend/src/hooks/useNewEventFlash.ts`, `frontend/src/services/wallboardClient.ts`.

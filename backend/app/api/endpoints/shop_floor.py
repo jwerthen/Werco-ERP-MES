@@ -2149,8 +2149,9 @@ def shop_floor_wallboard(
         None,
         max_length=50,
         description=(
-            "Scope to one work-center type (case-insensitive): filters the work centers "
-            "AND the late/blocked lists + totals; ship/today/quality/kpi_strip stay plant-wide"
+            "Scope to one work-center type (case-insensitive): filters the work centers, "
+            "the job wall (by each WO's CURRENT operation's work center), and the "
+            "late/blocked lists + totals; ship/today/quality stay plant-wide"
         ),
     ),
     db: Session = Depends(get_db),

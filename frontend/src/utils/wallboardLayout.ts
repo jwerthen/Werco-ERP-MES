@@ -6,7 +6,7 @@
  * wallboardLayout.test.ts — N = 1, 3, 8, 9, 12, 14, 20).
  */
 
-import type { WallboardWorkCenter } from '../types/wallboard';
+import type { WallboardJob, WallboardWorkCenter } from '../types/wallboard';
 
 /** Per-tile job-row budget tier, driven by the count of ACTIVE tiles. */
 export type WallboardDensityTier = 'roomy' | 'standard' | 'dense';
@@ -114,6 +114,24 @@ export function partitionWorkCenters(workCenters: WallboardWorkCenter[]): {
   });
   idle.sort((a, b) => a.name.localeCompare(b.name));
   return { active, idle };
+}
+
+// ---- Job (work-order) classification ----------------------------------------
+
+/**
+ * Job-tile state class, strict precedence DOWN > BLOCKED > LATE > RUNNING >
+ * WAITING. Drives the filled header band + right-hand state word. The server
+ * sorts the wall (alarm-first, then lateness, then promise date) — the client
+ * NEVER re-sorts; this classifier only styles.
+ */
+export type JobStateClass = 'down' | 'blocked' | 'late' | 'running' | 'waiting';
+
+export function classifyJob(job: WallboardJob): JobStateClass {
+  if (job.down) return 'down';
+  if (job.blocked) return 'blocked';
+  if (job.is_late) return 'late';
+  if (job.running) return 'running';
+  return 'waiting';
 }
 
 // ---- Leading-magnitude / duration formatting --------------------------------

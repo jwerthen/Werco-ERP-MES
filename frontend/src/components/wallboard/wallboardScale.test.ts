@@ -15,14 +15,21 @@ const wallboardComponentDir = __dirname;
 const sources: string[] = [
   ...fs
     .readdirSync(wallboardComponentDir)
-    .filter(name => name.endsWith('.tsx'))
+    // Every wallboard component is scanned (new files opt IN automatically);
+    // colocated test files are assertions, not rendered sources.
+    .filter(name => name.endsWith('.tsx') && !name.endsWith('.test.tsx'))
     .map(name => path.join(wallboardComponentDir, name)),
   path.resolve(wallboardComponentDir, '../../pages/Wallboard.tsx'),
 ];
 
 describe('wallboard rem-scaling discipline', () => {
-  it('scans the expected sources', () => {
-    expect(sources.length).toBeGreaterThanOrEqual(7);
+  it('scans the expected sources (incl. the JobWall/JobTile job wall)', () => {
+    // 9 components (ExceptionRail, FloorGrid, IdleStrip, JobRow, JobTile,
+    // JobWall, TodayBand, WallboardHeader, WorkCenterTile) + the page.
+    expect(sources.length).toBeGreaterThanOrEqual(9);
+    expect(sources.some(file => file.endsWith('JobWall.tsx'))).toBe(true);
+    expect(sources.some(file => file.endsWith('JobTile.tsx'))).toBe(true);
+    expect(sources.some(file => file.endsWith('.test.tsx'))).toBe(false);
   });
 
   it.each(sources.map(file => [path.basename(file), file]))(

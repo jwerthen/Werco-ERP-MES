@@ -13,8 +13,9 @@
  *    (~2 min). Never flashing — flashing is reserved for newly-raised events.
  *  - ?dept=<work_center_type> narrows the board to one department's centers.
  *
- * Layout (spec): Z1 header 9% / Z2 floor wall 72.5%w + Z3 exception rail
- * 27.5%w at 82%h / Z4 today+30d band 9%. NO scroll containers anywhere —
+ * Layout (spec): Z1 header 9% / Z2 job wall (open WOs + current op; machine
+ * FloorGrid fallback for old backends) 72.5%w + Z3 exception rail 27.5%w at
+ * 82%h / Z4 today band 9%. NO scroll containers anywhere —
  * every zone has computed capacity, a "+N more" overflow, and a designed
  * empty state. Fixed geography: panels keep their slots at all data values.
  *
@@ -29,6 +30,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import ExceptionRail from '../components/wallboard/ExceptionRail';
 import FloorGrid from '../components/wallboard/FloorGrid';
+import JobWall from '../components/wallboard/JobWall';
 import TodayBand from '../components/wallboard/TodayBand';
 import WallboardHeader from '../components/wallboard/WallboardHeader';
 import { useNewEventFlash } from '../hooks/useNewEventFlash';
@@ -224,8 +226,8 @@ export default function Wallboard() {
         <div className="flex flex-1 flex-col items-center justify-center gap-[1rem] text-center">
           <p className="text-[2.5rem] font-bold">No display token</p>
           <p className="max-w-[48rem] text-[1.5rem] text-[#8b98a9]">
-            Open this screen using the wallboard link from Admin Settings → Wallboard Displays (it includes a one-time
-            #token=… fragment), or sign in first.
+            Get a setup code from Admin Settings → Wallboard Displays and enter it at /tv on this screen. (Or use the
+            one-time wallboard link from the same page, or sign in first.)
           </p>
         </div>
       ) : !data ? (
@@ -243,15 +245,28 @@ export default function Wallboard() {
             }`}
           >
             <div className="min-w-0 basis-[72.5%]">
-              <FloorGrid
-                key={dept ?? 'all'}
-                workCenters={data.work_centers}
-                pollKey={data.generated_at}
-                dept={dept}
-                flashKeys={flashKeys}
-                extraMinutes={extraMinutes}
-                lateDaysByWo={lateDaysByWo}
-              />
+              {/* Job wall (WOs + current op) when the backend sends `jobs`;
+                  otherwise the original machine wall — old-backend grace. */}
+              {Array.isArray(data.jobs) ? (
+                <JobWall
+                  key={dept ?? 'all'}
+                  jobs={data.jobs}
+                  jobsTotal={data.jobs_total}
+                  pollKey={data.generated_at}
+                  flashKeys={flashKeys}
+                  extraMinutes={extraMinutes}
+                />
+              ) : (
+                <FloorGrid
+                  key={dept ?? 'all'}
+                  workCenters={data.work_centers}
+                  pollKey={data.generated_at}
+                  dept={dept}
+                  flashKeys={flashKeys}
+                  extraMinutes={extraMinutes}
+                  lateDaysByWo={lateDaysByWo}
+                />
+              )}
             </div>
             <div className="min-w-0 basis-[27.5%]">
               <ExceptionRail
@@ -271,9 +286,9 @@ export default function Wallboard() {
             </div>
           </div>
 
-          {/* Z4 TODAY / 30-DAY BAND — 9%h */}
+          {/* Z4 TODAY BAND — 9%h */}
           <div className={`min-h-0 shrink-0 grow-0 basis-[9%] ${swapping ? 'wb-swap' : ''}`}>
-            <TodayBand today={data.today ?? null} kpis={data.kpi_strip ?? null} />
+            <TodayBand today={data.today ?? null} />
           </div>
         </>
       )}

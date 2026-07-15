@@ -1,9 +1,13 @@
 """Read-only payload builder for the shop-floor TV wallboard (A0.5).
 
-One call returns the whole board: per-work-center live state (who's on it,
-what WO/op, elapsed time, queue depth, blockers, downtime), the late / blocked
-work-order rails with true uncapped totals, and the plant-wide ship / today /
-quality blocks.
+One call returns the whole board: the JOB WALL (open work-order tiles with
+their current operation — the main wall since the 2026-07-15 owner feedback),
+per-work-center live state (who's on it, what WO/op, elapsed time, queue
+depth, blockers, downtime — kept for old TV bundles and the exception rail),
+the late / blocked work-order rails with true uncapped totals, and the
+plant-wide ship / today / quality blocks. The trailing-30d ``kpi_strip`` was
+dropped from the TV — the response field survives for wire back-compat but is
+always None and nothing computes it anymore.
 
 DELIBERATELY READ-ONLY: unlike the interactive /shop-floor/dashboard, this
 builder runs NO reconcile-on-read and writes NOTHING (no audit rows, no
@@ -28,8 +32,6 @@ handler so the two surfaces can't drift on what "active/queued" means.
 """
 
 import logging
-import threading
-import time
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
@@ -49,7 +51,8 @@ from app.schemas.wallboard import (
     WallboardActiveJob,
     WallboardBlockedWorkOrder,
     WallboardDowntime,
-    WallboardKPIStrip,
+    WallboardJob,
+    WallboardJobOp,
     WallboardLateWorkOrder,
     WallboardQuality,
     WallboardResponse,
@@ -84,75 +87,18 @@ _TICKER_LIMIT = 12
 # before the first not-fully-shipped promise date is found.
 _NEXT_DUE_SCAN_LIMIT = 200
 
-# ── KPI strip cache (Lean Phase 1 / issue #88) ──────────────────────────────
-# The trailing-30-day KPI legs (ship OTD, FPY, scrap rate, WIP aging) are far
-# heavier than the live board queries, and the TV polls every 30s. A coarse
-# per-company in-process TTL cache keeps the strip to ~one analytics pass per
-# 5 minutes per company per worker process — trailing-30-day numbers do not
-# meaningfully change faster than that. Successful computes only are cached; a
-# failed compute returns None (strip omitted) and is retried on the next poll.
-_KPI_STRIP_TTL_SECONDS = 300.0
-_kpi_strip_cache: dict[int, tuple[float, WallboardKPIStrip]] = {}
-_kpi_strip_lock = threading.Lock()
+# The job wall renders WORK ORDERS (owner feedback 2026-07-15). Population:
+# open (RELEASED / IN_PROGRESS) WOs only. ON_HOLD is deliberately EXCLUDED
+# from the wall — the quality rail already counts holds; DRAFT and terminal
+# statuses are off the board like everywhere else.
+_JOB_WALL_WO_STATUSES = [WorkOrderStatus.RELEASED, WorkOrderStatus.IN_PROGRESS]
 
+# Cap the job wall at a readable TV grid; jobs_total rides separately as the
+# true uncapped count for the "+N more" affordance.
+_JOB_WALL_LIMIT = 24
 
-def reset_kpi_strip_cache() -> None:
-    """Drop all cached KPI strips (test isolation helper)."""
-    with _kpi_strip_lock:
-        _kpi_strip_cache.clear()
-
-
-def _compute_kpi_strip(db: Session, company_id: int) -> WallboardKPIStrip:
-    """Trailing-30-day floor KPIs via the Lean Phase 1 metric services.
-
-    READ-ONLY like the rest of this builder (all three services only query).
-    Percentages are 0-100; None = insufficient data in the window ("n/a" on
-    the TV), never a fake 0/100. The provenance rule rides along wherever the
-    underlying data supports it (WIP/OTD/FPY are WO/op/shipment-anchored).
-    """
-    # Local imports keep this module cheap to import for its shared helpers
-    # (shop_floor imports LABOR_ENTRY_TYPES et al at startup).
-    from app.services.analytics_service import AnalyticsService
-    from app.services.flow_metrics_service import get_wip_aging
-    from app.services.quality_yield_service import get_fpy_rty, get_scrap_rate
-
-    end = date.today()
-    start = end - timedelta(days=30)
-
-    otd_ship = AnalyticsService(db, company_id).get_ship_otd_value(start, end)
-    fpy = get_fpy_rty(db, company_id, start, end).overall_fpy_pct
-    scrap = get_scrap_rate(db, company_id, start, end)
-    wip = get_wip_aging(db, company_id)
-    ages = [item.days_since_release for item in wip.items if item.days_since_release is not None]
-
-    return WallboardKPIStrip(
-        otd_ship_pct_30d=round(otd_ship, 1) if otd_ship is not None else None,
-        fpy_pct_30d=fpy,
-        scrap_pct_30d=scrap,
-        open_wip_count=wip.total_open,
-        avg_wip_age_days=round(sum(ages) / len(ages), 1) if ages else None,
-    )
-
-
-def get_kpi_strip(db: Session, company_id: int) -> Optional[WallboardKPIStrip]:
-    """Cached KPI strip for one company; None only when the compute failed.
-
-    Best-effort: an analytics failure must never take down the live board, so
-    errors are logged and the strip is simply omitted for that poll.
-    """
-    now_monotonic = time.monotonic()
-    with _kpi_strip_lock:
-        cached = _kpi_strip_cache.get(company_id)
-        if cached is not None and cached[0] > now_monotonic:
-            return cached[1]
-    try:
-        strip = _compute_kpi_strip(db, company_id)
-    except Exception:  # pragma: no cover - strip failure must not break the board
-        logger.exception("wallboard kpi_strip compute failed for company %s", company_id)
-        return None
-    with _kpi_strip_lock:
-        _kpi_strip_cache[company_id] = (now_monotonic + _KPI_STRIP_TTL_SECONDS, strip)
-    return strip
+# current-op precedence lives in _current_operation: IN_PROGRESS with open
+# labor > IN_PROGRESS > READY > PENDING, lowest sequence within each class.
 
 
 def operator_display_name(first_name: Optional[str], last_name: Optional[str]) -> Optional[str]:
@@ -173,6 +119,162 @@ def _elapsed_minutes(since: Optional[datetime], now: datetime) -> int:
     elif since.tzinfo is None and reference.tzinfo is not None:
         reference = reference.replace(tzinfo=None)
     return max(int((reference - since).total_seconds() // 60), 0)
+
+
+def _crew_summary(entries: list[TimeEntry], now: datetime) -> tuple[list[str], int, int, TimeEntry]:
+    """Crew facts for one operation's open labor entries.
+
+    Returns (crew names in clock-in order capped at 3, TRUE headcount with
+    duplicate open entries by one operator counted once, elapsed minutes from
+    the EARLIEST open clock_in, the earliest entry itself). Shared by the
+    machine wall's active_jobs rows and the job wall's current_op so the two
+    can never drift on what "crew" means. ``entries`` must be non-empty.
+    """
+    ordered = sorted(entries, key=lambda item: (item.clock_in is None, item.clock_in))
+    first = ordered[0]
+    crew: list[str] = []
+    seen_user_ids: set[Optional[int]] = set()
+    for entry in ordered:
+        if entry.user_id in seen_user_ids:
+            continue  # duplicate open entries by one operator are one head
+        seen_user_ids.add(entry.user_id)
+        name = operator_display_name(entry.user.first_name, entry.user.last_name) if entry.user else None
+        if name and len(crew) < 3:
+            crew.append(name)
+    return crew, len(seen_user_ids), _elapsed_minutes(first.clock_in, now), first
+
+
+def _current_operation(
+    operations: list[WorkOrderOperation], labor_op_ids: Optional[set[int]] = None
+) -> Optional[WorkOrderOperation]:
+    """THE current op of a WO for the job wall: lowest-sequence IN_PROGRESS,
+    else lowest READY, else lowest PENDING; None when all are complete (or
+    the WO has no routed operations).
+
+    Among IN_PROGRESS candidates, ops carrying OPEN LABOR (``labor_op_ids``)
+    win first: overlapping in-progress ops are permitted, and pinning to an
+    idle earlier op would render the tile WAITING with no crew while people
+    are actively working the WO — the exact question the wall exists to
+    answer ("what op is it on, who's on it").
+    """
+    in_progress = [op for op in operations if op.status == OperationStatus.IN_PROGRESS]
+    if labor_op_ids:
+        worked = [op for op in in_progress if op.id in labor_op_ids]
+        if worked:
+            return min(worked, key=lambda op: (op.sequence is None, op.sequence, op.id))
+    if in_progress:
+        return min(in_progress, key=lambda op: (op.sequence is None, op.sequence, op.id))
+    for wanted in (OperationStatus.READY, OperationStatus.PENDING):
+        candidates = [op for op in operations if op.status == wanted]
+        if candidates:
+            return min(candidates, key=lambda op: (op.sequence is None, op.sequence, op.id))
+    return None
+
+
+def _work_center_type_norm(work_center: Optional[WorkCenter]) -> Optional[str]:
+    """Lowercased work_center_type, the Python mirror of the SQL
+    ``func.lower(WorkCenter.work_center_type)`` dept comparisons."""
+    if work_center is None or work_center.work_center_type is None:
+        return None
+    raw = work_center.work_center_type
+    value = raw.value if hasattr(raw, "value") else str(raw)
+    return value.strip().lower()
+
+
+def _job_sort_key(job: WallboardJob):
+    """Deterministic job-wall priority: blocked/down first, then late (worst
+    days_late first), then running, then the rest by promise_date asc (nulls
+    last); wo_number breaks every tie."""
+    return (
+        0 if (job.blocked or job.down) else 1,
+        -job.days_late,
+        0 if job.running else 1,
+        job.promise_date is None,  # nulls last
+        job.promise_date or date.max,
+        job.wo_number,
+    )
+
+
+def _build_job_wall(
+    wall_wos: list[WorkOrder],
+    ops_by_wo: dict[int, list[WorkOrderOperation]],
+    entries_by_operation: dict[int, list[TimeEntry]],
+    blocked_wo_ids: set[int],
+    down_wc_ids: set[int],
+    late_wo_ids: set[int],
+    dept_norm: Optional[str],
+    central_today: date,
+    now: datetime,
+) -> tuple[list[WallboardJob], int]:
+    """Assemble the job wall from pre-fetched rows — pure Python, ZERO queries.
+
+    PRIVACY: a WallboardJob carries NO customer_name (the WorkOrder model has
+    that column — it must never reach the public TV), no dollars, no notes.
+
+    When ``dept_norm`` is set, a job belongs to the dept TV via its CURRENT
+    op's work-center type (a WO with no current op drops off dept boards).
+    Returns (priority-sorted list capped at _JOB_WALL_LIMIT, true count).
+    """
+    jobs: list[WallboardJob] = []
+    labor_op_ids = set(entries_by_operation.keys())
+    for wo in wall_wos:
+        operations = ops_by_wo.get(wo.id, [])
+        current = _current_operation(operations, labor_op_ids)
+        current_wc = current.work_center if current is not None else None
+        if dept_norm is not None and _work_center_type_norm(current_wc) != dept_norm:
+            continue
+
+        running = False
+        current_op: Optional[WallboardJobOp] = None
+        if current is not None:
+            crew: list[str] = []
+            crew_count = 0
+            elapsed = 0
+            op_entries = entries_by_operation.get(current.id, [])
+            if op_entries:
+                running = True
+                crew, crew_count, elapsed, _first = _crew_summary(op_entries, now)
+            current_op = WallboardJobOp(
+                sequence=current.sequence,
+                name=current.name,
+                work_center_code=current_wc.code if current_wc else None,
+                work_center_name=current_wc.name if current_wc else None,
+                status=current.status.value if hasattr(current.status, "value") else str(current.status),
+                qty_done=float(current.quantity_complete or 0),
+                qty_target=operation_target_quantity(current, wo),
+                crew=crew,
+                crew_count=crew_count,
+                elapsed_minutes=elapsed,
+            )
+
+        # Lateness comes from the SAME predicate as the late rail (the ids in
+        # ``late_wo_ids`` were selected via _late_wo_filters); days_late via
+        # the shared promise helper so the tile and rail can never disagree.
+        is_late = wo.id in late_wo_ids
+        promise = work_order_promise_date(wo)
+        days_late = max((central_today - promise).days, 0) if (is_late and promise is not None) else 0
+
+        jobs.append(
+            WallboardJob(
+                wo_number=wo.work_order_number,
+                part_number=wo.part.part_number if wo.part else None,
+                status=wo.status.value if hasattr(wo.status, "value") else str(wo.status),
+                qty_complete=float(wo.quantity_complete or 0),
+                qty_ordered=float(wo.quantity_ordered or 0),
+                promise_date=promise,
+                is_late=is_late,
+                days_late=days_late,
+                blocked=wo.id in blocked_wo_ids,
+                down=bool(current is not None and current.work_center_id in down_wc_ids),
+                running=running,
+                current_op=current_op,
+                ops_completed=sum(1 for op in operations if op.status == OperationStatus.COMPLETE),
+                ops_total=len(operations),
+            )
+        )
+
+    jobs.sort(key=_job_sort_key)
+    return jobs[:_JOB_WALL_LIMIT], len(jobs)
 
 
 def _central_today() -> date:
@@ -301,7 +403,7 @@ def operation_counts_by_work_center(db: Session, company_id: int) -> dict[int, d
 # ── Plant-wide blocks (ship / today / quality) ──────────────────────────────
 # Each is cheap indexed aggregates, recomputed per 30s poll, and each is
 # independently best-effort in build_wallboard_payload: a failed block is
-# None, never a failed payload (the get_kpi_strip pattern). ZERO-WRITE.
+# None, never a failed payload. ZERO-WRITE.
 
 
 def _compute_ship(db: Session, company_id: int, central_today: date) -> WallboardShip:
@@ -551,10 +653,14 @@ def build_wallboard_payload(db: Session, company_id: int, dept: Optional[str] = 
 
     ``dept`` optionally narrows the board to work centers whose
     ``work_center_type`` matches (case-insensitive) — one TV per department —
-    and scopes the late/blocked rails AND their totals to that dept (late via
-    any open op routed to a dept work center; blocked via the blocker's
+    and scopes the JOB WALL (via each job's CURRENT op's work-center type)
+    plus the late/blocked rails AND their totals to that dept (late via any
+    open op routed to a dept work center; blocked via the blocker's
     operation's work center; down via the work center itself). The ship /
-    today / quality blocks and the kpi_strip stay plant-wide on every TV.
+    today / quality blocks stay plant-wide on every TV.
+
+    The job wall is core like work_centers — computed inline, not best-effort.
+    ``kpi_strip`` is deprecated and no longer computed (always None).
 
     Late = promise (coalesce(must_ship_by, due_date)) strictly before today's
     CENTRAL date on a live, non-terminal WO — see ``_late_wo_filters``.
@@ -597,12 +703,45 @@ def build_wallboard_payload(db: Session, company_id: int, dept: Optional[str] = 
     # Crew-station grouping: several operators clocked into the same operation
     # are ONE job row with a crew list, not N duplicate rows.
     entries_by_op: dict[tuple[Optional[int], Optional[int]], list[TimeEntry]] = defaultdict(list)
+    # The job wall shares the SAME single open-labor query, re-grouped by
+    # operation only (its crew hangs off the current op, not a work center).
+    entries_by_operation: dict[int, list[TimeEntry]] = defaultdict(list)
     for entry in active_entries:
         entries_by_op[(entry.work_center_id, entry.operation_id)].append(entry)
+        if entry.operation_id is not None:
+            entries_by_operation[entry.operation_id].append(entry)
 
-    # Per-job lateness comes from the SAME predicate as the late rail (one
-    # id-scoped query, so the two can never disagree on what "late" means).
+    # --- Job wall population: ONE query for open WOs, ONE for their ops -----
+    wall_wos = (
+        db.query(WorkOrder)
+        .options(joinedload(WorkOrder.part))
+        .filter(
+            WorkOrder.company_id == company_id,
+            WorkOrder.is_deleted == False,  # noqa: E712
+            WorkOrder.status.in_(_JOB_WALL_WO_STATUSES),
+        )
+        .all()
+    )
+    ops_by_wo: dict[int, list[WorkOrderOperation]] = defaultdict(list)
+    if wall_wos:
+        wall_ops = (
+            db.query(WorkOrderOperation)
+            .options(joinedload(WorkOrderOperation.work_center))
+            .filter(
+                WorkOrderOperation.company_id == company_id,
+                WorkOrderOperation.work_order_id.in_([wo.id for wo in wall_wos]),
+            )
+            .order_by(WorkOrderOperation.sequence.asc(), WorkOrderOperation.id.asc())
+            .all()
+        )
+        for op in wall_ops:
+            ops_by_wo[op.work_order_id].append(op)
+
+    # Per-job lateness comes from the SAME predicate as the late rail (ONE
+    # id-scoped query serving both the machine wall's active-job flags and
+    # the job wall's tiles, so none of the three can disagree on "late").
     job_wo_ids = {entry.work_order_id for entry in active_entries if entry.work_order_id}
+    job_wo_ids |= {wo.id for wo in wall_wos}
     late_job_wo_ids: set[int] = set()
     if job_wo_ids:
         late_job_wo_ids = {
@@ -614,19 +753,9 @@ def build_wallboard_payload(db: Session, company_id: int, dept: Optional[str] = 
 
     jobs_by_wc: dict[int, list[WallboardActiveJob]] = defaultdict(list)
     for (wc_id, _op_id), group in entries_by_op.items():
-        group.sort(key=lambda item: (item.clock_in is None, item.clock_in))
-        first = group[0]  # earliest clock_in drives elapsed time
+        crew, crew_count, elapsed, first = _crew_summary(group, now)  # earliest clock_in drives elapsed
         operation = first.operation
         work_order = first.work_order
-        crew: list[str] = []
-        seen_user_ids: set[Optional[int]] = set()
-        for entry in group:
-            if entry.user_id in seen_user_ids:
-                continue  # duplicate open entries by one operator are one head
-            seen_user_ids.add(entry.user_id)
-            name = operator_display_name(entry.user.first_name, entry.user.last_name) if entry.user else None
-            if name and len(crew) < 3:
-                crew.append(name)
         jobs_by_wc[wc_id].append(
             WallboardActiveJob(
                 wo_number=work_order.work_order_number if work_order else None,
@@ -634,8 +763,8 @@ def build_wallboard_payload(db: Session, company_id: int, dept: Optional[str] = 
                 op_name=operation.name if operation else None,
                 operator_name=crew[0] if crew else None,  # back-compat alias of crew[0]
                 crew=crew,
-                crew_count=len(seen_user_ids),
-                elapsed_minutes=_elapsed_minutes(first.clock_in, now),
+                crew_count=crew_count,
+                elapsed_minutes=elapsed,
                 qty_done=float(operation.quantity_complete or 0) if operation else 0.0,
                 qty_target=operation_target_quantity(operation, work_order),
                 is_late=bool(work_order is not None and work_order.id in late_job_wo_ids),
@@ -659,6 +788,23 @@ def build_wallboard_payload(db: Session, company_id: int, dept: Optional[str] = 
         .group_by(WorkOrderOperation.work_center_id)
         .all()
     )
+
+    # --- Blocked flag for the job wall: ONE grouped query on work_order_id --
+    # WO-level (any unresolved blocker on the WO, routed or not) — the tile
+    # turns orange whether or not the blocker names an operation.
+    blocked_job_wo_ids: set[int] = set()
+    if wall_wos:
+        blocked_job_wo_ids = {
+            row[0]
+            for row in db.query(WorkOrderBlocker.work_order_id)
+            .filter(
+                WorkOrderBlocker.company_id == company_id,
+                WorkOrderBlocker.status.in_(_UNRESOLVED_BLOCKER_STATUSES),
+                WorkOrderBlocker.work_order_id.in_([wo.id for wo in wall_wos]),
+            )
+            .group_by(WorkOrderBlocker.work_order_id)
+            .all()
+        }
 
     # --- Active downtime per work center (open DowntimeEvent) ---------------
     open_downtime = (
@@ -694,6 +840,21 @@ def build_wallboard_payload(db: Session, company_id: int, dept: Optional[str] = 
         )
         for wc in work_centers
     ]
+
+    # --- Job wall: pure assembly over the rows fetched above (no queries) ---
+    # Downtime attributes to a job via its CURRENT op's work center; the map
+    # already holds every open downtime event for the company.
+    jobs, jobs_total = _build_job_wall(
+        wall_wos,
+        ops_by_wo,
+        entries_by_operation,
+        blocked_job_wo_ids,
+        set(downtime_by_wc.keys()),
+        late_job_wo_ids,
+        dept_norm,
+        central_today,
+        now,
+    )
 
     # --- Late work orders rail: worst-first (most days late), capped --------
     late_filters = _late_wo_filters(company_id, central_today)
@@ -777,9 +938,10 @@ def build_wallboard_payload(db: Session, company_id: int, dept: Optional[str] = 
         work_centers=wc_cards,
         late_wos=late_wos,
         blocked_wos=blocked_wos,
-        # Trailing-30-day floor KPIs, company-wide (NOT narrowed by ``dept`` —
-        # the strip is the same on every TV), TTL-cached, best-effort.
-        kpi_strip=get_kpi_strip(db, company_id),
+        # kpi_strip is DEPRECATED (Job Wall redesign) — deliberately left at
+        # its None default; nothing computes it anymore.
+        jobs=jobs,
+        jobs_total=jobs_total,
         late_total=late_total,
         blocked_total=blocked_total,
         down_total=down_total,

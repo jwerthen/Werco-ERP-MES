@@ -1,14 +1,17 @@
 /**
  * Wallboard — the full-screen shop-floor TV board ("ANDON WALL").
  *
- * Covers: the deterministic floor grid + filled-header tiles + exception rail
- * + today band rendered from mock payload data; the shop-state hero; the
- * steady amber→red offline chip that keeps the last good data on failed
- * polls; the revoked/no-token states; the ?dept= pass-through with a
- * title-cased chip and PLANT tags; back-compat against the OLD payload shape
- * (no new blocks, no crew/is_late — em-dash panels, fallback totals); the
- * new-event flash (suppressed on first paint, fired for a newly-down center);
- * and the no-scroll / no-ticker invariants.
+ * Covers: the JOB WALL (owner feedback 2026-07-15 — work-order tiles with
+ * their current operation, server priority order preserved, "+N more" from
+ * the uncapped jobs_total, DOWN > BLOCKED > LATE > RUNNING > WAITING bands)
+ * + exception rail + today band (PLANT 30d cluster removed) rendered from
+ * mock payload data; the shop-state hero; the steady amber→red offline chip
+ * that keeps the last good data on failed polls; the revoked/no-token states;
+ * the ?dept= pass-through with a title-cased chip and PLANT tags; fallback to
+ * the ORIGINAL machine-tile FloorGrid when `jobs` is absent (old-backend
+ * grace) incl. the OLD payload shape (no new blocks, no crew/is_late); the
+ * new-event flash (suppressed on first paint, fired for a newly-blocked job
+ * and a newly-down center); and the no-scroll / no-ticker invariants.
  *
  * services/wallboardClient is mocked at the module boundary — the page must
  * never touch the global axios client (a display token cannot enter it).
@@ -24,7 +27,7 @@ import {
   fetchWallboard,
   getWallboardToken,
 } from '../services/wallboardClient';
-import type { WallboardResponse } from '../types/wallboard';
+import type { WallboardJob, WallboardResponse } from '../types/wallboard';
 
 jest.mock('../services/wallboardClient', () => ({
   __esModule: true,
@@ -39,7 +42,151 @@ const mockGetToken = getWallboardToken as jest.MockedFunction<typeof getWallboar
 const mockClearToken = clearWallboardToken as jest.MockedFunction<typeof clearWallboardToken>;
 const mockCapture = captureWallboardTokenFromUrl as jest.MockedFunction<typeof captureWallboardTokenFromUrl>;
 
-/** Full NEW payload shape — every optional block present. */
+/** Job wall block in SERVER priority order (alarms first) — never re-sorted. */
+const jobs: WallboardJob[] = [
+  {
+    // down+blocked+late — DOWN wins the band.
+    wo_number: 'WO-3001',
+    part_number: 'PN-D1',
+    status: 'in_progress',
+    qty_complete: 5,
+    qty_ordered: 20,
+    promise_date: '2026-06-08',
+    is_late: true,
+    days_late: 2,
+    blocked: true,
+    down: true,
+    running: false,
+    ops_completed: 1,
+    ops_total: 4,
+    current_op: {
+      sequence: 20,
+      name: 'Weld',
+      work_center_code: 'WELD-2',
+      work_center_name: 'Weld 2',
+      status: 'ready',
+      qty_done: 0,
+      qty_target: 20,
+      crew: [],
+      crew_count: 0,
+      elapsed_minutes: 0,
+    },
+  },
+  {
+    // blocked+late — BLOCKED wins.
+    wo_number: 'WO-3002',
+    part_number: 'PN-B1',
+    status: 'released',
+    qty_complete: 0,
+    qty_ordered: 10,
+    promise_date: '2026-06-09',
+    is_late: true,
+    days_late: 1,
+    blocked: true,
+    down: false,
+    running: false,
+    ops_completed: 0,
+    ops_total: 3,
+    current_op: {
+      sequence: 10,
+      name: 'Saw',
+      work_center_code: 'SAW-1',
+      work_center_name: 'Saw 1',
+      status: 'pending',
+      qty_done: 0,
+      qty_target: 10,
+      crew: [],
+      crew_count: 0,
+      elapsed_minutes: 0,
+    },
+  },
+  {
+    // late+running — LATE wins; "Late 3d" chip on the part line.
+    wo_number: 'WO-3003',
+    part_number: 'PN-L1',
+    status: 'in_progress',
+    qty_complete: 8,
+    qty_ordered: 40,
+    promise_date: '2026-06-07',
+    is_late: true,
+    days_late: 3,
+    blocked: false,
+    down: false,
+    running: true,
+    ops_completed: 3,
+    ops_total: 6,
+    current_op: {
+      sequence: 40,
+      name: 'Deburr',
+      work_center_code: 'DEB-1',
+      work_center_name: 'Deburr 1',
+      status: 'in_progress',
+      qty_done: 8,
+      qty_target: 40,
+      crew: ['Ana P.'],
+      crew_count: 1,
+      elapsed_minutes: 30,
+    },
+  },
+  {
+    // RUNNING — crew suffix + live elapsed.
+    wo_number: 'WO-3004',
+    part_number: 'PN-77',
+    status: 'in_progress',
+    qty_complete: 12,
+    qty_ordered: 50,
+    promise_date: '2026-06-15',
+    is_late: false,
+    days_late: 0,
+    blocked: false,
+    down: false,
+    running: true,
+    ops_completed: 2,
+    ops_total: 5,
+    current_op: {
+      sequence: 30,
+      name: 'Mill',
+      work_center_code: 'MILL-1',
+      work_center_name: 'Mill 1',
+      status: 'in_progress',
+      qty_done: 12,
+      qty_target: 50,
+      crew: ['Jon W.', 'Sam K.'],
+      crew_count: 2,
+      elapsed_minutes: 75,
+    },
+  },
+  {
+    // Nothing on it yet — WAITING (slate).
+    wo_number: 'WO-3005',
+    part_number: 'PN-W1',
+    status: 'released',
+    qty_complete: 0,
+    qty_ordered: 5,
+    promise_date: null,
+    is_late: false,
+    days_late: 0,
+    blocked: false,
+    down: false,
+    running: false,
+    ops_completed: 0,
+    ops_total: 2,
+    current_op: {
+      sequence: 10,
+      name: 'Laser Cut',
+      work_center_code: 'LASER-1',
+      work_center_name: 'Laser 1',
+      status: 'ready',
+      qty_done: 0,
+      qty_target: 5,
+      crew: [],
+      crew_count: 0,
+      elapsed_minutes: 0,
+    },
+  },
+];
+
+/** Full NEW payload shape — every optional block present (jobs = job wall). */
 const payload: WallboardResponse = {
   work_centers: [
     {
@@ -86,6 +233,8 @@ const payload: WallboardResponse = {
     },
   ],
   blocked_wos: [{ wo_number: 'WO-0998', category: 'material_missing', age_hours: 5.5 }],
+  // Deprecated block — even when an old backend still sends it, the strip
+  // must NOT render (removed on owner feedback 2026-07-15).
   kpi_strip: {
     otd_ship_pct_30d: 96.2,
     fpy_pct_30d: 98.1,
@@ -114,8 +263,13 @@ const payload: WallboardResponse = {
     scrap_events: 1,
   },
   quality: { open_ncr_count: 3, newest_ncr_age_days: 2, wos_on_hold: 1 },
+  jobs,
+  jobs_total: 7,
   generated_at: '2026-06-10T13:00:00Z',
 };
+
+/** New blocks present but NO `jobs` → the machine-tile FloorGrid renders. */
+const machinePayload: WallboardResponse = { ...payload, jobs: undefined, jobs_total: undefined };
 
 /** The OLD production payload shape — no new blocks, no crew, no is_late. */
 const oldPayload: WallboardResponse = {
@@ -180,32 +334,56 @@ beforeEach(() => {
 });
 
 describe('Wallboard', () => {
-  it('renders the floor grid, tiles, exception rail, hero, and today band', async () => {
+  it('renders the job wall, tiles, exception rail, hero, and today band', async () => {
     mockFetchWallboard.mockResolvedValue(payload);
     renderWallboard();
 
     expect(await screen.findByTestId('wallboard-grid')).toBeInTheDocument();
     expect(mockCapture).toHaveBeenCalled();
 
+    // The wall is the JOB wall — machine tiles do not render alongside it.
+    expect(screen.getByTestId('job-wall')).toBeInTheDocument();
+    expect(screen.queryByTestId('wc-card-LASER-1')).not.toBeInTheDocument();
+
     // Hero: computed shop-state sentence from the true totals — red class of
     // problem leads, zero segments omitted.
     expect(screen.getByTestId('shop-state-headline')).toHaveTextContent('1 DOWN · 4 BLOCKED · 12 LATE');
 
-    // Tile 1: running — green band, queue chip, job row (part number leads,
-    // WO · op · crew secondary with the +N crew suffix, qty, elapsed, bar).
-    const laser = screen.getByTestId('wc-card-LASER-1');
-    expect(laser).toHaveTextContent('Laser 1');
-    expect(screen.getByTestId('wc-tile-header-LASER-1')).toHaveTextContent('RUNNING');
-    expect(screen.getByTestId('wc-tile-header-LASER-1')).toHaveTextContent('Q 3');
-    expect(laser).toHaveTextContent('PN-77');
-    expect(laser).toHaveTextContent('WO-1001 · Laser Cut · Jon W. +2');
-    expect(laser).toHaveTextContent('12/50');
-    expect(laser).toHaveTextContent('1h15m');
+    // SERVER priority order preserved — the client never re-sorts.
+    const tileIds = screen.getAllByTestId(/^job-tile-WO/).map(el => el.getAttribute('data-testid'));
+    expect(tileIds).toEqual([
+      'job-tile-WO-3001',
+      'job-tile-WO-3002',
+      'job-tile-WO-3003',
+      'job-tile-WO-3004',
+      'job-tile-WO-3005',
+    ]);
 
-    // Tile 2: down wins over blocked — red band; the category + live minutes
-    // move to the tile body so the machine name survives the band.
-    expect(screen.getByTestId('wc-tile-header-WELD-2')).toHaveTextContent('DOWN');
-    expect(screen.getByTestId('wc-card-WELD-2')).toHaveTextContent('mechanical · 18m');
+    // State bands, strict precedence: down > blocked > late > running > waiting.
+    expect(screen.getByTestId('job-tile-header-WO-3001')).toHaveTextContent('DOWN');
+    expect(screen.getByTestId('job-tile-header-WO-3002')).toHaveTextContent('BLOCKED');
+    expect(screen.getByTestId('job-tile-header-WO-3003')).toHaveTextContent('LATE');
+    expect(screen.getByTestId('job-tile-header-WO-3004')).toHaveTextContent('RUNNING');
+    expect(screen.getByTestId('job-tile-header-WO-3005')).toHaveTextContent('WAITING');
+
+    // RUNNING tile anatomy: WO number in the band; part + WO qty; THE ASK —
+    // "Op n/total · op name · work center" with the crew suffix; live elapsed.
+    const running = screen.getByTestId('job-tile-WO-3004');
+    expect(screen.getByTestId('job-tile-header-WO-3004')).toHaveTextContent('WO-3004');
+    expect(running).toHaveTextContent('PN-77');
+    expect(running).toHaveTextContent('12/50');
+    expect(running).toHaveTextContent('Op 3/5 · Mill · Mill 1 · Jon W. +1');
+    expect(running).toHaveTextContent('1h15m');
+
+    // LATE tile: "Late 3d" chip on the part line.
+    expect(screen.getByTestId('job-tile-WO-3003')).toHaveTextContent('Late 3d');
+    expect(screen.getByTestId('job-tile-WO-3003')).toHaveTextContent('Op 4/6 · Deburr · Deburr 1 · Ana P.');
+
+    // DOWN tile body leads with the machine-down context in red.
+    expect(screen.getByTestId('job-tile-WO-3001')).toHaveTextContent('Machine Down · Weld 2');
+
+    // "+N more" from the uncapped jobs_total (7 total, 5 tiles).
+    expect(screen.getByTestId('job-wall')).toHaveTextContent('+2 more work orders');
 
     // Rail P1 SHIP: shipped/due fraction, behind-state, week count, rows.
     const ship = screen.getByTestId('ship-panel');
@@ -238,17 +416,15 @@ describe('Wallboard', () => {
     expect(quality).toHaveTextContent('newest 2d');
     expect(quality).toHaveTextContent('On Hold');
 
-    // Z4: six TODAY cells + the relocated 30d KPI cluster.
+    // Z4: six TODAY cells; the PLANT 30d cluster is GONE (owner feedback) —
+    // even though this payload still carries a kpi_strip block.
     const band = screen.getByTestId('today-band');
     expect(band).toHaveTextContent('27');
     expect(band).toHaveTextContent('342');
     expect(band).toHaveTextContent('61.5');
-    const kpis = screen.getByTestId('wallboard-kpi-strip');
-    expect(kpis).toHaveTextContent('96.2%');
-    expect(kpis).toHaveTextContent('98.1%');
-    expect(kpis).toHaveTextContent('1.2%');
-    expect(kpis).toHaveTextContent('47');
-    expect(kpis).toHaveTextContent('12.3d');
+    expect(screen.queryByTestId('wallboard-kpi-strip')).not.toBeInTheDocument();
+    expect(band).not.toHaveTextContent('Plant 30d');
+    expect(band).not.toHaveTextContent('96.2%');
 
     // The ticker is gone, nothing scrolls, no offline chip when healthy.
     expect(screen.queryByTestId('ticker')).not.toBeInTheDocument();
@@ -260,12 +436,24 @@ describe('Wallboard', () => {
     expect(document.getElementsByClassName('wb-flash-new').length).toBe(0);
   });
 
-  it('renders the all-clear board: green hero, zero-line panels, idle strip', async () => {
+  it('renders the job-wall empty state when there are no open work orders', async () => {
+    mockFetchWallboard.mockResolvedValue({ ...payload, jobs: [], jobs_total: 0 });
+    renderWallboard();
+
+    expect(await screen.findByText('No open work orders')).toBeInTheDocument();
+    expect(screen.getByTestId('job-wall')).toBeInTheDocument();
+    // No grid, no machine-wall fallback — jobs IS present, just empty.
+    expect(screen.queryByTestId('wallboard-grid')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('wc-card-LASER-1')).not.toBeInTheDocument();
+  });
+
+  it('renders the all-clear machine board: green hero, zero-line panels, idle strip', async () => {
+    // Machine-wall (no jobs) fallback keeps its designed all-clear state.
     const clean: WallboardResponse = {
-      ...payload,
+      ...machinePayload,
       work_centers: [
-        payload.work_centers[0],
-        { ...payload.work_centers[1], blocked_count: 0, down: null }, // now idle
+        machinePayload.work_centers[0],
+        { ...machinePayload.work_centers[1], blocked_count: 0, down: null }, // now idle
       ],
       late_wos: [],
       blocked_wos: [],
@@ -308,7 +496,7 @@ describe('Wallboard', () => {
       expect(chip).toHaveAttribute('data-offline-level', '1');
       // The chip carries the as-of time of the LAST GOOD poll: "Offline · h:mm AM/PM".
       expect(chip).toHaveTextContent(/Offline · \d{1,2}:\d{2}/);
-      expect(screen.getByTestId('wc-card-LASER-1')).toBeInTheDocument();
+      expect(screen.getByTestId('job-tile-WO-3001')).toBeInTheDocument();
       // Steady, never flashing — the flash class is reserved for new events.
       expect(chip.className).not.toContain('wb-flash');
 
@@ -317,7 +505,7 @@ describe('Wallboard', () => {
         jest.advanceTimersByTime(90_000);
       });
       expect(screen.getByTestId('offline-banner')).toHaveAttribute('data-offline-level', '2');
-      expect(screen.getByTestId('wc-card-LASER-1')).toBeInTheDocument();
+      expect(screen.getByTestId('job-tile-WO-3001')).toBeInTheDocument();
 
       // Recovery: one good poll clears the chip AND resets the failure count…
       mockFetchWallboard.mockResolvedValue(payload);
@@ -392,14 +580,42 @@ describe('Wallboard', () => {
     renderWallboard();
 
     expect(await screen.findByText('No display token')).toBeInTheDocument();
-    expect(screen.getByText(/Admin Settings/)).toBeInTheDocument();
+    // Leads with the /tv setup-code pairing flow; link + sign-in are fallbacks.
+    expect(screen.getByText(/setup code from Admin Settings .* enter it at \/tv/i)).toBeInTheDocument();
   });
 
-  it('renders correctly against the OLD payload shape (back-compat, degraded mode)', async () => {
+  it('falls back to the machine wall when `jobs` is absent (new blocks, no job wall)', async () => {
+    mockFetchWallboard.mockResolvedValue(machinePayload);
+    renderWallboard();
+
+    expect(await screen.findByTestId('wallboard-grid')).toBeInTheDocument();
+
+    // The ORIGINAL machine-tile FloorGrid renders, unchanged.
+    expect(screen.queryByTestId('job-wall')).not.toBeInTheDocument();
+    const laser = screen.getByTestId('wc-card-LASER-1');
+    expect(laser).toHaveTextContent('Laser 1');
+    expect(screen.getByTestId('wc-tile-header-LASER-1')).toHaveTextContent('RUNNING');
+    expect(screen.getByTestId('wc-tile-header-LASER-1')).toHaveTextContent('Q 3');
+    expect(laser).toHaveTextContent('PN-77');
+    expect(laser).toHaveTextContent('WO-1001 · Laser Cut · Jon W. +2');
+    expect(laser).toHaveTextContent('12/50');
+    expect(laser).toHaveTextContent('1h15m');
+
+    // Down wins over blocked — red band; category + live minutes in the body.
+    expect(screen.getByTestId('wc-tile-header-WELD-2')).toHaveTextContent('DOWN');
+    expect(screen.getByTestId('wc-card-WELD-2')).toHaveTextContent('mechanical · 18m');
+  });
+
+  it('renders correctly against the OLD payload shape (back-compat, degraded machine wall)', async () => {
     mockFetchWallboard.mockResolvedValue(oldPayload);
     renderWallboard();
 
     expect(await screen.findByTestId('wallboard-grid')).toBeInTheDocument();
+
+    // No `jobs` block → the machine wall renders (old-backend grace).
+    expect(screen.queryByTestId('job-wall')).not.toBeInTheDocument();
+    expect(screen.getByTestId('wc-card-LASER-1')).toBeInTheDocument();
+    expect(screen.getByTestId('wc-tile-header-WELD-2')).toHaveTextContent('DOWN');
 
     // Hero derives from work_centers + list lengths when totals are absent.
     expect(screen.getByTestId('shop-state-headline')).toHaveTextContent('1 DOWN · 1 BLOCKED · 1 LATE');
@@ -415,8 +631,10 @@ describe('Wallboard', () => {
     // QUALITY has no block → em-dash values.
     expect(screen.getByTestId('quality-panel')).toHaveTextContent('—');
 
-    // TODAY band renders with em-dash values (no `today` block).
+    // TODAY band renders with em-dash values (no `today` block), and the
+    // removed 30d cluster never comes back.
     expect(screen.getByTestId('today-band')).toHaveTextContent('—');
+    expect(screen.queryByTestId('wallboard-kpi-strip')).not.toBeInTheDocument();
 
     // Job row falls back to operator_name when there is no crew array.
     expect(screen.getByTestId('wc-card-LASER-1')).toHaveTextContent('WO-1001 · Laser Cut · Jon W.');
@@ -426,7 +644,7 @@ describe('Wallboard', () => {
     expect(document.getElementsByClassName('wb-flash-new').length).toBe(0);
   });
 
-  it('flashes a newly-down work center once, and never re-flashes unchanged events', async () => {
+  it('flashes a newly-blocked job once, and never re-flashes unchanged jobs', async () => {
     jest.useFakeTimers();
     try {
       mockFetchWallboard.mockResolvedValueOnce(payload);
@@ -436,15 +654,55 @@ describe('Wallboard', () => {
       // First paint: suppressed.
       expect(document.getElementsByClassName('wb-flash-new').length).toBe(0);
 
+      // Next poll: the WAITING job newly enters BLOCKED → its band flashes.
+      const withNewBlock: WallboardResponse = {
+        ...payload,
+        jobs: payload.jobs!.map(job => (job.wo_number === 'WO-3005' ? { ...job, blocked: true } : job)),
+        generated_at: '2026-06-10T13:00:30Z',
+      };
+      mockFetchWallboard.mockResolvedValueOnce(withNewBlock);
+      await act(async () => {
+        jest.advanceTimersByTime(30_000);
+      });
+      expect(screen.getByTestId('job-tile-header-WO-3005')).toHaveTextContent('BLOCKED');
+      expect(screen.getByTestId('job-tile-header-WO-3005').className).toContain('wb-flash-new');
+      // Already-blocked/down jobs do NOT re-flash — diff is by stable WO number.
+      expect(screen.getByTestId('job-tile-header-WO-3001').className).not.toContain('wb-flash-new');
+      expect(screen.getByTestId('job-tile-header-WO-3002').className).not.toContain('wb-flash-new');
+
+      // Next poll with the same states → steady, no flash classes anywhere.
+      mockFetchWallboard.mockResolvedValueOnce({
+        ...withNewBlock,
+        generated_at: '2026-06-10T13:01:00Z',
+      });
+      await act(async () => {
+        jest.advanceTimersByTime(30_000);
+      });
+      expect(document.getElementsByClassName('wb-flash-new').length).toBe(0);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('flashes a newly-down work center once on the fallback machine wall', async () => {
+    jest.useFakeTimers();
+    try {
+      mockFetchWallboard.mockResolvedValueOnce(machinePayload);
+      renderWallboard();
+
+      expect(await screen.findByTestId('wallboard-grid')).toBeInTheDocument();
+      // First paint: suppressed.
+      expect(document.getElementsByClassName('wb-flash-new').length).toBe(0);
+
       // Next poll: LASER-1 newly enters DOWN → its header band flashes.
       const withNewDown: WallboardResponse = {
-        ...payload,
+        ...machinePayload,
         work_centers: [
           {
-            ...payload.work_centers[0],
+            ...machinePayload.work_centers[0],
             down: { category: 'tooling', since: null, minutes: 1 },
           },
-          payload.work_centers[1],
+          machinePayload.work_centers[1],
         ],
         generated_at: '2026-06-10T13:00:30Z',
       };
@@ -470,8 +728,8 @@ describe('Wallboard', () => {
     }
   });
 
-  it('keeps the empty-state copy for a dept with zero work centers', async () => {
-    mockFetchWallboard.mockResolvedValue({ ...payload, work_centers: [] });
+  it('keeps the empty-state copy for a dept with zero work centers (machine wall)', async () => {
+    mockFetchWallboard.mockResolvedValue({ ...machinePayload, work_centers: [] });
     renderWallboard('/wallboard?dept=bogus');
 
     // Same convention as the dept chip: title-cased, never the raw query param.
