@@ -30,6 +30,7 @@ const ShopFloorSimple = lazyWithRetry(() => import('./pages/ShopFloorSimple'));
 const OperatorKiosk = lazyWithRetry(() => import('./pages/OperatorKiosk'));
 const CrewStationKiosk = lazyWithRetry(() => import('./pages/CrewStationKiosk'));
 const Wallboard = lazyWithRetry(() => import('./pages/Wallboard'));
+const TvPair = lazyWithRetry(() => import('./pages/TvPair'));
 const WorkCenters = lazyWithRetry(() => import('./pages/WorkCenters'));
 const Parts = lazyWithRetry(() => import('./pages/PartsNew'));
 const PartDetail = lazyWithRetry(() => import('./pages/PartDetail'));
@@ -299,6 +300,13 @@ function AppRoutes() {
           Auth is a scoped display token via ?token= (or a signed-in session);
           the backend endpoint rejects anything else. */}
       <Route path="/wallboard" element={<LazyRoute><Wallboard /></LazyRoute>} />
+
+      {/* TV pairing — full-screen, NO Layout chrome, NO PrivateRoute. Safe as a
+          TV's browser homepage: already-paired displays bounce straight to
+          /wallboard; otherwise an 8-char setup code (issued in Admin Settings →
+          Wallboard Displays) is claimed via the PUBLIC single-use claim endpoint. */}
+      <Route path="/tv" element={<LazyRoute><TvPair /></LazyRoute>} />
+      <Route path="/tv/:code" element={<LazyRoute><TvPair /></LazyRoute>} />
 
       {/* Visitor sign-in tablet — full-screen, NO Layout chrome, NO PrivateRoute.
           Auth is a shared-PIN station token minted via POST /visitor-logs/station-login;

@@ -10,25 +10,48 @@ Compliance assertions covered here:
 - Tenant isolation: a company-A display token can never read company B's
   board; management endpoints are tenant-scoped too.
 - Operator names on the public wallboard are truncated to "First L.".
+- One-time TV setup codes: 8-char/15-min/single-use, hash-only at rest,
+  never on the audit chain, claimed via a PUBLIC no-oracle endpoint whose
+  re-minted JWT stays anchored to (and revocable through) the same row.
 """
 
-from datetime import date, datetime, timedelta, timezone
+import hashlib
+import re
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
+import app.main as app_main
 from app.core.security import create_display_token, get_current_user_from_token, verify_token
+from app.core.time_utils import CENTRAL_TIME_ZONE
 from app.models.audit_log import AuditLog
 from app.models.company import Company
 from app.models.display_token import DisplayToken
 from app.models.downtime import DowntimeCategory, DowntimeEvent
+from app.models.purchasing import POReceipt, PurchaseOrder, PurchaseOrderLine, Vendor
+from app.models.quality import NCRSource, NCRStatus, NonConformanceReport
 from app.models.time_entry import TimeEntry, TimeEntryType
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.models.work_order_blocker import WorkOrderBlocker, WorkOrderBlockerCategory, WorkOrderBlockerStatus
+from app.services.display_token_service import SETUP_CODE_TTL_MINUTES
+from app.services.wallboard_service import central_day_window_utc
 from tests.conftest import TEST_PASSWORD_HASH
+from tests.lean_phase1_helpers import (
+    headers_for,
+    make_entry,
+    make_op,
+    make_part,
+    make_shipment,
+    make_user,
+    make_wo,
+    make_work_center,
+)
+
+pytestmark = [pytest.mark.api, pytest.mark.requires_db]
 
 DISPLAY_TOKEN_URL = "/api/v1/auth/display-token"
 WALLBOARD_URL = "/api/v1/shop-floor/wallboard"
@@ -214,8 +237,21 @@ def test_display_token_authenticates_wallboard(client: TestClient, admin_headers
     response = client.get(WALLBOARD_URL, headers=_display_headers(data["token"]))
     assert response.status_code == 200
     payload = response.json()
-    # Lean Phase 1: the trailing-30d kpi_strip rides the same payload.
-    assert set(payload.keys()) == {"work_centers", "late_wos", "blocked_wos", "kpi_strip", "generated_at"}
+    # Lean Phase 1 added kpi_strip; the TV redesign added the true totals and
+    # the ship/today/quality blocks — all on the same single payload.
+    assert set(payload.keys()) == {
+        "work_centers",
+        "late_wos",
+        "blocked_wos",
+        "kpi_strip",
+        "late_total",
+        "blocked_total",
+        "down_total",
+        "ship",
+        "today",
+        "quality",
+        "generated_at",
+    }
 
 
 def test_user_token_still_works_on_wallboard_and_dashboard(client: TestClient, auth_headers: dict):
@@ -319,6 +355,88 @@ def test_wallboard_tenant_isolation(
     assert names_b == {"B Lathe"}
 
 
+def test_new_blocks_are_tenant_isolated(client: TestClient, admin_headers: dict, db_session: Session):
+    """A regression that drops a company_id filter from ANY new-block query
+    (ship/today/quality/totals) must fail here: company B gets exceptions and
+    activity in every block; company A's board must stay all-zero."""
+    company_b, admin_b = _make_company_b(db_session)
+    b = company_b.id
+    central_today = datetime.now(CENTRAL_TIME_ZONE).date()
+    _, now_utc = central_day_window_utc()
+
+    part_b = make_part(db_session, company_id=b)
+    wc_b = make_work_center(db_session, company_id=b)
+    # Late + promised-today + on-hold WOs, downtime, blocker, NCR, receipt,
+    # open + completed labor — one of everything the new blocks count.
+    late_b = make_wo(db_session, part_b, company_id=b, due_date=central_today - timedelta(days=4))
+    make_wo(db_session, part_b, company_id=b, due_date=central_today)  # ship due today
+    make_wo(db_session, part_b, company_id=b, status_=WorkOrderStatus.ON_HOLD)
+    make_wo(
+        db_session, part_b, company_id=b, status_=WorkOrderStatus.COMPLETE, actual_end=now_utc
+    )  # wos_completed today
+    op_b = make_op(db_session, late_b, wc_b, company_id=b, status_=OperationStatus.COMPLETE)
+    op_b.actual_end = now_utc  # ops_completed today
+    db_session.add(
+        DowntimeEvent(
+            company_id=b, work_center_id=wc_b.id, start_time=now_utc - timedelta(hours=1), reported_by=admin_b.id
+        )
+    )
+    db_session.add(
+        WorkOrderBlocker(
+            company_id=b,
+            work_order_id=late_b.id,
+            operation_id=op_b.id,
+            category=WorkOrderBlockerCategory.MATERIAL_MISSING.value,
+            status=WorkOrderBlockerStatus.OPEN.value,
+            title="B blocker",
+            reported_by=admin_b.id,
+        )
+    )
+    db_session.add(
+        NonConformanceReport(
+            company_id=b,
+            ncr_number="NCR-B-1",
+            source=NCRSource.IN_PROCESS,
+            status=NCRStatus.OPEN,
+            title="B ncr",
+            description="B only",
+        )
+    )
+    make_entry(db_session, admin_b, late_b, None, wc_b, company_id=b, open_entry=True, quantity_produced=9)
+    db_session.commit()
+
+    # Company B sees its own exceptions...
+    token_b = _company_b_display_token(client, db_session, admin_b)
+    payload_b = client.get(WALLBOARD_URL, headers=_display_headers(token_b)).json()
+    assert payload_b["late_total"] == 1
+    assert payload_b["blocked_total"] == 1
+    assert payload_b["down_total"] == 1
+    assert payload_b["quality"] == {"open_ncr_count": 1, "newest_ncr_age_days": 0, "wos_on_hold": 1}
+    assert payload_b["ship"]["due_today"] >= 1
+    assert payload_b["today"]["operators_on_clock"] == 1
+
+    # ...and company A's board stays all-zero across every new block.
+    token_a = _issue_token(client, admin_headers)["token"]
+    payload_a = client.get(WALLBOARD_URL, headers=_display_headers(token_a)).json()
+    assert payload_a["late_total"] == 0
+    assert payload_a["blocked_total"] == 0
+    assert payload_a["down_total"] == 0
+    assert payload_a["late_wos"] == []
+    assert payload_a["blocked_wos"] == []
+    assert payload_a["ship"]["due_today"] == 0
+    assert payload_a["ship"]["shipped_today"] == 0
+    assert payload_a["ship"]["due_this_week"] == 0
+    assert payload_a["quality"] == {"open_ncr_count": 0, "newest_ncr_age_days": None, "wos_on_hold": 0}
+    today_a = payload_a["today"]
+    assert today_a["ops_completed"] == 0
+    assert today_a["pieces_completed"] == 0
+    assert today_a["wos_completed"] == 0
+    assert today_a["operators_on_clock"] == 0
+    assert today_a["receipts"] == 0
+    assert today_a["scrap_events"] == 0
+    assert today_a["hours_logged"] == 0
+
+
 # ---------------------------------------------------------------------------
 # Payload shape / contents
 # ---------------------------------------------------------------------------
@@ -333,8 +451,10 @@ def test_wallboard_payload_contents(
     operator_user: User,
 ):
     # Make the WO late + in progress, its op READY (queued), with one live job.
+    # Lateness is judged against the CENTRAL calendar day, so seed from it.
+    central_today = datetime.now(CENTRAL_TIME_ZONE).date()
     test_work_order.status = WorkOrderStatus.IN_PROGRESS
-    test_work_order.due_date = date.today() - timedelta(days=3)
+    test_work_order.due_date = central_today - timedelta(days=3)
     operation = test_work_order.operations[0]
     operation.status = OperationStatus.READY
     operation.quantity_complete = 4
@@ -387,6 +507,9 @@ def test_wallboard_payload_contents(
     # PRIVACY: public screen shows first name + last initial only
     assert job["operator_name"] == "Operator U."
     assert "Operator User" not in str(payload)
+    assert job["crew"] == ["Operator U."]
+    assert job["crew_count"] == 1
+    assert job["is_late"] is True  # promise (due_date) is 3 days past
     assert job["elapsed_minutes"] >= 41
     assert job["qty_done"] == 4.0
     assert job["qty_target"] == float(test_work_order.quantity_ordered)
@@ -580,3 +703,782 @@ def test_wallboard_dept_filter(client: TestClient, admin_headers: dict, db_sessi
     names = {wc["name"] for wc in payload["work_centers"]}
     assert "Mill 1" in names
     assert "Weld 1" not in names
+
+
+# ---------------------------------------------------------------------------
+# TV redesign payload: crew grouping, promise-based lateness, dept-scoped
+# rails + totals, and the ship / today / quality blocks
+# ---------------------------------------------------------------------------
+
+
+def _payload(client: TestClient, headers: dict, dept: "str | None" = None) -> dict:
+    url = f"{WALLBOARD_URL}?dept={dept}" if dept else WALLBOARD_URL
+    response = client.get(url, headers=headers)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_crew_grouping_one_row_per_operation(client: TestClient, db_session: Session):
+    """Several operators clocked into ONE operation are one job row: crew in
+    clock-in order capped at 3 names, crew_count = true headcount, elapsed
+    from the EARLIEST clock_in, operator_name = crew[0] for back-compat."""
+    viewer = make_user(db_session)
+    part = make_part(db_session)
+    wc = make_work_center(db_session)
+    wo = make_wo(db_session, part, status_=WorkOrderStatus.IN_PROGRESS, quantity_ordered=20)
+    op = make_op(db_session, wo, wc, status_=OperationStatus.IN_PROGRESS, quantity_complete=5)
+
+    alice = make_user(db_session, role=UserRole.OPERATOR, first_name="Alice", last_name="Anders")
+    bob = make_user(db_session, role=UserRole.OPERATOR, first_name="Bob", last_name="Baker")
+    cara = make_user(db_session, role=UserRole.OPERATOR, first_name="Cara", last_name="Cole")
+    dave = make_user(db_session, role=UserRole.OPERATOR, first_name="Dave", last_name="Diaz")
+
+    now = datetime.utcnow()
+    for user, minutes_ago in ((alice, 50), (bob, 30), (cara, 10), (dave, 5)):
+        make_entry(db_session, user, wo, op, wc, open_entry=True, clock_in=now - timedelta(minutes=minutes_ago))
+
+    payload = _payload(client, headers_for(viewer))
+    card = next(w for w in payload["work_centers"] if w["id"] == wc.id)
+    assert len(card["active_jobs"]) == 1  # ONE row per operation, not four
+    job = card["active_jobs"][0]
+    assert job["crew"] == ["Alice A.", "Bob B.", "Cara C."]  # clock-in order, capped at 3
+    assert job["crew_count"] == 4  # true headcount rides separately for the "+N"
+    assert job["operator_name"] == "Alice A."  # back-compat alias of crew[0]
+    assert 49 <= job["elapsed_minutes"] <= 52  # EARLIEST clock_in drives elapsed
+
+
+def test_is_late_uses_promise_precedence_and_central_today(client: TestClient, db_session: Session):
+    """Lateness = coalesce(must_ship_by, due_date) < Central today; the per-job
+    flag and the late rail share the predicate so they cannot disagree."""
+    viewer = make_user(db_session)
+    part = make_part(db_session)
+    wc = make_work_center(db_session)
+    central_today = datetime.now(CENTRAL_TIME_ZONE).date()
+
+    # Past due_date but a future must_ship_by: the promise is NOT late.
+    saved = make_wo(
+        db_session,
+        part,
+        status_=WorkOrderStatus.IN_PROGRESS,
+        due_date=central_today - timedelta(days=4),
+        must_ship_by=central_today + timedelta(days=1),
+    )
+    saved_op = make_op(db_session, saved, wc, status_=OperationStatus.IN_PROGRESS)
+
+    # must_ship_by in the past trumps a comfortable due_date: LATE.
+    late = make_wo(
+        db_session,
+        part,
+        status_=WorkOrderStatus.IN_PROGRESS,
+        due_date=central_today + timedelta(days=7),
+        must_ship_by=central_today - timedelta(days=2),
+    )
+    late_op = make_op(db_session, late, wc, sequence=20, status_=OperationStatus.IN_PROGRESS)
+
+    operator = make_user(db_session, role=UserRole.OPERATOR, first_name="Olga", last_name="Ops")
+    make_entry(db_session, operator, saved, saved_op, wc, open_entry=True)
+    make_entry(db_session, operator, late, late_op, wc, open_entry=True)
+
+    payload = _payload(client, headers_for(viewer))
+    card = next(w for w in payload["work_centers"] if w["id"] == wc.id)
+    late_by_wo = {job["wo_number"]: job["is_late"] for job in card["active_jobs"]}
+    assert late_by_wo[saved.work_order_number] is False
+    assert late_by_wo[late.work_order_number] is True
+
+    late_numbers = {row["wo_number"] for row in payload["late_wos"]}
+    assert late.work_order_number in late_numbers
+    assert saved.work_order_number not in late_numbers
+    late_row = next(row for row in payload["late_wos"] if row["wo_number"] == late.work_order_number)
+    assert late_row["days_late"] == 2
+    assert late_row["due_date"] == (central_today - timedelta(days=2)).isoformat()  # the PROMISE date
+    assert payload["late_total"] == 1
+
+
+def test_dept_scoping_of_rails_and_totals(client: TestClient, db_session: Session):
+    """?dept= scopes the late/blocked rails AND the late/blocked/down totals:
+    a WO spanning two depts appears on both; a late WO with no open routed
+    ops appears only on the unfiltered board; blockers attribute via their
+    operation's work center; down via the work center itself."""
+    viewer = make_user(db_session)
+    part = make_part(db_session)
+    mill = make_work_center(db_session)  # machining
+    weld = make_work_center(db_session, work_center_type="welding")
+    central_today = datetime.now(CENTRAL_TIME_ZONE).date()
+
+    # Late WO with open ops in BOTH depts -> on both dept boards.
+    spanning = make_wo(
+        db_session, part, status_=WorkOrderStatus.IN_PROGRESS, due_date=central_today - timedelta(days=1)
+    )
+    span_mill_op = make_op(db_session, spanning, mill, status_=OperationStatus.READY)
+    make_op(db_session, spanning, weld, sequence=20, status_=OperationStatus.IN_PROGRESS)
+
+    # Late WO whose only op is COMPLETE: no open routing -> unfiltered board only.
+    unrouted = make_wo(
+        db_session, part, status_=WorkOrderStatus.IN_PROGRESS, due_date=central_today - timedelta(days=5)
+    )
+    make_op(db_session, unrouted, mill, status_=OperationStatus.COMPLETE)
+
+    db_session.add(
+        WorkOrderBlocker(
+            work_order_id=spanning.id,
+            operation_id=span_mill_op.id,  # blocker lives at the MACHINING op
+            category=WorkOrderBlockerCategory.TOOLING_MISSING.value,
+            status=WorkOrderBlockerStatus.OPEN.value,
+            title="No fixture",
+            reported_at=datetime.utcnow() - timedelta(hours=1),
+            company_id=1,
+        )
+    )
+    db_session.add(
+        DowntimeEvent(
+            work_center_id=weld.id,  # open downtime on the WELDING work center
+            start_time=datetime.utcnow() - timedelta(minutes=20),
+            category=DowntimeCategory.MECHANICAL,
+            reported_by=viewer.id,
+            company_id=1,
+        )
+    )
+    db_session.commit()
+
+    unfiltered = _payload(client, headers_for(viewer))
+    assert {w["wo_number"] for w in unfiltered["late_wos"]} == {
+        spanning.work_order_number,
+        unrouted.work_order_number,
+    }
+    assert unfiltered["late_total"] == 2
+    assert unfiltered["blocked_total"] == 1
+    assert unfiltered["down_total"] == 1
+    # Worst-first ranking: 5 days late outranks 1 day late.
+    assert unfiltered["late_wos"][0]["wo_number"] == unrouted.work_order_number
+
+    machining = _payload(client, headers_for(viewer), dept="machining")
+    assert {w["wo_number"] for w in machining["late_wos"]} == {spanning.work_order_number}
+    assert machining["late_total"] == 1
+    assert {b["wo_number"] for b in machining["blocked_wos"]} == {spanning.work_order_number}
+    assert machining["blocked_total"] == 1
+    assert machining["down_total"] == 0
+
+    welding = _payload(client, headers_for(viewer), dept="Welding")  # case-insensitive
+    assert {w["wo_number"] for w in welding["late_wos"]} == {spanning.work_order_number}
+    assert welding["late_total"] == 1
+    assert welding["blocked_wos"] == []
+    assert welding["blocked_total"] == 0
+    assert welding["down_total"] == 1
+
+
+def test_ship_block_happy_path(client: TestClient, db_session: Session):
+    """Ship panel: promise = must_ship_by || due_date, Central-day window,
+    'fully shipped' via the cumulative-crossing rule, rows ranked by
+    qty_remaining, no next_due when something IS due today."""
+    viewer = make_user(db_session)
+    part = make_part(db_session)
+    central_today = datetime.now(CENTRAL_TIME_ZONE).date()
+
+    # Promised today (must_ship_by leg), 4 of 10 shipped -> due today, 6 remaining.
+    wo_a = make_wo(db_session, part, must_ship_by=central_today, quantity_ordered=10)
+    make_shipment(db_session, wo_a, ship_date=central_today - timedelta(days=1), quantity_shipped=4)
+    # Promised today (due_date leg), nothing shipped -> due today, 5 remaining.
+    wo_b = make_wo(db_session, part, due_date=central_today, quantity_ordered=5)
+    # Promised today AND fully shipped -> in the due_today denominator, counts
+    # as shipped_today, but renders no open row.
+    wo_c = make_wo(db_session, part, due_date=central_today, quantity_ordered=3)
+    make_shipment(db_session, wo_c, ship_date=central_today, quantity_shipped=3)
+    # Promised in 3 days -> due_this_week only.
+    make_wo(db_session, part, due_date=central_today + timedelta(days=3), quantity_ordered=2)
+    # Promised beyond the 7-day window -> not on the panel at all.
+    make_wo(db_session, part, due_date=central_today + timedelta(days=10), quantity_ordered=2)
+
+    ship = _payload(client, headers_for(viewer))["ship"]
+    # One population (WOs promised today): 3 promised, 1 of them fully shipped
+    # -> the TV fraction reads "1 / 3" with "2 TO GO".
+    assert ship["due_today"] == 3
+    assert ship["shipped_today"] == 1
+    assert ship["due_this_week"] == 3
+    assert [(row["wo_number"], row["qty_remaining"]) for row in ship["due_today_rows"]] == [
+        (wo_a.work_order_number, 6.0),  # largest remaining first
+        (wo_b.work_order_number, 5.0),
+    ]
+    assert ship["due_today_rows"][0]["promise_date"] == central_today.isoformat()
+    assert ship["next_due_date"] is None
+    assert ship["next_due_count"] == 0
+
+
+def test_ship_block_next_due_when_nothing_due_today(client: TestClient, db_session: Session):
+    viewer = make_user(db_session)
+    part = make_part(db_session)
+    central_today = datetime.now(CENTRAL_TIME_ZONE).date()
+
+    make_wo(db_session, part, must_ship_by=central_today + timedelta(days=2), quantity_ordered=4)
+    make_wo(db_session, part, due_date=central_today + timedelta(days=2), quantity_ordered=1)
+    make_wo(db_session, part, due_date=central_today + timedelta(days=5), quantity_ordered=6)
+    # Fully shipped WO promised sooner must NOT be the "next due".
+    done = make_wo(db_session, part, due_date=central_today + timedelta(days=1), quantity_ordered=2)
+    make_shipment(db_session, done, ship_date=central_today, quantity_shipped=2)
+
+    ship = _payload(client, headers_for(viewer))["ship"]
+    assert ship["due_today"] == 0
+    assert ship["due_today_rows"] == []
+    assert ship["next_due_date"] == (central_today + timedelta(days=2)).isoformat()
+    assert ship["next_due_count"] == 2
+    assert ship["due_this_week"] == 3
+
+
+def test_today_block_counts_central_day_activity(client: TestClient, db_session: Session):
+    viewer = make_user(db_session)
+    part = make_part(db_session)
+    wc = make_work_center(db_session)
+    day_start_utc, now_utc = central_day_window_utc()
+    # Clock-ins guaranteed inside the live Central day even right after midnight.
+    recent = now_utc - min(timedelta(minutes=30), (now_utc - day_start_utc) / 2)
+
+    wo = make_wo(db_session, part, status_=WorkOrderStatus.IN_PROGRESS, quantity_ordered=50)
+    make_op(db_session, wo, wc, status_=OperationStatus.COMPLETE, actual_end=now_utc)  # ops_completed
+
+    runner = make_user(db_session, role=UserRole.OPERATOR, first_name="Runa", last_name="Runner")
+    idler = make_user(db_session, role=UserRole.OPERATOR, first_name="Ida", last_name="Idle")
+
+    # Closed RUN entry: 7 pieces, 1.5 h.
+    make_entry(db_session, runner, wo, None, wc, clock_in=recent, duration_hours=1.5, quantity_produced=7)
+    # Backfill/import provenance: excluded from pieces, scrap AND hours.
+    make_entry(
+        db_session,
+        runner,
+        wo,
+        None,
+        wc,
+        clock_in=recent,
+        duration_hours=1.0,
+        quantity_produced=100,
+        quantity_scrapped=5,
+        source="import",
+    )
+    # Live scrap event (closed).
+    make_entry(db_session, runner, wo, None, wc, clock_in=recent, duration_hours=0.5, quantity_scrapped=2)
+    # Open entry -> operators_on_clock + open elapsed hours.
+    make_entry(db_session, idler, wo, None, wc, open_entry=True, clock_in=recent)
+
+    # A WO completed today.
+    make_wo(db_session, part, status_=WorkOrderStatus.COMPLETE, actual_end=now_utc)
+
+    # One PO receipt received today.
+    vendor = Vendor(code="V-TODAY", name="Today Vendor", company_id=1)
+    db_session.add(vendor)
+    db_session.flush()
+    po = PurchaseOrder(po_number="PO-TODAY", vendor_id=vendor.id, company_id=1)
+    db_session.add(po)
+    db_session.flush()
+    line = PurchaseOrderLine(
+        purchase_order_id=po.id, line_number=1, part_id=part.id, quantity_ordered=10, unit_price=1.0, company_id=1
+    )
+    db_session.add(line)
+    db_session.flush()
+    db_session.add(
+        POReceipt(
+            receipt_number="RCPT-TODAY",
+            po_line_id=line.id,
+            quantity_received=10,
+            lot_number="LOT-1",
+            received_by=viewer.id,
+            received_at=now_utc,
+            company_id=1,
+        )
+    )
+    db_session.commit()
+
+    today = _payload(client, headers_for(viewer))["today"]
+    assert today["ops_completed"] == 1
+    assert today["pieces_completed"] == 7  # the 100-piece import row is provenance-excluded
+    assert today["wos_completed"] == 1
+    assert today["operators_on_clock"] == 1  # only the open entry's operator
+    assert today["receipts"] == 1
+    assert today["scrap_events"] == 1  # import-sourced scrap is excluded
+    # 1.5 + 0.5 closed + the open entry's elapsed time — the 1.0h import row
+    # is provenance-excluded like pieces/scrap (backfill must not inflate the TV).
+    open_elapsed_hours = (now_utc - recent).total_seconds() / 3600.0
+    assert today["hours_logged"] == pytest.approx(2.0 + open_elapsed_hours, abs=0.2)
+
+
+def test_quality_block_counts_and_age_only(client: TestClient, db_session: Session):
+    viewer = make_user(db_session)
+    part = make_part(db_session)
+    now = datetime.utcnow()
+
+    db_session.add_all(
+        [
+            NonConformanceReport(
+                ncr_number="NCR-OLD",
+                title="TITLE-MUST-NOT-LEAK",
+                description="DESC-MUST-NOT-LEAK",
+                source=NCRSource.IN_PROCESS,
+                status=NCRStatus.OPEN,
+                company_id=1,
+                created_at=now - timedelta(days=6),
+            ),
+            NonConformanceReport(
+                ncr_number="NCR-NEW",
+                title="Newest one",
+                description="Newest desc",
+                source=NCRSource.FINAL_INSPECTION,
+                status=NCRStatus.UNDER_REVIEW,
+                company_id=1,
+                created_at=now - timedelta(days=1),
+            ),
+            NonConformanceReport(
+                ncr_number="NCR-CLOSED",
+                title="Closed one",
+                description="Closed desc",
+                source=NCRSource.IN_PROCESS,
+                status=NCRStatus.CLOSED,
+                company_id=1,
+                created_at=now - timedelta(days=3),
+            ),
+        ]
+    )
+    make_wo(db_session, part, status_=WorkOrderStatus.ON_HOLD)
+    db_session.commit()
+
+    response = client.get(WALLBOARD_URL, headers=headers_for(viewer))
+    assert response.status_code == 200, response.text
+    assert response.json()["quality"] == {"open_ncr_count": 2, "newest_ncr_age_days": 1, "wos_on_hold": 1}
+    # Counts and ages ONLY: NCR narrative never reaches the public screen.
+    assert "MUST-NOT-LEAK" not in response.text
+
+
+def test_new_blocks_zero_state_on_empty_db(client: TestClient, db_session: Session):
+    """Empty shop: real zeros (not nulls) for counts, null only where 'no data'
+    genuinely differs from zero (next_due_date, newest_ncr_age_days)."""
+    viewer = make_user(db_session)
+    payload = _payload(client, headers_for(viewer))
+    assert payload["late_total"] == 0
+    assert payload["blocked_total"] == 0
+    assert payload["down_total"] == 0
+    assert payload["ship"] == {
+        "due_today": 0,
+        "shipped_today": 0,
+        "due_this_week": 0,
+        "due_today_rows": [],
+        "next_due_date": None,
+        "next_due_count": 0,
+    }
+    assert payload["today"] == {
+        "ops_completed": 0,
+        "pieces_completed": 0,
+        "wos_completed": 0,
+        "operators_on_clock": 0,
+        "hours_logged": 0.0,
+        "receipts": 0,
+        "scrap_events": 0,
+    }
+    assert payload["quality"] == {"open_ncr_count": 0, "newest_ncr_age_days": None, "wos_on_hold": 0}
+
+
+def test_block_failure_nulls_that_block_only(client: TestClient, db_session: Session, monkeypatch):
+    """The get_kpi_strip best-effort pattern: one panel's compute blowing up
+    nulls THAT panel, never the payload."""
+    import app.services.wallboard_service as wallboard_service
+
+    def _boom(db, company_id, central_today):
+        raise RuntimeError("ship panel exploded")
+
+    monkeypatch.setattr(wallboard_service, "_compute_ship", _boom)
+
+    viewer = make_user(db_session)
+    response = client.get(WALLBOARD_URL, headers=headers_for(viewer))
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["ship"] is None
+    assert payload["today"] is not None
+    assert payload["quality"] is not None
+    assert payload["late_total"] == 0
+    assert "work_centers" in payload
+
+
+def test_wallboard_build_is_zero_write(db_session: Session):
+    """The builder must stay ZERO-WRITE: no new/dirty/deleted ORM state and no
+    audit rows after building a fully-populated payload."""
+    from app.services.wallboard_service import build_wallboard_payload
+
+    viewer = make_user(db_session)
+    part = make_part(db_session)
+    wc = make_work_center(db_session)
+    central_today = datetime.now(CENTRAL_TIME_ZONE).date()
+    wo = make_wo(db_session, part, status_=WorkOrderStatus.IN_PROGRESS, due_date=central_today - timedelta(days=1))
+    op = make_op(db_session, wo, wc, status_=OperationStatus.IN_PROGRESS)
+    operator = make_user(db_session, role=UserRole.OPERATOR)
+    make_entry(db_session, operator, wo, op, wc, open_entry=True)
+    assert viewer.company_id == 1
+
+    audit_before = db_session.query(AuditLog).count()
+
+    payload = build_wallboard_payload(db_session, 1)
+    assert payload.late_total == 1  # the build really ran against the seeded data
+
+    assert not db_session.new
+    assert not db_session.dirty
+    assert not db_session.deleted
+    assert db_session.query(AuditLog).count() == audit_before
+
+
+def test_payload_privacy_no_identities_costs_or_customers(client: TestClient, db_session: Session):
+    """Serialize a fully-populated payload and prove the public-TV contract:
+    no customer identity, no ship-to, no dollars, no NCR narrative, no full
+    last names — every rendered name is 'First L.'-shaped."""
+    viewer = make_user(db_session)
+    part = make_part(db_session)
+    wc = make_work_center(db_session)
+    central_today = datetime.now(CENTRAL_TIME_ZONE).date()
+
+    wo = make_wo(
+        db_session,
+        part,
+        status_=WorkOrderStatus.IN_PROGRESS,
+        customer_name="Sensitive Customer Co",
+        must_ship_by=central_today,
+        due_date=central_today - timedelta(days=2),
+        quantity_ordered=10,
+    )
+    wo.estimated_cost = 1234.56
+    wo.actual_cost = 789.01
+    op = make_op(db_session, wo, wc, status_=OperationStatus.IN_PROGRESS)
+    operator = make_user(db_session, role=UserRole.OPERATOR, first_name="Priya", last_name="Rockefeller")
+    make_entry(db_session, operator, wo, op, wc, open_entry=True)
+    db_session.add(
+        NonConformanceReport(
+            ncr_number="NCR-PRIV",
+            title="Priv title SECRET",
+            description="Priv desc SECRET",
+            source=NCRSource.IN_PROCESS,
+            status=NCRStatus.OPEN,
+            company_id=1,
+        )
+    )
+    make_shipment(db_session, wo, ship_date=central_today, quantity_shipped=4)
+    db_session.commit()
+
+    response = client.get(WALLBOARD_URL, headers=headers_for(viewer))
+    assert response.status_code == 200, response.text
+    raw = response.text
+    for forbidden in (
+        "Sensitive Customer",  # customer identity is OMITTED (product ruling)
+        "customer_name",
+        "ship_to",
+        "estimated_cost",
+        "actual_cost",
+        "hourly_rate",
+        "employee_id",
+        "Rockefeller",  # full last names never leave the server
+        "SECRET",  # NCR narrative
+    ):
+        assert forbidden not in raw, f"public wallboard payload leaked {forbidden!r}"
+
+    payload = response.json()
+    name_shape = re.compile(r"^\S+ [A-Z]\.$")
+    names = []
+    for card in payload["work_centers"]:
+        for job in card["active_jobs"]:
+            if job["operator_name"]:
+                names.append(job["operator_name"])
+            names.extend(job["crew"])
+    assert names, "expected at least one crew name on the seeded board"
+    for name in names:
+        assert name_shape.match(name), f"operator name {name!r} is not 'First L.'-shaped"
+
+
+# ---------------------------------------------------------------------------
+# One-time TV setup codes (pair by typing 8 chars, not a 355-char #token= URL)
+# ---------------------------------------------------------------------------
+
+CLAIM_URL = f"{DISPLAY_TOKEN_URL}/claim"
+SETUP_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+GENERIC_CLAIM_DETAIL = "Setup code not recognized"
+
+_RATE_LIMITING_ON = getattr(app_main, "AUTH_RATE_LIMITS", None) is not None
+
+
+def _claim(client: TestClient, code: str):
+    """POST the claim with NO auth headers — the endpoint is public by design;
+    every use of this helper is also proof no credential is required."""
+    return client.post(CLAIM_URL, json={"code": code})
+
+
+def _reissue(client: TestClient, token_id: int, headers: dict):
+    return client.post(f"{DISPLAY_TOKEN_URL}/{token_id}/setup-code", headers=headers)
+
+
+def test_issue_returns_setup_code_with_15_minute_expiry(client: TestClient, admin_headers: dict):
+    data = _issue_token(client, admin_headers, label="Paired TV", dept="machining")
+
+    code = data["setup_code"]
+    assert len(code) == 8
+    assert set(code) <= set(SETUP_CODE_ALPHABET), f"code {code!r} uses ambiguous characters"
+    assert data["dept"] == "machining"
+
+    expires = datetime.fromisoformat(data["setup_code_expires_at"])
+    minutes_left = (expires - datetime.now(timezone.utc)).total_seconds() / 60
+    assert SETUP_CODE_TTL_MINUTES - 2 <= minutes_left <= SETUP_CODE_TTL_MINUTES + 1
+
+
+def test_setup_code_never_in_list_response_or_audit_trail(client: TestClient, admin_headers: dict, db_session: Session):
+    data = _issue_token(client, admin_headers, label="Secret code TV")
+    code = data["setup_code"]
+    code_hash = hashlib.sha256(code.encode("utf-8")).hexdigest()
+
+    listing = client.get(DISPLAY_TOKEN_URL, headers=admin_headers)
+    assert listing.status_code == 200
+    assert code not in listing.text
+    assert code_hash not in listing.text
+    for row in listing.json()["display_tokens"]:
+        assert "setup_code" not in row and "setup_code_hash" not in row
+
+    audit_row = (
+        db_session.query(AuditLog)
+        .filter(
+            AuditLog.resource_type == "display_token",
+            AuditLog.action == "CREATE",
+            AuditLog.resource_id == data["id"],
+        )
+        .first()
+    )
+    assert audit_row is not None
+    serialized = f"{audit_row.new_values}{audit_row.extra_data}{audit_row.description}"
+    assert code not in serialized, "plaintext setup code leaked onto the audit chain"
+    assert code_hash not in serialized, "setup code hash (the lookup credential) leaked onto the audit chain"
+    # ...but the auditable facts (dept + the code's expiry) ARE recorded.
+    assert "setup_code_expires_at" in str(audit_row.new_values)
+    assert "dept" in str(audit_row.new_values)
+
+
+@pytest.mark.parametrize(
+    "transform",
+    [
+        pytest.param(lambda c: c, id="verbatim"),
+        pytest.param(lambda c: c.lower(), id="lowercase"),
+        pytest.param(lambda c: f"{c[:4]}-{c[4:]}", id="dashed"),
+    ],
+)
+def test_claim_setup_code_happy_path(client: TestClient, admin_headers: dict, db_session: Session, transform):
+    """An unauthenticated TV types the code (any case, optional dash) and gets
+    a working display JWT + the dept preset; the code burns; the claim is
+    audited on the right company with no acting user."""
+    data = _issue_token(client, admin_headers, label="Lobby TV", dept="welding")
+
+    response = _claim(client, transform(data["setup_code"]))
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["label"] == "Lobby TV"
+    assert body["dept"] == "welding"
+    assert body["expires_at"] == data["expires_at"]  # the row's expiry, not the code's
+
+    # The minted JWT authenticates the wallboard (same row-anchored shape the
+    # fencing matrix above already proves is wallboard-only).
+    assert client.get(WALLBOARD_URL, headers=_display_headers(body["token"])).status_code == 200
+
+    # The code is burned on the row...
+    db_session.expire_all()
+    record = db_session.query(DisplayToken).filter(DisplayToken.id == data["id"]).first()
+    assert record.setup_code_used_at is not None
+
+    # ...and the pairing is audited: right company, user_id None (a TV, not a person).
+    audit_row = (
+        db_session.query(AuditLog)
+        .filter(
+            AuditLog.resource_type == "display_token",
+            AuditLog.action == "CLAIM",
+            AuditLog.resource_id == data["id"],
+        )
+        .first()
+    )
+    assert audit_row is not None
+    assert audit_row.user_id is None
+    assert audit_row.company_id == 1
+    assert audit_row.success == "true"
+
+
+def test_setup_code_is_single_use(client: TestClient, admin_headers: dict):
+    data = _issue_token(client, admin_headers, label="One-shot TV")
+    assert _claim(client, data["setup_code"]).status_code == 200
+
+    second = _claim(client, data["setup_code"])
+    assert second.status_code == 404
+    assert second.json()["detail"] == GENERIC_CLAIM_DETAIL
+
+
+def test_expired_setup_code_rejected(client: TestClient, admin_headers: dict, db_session: Session):
+    data = _issue_token(client, admin_headers, label="Slow TV")
+    record = db_session.query(DisplayToken).filter(DisplayToken.id == data["id"]).first()
+    record.setup_code_expires_at = datetime.utcnow() - timedelta(minutes=1)
+    db_session.commit()
+
+    response = _claim(client, data["setup_code"])
+    assert response.status_code == 404
+    assert response.json()["detail"] == GENERIC_CLAIM_DETAIL
+
+
+def test_revoked_display_setup_code_rejected(client: TestClient, admin_headers: dict):
+    data = _issue_token(client, admin_headers, label="Dead TV")
+    assert client.delete(f"{DISPLAY_TOKEN_URL}/{data['id']}", headers=admin_headers).status_code == 200
+
+    response = _claim(client, data["setup_code"])
+    assert response.status_code == 404
+    assert response.json()["detail"] == GENERIC_CLAIM_DETAIL
+
+
+def test_expired_display_setup_code_rejected(client: TestClient, admin_headers: dict, db_session: Session):
+    """A fresh (unexpired, unused) CODE on an EXPIRED display still 404s — the
+    claim can never mint a JWT the wallboard dependency would reject."""
+    data = _issue_token(client, admin_headers, label="Expired TV")
+    record = db_session.query(DisplayToken).filter(DisplayToken.id == data["id"]).first()
+    record.expires_at = datetime.utcnow() - timedelta(minutes=1)
+    db_session.commit()
+
+    response = _claim(client, data["setup_code"])
+    assert response.status_code == 404
+    assert response.json()["detail"] == GENERIC_CLAIM_DETAIL
+
+
+def test_unknown_setup_code_rejected_with_same_generic_detail(client: TestClient, db_session: Session):
+    """Unknown / used / expired / revoked all read identically to a caller —
+    the pairs above each assert the SAME string this one does."""
+    response = _claim(client, "ZZZZ9999")
+    assert response.status_code == 404
+    assert response.json()["detail"] == GENERIC_CLAIM_DETAIL
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param({}, id="missing-code"),
+        pytest.param({"code": ""}, id="empty-code"),
+        pytest.param({"code": None}, id="null-code"),
+        pytest.param({"code": "A" * 21}, id="over-max-length"),
+    ],
+)
+def test_claim_malformed_body_is_422_not_500(client: TestClient, body: dict):
+    """The PUBLIC claim endpoint must shrug off garbage input with Pydantic
+    422s — an unauthenticated 500 here would be both an outage lever and an
+    oracle that something differs server-side."""
+    response = client.post(CLAIM_URL, json=body)
+    assert response.status_code == 422, response.text
+
+
+def test_reissue_rotates_code_and_resets_single_use(client: TestClient, admin_headers: dict, db_session: Session):
+    data = _issue_token(client, admin_headers, label="Rotating TV", dept="machining")
+    old_code = data["setup_code"]
+    # Burn the original code so the reset of setup_code_used_at is observable.
+    assert _claim(client, old_code).status_code == 200
+
+    response = _reissue(client, data["id"], admin_headers)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["id"] == data["id"]
+    assert body["label"] == "Rotating TV"
+    assert body["dept"] == "machining"
+    new_code = body["setup_code"]
+    assert len(new_code) == 8 and set(new_code) <= set(SETUP_CODE_ALPHABET)
+    assert new_code != old_code
+    expires = datetime.fromisoformat(body["setup_code_expires_at"])
+    minutes_left = (expires - datetime.now(timezone.utc)).total_seconds() / 60
+    assert SETUP_CODE_TTL_MINUTES - 2 <= minutes_left <= SETUP_CODE_TTL_MINUTES + 1
+
+    # used_at reset -> the NEW code is claimable exactly once...
+    db_session.expire_all()
+    record = db_session.query(DisplayToken).filter(DisplayToken.id == data["id"]).first()
+    assert record.setup_code_used_at is None
+
+    # ...the OLD code is dead, the new one works.
+    old = _claim(client, old_code)
+    assert old.status_code == 404
+    assert old.json()["detail"] == GENERIC_CLAIM_DETAIL
+    assert _claim(client, new_code).status_code == 200
+
+    # The rotation landed on the audit chain — without either code value.
+    audit_row = (
+        db_session.query(AuditLog)
+        .filter(
+            AuditLog.resource_type == "display_token",
+            AuditLog.action == "UPDATE",
+            AuditLog.resource_id == data["id"],
+        )
+        .order_by(AuditLog.id.desc())
+        .first()
+    )
+    assert audit_row is not None
+    serialized = f"{audit_row.old_values}{audit_row.new_values}{audit_row.extra_data}{audit_row.description}"
+    assert old_code not in serialized and new_code not in serialized
+
+
+def test_reissue_after_code_expiry_succeeds(client: TestClient, admin_headers: dict, db_session: Session):
+    """The everyday recovery path: the 15-minute CODE lapsed before anyone
+    walked to the TV, but the display token itself is alive — reissue must
+    mint a fresh claimable code (no need to revoke and recreate the display)."""
+    data = _issue_token(client, admin_headers, label="Slow walker TV")
+    record = db_session.query(DisplayToken).filter(DisplayToken.id == data["id"]).first()
+    record.setup_code_expires_at = datetime.utcnow() - timedelta(minutes=1)
+    db_session.commit()
+
+    # The lapsed code is dead...
+    assert _claim(client, data["setup_code"]).status_code == 404
+
+    # ...but reissue on the LIVE display succeeds and the new code claims.
+    response = _reissue(client, data["id"], admin_headers)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    expires = datetime.fromisoformat(body["setup_code_expires_at"])
+    assert (expires - datetime.now(timezone.utc)).total_seconds() > 0  # fresh 15-min window
+    assert _claim(client, body["setup_code"]).status_code == 200
+
+
+def test_reissue_expired_token_400(client: TestClient, admin_headers: dict, db_session: Session):
+    """Reissue refuses an EXPIRED display outright (400, like revoked): a code
+    for a dead display could only mint a JWT the wallboard would reject."""
+    data = _issue_token(client, admin_headers, label="Expired display TV")
+    record = db_session.query(DisplayToken).filter(DisplayToken.id == data["id"]).first()
+    record.expires_at = datetime.utcnow() - timedelta(minutes=1)
+    db_session.commit()
+
+    response = _reissue(client, data["id"], admin_headers)
+    assert response.status_code == 400
+
+
+def test_reissue_is_tenant_scoped(client: TestClient, admin_headers: dict, db_session: Session):
+    company_b, admin_b = _make_company_b(db_session)
+    _company_b_display_token(client, db_session, admin_b)
+    record_b = db_session.query(DisplayToken).filter(DisplayToken.company_id == company_b.id).first()
+
+    # Company-A admin cannot mint a pairing code for company B's display.
+    response = _reissue(client, record_b.id, admin_headers)
+    assert response.status_code == 404
+
+
+def test_reissue_revoked_token_400(client: TestClient, admin_headers: dict):
+    data = _issue_token(client, admin_headers, label="Revoked TV")
+    assert client.delete(f"{DISPLAY_TOKEN_URL}/{data['id']}", headers=admin_headers).status_code == 200
+
+    response = _reissue(client, data["id"], admin_headers)
+    assert response.status_code == 400
+
+
+def test_operator_cannot_reissue_setup_code(client: TestClient, admin_headers: dict, operator_headers: dict):
+    data = _issue_token(client, admin_headers, label="RBAC TV")
+    response = _reissue(client, data["id"], operator_headers)
+    assert response.status_code == 403
+
+
+@pytest.mark.skipif(not _RATE_LIMITING_ON, reason="Rate limiting disabled in this environment")
+def test_claim_endpoint_registered_in_auth_rate_limits():
+    """The public claim path carries a strict per-path limit, registered the
+    same way station-login's is (main.py AUTH_RATE_LIMITS)."""
+    assert app_main.AUTH_RATE_LIMITS.get(CLAIM_URL) == "10/minute"
+
+
+def test_claimed_jwt_is_revocable(client: TestClient, admin_headers: dict):
+    """The re-minted JWT stays anchored to the SAME display_tokens row:
+    revoking the display kills the claimed token on the TV's next poll."""
+    data = _issue_token(client, admin_headers, label="Revocable claimed TV")
+    claimed = _claim(client, data["setup_code"])
+    assert claimed.status_code == 200
+    headers = _display_headers(claimed.json()["token"])
+    assert client.get(WALLBOARD_URL, headers=headers).status_code == 200
+
+    assert client.delete(f"{DISPLAY_TOKEN_URL}/{data['id']}", headers=admin_headers).status_code == 200
+    assert client.get(WALLBOARD_URL, headers=headers).status_code == 401

@@ -46,20 +46,36 @@ long-lived JWT with `type="display"` that authenticates **only** `GET /shop-floo
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| POST | `/auth/display-token` | Issue a display token. Body: `{"label", "expires_days"}` (label 1–100 chars; lifetime default **90** days, capped at **365**) | Admin / Manager |
-| GET | `/auth/display-token` | List this company's display tokens (metadata only — the JWTs are never returned) | Admin / Manager |
+| POST | `/auth/display-token` | Issue a display token. Body: `{"label", "expires_days", "dept"?}` (label 1–100 chars; lifetime default **90** days, capped at **365**; optional `dept` ≤ 50 chars — the work-center-type preset the TV opens with). Response carries the one-time `token` **plus** the one-time `setup_code` + `setup_code_expires_at` (15-min TTL — see callouts) | Admin / Manager |
+| GET | `/auth/display-token` | List this company's display tokens (metadata only, incl. `dept` — the JWTs and setup codes are never returned) | Admin / Manager |
+| POST | `/auth/display-token/{id}/setup-code` | Reissue the one-time TV setup code for an existing display → `{"id", "label", "dept", "setup_code", "setup_code_expires_at"}`. The previous code — used or not — is invalidated immediately; the new code is shown once and expires in **15 minutes**. Revoked/expired token → **400**; cross-tenant id → **404** | Admin / Manager |
+| POST | `/auth/display-token/claim` | Exchange a one-time setup code for the display JWT. Body `{"code"}` (case-, space- and dash-insensitive) → `{"token", "label", "dept", "expires_at"}`. **Every** failure mode (unknown / used / expired code, revoked / expired display) → the same generic **404** | **Public** (rate-limited **10/minute** per IP) |
 | DELETE | `/auth/display-token/{id}` | Revoke a display token (status flip, idempotent; cross-tenant id → 404) | Admin / Manager |
 
-> **One-time reveal.** The raw JWT is returned exactly **once** — the `token` field on the POST
-> response. It is never stored server-side (only its `jti` lands in the `display_tokens` row) and
-> never appears in the list response, so a lost token cannot be recovered — revoke it and issue a
-> new one.
+> **One-time reveal.** The raw JWT **and the 8-char setup code** are returned exactly **once** —
+> the `token` / `setup_code` fields on the POST response. Neither is stored server-side (only the
+> JWT's `jti` and the code's **SHA-256 hash** land in the `display_tokens` row) and neither appears
+> in the list response. A lost token cannot be recovered — but a lost or expired setup code can be
+> **reissued** via `POST /auth/display-token/{id}/setup-code`.
+>
+> **Setup-code claim (TV pairing).** `POST /auth/display-token/claim` is deliberately **public** —
+> a TV pairing itself has no credential yet; the high-entropy single-use code (8 chars of CSPRNG
+> output over a 31-symbol alphabet excluding `0/O/1/I/L`, **15-minute TTL**) *is* the credential,
+> and the matched `display_tokens` row is the company-binding authority. The endpoint is
+> rate-limited (**10/minute per IP**, see Rate Limiting) and returns the **same generic 404 for
+> every failure mode**, so it cannot be used as an oracle for why a code failed. On success the
+> code is burned (single use), the pairing is audit-logged (a `CLAIM` event on the row's company —
+> no user identity; it's a TV), and the JWT is **re-minted from the row** (same `jti` / company /
+> `expires_at` as the issuance JWT), so the revocation semantics below are unchanged. See
+> [docs/WALLBOARD.md](WALLBOARD.md) → Setting up a TV.
 >
 > **Revocation is DB-authoritative.** `DELETE` flips the row's `revoked` flag (the row is kept as
-> the issuance record, not deleted). Issuance and revocation both write tamper-evident `audit_log`
-> rows. The wallboard auth dependency re-checks the `display_tokens` row (exists / not revoked /
+> the issuance record, not deleted). Issuance, revocation, setup-code reissue, and each successful
+> claim all write tamper-evident `audit_log` rows (never the code value or its hash). The
+> wallboard auth dependency re-checks the `display_tokens` row (exists / not revoked /
 > not past its DB `expires_at`) on **every** request, so a revoked or expired token stops working
-> on the TV's next poll (~30s) even though the JWT itself is still signature-valid.
+> on the TV's next poll (~30s) even though the JWT itself is still signature-valid — regardless of
+> whether the TV was paired via URL or setup code.
 
 ### Station signin tokens (visitor sign-in tablet)
 
@@ -729,7 +745,7 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 | POST | `/shop-floor/time-entries/{id}/approve` | Approve a TimeEntry (sets `approved` / `approved_by`) | Admin / Manager / Supervisor / Quality |
 | POST | `/shop-floor/time-entries/{id}/unapprove` | Clear approval on a TimeEntry | Admin / Manager / Supervisor / Quality |
 | GET | `/shop-floor/work-center-queue/{id}` | Get work center queue, each row carrying the live crew `roster` (see note below) | User **or** kiosk station token |
-| GET | `/shop-floor/wallboard` | Read-only TV wallboard snapshot (`?dept=` narrows to one work-center type, case-insensitive) | User **or** display token |
+| GET | `/shop-floor/wallboard` | Read-only TV wallboard snapshot (`?dept=` narrows to one work-center type, case-insensitive — scopes the work centers **and** the late/blocked lists + totals; ship/today/quality/kpi_strip stay plant-wide) | User **or** display token |
 | POST | `/shop-floor/kiosk-stations/station-login` | Unlock a crew tablet with the shared station PIN. Body `{"station_id", "pin"}` (PIN 4–8 digits) → `{"access_token", "token_type", "expires_in", "station": {"id", "label", "work_center_id", "work_center_code", "work_center_name"}}` (24 h scoped `type="kiosk"` JWT). Bad/revoked station or wrong PIN → **401** (indistinguishable; failed attempt audited) | **Public** (PIN-gated, 5/minute per IP) |
 | POST | `/shop-floor/kiosk-stations` | Create a PIN-protected crew-station kiosk bound to a work center. Body `{"label", "work_center_id", "pin"}` → **201** `KioskStationResponse` (PIN hashed, never echoed; a work center outside the active company → **404**) | Admin / Manager |
 | GET | `/shop-floor/kiosk-stations` | List this company's kiosk stations (no PIN/`pin_hash`) → `{"stations"}` | Admin / Manager |
@@ -745,17 +761,44 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > comes from the **DB row, never client input**, so revocation/expiry hold for already-minted JWTs
 > and a forged claim cannot widen scope. The endpoint is a **zero-write read**: deliberately no
 > reconcile-on-read, no audit rows, no events — an unattended TV polling every 30s must never
-> mutate state, and a display token has no user identity to attribute writes to. Operator names in
-> the payload are truncated to "First L." (`operator_name`) because the board renders on a public
-> screen. Signed-in users can call it too (their active company scopes the data). Payload:
-> `work_centers[]` (`{code, name, status, active_jobs[], queued_count, blocked_count, down}`, each
-> active job `{wo_number, part_number, op_name, operator_name, elapsed_minutes, qty_done,
-> qty_target}`), `late_wos[]`, `blocked_wos[]` (tickers capped at 25), an optional **`kpi_strip`**
-> block (trailing-30-day floor KPIs — `otd_ship_pct_30d`, `fpy_pct_30d`, `scrap_pct_30d`,
-> `open_wip_count`, `avg_wip_age_days`; company-wide, never narrowed by `?dept=`; values are
-> ~5-minute server-side cached and each nullable = insufficient data; the whole block is `null` only
-> when its computation failed — see [docs/WALLBOARD.md](WALLBOARD.md) → KPI strip), and
-> `generated_at`. Token issuance/revocation: see Authentication → Display tokens. Operating a TV:
+> mutate state, and a display token has no user identity to attribute writes to. The payload is
+> built for a public screen: operator identity is truncated to "First L." (`crew` / `operator_name`),
+> and the ship/today/quality blocks carry counts, ages, WO/part numbers and dates only — **no
+> customer names, no ship-to addresses, no dollar figures, no NCR titles/descriptions**. Signed-in
+> users can call it too (their active company scopes the data). Payload:
+> - `work_centers[]` (`{code, name, status, active_jobs[], queued_count, blocked_count, down}`).
+>   Each active job is **one row per operation** (crew-station grouping): `{wo_number, part_number,
+>   op_name, crew[]` (up to 3 "First L." names)`, crew_count` (true headcount)`, operator_name`
+>   (back-compat alias of `crew[0]`)`, elapsed_minutes` (earliest open clock-in)`, qty_done,
+>   qty_target, is_late}`. `is_late` is server-computed: promise (`coalesce(must_ship_by,
+>   due_date)`, the OTD precedence) before today's Central date on a live, non-terminal WO — the
+>   same predicate as `late_wos` / `late_total`.
+> - `late_wos[]` (worst-first), `blocked_wos[]` (oldest-first) — capped at **12**; `late_wos[].due_date`
+>   carries the promise date under the original field name. **Dept-scoped** when `?dept=` is passed
+>   (late via any open op routed to a dept work center; blocked via the blocker's operation's work
+>   center — a blocker with no operation appears only on the unfiltered board).
+> - `late_total` / `blocked_total` / `down_total` — true **uncapped** counts (dept-scoped with the
+>   lists); `down_total` = active work centers with an open downtime event.
+> - **`ship`** (plant-wide, Central-day window): `due_today` = all WOs promised today via
+>   `must_ship_by || due_date` (one population), `shipped_today` = of those, fully shipped (the
+>   analytics counted-shipment rules), `due_this_week` (promised today..+6, not fully shipped),
+>   `due_today_rows[]` (top 2 open by qty remaining — `{wo_number, part_number, promise_date,
+>   qty_remaining}` only), `next_due_date` / `next_due_count` when nothing is promised today.
+> - **`today`** (plant-wide, Central-midnight window): `ops_completed`, `pieces_completed`
+>   (RUN+REWORK, provenance-excluded), `wos_completed`, `operators_on_clock` (distinct users with
+>   an open time entry, any entry type), `hours_logged`, `receipts`, `scrap_events`
+>   (provenance-excluded). Aggregates only.
+> - **`quality`** (plant-wide): `open_ncr_count`, `newest_ncr_age_days`, `wos_on_hold` — counts and
+>   ages only, never NCR text.
+> - **`kpi_strip`** (trailing-30-day floor KPIs — `otd_ship_pct_30d`, `fpy_pct_30d`,
+>   `scrap_pct_30d`, `open_wip_count`, `avg_wip_age_days`; company-wide, never narrowed by
+>   `?dept=`; values are ~5-minute server-side cached and each nullable = insufficient data — see
+>   [docs/WALLBOARD.md](WALLBOARD.md) → KPI strip), and `generated_at`.
+>
+> Every block/field added after A0.5 v1 is **optional** (old TVs ignore them; a new TV against an
+> old backend renders em-dashes), and `ship` / `today` / `quality` / `kpi_strip` are each
+> independently best-effort — a failed block is `null` on that poll, never a failed payload.
+> Token issuance/revocation: see Authentication → Display tokens. Operating a TV:
 > see [docs/WALLBOARD.md](WALLBOARD.md).
 
 > **Crew roster on `GET /shop-floor/work-center-queue/{id}` (crew-station kiosk).** The queue read
@@ -2498,6 +2541,7 @@ the global default applied):
 | `POST /auth/refresh` | 30/minute |
 | `POST /auth/employee-login` | 3/minute |
 | `POST /auth/kiosk-badge-token` | 30/minute |
+| `POST /auth/display-token/claim` | 10/minute |
 | `POST /visitor-logs/station-login` | 5/minute |
 | `POST /shop-floor/kiosk-stations/station-login` | 5/minute |
 | `POST /scanner/resolve-action` | 60/minute |

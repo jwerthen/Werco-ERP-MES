@@ -1,8 +1,15 @@
 """Pydantic contracts for the shop-floor TV wallboard payload (A0.5).
 
 PRIVACY: this payload renders on a public screen. Operator identity is
-truncated to first name + last initial (``operator_name``) by the service —
-never widen it to full names / employee ids without a privacy review.
+truncated to first name + last initial (``operator_name`` / ``crew``) by the
+service — never widen it to full names / employee ids without a privacy
+review. The same discipline applies to the ship / today / quality blocks:
+counts, ages, WO/part numbers and dates ONLY — no customer names, no ship-to
+addresses, no dollar figures, no NCR titles/descriptions.
+
+Back-compat: every field added after A0.5 v1 is optional/defaulted (the
+``kpi_strip`` precedent) — an old backend → new TV renders ``—`` panels; a
+new backend → old TV ignores unknown fields.
 """
 
 from datetime import date, datetime
@@ -17,10 +24,20 @@ class WallboardActiveJob(BaseModel):
     wo_number: Optional[str] = None
     part_number: Optional[str] = None
     op_name: Optional[str] = None
-    operator_name: Optional[str] = None  # "First L." — public-screen safe
-    elapsed_minutes: int = 0
+    # BACK-COMPAT: kept, always = crew[0] (or None). "First L." only.
+    operator_name: Optional[str] = None
+    # Crew-station grouping: one row per OPERATION, not per time entry.
+    # Each entry is operator_display_name() output ("First L."), max 3;
+    # crew_count carries the true headcount for the "+N" suffix.
+    crew: list[str] = []
+    crew_count: int = 0
+    elapsed_minutes: int = 0  # from the EARLIEST open clock_in of the crew
     qty_done: float = 0
     qty_target: float = 0
+    # Server-computed lateness (kills the capped client-side derivation):
+    # True when the parent WO's promise (coalesce(must_ship_by, due_date)) is
+    # before today's Central date and the WO is not complete/closed/cancelled.
+    is_late: bool = False
 
 
 class WallboardDowntime(UTCModel):
@@ -43,6 +60,8 @@ class WallboardWorkCenter(BaseModel):
 class WallboardLateWorkOrder(UTCModel):
     wo_number: str
     part_number: Optional[str] = None
+    # The WO's PROMISE date (coalesce(must_ship_by, due_date) — OTD precedence),
+    # kept under the original field name for wire back-compat.
     due_date: Optional[date] = None
     days_late: int = 0
     status: Optional[str] = None
@@ -52,6 +71,54 @@ class WallboardBlockedWorkOrder(BaseModel):
     wo_number: str
     category: str
     age_hours: float = 0
+
+
+class WallboardShipRow(BaseModel):
+    """One WO due to ship. NO customer_name, NO ship_to_*, NO cost columns —
+    the display token may drive a public shop-floor TV."""
+
+    wo_number: str
+    part_number: Optional[str] = None
+    promise_date: Optional[date] = None  # coalesce(must_ship_by, due_date) — OTD precedence
+    qty_remaining: float = 0
+
+
+class WallboardShip(BaseModel):
+    """Plant-wide ship status (Central-day window). Promise = must_ship_by || due_date,
+    identical to AnalyticsService OTD semantics so this panel and the OTD KPI agree."""
+
+    # ONE population — WOs promised (must_ship_by || due_date) today — so the
+    # TV fraction "shipped_today / due_today" is coherent: the denominator is
+    # every promise dated today, the numerator those already fully shipped.
+    due_today: int = 0  # ALL WOs promised today (shipped or not)
+    shipped_today: int = 0  # of those, fully shipped (cumulative-crossing rule)
+    due_this_week: int = 0  # promised today..today+6, not fully shipped
+    due_today_rows: list[WallboardShipRow] = []  # top 2 worst (largest qty_remaining)
+    next_due_date: Optional[date] = None  # populated when due_today == 0
+    next_due_count: int = 0
+
+
+class WallboardToday(BaseModel):
+    """Live today-so-far pulse. Central-midnight window (CENTRAL_TIME_ZONE day
+    start — never naive date.today()). Aggregate counts only — no names, no
+    per-person figures, no dollars."""
+
+    ops_completed: int = 0
+    pieces_completed: int = 0  # sum(TimeEntry.quantity_produced), RUN+REWORK,
+    # provenance-excluded (BASELINE_EXCLUDED_SOURCES)
+    wos_completed: int = 0
+    operators_on_clock: int = 0  # distinct user_id, clock_out IS NULL (any entry type)
+    hours_logged: Optional[float] = None  # closed durations + open elapsed; provenance-excluded
+    receipts: int = 0  # POReceipt received_at within Central day
+    scrap_events: int = 0  # TimeEntry qty_scrapped>0, provenance-excluded
+
+
+class WallboardQuality(BaseModel):
+    """Counts and ages ONLY — never NCR titles/descriptions/supplier/cost."""
+
+    open_ncr_count: int = 0  # status not in (CLOSED, VOID)
+    newest_ncr_age_days: Optional[int] = None
+    wos_on_hold: int = 0  # WorkOrderStatus.ON_HOLD, is_deleted == False
 
 
 class WallboardKPIStrip(BaseModel):
@@ -72,9 +139,21 @@ class WallboardKPIStrip(BaseModel):
 
 class WallboardResponse(UTCModel):
     work_centers: list[WallboardWorkCenter]
+    # Server-side ranked (late: worst-first; blocked: oldest-first), capped at
+    # 12, and DEPT-SCOPED when ``dept`` is passed (as are the totals below).
     late_wos: list[WallboardLateWorkOrder]
     blocked_wos: list[WallboardBlockedWorkOrder]
     # Optional so pre-existing consumers/fixtures are unaffected; the live
     # builder populates it (null only if the KPI computation itself failed).
     kpi_strip: Optional[WallboardKPIStrip] = None
+    # True uncapped totals for the rail headlines / hero sentence.
+    # Dept-scoped when ?dept= is set; None (not 0) when omitted by an old backend.
+    late_total: Optional[int] = None
+    blocked_total: Optional[int] = None
+    down_total: Optional[int] = None
+    # Plant-wide blocks, each independently best-effort (try/except like
+    # kpi_strip: a failed block is None, never a failed payload).
+    ship: Optional[WallboardShip] = None
+    today: Optional[WallboardToday] = None
+    quality: Optional[WallboardQuality] = None
     generated_at: datetime

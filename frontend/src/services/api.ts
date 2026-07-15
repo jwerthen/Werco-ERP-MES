@@ -41,7 +41,7 @@ import {
   WorkOrderBlockerStatus,
 } from '../types/aiForward';
 import { AIUsageSummaryResponse } from '../types/aiUsage';
-import { DisplayToken, DisplayTokenCreateInput, DisplayTokenIssued } from '../types/wallboard';
+import { DisplayToken, DisplayTokenCreateInput, DisplayTokenIssued, SetupCodeResponse } from '../types/wallboard';
 import { ScrapReasonCode } from '../types/scrapReason';
 import {
   AdoptionMetricsResponse,
@@ -2114,6 +2114,16 @@ class ApiService {
 
   async revokeDisplayToken(id: number): Promise<DisplayToken> {
     const response = await this.api.delete(`/auth/display-token/${id}`);
+    return response.data;
+  }
+
+  // Re-issue a fresh one-time TV pairing code for an existing display
+  // (ADMIN + MANAGER, audited server-side). The code is 15-minute /
+  // single-use and shown exactly once — like the JWT on create. The TV-side
+  // claim of the code is PUBLIC and goes through services/wallboardClient,
+  // never this client.
+  async issueDisplaySetupCode(id: number): Promise<SetupCodeResponse> {
+    const response = await this.api.post(`/auth/display-token/${id}/setup-code`);
     return response.data;
   }
 

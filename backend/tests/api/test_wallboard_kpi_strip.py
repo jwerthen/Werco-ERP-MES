@@ -23,6 +23,7 @@ from app.models.user import UserRole
 from app.models.work_order import OperationStatus, WorkOrderStatus
 from app.services.wallboard_service import reset_kpi_strip_cache
 from tests.lean_phase1_helpers import (
+    COMPANY_B,
     headers_for,
     make_op,
     make_part,
@@ -119,6 +120,31 @@ def test_kpi_strip_is_ttl_cached_until_reset(client: TestClient, db_session: Ses
     reset_kpi_strip_cache()
     refreshed = client.get(WALLBOARD_URL, headers=headers_for(user)).json()["kpi_strip"]
     assert refreshed["open_wip_count"] == 2
+
+
+def test_kpi_strip_cache_is_isolated_per_company(client: TestClient, db_session: Session):
+    """The module TTL cache is keyed by company_id: within one TTL window,
+    company B must get ITS OWN strip (not company A's cached one), and B's
+    poll must not evict or overwrite A's entry."""
+    user_a = make_user(db_session)
+    user_b = make_user(db_session, company_id=COMPANY_B)
+    part_a = make_part(db_session)
+    now = datetime.utcnow()
+    make_wo(db_session, part_a, status_=WorkOrderStatus.RELEASED, released_at=now - timedelta(days=1))
+
+    # Prime company A's cache entry: 1 open WIP.
+    strip_a = client.get(WALLBOARD_URL, headers=headers_for(user_a)).json()["kpi_strip"]
+    assert strip_a["open_wip_count"] == 1
+
+    # Company B polls inside the same TTL window: an empty shop, real 0 — never A's 1.
+    strip_b = client.get(WALLBOARD_URL, headers=headers_for(user_b)).json()["kpi_strip"]
+    assert strip_b["open_wip_count"] == 0
+
+    # A's cached entry survives B's poll untouched (still the cached 1, even
+    # though new A-side WIP has landed since the entry was cached).
+    make_wo(db_session, part_a, status_=WorkOrderStatus.RELEASED, released_at=now - timedelta(days=1))
+    strip_a_again = client.get(WALLBOARD_URL, headers=headers_for(user_a)).json()["kpi_strip"]
+    assert strip_a_again["open_wip_count"] == 1
 
 
 def test_kpi_strip_compute_failure_omits_strip_not_the_board(client: TestClient, db_session: Session, monkeypatch):

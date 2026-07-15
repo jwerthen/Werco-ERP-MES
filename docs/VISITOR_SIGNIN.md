@@ -23,14 +23,15 @@ Backend: `backend/app/api/endpoints/visitor_logs.py`, `backend/app/services/visi
 The tablet is unlocked once with a **per-company shared PIN** (not tied to a person). This is a
 structural twin of the wallboard display-token mechanism, with two deliberate differences:
 
-- The unlock is a **PIN** the tablet exchanges for a token, not a one-time URL link.
+- The unlock is a reusable shared **PIN** the tablet exchanges for a token, not the wallboard's
+  one-time hand-off (a single-use `/tv` setup code, or the fallback one-time `#token=` URL).
 - The minted token authorizes exactly **two scoped writes** — visitor sign-in and sign-out — and
   nothing else.
 
 | | Wallboard display token | Visitor sign-in station token |
 | --- | --- | --- |
 | JWT `type` claim | `"display"` | `"signin"` |
-| How it's obtained | one-time `?token=<jwt>` URL, captured from the URL into `sessionStorage` | minted by **PIN**: `POST /visitor-logs/station-login {station_id, pin}` |
+| How it's obtained | single-use 15-min setup code typed at `/tv` (`POST /auth/display-token/claim`, persisted to `localStorage`) — or the fallback one-time `#token=` URL, captured into `sessionStorage` | minted by **PIN**: `POST /visitor-logs/station-login {station_id, pin}` |
 | Lifetime | ≤ 365 days (default 90) | **24 h** |
 | Authorizes | the read-only `GET /shop-floor/wallboard` | the two writes `POST /visitor-logs/sign-in` and `/sign-out` |
 | Auth dependency | `get_display_or_user` | `get_signin_principal` |

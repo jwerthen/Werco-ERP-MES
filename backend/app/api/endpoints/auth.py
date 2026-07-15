@@ -29,10 +29,13 @@ from app.models.company import Company
 from app.models.kiosk_station import KioskStation
 from app.models.user import User, UserRole
 from app.schemas.display_token import (
+    DisplayTokenClaimRequest,
+    DisplayTokenClaimResponse,
     DisplayTokenCreate,
     DisplayTokenIssueResponse,
     DisplayTokenListResponse,
     DisplayTokenResponse,
+    SetupCodeReissueResponse,
 )
 from app.schemas.kiosk_station import (
     KioskBadgeTokenRequest,
@@ -49,7 +52,13 @@ from app.schemas.user import (
     UserResponse,
 )
 from app.services.audit_service import AuditService
-from app.services.display_token_service import issue_display_token, list_display_tokens, revoke_display_token
+from app.services.display_token_service import (
+    claim_display_token,
+    issue_display_token,
+    list_display_tokens,
+    reissue_setup_code,
+    revoke_display_token,
+)
 
 router = APIRouter()
 
@@ -806,18 +815,26 @@ def create_display_token_endpoint(
 ):
     """Mint a scoped, revocable display token for a shop TV (ADMIN/MANAGER).
 
-    The returned ``token`` is shown ONCE — it is not stored and cannot be
-    retrieved again. Default lifetime 90 days, capped at 365.
+    The returned ``token`` AND ``setup_code`` are shown ONCE — neither is
+    stored and neither can be retrieved again (the code can be *reissued*
+    via POST /display-token/{id}/setup-code). Default lifetime 90 days,
+    capped at 365; the setup code itself expires in 15 minutes.
     """
-    record, token = issue_display_token(
+    record, token, setup_code = issue_display_token(
         db,
         company_id=company_id,
         label=payload.label,
         expires_days=payload.expires_days,
         created_by=current_user.id,
         audit=audit,
+        dept=payload.dept,
     )
-    return DisplayTokenIssueResponse(**DisplayTokenResponse.model_validate(record).model_dump(), token=token)
+    return DisplayTokenIssueResponse(
+        **DisplayTokenResponse.model_validate(record).model_dump(),
+        token=token,
+        setup_code=setup_code,
+        setup_code_expires_at=record.setup_code_expires_at,
+    )
 
 
 @router.get("/display-token", response_model=DisplayTokenListResponse, summary="List wallboard display tokens")
@@ -852,6 +869,68 @@ def revoke_display_token_endpoint(
         audit=audit,
     )
     return DisplayTokenResponse.model_validate(record)
+
+
+@router.post(
+    "/display-token/{token_id}/setup-code",
+    response_model=SetupCodeReissueResponse,
+    summary="Reissue a one-time TV setup code",
+)
+def reissue_setup_code_endpoint(
+    token_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(_DISPLAY_TOKEN_MANAGER_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Rotate the pairing code for an existing display token (ADMIN/MANAGER).
+
+    The previous code — used or not — stops working immediately; the new code
+    is shown ONCE and expires in 15 minutes. 400 for revoked/expired tokens
+    (issue a fresh token instead), 404 if the token isn't this company's.
+    """
+    record, setup_code = reissue_setup_code(
+        db,
+        company_id=company_id,
+        token_id=token_id,
+        audit=audit,
+    )
+    return SetupCodeReissueResponse(
+        id=record.id,
+        label=record.label,
+        dept=record.dept,
+        setup_code=setup_code,
+        setup_code_expires_at=record.setup_code_expires_at,
+    )
+
+
+@router.post(
+    "/display-token/claim",
+    response_model=DisplayTokenClaimResponse,
+    summary="Claim a TV setup code (public)",
+)
+def claim_display_token_endpoint(
+    payload: DisplayTokenClaimRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Exchange a one-time setup code for the wallboard display JWT.
+
+    PUBLIC + rate-limited (10/minute per IP, see main.py AUTH_RATE_LIMITS) —
+    the TV has no credentials yet; the high-entropy single-use code IS the
+    credential and the matched row is the company-binding authority. Every
+    failure mode (unknown / used / expired code, revoked / expired display)
+    returns the SAME generic 404 so the endpoint can't be used as an oracle.
+    The minted JWT is re-minted from the row, so revoking the display token
+    still kills the TV on its next poll.
+    """
+    record, token = claim_display_token(db, raw_code=payload.code, request=request)
+    return DisplayTokenClaimResponse(
+        token=token,
+        label=record.label,
+        dept=record.dept,
+        expires_at=record.expires_at,
+    )
 
 
 @router.post("/reset-database")
