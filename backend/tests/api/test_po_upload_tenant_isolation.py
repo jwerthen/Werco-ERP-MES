@@ -231,10 +231,27 @@ def test_create_from_upload_foreign_vendor_id_is_400(client: TestClient, db_sess
     manager_a = make_user(db_session, role=UserRole.MANAGER, company_id=COMPANY_A)
     po_number = f"PO-XT-{_next():05d}"
 
+    # One line item so the empty-line-items early guard (400) doesn't fire before
+    # the vendor check; the vendor 400 raises before the create_parts loop runs.
+    pn = f"XTVND-{_next():05d}"
+    payload = _create_payload(
+        po_number,
+        vendor_b.id,
+        line_items=[
+            {
+                "part_id": 0,
+                "part_number": pn,
+                "description": "Foreign vendor probe",
+                "quantity_ordered": 1,
+                "unit_price": 1.0,
+            }
+        ],
+        create_parts=[{"part_number": pn, "description": "Foreign vendor probe"}],
+    )
     resp = client.post(
         "/api/v1/po-upload/create-from-upload",
         headers=headers_for(manager_a),
-        json=_create_payload(po_number, vendor_b.id),
+        json=payload,
     )
 
     assert resp.status_code == status.HTTP_400_BAD_REQUEST, resp.text
