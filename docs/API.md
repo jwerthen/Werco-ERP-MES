@@ -1448,13 +1448,29 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 | PUT | `/receiving/print-profile` | Create / update the print profile, incl. the `allow_print_egress` kill switch | Admin |
 
 > **Incoming-inspection default (`requires_inspection`).** On `POST /receiving/receive` the
-> field defaults to **`false`** when omitted: the receipt is auto-accepted (dock-to-stock,
-> stamped PASSED/VISUAL) and lands directly in inventory. Pass `true` to hold the lot in the
-> inspection queue until `POST /receiving/inspect/{receipt_id}`. The part master's
-> `Part.requires_inspection` flag is **not** applied automatically — it is exposed on the
-> `/receiving/open-pos` and `/receiving/po/{po_id}` line payloads, and the Receiving UI
-> renders it as an amber advisory hint next to its "Requires Inspection" checkbox (which
-> always starts unchecked) so the receiver can opt in deliberately.
+> field defaults to **`false`** when omitted: the receipt is auto-accepted (dock-to-stock) and
+> lands directly in inventory with **`inspection_status = not_required`**. No incoming
+> inspection is performed on this path, so `inspection_method`, `inspected_by`, and
+> `inspected_at` stay **null** — the record must not assert an inspection that never happened
+> (AS9100D records integrity); the receiver and receipt time are still captured by `received_by`
+> / `received_at`. Pass `true` to hold the lot in the inspection queue until
+> `POST /receiving/inspect/{receipt_id}`, where it resolves to `passed` / `failed` / `partial`
+> with a real inspector, method, and timestamp. The part master's `Part.requires_inspection`
+> flag is **not** applied automatically — it is exposed on the `/receiving/open-pos` and
+> `/receiving/po/{po_id}` line payloads, and the Receiving UI renders it as an amber advisory
+> hint next to its "Requires Inspection" checkbox (which always starts unchecked) so the
+> receiver can opt in deliberately.
+>
+> A receipt's **`inspection_status`** (returned by `/receiving/history` and
+> `/receiving/receipt/{receipt_id}`) is one of: **`not_required`** (dock-to-stock — accepted
+> without inspection; no inspector/method/time), `pending` (awaiting inspection in the queue),
+> `passed`, `failed`, or `partial` (recorded by `/receiving/inspect/{receipt_id}`). The History
+> view badges `not_required` as a neutral **"Not Required"**, visually distinct from a green
+> **"Passed"** (which means a real incoming inspection passed). Vendor acceptance-rate analytics
+> count `not_required` as **accepted** (dock-to-stock material enters stock without rejection),
+> so acceptance rates are unaffected. Receipts auto-accepted before this change keep their
+> prior values (they may still read `passed` / `visual`) — historical quality records are
+> corrected forward, not rewritten.
 
 > **Thermal receiving-label printing (ProxyBox / WHTP203e).** A 4×6 PDF (part / rev /
 > qty / lot / Code128, CRITICAL banner for critical parts) is rendered, stored as a

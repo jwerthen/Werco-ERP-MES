@@ -130,6 +130,10 @@ const statusVariantMap: Record<string, StatusVariant> = {
   skipped: 'slate',
   out_of_service: 'slate',
   not_assessed: 'slate',
+  // Receiving dock-to-stock: the lot was accepted into inventory without an
+  // incoming inspection because none was required. Neutral slate (NOT green
+  // `passed`) so the receiving record reads honestly — no inspection occurred.
+  not_required: 'slate',
 };
 
 /**

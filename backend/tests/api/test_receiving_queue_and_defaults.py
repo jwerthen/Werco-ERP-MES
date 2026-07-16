@@ -28,7 +28,7 @@ from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.models.inventory import InventoryItem
-from app.models.purchasing import POReceipt, ReceiptStatus
+from app.models.purchasing import InspectionStatus, POReceipt, ReceiptStatus
 from app.models.user import UserRole
 from app.schemas.purchasing import POCreate, POLineCreate, POUpdate, ReceiptCreate
 from tests.api.test_receiving_compliance import (
@@ -188,6 +188,12 @@ def test_receive_with_explicit_true_still_lands_pending_inspection(client: TestC
     body = resp.json()
     assert body["requires_inspection"] is True
     assert body["status"] == ReceiptStatus.PENDING_INSPECTION.value
+    # Opting in queues the lot for inspection: inspection_status is PENDING (not
+    # yet resolved), and no inspector/method is fabricated on receipt.
+    assert body["inspection_status"] == InspectionStatus.PENDING.value
+    assert body["inspection_method"] is None
+    assert body["inspected_by"] is None
+    assert body["inspected_at"] is None
 
     # Nothing in inventory yet — the lot is held for inspection.
     inv_item = db_session.query(InventoryItem).filter(InventoryItem.lot_number == "LOT-EXPLICIT-TRUE").first()
@@ -214,6 +220,144 @@ def test_receiving_po_payloads_expose_part_inspection_flag(client: TestClient, d
     detail_resp = client.get(f"/api/v1/receiving/po/{po_id}", headers=headers_for(admin))
     assert detail_resp.status_code == status.HTTP_200_OK, detail_resp.text
     assert detail_resp.json()["lines"][0]["requires_inspection"] is True
+
+
+# ---------------------------------------------------------------------------
+# TASK A (records integrity): dock-to-stock stamps inspection_status
+# NOT_REQUIRED and fabricates NO inspector / method / time.
+#
+# The core AS9100D records-integrity guarantee of the PR #127 follow-up: a
+# no-inspection (dock-to-stock) receipt must NOT assert a passed VISUAL
+# inspection performed by the receiver — no inspection occurred. It lands
+# inspection_status = NOT_REQUIRED (the honest state, distinct from PASSED),
+# quantity_accepted = full received qty, status = ACCEPTED, and
+# inspection_method / inspected_by / inspected_at stay NULL. Only received_by /
+# received_at (who took delivery, and when) are recorded.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "flag_payload",
+    [
+        pytest.param({}, id="omitted_flag"),
+        pytest.param({"requires_inspection": False}, id="explicit_false"),
+    ],
+)
+def test_dock_to_stock_stamps_not_required_and_fabricates_no_inspection(
+    client: TestClient, db_session: Session, flag_payload: dict
+):
+    """A no-inspection receive records NOT_REQUIRED with a NULL inspector/method/time.
+
+    Covers both the omitted flag and an explicit requires_inspection=false — the
+    records-integrity guarantee must hold identically for both.
+    """
+    admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
+    line = make_po_line(db_session, company_id=1, quantity_ordered=10)
+    lot = f"LOT-DTS-{_next():05d}"
+
+    resp = client.post(
+        "/api/v1/receiving/receive",
+        headers=headers_for(admin),
+        json={"po_line_id": line.id, "quantity_received": 7, "lot_number": lot, **flag_payload},
+    )
+
+    assert resp.status_code in (status.HTTP_200_OK, status.HTTP_201_CREATED), resp.text
+    body = resp.json()
+
+    # Wire contract (ReceiptResponse serializes enums as .value): NOT_REQUIRED, not
+    # PASSED; ACCEPTED; and NO fabricated inspection method / inspector / time.
+    assert body["inspection_status"] == InspectionStatus.NOT_REQUIRED.value == "not_required"
+    assert body["status"] == ReceiptStatus.ACCEPTED.value
+    assert body["requires_inspection"] is False
+    assert body["inspection_method"] is None
+    assert body["inspected_by"] is None
+    assert body["inspected_at"] is None
+    # Full received qty is accepted into stock (dock-to-stock).
+    assert float(body["quantity_accepted"]) == 7
+    assert float(body["quantity_received"]) == 7
+
+    # Same guarantee at rest in the DB row.
+    receipt = db_session.query(POReceipt).filter(POReceipt.id == body["id"]).one()
+    assert receipt.inspection_status == InspectionStatus.NOT_REQUIRED
+    assert receipt.inspection_method is None
+    assert receipt.inspected_by is None
+    assert receipt.inspected_at is None
+    assert receipt.status == ReceiptStatus.ACCEPTED
+    assert float(receipt.quantity_accepted) == 7
+
+    # The lot is traceable in inventory (dock-to-stock landed the material).
+    inv_item = db_session.query(InventoryItem).filter(InventoryItem.lot_number == lot).one()
+    assert inv_item.company_id == 1
+    assert float(inv_item.quantity_on_hand) == 7
+
+
+# ---------------------------------------------------------------------------
+# Inspect path regression guards (should be UNCHANGED by the NOT_REQUIRED work):
+# a completed inspection resolves to passed / failed / partial and records a
+# REAL inspection_method + inspected_by + inspected_at (the exact opposite of
+# the dock-to-stock path above, which must record none of those).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "accepted, rejected, expected_inspection, expected_status, expects_ncr, expected_inventory",
+    [
+        pytest.param(6, 0, "passed", ReceiptStatus.ACCEPTED.value, False, 6, id="all_accepted_passed"),
+        pytest.param(0, 6, "failed", ReceiptStatus.REJECTED.value, True, None, id="all_rejected_failed"),
+        pytest.param(4, 2, "partial", ReceiptStatus.ACCEPTED.value, True, 4, id="mixed_partial"),
+    ],
+)
+def test_inspect_result_status_mapping_records_real_inspection(
+    client: TestClient,
+    db_session: Session,
+    accepted: float,
+    rejected: float,
+    expected_inspection: str,
+    expected_status: str,
+    expects_ncr: bool,
+    expected_inventory,
+):
+    """/receiving/inspect maps accepted/rejected → passed/failed/partial and, unlike
+    dock-to-stock, stamps a real inspection_method / inspected_by / inspected_at."""
+    admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
+    quality = make_user(db_session, role=UserRole.QUALITY, company_id=1)
+    line = make_po_line(db_session, company_id=1, quantity_ordered=10)
+    lot = f"LOT-INSP-{_next():05d}"
+
+    recv = client.post(
+        "/api/v1/receiving/receive",
+        headers=headers_for(admin),
+        json={"po_line_id": line.id, "quantity_received": 6, "lot_number": lot, "requires_inspection": True},
+    )
+    assert recv.status_code in (status.HTTP_200_OK, status.HTTP_201_CREATED), recv.text
+    receipt_id = recv.json()["id"]
+    assert recv.json()["inspection_status"] == InspectionStatus.PENDING.value
+
+    payload = {"quantity_accepted": accepted, "quantity_rejected": rejected, "inspection_method": "dimensional"}
+    if rejected > 0:
+        payload["defect_type"] = "dimensional"
+        payload["inspection_notes"] = "Out of tolerance on the bore diameter."
+
+    resp = client.post(f"/api/v1/receiving/inspect/{receipt_id}", headers=headers_for(quality), json=payload)
+    assert resp.status_code in (status.HTTP_200_OK, status.HTTP_201_CREATED), resp.text
+    result = resp.json()
+
+    receipt_body = result["receipt"]
+    assert receipt_body["inspection_status"] == expected_inspection
+    assert receipt_body["status"] == expected_status
+    # A REAL inspection is recorded on this path (contrast the dock-to-stock nulls).
+    assert receipt_body["inspection_method"] == "dimensional"
+    assert receipt_body["inspected_by"] == quality.id
+    assert receipt_body["inspected_at"] is not None
+    assert result["ncr_created"] is expects_ncr
+
+    # Inventory reflects ONLY the accepted quantity (nothing for an all-rejected fail).
+    inv_item = db_session.query(InventoryItem).filter(InventoryItem.lot_number == lot).first()
+    if expected_inventory is None:
+        assert inv_item is None
+    else:
+        assert inv_item is not None
+        assert float(inv_item.quantity_on_hand) == expected_inventory
 
 
 # ---------------------------------------------------------------------------

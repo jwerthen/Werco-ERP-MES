@@ -267,11 +267,16 @@ def receive_material(
 
     Creates the receipt record and updates PO quantities. ``requires_inspection``
     defaults to **false** when omitted (owner-requested receiving default): the
-    receipt is auto-accepted straight into inventory (dock-to-stock). Pass ``true``
-    to hold the lot in the inspection queue. The part master's
-    ``Part.requires_inspection`` flag is NOT applied automatically — it is exposed
-    on the /receiving/open-pos and /receiving/po/{id} line payloads as an advisory
-    hint the receiving UI shows next to the checkbox.
+    receipt is auto-accepted straight into inventory (dock-to-stock) and recorded
+    with ``inspection_status = not_required``. No inspection is performed on this
+    path, so ``inspection_method`` / ``inspected_by`` / ``inspected_at`` stay null —
+    the record is never stamped ``passed`` for an inspection that did not happen
+    (AS9100D records integrity). Pass ``true`` to hold the lot in the inspection
+    queue, where it resolves to ``passed`` / ``failed`` / ``partial`` with a real
+    inspector, method, and timestamp. The part master's ``Part.requires_inspection``
+    flag is NOT applied automatically — it is exposed on the /receiving/open-pos and
+    /receiving/po/{id} line payloads as an advisory hint the receiving UI shows next
+    to the checkbox.
     """
     po_line = (
         db.query(PurchaseOrderLine)
@@ -343,7 +348,9 @@ def receive_material(
         location_id=receipt_in.location_id,
         requires_inspection=requires_inspection,
         status=(ReceiptStatus.PENDING_INSPECTION if requires_inspection else ReceiptStatus.ACCEPTED),
-        inspection_status=(InspectionStatus.PENDING if requires_inspection else InspectionStatus.PASSED),
+        # NOT_REQUIRED (not PASSED) for dock-to-stock: no incoming inspection was
+        # performed, so the record must not assert a passed inspection.
+        inspection_status=(InspectionStatus.PENDING if requires_inspection else InspectionStatus.NOT_REQUIRED),
         packing_slip_number=receipt_in.packing_slip_number,
         carrier=receipt_in.carrier,
         tracking_number=receipt_in.tracking_number,
@@ -379,14 +386,15 @@ def receive_material(
     elif any_received:
         po.status = POStatus.PARTIAL
 
-    # If not requiring inspection, auto-accept and add to inventory
+    # If not requiring inspection, auto-accept and add to inventory (dock-to-stock).
     if not requires_inspection:
         receipt.quantity_accepted = qty_received
-        receipt.inspection_status = InspectionStatus.PASSED
-        receipt.inspection_method = InspectionMethod.VISUAL
-        receipt.inspected_by = current_user.id
-        receipt.inspected_at = datetime.utcnow()
-
+        # Records integrity (AS9100D): no incoming inspection occurred, so DO NOT
+        # stamp an inspection result/method/inspector/time. inspection_status stays
+        # NOT_REQUIRED (set on construction) and inspection_method / inspected_by /
+        # inspected_at stay NULL. The receiver + receipt time are already captured
+        # by received_by / received_at. Fabricating a VISUAL inspection by the
+        # receiver here was the records-integrity defect flagged on PR #127.
         location_code = location.code if location else "RECV-01"
         _add_to_inventory(
             db,
