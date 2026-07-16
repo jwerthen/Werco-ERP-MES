@@ -1405,6 +1405,10 @@ runs through the shared `run_llm_task` pipeline (prompt `po_extraction` 1.0.0,
 and is covered by the per-company `allow_ai_egress` kill switch (see **Company (self-service)**
 below).
 
+All endpoints are stateless and **per-document** — there is no batch endpoint. The Upload PO
+page's multi-file batch mode is pure client-side orchestration: one `upload-po` / `upload-quote`
+call per file (at most 2 concurrent) and one `create-from-upload` call per reviewed document.
+
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
 | POST | `/po-upload/upload-po` | Upload a PO document (`.pdf`/`.doc`/`.docx`, 10 MB cap; else **400**) — AI-extracts data for review before commit | Yes |

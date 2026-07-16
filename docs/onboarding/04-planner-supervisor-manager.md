@@ -187,7 +187,7 @@ MRP (material requirements planning) compares what you need to build against wha
 
 ### Upload a PO or quote PDF
 
-If a customer or vendor sends a PDF, use **Upload PO** (in the menu) to upload it. The system reads the document, you review the extracted fields, match parts and vendors, and create the purchase order from the upload.
+If a customer or vendor sends a PDF, use **Upload PO** (in the menu) to upload it — you can add one document or several at once (PDF or Word, up to 10MB each). The system reads each document, then walks you through them one at a time: review the extracted fields, match parts and vendors, and create a purchase order from each document. **Skip Document** moves past one without creating a PO. A document that fails to process doesn't block the others — the closing summary shows its error with a **Retry** button, alongside the list of POs that were created and anything that was skipped.
 
 On the review screen, each extracted line has a **Remove** (trash) button for lines you don't want on the PO — a purchase order needs at least one line, so the last remaining line can't be removed. If several lines share the same part number and you mark one of them **create as new part**, the others show a "same part — created once" note and are covered by it: the part is created once and every matching line uses it.
 
