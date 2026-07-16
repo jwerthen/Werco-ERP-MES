@@ -23,6 +23,12 @@ jest.mock('../services/api', () => ({
   },
 }));
 
+// The page gates its create/send actions by role (useAuth), so tests need an
+// authenticated user; manager sees every action.
+jest.mock('../context/AuthContext', () => ({
+  useAuth: () => ({ user: { id: 1, role: 'manager' }, isAuthenticated: true, isLoading: false }),
+}));
+
 const mockedApi = api as jest.Mocked<typeof api>;
 
 // Distinct vendors so a sort on the Vendor column is observable. Default sort is

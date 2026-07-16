@@ -212,7 +212,12 @@ class POReceipt(Base, TenantMixin):
     # Inspection status and result
     status = Column(SQLEnum(ReceiptStatus), default=ReceiptStatus.PENDING_INSPECTION)
     inspection_status = Column(SQLEnum(InspectionStatus), default=InspectionStatus.PENDING)
-    requires_inspection = Column(Boolean, default=True)
+    # Python-side default only (no server default / migration): a receipt row
+    # written without the flag defaults to "no inspection required" — matching
+    # the /receiving/receive endpoint's omitted-field default (dock-to-stock).
+    # The part master's Part.requires_inspection flag is NOT applied
+    # automatically; it is only an advisory hint in the receiving UI.
+    requires_inspection = Column(Boolean, default=False)
 
     # Inspection details
     inspected_by = Column(Integer, ForeignKey("users.id"), nullable=True)

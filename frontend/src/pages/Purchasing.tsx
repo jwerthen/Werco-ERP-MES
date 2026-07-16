@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import api from '../services/api';
 import { useSearchParams } from 'react-router-dom';
+import { useAuth } from '../context/AuthContext';
+import { hasPermission } from '../utils/permissions';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import { formatCentralDate } from '../utils/centralTime';
 import { Modal } from '../components/ui/Modal';
@@ -85,6 +87,13 @@ type TabType = 'orders' | 'vendors';
 
 export default function Purchasing() {
   const { showToast } = useToast();
+  const { user } = useAuth();
+  // Mirror the backend role gates so no button 403s:
+  // - POST /purchasing/purchase-orders allows admin/manager/supervisor → purchasing:create
+  // - PO send and vendor create are admin/manager only → purchasing:approve (same role set)
+  const canCreatePO = hasPermission(user?.role, 'purchasing:create');
+  const canSendPO = hasPermission(user?.role, 'purchasing:approve');
+  const canCreateVendor = hasPermission(user?.role, 'purchasing:approve');
   const [searchParams] = useSearchParams();
   const [activeTab, setActiveTab] = useState<TabType>('orders');
   const [vendors, setVendors] = useState<Vendor[]>([]);
@@ -354,12 +363,35 @@ export default function Purchasing() {
 
   const handleCreatePO = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!newPO.vendor_id || newPO.vendor_id <= 0) {
+      showToast('error', 'Please select a vendor');
+      return;
+    }
     if (newPO.lines.length === 0) {
       showToast('error', 'Please add at least one line item');
       return;
     }
+    for (let i = 0; i < newPO.lines.length; i++) {
+      const line = newPO.lines[i];
+      if (!line.part_id || line.part_id <= 0) {
+        showToast('error', `Line ${i + 1}: please select a part`);
+        return;
+      }
+      if (!Number.isFinite(line.quantity_ordered) || line.quantity_ordered <= 0) {
+        showToast('error', `Line ${i + 1}: quantity must be a number greater than 0`);
+        return;
+      }
+      if (!Number.isFinite(line.unit_price) || line.unit_price < 0) {
+        showToast('error', `Line ${i + 1}: unit price must be a number of 0 or more`);
+        return;
+      }
+    }
     try {
-      await api.createPurchaseOrder(newPO);
+      // An empty-string date 422s server-side — omit it when blank.
+      await api.createPurchaseOrder({
+        ...newPO,
+        required_date: newPO.required_date || undefined,
+      });
       setShowPOModal(false);
       setNewPO({ vendor_id: 0, required_date: '', notes: '', lines: [] });
       showToast('success', 'Purchase order created');
@@ -525,7 +557,7 @@ export default function Purchasing() {
           >
             Print
           </button>
-          {po.status === 'draft' && (
+          {canSendPO && po.status === 'draft' && (
             <button
               onClick={() => handleSendPO(po.id)}
               className="text-werco-primary hover:underline text-sm"
@@ -561,7 +593,7 @@ export default function Purchasing() {
           >
             Print
           </button>
-          {po.status === 'draft' && (
+          {canSendPO && po.status === 'draft' && (
             <button
               onClick={() => handleSendPO(po.id)}
               className="text-werco-primary hover:underline text-sm"
@@ -601,14 +633,18 @@ export default function Purchasing() {
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold text-white">Purchasing & Receiving</h1>
         <div className="flex gap-2">
-          <Button variant="secondary" onClick={() => setShowVendorModal(true)} className="flex items-center">
-            <BuildingOfficeIcon className="h-5 w-5 mr-2" />
-            New Vendor
-          </Button>
-          <Button onClick={() => setShowPOModal(true)} className="flex items-center">
-            <PlusIcon className="h-5 w-5 mr-2" />
-            New PO
-          </Button>
+          {canCreateVendor && (
+            <Button variant="secondary" onClick={() => setShowVendorModal(true)} className="flex items-center">
+              <BuildingOfficeIcon className="h-5 w-5 mr-2" />
+              New Vendor
+            </Button>
+          )}
+          {canCreatePO && (
+            <Button onClick={() => setShowPOModal(true)} className="flex items-center">
+              <PlusIcon className="h-5 w-5 mr-2" />
+              New PO
+            </Button>
+          )}
         </div>
       </div>
 
@@ -689,7 +725,10 @@ export default function Purchasing() {
               description: debouncedPoSearch.trim()
                 ? 'No purchase orders match your search. Adjust the term above.'
                 : 'Purchase orders you create will appear here.',
-              action: debouncedPoSearch.trim() ? undefined : { label: 'New PO', onClick: () => setShowPOModal(true) },
+              action:
+                debouncedPoSearch.trim() || !canCreatePO
+                  ? undefined
+                  : { label: 'New PO', onClick: () => setShowPOModal(true) },
             }}
           />
         </div>
@@ -835,7 +874,7 @@ export default function Purchasing() {
                       <input
                         type="number"
                         value={line.quantity_ordered}
-                        onChange={(e) => updatePOLine(idx, 'quantity_ordered', parseFloat(e.target.value))}
+                        onChange={(e) => updatePOLine(idx, 'quantity_ordered', parseFloat(e.target.value) || 0)}
                         className="input text-sm"
                         min={1}
                         required
@@ -846,7 +885,7 @@ export default function Purchasing() {
                       <input
                         type="number"
                         value={line.unit_price}
-                        onChange={(e) => updatePOLine(idx, 'unit_price', parseFloat(e.target.value))}
+                        onChange={(e) => updatePOLine(idx, 'unit_price', parseFloat(e.target.value) || 0)}
                         className="input text-sm"
                         step={0.01}
                         min={0}

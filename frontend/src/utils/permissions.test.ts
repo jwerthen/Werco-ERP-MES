@@ -91,6 +91,35 @@ describe('permissions utility', () => {
     });
   });
 
+  describe('receiving:inspect matrix (inspection-queue Inspect gating)', () => {
+    // Mirrors the backend inspect endpoint's role gate
+    // (admin / manager / supervisor / quality).
+    it('grants inspect to admin, manager, supervisor, and quality', () => {
+      (['platform_admin', 'admin', 'manager', 'supervisor', 'quality'] as const).forEach((role) => {
+        expect(hasPermission(role, 'receiving:inspect')).toBe(true);
+      });
+    });
+
+    it('denies inspect to operator, shipping, and viewer', () => {
+      (['operator', 'shipping', 'viewer'] as const).forEach((role) => {
+        expect(hasPermission(role, 'receiving:inspect')).toBe(false);
+      });
+    });
+  });
+
+  describe('purchasing matrix (Purchasing page action gating)', () => {
+    it('supervisor can create POs but cannot approve/send', () => {
+      expect(hasPermission('supervisor', 'purchasing:create')).toBe(true);
+      expect(hasPermission('supervisor', 'purchasing:approve')).toBe(false);
+    });
+
+    it('viewer can only view purchasing', () => {
+      expect(hasPermission('viewer', 'purchasing:view')).toBe(true);
+      expect(hasPermission('viewer', 'purchasing:create')).toBe(false);
+      expect(hasPermission('viewer', 'purchasing:approve')).toBe(false);
+    });
+  });
+
   describe('hasAnyPermission', () => {
     it('returns true if user has at least one permission', () => {
       expect(hasAnyPermission('operator', ['work_orders:view', 'users:create'])).toBe(true);

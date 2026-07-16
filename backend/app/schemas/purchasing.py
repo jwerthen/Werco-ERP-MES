@@ -8,6 +8,17 @@ from app.core.validation import Money, MoneySmall
 from app.schemas.base import UTCModel
 
 
+def blank_str_to_none(v: object) -> object:
+    """Coerce '' / whitespace-only strings to None (mode='before' helper).
+
+    HTML date inputs submit an empty string when left blank; without this an
+    Optional[date] field 422s instead of accepting the omitted value.
+    """
+    if isinstance(v, str) and not v.strip():
+        return None
+    return v
+
+
 # Vendor schemas
 class VendorBase(UTCModel):
     code: str = Field(..., min_length=2, max_length=20, pattern=r'^[A-Z0-9\-]+$', description="Vendor code (unique)")
@@ -100,6 +111,12 @@ class POLineBase(UTCModel):
     required_date: Optional[date] = None
     notes: Optional[str] = Field(None, max_length=500)
 
+    @field_validator('required_date', mode='before')
+    @classmethod
+    def empty_dates_to_none(cls, v: object) -> object:
+        """HTML forms submit '' for a blank date input — treat it as omitted."""
+        return blank_str_to_none(v)
+
 
 class POLineCreate(POLineBase):
     pass
@@ -137,6 +154,12 @@ class POBase(UTCModel):
     shipping_method: Optional[str] = Field(None, max_length=100)
     notes: Optional[str] = Field(None, max_length=2000)
 
+    @field_validator('required_date', 'expected_date', mode='before')
+    @classmethod
+    def empty_dates_to_none(cls, v: object) -> object:
+        """HTML forms submit '' for a blank date input — treat it as omitted."""
+        return blank_str_to_none(v)
+
     @model_validator(mode='after')
     def validate_dates(self) -> 'POBase':
         """Validate date relationships"""
@@ -159,6 +182,12 @@ class POUpdate(BaseModel):
     shipping_method: Optional[str] = Field(None, max_length=100)
     notes: Optional[str] = Field(None, max_length=2000)
     status: Optional[str] = None
+
+    @field_validator('required_date', 'expected_date', mode='before')
+    @classmethod
+    def empty_dates_to_none(cls, v: object) -> object:
+        """HTML forms submit '' for a blank date input — treat it as omitted (parity with POBase)."""
+        return blank_str_to_none(v)
 
 
 class VendorSummary(BaseModel):
@@ -218,7 +247,19 @@ class ReceiptCreate(BaseModel):
     cert_number: Optional[str] = Field(None, max_length=50)
     coc_attached: bool = False
     location_id: Optional[int] = Field(None, gt=0)
-    requires_inspection: bool = True
+    # Owner-requested receiving default: an omitted flag means "no inspection
+    # required" (dock-to-stock). The part master's Part.requires_inspection is
+    # NOT applied automatically — it is surfaced on the /receiving/open-pos and
+    # /receiving/po/{id} line payloads as an advisory hint in the receiving UI.
+    requires_inspection: bool = Field(
+        False,
+        description=(
+            "Defaults to false when omitted: the receipt is dock-to-stock (auto-accepted into "
+            "inventory). Pass true to hold the lot in the inspection queue. The part master's "
+            "requires_inspection flag is an advisory hint in the receiving UI, not an automatic "
+            "server-side default."
+        ),
+    )
     packing_slip_number: Optional[str] = Field(None, max_length=50)
     carrier: Optional[str] = Field(None, max_length=100)
     tracking_number: Optional[str] = Field(None, max_length=100)
@@ -289,17 +330,20 @@ class ReceiptResponse(UTCModel):
 class InspectionQueueItem(UTCModel):
     receipt_id: int
     receipt_number: str
-    po_number: str
-    po_id: int
+    # PO / part context is Optional so one orphaned receipt row (missing PO line,
+    # part, or purchase order) degrades to None fields instead of 500ing the
+    # whole inspection queue.
+    po_number: Optional[str] = None
+    po_id: Optional[int] = None
     vendor_name: Optional[str] = None
-    part_id: int
-    part_number: str
+    part_id: Optional[int] = None
+    part_number: Optional[str] = None
     part_name: Optional[str] = None
     quantity_received: MoneySmall
     lot_number: str
     cert_number: Optional[str] = None
     coc_attached: bool = False
-    received_at: datetime
+    received_at: Optional[datetime] = None
     received_by_name: Optional[str] = None
     location_code: Optional[str] = None
     days_pending: int = 0

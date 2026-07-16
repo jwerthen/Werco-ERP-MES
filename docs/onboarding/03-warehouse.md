@@ -108,7 +108,7 @@ There are three tabs inside Receiving:
 
 - **Receive Material** — log new deliveries against a PO.
 - **Inspection Queue** — items waiting for you to inspect (the badge shows how many).
-- **History** — everything received in the last 30 days.
+- **History** — everything received in the last 30 days, including who received each delivery and when (date and time).
 
 ### Step 1 — Receive material against a PO
 
@@ -123,7 +123,7 @@ There are three tabs inside Receiving:
    - **Location** — where it's going on the shelf.
    - **Packing Slip #**, **Carrier**, **Tracking Number** — copy these from the shipment.
    - **Notes** — anything worth recording.
-5. Check **Requires Inspection** (on by default) so it goes to the inspection queue. Check **CoC Attached** if a certificate of conformance came with it.
+5. Check **Requires Inspection** if the material needs incoming inspection before it can be used. The box always starts **unchecked** — left unchecked, the material goes straight to inventory (dock-to-stock). If the part's master record is flagged "Inspection Required", an amber hint appears next to the box so you can check it deliberately for this receipt. Check **CoC Attached** if a certificate of conformance came with it.
 6. Click **Receive Material**.
 
 > Heads up: **Lot Number is mandatory.** If you click Receive Material and nothing happens, look for a red message at the top — the most common cause is a missing lot number.
@@ -136,7 +136,7 @@ There are three tabs inside Receiving:
 
 ### Step 2 — Inspect what you received
 
-Receiving puts the material into the **Inspection Queue** — it is *not* available to use until you finish inspection.
+Receiving with **Requires Inspection** checked puts the material into the **Inspection Queue** — it is *not* available to use until you finish inspection. (Receipts received *without* the inspection flag skip this step and go straight to inventory.)
 
 1. Go to the **Inspection Queue** tab. Each row shows the receipt, PO/vendor, part, quantity, lot, whether a **CoC** is attached, and how many **Days** it's been waiting (rows turn amber/red when they sit too long).
 2. Click **Inspect** on the row you're working.
@@ -218,7 +218,8 @@ Where your station has a barcode/QR scanner, you can scan a lot or serial label 
 | "Receive Material" does nothing | Look for a red message at the top. Almost always it's a missing **Lot Number** — it's required on every receipt. |
 | It won't let me receive the quantity I have | You're entering more than the line's remaining amount. Either lower the quantity, or check **Approve Over-Receipt** if you truly received extra. |
 | Inspection won't complete | Check three things: **Accepted + Rejected** can't be more than the received quantity; and if you rejected any, both **Defect Type** and **Inspection Notes** are required. |
-| Material I received isn't on the shelf yet | It's still in the **Inspection Queue**. It only reaches Inventory after you finish inspection and accept it. |
+| Material I received isn't on the shelf yet | If it was received with **Requires Inspection** checked, it's still in the **Inspection Queue** — it only reaches Inventory after you finish inspection and accept it. |
+| There's no **Inspect** button on a queue row | Completing inspections is limited to certain roles (Administrator, Manager, Supervisor, Quality). If you don't have one of those, hand the receipt to someone who does. |
 | I can't transfer as much as I want | The box caps you at the **Available** quantity for that batch. Some of it may be allocated to a job. |
 | No work orders show in "Ready to Ship" | Only finished work orders appear here. If one's missing, it isn't marked complete yet — check with the shop floor or your supervisor. |
 | A low-stock part isn't getting reordered | The red **LOW STOCK** flag is a heads-up, not an order. Let purchasing know, or raise it with your supervisor. |
@@ -236,7 +237,7 @@ A short end-to-end drill. Use a training PO and work order if you have them — 
 
 1. Open **Warehouse** and click the **Receiving & Inspection** tab.
 2. On **Receive Material**, click a PO, then click **Receive** on one of its lines.
-3. Enter a **Quantity Received**, a **Lot Number**, pick a **Location**, and click **Receive Material**.
+3. Enter a **Quantity Received**, a **Lot Number**, pick a **Location**, make sure **Requires Inspection** is checked, and click **Receive Material**.
 4. Go to the **Inspection Queue** tab and click **Inspect** on the receipt you just made.
 5. Accept all of it (full pass), pick an **Inspection Method**, and click **Complete Inspection**.
 6. Click the **Inventory** tab and confirm your quantity now shows up under that part and lot.

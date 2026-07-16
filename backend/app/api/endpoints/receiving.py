@@ -1,7 +1,7 @@
 from datetime import date, datetime, timedelta
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
@@ -154,6 +154,10 @@ def get_open_purchase_orders(
                         "quantity_remaining": remaining,
                         "unit_price": line.unit_price,
                         "required_date": line.required_date,
+                        # Part-master incoming-inspection flag — shown as an
+                        # advisory hint next to the Receive form's checkbox
+                        # (the checkbox itself always starts unchecked).
+                        "requires_inspection": bool(line.part.requires_inspection) if line.part else False,
                     }
                 )
 
@@ -226,6 +230,10 @@ def get_purchase_order_for_receiving(
                 "unit_price": line.unit_price,
                 "required_date": line.required_date,
                 "is_closed": line.is_closed,
+                # Part-master incoming-inspection flag — shown as an advisory
+                # hint next to the Receive form's checkbox (the checkbox itself
+                # always starts unchecked).
+                "requires_inspection": bool(line.part.requires_inspection) if line.part else False,
                 "receipts": receipts_data,
             }
         )
@@ -256,7 +264,14 @@ def receive_material(
 ):
     """
     Receive material against a PO line.
-    Creates receipt record, updates PO quantities, places in inspection queue if required.
+
+    Creates the receipt record and updates PO quantities. ``requires_inspection``
+    defaults to **false** when omitted (owner-requested receiving default): the
+    receipt is auto-accepted straight into inventory (dock-to-stock). Pass ``true``
+    to hold the lot in the inspection queue. The part master's
+    ``Part.requires_inspection`` flag is NOT applied automatically — it is exposed
+    on the /receiving/open-pos and /receiving/po/{id} line payloads as an advisory
+    hint the receiving UI shows next to the checkbox.
     """
     po_line = (
         db.query(PurchaseOrderLine)
@@ -309,6 +324,11 @@ def receive_material(
         if not location:
             raise HTTPException(status_code=404, detail="Location not found")
 
+    # Owner-requested receiving default: an omitted flag means "no inspection
+    # required" (schema default False = dock-to-stock). No part-master deferral
+    # here — the part flag is only an advisory hint in the receiving UI.
+    requires_inspection = receipt_in.requires_inspection
+
     receipt_number = generate_receipt_number(db, company_id)
 
     receipt = POReceipt(
@@ -321,9 +341,9 @@ def receive_material(
         cert_number=receipt_in.cert_number,
         coc_attached=receipt_in.coc_attached,
         location_id=receipt_in.location_id,
-        requires_inspection=receipt_in.requires_inspection,
-        status=(ReceiptStatus.PENDING_INSPECTION if receipt_in.requires_inspection else ReceiptStatus.ACCEPTED),
-        inspection_status=(InspectionStatus.PENDING if receipt_in.requires_inspection else InspectionStatus.PASSED),
+        requires_inspection=requires_inspection,
+        status=(ReceiptStatus.PENDING_INSPECTION if requires_inspection else ReceiptStatus.ACCEPTED),
+        inspection_status=(InspectionStatus.PENDING if requires_inspection else InspectionStatus.PASSED),
         packing_slip_number=receipt_in.packing_slip_number,
         carrier=receipt_in.carrier,
         tracking_number=receipt_in.tracking_number,
@@ -360,7 +380,7 @@ def receive_material(
         po.status = POStatus.PARTIAL
 
     # If not requiring inspection, auto-accept and add to inventory
-    if not receipt_in.requires_inspection:
+    if not requires_inspection:
         receipt.quantity_accepted = qty_received
         receipt.inspection_status = InspectionStatus.PASSED
         receipt.inspection_method = InspectionMethod.VISUAL
@@ -444,15 +464,21 @@ def receive_material(
 
 @router.get("/inspection-queue", response_model=List[InspectionQueueItem])
 def get_inspection_queue(
-    days_back: int = 30,
+    # Bounded so a negative value can't yield a future cutoff (empty queue) and
+    # a huge value can't OverflowError timedelta into a 500.
+    days_back: Optional[int] = Query(None, ge=1, le=3650),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Get items pending inspection, sorted by date received (oldest first)"""
-    cutoff = datetime.utcnow() - timedelta(days=days_back)
+    """Get items pending inspection, sorted by date received (oldest first).
 
-    receipts = (
+    By default there is NO date cutoff: a pending inspection must never age out
+    of the queue (the /stats "pending_inspection" badge counts all of them, and
+    the list must match). Pass ``days_back`` to explicitly narrow to recent
+    receipts.
+    """
+    query = (
         db.query(POReceipt)
         .options(
             joinedload(POReceipt.po_line).joinedload(PurchaseOrderLine.part),
@@ -463,26 +489,34 @@ def get_inspection_queue(
         .filter(
             POReceipt.company_id == company_id,
             POReceipt.status == ReceiptStatus.PENDING_INSPECTION,
-            POReceipt.received_at >= cutoff,
         )
-        .order_by(POReceipt.received_at)
-        .all()
     )
+    if days_back is not None:
+        cutoff = datetime.utcnow() - timedelta(days=days_back)
+        query = query.filter(POReceipt.received_at >= cutoff)
+
+    receipts = query.order_by(POReceipt.received_at).all()
 
     result = []
     now = datetime.utcnow()
     for r in receipts:
+        # Degrade per-row instead of 500ing the whole list: an orphaned receipt
+        # (missing PO line / purchase order / part) still shows up with None
+        # context fields so it can be found and fixed — skip nothing.
+        po_line = r.po_line
+        po = po_line.purchase_order if po_line else None
+        part = po_line.part if po_line else None
         days_pending = (now - r.received_at).days if r.received_at else 0
         result.append(
             InspectionQueueItem(
                 receipt_id=r.id,
                 receipt_number=r.receipt_number,
-                po_number=r.po_line.purchase_order.po_number,
-                po_id=r.po_line.purchase_order.id,
-                vendor_name=(r.po_line.purchase_order.vendor.name if r.po_line.purchase_order.vendor else None),
-                part_id=r.po_line.part_id,
-                part_number=r.po_line.part.part_number if r.po_line.part else None,
-                part_name=r.po_line.part.name if r.po_line.part else None,
+                po_number=po.po_number if po else None,
+                po_id=po.id if po else None,
+                vendor_name=po.vendor.name if po and po.vendor else None,
+                part_id=po_line.part_id if po_line else None,
+                part_number=part.part_number if part else None,
+                part_name=part.name if part else None,
                 quantity_received=r.quantity_received,
                 lot_number=r.lot_number,
                 cert_number=r.cert_number,
@@ -521,20 +555,26 @@ def get_receipt_detail(
     if not receipt:
         raise HTTPException(status_code=404, detail="Receipt not found")
 
+    # Degrade instead of 500ing: an orphaned receipt (missing PO line /
+    # purchase order / part) returns None context fields — same posture as the
+    # hardened inspection queue, which deliberately surfaces such rows.
+    po_line = receipt.po_line
+    po = po_line.purchase_order if po_line else None
+    part = po_line.part if po_line else None
+    vendor = po.vendor if po else None
+
     return {
         "receipt_id": receipt.id,
         "receipt_number": receipt.receipt_number,
-        "po_number": receipt.po_line.purchase_order.po_number,
-        "po_id": receipt.po_line.purchase_order.id,
-        "vendor_name": (receipt.po_line.purchase_order.vendor.name if receipt.po_line.purchase_order.vendor else None),
-        "vendor_code": (receipt.po_line.purchase_order.vendor.code if receipt.po_line.purchase_order.vendor else None),
-        "is_approved_vendor": (
-            receipt.po_line.purchase_order.vendor.is_approved if receipt.po_line.purchase_order.vendor else False
-        ),
-        "part_id": receipt.po_line.part_id,
-        "part_number": (receipt.po_line.part.part_number if receipt.po_line.part else None),
-        "part_name": receipt.po_line.part.name if receipt.po_line.part else None,
-        "part_description": (receipt.po_line.part.description if receipt.po_line.part else None),
+        "po_number": po.po_number if po else None,
+        "po_id": po.id if po else None,
+        "vendor_name": vendor.name if vendor else None,
+        "vendor_code": vendor.code if vendor else None,
+        "is_approved_vendor": vendor.is_approved if vendor else False,
+        "part_id": po_line.part_id if po_line else None,
+        "part_number": part.part_number if part else None,
+        "part_name": part.name if part else None,
+        "part_description": part.description if part else None,
         "quantity_received": receipt.quantity_received,
         "quantity_accepted": receipt.quantity_accepted,
         "quantity_rejected": receipt.quantity_rejected,
@@ -569,7 +609,11 @@ def inspect_receipt(
     receipt_id: int,
     inspection: ReceiptInspection,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
+    # SUPERVISOR added deliberately (owner-approved): the same roles that can
+    # receive material may complete incoming inspection, plus QUALITY.
+    current_user: User = Depends(
+        require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY, UserRole.SUPERVISOR])
+    ),
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
@@ -595,6 +639,19 @@ def inspect_receipt(
 
     if receipt.status != ReceiptStatus.PENDING_INSPECTION:
         raise HTTPException(status_code=400, detail="Receipt is not pending inspection")
+
+    # An orphaned receipt (dangling PO line) cannot complete inspection — there
+    # is no part/price context to post accepted material into inventory. Fail
+    # with a clear 400 instead of a 500; the hardened inspection queue
+    # deliberately surfaces such rows so they can be found and repaired.
+    if receipt.po_line is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Receipt's PO line no longer exists, so this inspection cannot be completed. "
+                "Contact an administrator to repair the receipt record."
+            ),
+        )
 
     # Quantities arrive as Decimal (Pydantic MoneySmall); the inventory/Float columns
     # below work in float, so normalize once here (mirrors the receive path which does
@@ -650,8 +707,11 @@ def inspect_receipt(
         ncr_created=False,
     )
 
+    # The PO line is guaranteed above; the purchase order / part may still be
+    # missing on an orphaned row — degrade those to None context.
     po = receipt.po_line.purchase_order
     part = receipt.po_line.part
+    vendor_name = po.vendor.name if po and po.vendor else None
 
     # Add accepted quantity to inventory
     if qty_accepted > 0:
@@ -667,7 +727,7 @@ def inspect_receipt(
             current_user.id,
             receipt.receipt_number,
             audit,
-            po.vendor.name if po.vendor else None,
+            vendor_name,
         )
         result.inventory_created = True
         result.inventory_item_id = inv_item.id if inv_item else None
@@ -680,8 +740,8 @@ def inspect_receipt(
             receipt,
             inspection,
             current_user,
-            po.vendor.name if po.vendor else None,
-            po.po_number,
+            vendor_name,
+            po.po_number if po else None,
             part,
             audit,
         )
@@ -833,7 +893,7 @@ def _create_ncr_for_rejection(
     inspection: ReceiptInspection,
     current_user: User,
     supplier_name: Optional[str],
-    po_number: str,
+    po_number: Optional[str],
     part: Optional[Part],
     audit: AuditService,
 ) -> NonConformanceReport:
@@ -920,14 +980,20 @@ def get_receiving_history(
 
     result = []
     for r in receipts:
+        # Degrade per-row instead of 500ing the whole list — same posture as
+        # the hardened inspection queue: an orphaned receipt (missing PO line /
+        # purchase order / part) still shows with None context fields.
+        po_line = r.po_line
+        po = po_line.purchase_order if po_line else None
+        part = po_line.part if po_line else None
         result.append(
             {
                 "receipt_id": r.id,
                 "receipt_number": r.receipt_number,
-                "po_number": r.po_line.purchase_order.po_number,
-                "vendor_name": (r.po_line.purchase_order.vendor.name if r.po_line.purchase_order.vendor else None),
-                "part_number": r.po_line.part.part_number if r.po_line.part else None,
-                "part_name": r.po_line.part.name if r.po_line.part else None,
+                "po_number": po.po_number if po else None,
+                "vendor_name": po.vendor.name if po and po.vendor else None,
+                "part_number": part.part_number if part else None,
+                "part_name": part.name if part else None,
                 "quantity_received": r.quantity_received,
                 "quantity_accepted": r.quantity_accepted,
                 "quantity_rejected": r.quantity_rejected,

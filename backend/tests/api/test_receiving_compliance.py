@@ -7,7 +7,8 @@ endpoints that now live at /api/v1/receiving (the duplicate
 - Tenant isolation: every lookup is scoped by the active company_id, and writes
   are stamped with it.
 - RBAC: receive is gated to ADMIN/MANAGER/SUPERVISOR; inspect is gated to
-  ADMIN/MANAGER/QUALITY (SUPERVISOR may NOT inspect).
+  ADMIN/MANAGER/QUALITY/SUPERVISOR (the roles that can receive may also complete
+  incoming inspection — owner-approved spec change).
 - Audit: receive emits tamper-evident AuditLog entries (receipt CREATE,
   purchase_order STATUS_CHANGE, inventory CREATE/UPDATE).
 """
@@ -471,32 +472,36 @@ def inspect_payload(quantity_accepted: float = 5) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 6. Inspect RBAC narrowed (SUPERVISOR excluded, QUALITY included)
+# 6. Inspect RBAC: ADMIN/MANAGER/QUALITY/SUPERVISOR allowed (owner-approved spec
+#    change — the roles that can receive may also complete incoming inspection);
+#    OPERATOR/VIEWER remain forbidden.
 # ---------------------------------------------------------------------------
 
 
-def test_inspect_forbidden_for_supervisor(client: TestClient, db_session: Session):
-    """Regression guard: SUPERVISOR may receive but may NOT inspect (403)."""
-    supervisor = make_user(db_session, role=UserRole.SUPERVISOR, company_id=1)
+@pytest.mark.parametrize("role", [UserRole.OPERATOR, UserRole.VIEWER])
+def test_inspect_forbidden_for_unauthorized_roles(client: TestClient, db_session: Session, role: UserRole):
+    """OPERATOR and VIEWER are not allowed to inspect (403)."""
+    user = make_user(db_session, role=role, company_id=1)
     receipt = make_pending_receipt(db_session, company_id=1)
 
     resp = client.post(
         f"/api/v1/receiving/inspect/{receipt.id}",
-        headers=headers_for(supervisor),
+        headers=headers_for(user),
         json=inspect_payload(quantity_accepted=receipt.quantity_received),
     )
 
     assert resp.status_code == status.HTTP_403_FORBIDDEN
 
 
-def test_inspect_allowed_for_quality(client: TestClient, db_session: Session):
-    """A QUALITY user is allowed to inspect (not 403)."""
-    quality = make_user(db_session, role=UserRole.QUALITY, company_id=1)
+@pytest.mark.parametrize("role", [UserRole.QUALITY, UserRole.SUPERVISOR])
+def test_inspect_allowed_for_quality_and_supervisor(client: TestClient, db_session: Session, role: UserRole):
+    """QUALITY and SUPERVISOR users are allowed to inspect (not 403)."""
+    user = make_user(db_session, role=role, company_id=1)
     receipt = make_pending_receipt(db_session, company_id=1)
 
     resp = client.post(
         f"/api/v1/receiving/inspect/{receipt.id}",
-        headers=headers_for(quality),
+        headers=headers_for(user),
         json=inspect_payload(quantity_accepted=receipt.quantity_received),
     )
 

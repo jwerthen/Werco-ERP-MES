@@ -2897,8 +2897,12 @@ class ApiService {
     return response.data;
   }
 
-  async getInspectionQueue(daysBack = 30) {
-    const response = await this.api.get('/receiving/inspection-queue', { params: { days_back: daysBack } });
+  async getInspectionQueue(daysBack?: number) {
+    // When no daysBack is given, days_back is omitted entirely and the backend
+    // returns ALL receipts still pending inspection (no date cutoff).
+    const response = await this.api.get('/receiving/inspection-queue', {
+      params: daysBack !== undefined ? { days_back: daysBack } : {},
+    });
     return response.data;
   }
 

@@ -128,7 +128,8 @@ describe('Receiving — print label button', () => {
 
     const row = await findDesktopRow('RCV-20260618-001');
     expect(within(row).queryByRole('button', { name: /label/i })).toBeNull();
-    // The Inspect button is unaffected.
-    expect(within(row).getByRole('button', { name: /inspect/i })).toBeInTheDocument();
+    // Operators lack receiving:inspect, so the Inspect button is hidden too —
+    // no dead button that would 403 on the inspect endpoint.
+    expect(within(row).queryByRole('button', { name: /inspect/i })).toBeNull();
   });
 });

@@ -201,14 +201,16 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 |------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
 | View | ✓ | ✓ | ✓ | | ✓ | | ✓ |
 | Create | ✓ | ✓ | ✓ | | | | |
-| Inspect | ✓ | ✓ | | | ✓ | | |
+| Inspect | ✓ | ✓ | ✓ | | ✓ | | |
 | Print / reprint receiving label | ✓ | ✓ | ✓ | | | | |
 | Configure print profile | ✓ | | | | | | |
 
 > **Write enforcement:** The Create and Inspect rows above are now enforced **in code** on
 > the canonical `/api/v1/receiving` endpoints (`app/api/endpoints/receiving.py`):
 > `POST /receiving/receive` → `require_role([ADMIN, MANAGER, SUPERVISOR])` and
-> `POST /receiving/inspect/{receipt_id}` → `require_role([ADMIN, MANAGER, QUALITY])`
+> `POST /receiving/inspect/{receipt_id}` → `require_role([ADMIN, MANAGER, QUALITY, SUPERVISOR])`
+> — the receive-capable roles may also complete incoming inspection, plus Quality; adding
+> Supervisor is an owner-approved spec change (2026-07-16, previously excluded)
 > (superuser / Platform Admin bypass role checks, as elsewhere). This replaces a prior state
 > where the receive endpoint was not role-restricted and a duplicate receiving/inspection
 > path existed under `/api/v1/purchasing`; that duplicate has been removed, so `/api/v1/receiving`
