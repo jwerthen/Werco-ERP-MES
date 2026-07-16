@@ -34,7 +34,7 @@ Shipped modules, grouped by domain:
 - **Lot/serial traceability** and genealogy.
 
 ### Purchasing & Supply Chain
-- Vendors, **purchase orders** (create/send), **MRP** (shortage detection and suggested-PO generation), receiving, **supplier scorecards**, and **PO upload** (AI parsing of PO/quote PDFs).
+- Vendors, **purchase orders** (create/send), **MRP** (shortage detection and suggested-PO generation), receiving, **supplier scorecards**, and **PO upload** (AI parsing of PO/quote PDFs, single or multi-document batch).
 
 ### Quality & Compliance
 - **NCR / CAR / FAI**, **SPC**, **calibration** management, **customer complaints**, **QMS standards**, and **operator certifications / skill matrix**.
