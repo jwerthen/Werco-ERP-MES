@@ -5,6 +5,8 @@ Tests for security headers and middleware behavior.
 import pytest
 from fastapi.testclient import TestClient
 
+from app.core.config import settings
+
 
 @pytest.mark.api
 class TestSecurityHeaders:
@@ -28,6 +30,15 @@ class TestSecurityHeaders:
 
 @pytest.mark.api
 class TestRateLimitMiddleware:
+    # Same skip guard as tests/api/test_auth_rate_limit.py: when the environment
+    # disables rate limiting (settings.RATE_LIMIT_ENABLED=False, e.g. a local
+    # backend/.env set for E2E/browser verification), app/main.py deliberately
+    # never wires SlowAPIMiddleware — so this registration check skips rather
+    # than fails. CI runs with rate limiting enabled, where it still enforces.
+    @pytest.mark.skipif(
+        not settings.RATE_LIMIT_ENABLED,
+        reason="Rate limiting disabled in this environment (settings.RATE_LIMIT_ENABLED=False)",
+    )
     def test_slowapi_middleware_registered(self, client: TestClient):
         middleware_names = {mw.cls.__name__ for mw in client.app.user_middleware}
         assert "SlowAPIMiddleware" in middleware_names

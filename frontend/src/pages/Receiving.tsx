@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import api from '../services/api';
 import { useAuth } from '../context/AuthContext';
+import { hasPermission } from '../utils/permissions';
 import { formatCentralDate, formatCentralDateTime } from '../utils/centralTime';
 import {
   TruckIcon,
@@ -41,6 +42,11 @@ interface POLine {
   quantity_remaining: number;
   unit_price: number;
   required_date: string | null;
+  /**
+   * Part-master incoming-inspection flag — shown as an advisory hint next to
+   * the Receive form checkbox (the checkbox itself always starts unchecked).
+   */
+  requires_inspection?: boolean;
   is_closed?: boolean;
   receipts?: {
     receipt_id: number;
@@ -91,17 +97,22 @@ interface ReceiveFormData {
   over_receive_approved: boolean;
 }
 
+// PO / part context is nullable to match the backend InspectionQueueItem
+// schema: an orphaned receipt row (missing PO line / purchase order / part)
+// degrades to null fields instead of dropping off the queue.
 interface InspectionQueueItem {
   receipt_id: number;
   receipt_number: string;
-  po_number: string;
-  vendor_name: string;
-  part_number: string;
-  part_name: string;
+  po_number: string | null;
+  po_id: number | null;
+  vendor_name: string | null;
+  part_id: number | null;
+  part_number: string | null;
+  part_name: string | null;
   quantity_received: number;
   lot_number: string;
   coc_attached: boolean;
-  received_at: string;
+  received_at: string | null;
   days_pending: number;
 }
 
@@ -117,6 +128,7 @@ interface HistoryItem {
   inspection_status?: string;
   status: string;
   received_at: string;
+  received_by_name?: string | null;
 }
 
 type TabType = 'receive' | 'queue' | 'history';
@@ -131,9 +143,9 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
   const [searchParams, setSearchParams] = useSearchParams();
   const [activeTab, setActiveTab] = useState<TabType>(() => {
     const tab = searchParams.get('tab');
-    return (tab === 'queue' || tab === 'history') ? tab : 'receive';
+    return tab === 'queue' || tab === 'history' ? tab : 'receive';
   });
-  
+
   const { showToast } = useToast();
 
   const [openPOs, setOpenPOs] = useState<PurchaseOrder[]>([]);
@@ -148,12 +160,12 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
   const [queueError, setQueueError] = useState(false);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [historyError, setHistoryError] = useState(false);
-  
+
   const [showReceiveModal, setShowReceiveModal] = useState(false);
   const [showInspectModal, setShowInspectModal] = useState(false);
   const [selectedReceipt, setSelectedReceipt] = useState<any>(null);
   const [receiptDetail, setReceiptDetail] = useState<any>(null);
-  
+
   const [formData, setFormData] = useState<ReceiveFormData>({
     po_line_id: 0,
     quantity_received: 0,
@@ -163,7 +175,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
     cert_number: '',
     coc_attached: false,
     location_id: null,
-    requires_inspection: true,
+    requires_inspection: false,
     packing_slip_number: '',
     carrier: '',
     tracking_number: '',
@@ -191,13 +203,15 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
   // Label printing is gated to the same roles that can receive (ADMIN / MANAGER
   // / SUPERVISOR) so the UI matches what the backend will allow.
   const canPrintLabel = !!user && ['admin', 'manager', 'supervisor'].includes(user.role);
+  // Completing an inspection is gated to the roles the backend allows on the
+  // inspect endpoint (admin / manager / supervisor / quality) so users without
+  // it never see an Inspect button that would 403.
+  const canInspect = hasPermission(user?.role, 'receiving:inspect');
 
-  const isPartialLine = (line: POLine) => (
-    !line.is_closed && line.quantity_received > 0 && line.quantity_remaining > 0
-  );
+  const isPartialLine = (line: POLine) => !line.is_closed && line.quantity_received > 0 && line.quantity_remaining > 0;
 
   const applyReceiptToPO = (po: PurchaseOrder, lineId: number, qtyReceived: number): PurchaseOrder => {
-    const updatedLines = po.lines.map((line) => {
+    const updatedLines = po.lines.map(line => {
       if (line.line_id !== lineId) {
         return line;
       }
@@ -243,7 +257,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
       const [posRes, locsRes, statsRes] = await Promise.all([
         api.getOpenPOsForReceiving(),
         api.getReceivingLocations(),
-        api.getReceivingStats(30)
+        api.getReceivingStats(30),
       ]);
       setOpenPOs(posRes);
       setLocations(locsRes);
@@ -259,7 +273,8 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
   const loadInspectionQueue = async () => {
     setQueueError(false);
     try {
-      const data = await api.getInspectionQueue(30);
+      // No cutoff — the queue must list every receipt still pending inspection.
+      const data = await api.getInspectionQueue();
       setInspectionQueue(data);
     } catch (err) {
       console.error('Failed to load inspection queue:', err);
@@ -294,25 +309,36 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
       ...formData,
       po_line_id: line.line_id,
       quantity_received: line.quantity_remaining,
+      // Owner-requested receiving default: the checkbox ALWAYS starts
+      // unchecked (reset per line select — no within-session stickiness for
+      // this field). A part flagged in the part master shows an advisory hint
+      // next to the checkbox instead, so the receiver opts in deliberately.
+      requires_inspection: false,
     });
     setShowReceiveModal(true);
   };
 
   const handleReceive = async () => {
     setError('');
-    
+
     if (!formData.lot_number.trim()) {
       setError('Lot number is required for AS9100D traceability');
       return;
     }
-    
+
     if (formData.quantity_received <= 0) {
       setError('Quantity must be greater than 0');
       return;
     }
 
-    if (selectedLine && formData.quantity_received > selectedLine.quantity_remaining && !formData.over_receive_approved) {
-      setError(`Quantity exceeds remaining (${selectedLine.quantity_remaining}). Check "Approve Over-Receipt" to proceed.`);
+    if (
+      selectedLine &&
+      formData.quantity_received > selectedLine.quantity_remaining &&
+      !formData.over_receive_approved
+    ) {
+      setError(
+        `Quantity exceeds remaining (${selectedLine.quantity_remaining}). Check "Approve Over-Receipt" to proceed.`
+      );
       return;
     }
 
@@ -329,7 +355,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
       // Offer a one-click label print/reprint on the success toast.
       setLastReceiptId(receipt?.id ?? null);
       if (selectedPO && selectedLine && selectedLineId !== undefined) {
-        setSelectedPO((prev) => (prev ? applyReceiptToPO(prev, selectedLineId, receivedQty) : prev));
+        setSelectedPO(prev => (prev ? applyReceiptToPO(prev, selectedLineId, receivedQty) : prev));
       }
       setShowReceiveModal(false);
       setSelectedLine(null);
@@ -344,7 +370,10 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
       }
 
       // Keep the toast (and its Print label action) up a touch longer.
-      setTimeout(() => { setSuccess(''); setLastReceiptId(null); }, 8000);
+      setTimeout(() => {
+        setSuccess('');
+        setLastReceiptId(null);
+      }, 8000);
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Failed to receive material');
     }
@@ -394,18 +423,18 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
 
   const handleInspect = async () => {
     setError('');
-    
+
     const total = inspectionData.quantity_accepted + inspectionData.quantity_rejected;
     if (total > (selectedReceipt?.quantity_received || 0)) {
       setError('Total cannot exceed received quantity');
       return;
     }
-    
+
     if (inspectionData.quantity_rejected > 0 && !inspectionData.defect_type) {
       setError('Defect type is required when rejecting material');
       return;
     }
-    
+
     if (inspectionData.quantity_rejected > 0 && !inspectionData.inspection_notes) {
       setError('Notes are required when rejecting material');
       return;
@@ -416,7 +445,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
         ...inspectionData,
         defect_type: inspectionData.quantity_rejected > 0 ? inspectionData.defect_type : undefined,
       });
-      
+
       let message = 'Inspection completed';
       if (result.inventory_created) {
         message += ` - ${inspectionData.quantity_accepted} added to inventory`;
@@ -424,14 +453,14 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
       if (result.ncr_created) {
         message += ` - NCR ${result.ncr_number} created for ${inspectionData.quantity_rejected} rejected`;
       }
-      
+
       setSuccess(message);
       setShowInspectModal(false);
       setSelectedReceipt(null);
       setReceiptDetail(null);
       loadInspectionQueue();
       loadData();
-      
+
       setTimeout(() => setSuccess(''), 5000);
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Failed to complete inspection');
@@ -461,132 +490,139 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
 
   const renderDaysBadge = (days: number) => {
     const tone = days > 3 ? 'urgent' : days > 1 ? 'warn' : 'ok';
-    return (
-      <span className={`px-2 py-1 rounded text-xs font-medium ${QUEUE_DAYS_BADGE[tone]}`}>
-        {days}d
-      </span>
-    );
+    return <span className={`px-2 py-1 rounded text-xs font-medium ${QUEUE_DAYS_BADGE[tone]}`}>{days}d</span>;
   };
 
-  const queueColumns = useMemo<Array<DataTableColumn<InspectionQueueItem>>>(() => [
-    {
-      key: 'receipt_number',
-      header: 'Receipt',
-      sortable: true,
-      className: 'font-mono',
-      accessor: (item) => item.receipt_number,
-    },
-    {
-      key: 'po_number',
-      header: 'PO / Vendor',
-      sortable: true,
-      accessor: (item) => item.po_number,
-      csv: (item) => `${item.po_number} / ${item.vendor_name}`,
-      render: (item) => (
-        <div>
-          <p className="font-medium">{item.po_number}</p>
-          <p className="text-xs text-slate-400">{item.vendor_name}</p>
-        </div>
-      ),
-    },
-    {
-      key: 'part_number',
-      header: 'Part',
-      sortable: true,
-      accessor: (item) => item.part_number,
-      csv: (item) => `${item.part_number} ${item.part_name}`.trim(),
-      render: (item) => (
-        <div>
-          <p className="font-mono">{item.part_number}</p>
-          <p className="text-xs text-slate-400 truncate max-w-[200px]">{item.part_name}</p>
-        </div>
-      ),
-    },
-    {
-      key: 'quantity_received',
-      header: 'Qty',
-      sortable: true,
-      align: 'right',
-      className: 'font-medium',
-      accessor: (item) => item.quantity_received,
-    },
-    {
-      key: 'lot_number',
-      header: 'Lot #',
-      sortable: true,
-      className: 'font-mono',
-      accessor: (item) => item.lot_number,
-    },
-    {
-      key: 'coc_attached',
-      header: 'CoC',
-      align: 'center',
-      accessor: (item) => (item.coc_attached ? 'Yes' : 'No'),
-      render: (item) =>
-        item.coc_attached ? (
-          <CheckCircleIcon className="h-5 w-5 text-green-500 mx-auto" />
-        ) : (
-          <span className="text-gray-300">-</span>
+  const queueColumns = useMemo<Array<DataTableColumn<InspectionQueueItem>>>(
+    () => [
+      {
+        key: 'receipt_number',
+        header: 'Receipt',
+        sortable: true,
+        className: 'font-mono',
+        accessor: item => item.receipt_number,
+      },
+      {
+        key: 'po_number',
+        header: 'PO / Vendor',
+        sortable: true,
+        accessor: item => item.po_number,
+        csv: item => `${item.po_number ?? '—'} / ${item.vendor_name ?? '—'}`,
+        render: item => (
+          <div>
+            <p className="font-medium">{item.po_number ?? '—'}</p>
+            <p className="text-xs text-slate-400">{item.vendor_name ?? '—'}</p>
+          </div>
         ),
-    },
-    {
-      key: 'received_at',
-      header: 'Received',
-      sortable: true,
-      accessor: (item) => item.received_at,
-      render: (item) =>
-        formatCentralDateTime(item.received_at, {
-          year: undefined,
-          hour: '2-digit',
-          minute: '2-digit',
-          hour12: false,
-        }),
-    },
-    {
-      key: 'days_pending',
-      header: 'Days',
-      sortable: true,
-      align: 'center',
-      accessor: (item) => item.days_pending,
-      render: (item) => renderDaysBadge(item.days_pending),
-    },
-    {
-      key: 'actions',
-      header: 'Action',
-      align: 'right',
-      render: (item) => (
-        <div className="flex items-center justify-end gap-2">
-          {canPrintLabel && (
-            <button
-              onClick={(e) => { e.stopPropagation(); handlePrintLabel(item.receipt_id); }}
-              disabled={printingReceiptId === item.receipt_id}
-              title="Print 4×6 receiving label"
-              className="inline-flex items-center gap-1.5 border border-slate-600 text-slate-200 hover:border-werco-primary hover:text-werco-primary text-sm px-3 py-1 transition-colors disabled:opacity-50"
-            >
-              <PrinterIcon className="h-4 w-4" />
-              {printingReceiptId === item.receipt_id ? 'Printing…' : 'Label'}
-            </button>
-          )}
-          <button
-            onClick={(e) => { e.stopPropagation(); handleOpenInspection(item); }}
-            className="btn-primary text-sm px-3 py-1"
-          >
-            Inspect
-          </button>
-        </div>
-      ),
-    },
-  ], [canPrintLabel, printingReceiptId]);
+      },
+      {
+        key: 'part_number',
+        header: 'Part',
+        sortable: true,
+        accessor: item => item.part_number,
+        csv: item => `${item.part_number ?? '—'} ${item.part_name ?? ''}`.trim(),
+        render: item => (
+          <div>
+            <p className="font-mono">{item.part_number ?? '—'}</p>
+            <p className="text-xs text-slate-400 truncate max-w-[200px]">{item.part_name}</p>
+          </div>
+        ),
+      },
+      {
+        key: 'quantity_received',
+        header: 'Qty',
+        sortable: true,
+        align: 'right',
+        className: 'font-medium',
+        accessor: item => item.quantity_received,
+      },
+      {
+        key: 'lot_number',
+        header: 'Lot #',
+        sortable: true,
+        className: 'font-mono',
+        accessor: item => item.lot_number,
+      },
+      {
+        key: 'coc_attached',
+        header: 'CoC',
+        align: 'center',
+        accessor: item => (item.coc_attached ? 'Yes' : 'No'),
+        render: item =>
+          item.coc_attached ? (
+            <CheckCircleIcon className="h-5 w-5 text-green-500 mx-auto" />
+          ) : (
+            <span className="text-gray-300">-</span>
+          ),
+      },
+      {
+        key: 'received_at',
+        header: 'Received',
+        sortable: true,
+        accessor: item => item.received_at,
+        render: item =>
+          formatCentralDateTime(item.received_at, {
+            year: undefined,
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false,
+          }),
+      },
+      {
+        key: 'days_pending',
+        header: 'Days',
+        sortable: true,
+        align: 'center',
+        accessor: item => item.days_pending,
+        render: item => renderDaysBadge(item.days_pending),
+      },
+      {
+        key: 'actions',
+        header: 'Action',
+        align: 'right',
+        render: item => (
+          <div className="flex items-center justify-end gap-2">
+            {canPrintLabel && (
+              <button
+                onClick={e => {
+                  e.stopPropagation();
+                  handlePrintLabel(item.receipt_id);
+                }}
+                disabled={printingReceiptId === item.receipt_id}
+                title="Print 4×6 receiving label"
+                className="inline-flex items-center gap-1.5 border border-slate-600 text-slate-200 hover:border-werco-primary hover:text-werco-primary text-sm px-3 py-1 transition-colors disabled:opacity-50"
+              >
+                <PrinterIcon className="h-4 w-4" />
+                {printingReceiptId === item.receipt_id ? 'Printing…' : 'Label'}
+              </button>
+            )}
+            {canInspect && (
+              <button
+                onClick={e => {
+                  e.stopPropagation();
+                  handleOpenInspection(item);
+                }}
+                className="btn-primary text-sm px-3 py-1"
+              >
+                Inspect
+              </button>
+            )}
+          </div>
+        ),
+      },
+    ],
+    [canPrintLabel, canInspect, printingReceiptId]
+  );
 
   const renderQueueCard = (item: InspectionQueueItem) => (
     <MobileDataCard
       key={item.receipt_id}
       title={item.receipt_number}
-      subtitle={`${item.po_number} · ${item.vendor_name}`}
+      subtitle={`${item.po_number ?? '—'} · ${item.vendor_name ?? '—'}`}
       badge={renderDaysBadge(item.days_pending)}
       highlight={item.days_pending > 3}
       fields={[
-        { label: 'Part', value: item.part_number, fullWidth: true },
+        { label: 'Part', value: item.part_number ?? '—', fullWidth: true },
         { label: 'Qty', value: item.quantity_received },
         { label: 'Lot #', value: <span className="font-mono">{item.lot_number}</span> },
         {
@@ -619,102 +655,110 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
               {printingReceiptId === item.receipt_id ? 'Printing…' : 'Label'}
             </button>
           )}
-          <button
-            onClick={() => handleOpenInspection(item)}
-            className="btn-primary text-sm px-3 py-1"
-          >
-            Inspect
-          </button>
+          {canInspect && (
+            <button onClick={() => handleOpenInspection(item)} className="btn-primary text-sm px-3 py-1">
+              Inspect
+            </button>
+          )}
         </>
       }
     />
   );
 
-  const historyColumns = useMemo<Array<DataTableColumn<HistoryItem>>>(() => [
-    {
-      key: 'receipt_number',
-      header: 'Receipt',
-      sortable: true,
-      className: 'font-mono',
-      accessor: (item) => item.receipt_number,
-    },
-    {
-      key: 'po_number',
-      header: 'PO',
-      sortable: true,
-      accessor: (item) => item.po_number,
-    },
-    {
-      key: 'part_number',
-      header: 'Part',
-      sortable: true,
-      className: 'font-mono',
-      accessor: (item) => item.part_number,
-    },
-    {
-      key: 'quantity_received',
-      header: "Recv'd",
-      sortable: true,
-      align: 'right',
-      accessor: (item) => item.quantity_received,
-    },
-    {
-      key: 'quantity_accepted',
-      header: 'Accepted',
-      sortable: true,
-      align: 'right',
-      className: 'text-green-600',
-      accessor: (item) => item.quantity_accepted,
-    },
-    {
-      key: 'quantity_rejected',
-      header: 'Rejected',
-      sortable: true,
-      align: 'right',
-      className: 'text-red-600',
-      accessor: (item) => item.quantity_rejected ?? 0,
-      render: (item) => item.quantity_rejected || '-',
-    },
-    {
-      key: 'lot_number',
-      header: 'Lot #',
-      sortable: true,
-      className: 'font-mono',
-      accessor: (item) => item.lot_number,
-    },
-    {
-      key: 'status',
-      header: 'Status',
-      sortable: true,
-      align: 'center',
-      accessor: (item) => item.inspection_status || item.status,
-      render: (item) => (
-        <StatusBadge status={item.inspection_status || item.status} />
-      ),
-    },
-    {
-      key: 'received_at',
-      header: 'Date',
-      sortable: true,
-      accessor: (item) => item.received_at,
-      render: (item) => formatCentralDate(item.received_at),
-    },
-  ], []);
+  const historyColumns = useMemo<Array<DataTableColumn<HistoryItem>>>(
+    () => [
+      {
+        key: 'receipt_number',
+        header: 'Receipt',
+        sortable: true,
+        className: 'font-mono',
+        accessor: item => item.receipt_number,
+      },
+      {
+        key: 'po_number',
+        header: 'PO',
+        sortable: true,
+        accessor: item => item.po_number,
+      },
+      {
+        key: 'part_number',
+        header: 'Part',
+        sortable: true,
+        className: 'font-mono',
+        accessor: item => item.part_number,
+      },
+      {
+        key: 'quantity_received',
+        header: "Recv'd",
+        sortable: true,
+        align: 'right',
+        accessor: item => item.quantity_received,
+      },
+      {
+        key: 'quantity_accepted',
+        header: 'Accepted',
+        sortable: true,
+        align: 'right',
+        className: 'text-green-600',
+        accessor: item => item.quantity_accepted,
+      },
+      {
+        key: 'quantity_rejected',
+        header: 'Rejected',
+        sortable: true,
+        align: 'right',
+        className: 'text-red-600',
+        accessor: item => item.quantity_rejected ?? 0,
+        render: item => item.quantity_rejected || '-',
+      },
+      {
+        key: 'lot_number',
+        header: 'Lot #',
+        sortable: true,
+        className: 'font-mono',
+        accessor: item => item.lot_number,
+      },
+      {
+        key: 'status',
+        header: 'Status',
+        sortable: true,
+        align: 'center',
+        accessor: item => item.inspection_status || item.status,
+        render: item => <StatusBadge status={item.inspection_status || item.status} />,
+      },
+      {
+        key: 'received_by_name',
+        header: 'Received By',
+        sortable: true,
+        accessor: item => item.received_by_name ?? '',
+        render: item => item.received_by_name || '-',
+      },
+      {
+        key: 'received_at',
+        header: 'Date',
+        sortable: true,
+        accessor: item => item.received_at,
+        render: item => formatCentralDateTime(item.received_at),
+        // Export what the cell shows (Central date-time), not the raw UTC ISO.
+        csv: item => formatCentralDateTime(item.received_at),
+      },
+    ],
+    []
+  );
 
   const renderHistoryCard = (item: HistoryItem) => (
     <MobileDataCard
       key={item.receipt_id}
       title={item.receipt_number}
       subtitle={`${item.po_number} · ${item.part_number}`}
-      badge={
-        <StatusBadge status={item.inspection_status || item.status} />
-      }
+      badge={<StatusBadge status={item.inspection_status || item.status} />}
       fields={[
         { label: "Recv'd", value: item.quantity_received },
         { label: 'Lot #', value: <span className="font-mono">{item.lot_number}</span> },
         { label: 'Accepted', value: <span className="text-green-600">{item.quantity_accepted}</span> },
         { label: 'Rejected', value: <span className="text-red-600">{item.quantity_rejected || '-'}</span> },
-        { label: 'Date', value: formatCentralDate(item.received_at), fullWidth: true },
+        { label: 'Received By', value: item.received_by_name || '-' },
+        { label: 'Date', value: formatCentralDateTime(item.received_at), fullWidth: true },
       ]}
     />
   );
@@ -809,9 +853,14 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
         <nav className="-mb-px flex space-x-8">
           {[
             { id: 'receive', label: 'Receive Material', icon: TruckIcon },
-            { id: 'queue', label: 'Inspection Queue', icon: ClipboardDocumentCheckIcon, count: stats?.pending_inspection },
+            {
+              id: 'queue',
+              label: 'Inspection Queue',
+              icon: ClipboardDocumentCheckIcon,
+              count: stats?.pending_inspection,
+            },
             { id: 'history', label: 'History', icon: ClockIcon },
-          ].map((tab) => (
+          ].map(tab => (
             <button
               key={tab.id}
               onClick={() => {
@@ -847,10 +896,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                 <h2 className="text-lg font-semibold mb-3">Open Purchase Orders</h2>
                 <div className="space-y-2 flex-1 overflow-y-auto pr-2">
                   {loadError ? (
-                    <ErrorState
-                      message="Could not load open purchase orders."
-                      onRetry={loadData}
-                    />
+                    <ErrorState message="Could not load open purchase orders." onRetry={loadData} />
                   ) : openPOs.length === 0 ? (
                     <EmptyState
                       icon={InboxArrowDownIcon}
@@ -858,7 +904,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                       description="Open purchase orders awaiting receipt will appear here."
                     />
                   ) : (
-                    openPOs.map((po) => (
+                    openPOs.map(po => (
                       <button
                         type="button"
                         key={po.po_id}
@@ -879,9 +925,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                           </span>
                         </div>
                         {po.required_date && (
-                          <p className="text-xs text-slate-400 mt-1">
-                            Required: {formatCentralDate(po.required_date)}
-                          </p>
+                          <p className="text-xs text-slate-400 mt-1">Required: {formatCentralDate(po.required_date)}</p>
                         )}
                       </button>
                     ))
@@ -899,7 +943,9 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                         <div className="min-w-0">
                           <div className="flex items-center gap-2">
                             <h3 className="text-lg font-bold text-werco-primary">{selectedPO.po_number}</h3>
-                            <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${statusColor(selectedPO.status)}`}>
+                            <span
+                              className={`px-2 py-0.5 rounded-full text-xs font-medium ${statusColor(selectedPO.status)}`}
+                            >
                               {selectedPO.status.charAt(0).toUpperCase() + selectedPO.status.slice(1)}
                             </span>
                             {selectedPO.is_approved_vendor && (
@@ -908,7 +954,9 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                           </div>
                           <p className="text-sm text-slate-400 truncate">
                             {selectedPO.vendor_name}
-                            {selectedPO.vendor_code && <span className="text-slate-400 ml-1">({selectedPO.vendor_code})</span>}
+                            {selectedPO.vendor_code && (
+                              <span className="text-slate-400 ml-1">({selectedPO.vendor_code})</span>
+                            )}
                           </p>
                         </div>
                       </div>
@@ -936,7 +984,8 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
 
                     {selectedPO.notes && (
                       <div className="mb-3 px-3 py-2 bg-fd-panel rounded-lg border border-slate-700 text-sm text-slate-400 flex-shrink-0">
-                        <span className="text-slate-400 font-medium">Notes: </span>{selectedPO.notes}
+                        <span className="text-slate-400 font-medium">Notes: </span>
+                        {selectedPO.notes}
                       </div>
                     )}
 
@@ -945,14 +994,29 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                       <table className="w-full divide-y divide-slate-700">
                         <thead className="bg-slate-800/50 sticky top-0">
                           <tr>
-                            <th className="px-3 py-2 text-left text-xs font-semibold text-slate-400 uppercase w-10">#</th>
+                            <th className="px-3 py-2 text-left text-xs font-semibold text-slate-400 uppercase w-10">
+                              #
+                            </th>
                             <th className="px-3 py-2 text-left text-xs font-semibold text-slate-400 uppercase">Part</th>
-                            <th className="px-3 py-2 text-right text-xs font-semibold text-slate-400 uppercase w-16">Ord</th>
-                            <th className="px-3 py-2 text-right text-xs font-semibold text-slate-400 uppercase w-16">Recv</th>
-                            <th className="px-3 py-2 text-right text-xs font-semibold text-slate-400 uppercase w-16">Rem</th>
-                            <th className="px-3 py-2 text-right text-xs font-semibold text-slate-400 uppercase w-20">Unit $</th>
-                            <th className="px-3 py-2 text-center text-xs font-semibold text-slate-400 uppercase w-20">Status</th>
-                            <th className="px-3 py-2 text-center text-xs font-semibold text-slate-400 uppercase w-20" aria-label="Actions"></th>
+                            <th className="px-3 py-2 text-right text-xs font-semibold text-slate-400 uppercase w-16">
+                              Ord
+                            </th>
+                            <th className="px-3 py-2 text-right text-xs font-semibold text-slate-400 uppercase w-16">
+                              Recv
+                            </th>
+                            <th className="px-3 py-2 text-right text-xs font-semibold text-slate-400 uppercase w-16">
+                              Rem
+                            </th>
+                            <th className="px-3 py-2 text-right text-xs font-semibold text-slate-400 uppercase w-20">
+                              Unit $
+                            </th>
+                            <th className="px-3 py-2 text-center text-xs font-semibold text-slate-400 uppercase w-20">
+                              Status
+                            </th>
+                            <th
+                              className="px-3 py-2 text-center text-xs font-semibold text-slate-400 uppercase w-20"
+                              aria-label="Actions"
+                            ></th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-700">
@@ -986,11 +1050,17 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                               <td className="px-3 py-2 text-right text-sm">${(line.unit_price || 0).toFixed(2)}</td>
                               <td className="px-3 py-2 text-center">
                                 {line.is_closed ? (
-                                  <span className="px-2 py-0.5 rounded text-xs font-medium bg-green-500/20 text-emerald-300">Done</span>
+                                  <span className="px-2 py-0.5 rounded text-xs font-medium bg-green-500/20 text-emerald-300">
+                                    Done
+                                  </span>
                                 ) : line.quantity_received > 0 ? (
-                                  <span className="px-2 py-0.5 rounded text-xs font-medium bg-amber-500/20 text-amber-300">Partial</span>
+                                  <span className="px-2 py-0.5 rounded text-xs font-medium bg-amber-500/20 text-amber-300">
+                                    Partial
+                                  </span>
                                 ) : (
-                                  <span className="px-2 py-0.5 rounded text-xs font-medium bg-blue-500/20 text-blue-300">Open</span>
+                                  <span className="px-2 py-0.5 rounded text-xs font-medium bg-blue-500/20 text-blue-300">
+                                    Open
+                                  </span>
                                 )}
                               </td>
                               <td className="px-3 py-2 text-center">
@@ -1008,9 +1078,17 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                         </tbody>
                         <tfoot className="bg-slate-800/50">
                           <tr>
-                            <td colSpan={5} className="px-3 py-2 text-right text-sm font-semibold">PO Total:</td>
+                            <td colSpan={5} className="px-3 py-2 text-right text-sm font-semibold">
+                              PO Total:
+                            </td>
                             <td className="px-3 py-2 text-right text-sm font-bold">
-                              ${selectedPO.lines?.reduce((sum: number, l: any) => sum + ((l.unit_price || 0) * (l.quantity_ordered || 0)), 0).toFixed(2)}
+                              $
+                              {selectedPO.lines
+                                ?.reduce(
+                                  (sum: number, l: any) => sum + (l.unit_price || 0) * (l.quantity_ordered || 0),
+                                  0
+                                )
+                                .toFixed(2)}
                             </td>
                             <td colSpan={2} aria-label="Actions"></td>
                           </tr>
@@ -1022,18 +1100,31 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                     {selectedPO.lines?.some((l: any) => l.receipts?.length > 0) && (
                       <details className="mt-3 flex-shrink-0">
                         <summary className="text-sm font-semibold text-slate-400 cursor-pointer hover:text-slate-100">
-                          Receipt History ({selectedPO.lines?.reduce((c: number, l: any) => c + (l.receipts?.length || 0), 0)} receipts)
+                          Receipt History (
+                          {selectedPO.lines?.reduce((c: number, l: any) => c + (l.receipts?.length || 0), 0)} receipts)
                         </summary>
                         <div className="mt-2 bg-fd-panel rounded-lg border border-slate-700 overflow-x-auto max-h-48 overflow-y-auto">
                           <table className="w-full divide-y divide-slate-700">
                             <thead className="bg-slate-800 sticky top-0">
                               <tr>
-                                <th className="px-3 py-2 text-left text-xs font-semibold text-slate-400 uppercase">Receipt #</th>
-                                <th className="px-3 py-2 text-left text-xs font-semibold text-slate-400 uppercase">Part</th>
-                                <th className="px-3 py-2 text-right text-xs font-semibold text-slate-400 uppercase">Qty</th>
-                                <th className="px-3 py-2 text-left text-xs font-semibold text-slate-400 uppercase">Lot #</th>
-                                <th className="px-3 py-2 text-center text-xs font-semibold text-slate-400 uppercase">Status</th>
-                                <th className="px-3 py-2 text-left text-xs font-semibold text-slate-400 uppercase">Date</th>
+                                <th className="px-3 py-2 text-left text-xs font-semibold text-slate-400 uppercase">
+                                  Receipt #
+                                </th>
+                                <th className="px-3 py-2 text-left text-xs font-semibold text-slate-400 uppercase">
+                                  Part
+                                </th>
+                                <th className="px-3 py-2 text-right text-xs font-semibold text-slate-400 uppercase">
+                                  Qty
+                                </th>
+                                <th className="px-3 py-2 text-left text-xs font-semibold text-slate-400 uppercase">
+                                  Lot #
+                                </th>
+                                <th className="px-3 py-2 text-center text-xs font-semibold text-slate-400 uppercase">
+                                  Status
+                                </th>
+                                <th className="px-3 py-2 text-left text-xs font-semibold text-slate-400 uppercase">
+                                  Date
+                                </th>
                               </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-700">
@@ -1042,10 +1133,14 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                                   <tr key={r.receipt_id} className="hover:bg-slate-800">
                                     <td className="px-3 py-1.5 font-mono text-sm">{r.receipt_number}</td>
                                     <td className="px-3 py-1.5 font-mono text-sm">{l.part_number}</td>
-                                    <td className="px-3 py-1.5 text-right text-sm font-medium">{r.quantity_received}</td>
+                                    <td className="px-3 py-1.5 text-right text-sm font-medium">
+                                      {r.quantity_received}
+                                    </td>
                                     <td className="px-3 py-1.5 font-mono text-sm">{r.lot_number}</td>
                                     <td className="px-3 py-1.5 text-center">
-                                      <span className={`px-2 py-0.5 rounded text-xs font-medium ${statusColor(r.status)}`}>
+                                      <span
+                                        className={`px-2 py-0.5 rounded text-xs font-medium ${statusColor(r.status)}`}
+                                      >
                                         {r.status.replace(/_/g, ' ')}
                                       </span>
                                     </td>
@@ -1080,7 +1175,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
             <DataTable
               columns={queueColumns}
               data={inspectionQueue}
-              rowKey={(item) => item.receipt_id}
+              rowKey={item => item.receipt_id}
               defaultSort={{ key: 'days_pending', dir: 'desc' }}
               pageSize={25}
               csvExport={{ filename: 'inspection-queue' }}
@@ -1103,7 +1198,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
             <DataTable
               columns={historyColumns}
               data={history}
-              rowKey={(item) => item.receipt_id}
+              rowKey={item => item.receipt_id}
               defaultSort={{ key: 'received_at', dir: 'desc' }}
               pageSize={25}
               csvExport={{ filename: 'receiving-history' }}
@@ -1161,13 +1256,17 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
             {/* Form */}
             <div className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
-                <FormField label="Quantity Received" required labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                  {(field) => (
+                <FormField
+                  label="Quantity Received"
+                  required
+                  labelClassName="block text-sm font-medium text-slate-300 mb-1"
+                >
+                  {field => (
                     <input
                       {...field}
                       type="number"
                       value={formData.quantity_received}
-                      onChange={(e) => setFormData({ ...formData, quantity_received: parseFloat(e.target.value) || 0 })}
+                      onChange={e => setFormData({ ...formData, quantity_received: parseFloat(e.target.value) || 0 })}
                       className="input w-full"
                       min="0"
                       step="1"
@@ -1175,12 +1274,12 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                   )}
                 </FormField>
                 <FormField label="Lot Number" required labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                  {(field) => (
+                  {field => (
                     <input
                       {...field}
                       type="text"
                       value={formData.lot_number}
-                      onChange={(e) => setFormData({ ...formData, lot_number: e.target.value })}
+                      onChange={e => setFormData({ ...formData, lot_number: e.target.value })}
                       className="input w-full"
                       placeholder="Required for traceability"
                     />
@@ -1190,24 +1289,24 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
 
               <div className="grid grid-cols-2 gap-4">
                 <FormField label="Heat Number" labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                  {(field) => (
+                  {field => (
                     <input
                       {...field}
                       type="text"
                       value={formData.heat_number}
-                      onChange={(e) => setFormData({ ...formData, heat_number: e.target.value })}
+                      onChange={e => setFormData({ ...formData, heat_number: e.target.value })}
                       className="input w-full"
                       placeholder="For metals"
                     />
                   )}
                 </FormField>
                 <FormField label="Cert Number" labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                  {(field) => (
+                  {field => (
                     <input
                       {...field}
                       type="text"
                       value={formData.cert_number}
-                      onChange={(e) => setFormData({ ...formData, cert_number: e.target.value })}
+                      onChange={e => setFormData({ ...formData, cert_number: e.target.value })}
                       className="input w-full"
                       placeholder="Certificate of conformance"
                     />
@@ -1217,27 +1316,31 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
 
               <div className="grid grid-cols-2 gap-4">
                 <FormField label="Location" labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                  {(field) => (
+                  {field => (
                     <select
                       {...field}
                       value={formData.location_id || ''}
-                      onChange={(e) => setFormData({ ...formData, location_id: e.target.value ? parseInt(e.target.value) : null })}
+                      onChange={e =>
+                        setFormData({ ...formData, location_id: e.target.value ? parseInt(e.target.value) : null })
+                      }
                       className="input w-full"
                     >
                       <option value="">Select location</option>
-                      {locations.map((loc) => (
-                        <option key={loc.id} value={loc.id}>{loc.code} - {loc.name}</option>
+                      {locations.map(loc => (
+                        <option key={loc.id} value={loc.id}>
+                          {loc.code} - {loc.name}
+                        </option>
                       ))}
                     </select>
                   )}
                 </FormField>
                 <FormField label="Packing Slip #" labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                  {(field) => (
+                  {field => (
                     <input
                       {...field}
                       type="text"
                       value={formData.packing_slip_number}
-                      onChange={(e) => setFormData({ ...formData, packing_slip_number: e.target.value })}
+                      onChange={e => setFormData({ ...formData, packing_slip_number: e.target.value })}
                       className="input w-full"
                     />
                   )}
@@ -1246,24 +1349,24 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
 
               <div className="grid grid-cols-2 gap-4">
                 <FormField label="Carrier" labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                  {(field) => (
+                  {field => (
                     <input
                       {...field}
                       type="text"
                       value={formData.carrier}
-                      onChange={(e) => setFormData({ ...formData, carrier: e.target.value })}
+                      onChange={e => setFormData({ ...formData, carrier: e.target.value })}
                       className="input w-full"
                       placeholder="e.g., UPS, FedEx"
                     />
                   )}
                 </FormField>
                 <FormField label="Tracking Number" labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                  {(field) => (
+                  {field => (
                     <input
                       {...field}
                       type="text"
                       value={formData.tracking_number}
-                      onChange={(e) => setFormData({ ...formData, tracking_number: e.target.value })}
+                      onChange={e => setFormData({ ...formData, tracking_number: e.target.value })}
                       className="input w-full"
                     />
                   )}
@@ -1271,33 +1374,39 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
               </div>
 
               <FormField label="Notes" labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                {(field) => (
+                {field => (
                   <textarea
                     {...field}
                     value={formData.notes}
-                    onChange={(e) => setFormData({ ...formData, notes: e.target.value })}
+                    onChange={e => setFormData({ ...formData, notes: e.target.value })}
                     className="input w-full"
                     rows={2}
                   />
                 )}
               </FormField>
 
-              <div className="flex gap-6">
+              <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
                 <label className="flex items-center gap-2">
                   <input
                     type="checkbox"
                     checked={formData.requires_inspection}
-                    onChange={(e) => setFormData({ ...formData, requires_inspection: e.target.checked })}
+                    onChange={e => setFormData({ ...formData, requires_inspection: e.target.checked })}
                     className="rounded border-slate-600"
                     aria-label="Requires Inspection"
                   />
                   <span className="text-sm">Requires Inspection</span>
                 </label>
+                {selectedLine.requires_inspection === true && (
+                  <span className="inline-flex items-center gap-1.5 border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-xs text-amber-300">
+                    <ExclamationTriangleIcon className="h-3.5 w-3.5 flex-shrink-0" aria-hidden="true" />
+                    Part master flags this part as requiring incoming inspection
+                  </span>
+                )}
                 <label className="flex items-center gap-2">
                   <input
                     type="checkbox"
                     checked={formData.coc_attached}
-                    onChange={(e) => setFormData({ ...formData, coc_attached: e.target.checked })}
+                    onChange={e => setFormData({ ...formData, coc_attached: e.target.checked })}
                     className="rounded border-slate-600"
                     aria-label="CoC Attached"
                   />
@@ -1311,12 +1420,13 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                     <input
                       type="checkbox"
                       checked={formData.over_receive_approved}
-                      onChange={(e) => setFormData({ ...formData, over_receive_approved: e.target.checked })}
+                      onChange={e => setFormData({ ...formData, over_receive_approved: e.target.checked })}
                       className="rounded border-amber-500/40"
                       aria-label="Approve Over-Receipt"
                     />
                     <span className="text-sm text-amber-300">
-                      <strong>Approve Over-Receipt:</strong> Receiving {formData.quantity_received - selectedLine.quantity_remaining} more than remaining quantity
+                      <strong>Approve Over-Receipt:</strong> Receiving{' '}
+                      {formData.quantity_received - selectedLine.quantity_remaining} more than remaining quantity
                     </span>
                   </label>
                 </div>
@@ -1400,20 +1510,24 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
             <div className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
                 <FormField
-                  label={<>Quantity Accepted <span className="text-green-600">✓</span></>}
+                  label={
+                    <>
+                      Quantity Accepted <span className="text-green-600">✓</span>
+                    </>
+                  }
                   labelClassName="block text-sm font-medium text-slate-300 mb-1"
                 >
-                  {(field) => (
+                  {field => (
                     <input
                       {...field}
                       type="number"
                       value={inspectionData.quantity_accepted}
-                      onChange={(e) => {
+                      onChange={e => {
                         const val = parseFloat(e.target.value) || 0;
                         setInspectionData({
                           ...inspectionData,
                           quantity_accepted: val,
-                          quantity_rejected: Math.max(0, receiptDetail.quantity_received - val)
+                          quantity_rejected: Math.max(0, receiptDetail.quantity_received - val),
                         });
                       }}
                       className="input w-full"
@@ -1423,20 +1537,24 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                   )}
                 </FormField>
                 <FormField
-                  label={<>Quantity Rejected <span className="text-red-600">✗</span></>}
+                  label={
+                    <>
+                      Quantity Rejected <span className="text-red-600">✗</span>
+                    </>
+                  }
                   labelClassName="block text-sm font-medium text-slate-300 mb-1"
                 >
-                  {(field) => (
+                  {field => (
                     <input
                       {...field}
                       type="number"
                       value={inspectionData.quantity_rejected}
-                      onChange={(e) => {
+                      onChange={e => {
                         const val = parseFloat(e.target.value) || 0;
                         setInspectionData({
                           ...inspectionData,
                           quantity_rejected: val,
-                          quantity_accepted: Math.max(0, receiptDetail.quantity_received - val)
+                          quantity_accepted: Math.max(0, receiptDetail.quantity_received - val),
                         });
                       }}
                       className="input w-full"
@@ -1447,16 +1565,22 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                 </FormField>
               </div>
 
-              <FormField label="Inspection Method" required labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                {(field) => (
+              <FormField
+                label="Inspection Method"
+                required
+                labelClassName="block text-sm font-medium text-slate-300 mb-1"
+              >
+                {field => (
                   <select
                     {...field}
                     value={inspectionData.inspection_method}
-                    onChange={(e) => setInspectionData({ ...inspectionData, inspection_method: e.target.value })}
+                    onChange={e => setInspectionData({ ...inspectionData, inspection_method: e.target.value })}
                     className="input w-full"
                   >
-                    {inspectionMethods.map((m) => (
-                      <option key={m.value} value={m.value}>{m.label}</option>
+                    {inspectionMethods.map(m => (
+                      <option key={m.value} value={m.value}>
+                        {m.label}
+                      </option>
                     ))}
                   </select>
                 )}
@@ -1464,24 +1588,31 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
 
               {inspectionData.quantity_rejected > 0 && (
                 <>
-                  <FormField label="Defect Type" required labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                    {(field) => (
+                  <FormField
+                    label="Defect Type"
+                    required
+                    labelClassName="block text-sm font-medium text-slate-300 mb-1"
+                  >
+                    {field => (
                       <select
                         {...field}
                         value={inspectionData.defect_type}
-                        onChange={(e) => setInspectionData({ ...inspectionData, defect_type: e.target.value })}
+                        onChange={e => setInspectionData({ ...inspectionData, defect_type: e.target.value })}
                         className="input w-full"
                       >
                         <option value="">Select defect type</option>
-                        {defectTypes.map((d) => (
-                          <option key={d.value} value={d.value}>{d.label}</option>
+                        {defectTypes.map(d => (
+                          <option key={d.value} value={d.value}>
+                            {d.label}
+                          </option>
                         ))}
                       </select>
                     )}
                   </FormField>
                   <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4">
                     <p className="text-sm text-red-300 mb-2">
-                      <strong>Note:</strong> An NCR will be auto-created for the rejected quantity ({inspectionData.quantity_rejected})
+                      <strong>Note:</strong> An NCR will be auto-created for the rejected quantity (
+                      {inspectionData.quantity_rejected})
                     </p>
                   </div>
                 </>
@@ -1493,10 +1624,12 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                 </label>
                 <textarea
                   value={inspectionData.inspection_notes}
-                  onChange={(e) => setInspectionData({ ...inspectionData, inspection_notes: e.target.value })}
+                  onChange={e => setInspectionData({ ...inspectionData, inspection_notes: e.target.value })}
                   className="input w-full"
                   rows={3}
-                  placeholder={inspectionData.quantity_rejected > 0 ? 'Required - describe the non-conformance' : 'Optional notes'}
+                  placeholder={
+                    inspectionData.quantity_rejected > 0 ? 'Required - describe the non-conformance' : 'Optional notes'
+                  }
                   aria-label="Inspection Notes"
                 />
               </div>
@@ -1513,7 +1646,8 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                   )}
                   {inspectionData.quantity_accepted > 0 && inspectionData.quantity_rejected > 0 && (
                     <span className="text-amber-600 font-semibold">
-                      ⚠ Partial - {inspectionData.quantity_accepted} to Inventory, {inspectionData.quantity_rejected} to NCR
+                      ⚠ Partial - {inspectionData.quantity_accepted} to Inventory, {inspectionData.quantity_rejected} to
+                      NCR
                     </span>
                   )}
                 </div>

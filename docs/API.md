@@ -1386,6 +1386,15 @@ the public paths are `/eco/eco/…`.
 > **creates and updates** both write to the tamper-evident `audit_log` (`GET /audit/`) — the direct
 > `POST` create, `PUT` updates, and the per-row audit of CSV/XLSX-imported vendor creates.
 >
+> **Blank dates are treated as omitted (create and update payloads).** On
+> `POST /purchasing/purchase-orders` (and its line payloads / `POST .../lines`), an empty or
+> whitespace-only string in the PO's `required_date` / `expected_date` or a line's
+> `required_date` is coerced to `null` before validation instead of failing with **422** —
+> HTML date inputs submit `""` when left blank. Explicit dates are validated as before
+> (`expected_date` must be after `required_date` when both are set).
+> `PUT /purchasing/purchase-orders/{po_id}` (`POUpdate`) applies the same coercion to its
+> `required_date` / `expected_date`.
+>
 > **PO writes are audited.** The interactive purchase-order write endpoints record to the
 > tamper-evident `audit_log` (`GET /audit/`): create writes one CREATE row for the PO (resource type
 > `purchase_order`; vendor code + line count in `extra_data`, no per-line rows at document creation);
@@ -1428,15 +1437,24 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 | GET | `/receiving/open-pos` | List POs available for receiving (sent/partial) | Yes |
 | GET | `/receiving/po/{po_id}` | Get full PO detail for receiving | Yes |
 | POST | `/receiving/receive` | Receive material against a PO line | Admin / Manager / Supervisor |
-| GET | `/receiving/inspection-queue` | List receipts pending inspection | Yes |
+| GET | `/receiving/inspection-queue` | List receipts pending inspection (`days_back` optional, bounded 1–3650; **no date cutoff by default** — pending receipts never age out, so the list matches the `/stats` `pending_inspection` count) | Yes |
 | GET | `/receiving/receipt/{receipt_id}` | Get receipt detail | Yes |
-| POST | `/receiving/inspect/{receipt_id}` | Complete inspection (accept/reject, auto-NCR on rejection) | Admin / Manager / Quality |
+| POST | `/receiving/inspect/{receipt_id}` | Complete inspection (accept/reject, auto-NCR on rejection) | Admin / Manager / Quality / Supervisor |
 | GET | `/receiving/history` | Receiving history with inspection results | Yes |
 | GET | `/receiving/stats` | Receiving statistics for dashboard | Yes |
 | GET | `/receiving/locations` | Receivable inventory locations | Yes |
 | POST | `/receiving/receipt/{receipt_id}/print-label` | Manually (re)print the 4×6 thermal receiving label | Admin / Manager / Supervisor |
 | GET | `/receiving/print-profile` | Get the company ProxyBox print profile (key masked; **404** until created) | Admin |
 | PUT | `/receiving/print-profile` | Create / update the print profile, incl. the `allow_print_egress` kill switch | Admin |
+
+> **Incoming-inspection default (`requires_inspection`).** On `POST /receiving/receive` the
+> field defaults to **`false`** when omitted: the receipt is auto-accepted (dock-to-stock,
+> stamped PASSED/VISUAL) and lands directly in inventory. Pass `true` to hold the lot in the
+> inspection queue until `POST /receiving/inspect/{receipt_id}`. The part master's
+> `Part.requires_inspection` flag is **not** applied automatically — it is exposed on the
+> `/receiving/open-pos` and `/receiving/po/{po_id}` line payloads, and the Receiving UI
+> renders it as an amber advisory hint next to its "Requires Inspection" checkbox (which
+> always starts unchecked) so the receiver can opt in deliberately.
 
 > **Thermal receiving-label printing (ProxyBox / WHTP203e).** A 4×6 PDF (part / rev /
 > qty / lot / Code128, CRITICAL banner for critical parts) is rendered, stored as a

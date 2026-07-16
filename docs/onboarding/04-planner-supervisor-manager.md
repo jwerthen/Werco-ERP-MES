@@ -171,6 +171,8 @@ The **Dispatch Queue** sorts jobs by an urgency score so the most important work
 ![Purchasing screen with the Purchase Orders and Vendors tabs](images/purchasing.png)
 *Create vendors and POs here, then send the PO when it's ready.*
 
+> Heads up: Button visibility follows your role. **New PO** shows for Admins, Managers, and Supervisors; **New Vendor** and **Send** are Admin/Manager only. If a button described here isn't on your screen, that step needs a manager. A PO's **Required Date** is optional — leave it blank if you don't have one.
+
 > Heads up: To actually receive material and run receiving inspection, use the **Receiving** tab in the **Warehouse** screen — that's covered in the Warehouse guide. Purchasing is where the order is created and sent.
 
 ### Run MRP to find shortages

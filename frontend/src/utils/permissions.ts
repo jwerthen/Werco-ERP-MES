@@ -150,7 +150,7 @@ const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'process_sheets:author',
     'inventory:view', 'inventory:adjust', 'inventory:transfer',
     'purchasing:view', 'purchasing:create',
-    'receiving:view', 'receiving:create',
+    'receiving:view', 'receiving:create', 'receiving:inspect',
     'shipping:view', 'shipping:create', 'shipping:complete',
     'quality:view', 'quality:inspect',
     'analytics:view',
