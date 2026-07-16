@@ -51,8 +51,20 @@ describe('statusVariant', () => {
     ['void', 'slate'],
     ['retired', 'slate'],
     ['closed', 'slate'],
+    // Receiving dock-to-stock: no incoming inspection was required. Slate (neutral),
+    // NOT green `passed`, so the receiving record reads honestly.
+    ['not_required', 'slate'],
   ] as const)('maps domain status %s -> %s', (status, expected) => {
     expect(statusVariant(status)).toBe(expected);
+  });
+
+  it('resolves not_required (dock-to-stock) to slate, case/format-insensitive', () => {
+    // The wire value is `not_required`; assert the humanized/cased variants an API or
+    // badge label might yield all resolve to the same slate variant.
+    expect(statusVariant('not_required')).toBe('slate');
+    expect(statusVariant('NOT_REQUIRED')).toBe('slate');
+    expect(statusVariant('Not Required')).toBe('slate');
+    expect(statusColor('not_required')).toBe(variantClass.slate);
   });
 
   it('falls back to slate for unknown / empty statuses', () => {

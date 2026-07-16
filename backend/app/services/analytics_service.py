@@ -1613,7 +1613,22 @@ class AnalyticsService:
                 Vendor.id,
                 Vendor.name,
                 func.count(POReceipt.id).label('receipts'),
-                func.sum(case((POReceipt.inspection_status == InspectionStatus.PASSED, 1), else_=0)).label('accepted'),
+                # "Accepted" = taken into stock without rejection. Dock-to-stock
+                # receipts (no inspection required) now land as NOT_REQUIRED rather
+                # than PASSED, so count both — otherwise the acceptance rate for a
+                # vendor received dock-to-stock (the receiving default since PR #127)
+                # would collapse toward 0% even with zero rejections.
+                # NOTE: get_quality_metrics is currently unreachable — the vendor
+                # join below (POReceipt.po_line.has(...)) is a pre-existing malformed
+                # predicate that raises at query build (tracked separately). This
+                # predicate is kept correct-by-construction so that when that join is
+                # fixed, NOT_REQUIRED already counts as accepted (no 0%-rate regression).
+                func.sum(
+                    case(
+                        (POReceipt.inspection_status.in_([InspectionStatus.PASSED, InspectionStatus.NOT_REQUIRED]), 1),
+                        else_=0,
+                    )
+                ).label('accepted'),
                 func.sum(case((POReceipt.inspection_status == InspectionStatus.FAILED, 1), else_=0)).label('rejected'),
             )
             .join(POReceipt, POReceipt.po_line.has(purchase_order=Vendor.purchase_orders))

@@ -26,6 +26,14 @@ class InspectionStatus(str, enum.Enum):
     PASSED = "passed"
     FAILED = "failed"
     PARTIAL = "partial"
+    # Dock-to-stock: the lot was accepted into inventory without an incoming
+    # inspection because none was required. Distinct from PASSED (which asserts a
+    # real inspection occurred and passed) so the receiving record never claims a
+    # visual inspection that never happened -- an AS9100D records-integrity
+    # requirement (compliance-auditor, PR #127). SQLAlchemy stores the native
+    # Postgres enum by MEMBER NAME, so the DB label is 'NOT_REQUIRED'; the API
+    # serializes .value, so the wire/JSON value is 'not_required'.
+    NOT_REQUIRED = "not_required"
 
 
 class DefectType(str, enum.Enum):

@@ -108,7 +108,7 @@ There are three tabs inside Receiving:
 
 - **Receive Material** — log new deliveries against a PO.
 - **Inspection Queue** — items waiting for you to inspect (the badge shows how many).
-- **History** — everything received in the last 30 days, including who received each delivery and when (date and time).
+- **History** — everything received in the last 30 days, including who received each delivery and when (date and time). Each row carries a status badge — **Passed**, **Failed**, or **Partial** for material that went through inspection, or a neutral **Not Required** for dock-to-stock receipts that skipped it.
 
 ### Step 1 — Receive material against a PO
 
@@ -123,7 +123,7 @@ There are three tabs inside Receiving:
    - **Location** — where it's going on the shelf.
    - **Packing Slip #**, **Carrier**, **Tracking Number** — copy these from the shipment.
    - **Notes** — anything worth recording.
-5. Check **Requires Inspection** if the material needs incoming inspection before it can be used. The box always starts **unchecked** — left unchecked, the material goes straight to inventory (dock-to-stock). If the part's master record is flagged "Inspection Required", an amber hint appears next to the box so you can check it deliberately for this receipt. Check **CoC Attached** if a certificate of conformance came with it.
+5. Check **Requires Inspection** if the material needs incoming inspection before it can be used. The box always starts **unchecked** — left unchecked, the material goes straight to inventory (dock-to-stock) and the receipt is recorded as **Not Required**. Because no inspection actually happened on that path, the receipt carries **no inspector, method, or inspection time** — it is *not* logged as a passed inspection (that keeps our records honest for an AS9100D audit). If the part's master record is flagged "Inspection Required", an amber hint appears next to the box so you can check it deliberately for this receipt. Check **CoC Attached** if a certificate of conformance came with it.
 6. Click **Receive Material**.
 
 > Heads up: **Lot Number is mandatory.** If you click Receive Material and nothing happens, look for a red message at the top — the most common cause is a missing lot number.

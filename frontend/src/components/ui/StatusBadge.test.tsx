@@ -37,6 +37,16 @@ describe('StatusBadge', () => {
       const badge = screen.getByText('made up');
       variantClass.slate.split(' ').forEach((c) => expect(badge).toHaveClass(c));
     });
+
+    it('renders a dock-to-stock receipt as a slate "Not Required" badge', () => {
+      // Receiving History renders inspection_status via StatusBadge; a no-inspection
+      // (dock-to-stock) receipt is `not_required` -> humanized label + slate (not the
+      // green `passed`), so the record reads honestly.
+      render(<StatusBadge status="not_required" />);
+      const badge = screen.getByText('not required'); // CSS `capitalize` displays "Not Required"
+      expect(badge).toHaveClass('capitalize');
+      variantClass.slate.split(' ').forEach((c) => expect(badge).toHaveClass(c));
+    });
   });
 
   describe('colorMap override', () => {
