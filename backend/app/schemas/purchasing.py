@@ -241,7 +241,11 @@ class POListResponse(UTCModel):
 class ReceiptCreate(BaseModel):
     po_line_id: int = Field(..., gt=0)
     quantity_received: MoneySmall = Field(..., gt=Decimal("0"))
-    lot_number: str = Field(..., min_length=1, max_length=50, description="Required for AS9100D traceability")
+    lot_number: Optional[str] = Field(
+        None,
+        max_length=50,
+        description="Optional; auto-assigned from the receipt number when blank (AS9100D traceability preserved)",
+    )
     serial_numbers: Optional[str] = Field(None, max_length=500)
     heat_number: Optional[str] = Field(None, max_length=50)
     cert_number: Optional[str] = Field(None, max_length=50)

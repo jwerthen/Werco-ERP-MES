@@ -120,7 +120,12 @@ def get_open_purchase_orders(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Get POs available for receiving (sent or partial status)"""
+    """
+    Get POs available for receiving (sent or partial status).
+
+    Each PO in the payload carries ``order_date``, ``required_date``, and
+    ``expected_date`` alongside its open (unclosed, quantity-remaining) lines.
+    """
     query = (
         db.query(PurchaseOrder)
         .filter(PurchaseOrder.company_id == company_id)
@@ -171,6 +176,7 @@ def get_open_purchase_orders(
                     "vendor_code": po.vendor.code if po.vendor else None,
                     "order_date": po.order_date,
                     "required_date": po.required_date,
+                    "expected_date": po.expected_date,
                     "status": po.status.value,
                     "lines": lines_data,
                     "total_lines": len(lines_data),
@@ -265,7 +271,10 @@ def receive_material(
     """
     Receive material against a PO line.
 
-    Creates the receipt record and updates PO quantities. ``requires_inspection``
+    Creates the receipt record and updates PO quantities. ``lot_number`` is
+    optional: when blank or omitted the server auto-assigns the receipt number
+    as the lot, so every receipt still stores a non-null lot and AS9100D lot
+    traceability is preserved. ``requires_inspection``
     defaults to **false** when omitted (owner-requested receiving default): the
     receipt is auto-accepted straight into inventory (dock-to-stock) and recorded
     with ``inspection_status = not_required``. No inspection is performed on this
@@ -301,9 +310,9 @@ def receive_material(
     if po_line.is_closed:
         raise HTTPException(status_code=400, detail="PO line is already closed")
 
-    # Lot number is required for AS9100D compliance
-    if not receipt_in.lot_number or not receipt_in.lot_number.strip():
-        raise HTTPException(status_code=400, detail="Lot number is required for traceability (AS9100D)")
+    # Lot number is optional at receiving; when blank it is auto-assigned from
+    # the receipt number below, so AS9100D lot traceability is preserved.
+    lot_number = (receipt_in.lot_number or "").strip()
 
     qty_received = float(receipt_in.quantity_received)
     # Check for over-receiving
@@ -335,12 +344,16 @@ def receive_material(
     requires_inspection = receipt_in.requires_inspection
 
     receipt_number = generate_receipt_number(db, company_id)
+    # Auto-assign the lot from the (unique, company-scoped) receipt number when
+    # the receiver left it blank — every receipt still gets a real lot value.
+    if not lot_number:
+        lot_number = receipt_number
 
     receipt = POReceipt(
         receipt_number=receipt_number,
         po_line_id=po_line.id,
         quantity_received=qty_received,
-        lot_number=receipt_in.lot_number.strip(),
+        lot_number=lot_number,
         serial_numbers=receipt_in.serial_numbers,
         heat_number=receipt_in.heat_number,
         cert_number=receipt_in.cert_number,
@@ -402,7 +415,7 @@ def receive_material(
             po_line.part_id,
             qty_received,
             location_code,
-            receipt_in.lot_number.strip(),
+            lot_number,
             po_line.unit_price,
             current_user.id,
             receipt_number,
@@ -417,9 +430,7 @@ def receive_material(
         receipt.id,
         receipt.receipt_number,
         new_values=receipt,
-        description=(
-            f"Received {qty_received} of part {part_number} on PO {po.po_number} lot {receipt_in.lot_number.strip()}"
-        ),
+        description=(f"Received {qty_received} of part {part_number} on PO {po.po_number} lot {lot_number}"),
     )
     if po.status != old_po_status:
         audit.log_status_change(

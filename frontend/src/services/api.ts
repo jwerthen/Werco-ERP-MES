@@ -2901,7 +2901,8 @@ class ApiService {
   async receiveNewMaterial(data: {
     po_line_id: number;
     quantity_received: number;
-    lot_number: string;
+    // Optional — when omitted the backend auto-assigns the receipt number as the lot.
+    lot_number?: string;
     serial_numbers?: string;
     heat_number?: string;
     cert_number?: string;

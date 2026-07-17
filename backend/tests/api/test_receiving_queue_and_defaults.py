@@ -17,9 +17,14 @@
   (blank required/expected date no longer 422s) — on create AND update
   (POUpdate parity) — while the expected_date > required_date rule still
   enforces on real create values.
+
+Plus the 2026-07-17 receiving follow-ups (sections at the bottom): Lot # is
+optional on /receive — blank/whitespace auto-assigns the receipt number as the
+lot (AS9100D traceability preserved; an explicit lot stays verbatim) — and the
+/open-pos payload carries expected_date for parity with /po/{id}.
 """
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 from fastapi import status
@@ -620,3 +625,124 @@ def test_po_create_still_rejects_garbage_date_strings(garbage: str):
 def test_po_line_create_still_rejects_garbage_date_strings():
     with pytest.raises(ValidationError):
         POLineCreate(part_id=1, quantity_ordered=1, unit_price=0, required_date="not-a-date")
+
+
+# ---------------------------------------------------------------------------
+# 2026-07-17: Lot # is optional at receiving — a blank lot auto-assigns the
+# receipt number, so every receipt still carries a real lot value (AS9100D
+# traceability preserved, no schema/migration change).
+# ---------------------------------------------------------------------------
+
+
+def test_receipt_create_schema_accepts_omitted_lot_number():
+    """Schema-level: lot_number is now optional (None when omitted)."""
+    body = ReceiptCreate(po_line_id=1, quantity_received=1)
+    assert body.lot_number is None
+
+
+def test_receive_without_lot_number_auto_assigns_receipt_number(client: TestClient, db_session: Session):
+    """Omitted lot -> the receipt number IS the lot; dock-to-stock inventory lands under it."""
+    admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
+    line = make_po_line(db_session, company_id=1)
+
+    resp = client.post(
+        "/api/v1/receiving/receive",
+        headers=headers_for(admin),
+        json={
+            "po_line_id": line.id,
+            "quantity_received": 5,
+            # lot_number deliberately omitted -> auto-assigned from the receipt number
+            "requires_inspection": False,
+        },
+    )
+
+    assert resp.status_code in (status.HTTP_200_OK, status.HTTP_201_CREATED), resp.text
+    body = resp.json()
+    assert body["lot_number"] == body["receipt_number"]
+    assert body["lot_number"].startswith("RCV-")
+
+    # Dock-to-stock (requires_inspection=false): the material landed in inventory
+    # under the auto-assigned lot, fully lot-traceable.
+    inv_item = db_session.query(InventoryItem).filter(InventoryItem.lot_number == body["receipt_number"]).one()
+    assert inv_item.company_id == 1
+    assert float(inv_item.quantity_on_hand) == 5
+
+
+def test_receive_whitespace_lot_number_auto_assigns_receipt_number(client: TestClient, db_session: Session):
+    """A whitespace-only lot behaves exactly like an omitted one."""
+    admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
+    line = make_po_line(db_session, company_id=1)
+
+    resp = client.post(
+        "/api/v1/receiving/receive",
+        headers=headers_for(admin),
+        json={
+            "po_line_id": line.id,
+            "quantity_received": 3,
+            "lot_number": "   ",
+            "requires_inspection": False,
+        },
+    )
+
+    assert resp.status_code in (status.HTTP_200_OK, status.HTTP_201_CREATED), resp.text
+    body = resp.json()
+    assert body["lot_number"] == body["receipt_number"]
+
+    inv_item = db_session.query(InventoryItem).filter(InventoryItem.lot_number == body["receipt_number"]).one()
+    assert float(inv_item.quantity_on_hand) == 3
+
+
+def test_receive_explicit_lot_number_stored_verbatim(client: TestClient, db_session: Session):
+    """Regression: an explicit lot is stored verbatim (trimmed), never overwritten."""
+    admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
+    line = make_po_line(db_session, company_id=1)
+    lot = f"LOT-EXPLICIT-{_next():05d}"
+
+    resp = client.post(
+        "/api/v1/receiving/receive",
+        headers=headers_for(admin),
+        json={
+            "po_line_id": line.id,
+            "quantity_received": 4,
+            "lot_number": lot,
+            "requires_inspection": False,
+        },
+    )
+
+    assert resp.status_code in (status.HTTP_200_OK, status.HTTP_201_CREATED), resp.text
+    body = resp.json()
+    assert body["lot_number"] == lot
+    assert body["lot_number"] != body["receipt_number"]
+
+    inv_item = db_session.query(InventoryItem).filter(InventoryItem.lot_number == lot).one()
+    assert float(inv_item.quantity_on_hand) == 4
+
+
+# ---------------------------------------------------------------------------
+# 2026-07-17: /open-pos carries expected_date (parity with /po/{id})
+# ---------------------------------------------------------------------------
+
+
+def test_open_pos_payload_includes_expected_date(client: TestClient, db_session: Session):
+    """The open-POs list serves expected_date like the PO detail endpoint does."""
+    admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
+    line = make_po_line(db_session, company_id=1)
+    line.purchase_order.expected_date = date(2026, 8, 1)
+    db_session.commit()
+
+    resp = client.get("/api/v1/receiving/open-pos", headers=headers_for(admin))
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    open_po = next(p for p in resp.json() if p["po_id"] == line.purchase_order_id)
+    assert open_po["expected_date"] == "2026-08-01"
+
+
+def test_open_pos_expected_date_none_when_unset(client: TestClient, db_session: Session):
+    """A PO without an expected date still serves the key (null, not missing)."""
+    admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
+    line = make_po_line(db_session, company_id=1)
+
+    resp = client.get("/api/v1/receiving/open-pos", headers=headers_for(admin))
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    open_po = next(p for p in resp.json() if p["po_id"] == line.purchase_order_id)
+    assert "expected_date" in open_po
+    assert open_po["expected_date"] is None

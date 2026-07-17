@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import api from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import { hasPermission } from '../utils/permissions';
-import { formatCentralDate, formatCentralDateTime } from '../utils/centralTime';
+import { formatCentralDate, formatCentralDateTime, getCentralTodayISODate } from '../utils/centralTime';
 import {
   TruckIcon,
   MagnifyingGlassIcon,
@@ -133,6 +133,51 @@ interface HistoryItem {
 
 type TabType = 'receive' | 'queue' | 'history';
 
+export type POArrivalStatus = 'overdue' | 'today' | 'later' | 'unscheduled';
+
+export interface POArrival {
+  status: POArrivalStatus;
+  /** Date-only ISO string (YYYY-MM-DD) the shipment is expected, or null when unscheduled. */
+  date: string | null;
+}
+
+/** Minimal shape classifyPOArrival needs — keeps the helper unit-testable without full PO fixtures. */
+interface POArrivalInput {
+  expected_date?: string | null;
+  required_date?: string | null;
+  lines?: Array<{ required_date?: string | null; is_closed?: boolean }> | null;
+}
+
+/** Defensive date-only normalization: an ISO datetime slices down to its YYYY-MM-DD prefix. */
+const toISODateOnly = (value: string | null | undefined): string | null => (value ? value.slice(0, 10) : null);
+
+/**
+ * Classify when a PO's shipment is expected, relative to today (Central).
+ *
+ * Arrival date precedence: expected_date ?? required_date ?? earliest
+ * required_date across the PO's open (not closed) lines. All values are
+ * date-only YYYY-MM-DD strings, so plain string comparison is a correct
+ * chronological compare.
+ */
+export function classifyPOArrival(po: POArrivalInput, todayISO: string): POArrival {
+  let date = toISODateOnly(po.expected_date) ?? toISODateOnly(po.required_date);
+  if (!date) {
+    for (const line of po.lines ?? []) {
+      if (line.is_closed) continue;
+      const lineDate = toISODateOnly(line.required_date);
+      if (lineDate && (!date || lineDate < date)) {
+        date = lineDate;
+      }
+    }
+  }
+  if (!date) return { status: 'unscheduled', date: null };
+  if (date === todayISO) return { status: 'today', date };
+  if (date < todayISO) return { status: 'overdue', date };
+  return { status: 'later', date };
+}
+
+const ARRIVAL_RANK: Record<POArrivalStatus, number> = { overdue: 0, today: 1, later: 2, unscheduled: 3 };
+
 const QUEUE_DAYS_BADGE: Record<string, string> = {
   urgent: 'bg-red-500/20 text-red-300',
   warn: 'bg-amber-500/20 text-amber-300',
@@ -209,6 +254,41 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
   const canInspect = hasPermission(user?.role, 'receiving:inspect');
 
   const isPartialLine = (line: POLine) => !line.is_closed && line.quantity_received > 0 && line.quantity_remaining > 0;
+
+  // Arrival classification for the "Arriving Today" strip, card badges, and
+  // list ordering (overdue → today → later → unscheduled). Pure — the state
+  // array is never mutated; sorting happens on a copy.
+  const poArrivals = useMemo(() => {
+    const todayISO = getCentralTodayISODate();
+    const arrivalById = new Map<number, POArrival>();
+    let todayCount = 0;
+    let overdueCount = 0;
+    let todayLineCount = 0;
+    for (const po of openPOs) {
+      const arrival = classifyPOArrival(po, todayISO);
+      arrivalById.set(po.po_id, arrival);
+      if (arrival.status === 'today') {
+        todayCount += 1;
+        todayLineCount += po.total_lines ?? po.lines?.length ?? 0;
+      } else if (arrival.status === 'overdue') {
+        overdueCount += 1;
+      }
+    }
+    const sortedPOs = [...openPOs].sort((a, b) => {
+      const aa = arrivalById.get(a.po_id) as POArrival;
+      const ab = arrivalById.get(b.po_id) as POArrival;
+      if (ARRIVAL_RANK[aa.status] !== ARRIVAL_RANK[ab.status]) {
+        return ARRIVAL_RANK[aa.status] - ARRIVAL_RANK[ab.status];
+      }
+      if (aa.date !== ab.date) {
+        if (aa.date === null) return 1;
+        if (ab.date === null) return -1;
+        return aa.date < ab.date ? -1 : 1;
+      }
+      return a.po_number.localeCompare(b.po_number);
+    });
+    return { sortedPOs, arrivalById, todayCount, overdueCount, todayLineCount };
+  }, [openPOs]);
 
   const applyReceiptToPO = (po: PurchaseOrder, lineId: number, qtyReceived: number): PurchaseOrder => {
     const updatedLines = po.lines.map(line => {
@@ -321,11 +401,6 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
   const handleReceive = async () => {
     setError('');
 
-    if (!formData.lot_number.trim()) {
-      setError('Lot number is required for AS9100D traceability');
-      return;
-    }
-
     if (formData.quantity_received <= 0) {
       setError('Quantity must be greater than 0');
       return;
@@ -349,6 +424,9 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
     try {
       const receipt = await api.receiveNewMaterial({
         ...formData,
+        // Optional: when blank the backend auto-assigns the receipt number as
+        // the lot, so AS9100D traceability is preserved server-side.
+        lot_number: formData.lot_number.trim() || undefined,
         location_id: formData.location_id || undefined,
       });
       setSuccess('Material received successfully');
@@ -893,7 +971,37 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
             {/* PO Selection Row */}
             <div className="grid grid-cols-3 gap-4" style={{ minHeight: '500px' }}>
               <div className="col-span-1 flex flex-col">
-                <h2 className="text-lg font-semibold mb-3">Open Purchase Orders</h2>
+                <h2 className="text-lg font-semibold mb-2">Open Purchase Orders</h2>
+                {/* Arriving Today summary strip — always rendered so a zero is a
+                    trustworthy "nothing due", not a missing signal. */}
+                <div
+                  data-testid="arriving-today-strip"
+                  className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1 border border-slate-700 bg-fd-panel px-3 py-2"
+                >
+                  <div className="flex items-baseline gap-1.5">
+                    <span
+                      className={`text-xl font-bold tabular-nums ${
+                        poArrivals.todayCount > 0 ? 'text-amber-300' : 'text-slate-400'
+                      }`}
+                    >
+                      {poArrivals.todayCount}
+                    </span>
+                    <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                      expected today
+                    </span>
+                  </div>
+                  {poArrivals.todayLineCount > 0 && (
+                    <span className="text-xs text-slate-400">
+                      {poArrivals.todayLineCount} open line{poArrivals.todayLineCount !== 1 ? 's' : ''}
+                    </span>
+                  )}
+                  {poArrivals.overdueCount > 0 && (
+                    <div className="flex items-baseline gap-1.5">
+                      <span className="text-xl font-bold tabular-nums text-red-400">{poArrivals.overdueCount}</span>
+                      <span className="text-[11px] font-semibold uppercase tracking-wider text-red-300">overdue</span>
+                    </div>
+                  )}
+                </div>
                 <div className="space-y-2 flex-1 overflow-y-auto pr-2">
                   {loadError ? (
                     <ErrorState message="Could not load open purchase orders." onRetry={loadData} />
@@ -904,31 +1012,56 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                       description="Open purchase orders awaiting receipt will appear here."
                     />
                   ) : (
-                    openPOs.map(po => (
-                      <button
-                        type="button"
-                        key={po.po_id}
-                        onClick={() => handleSelectPO(po)}
-                        className={`w-full text-left p-3 rounded-xl border-2 cursor-pointer transition-all ${
-                          selectedPO?.po_id === po.po_id
-                            ? 'border-werco-primary bg-werco-500/10'
-                            : 'border-slate-700 hover:border-slate-600 hover:bg-slate-800'
-                        }`}
-                      >
-                        <div className="flex justify-between items-start">
-                          <div>
-                            <p className="font-semibold text-werco-primary">{po.po_number}</p>
-                            <p className="text-sm text-slate-400">{po.vendor_name}</p>
+                    poArrivals.sortedPOs.map(po => {
+                      const arrival = poArrivals.arrivalById.get(po.po_id);
+                      return (
+                        <button
+                          type="button"
+                          key={po.po_id}
+                          onClick={() => handleSelectPO(po)}
+                          className={`w-full text-left p-3 rounded-xl border-2 cursor-pointer transition-all ${
+                            selectedPO?.po_id === po.po_id
+                              ? 'border-werco-primary bg-werco-500/10'
+                              : 'border-slate-700 hover:border-slate-600 hover:bg-slate-800'
+                          }`}
+                        >
+                          <div className="flex justify-between items-start">
+                            <div>
+                              <p className="font-semibold text-werco-primary">{po.po_number}</p>
+                              <p className="text-sm text-slate-400">{po.vendor_name}</p>
+                            </div>
+                            <span className="flex flex-shrink-0 items-center gap-1.5">
+                              {arrival?.status === 'today' && (
+                                <span className="px-2 py-1 rounded text-xs font-medium bg-amber-500/20 text-amber-300">
+                                  Today
+                                </span>
+                              )}
+                              {arrival?.status === 'overdue' && (
+                                <span className="px-2 py-1 rounded text-xs font-medium bg-red-500/20 text-red-300">
+                                  Overdue
+                                </span>
+                              )}
+                              <span className="px-2 py-1 rounded text-xs font-medium bg-blue-500/20 text-blue-300">
+                                {po.total_lines} line{po.total_lines !== 1 ? 's' : ''}
+                              </span>
+                            </span>
                           </div>
-                          <span className="px-2 py-1 rounded text-xs font-medium bg-blue-500/20 text-blue-300">
-                            {po.total_lines} line{po.total_lines !== 1 ? 's' : ''}
-                          </span>
-                        </div>
-                        {po.required_date && (
-                          <p className="text-xs text-slate-400 mt-1">Required: {formatCentralDate(po.required_date)}</p>
-                        )}
-                      </button>
-                    ))
+                          {(po.required_date || arrival?.date) && (
+                            <p className="text-xs text-slate-400 mt-1">
+                              {po.required_date && <>Required: {formatCentralDate(po.required_date)}</>}
+                              {/* When the Today/Overdue badge is driven by a date other than the
+                                  visible Required date, show it so the badge is never contradicted. */}
+                              {arrival?.date && arrival.date !== toISODateOnly(po.required_date) && (
+                                <>
+                                  {po.required_date && ' · '}
+                                  Expected: {formatCentralDate(arrival.date)}
+                                </>
+                              )}
+                            </p>
+                          )}
+                        </button>
+                      );
+                    })
                   )}
                 </div>
               </div>
@@ -1273,7 +1406,11 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                     />
                   )}
                 </FormField>
-                <FormField label="Lot Number" required labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                <FormField
+                  label="Lot Number"
+                  help="Optional — left blank, the receipt number is auto-assigned as the lot"
+                  labelClassName="block text-sm font-medium text-slate-300 mb-1"
+                >
                   {field => (
                     <input
                       {...field}
@@ -1281,7 +1418,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                       value={formData.lot_number}
                       onChange={e => setFormData({ ...formData, lot_number: e.target.value })}
                       className="input w-full"
-                      placeholder="Required for traceability"
+                      placeholder="Vendor lot # (if known)"
                     />
                   )}
                 </FormField>

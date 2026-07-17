@@ -12,7 +12,7 @@
  * prune the DOM), so assertions prefer role/anchor queries that stay stable.
  */
 import React from 'react';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import api from '../services/api';
 import Dashboard from './Dashboard';
@@ -225,6 +225,53 @@ test('cross-link: clicking an on-the-job presence chip jumps to its assignment r
   fireEvent.click(screen.getByRole('button', { name: /Alex Reyes/i }));
   expect(getById).toHaveBeenCalledWith('assign-101');
   getById.mockRestore();
+});
+
+describe('Live Shop Activity operator label', () => {
+  test('derives "First L." when backend display_name is absent; employee id is tooltip-only, not row text', async () => {
+    renderDashboard();
+    await screen.findByText('Capacity Overview');
+
+    const row = document.getElementById('assign-101') as HTMLElement;
+    expect(row).not.toBeNull();
+    // Compact "First L." label instead of the full name or the employee id.
+    expect(within(row).getByText('Alex R.')).toBeInTheDocument();
+    expect(within(row).queryByText('Alex Reyes')).toBeNull();
+    expect(within(row).queryByText('E011')).toBeNull();
+    // Full name + employee id are preserved in the row tooltip so no data is lost.
+    expect(row.title).toContain('Alex Reyes');
+    expect(row.title).toContain('E011');
+  });
+
+  test('prefers backend display_name; single-token names render as-is; empty names fall back to employee id', async () => {
+    const base = dashboardData.active_assignments[0];
+    mockedApi.getDashboardWithCache.mockResolvedValue({
+      data: {
+        ...dashboardData,
+        active_assignments: [
+          { ...base, user: { ...base.user, display_name: 'Jon W.' } },
+          {
+            ...base,
+            time_entry_id: 102,
+            user: { id: 12, employee_id: 'E012', name: 'Cher', role: 'operator' },
+          },
+          {
+            ...base,
+            time_entry_id: 103,
+            user: { id: 13, employee_id: 'E013', name: '', role: 'operator' },
+          },
+        ],
+      } as any,
+      fromCache: false,
+      changed: true,
+    });
+    renderDashboard();
+    await screen.findByText('Capacity Overview');
+
+    expect(within(document.getElementById('assign-101') as HTMLElement).getByText('Jon W.')).toBeInTheDocument();
+    expect(within(document.getElementById('assign-102') as HTMLElement).getByText('Cher')).toBeInTheDocument();
+    expect(within(document.getElementById('assign-103') as HTMLElement).getByText('E013')).toBeInTheDocument();
+  });
 });
 
 test('multi-assignment (crew stations): chip clicks CYCLE through every assignment, title shows the job count', async () => {
