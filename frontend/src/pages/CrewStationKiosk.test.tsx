@@ -22,6 +22,7 @@ jest.mock('../services/kioskStationClient', () => {
     clockIn: jest.fn(),
     clockOut: jest.fn(),
     reportProduction: jest.fn(),
+    reduceProduction: jest.fn(),
     completeOperation: jest.fn(),
     holdOperation: jest.fn(),
   };
@@ -267,6 +268,63 @@ describe('CrewStationKiosk', () => {
       })
     );
     expect(await screen.findByText(/saved by alice w — crew total now 40 of 50 · 2 scrap/i)).toBeInTheDocument();
+  });
+
+  it('CORRECT OVER-COUNT: quantity + reason then a badge signature walks back the count', async () => {
+    unlockedStation();
+    mocked.mintBadgeToken.mockResolvedValue(ALICE_MINT);
+    mocked.reduceProduction.mockResolvedValue({});
+    renderKiosk();
+
+    await openJobDetail();
+    fireEvent.click(screen.getByTestId('crew-correct-verb'));
+
+    // Correction screen: tally reminder + digits-only keypad + required reason.
+    expect(await screen.findByTestId('kiosk-correct-tally-banner')).toHaveTextContent(
+      'CREW TOTAL SO FAR: 37 of 50 · 2 scrap'
+    );
+    fireEvent.click(screen.getByTestId('kiosk-correct-key-2'));
+    // No reason yet → confirm blocked.
+    expect(screen.getByTestId('kiosk-correct-confirm')).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Double-counted' }));
+    fireEvent.click(screen.getByTestId('kiosk-correct-confirm'));
+
+    // Badge-signature screen shows what is about to be removed.
+    expect(await screen.findByRole('heading', { name: /scan badge to correct/i })).toBeInTheDocument();
+    expect(screen.getByText(/removing: 2 good/i)).toBeInTheDocument();
+
+    scanBadge('E013');
+    await waitFor(() =>
+      expect(mocked.reduceProduction).toHaveBeenCalledWith('op-token-alice', 31, {
+        quantity_delta: 2,
+        reason: 'Double-counted',
+        source: 'kiosk',
+      })
+    );
+    expect(mocked.mintBadgeToken).toHaveBeenCalledWith('E013');
+    // The success toast quotes the NEW crew tally (37 − 2 = 35).
+    expect(await screen.findByText(/alice w removed 2 — crew total now 35 of 50 · 2 scrap/i)).toBeInTheDocument();
+    // The additive report is never called on the correction path.
+    expect(mocked.reportProduction).not.toHaveBeenCalled();
+  });
+
+  it('CORRECT OVER-COUNT: a server refusal shows verbatim and preserves the entered correction', async () => {
+    unlockedStation();
+    mocked.mintBadgeToken.mockResolvedValue(BOB_MINT);
+    const refusal = 'You can only remove up to the 1 piece(s) you recorded on this clock-in; ask a supervisor to correct more.';
+    mocked.reduceProduction.mockRejectedValue(new KioskApiError(400, refusal, refusal));
+    renderKiosk();
+
+    await openJobDetail();
+    fireEvent.click(screen.getByTestId('crew-correct-verb'));
+    fireEvent.click(screen.getByTestId('kiosk-correct-key-5'));
+    fireEvent.click(screen.getByRole('button', { name: 'Wrong job' }));
+    fireEvent.click(screen.getByTestId('kiosk-correct-confirm'));
+
+    scanBadge('E011');
+    expect(await screen.findByRole('alert')).toHaveTextContent('You can only remove up to the 1 piece(s)');
+    // Still on the sign screen with the entered correction preserved for a re-scan.
+    expect(screen.getByText(/removing: 5 good/i)).toBeInTheDocument();
   });
 
   it('COMPLETE: the confirm modal names everyone who will be clocked out, re-derived from queue state', async () => {

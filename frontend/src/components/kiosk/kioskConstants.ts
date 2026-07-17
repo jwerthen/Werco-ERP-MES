@@ -44,6 +44,22 @@ export const SCRAP_REASONS: KioskReason[] = [
   { value: 'Handling damage', label: 'Handling damage' },
 ];
 
+/**
+ * Over-count CORRECTION reasons (self-service reduce-production). These are NOT
+ * scrap — no scrap move happens — but the backend requires a non-blank reason on
+ * every walk-back for the tamper-evident audit trail. The chosen label is stored
+ * verbatim as the correction reason (255 max). Touch-friendly tiles keep the
+ * digits-only keypad free for the quantity.
+ */
+export const CORRECTION_REASONS: KioskReason[] = [
+  { value: 'Double-counted', label: 'Double-counted' },
+  { value: 'Scanned twice', label: 'Scanned twice' },
+  { value: 'Wrong quantity entered', label: 'Wrong qty entered' },
+  { value: 'Mis-key / typo', label: 'Mis-key / typo' },
+  { value: 'Counted wrong job', label: 'Wrong job' },
+  { value: 'Other', label: 'Other' },
+];
+
 /** Hold reasons — values are WorkOrderBlockerCategory enum values. */
 export const HOLD_REASONS: KioskReason[] = [
   { value: 'material_missing', label: 'Material missing' },

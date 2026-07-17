@@ -15,6 +15,7 @@ import {
 import {
   PlayIcon,
   CheckCircleIcon,
+  MinusCircleIcon,
   XMarkIcon,
   WrenchScrewdriverIcon,
   ArrowPathIcon,
@@ -96,6 +97,21 @@ const statusDot = (status: string) => STATUS_DOT_BY_VARIANT[statusVariant(status
 
 const WORK_CENTER_STORAGE_KEY = 'shop_floor_work_center_id';
 
+// Production modal state. `mode` toggles the additive "Add completed" path and
+// the self-service "Correct over-count" (reduce-production) path — the latter is
+// a miscount fix, NOT scrap, bounded server-side to what the operator recorded on
+// their own open clock-in. remove_delta/remove_reason back the correct-count form.
+type ProductionMode = 'add' | 'remove';
+const INITIAL_PRODUCTION_DATA = {
+  mode: 'add' as ProductionMode,
+  quantity_complete_delta: 1,
+  quantity_scrapped_delta: 0,
+  scrap: EMPTY_SCRAP_SELECTION,
+  notes: '',
+  remove_delta: 1,
+  remove_reason: '',
+};
+
 const formatScanActions = (actions: string[]) => actions.map((action) => action.replace(/_/g, ' ')).join(', ');
 
 export default function ShopFloorSimple() {
@@ -130,7 +146,7 @@ export default function ShopFloorSimple() {
   const [productionModal, setProductionModal] = useState<{ operation: Operation; job: ActiveJob } | null>(null);
   const [detailsModal, setDetailsModal] = useState<any | null>(null);
   const [checkOutData, setCheckOutData] = useState({ quantity_produced: 0, quantity_scrapped: 0, scrap: EMPTY_SCRAP_SELECTION, notes: '' });
-  const [productionData, setProductionData] = useState({ quantity_complete_delta: 1, quantity_scrapped_delta: 0, scrap: EMPTY_SCRAP_SELECTION, notes: '' });
+  const [productionData, setProductionData] = useState(INITIAL_PRODUCTION_DATA);
   // Lean Phase 1: company scrap reason codes ([] -> legacy SCRAP_REASONS fallback).
   const { codes: scrapCodes } = useScrapReasonCodes();
   // Hold picker — desktop holds must file a structured WorkOrderBlocker
@@ -560,7 +576,7 @@ export default function ShopFloorSimple() {
 
   const handleOpenProductionModal = (operation: Operation, job: ActiveJob) => {
     setProductionModal({ operation, job });
-    setProductionData({ quantity_complete_delta: 1, quantity_scrapped_delta: 0, scrap: EMPTY_SCRAP_SELECTION, notes: '' });
+    setProductionData(INITIAL_PRODUCTION_DATA);
   };
 
   const getOperationForActiveJob = (job: ActiveJob): Operation => {
@@ -608,7 +624,7 @@ export default function ShopFloorSimple() {
 
   const closeProductionModal = () => {
     setProductionModal(null);
-    setProductionData({ quantity_complete_delta: 1, quantity_scrapped_delta: 0, scrap: EMPTY_SCRAP_SELECTION, notes: '' });
+    setProductionData(INITIAL_PRODUCTION_DATA);
   };
 
   const adjustGoodQuantity = (delta: number) => {
@@ -622,6 +638,13 @@ export default function ShopFloorSimple() {
     setProductionData((prev) => ({
       ...prev,
       quantity_complete_delta: Math.max(0, Number(prev.quantity_complete_delta || 0) + delta),
+    }));
+  };
+
+  const adjustRemoveQuantity = (delta: number) => {
+    setProductionData((prev) => ({
+      ...prev,
+      remove_delta: Math.max(0, Number(prev.remove_delta || 0) + delta),
     }));
   };
 
@@ -667,6 +690,33 @@ export default function ShopFloorSimple() {
       true,
       scrapSelectionPayload(scrapCodes, productionData.scrap)
     );
+  };
+
+  // Over-count correction (reduce-production). Server-gated ⇒ NON-optimistic: we
+  // do NOT touch the on-screen count; on success we refetch and reflect only what
+  // the server returns, and on refusal we surface the server's `detail` verbatim.
+  const handleReduceProduction = async () => {
+    if (!productionModal) return;
+    const operation = productionModal.operation;
+    const delta = Number(productionData.remove_delta || 0);
+    const reason = productionData.remove_reason.trim();
+    if (delta <= 0 || !reason) return;
+    setActionLoading(operation.id);
+    try {
+      await api.reduceOperationProduction(operation.id, {
+        quantity_delta: delta,
+        reason,
+        notes: productionData.notes.trim() || undefined,
+        source: 'desktop',
+      });
+      showToast('success', `Removed ${delta} over-counted part${delta === 1 ? '' : 's'}`);
+      closeProductionModal();
+      await Promise.all([loadOperations(), loadActiveJobs(), loadDashboardCounts()]);
+    } catch (err: any) {
+      showToast('error', err.response?.data?.detail || 'Failed to correct completed quantity');
+    } finally {
+      setActionLoading(null);
+    }
   };
 
   const handleCompleteOperation = async (operation: Operation) => {
@@ -1766,8 +1816,10 @@ export default function ShopFloorSimple() {
         {productionModal && (
           <>
             <div className="modal-header">
-              <h3 className="text-lg font-semibold">Add Completed Quantity</h3>
-              <button onClick={closeProductionModal} className="p-2 rounded-lg hover:bg-slate-800">
+              <h3 className="text-lg font-semibold">
+                {productionData.mode === 'remove' ? 'Correct Over-Count' : 'Add Completed Quantity'}
+              </h3>
+              <button onClick={closeProductionModal} className="p-2 rounded-lg hover:bg-slate-800" aria-label="Close">
                 <XMarkIcon className="h-5 w-5" />
               </button>
             </div>
@@ -1786,6 +1838,39 @@ export default function ShopFloorSimple() {
                 </p>
               </div>
 
+              {/* Mode toggle: additive report vs. self-service over-count
+                  correction (reduce-production). Removing is a miscount fix, not
+                  scrap — the server bounds it to what THIS operator recorded on
+                  their own open clock-in and refuses once the op/WO is complete. */}
+              <div className="grid grid-cols-2 gap-2" role="group" aria-label="Quantity adjustment mode">
+                <button
+                  type="button"
+                  aria-pressed={productionData.mode === 'add'}
+                  onClick={() => setProductionData((prev) => ({ ...prev, mode: 'add' }))}
+                  className={`min-h-11 rounded-sm border px-3 text-sm font-semibold transition ${
+                    productionData.mode === 'add'
+                      ? 'border-emerald-500 bg-emerald-500/15 text-emerald-300'
+                      : 'border-slate-700 text-slate-400 hover:border-slate-500'
+                  }`}
+                >
+                  Add completed
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={productionData.mode === 'remove'}
+                  onClick={() => setProductionData((prev) => ({ ...prev, mode: 'remove' }))}
+                  className={`min-h-11 rounded-sm border px-3 text-sm font-semibold transition ${
+                    productionData.mode === 'remove'
+                      ? 'border-amber-500 bg-amber-500/15 text-amber-300'
+                      : 'border-slate-700 text-slate-400 hover:border-slate-500'
+                  }`}
+                >
+                  Correct over-count
+                </button>
+              </div>
+
+              {productionData.mode === 'add' && (
+              <>
               <div>
                 <label htmlFor="shopfloor-prod-good-parts" className="label">Good parts to add</label>
                 <input
@@ -1850,6 +1935,66 @@ export default function ShopFloorSimple() {
                   onChange={(scrap) => setProductionData({ ...productionData, scrap })}
                 />
               )}
+              </>
+              )}
+
+              {productionData.mode === 'remove' && (
+              <>
+              <div className="rounded-sm border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200/90">
+                Removes over-counted quantity you recorded on your current clock-in. This is a miscount
+                correction, not scrap. Ask a supervisor to correct a completed operation.
+              </div>
+
+              <div>
+                <label htmlFor="shopfloor-reduce-qty" className="label">Parts to remove</label>
+                <input
+                  id="shopfloor-reduce-qty"
+                  type="number"
+                  inputMode="decimal"
+                  min={0}
+                  value={productionData.remove_delta}
+                  onChange={(e) => setProductionData({ ...productionData, remove_delta: Number(e.target.value) || 0 })}
+                  className="input h-14 text-center text-2xl font-bold"
+                  aria-label="Parts to remove"
+                  autoFocus
+                />
+                <div className="mt-3 grid grid-cols-3 gap-2">
+                  {[1, 5, 10].map((amount) => (
+                    <button
+                      key={amount}
+                      type="button"
+                      onClick={() => adjustRemoveQuantity(amount)}
+                      className="btn-secondary min-h-11 px-2 text-sm"
+                    >
+                      +{amount}
+                    </button>
+                  ))}
+                </div>
+                <p className="mt-2 text-xs text-slate-400">
+                  Completed now: {productionModal.operation.quantity_complete} / {productionModal.operation.quantity_ordered}
+                </p>
+              </div>
+
+              <div>
+                <label htmlFor="shopfloor-reduce-reason" className="label">
+                  Reason for correction{' '}
+                  <span aria-hidden="true" className="text-fd-red">*</span>
+                </label>
+                <input
+                  id="shopfloor-reduce-reason"
+                  type="text"
+                  maxLength={255}
+                  value={productionData.remove_reason}
+                  onChange={(e) => setProductionData({ ...productionData, remove_reason: e.target.value })}
+                  className="input"
+                  placeholder="e.g. double-scanned the tray"
+                  aria-label="Reason for correction"
+                  aria-required="true"
+                />
+                <p className="mt-1 text-xs text-slate-400">Recorded on the audit trail. Required.</p>
+              </div>
+              </>
+              )}
 
               <div>
                 <label htmlFor="shopfloor-prod-notes" className="label">Notes (optional)</label>
@@ -1869,26 +2014,47 @@ export default function ShopFloorSimple() {
               <Button variant="secondary" onClick={closeProductionModal}>
                 Cancel
               </Button>
-              <button
-                onClick={handleSaveProduction}
-                disabled={
-                  actionLoading === productionModal.operation.id ||
-                  (Number(productionData.quantity_complete_delta || 0) <= 0 &&
-                    Number(productionData.quantity_scrapped_delta || 0) <= 0) ||
-                  (Number(productionData.quantity_scrapped_delta || 0) > 0 &&
-                    !isScrapSelectionComplete(scrapCodes, productionData.scrap))
-                }
-                className="btn-success disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {actionLoading === productionModal.operation.id ? (
-                  <ArrowPathIcon className="h-5 w-5 animate-spin" />
-                ) : (
-                  <>
-                    <CheckCircleIcon className="h-5 w-5 mr-2" />
-                    Add to Completed
-                  </>
-                )}
-              </button>
+              {productionData.mode === 'remove' ? (
+                <button
+                  onClick={handleReduceProduction}
+                  disabled={
+                    actionLoading === productionModal.operation.id ||
+                    Number(productionData.remove_delta || 0) <= 0 ||
+                    productionData.remove_reason.trim().length === 0
+                  }
+                  className="btn-danger disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {actionLoading === productionModal.operation.id ? (
+                    <ArrowPathIcon className="h-5 w-5 animate-spin" />
+                  ) : (
+                    <>
+                      <MinusCircleIcon className="h-5 w-5 mr-2" />
+                      Remove from Completed
+                    </>
+                  )}
+                </button>
+              ) : (
+                <button
+                  onClick={handleSaveProduction}
+                  disabled={
+                    actionLoading === productionModal.operation.id ||
+                    (Number(productionData.quantity_complete_delta || 0) <= 0 &&
+                      Number(productionData.quantity_scrapped_delta || 0) <= 0) ||
+                    (Number(productionData.quantity_scrapped_delta || 0) > 0 &&
+                      !isScrapSelectionComplete(scrapCodes, productionData.scrap))
+                  }
+                  className="btn-success disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {actionLoading === productionModal.operation.id ? (
+                    <ArrowPathIcon className="h-5 w-5 animate-spin" />
+                  ) : (
+                    <>
+                      <CheckCircleIcon className="h-5 w-5 mr-2" />
+                      Add to Completed
+                    </>
+                  )}
+                </button>
+              )}
             </div>
           </>
         )}

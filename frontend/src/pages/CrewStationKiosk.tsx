@@ -35,6 +35,7 @@ import { useKioskIdleLogout } from '../hooks/useKioskIdleLogout';
 import KioskKeypad from '../components/kiosk/KioskKeypad';
 import KioskCrewJobCard from '../components/kiosk/KioskCrewJobCard';
 import KioskQuantityScreen from '../components/kiosk/KioskQuantityScreen';
+import KioskCorrectionScreen from '../components/kiosk/KioskCorrectionScreen';
 import KioskReasonGrid from '../components/kiosk/KioskReasonGrid';
 import KioskCompleteConfirmModal from '../components/kiosk/KioskCompleteConfirmModal';
 import KioskNcrFiledScreen from '../components/kiosk/KioskNcrFiledScreen';
@@ -98,6 +99,11 @@ type CrewView =
     }
   | { name: 'productionQty'; operationId: number }
   | { name: 'productionSign'; operationId: number; good: number; scrap: number; reason: string | null; reasonCodeId: number | null }
+  // Over-count correction (reduce-production): quantity + reason, then a badge
+  // signature. The signing operator must have an open clock-in on the op — the
+  // server bounds the walk-back to THEIR own recorded evidence (crew-safe).
+  | { name: 'correctQty'; operationId: number }
+  | { name: 'correctSign'; operationId: number; quantity: number; reason: string }
   | { name: 'completeQty'; operationId: number }
   | { name: 'completeConfirm'; operationId: number; good: number; scrap: number; reason: string | null; reasonCodeId: number | null }
   | { name: 'hold'; operationId: number }
@@ -507,6 +513,40 @@ export default function CrewStationKiosk() {
       } catch (err) {
         // Verbatim rejection; quantities stay in the view state for a re-scan.
         setBadgeError(kioskErrorMessage(err, 'Could not save production. Try again.'));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [view, findItem, mutationsBlocked, showToast, bumpAndRefresh]
+  );
+
+  /** CORRECT OVER-COUNT — badge-signature scan walks back the entered quantity. */
+  const handleCorrectBadge = useCallback(
+    async (badgeId: string) => {
+      const item = view.name === 'correctSign' ? findItem(view.operationId) : null;
+      if (view.name !== 'correctSign' || !item || mutationsBlocked) return;
+      const { quantity, reason } = view;
+      setBusy(true);
+      setBadgeError(null);
+      try {
+        const minted = await kioskClient.mintBadgeToken(badgeId);
+        await kioskClient.reduceProduction(minted.access_token, item.operation_id, {
+          quantity_delta: quantity,
+          reason,
+          source: KIOSK_SOURCE,
+        });
+        const newTally = formatCrewTally({
+          quantity_complete: Math.max(0, Number(item.quantity_complete || 0) - quantity),
+          quantity_ordered: item.quantity_ordered,
+          quantity_scrapped: item.quantity_scrapped,
+        });
+        showToast('success', `${minted.user.full_name} removed ${quantity} — crew total now ${newTally}`);
+        setView({ name: 'job', operationId: item.operation_id });
+        await bumpAndRefresh();
+      } catch (err) {
+        // Verbatim rejection (e.g. "You can only remove up to the N piece(s)…");
+        // quantity + reason stay in the view state for a re-scan by the right badge.
+        setBadgeError(kioskErrorMessage(err, 'Could not correct the count. Try again.'));
       } finally {
         setBusy(false);
       }
@@ -940,6 +980,19 @@ export default function CrewStationKiosk() {
               >
                 Report production
               </button>
+              <button
+                type="button"
+                data-testid="crew-correct-verb"
+                disabled={mutationsBlocked}
+                aria-describedby={!online ? OFFLINE_HINT_ID : undefined}
+                onClick={() => {
+                  setBadgeError(null);
+                  setView({ name: 'correctQty', operationId: viewItem.operation_id });
+                }}
+                className="min-h-20 rounded border border-fd-line bg-fd-sunken px-4 text-xl font-bold uppercase tracking-wide text-fd-mute transition-colors hover:border-fd-line-bright hover:text-fd-body disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Correct over-count
+              </button>
               {Number(viewItem.steps_total || 0) > 0 && (
                 <button
                   type="button"
@@ -1103,6 +1156,45 @@ export default function CrewStationKiosk() {
               onCancel={() =>
                 setView({ name: 'productionQty', operationId: viewItem.operation_id })
               }
+            />
+          </section>
+        )}
+
+        {/* CORRECT OVER-COUNT — quantity + reason, then badge signature. The
+            badge that signs must have an open clock-in on this op; the server
+            bounds the walk-back to THAT operator's recorded evidence. */}
+        {view.name === 'correctQty' && viewItem && (
+          <KioskCorrectionScreen
+            jobLabel={crewJobLabel(viewItem)}
+            tallyBanner={`CREW TOTAL SO FAR: ${formatCrewTally(viewItem)}`}
+            busy={mutationsBlocked}
+            onConfirm={(quantity, reason) => {
+              setBadgeError(null);
+              setView({ name: 'correctSign', operationId: viewItem.operation_id, quantity, reason });
+            }}
+            onCancel={() => setView({ name: 'job', operationId: viewItem.operation_id })}
+          />
+        )}
+
+        {view.name === 'correctSign' && viewItem && (
+          <section aria-label="Sign over-count correction" className="mx-auto w-full max-w-2xl">
+            <h2 className="text-3xl font-bold text-fd-ink">Scan badge to correct</h2>
+            <p className="mt-1 font-mono text-lg text-fd-mute">{crewJobLabel(viewItem)}</p>
+            <p className="mt-4 rounded border border-fd-amber/50 bg-fd-amber/10 px-4 py-3 font-mono text-xl font-bold text-fd-amber">
+              Removing: {view.quantity} good ({view.reason})
+            </p>
+            <p className="mt-3 text-base text-fd-body">
+              Scan the badge of the operator whose count this corrects — you can only remove what you recorded.
+            </p>
+            <BadgeScanPanel
+              busy={busy}
+              blocked={mutationsBlocked}
+              offlineHintId={!online ? OFFLINE_HINT_ID : undefined}
+              error={badgeError}
+              idPrefix="crew-correct"
+              prompt="Scan badge to correct — or type ID"
+              onBadge={(id) => void handleCorrectBadge(id)}
+              onCancel={() => setView({ name: 'correctQty', operationId: viewItem.operation_id })}
             />
           </section>
         )}

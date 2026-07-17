@@ -283,6 +283,25 @@ export async function reportProduction(
 }
 
 /**
+ * POST /shop-floor/operations/{id}/reduce-production — over-count correction.
+ * Walks back good-count quantity the badge-identified operator OVER-reported on
+ * their OWN open clock-in, BEFORE the operation is complete. NOT a scrap move.
+ * The server bounds the delta to that operator's recorded evidence and refuses
+ * once the op/WO is complete (409) — the crew flow stays non-optimistic.
+ */
+export async function reduceProduction(
+  operatorToken: string,
+  operationId: number,
+  data: {
+    quantity_delta: number;
+    reason: string;
+    source: string;
+  }
+): Promise<unknown> {
+  return operatorFetch(operatorToken, 'POST', `/shop-floor/operations/${operationId}/reduce-production`, data);
+}
+
+/**
  * POST /shop-floor/operations/{id}/complete — auto-closes ALL operators' open
  * entries; the response's `closed_time_entries` names who was clocked out.
  */

@@ -22,6 +22,7 @@ import KioskActiveJobBanner from '../components/kiosk/KioskActiveJobBanner';
 import KioskNcrFiledScreen from '../components/kiosk/KioskNcrFiledScreen';
 import KioskQueueCard from '../components/kiosk/KioskQueueCard';
 import KioskQuantityScreen from '../components/kiosk/KioskQuantityScreen';
+import KioskCorrectionScreen from '../components/kiosk/KioskCorrectionScreen';
 import KioskReasonGrid from '../components/kiosk/KioskReasonGrid';
 import KioskStepsPanel, { StepsTransport } from '../components/kiosk/KioskStepsPanel';
 import LaserNestOperatorPanel from '../components/laser/LaserNestOperatorPanel';
@@ -47,6 +48,9 @@ type KioskView =
   | { name: 'queue' }
   | { name: 'confirm'; item: KioskQueueItem }
   | { name: 'production'; job: ActiveJob }
+  // Over-count correction (reduce-production) — walk back good pieces the
+  // operator OVER-reported on their own open clock-in. Server-gated, non-optimistic.
+  | { name: 'correct'; job: ActiveJob }
   | { name: 'complete'; job: ActiveJob }
   | { name: 'hold'; job: ActiveJob }
   | { name: 'steps'; operationId: number; jobLabel: string; missing?: MissingStepInfo[] | null }
@@ -239,6 +243,30 @@ export default function OperatorKiosk() {
       } catch (err) {
         // Keep the production view (and its entered quantities) on failure.
         showToast('error', kioskErrorMessage(err, 'Could not save production. Try again.'));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [refresh, showToast]
+  );
+
+  const handleCorrectProduction = useCallback(
+    async (job: ActiveJob, quantity: number, reason: string) => {
+      if (!job.operation_id) return;
+      setBusy(true);
+      try {
+        await api.reduceOperationProduction(job.operation_id, {
+          quantity_delta: quantity,
+          reason,
+          source: KIOSK_SOURCE,
+        });
+        showToast('success', `Removed ${quantity} from ${job.work_order_number || 'this job'}`);
+        setView({ name: 'queue' });
+        await refresh();
+      } catch (err) {
+        // Non-optimistic: the count never moved locally. Keep the correction view
+        // (entered quantity retained) and surface the server's refusal verbatim.
+        showToast('error', kioskErrorMessage(err, 'Could not correct the count. Try again.'));
       } finally {
         setBusy(false);
       }
@@ -477,6 +505,7 @@ export default function OperatorKiosk() {
                     : undefined
                 }
                 onReportProduction={() => setView({ name: 'production', job: activeJob })}
+                onCorrect={() => setView({ name: 'correct', job: activeJob })}
                 onComplete={() => setView({ name: 'complete', job: activeJob })}
                 onHold={() => {
                   setHoldReason(null);
@@ -579,6 +608,15 @@ export default function OperatorKiosk() {
             scrapCodes={scrapCodes}
             busy={mutationsBlocked}
             onConfirm={(good, scrap, reason, codeId) => void handleReportProduction(view.job, good, scrap, reason, codeId)}
+            onCancel={() => setView({ name: 'queue' })}
+          />
+        )}
+
+        {view.name === 'correct' && (
+          <KioskCorrectionScreen
+            jobLabel={jobLabel(view.job)}
+            busy={mutationsBlocked}
+            onConfirm={(quantity, reason) => void handleCorrectProduction(view.job, quantity, reason)}
             onCancel={() => setView({ name: 'queue' })}
           />
         )}

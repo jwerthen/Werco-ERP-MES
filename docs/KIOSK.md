@@ -92,6 +92,22 @@ URL is all the station setup there is.
      missing, quality hold, …), then `PUT /shop-floor/operations/{id}/hold` at `medium`
      severity. A kiosk hold files the same structured `WorkOrderBlocker` a supervisor would.
 
+   Below the three primary verbs the banner carries a **lower-emphasis** fourth action —
+   deliberately styled apart so it can't be tapped by mistake:
+   - **CORRECT OVER-COUNT** — opens a touch `KioskCorrectionScreen` (digits-only keypad, **no
+     minus key**, plus a **required** correction-reason tile from a set **distinct from the scrap
+     grid** — "Double-counted", "Scanned twice", "Wrong qty entered", "Mis-key / typo", "Wrong
+     job", "Other"). Confirm posts `POST /shop-floor/operations/{id}/reduce-production` with
+     `{quantity_delta, reason, source: "kiosk"}`. This **removes good pieces the operator
+     OVER-reported** on the job they are actively working — a **miscount fix, not scrap** (nothing
+     moves to scrap). What it can/can't do is enforced server-side, not in the UI: it only walks
+     back **the operator's OWN open clock-in** (never another operator's count), only **before**
+     the operation/WO is complete (a complete op/terminal WO is refused **409** "ask a
+     supervisor"), and only up to what they recorded (**400** otherwise). Every walk-back is
+     tamper-evidently audited with its reason. Like every kiosk verb it is **non-optimistic** — the
+     count never moves locally; the screen keeps the entered quantity and surfaces the server's
+     refusal verbatim (see `docs/API.md` → Shop Floor → "Over-count correction").
+
 **Scrap reason picker — company codes vs. legacy grid (Lean Phase 1).** What the required
 scrap grid contains depends on whether the company has **active scrap reason codes** (the
 tenant vocabulary behind `GET /quality/scrap-reason-codes` — see `docs/API.md` → Quality):
@@ -420,6 +436,16 @@ token scope was widened. An empty array means no active codes → the legacy gri
   clock out) and the joinable jobs at this station.
 - **REPORT PRODUCTION.** Quantities first, then a **badge-signature scan** saves the report as
   that operator (`POST /shop-floor/operations/{id}/production`).
+- **CORRECT OVER-COUNT.** The same `KioskCorrectionScreen` as the single-operator mode (quantity to
+  remove + a **required** correction-reason tile, distinct from the scrap grid), then a
+  **badge-signature scan** saves the walk-back as that operator
+  (`POST /shop-floor/operations/{id}/reduce-production`). The signing badge **must have an open
+  clock-in on this op** — that is precisely how the server bounds the walk-back to **their own**
+  recorded evidence (crew-safe: one welder can't erase another's pieces). It **removes good pieces
+  over-reported by mistake — not scrap**, and is refused once the op/WO is complete (**409** "ask a
+  supervisor"). The success toast quotes the corrected crew total; a verbatim refusal (e.g. "you can
+  only remove up to the N piece(s) you recorded") keeps the quantity + reason so the **right** badge
+  can re-scan.
 - **COMPLETE (crew-wide, confirmed).** Completion auto-closes **every** operator's open entry on
   the operation, so the confirm dialog names who else gets clocked out, with their running
   durations, re-derived live from queue state. A badge scan inside the dialog signs it; if final

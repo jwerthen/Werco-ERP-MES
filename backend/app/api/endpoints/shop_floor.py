@@ -7,7 +7,7 @@ from datetime import date, datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, Request, Response, UploadFile
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import and_, func, or_
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, joinedload, selectinload
@@ -122,6 +122,7 @@ from app.services.work_order_state_service import (
     has_incomplete_predecessors,
     operation_target_quantity,
     reconcile_work_orders_from_completion_evidence,
+    reduce_operation_produced_quantity,
     resolve_absolute_operation_quantity,
     sync_work_order_quantity_complete,
     validate_operation_quantity,
@@ -186,6 +187,59 @@ class ProductionReportRequest(BaseModel):
                 "scrap_reason or scrap_reason_code_id is required when quantity_scrapped_delta is greater than 0"
             )
         return self
+
+
+class ProductionReductionRequest(BaseModel):
+    """Operator self-service over-count correction (inverse of ``ProductionReportRequest``).
+
+    Removes good-count quantity the operator accidentally over-reported on an
+    operation they are ACTIVELY working, BEFORE the operation / work order is
+    complete. This is a miscount correction, NOT a scrap move: it never touches
+    scrap fields, never changes status, and is bounded to the caller's own open
+    clock-in evidence.
+    """
+
+    quantity_delta: float = Field(
+        ...,
+        gt=0,
+        description="Good-count quantity to REMOVE from this operation. Must be > 0 and no greater "
+        "than the quantity the caller recorded on their current (open) clock-in.",
+    )
+    # Correction reason for the tamper-evident audit trail -- this is NOT a scrap reason
+    # (no scrap moves here). Required and non-blank so every walk-back is explainable.
+    reason: str = Field(
+        ...,
+        min_length=1,
+        max_length=255,
+        description="Why the count is being corrected (e.g. 'double-scanned the tray'). Required "
+        "for the audit trail; this is a correction reason, NOT a scrap reason.",
+    )
+    # A0.1 adoption telemetry: same trust model / channel semantics as the additive twin.
+    source: Optional[TimeEntrySource] = Field(
+        None,
+        description="Adoption-telemetry channel of this correction (kiosk | desktop | scanner | "
+        "backfill). Omit to keep the active entry's existing channel. 'import' is rejected (422) here "
+        "(reserved for the bulk-migration loaders); a kiosk-scoped operator token forces 'kiosk' "
+        "regardless of this hint.",
+    )
+    notes: Optional[str] = Field(None, description="Optional extra note appended to the active time entry.")
+
+    @field_validator("quantity_delta")
+    @classmethod
+    def _finite_delta(cls, value: float) -> float:
+        # Mirror the additive report's numeric guard: reject NaN/Inf at the boundary
+        # (gt=0 already rejects NaN and negatives, but +Inf slips past a bare gt).
+        if math.isnan(value) or math.isinf(value):
+            raise ValueError("quantity_delta must be a finite number")
+        return value
+
+    @field_validator("reason")
+    @classmethod
+    def _reason_not_blank(cls, value: str) -> str:
+        # Whitespace-only is meaningless for an audit trail; treat it as missing.
+        if not value.strip():
+            raise ValueError("reason is required")
+        return value.strip()
 
 
 class OperationHoldRequest(BaseModel):
@@ -2744,6 +2798,309 @@ def report_operation_production(
 
     return {
         "message": "Production quantity added",
+        "operation": {
+            "id": operation.id,
+            "status": operation.status.value,
+            "quantity_complete": operation.quantity_complete,
+            "quantity_scrapped": operation.quantity_scrapped,
+            "quantity_ordered": target_qty,
+        },
+        "active_time_entry": {
+            "id": active_entry.id,
+            "quantity_produced": active_entry.quantity_produced,
+            "quantity_scrapped": active_entry.quantity_scrapped,
+            "clock_out": to_utc_iso(active_entry.clock_out),
+        },
+    }
+
+
+@router.post("/operations/{operation_id}/reduce-production")
+def reduce_operation_production(
+    operation_id: int,
+    reduction_data: ProductionReductionRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """
+    Correct (walk back) good-count quantity an operator OVER-reported on an
+    operation they are actively working, BEFORE it is complete. This is the inverse
+    of ``report_operation_production`` -- a miscount correction, not a scrap move and
+    not a completion.
+
+    Reconcile-safety is the crux: produced quantity is monotonic-up and re-derived
+    from durable ``TimeEntry.quantity_produced`` evidence on every WO read, so the
+    reduction lowers the backing evidence, the operation total, and the WO rollup in
+    lock-step (see ``reduce_operation_produced_quantity``) -- otherwise the next read
+    would re-raise the count. Scrap fields and status are left untouched; the op / WO
+    stay in progress.
+
+    Preconditions (each a clear 4xx; the UI reflects only what we return):
+
+    * Operation missing / cross-tenant -> 404.
+    * Terminal work order (COMPLETE/CLOSED/CANCELLED) or a COMPLETE operation -> 409
+      (finished work is corrected by a supervisor, not self-service here). Re-checked
+      under the row lock so a concurrent WO-cancel can't slip a reduction through.
+    * No open clock-in of the caller on this operation -> 400.
+    * The caller's open clock-in has already been APPROVED -> 409 (G5-A segregation of
+      duties: a supervisor unapproves before a signed-off count can be corrected).
+    * ``quantity_delta`` greater than what the caller recorded on THAT clock-in -> 400
+      (crew-safe: an operator can never walk back another operator's evidence, and the
+      entry can never go below zero).
+    """
+    operation = (
+        db.query(WorkOrderOperation)
+        .options(joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part))
+        .filter(
+            WorkOrderOperation.id == operation_id,
+            WorkOrderOperation.company_id == company_id,
+        )
+        .first()
+    )
+
+    if not operation:
+        raise HTTPException(status_code=404, detail="Operation not found")
+
+    work_order = operation.work_order
+    if not work_order:
+        raise HTTPException(status_code=404, detail="Work order not found for this operation")
+
+    # Before-completion scope gate (non-optimistic): once the operation is COMPLETE or
+    # the work order is terminal, downstream inventory / cost / FG effects have fired
+    # and self-service correction is out of bounds. 409 Conflict.
+    if work_order.status in TERMINAL_WO_STATUSES or operation.status == OperationStatus.COMPLETE:
+        raise HTTPException(
+            status_code=409,
+            detail="Completed work can't be corrected here -- ask a supervisor",
+        )
+
+    active_entry = (
+        db.query(TimeEntry)
+        .filter(
+            and_(
+                TimeEntry.user_id == current_user.id,
+                TimeEntry.operation_id == operation_id,
+                TimeEntry.clock_out.is_(None),
+                TimeEntry.company_id == company_id,
+            )
+        )
+        .first()
+    )
+    if not active_entry:
+        raise HTTPException(
+            status_code=400,
+            detail="You must be clocked in to this operation to correct its count",
+        )
+
+    # G5-A segregation of duties: an open entry can still be APPROVED (the approve
+    # endpoint has no clock-out guard). Self-service must never walk back a count a
+    # supervisor already signed off on -- that would leave approved_by endorsing a
+    # value the approver never saw. Refuse BEFORE any mutation; a supervisor unapproves
+    # first. 409 Conflict. (A concurrent approval AFTER this check bumps the entry
+    # version and is caught as a 409 at commit.)
+    if active_entry.approved is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="This labor has been approved -- ask a supervisor to correct it.",
+        )
+
+    # quantity_delta is already > 0 and finite (schema field validators).
+    delta = reduction_data.quantity_delta
+
+    # Crew-safety bound: an operator may only walk back what THEY recorded on THIS
+    # clock-in -- never another operator's evidence -- which also keeps the entry >= 0.
+    recorded = float(active_entry.quantity_produced or 0)
+    if delta > recorded:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"You can only remove up to the {recorded:g} piece(s) you recorded on this "
+                "clock-in; ask a supervisor to correct more."
+            ),
+        )
+
+    # A0.1 adoption-telemetry channel (kiosk-token forcing + import guard) resolved
+    # before any mutation so a disallowed 'import' 422s without touching the entry.
+    recorded_source = _resolve_labor_source(current_user, reduction_data.source)
+
+    # SFI-1: take the SAME row locks and lock ORDER the completion paths use --
+    # OPERATION first, then WORK ORDER (with_for_update) -- so the downward rollup
+    # serializes against concurrent producers instead of racing last-writer-wins.
+    # Re-read the freshest committed rows off the locked query. Tenant-scoped and
+    # soft-delete-aware.
+    operation = (
+        db.query(WorkOrderOperation)
+        .filter(
+            WorkOrderOperation.id == operation_id,
+            WorkOrderOperation.company_id == company_id,
+        )
+        .with_for_update()
+        .first()
+    )
+    if not operation:
+        raise HTTPException(status_code=404, detail="Operation not found")
+
+    work_order = (
+        db.query(WorkOrder)
+        .filter(
+            WorkOrder.id == operation.work_order_id,
+            WorkOrder.company_id == company_id,
+            WorkOrder.is_deleted == False,  # noqa: E712
+        )
+        .with_for_update()
+        .first()
+    )
+    if not work_order:
+        raise HTTPException(status_code=404, detail="Work order not found for this operation")
+
+    # TOCTOU re-check under the lock (mirrors complete_operation's post-lock terminal
+    # guard): re-assert the before-completion gate against the freshest committed rows.
+    # The op-COMPLETE race is also caught by the operation version bump, but a concurrent
+    # WO-cancel does NOT bump the entry/operation version -- without this a reduction
+    # could commit against a just-CANCELLED work order. 409 Conflict.
+    if work_order.status in TERMINAL_WO_STATUSES or operation.status == OperationStatus.COMPLETE:
+        raise HTTPException(
+            status_code=409,
+            detail="Completed work can't be corrected here -- ask a supervisor",
+        )
+
+    target_qty = operation_target_quantity(operation, work_order)
+
+    # Load the WO's operations under the WO row lock so the service can RECOMPUTE the
+    # rollup from the siblings (they are only written while holding this WO lock, so
+    # they are stable + fresh here). Loaded before the mutation -- nothing is pending to
+    # flush -- and includes the corrected operation itself (identity-mapped, so it will
+    # reflect the lowered count the service is about to set).
+    work_order_operations = list(work_order.operations)
+
+    # Lower the durable evidence + the operation total by delta, then recompute the WO
+    # rollup from the siblings (a blind subtract would corrupt a multi-op WO). See the
+    # service docstring for why this stays reconcile-safe.
+    reduction = reduce_operation_produced_quantity(operation, work_order, active_entry, delta, work_order_operations)
+
+    operation.updated_at = datetime.utcnow()
+    sync_laser_nest_from_operation(operation)
+
+    if reduction_data.notes:
+        active_entry.notes = (
+            f"{active_entry.notes}\n{reduction_data.notes}" if active_entry.notes else reduction_data.notes
+        )
+    # A0.1 adoption telemetry: record the channel when this write carries one (a
+    # kiosk-scoped token always resolves to KIOSK); omitted -> keep the entry's channel.
+    if recorded_source:
+        active_entry.source = recorded_source
+    active_entry.updated_at = datetime.utcnow()
+    work_order.updated_at = datetime.utcnow()
+
+    # Best-effort telemetry (never fails the request); emitted BEFORE commit because
+    # emit_best_effort only flushes. Mirrors clock_in/clock_out/complete emitting a
+    # shop-floor OperationalEvent.
+    OperationalEventService(db).emit_best_effort(
+        company_id=company_id,
+        event_type="operation_production_reduced",
+        source_module="shop_floor",
+        entity_type="work_order_operation",
+        entity_id=operation.id,
+        work_order_id=work_order.id,
+        operation_id=operation.id,
+        user_id=current_user.id,
+        severity="info",
+        event_payload={
+            "work_order_number": work_order.work_order_number,
+            "operation_number": operation.operation_number,
+            "quantity_delta": delta,
+            "quantity_complete_before": reduction.operation_quantity_complete_before,
+            "quantity_complete_after": reduction.operation_quantity_complete_after,
+            "time_entry_id": active_entry.id,
+            "reason": reduction_data.reason,
+            "source": recorded_source,
+        },
+    )
+
+    # Tamper-evident audit (hash chain): old->new quantity_complete + the affected time
+    # entry, carrying the operator-supplied correction reason. Flushed inside this unit
+    # of work so it commits atomically with the reduction. The audited diff also carries
+    # the affected TimeEntry.quantity_produced before->after: unlike quantity_complete
+    # (which could in principle be floored elsewhere), this value is ALWAYS lowered by a
+    # positive delta, so log_update's empty-diff skip can never fire and a correction can
+    # never commit unaudited (defense-in-depth).
+    audit.log_update(
+        resource_type="work_order_operation",
+        resource_id=operation.id,
+        resource_identifier=f"WO {work_order.work_order_number} / OP {operation.operation_number}",
+        old_values={
+            "quantity_complete": reduction.operation_quantity_complete_before,
+            "time_entry_quantity_produced": reduction.time_entry_quantity_produced_before,
+        },
+        new_values={
+            "quantity_complete": reduction.operation_quantity_complete_after,
+            "time_entry_quantity_produced": reduction.time_entry_quantity_produced_after,
+        },
+        action="reduce_operation_production",
+        description=(
+            f"Corrected over-reported production on operation {operation.operation_number} "
+            f"for WO {work_order.work_order_number}. Removed {delta:g}. "
+            f"Qty: {reduction.operation_quantity_complete_after:g}/{target_qty:g}. "
+            f"Reason: {reduction_data.reason}" + (f". Notes: {reduction_data.notes}" if reduction_data.notes else "")
+        ),
+        extra_data={
+            "reason": reduction_data.reason,
+            "quantity_delta": delta,
+            "time_entry_id": active_entry.id,
+            "time_entry_quantity_produced_before": reduction.time_entry_quantity_produced_before,
+            "time_entry_quantity_produced_after": reduction.time_entry_quantity_produced_after,
+            "work_order_id": work_order.id,
+            "work_order_quantity_complete_before": reduction.work_order_quantity_complete_before,
+            "work_order_quantity_complete_after": reduction.work_order_quantity_complete_after,
+        },
+    )
+
+    try:
+        db.commit()
+    except StaleDataError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="This operation was modified concurrently. Refresh and retry.",
+        ) from exc
+    db.refresh(operation)
+    db.refresh(active_entry)
+
+    if operation.work_center_id:
+        safe_broadcast(
+            broadcast_shop_floor_update,
+            operation.work_center_id,
+            {
+                "event": "operation_production_reduced",
+                "work_order_id": work_order.id,
+                "operation_id": operation.id,
+                "quantity_complete": operation.quantity_complete,
+                "quantity_scrapped": operation.quantity_scrapped,
+            },
+            company_id=company_id,
+        )
+    safe_broadcast(
+        broadcast_work_order_update,
+        work_order.id,
+        {
+            "event": "operation_production_reduced",
+            "operation_id": operation.id,
+        },
+        company_id=company_id,
+    )
+    safe_broadcast(
+        broadcast_dashboard_update,
+        {
+            "event": "operation_production_reduced",
+            "work_order_id": work_order.id,
+            "operation_id": operation.id,
+        },
+        company_id=company_id,
+    )
+
+    return {
+        "message": "Production quantity corrected",
         "operation": {
             "id": operation.id,
             "status": operation.status.value,
