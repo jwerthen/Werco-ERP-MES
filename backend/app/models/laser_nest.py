@@ -8,12 +8,20 @@ from app.db.mixins import SoftDeleteMixin, TenantMixin
 
 
 class LaserNestPackage(Base, TenantMixin):
-    """Imported laser nest package tied to a parent assembly work order."""
+    """Imported laser nest package.
+
+    Classic flow: tied to a parent assembly work order (``parent_work_order_id``
+    set) with the nests built onto a LASER_CUTTING child WO. Standalone flow:
+    the package is imported straight into a part-less laser-cutting WO with no
+    parent, so ``parent_work_order_id`` is NULL and ``child_work_order_id``
+    points at the standalone nest WO.
+    """
 
     __tablename__ = "laser_nest_packages"
 
     id = Column(Integer, primary_key=True, index=True)
-    parent_work_order_id = Column(Integer, ForeignKey("work_orders.id"), nullable=False, index=True)
+    # NULLABLE: standalone nest packages have no parent assembly work order.
+    parent_work_order_id = Column(Integer, ForeignKey("work_orders.id"), nullable=True, index=True)
     child_work_order_id = Column(Integer, ForeignKey("work_orders.id"), nullable=True, index=True)
     package_name = Column(String(255), nullable=False)
     source_path = Column(String(1000), nullable=True)

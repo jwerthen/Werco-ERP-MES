@@ -89,7 +89,8 @@ export interface WorkOrder {
   id: number;
   version: number;  // For optimistic locking
   work_order_number: string;
-  part_id: number;
+  /** NULL only for standalone laser-cutting (nest package) work orders. */
+  part_id: number | null;
   parent_work_order_id?: number;
   work_order_type: string;
   quantity_ordered: number;
@@ -275,15 +276,31 @@ export interface LaserNestImportRow {
   sheet_size: string | null;
 }
 
+/**
+ * Result of a nest-package import (parented or standalone). `child_work_order`
+ * is the laser-cutting WO the nests landed on: the auto-created child under an
+ * assembly WO, the target WO itself when it is already laser_cutting, or — for
+ * the standalone import — a fresh RELEASED laser WO with no parent and no part
+ * whose `quantity_ordered` is the total planned sheet runs.
+ */
+export interface LaserNestPackageImportResult {
+  package?: LaserNestPackagePreview;
+  child_work_order?: {
+    id: number;
+    work_order_number: string;
+  } | null;
+}
+
 export interface WorkOrderSummary {
   id: number;
   work_order_number: string;
-  part_id: number;
+  /** NULL only for standalone laser-cutting (nest package) work orders. */
+  part_id: number | null;
   parent_work_order_id?: number;
   work_order_type: string;
-  part_number?: string;
-  part_name?: string;
-  part_type?: string;
+  part_number?: string | null;
+  part_name?: string | null;
+  part_type?: string | null;
   status: WorkOrderStatus;
   priority: number;
   quantity_ordered: number;

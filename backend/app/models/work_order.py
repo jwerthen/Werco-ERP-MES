@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, Date, DateTime
+from sqlalchemy import Boolean, CheckConstraint, Column, Date, DateTime
 from sqlalchemy import Enum as SQLEnum
 from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
@@ -37,13 +37,25 @@ class WorkOrder(Base, SoftDeleteMixin, TenantMixin):
     """Manufacturing Work Order / Job"""
 
     __tablename__ = "work_orders"
-    __table_args__ = (UniqueConstraint('company_id', 'work_order_number', name='uq_work_orders_company_wo_number'),)
+    __table_args__ = (
+        UniqueConstraint('company_id', 'work_order_number', name='uq_work_orders_company_wo_number'),
+        # part_id is nullable ONLY for standalone laser-cutting nest WOs (sheet-run
+        # jobs born from an Ermaksan nest package, no finished-good part). Every
+        # other work_order_type still requires a part -- enforced here at the model
+        # level so create_all test DBs / fresh bootstraps carry the CHECK, and
+        # mirrored byte-identically in Alembic migration 067 for migrated Postgres.
+        CheckConstraint(
+            "part_id IS NOT NULL OR work_order_type = 'laser_cutting'",
+            name="ck_work_orders_part_required_unless_laser",
+        ),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     work_order_number = Column(String(50), index=True, nullable=False)
 
-    # Part/Assembly being made
-    part_id = Column(Integer, ForeignKey("parts.id"), nullable=False)
+    # Part/Assembly being made. NULLABLE only for work_order_type='laser_cutting'
+    # (standalone nest WOs) -- see the table CHECK constraint above.
+    part_id = Column(Integer, ForeignKey("parts.id"), nullable=True)
     parent_work_order_id = Column(Integer, ForeignKey("work_orders.id"), nullable=True, index=True)
     work_order_type = Column(String(50), default=WorkOrderType.PRODUCTION.value, nullable=False, index=True)
     quantity_ordered = Column(Float, nullable=False)

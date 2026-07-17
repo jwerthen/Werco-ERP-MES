@@ -91,7 +91,10 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > (create), `PATCH /api/v1/laser-nests/{id}` (edit), `POST /api/v1/laser-nests/{id}/attach-document`
 > and `DELETE /api/v1/laser-nests/{id}/document` (attach/detach the reference PDF), and
 > `DELETE /api/v1/laser-nests/{id}` (soft-delete; the operation goes `ON_HOLD`). This matches the
-> existing laser-nest **package import** trio (`…/laser-nest-packages/preview` and `…/import`) and the
+> laser-nest **package import** endpoints — the per-WO pair (`…/{id}/laser-nest-packages/preview`
+> and `…/import`) and the no-WO **standalone** pair
+> (`…/laser-nest-packages/standalone/preview|import`, whose import creates a fresh part-less
+> laser-cutting work order) — and the
 > stateless PDF field-extraction endpoint `POST /api/v1/laser-nests/extract` (same ADMIN/MANAGER/
 > SUPERVISOR gate; no DB write, no audit). The
 > **exception** is the operator-readable inline PDF preview `GET /api/v1/laser-nests/{id}/document`,

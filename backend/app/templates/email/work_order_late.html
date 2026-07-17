@@ -8,13 +8,14 @@
 </div>
 
 <table style="width: 100%; margin: 20px 0;">
+    {# Standalone laser nest WOs carry no part — mirror the app's "Nest package" labeling. #}
     <tr>
         <td><strong>Part Number:</strong></td>
-        <td>{{ work_order.part.part_number }}</td>
+        <td>{% if work_order.part %}{{ work_order.part.part_number }}{% else %}Nest package{% endif %}</td>
     </tr>
     <tr>
         <td><strong>Description:</strong></td>
-        <td>{{ work_order.part.description }}</td>
+        <td>{% if work_order.part %}{{ work_order.part.description }}{% else %}Standalone laser-cutting nest work order{% endif %}</td>
     </tr>
     <tr>
         <td><strong>Quantity:</strong></td>

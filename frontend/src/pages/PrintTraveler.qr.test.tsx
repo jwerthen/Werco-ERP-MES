@@ -183,3 +183,41 @@ describe('PrintTraveler scan QRs', () => {
     expect(screen.getByText(/^Printed: /)).toBeInTheDocument();
   });
 });
+
+describe('PrintTraveler — part-less standalone laser nest WO', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    // A standalone laser nest WO: part_id NULL, quantity = sheet runs.
+    mockedApi.getWorkOrder.mockResolvedValue({
+      ...WORK_ORDER,
+      part_id: null,
+      work_order_type: 'laser_cutting',
+    });
+    mockedApi.getMaterialRequirements.mockResolvedValue({
+      work_order_id: 42,
+      work_order_number: 'WO-2026-0042',
+      quantity_ordered: 25,
+      has_bom: false,
+      materials: [],
+    });
+    mockedToDataURL.mockImplementation(async (payload: string) => `data:image/png;base64,${encodeURIComponent(payload)}`);
+  });
+
+  it('skips the part fetch, renders an em-dash part number, and suppresses the "No BOM" note', async () => {
+    renderTraveler();
+
+    await waitFor(() => expect(screen.getByText('WORK ORDER TRAVELER')).toBeInTheDocument());
+
+    // No part on the WO → no part fetch fired.
+    expect(mockedApi.getPart).not.toHaveBeenCalled();
+    // The Part Number cell renders an em-dash, not a blank/undefined.
+    expect(screen.getByText('—')).toBeInTheDocument();
+    // has_bom:false on a part-less WO must NOT print the "No BOM defined for
+    // this part" note — there is no part for it to refer to.
+    expect(screen.queryByText(/no bom defined for this part/i)).not.toBeInTheDocument();
+    // The traveler still renders its routing steps and header QR.
+    await waitFor(() => expect(screen.getByAltText('Work Order QR')).toBeInTheDocument());
+    expect(screen.getByText('OP:101')).toBeInTheDocument();
+    expect(screen.queryByText(/undefined/)).not.toBeInTheDocument();
+  });
+});

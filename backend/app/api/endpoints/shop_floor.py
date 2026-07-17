@@ -2281,7 +2281,9 @@ def get_all_operations(
         search_term = f"%{search}%"
         from app.models.part import Part
 
-        query = query.join(Part, WorkOrder.part_id == Part.id).filter(
+        # Outer join: standalone laser-cutting WOs have part_id NULL, and their
+        # operations must still match a work-order-number search.
+        query = query.outerjoin(Part, WorkOrder.part_id == Part.id).filter(
             or_(WorkOrder.work_order_number.ilike(search_term), Part.part_number.ilike(search_term))
         )
 

@@ -5,22 +5,25 @@ import { WorkOrderSummary, WorkOrderStatus } from '../types';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { buildWsUrl, getAccessToken } from '../services/realtime';
 import { useAuth } from '../context/AuthContext';
+import { hasPermission } from '../utils/permissions';
 import { formatCentralDate, isDateBeforeTodayInCentral, isDateTodayInCentral } from '../utils/centralTime';
-import { 
-  PlusIcon, 
-  MagnifyingGlassIcon, 
-  Squares2X2Icon, 
+import {
+  PlusIcon,
+  MagnifyingGlassIcon,
+  Squares2X2Icon,
   ListBulletIcon,
   ChevronRightIcon,
   ClockIcon,
   ExclamationTriangleIcon,
   TrashIcon,
   CheckCircleIcon,
+  ArrowUpTrayIcon,
 } from '@heroicons/react/24/outline';
 import { SkeletonTable, SkeletonCard } from '../components/ui/Skeleton';
 import { EmptyState, ErrorState, useToast, DataTable, DataTableColumn, StatusBadge, Button } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { useOptimisticMutation } from '../hooks/useOptimisticMutation';
+import LaserNestImportWizard from '../components/laser/LaserNestImportWizard';
 
 const priorityConfig: Record<number, { bg: string; text: string; label: string }> = {
   1: { bg: 'bg-red-500/20', text: 'text-red-400', label: 'Critical' },
@@ -206,8 +209,14 @@ function buildWorkOrderColumns({
       csv: (wo) => wo.part_number ?? '',
       render: (wo) => (
         <div>
-          <p className="font-medium text-surface-900">{wo.part_number}</p>
-          <p className="text-sm text-surface-500 line-clamp-1">{wo.part_name}</p>
+          {/* Standalone laser nest WOs carry no part — label them instead of
+              rendering blank cells. */}
+          <p className="font-medium text-surface-900">
+            {wo.part_number || (wo.work_order_type === 'laser_cutting' ? 'Nest package' : '—')}
+          </p>
+          <p className="text-sm text-surface-500 line-clamp-1">
+            {wo.part_name || (!wo.part_number && wo.work_order_type === 'laser_cutting' ? 'Laser sheet runs' : '')}
+          </p>
         </div>
       ),
     });
@@ -278,6 +287,10 @@ export default function WorkOrders() {
   const navigate = useNavigate();
   const { showToast } = useToast();
   const canDeleteWorkOrders = user?.role === 'admin' || !!user?.is_superuser;
+  // Matches the backend RBAC on the nest endpoints (admin/manager/supervisor,
+  // + platform_admin) — the same gate WorkOrderDetail uses for nest actions.
+  const canImportNests = hasPermission(user?.role, 'routings:create');
+  const [nestWizardOpen, setNestWizardOpen] = useState(false);
   const [workOrders, setWorkOrders] = useState<WorkOrderSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
@@ -421,6 +434,18 @@ export default function WorkOrders() {
     runDelete({ wo, index: index === -1 ? workOrdersRef.current.length : index });
   }, [runDelete]);
 
+  // Standalone nest import: the wizard created a fresh released laser WO (no
+  // parent, no part) — route to it, mirroring WorkOrderDetail's handler.
+  const handleNestPackageImported = useCallback((newWorkOrderId?: number) => {
+    setNestWizardOpen(false);
+    showToast('success', 'Nest package imported — laser work order created.');
+    if (newWorkOrderId) {
+      navigate(`/work-orders/${newWorkOrderId}`);
+    } else {
+      loadWorkOrders();
+    }
+  }, [navigate, loadWorkOrders, showToast]);
+
   const handleRelease = useCallback(async (wo: WorkOrderSummary) => {
     if (wo.status !== 'draft') return;
     setReleasingIds((prev) => new Set(prev).add(wo.id));
@@ -477,7 +502,7 @@ export default function WorkOrders() {
           key = wo.customer_name || 'No Customer';
           break;
         case 'part':
-          key = wo.part_number || 'No Part';
+          key = wo.part_number || (wo.work_order_type === 'laser_cutting' ? 'Nest Packages' : 'No Part');
           break;
         case 'status':
           key = wo.status;
@@ -538,6 +563,16 @@ export default function WorkOrders() {
           <p className="page-subtitle">Manage and track manufacturing orders</p>
         </div>
         <div className="page-actions w-full sm:w-auto" data-tour="wo-create">
+          {canImportNests && (
+            <Button
+              variant="secondary"
+              onClick={() => setNestWizardOpen(true)}
+              className="w-full sm:w-auto flex items-center justify-center"
+            >
+              <ArrowUpTrayIcon className="h-5 w-5 mr-2 flex-shrink-0" />
+              Import Nest Package
+            </Button>
+          )}
           <Link to="/work-orders/new" className="btn-primary w-full sm:w-auto">
             <PlusIcon className="h-5 w-5 mr-2 flex-shrink-0" />
             New Work Order
@@ -732,6 +767,14 @@ export default function WorkOrders() {
           )}
         </div>
       )}
+
+      {canImportNests && (
+        <LaserNestImportWizard
+          open={nestWizardOpen}
+          onClose={() => setNestWizardOpen(false)}
+          onImported={handleNestPackageImported}
+        />
+      )}
     </div>
   );
 }
@@ -820,8 +863,13 @@ const WorkOrderMobileCard = React.memo(function WorkOrderMobileCard({ workOrder:
 
       <div className="px-4 py-3 space-y-3">
         <div className="min-w-0">
-          <p className="text-sm font-medium text-surface-900 truncate">{wo.part_number || 'No part number'}</p>
-          <p className="text-sm text-surface-500 line-clamp-2">{wo.part_name || 'No part description'}</p>
+          <p className="text-sm font-medium text-surface-900 truncate">
+            {wo.part_number || (wo.work_order_type === 'laser_cutting' ? 'Nest package' : 'No part number')}
+          </p>
+          <p className="text-sm text-surface-500 line-clamp-2">
+            {wo.part_name ||
+              (wo.work_order_type === 'laser_cutting' && !wo.part_number ? 'Laser sheet runs' : 'No part description')}
+          </p>
         </div>
 
         <div className="grid grid-cols-2 gap-3">

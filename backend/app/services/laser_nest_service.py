@@ -212,7 +212,7 @@ def _create_nest_document(
     db: Session,
     *,
     nest: ParsedLaserNest,
-    parent_work_order: WorkOrder,
+    work_order: WorkOrder,
     company_id: int,
     created_by: Optional[int],
     saved_storage_keys: Optional[list[str]] = None,
@@ -221,8 +221,10 @@ def _create_nest_document(
 
     Mirrors ``documents.upload_document`` storage handling: tenant-prefixed
     object key on remote storage, legacy ``UPLOAD_DIR/{uuid}{ext}`` layout
-    locally. The drawing is scoped to the PARENT assembly work order (matching
-    the manual-modal attach path). Returns None when the nest has no PDF source.
+    locally. The drawing is scoped to ``work_order`` -- the PARENT assembly WO
+    in the classic flow (matching the manual-modal attach path), or the
+    standalone laser-cutting WO itself when there is no parent. Returns None
+    when the nest has no PDF source.
 
     ``storage.save`` writes a REAL blob (disk/S3) BEFORE the surrounding
     transaction commits. Every reference it returns is appended to
@@ -256,7 +258,7 @@ def _create_nest_document(
         revision="A",
         title=nest.cnc_number or nest.nest_name,
         document_type=DocumentType.DRAWING,
-        work_order_id=parent_work_order.id,
+        work_order_id=work_order.id,
         file_name=nest.cnc_file_name,
         file_path=file_path,
         file_size=len(content),
@@ -273,7 +275,7 @@ def _create_nest_document(
 def build_laser_nest_child_work_order(
     db: Session,
     *,
-    parent_work_order: WorkOrder,
+    parent_work_order: Optional[WorkOrder],
     child_work_order: WorkOrder,
     package_name: str,
     package_source_path: Optional[str],
@@ -283,7 +285,13 @@ def build_laser_nest_child_work_order(
     created_by: Optional[int],
     saved_storage_keys: Optional[list[str]] = None,
 ) -> LaserNestPackage:
-    """Replace a child laser WO's nest tasks with the supplied package plan.
+    """Replace a laser WO's nest tasks with the supplied package plan.
+
+    ``parent_work_order`` is the assembly WO in the classic child-laser-WO flow.
+    It is ``None`` for a STANDALONE nest WO (part-less laser-cutting WO with no
+    parent): the package then carries ``parent_work_order_id IS NULL``, no
+    parent linkage is written onto ``child_work_order``, and nest-PDF Documents
+    attach to ``child_work_order`` itself instead of a parent.
 
     ``saved_storage_keys`` (when supplied) collects every storage reference this
     build writes for nest-PDF Documents. ``storage.save`` writes the blob BEFORE
@@ -325,7 +333,7 @@ def build_laser_nest_child_work_order(
 
     package = LaserNestPackage(
         company_id=company_id,
-        parent_work_order_id=parent_work_order.id,
+        parent_work_order_id=parent_work_order.id if parent_work_order is not None else None,
         child_work_order_id=child_work_order.id,
         package_name=package_name,
         source_path=package_source_path,
@@ -356,12 +364,14 @@ def build_laser_nest_child_work_order(
         db.flush()
 
         # PDF nests carry their source bytes: store them as a DRAWING Document
-        # (scoped to the parent WO) and attach it via document_id. CNC-file nests
-        # have no pdf_source_path, so this is a no-op for the legacy import path.
+        # and attach it via document_id. Scoped to the parent WO in the classic
+        # flow; to the standalone laser WO itself when there is no parent.
+        # CNC-file nests have no pdf_source_path, so this is a no-op for the
+        # legacy import path.
         document = _create_nest_document(
             db,
             nest=nest,
-            parent_work_order=parent_work_order,
+            work_order=parent_work_order if parent_work_order is not None else child_work_order,
             company_id=company_id,
             created_by=created_by,
             saved_storage_keys=saved_storage_keys,
@@ -393,7 +403,10 @@ def build_laser_nest_child_work_order(
 
     total_runs = sum(nest.planned_runs for nest in nests)
     child_work_order.quantity_ordered = float(total_runs or 1)
-    child_work_order.parent_work_order_id = parent_work_order.id
+    # Standalone nest WOs stay parent-less: never write a parent linkage (and
+    # never self-reference) when there is no parent assembly WO.
+    if parent_work_order is not None:
+        child_work_order.parent_work_order_id = parent_work_order.id
     child_work_order.work_order_type = WorkOrderType.LASER_CUTTING.value
     return package
 
@@ -468,7 +481,7 @@ def _manual_operation_description(
 def create_manual_laser_nest(
     db: Session,
     *,
-    parent_work_order: WorkOrder,
+    parent_work_order: Optional[WorkOrder],
     child_work_order: WorkOrder,
     laser_work_center: WorkCenter,
     data: "LaserNestManualCreate | dict",
@@ -480,10 +493,13 @@ def create_manual_laser_nest(
     Standalone creation path -- it does NOT touch existing import behavior. The
     caller (a thin endpoint) has already resolved the child laser WO and the
     laser work center via the endpoint-local helpers and hands them in here.
+    ``parent_work_order`` is ``None`` when the target is a standalone nest WO
+    (a part-less laser-cutting WO with no parent assembly).
 
-    All manual nests for a parent live under ONE reusable "Manual entry"
-    package (``source_path IS NULL``); each call appends one operation + one
-    nest to the child laser WO and re-derives the child's ordered quantity.
+    All manual nests for a parent (or for one standalone nest WO) live under
+    ONE reusable "Manual entry" package (``source_path IS NULL``); each call
+    appends one operation + one nest to the laser WO and re-derives its
+    ordered quantity.
     """
     payload = data if isinstance(data, dict) else data.model_dump()
     cnc_number = (payload.get("cnc_number") or "").strip()
@@ -494,11 +510,17 @@ def create_manual_laser_nest(
     sheet_size = payload.get("sheet_size")
 
     # Find or create the single reusable "Manual entry" package on this parent/child.
+    # Standalone nest WOs carry parent_work_order_id IS NULL on their packages.
+    parent_filter = (
+        LaserNestPackage.parent_work_order_id == parent_work_order.id
+        if parent_work_order is not None
+        else LaserNestPackage.parent_work_order_id.is_(None)
+    )
     package = (
         db.query(LaserNestPackage)
         .filter(
             LaserNestPackage.company_id == company_id,
-            LaserNestPackage.parent_work_order_id == parent_work_order.id,
+            parent_filter,
             LaserNestPackage.child_work_order_id == child_work_order.id,
             LaserNestPackage.package_name == "Manual entry",
             LaserNestPackage.source_path.is_(None),
@@ -508,7 +530,7 @@ def create_manual_laser_nest(
     if package is None:
         package = LaserNestPackage(
             company_id=company_id,
-            parent_work_order_id=parent_work_order.id,
+            parent_work_order_id=parent_work_order.id if parent_work_order is not None else None,
             child_work_order_id=child_work_order.id,
             package_name="Manual entry",
             source_path=None,

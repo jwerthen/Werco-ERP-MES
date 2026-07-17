@@ -106,6 +106,10 @@ A work order is one job: build this part, this quantity, by this date. If the pa
 
 > Tip: If the readiness panel blocks you, the part isn't ready (usually no released routing or BOM). Fix the engineering data first — see the section above.
 
+### Laser nest jobs (no part needed)
+
+A laser-cutting job run straight from an Ermaksan nest package is the one kind of work order that doesn't need a part. On **Work Orders**, click **Import Nest Package** (next to **New Work Order**), upload the zipped nest package (or point at a server folder), review the rows the system read from each sheet — the values are editable, so double-check anything marked low-confidence — and import. That creates a **released laser cutting work order** on its own: its quantity is the total planned **sheet runs** (not pieces), and the list shows **Nest package** where the part number would be. To re-import the package or add a nest by hand later, open that work order and use its **Laser Nest Package** card. (You'll see the button if you're an admin, manager, or supervisor.)
+
 ### Release, start, complete, and print
 
 On the **work order detail** page, the action buttons in the top-right change with the job's status:
