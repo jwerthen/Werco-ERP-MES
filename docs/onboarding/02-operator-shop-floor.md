@@ -148,8 +148,10 @@ If you accidentally recorded **more good parts than you actually made** — a do
 A few things to know:
 
 - **This is a miscount fix, not scrap.** Nothing moves to scrap — you're correcting the good count. If a part is actually bad, report it as **scrap** with a scrap reason instead.
-- **You can only remove what *you* recorded on your current check-in.** The system won't let you go below what you personally entered (so you can't touch a teammate's count on a shared job), and it always asks for a reason — the correction goes on the record.
+- **You can only remove what *you* recorded on this operation.** That includes your earlier check-ins on the same step — so if you notice the mistake after checking out and back in, you can still fix it yourself. It never touches a teammate's count on a shared job, and it always asks for a reason — the correction goes on the record.
+- **Not counts a supervisor has already approved.** Once your time entry is signed off, it's locked — the message will tell you approved labor needs a supervisor. The same goes for a teammate's count: ask a supervisor to use **Correct count** on the work-order page.
 - **Only before the step is finished.** Once the operation is complete (or the whole work order is closed), the button stops working and you'll be told to **ask a supervisor** — fixing a finished operation has to be done in the office because it can affect inventory and cost.
+- **If it says no, the reason shows right in the window** (or on the kiosk screen) — read it; it tells you exactly how many pieces you can remove or who to ask.
 
 ---
 
@@ -207,7 +209,7 @@ Before you leave, leave the floor clean for the next shift:
 | --- | --- |
 | **Check In won't work / shows "Waiting"** | An earlier step (often at another station) isn't done yet, or the job is on hold or blocked. Run the next job and tell your supervisor. |
 | **My completion was rejected** | Make sure the quantity is a whole, non-negative number and isn't more than what's ordered. Try again and add a note. If it keeps failing, get your supervisor. |
-| **Correct over-count won't remove the parts** | You can only remove what *you* recorded on your current check-in, and only before the step is finished. If it says to *ask a supervisor*, the operation is already complete — a supervisor fixes it in the office. If it says you can only remove a smaller number, that's all you personally counted. |
+| **Correct over-count won't remove the parts** | You can only remove what *you* recorded on this operation (your current check-in plus your own earlier ones), and only before the step is finished. If it says to *ask a supervisor*, the operation is already complete — a supervisor fixes it in the office. If it says you can only remove a smaller number, that's all you personally counted that isn't already approved — approved labor and a teammate's count need a supervisor's **Correct count** on the work-order page. |
 | **The queue looks wrong or empty** | You probably have a filter on. Tap **All**, turn off **Due Today**, clear the **Search** box, and confirm the right station is selected. Tap **Refresh** if needed. |
 | **Priority looks incorrect** | Don't re-order jobs on your own outside of policy. Raise it to your supervisor with the work order number and the reason. |
 | **The card shows the wrong station** | Tap the correct **Work Center Status** card (or **Change Station**) to re-select your cell. |

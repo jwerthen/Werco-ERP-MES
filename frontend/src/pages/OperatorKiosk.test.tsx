@@ -240,10 +240,11 @@ describe('OperatorKiosk', () => {
     expect(mockedApi.reportOperationProduction).not.toHaveBeenCalled();
   });
 
-  it('shows the backend refusal verbatim when a correction is rejected', async () => {
+  it('renders the backend refusal verbatim INLINE on the correction screen', async () => {
+    const refusal = "Completed work can't be corrected here -- ask a supervisor";
     mockedApi.getMyActiveJob.mockResolvedValue({ active_jobs: [ACTIVE_JOB], active_job: ACTIVE_JOB });
     mockedApi.reduceOperationProduction.mockRejectedValue({
-      response: { data: { detail: "Completed work can't be corrected here -- ask a supervisor" } },
+      response: { data: { detail: refusal } },
     });
     renderKiosk();
 
@@ -252,9 +253,14 @@ describe('OperatorKiosk', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Scanned twice' }));
     fireEvent.click(screen.getByTestId('kiosk-correct-confirm'));
 
-    expect(
-      await screen.findByText("Completed work can't be corrected here -- ask a supervisor")
-    ).toBeInTheDocument();
+    // The refusal renders INLINE next to the confirm button as role="alert"
+    // (production feedback: a toast alone was unreadable on the floor) and the
+    // screen stays open with the entered correction intact for a retry.
+    const inline = await screen.findByTestId('kiosk-correct-error');
+    expect(inline).toHaveTextContent(refusal);
+    expect(inline).toHaveAttribute('role', 'alert');
+    expect(screen.getByRole('region', { name: /correct over-count/i })).toBeInTheDocument();
+    expect(screen.getByTestId('kiosk-correct-confirm')).toBeEnabled();
   });
 
   it('says so honestly (with the backend detail verbatim) when clock-out lands but complete is refused', async () => {

@@ -1,11 +1,74 @@
+import math
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.core.time_utils import to_utc_iso
 from app.models.time_entry import TimeEntrySource, TimeEntryType
 from app.schemas.work_order import QualityExceptionInfo
+
+
+class ProductionReductionRequest(BaseModel):
+    """Over-count correction request (inverse of the additive production report).
+
+    Shared by BOTH reduce-production endpoints -- the operator self-service verb
+    (``POST /shop-floor/operations/{id}/reduce-production``, bounded to the caller's
+    own unapproved evidence) and the supervisor/office verb
+    (``POST /work-orders/operations/{id}/reduce-production``, bounded to ALL
+    unapproved evidence on the operation). Removes good-count quantity that was
+    over-reported, BEFORE the operation / work order is complete. This is a miscount
+    correction, NOT a scrap move: it never touches scrap fields, never changes
+    status, and never mutates APPROVED labor (approval is the immutability boundary;
+    unapprove first).
+    """
+
+    quantity_delta: float = Field(
+        ...,
+        gt=0,
+        description="Good-count quantity to REMOVE from this operation. Must be > 0 and no greater "
+        "than the unapproved evidence the endpoint may walk down (the caller's own entries for the "
+        "shop-floor verb; any operator's for the office verb).",
+    )
+    # Correction reason for the tamper-evident audit trail -- this is NOT a scrap reason
+    # (no scrap moves here). Required and non-blank so every walk-back is explainable.
+    reason: str = Field(
+        ...,
+        min_length=1,
+        max_length=255,
+        description="Why the count is being corrected (e.g. 'double-scanned the tray'). Required "
+        "for the audit trail; this is a correction reason, NOT a scrap reason.",
+    )
+    # A0.1 adoption telemetry: same trust model / channel semantics as the additive twin.
+    source: Optional[TimeEntrySource] = Field(
+        None,
+        description="Adoption-telemetry channel of this correction (kiosk | desktop | scanner | "
+        "backfill). Omit to keep the entry's existing channel. 'import' is rejected (422) here "
+        "(reserved for the bulk-migration loaders); a kiosk-scoped operator token forces 'kiosk' "
+        "regardless of this hint.",
+    )
+    notes: Optional[str] = Field(
+        None,
+        description="Optional extra note. On the shop-floor verb it is appended to the caller's "
+        "active time entry; on the office verb it is recorded on the audit row only.",
+    )
+
+    @field_validator("quantity_delta")
+    @classmethod
+    def _finite_delta(cls, value: float) -> float:
+        # Mirror the additive report's numeric guard: reject NaN/Inf at the boundary
+        # (gt=0 already rejects NaN and negatives, but +Inf slips past a bare gt).
+        if math.isnan(value) or math.isinf(value):
+            raise ValueError("quantity_delta must be a finite number")
+        return value
+
+    @field_validator("reason")
+    @classmethod
+    def _reason_not_blank(cls, value: str) -> str:
+        # Whitespace-only is meaningless for an audit trail; treat it as missing.
+        if not value.strip():
+            raise ValueError("reason is required")
+        return value.strip()
 
 
 class StepsIncompleteInfo(BaseModel):

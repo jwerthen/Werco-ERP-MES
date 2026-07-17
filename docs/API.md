@@ -139,6 +139,7 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 | PUT | `/work-orders/operations/{id}` | Update an operation | Yes |
 | POST | `/work-orders/operations/{id}/start` | Start an operation | Yes |
 | POST | `/work-orders/operations/{id}/complete` | Complete an operation (or record partial progress; 409 if the parent WO is terminal) | Yes |
+| POST | `/work-orders/operations/{id}/reduce-production` | Supervisor/office over-count correction — walk back good-count across **any** operator's **unapproved** labor on the operation, **before** completion; no clock-in required (see note below) | Admin / Manager / Supervisor |
 
 > **Tenant isolation on operation/completion endpoints.** The operation- and completion-level
 > endpoints above (`/start`, `/complete`, `/operations/{id}`, `/operations/{id}/start`,
@@ -289,6 +290,49 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > in-handler guard on the two query-param `complete` verbs), so a scripted/API client can no longer
 > record reasonless scrap that the office/admin UIs already block. `scrap_reason_code_id` is accepted
 > **only** on `/work-orders/{id}/complete` — the other three office endpoints remain free-text-only.
+>
+> **Over-count correction — `POST /work-orders/operations/{operation_id}/reduce-production`
+> (supervisor/office).** The role-gated twin of the operator's
+> `POST /shop-floor/operations/{id}/reduce-production` (see "Over-count correction" under Shop
+> Floor for the shared semantics — one shared core, the two paths cannot drift). It walks back
+> good-count quantity that was over-reported on an operation, **before** it is complete — a
+> miscount correction, **not** a scrap move (scrap fields and statuses are never touched).
+> Differences from the shop-floor verb:
+> - **Role-gated**: `require_role([ADMIN, MANAGER, SUPERVISOR])` — an Operator gets **403** (this
+>   verb corrects **other operators'** labor records, a Work Orders **Edit** power, not operator
+>   self-service). Kiosk-scoped tokens can't reach it (path-fenced away from `/work-orders`).
+> - **No clock-in required** — the supervisor is correcting from the office, not working the
+>   operation.
+> - **Scope: ALL unapproved labor on the operation, any operator's** — the walk goes open entries
+>   first, then closed entries newest-first; the bound is the **sum of unapproved
+>   `quantity_produced`** across those entries. **APPROVED entries are excluded** (approval is the
+>   immutability boundary, G5-A): to correct signed-off labor, unapprove it first via
+>   `POST /shop-floor/time-entries/{id}/unapprove` (the audited segregation-of-duties front door),
+>   then reduce.
+> - **`notes` goes on the audit row only** — deliberately **not** written onto another operator's
+>   labor record (the shop-floor verb appends it to the caller's own active entry).
+> - **`source`**: `import` is rejected **422** (loader-reserved), same as the shop-floor verb; no
+>   kiosk forcing applies here.
+>
+> Body is the same `ProductionReductionRequest` (`quantity_delta` required `> 0` finite; `reason`
+> required non-blank ≤ 255 — a **correction** reason, not a scrap reason; optional `source` /
+> `notes`). Everything else matches the shop-floor twin: **tenant-scoped 404** before any mutation,
+> **before-completion only** (COMPLETE operation / terminal WO → **409** `"Completed work can't be
+> corrected here -- ask a supervisor"`, re-checked under the op→WO row locks), **row-locked +
+> optimistic-locked** (concurrent stale write → **409**), the same **recomputed WO rollup** (max
+> over non-component siblings, only ever lowered), a **tamper-evident `audit_log` row** (action
+> `reduce_operation_production`, old→new quantities, the reason, and the per-entry before/after
+> slices in walk order), an `operation_production_reduced` operational event, and the shop-floor /
+> work-order / dashboard broadcasts. The bound refusal is **400** with an explanatory message:
+> when approved labor exists on the operation, `"Only N piece(s) on this operation are unapproved
+> and correctable; M piece(s) are on approved labor -- unapprove it first."`; otherwise `"Only N
+> piece(s) are recorded on this operation's time entries; the correction cannot exceed the recorded
+> evidence."`. Response **200** carries `message`, the updated `operation` block, a
+> `work_order {id, quantity_complete}` block (the recomputed rollup), and `reduced_time_entries[]`
+> — the per-entry paper trail of the walk (`{time_entry_id, entry_type, quantity_produced_before,
+> quantity_produced_after}`, in walk order). See the "Over-count correction Schema" under Shop
+> Floor. In the app this is the **Correct count** action on each operation row of the work-order
+> detail page (gated on `work_orders:edit`).
 
 #### Work Order Schema
 
@@ -739,7 +783,7 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 | POST | `/shop-floor/clock-out/{id}` | Clock out with production data | Yes |
 | POST | `/shop-floor/operations/{id}/start` | Start an operation | Yes |
 | POST | `/shop-floor/operations/{id}/production` | Add produced/scrapped quantity while staying clocked in | Yes |
-| POST | `/shop-floor/operations/{id}/reduce-production` | Correct (walk back) good-count an operator OVER-reported on their **own** open clock-in, **before** the operation/WO is complete — a miscount fix, **not** scrap (see note + schema below) | Yes |
+| POST | `/shop-floor/operations/{id}/reduce-production` | Correct (walk back) good-count an operator OVER-reported on their **own unapproved** labor (open clock-in first, then their own earlier unapproved sessions), **before** the operation/WO is complete — a miscount fix, **not** scrap (see note + schema below) | Yes |
 | POST | `/shop-floor/operations/{id}/complete` | Complete / report progress on an operation | Yes |
 | PUT | `/shop-floor/operations/{id}/hold` | Put an operation on hold (closes open time entries; body optional — category/severity/note file a structured blocker) | Yes |
 | POST | `/shop-floor/operations/{id}/inspection` | Record operation inspection complete (sets `inspection_complete`) | Admin / Manager / Supervisor / Quality |
@@ -941,23 +985,32 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > - `source` (optional adoption-telemetry channel) — `kiosk | desktop | scanner | backfill`; `import`
 >   is rejected **422** (loader-reserved) and a kiosk-scoped operator token forces `kiosk`, exactly like
 >   the other labor writes (see "Adoption-telemetry `source` channel" above).
-> - `notes` (optional) — appended to the active time entry.
+> - `notes` (optional) — appended to the caller's **open** (active) time entry.
 >
-> **Guardrails (the contract):** the reduction lowers the caller's **own open clock-in's**
-> `quantity_produced` (the durable evidence) and the operation's `quantity_complete` by the same delta
-> (and decrements the operation's `quantity_reworked` when that clock-in is a **REWORK** entry), then
-> **recomputes** the work order's `quantity_complete` from its operations — the max over non-component
-> operations (capped at the WO target), only ever lowered — so a multi-operation WO whose finished count
-> is held by a different operation is never pulled below it (reducing a non-defining or a component
-> operation leaves the WO total unchanged). Lowering the operation total together with its **backing
-> evidence** is what makes the correction **reconcile-safe**: produced quantity is monotonic-up and
-> re-derived from time-entry evidence on every WO read, so lowering the operation total alone would be
-> re-raised on the next read — lowering the backing evidence with it is what makes it stick. The walk-back is **bounded to what the caller
-> recorded on THEIR OWN current clock-in** (crew-safe — an operator can never touch another operator's
-> count, and the entry can never go below zero). It is **tenant-scoped**, **row-locked** (operation then
+> **Guardrails (the contract):** the walk-back is bounded to the **caller's OWN UNAPPROVED labor on
+> this operation** — their open clock-in first, then their own **closed unapproved sessions
+> newest-first** (the real-world "noticed after check-out" case); the allowed maximum is the **sum of
+> `quantity_produced` across those entries**. **Approval — not clock-out — is the immutability
+> boundary (G5-A):** APPROVED entries are excluded from the allowance, so a signed-off count can
+> never be walked back here — approved labor needs a supervisor (the office twin at
+> `POST /work-orders/operations/{id}/reduce-production`, after unapproving). The caller must still
+> hold an **open clock-in** on the operation ("actively working" is the product framing — the
+> correction UI is only reachable clocked-in). The reduction walks the delta down those entries'
+> `quantity_produced` (the durable evidence — no entry ever goes below zero; crew-safe — an operator
+> can never touch another operator's count) and lowers the operation's `quantity_complete` by the
+> same delta (decrementing the operation's `quantity_reworked` by the portion walked off **REWORK**
+> entries), then **recomputes** the work order's `quantity_complete` from its operations — the max
+> over non-component operations (capped at the WO target), only ever lowered — so a multi-operation
+> WO whose finished count is held by a different operation is never pulled below it (reducing a
+> non-defining or a component operation leaves the WO total unchanged). Lowering the operation total
+> together with its **backing evidence** is what makes the correction **reconcile-safe**: produced
+> quantity is monotonic-up and re-derived from time-entry evidence on every WO read, so lowering the
+> operation total alone would be re-raised on the next read — lowering the backing evidence with it
+> is what makes it stick. It is **tenant-scoped**, **row-locked** (operation then
 > WO, `SELECT … FOR UPDATE`, same order as the completion paths), **optimistic-locked**, and writes a
 > **tamper-evident `audit_log` row** (action `reduce_operation_production`, old→new `quantity_complete`
-> plus the operator-supplied reason and the affected time-entry before/after produced quantity). It also
+> plus the operator-supplied reason and the walked entries' before/after produced quantity — summed in
+> the diff, per-entry in `extra_data`). It also
 > emits an `operation_production_reduced` operational event and the shop-floor / work-order / dashboard
 > real-time broadcasts. Error codes:
 > - **404** — operation missing / cross-tenant, or its work order not found.
@@ -968,9 +1021,13 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 >   (`"This operation was modified concurrently. Refresh and retry."`).
 > - **400** — no open clock-in of the caller on this operation
 >   (`"You must be clocked in to this operation to correct its count"`), or `quantity_delta` greater
->   than the caller recorded on that clock-in
->   (`"You can only remove up to the N piece(s) you recorded on this clock-in; ask a supervisor to
->   correct more."`).
+>   than the caller's own **unapproved** evidence on the operation. The message says why the
+>   allowance is short: when some of the caller's evidence is already approved,
+>   `"You can only remove up to the N piece(s) you recorded on this operation that are not yet
+>   approved; approved labor needs a supervisor."`; otherwise `"You can only remove up to the N
+>   piece(s) you recorded on this operation; ask a supervisor to correct more."`. (The approved-labor
+>   refusal is this 400 allowance message — there is no longer a dedicated 409 for an approved
+>   entry.)
 > - **422** — schema validation (`quantity_delta` ≤ 0 / non-finite, `reason` blank or > 255, or a
 >   loader-reserved `source`). See the "Over-count correction Schema" below.
 >
@@ -1161,9 +1218,11 @@ let a supervisor sign off on shop-floor labor (G5-A). Approve sets `approved` (t
 
 #### Over-count correction Schema
 
-`POST /shop-floor/operations/{operation_id}/reduce-production` body (`ProductionReductionRequest`) —
-walk back an over-reported good count on the caller's own open clock-in (**not** scrap; see
-"Over-count correction" under the shop-floor notes above):
+`POST /shop-floor/operations/{operation_id}/reduce-production` body (`ProductionReductionRequest` —
+the **same body** is shared by the office twin
+`POST /work-orders/operations/{operation_id}/reduce-production`) — walk back an over-reported good
+count on the caller's own **unapproved** labor (open clock-in first, then their own earlier
+unapproved sessions; **not** scrap; see "Over-count correction" under the shop-floor notes above):
 
 ```json
 {
@@ -1175,7 +1234,8 @@ walk back an over-reported good count on the caller's own open clock-in (**not**
 ```
 
 Response **200** (`operation` stays in progress; `active_time_entry.clock_out` is `null` for the
-still-open entry the correction applies to):
+caller's still-open entry; `reduced_time_entries[]` is the per-entry paper trail of the walk, in
+walk order — open entry first, then the caller's closed unapproved sessions newest-first):
 
 ```json
 {
@@ -1189,17 +1249,41 @@ still-open entry the correction applies to):
   },
   "active_time_entry": {
     "id": 4471,
-    "quantity_produced": 47,
+    "quantity_produced": 0,
     "quantity_scrapped": 2,
     "clock_out": null
-  }
+  },
+  "reduced_time_entries": [
+    {
+      "time_entry_id": 4471,
+      "entry_type": "run",
+      "quantity_produced_before": 1,
+      "quantity_produced_after": 0
+    },
+    {
+      "time_entry_id": 4460,
+      "entry_type": "run",
+      "quantity_produced_before": 12,
+      "quantity_produced_after": 10
+    }
+  ]
 }
 ```
 
+(The example walks a delta of 3: the open clock-in's 1 piece is exhausted first, then 2 come off
+the caller's most recent closed unapproved session.)
+
 > `quantity_delta` must be `> 0`; `reason` is **required** and non-blank (a correction reason, not a
-> scrap reason). The delta may not exceed what the caller recorded on their own open clock-in (**400**),
-> and the endpoint refuses with **409** once the operation/WO is complete. See the full guardrail /
-> error-code contract in "Over-count correction" under the shop-floor notes above.
+> scrap reason). The delta may not exceed the caller's own **unapproved** recorded evidence on the
+> operation (**400** — approved labor is excluded and needs a supervisor), and the endpoint refuses
+> with **409** once the operation/WO is complete. See the full guardrail / error-code contract in
+> "Over-count correction" under the shop-floor notes above.
+>
+> The **office twin** `POST /work-orders/operations/{operation_id}/reduce-production` (Admin /
+> Manager / Supervisor; see "Over-count correction … (supervisor/office)" under Work Orders) returns
+> the same shape except `active_time_entry` is replaced by
+> `work_order {"id", "quantity_complete"}` (the recomputed rollup) — there is no caller clock-in on
+> that path — and its `reduced_time_entries[]` may span **multiple operators'** unapproved entries.
 
 ### Scanner (QR / barcode)
 

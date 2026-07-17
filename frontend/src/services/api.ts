@@ -1031,6 +1031,16 @@ class ApiService {
     return response.data;
   }
 
+  // Office-side over-count correction (supervisor reach) — the work-orders twin of
+  // the shop-floor reduceOperationProduction. Same body shape; RBAC and every
+  // safety rule are enforced server-side, so call sites stay NON-optimistic and
+  // surface the server's verbatim `detail` on refusal.
+  async reduceWOOperationProduction(operationId: number, data: { quantity_delta: number; reason: string; notes?: string; source?: string }) {
+    const response = await this.api.post(`/work-orders/operations/${operationId}/reduce-production`, data);
+    this.invalidateDashboardCache();
+    return response.data;
+  }
+
   // Shop Floor
   async getMyActiveJob() {
     const response = await this.api.get('/shop-floor/my-active-job');

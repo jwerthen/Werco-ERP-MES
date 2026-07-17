@@ -147,6 +147,12 @@ export default function ShopFloorSimple() {
   const [detailsModal, setDetailsModal] = useState<any | null>(null);
   const [checkOutData, setCheckOutData] = useState({ quantity_produced: 0, quantity_scrapped: 0, scrap: EMPTY_SCRAP_SELECTION, notes: '' });
   const [productionData, setProductionData] = useState(INITIAL_PRODUCTION_DATA);
+  // Server refusal for the production modal (add AND remove modes), rendered
+  // INLINE inside the modal. Toasts alone proved unreadable here: the page-local
+  // toast container sat at z-50 while the shared Modal overlays at z-[60], so a
+  // designed 400 (e.g. the reduce-production bound) appeared dimmed UNDER the
+  // open modal's backdrop on the shop floor. Verbatim `detail` only.
+  const [productionError, setProductionError] = useState<string | null>(null);
   // Lean Phase 1: company scrap reason codes ([] -> legacy SCRAP_REASONS fallback).
   const { codes: scrapCodes } = useScrapReasonCodes();
   // Hold picker — desktop holds must file a structured WorkOrderBlocker
@@ -577,6 +583,7 @@ export default function ShopFloorSimple() {
   const handleOpenProductionModal = (operation: Operation, job: ActiveJob) => {
     setProductionModal({ operation, job });
     setProductionData(INITIAL_PRODUCTION_DATA);
+    setProductionError(null);
   };
 
   const getOperationForActiveJob = (job: ActiveJob): Operation => {
@@ -625,6 +632,7 @@ export default function ShopFloorSimple() {
   const closeProductionModal = () => {
     setProductionModal(null);
     setProductionData(INITIAL_PRODUCTION_DATA);
+    setProductionError(null);
   };
 
   const adjustGoodQuantity = (delta: number) => {
@@ -657,6 +665,7 @@ export default function ShopFloorSimple() {
     scrapFields?: { scrap_reason?: string; scrap_reason_code_id?: number }
   ) => {
     setActionLoading(operation.id);
+    setProductionError(null);
     try {
       await api.reportOperationProduction(operation.id, {
         quantity_complete_delta: quantityCompleteDelta,
@@ -674,7 +683,13 @@ export default function ShopFloorSimple() {
       if (closeModal) closeProductionModal();
       await Promise.all([loadOperations(), loadActiveJobs(), loadDashboardCounts()]);
     } catch (err: any) {
-      showToast('error', err.response?.data?.detail || 'Failed to add completed quantity');
+      const detail = err.response?.data?.detail;
+      const message = typeof detail === 'string' && detail ? detail : 'Failed to add completed quantity';
+      // Modal submit path: the refusal renders INLINE inside the open modal
+      // (primary). The quick "+1 Complete" row path has no modal, so the toast
+      // carries it there; it stays as a secondary signal for the modal too.
+      if (closeModal) setProductionError(message);
+      showToast('error', message);
     } finally {
       setActionLoading(null);
     }
@@ -702,6 +717,7 @@ export default function ShopFloorSimple() {
     const reason = productionData.remove_reason.trim();
     if (delta <= 0 || !reason) return;
     setActionLoading(operation.id);
+    setProductionError(null);
     try {
       await api.reduceOperationProduction(operation.id, {
         quantity_delta: delta,
@@ -713,7 +729,12 @@ export default function ShopFloorSimple() {
       closeProductionModal();
       await Promise.all([loadOperations(), loadActiveJobs(), loadDashboardCounts()]);
     } catch (err: any) {
-      showToast('error', err.response?.data?.detail || 'Failed to correct completed quantity');
+      // The refusal is the WHOLE point of a server-gated correction — render it
+      // INLINE next to the confirm button (the toast is secondary), verbatim.
+      const detail = err.response?.data?.detail;
+      const message = typeof detail === 'string' && detail ? detail : 'Failed to correct completed quantity';
+      setProductionError(message);
+      showToast('error', message);
     } finally {
       setActionLoading(null);
     }
@@ -946,8 +967,10 @@ export default function ShopFloorSimple() {
 
   return (
     <div className="space-y-6">
-      {/* Toast Notifications */}
-      <div className="fixed top-4 left-4 right-4 z-50 space-y-2 md:left-auto">
+      {/* Toast Notifications. z-[70]: must stack ABOVE the shared Modal overlay
+          (z-[60]) — at the old z-50 an error toast fired while a modal stayed
+          open rendered dimmed UNDER the backdrop and was unreadable. */}
+      <div className="fixed top-4 left-4 right-4 z-[70] space-y-2 md:left-auto">
         {toasts.map(toast => (
           <div
             key={toast.id}
@@ -1846,7 +1869,10 @@ export default function ShopFloorSimple() {
                 <button
                   type="button"
                   aria-pressed={productionData.mode === 'add'}
-                  onClick={() => setProductionData((prev) => ({ ...prev, mode: 'add' }))}
+                  onClick={() => {
+                    setProductionError(null);
+                    setProductionData((prev) => ({ ...prev, mode: 'add' }));
+                  }}
                   className={`min-h-11 rounded-sm border px-3 text-sm font-semibold transition ${
                     productionData.mode === 'add'
                       ? 'border-emerald-500 bg-emerald-500/15 text-emerald-300'
@@ -1858,7 +1884,10 @@ export default function ShopFloorSimple() {
                 <button
                   type="button"
                   aria-pressed={productionData.mode === 'remove'}
-                  onClick={() => setProductionData((prev) => ({ ...prev, mode: 'remove' }))}
+                  onClick={() => {
+                    setProductionError(null);
+                    setProductionData((prev) => ({ ...prev, mode: 'remove' }));
+                  }}
                   className={`min-h-11 rounded-sm border px-3 text-sm font-semibold transition ${
                     productionData.mode === 'remove'
                       ? 'border-amber-500 bg-amber-500/15 text-amber-300'
@@ -1941,8 +1970,8 @@ export default function ShopFloorSimple() {
               {productionData.mode === 'remove' && (
               <>
               <div className="rounded-sm border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200/90">
-                Removes over-counted quantity you recorded on your current clock-in. This is a miscount
-                correction, not scrap. Ask a supervisor to correct a completed operation.
+                Removes over-counted pieces you recorded on this operation — a miscount correction,
+                not scrap. Approved labor or another operator&apos;s counts need a supervisor.
               </div>
 
               <div>
@@ -2008,6 +2037,20 @@ export default function ShopFloorSimple() {
                   aria-label="Notes (optional)"
                 />
               </div>
+
+              {/* Server refusal, INLINE and verbatim — the primary display. A
+                  toast alone sat under the Modal's z-[60] overlay and was
+                  unreadable on the shop floor; this region sits right above the
+                  confirm button and is announced via role="alert". */}
+              {productionError && (
+                <div
+                  role="alert"
+                  data-testid="shopfloor-production-error"
+                  className="rounded-sm border border-red-500/60 bg-red-500/10 px-4 py-3 text-base font-semibold text-red-300"
+                >
+                  {productionError}
+                </div>
+              )}
             </div>
 
             <div className="modal-footer">

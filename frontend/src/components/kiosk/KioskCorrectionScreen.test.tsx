@@ -6,17 +6,20 @@
  *    (the digits-only keypad drives the quantity; there is no minus key);
  *  - emit (quantity, reasonLabel) verbatim so the caller can submit the
  *    reduce-production correction;
- *  - stay non-optimistic — nothing here mutates a count.
+ *  - stay non-optimistic — nothing here mutates a count;
+ *  - render a caller-supplied server refusal INLINE as a prominent role="alert"
+ *    (production feedback: a toast alone was unreadable on shop displays).
  */
 import React from 'react';
 import { render, screen, fireEvent } from '@testing-library/react';
 import KioskCorrectionScreen from './KioskCorrectionScreen';
 
-function renderScreen(onConfirm = jest.fn(), busy = false) {
+function renderScreen(onConfirm = jest.fn(), busy = false, error: string | null = null) {
   render(
     <KioskCorrectionScreen
       jobLabel="WO-1 · Op 10 Deburr"
       busy={busy}
+      error={error}
       onConfirm={onConfirm}
       onCancel={jest.fn()}
     />
@@ -63,4 +66,18 @@ it('hard-disables the keypad and confirm while busy', () => {
   expect(screen.getByTestId('kiosk-correct-confirm')).toBeDisabled();
   fireEvent.click(screen.getByTestId('kiosk-correct-confirm'));
   expect(onConfirm).not.toHaveBeenCalled();
+});
+
+it('renders a server refusal INLINE as a prominent role="alert", verbatim', () => {
+  const refusal = "Completed work can't be corrected here -- ask a supervisor";
+  renderScreen(jest.fn(), false, refusal);
+
+  const alert = screen.getByTestId('kiosk-correct-error');
+  expect(alert).toHaveTextContent(refusal);
+  expect(alert).toHaveAttribute('role', 'alert');
+});
+
+it('renders no error region when there is no refusal', () => {
+  renderScreen();
+  expect(screen.queryByTestId('kiosk-correct-error')).not.toBeInTheDocument();
 });

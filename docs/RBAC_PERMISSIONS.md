@@ -59,17 +59,31 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > array on the response; it does **not** gate the operator's role or block the clock-in / start. The
 > gate's lookups are tenant-scoped (every skill/cert/work-center query filters the active company).
 
-> **Over-count correction is operator self-service — no new role.**
+> **Over-count correction — operator self-service (no new role) + a role-gated office twin.**
 > `POST /api/v1/shop-floor/operations/{id}/reduce-production` (walk back good-count an operator
-> OVER-reported on their **own** open clock-in, before completion — a miscount fix, not scrap) is
+> OVER-reported on their **own unapproved** labor — open clock-in first, then their own earlier
+> unapproved sessions — before completion; a miscount fix, not scrap) is
 > **operator-facing**, open to **any authenticated user** (`get_current_user`), matching the other
 > operator write verbs (clock-in, production, complete, hold). It adds **no new role or permission**.
-> Authorization is by **evidence, not role**: the walk-back is bounded to what the caller recorded on
-> **their own** open clock-in (crew-safe — never another operator's count) and is refused **409** once
+> Authorization is by **evidence, not role**: the walk-back is bounded to the caller's **own
+> unapproved** entries on the operation (crew-safe — never another operator's count; **approved**
+> labor is excluded — approval is the immutability boundary, G5-A) and is refused **409** once
 > the operation/WO is complete (post-completion corrections stay an office/supervisor task). It is
 > tenant-scoped (a cross-tenant id → **404** before any mutation) and writes a tamper-evident
 > `audit_log` row (action `reduce_operation_production`, old→new quantity + the operator-supplied
 > reason). See `docs/API.md` → Shop Floor → "Over-count correction".
+>
+> The **office twin** `POST /api/v1/work-orders/operations/{id}/reduce-production` is enforced
+> **in code** to `require_role([ADMIN, MANAGER, SUPERVISOR])` — the Work Orders **Edit** row above
+> (an Operator gets **403**): it corrects recorded production on **any operator's unapproved**
+> labor record, which is a supervisory power, not self-service. No clock-in is required. Approved
+> entries stay excluded on this path too — the front door for signed-off labor is
+> `POST /shop-floor/time-entries/{id}/unapprove` (the audited Approve-labor row, which forbids
+> self-unapproval), then reduce. Same tenant-scoped **404**, before-completion **409**, and
+> tamper-evident audit row as the shop-floor verb; the supervisor's optional note is recorded on
+> the **audit row only**, never written onto another operator's labor record. In the UI this is
+> the **Correct count** action on the work-order detail page, gated on `work_orders:edit`. See
+> `docs/API.md` → Work Orders → "Over-count correction … (supervisor/office)".
 
 > **Laser-nest manual entry + reference PDF — endpoint mapping.** Manually keying a laser nest and
 > all per-nest mutations follow the Work Orders **Create / Edit / Delete** rows above —

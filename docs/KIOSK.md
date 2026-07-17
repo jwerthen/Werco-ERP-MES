@@ -101,12 +101,16 @@ URL is all the station setup there is.
      `{quantity_delta, reason, source: "kiosk"}`. This **removes good pieces the operator
      OVER-reported** on the job they are actively working — a **miscount fix, not scrap** (nothing
      moves to scrap). What it can/can't do is enforced server-side, not in the UI: it only walks
-     back **the operator's OWN open clock-in** (never another operator's count), only **before**
-     the operation/WO is complete (a complete op/terminal WO is refused **409** "ask a
-     supervisor"), and only up to what they recorded (**400** otherwise). Every walk-back is
-     tamper-evidently audited with its reason. Like every kiosk verb it is **non-optimistic** — the
-     count never moves locally; the screen keeps the entered quantity and surfaces the server's
-     refusal verbatim (see `docs/API.md` → Shop Floor → "Over-count correction").
+     back **the operator's OWN unapproved labor** on the operation — their open clock-in first,
+     then their own **earlier unapproved sessions**, newest-first (still never another operator's
+     count, still never **approved** labor — a signed-off count needs a supervisor), only
+     **before** the operation/WO is complete (a complete op/terminal WO is refused **409** "ask a
+     supervisor"), and only up to what they recorded on the operation (**400** otherwise). Every
+     walk-back is tamper-evidently audited with its reason. Like every kiosk verb it is
+     **non-optimistic** — the count never moves locally; the screen keeps the entered quantity and
+     renders the server's refusal verbatim as a prominent **inline alert** on the correction screen
+     itself (not a toast), so the operator reads exactly why it was refused (see `docs/API.md` →
+     Shop Floor → "Over-count correction").
 
 **Scrap reason picker — company codes vs. legacy grid (Lean Phase 1).** What the required
 scrap grid contains depends on whether the company has **active scrap reason codes** (the
@@ -440,12 +444,14 @@ token scope was widened. An empty array means no active codes → the legacy gri
   remove + a **required** correction-reason tile, distinct from the scrap grid), then a
   **badge-signature scan** saves the walk-back as that operator
   (`POST /shop-floor/operations/{id}/reduce-production`). The signing badge **must have an open
-  clock-in on this op** — that is precisely how the server bounds the walk-back to **their own**
-  recorded evidence (crew-safe: one welder can't erase another's pieces). It **removes good pieces
+  clock-in on this op**, and the server bounds the walk-back to **their own unapproved** recorded
+  evidence — their open clock-in first, then their own earlier unapproved sessions on this op
+  (crew-safe: one welder can't erase another's pieces; **approved** labor is excluded — a
+  signed-off count needs a supervisor). It **removes good pieces
   over-reported by mistake — not scrap**, and is refused once the op/WO is complete (**409** "ask a
   supervisor"). The success toast quotes the corrected crew total; a verbatim refusal (e.g. "you can
-  only remove up to the N piece(s) you recorded") keeps the quantity + reason so the **right** badge
-  can re-scan.
+  only remove up to the N piece(s) you recorded on this operation") renders **inline on the
+  correction screen** and keeps the quantity + reason so the **right** badge can re-scan.
 - **COMPLETE (crew-wide, confirmed).** Completion auto-closes **every** operator's open entry on
   the operation, so the confirm dialog names who else gets clocked out, with their running
   durations, re-derived live from queue state. A badge scan inside the dialog signs it; if final
