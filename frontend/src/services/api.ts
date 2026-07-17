@@ -1299,6 +1299,17 @@ class ApiService {
     return response.data;
   }
 
+  // Operator self-service over-count correction: walk back good-count quantity the
+  // caller OVER-reported on an operation they are actively working, BEFORE it is
+  // complete. Inverse of reportOperationProduction — a miscount fix, NOT a scrap move.
+  // The server enforces every safety rule (must be clocked in, delta ≤ own recorded
+  // qty, op/WO not complete); the UI stays non-optimistic and surfaces `detail` verbatim.
+  async reduceOperationProduction(operationId: number, data: { quantity_delta: number; reason: string; notes?: string; source?: string }) {
+    const response = await this.api.post(`/shop-floor/operations/${operationId}/reduce-production`, data);
+    this.invalidateDashboardCache();
+    return response.data;
+  }
+
   async getOperationDetails(operationId: number) {
     const response = await this.api.get(`/shop-floor/operations/${operationId}`);
     return response.data;

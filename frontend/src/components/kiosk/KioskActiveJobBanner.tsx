@@ -1,5 +1,11 @@
 import React from 'react';
-import { PlusCircleIcon, CheckCircleIcon, ClipboardDocumentCheckIcon, PauseCircleIcon } from '@heroicons/react/24/solid';
+import {
+  PlusCircleIcon,
+  MinusCircleIcon,
+  CheckCircleIcon,
+  ClipboardDocumentCheckIcon,
+  PauseCircleIcon,
+} from '@heroicons/react/24/solid';
 import { ActiveJob } from '../../types';
 import LaserNestOperatorPanel from '../laser/LaserNestOperatorPanel';
 import { formatElapsed } from './kioskConstants';
@@ -13,6 +19,8 @@ interface KioskActiveJobBannerProps {
   stepsRecorded?: number | null;
   onSteps?: () => void;
   onReportProduction: () => void;
+  /** Over-count correction (reduce-production). Rendered as a low-emphasis link. */
+  onCorrect?: () => void;
   onComplete: () => void;
   onHold: () => void;
 }
@@ -29,6 +37,7 @@ export default function KioskActiveJobBanner({
   stepsRecorded,
   onSteps,
   onReportProduction,
+  onCorrect,
   onComplete,
   onHold,
 }: KioskActiveJobBannerProps) {
@@ -112,6 +121,22 @@ export default function KioskActiveJobBanner({
           Hold
         </button>
       </div>
+
+      {/* Lower-emphasis over-count correction (reduce-production): removes good
+          pieces over-reported on this operator's own clock-in. Separate from the
+          three primary verbs so it can't be tapped by mistake. */}
+      {onCorrect && (
+        <button
+          type="button"
+          data-testid="kiosk-active-correct"
+          disabled={busy}
+          onClick={onCorrect}
+          className="mt-3 flex min-h-14 w-full items-center justify-center gap-2 rounded border border-fd-line bg-fd-sunken px-4 text-base font-bold uppercase tracking-wide text-fd-mute transition-colors hover:border-fd-line-bright hover:text-fd-body disabled:opacity-40"
+        >
+          <MinusCircleIcon className="h-6 w-6 shrink-0" aria-hidden="true" />
+          Correct over-count
+        </button>
+      )}
     </section>
   );
 }

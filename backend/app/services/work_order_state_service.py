@@ -3,12 +3,12 @@
 import math
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional
+from typing import Iterable, Optional
 
 from sqlalchemy import and_, func
 from sqlalchemy.orm import Session
 
-from app.models.time_entry import TimeEntry
+from app.models.time_entry import TimeEntry, TimeEntryType
 from app.models.work_order import (
     OperationStatus,
     WorkOrder,
@@ -352,6 +352,126 @@ def sync_work_order_quantity_complete(
         if target > 0:
             candidate = min(candidate, target)
         work_order.quantity_complete = max(existing, candidate)
+
+
+@dataclass
+class OperationQuantityReduction:
+    """Before/after snapshot of a good-count over-report correction (for the audit row)."""
+
+    delta: float
+    operation_quantity_complete_before: float
+    operation_quantity_complete_after: float
+    work_order_quantity_complete_before: float
+    work_order_quantity_complete_after: float
+    time_entry_quantity_produced_before: float
+    time_entry_quantity_produced_after: float
+
+
+def reduce_operation_produced_quantity(
+    operation: WorkOrderOperation,
+    work_order: WorkOrder,
+    active_entry: TimeEntry,
+    delta: float,
+    work_order_operations: Iterable[WorkOrderOperation],
+) -> OperationQuantityReduction:
+    """Inverse of the monotonic-up completion helpers: correct an over-report DOWN.
+
+    The system's produced quantity is deliberately monotonic-up and re-derived from
+    durable evidence: ``reconcile_work_orders_from_completion_evidence`` (which runs
+    on every work-order read) RAISES ``operation.quantity_complete`` to
+    ``SUM(TimeEntry.quantity_produced)`` for the operation and never lowers it, and
+    ``sync_work_order_quantity_complete`` rolls op -> WO with ``max()``. So lowering
+    ``operation.quantity_complete`` ALONE is self-undoing -- the next read re-raises
+    it from the un-reduced TimeEntry evidence.
+
+    A correct reduction lowers the operation total and its BACKING EVIDENCE in
+    lock-step by the same delta, then RECOMPUTES the WO rollup from the siblings:
+
+    * ``active_entry.quantity_produced`` -- the backing durable EVIDENCE, so the
+      reconcile ``SUM`` drops with it (this is what makes the correction stick).
+    * ``operation.quantity_complete`` -- the derived op total, lowered by ``delta``.
+    * ``work_order.quantity_complete`` -- the WO rollup, RECOMPUTED (not blindly
+      subtracted) from ``work_order_operations``. On a multi-op WO another op may hold
+      an equal-or-higher count (e.g. an earlier COMPLETE op), so a blind ``- delta``
+      would pull the WO below ``max(op)`` with no read-time repair
+      (``_sync_work_order_status_from_operations`` only re-derives WO qty when ALL ops
+      are complete). Instead mirror ``sync_work_order_quantity_complete``'s invariant --
+      ``WO qty == max`` over NON-component ops of ``min(op.quantity_complete, target)``
+      -- but only ever LOWER: ``work_order.quantity_complete = min(wo_before,
+      recomputed_max)``. This naturally handles every case: reducing a non-max op
+      leaves the WO unchanged; reducing the max op drops it to the next-highest;
+      reducing a COMPONENT op leaves it unchanged (component-op production never rolled
+      into the WO rollup, so component ops are excluded from the max). The ``min``
+      guards against ever raising the WO (a reduction must not increase it) and against
+      a stale-low prior WO value.
+
+    Reconcile-safety invariant preserved: before the call
+    ``operation.quantity_complete >= SUM(quantity_produced)`` (the floor/reconcile
+    invariant); subtracting the same ``delta`` from both keeps
+    ``operation.quantity_complete >= SUM`` afterward, so the read-time reconcile has
+    nothing to re-raise. ``delta`` MUST already be validated by the caller (``> 0``
+    and ``<= active_entry.quantity_produced``); the ``max(0, ...)`` floors are
+    defensive so the persisted values can never go negative. NEVER touches scrap
+    fields or status -- this is a good-count miscount correction, not a scrap move,
+    and the operation / work order stay in progress.
+
+    ``work_order_operations`` must be the WO's operations loaded under the same WO row
+    lock the caller holds (siblings are only written while holding that lock, so their
+    counts are stable here); it must include ``operation`` itself.
+
+    True-inverse rework accounting (FPY): the additive twin
+    ``report_operation_production`` INCREMENTS ``operation.quantity_reworked`` by the
+    good delta when the active entry is a REWORK clock-in; so this reduction
+    symmetrically DECREMENTS it by the same delta under the same condition (REWORK
+    entry, ``delta > 0``), floored at 0. A non-REWORK (RUN) entry leaves
+    ``quantity_reworked`` untouched -- exactly as the twin only touches it for REWORK.
+
+    Mutates the affected rows in place and returns the before/after snapshot for the
+    caller's tamper-evident audit row.
+    """
+    op_before = float(operation.quantity_complete or 0)
+    wo_before = float(work_order.quantity_complete or 0)
+    entry_before = float(active_entry.quantity_produced or 0)
+
+    entry_after = max(0.0, entry_before - delta)
+    op_after = max(0.0, op_before - delta)
+
+    active_entry.quantity_produced = entry_after
+    operation.quantity_complete = op_after
+
+    # Recompute the WO rollup from the (now-updated) siblings rather than subtracting
+    # delta -- see the docstring. max over NON-component ops of min(op qty, target),
+    # capped only when target > 0 (mirrors sync_work_order_quantity_complete), then only
+    # LOWER via min(wo_before, ...). Empty non-component set defaults to 0.0.
+    target = float(work_order.quantity_ordered or 0)
+    non_component_caps: list[float] = []
+    for sibling in work_order_operations:
+        if sibling.component_part_id:
+            continue
+        # Use the freshly-lowered value for the corrected op (it may not be flushed yet).
+        candidate = op_after if sibling.id == operation.id else float(sibling.quantity_complete or 0)
+        if target > 0:
+            candidate = min(candidate, target)
+        non_component_caps.append(candidate)
+    recomputed_rollup = max(non_component_caps) if non_component_caps else 0.0
+    wo_after = min(wo_before, recomputed_rollup)
+    work_order.quantity_complete = wo_after
+
+    # FPY true-inverse: mirror exactly how the additive twin decides to touch
+    # quantity_reworked (entry_type == REWORK and a positive delta), decrementing
+    # instead of incrementing, bounded at 0. RUN entries are left unchanged.
+    if active_entry.entry_type == TimeEntryType.REWORK and delta > 0:
+        operation.quantity_reworked = max(0.0, float(operation.quantity_reworked or 0) - delta)
+
+    return OperationQuantityReduction(
+        delta=delta,
+        operation_quantity_complete_before=op_before,
+        operation_quantity_complete_after=op_after,
+        work_order_quantity_complete_before=wo_before,
+        work_order_quantity_complete_after=wo_after,
+        time_entry_quantity_produced_before=entry_before,
+        time_entry_quantity_produced_after=entry_after,
+    )
 
 
 def _active_operation_id(work_order: WorkOrder) -> Optional[int]:

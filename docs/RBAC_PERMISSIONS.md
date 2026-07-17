@@ -59,6 +59,18 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > array on the response; it does **not** gate the operator's role or block the clock-in / start. The
 > gate's lookups are tenant-scoped (every skill/cert/work-center query filters the active company).
 
+> **Over-count correction is operator self-service — no new role.**
+> `POST /api/v1/shop-floor/operations/{id}/reduce-production` (walk back good-count an operator
+> OVER-reported on their **own** open clock-in, before completion — a miscount fix, not scrap) is
+> **operator-facing**, open to **any authenticated user** (`get_current_user`), matching the other
+> operator write verbs (clock-in, production, complete, hold). It adds **no new role or permission**.
+> Authorization is by **evidence, not role**: the walk-back is bounded to what the caller recorded on
+> **their own** open clock-in (crew-safe — never another operator's count) and is refused **409** once
+> the operation/WO is complete (post-completion corrections stay an office/supervisor task). It is
+> tenant-scoped (a cross-tenant id → **404** before any mutation) and writes a tamper-evident
+> `audit_log` row (action `reduce_operation_production`, old→new quantity + the operator-supplied
+> reason). See `docs/API.md` → Shop Floor → "Over-count correction".
+
 > **Laser-nest manual entry + reference PDF — endpoint mapping.** Manually keying a laser nest and
 > all per-nest mutations follow the Work Orders **Create / Edit / Delete** rows above —
 > `require_role([ADMIN, MANAGER, SUPERVISOR])`: `POST /api/v1/work-orders/{id}/laser-nests/manual`

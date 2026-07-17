@@ -15,6 +15,7 @@ jest.mock('../services/api', () => ({
     clockOut: jest.fn(),
     completeOperation: jest.fn(),
     reportOperationProduction: jest.fn(),
+    reduceOperationProduction: jest.fn(),
     holdOperation: jest.fn(),
   },
 }));
@@ -212,6 +213,48 @@ describe('OperatorKiosk', () => {
         source: 'kiosk',
       })
     );
+  });
+
+  it('over-count correction reports the entered quantity + reason with source:"kiosk"', async () => {
+    mockedApi.getMyActiveJob.mockResolvedValue({ active_jobs: [ACTIVE_JOB], active_job: ACTIVE_JOB });
+    mockedApi.reduceOperationProduction.mockResolvedValue({});
+    renderKiosk();
+
+    fireEvent.click(await screen.findByTestId('kiosk-active-correct'));
+
+    // Enter 2 to remove on the digits-only keypad. Confirm is blocked until a reason.
+    fireEvent.click(screen.getByTestId('kiosk-correct-key-2'));
+    expect(screen.getByTestId('kiosk-correct-confirm')).toBeDisabled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Double-counted' }));
+    fireEvent.click(screen.getByTestId('kiosk-correct-confirm'));
+
+    await waitFor(() =>
+      expect(mockedApi.reduceOperationProduction).toHaveBeenCalledWith(31, {
+        quantity_delta: 2,
+        reason: 'Double-counted',
+        source: 'kiosk',
+      })
+    );
+    // The additive report is never called on the correction path.
+    expect(mockedApi.reportOperationProduction).not.toHaveBeenCalled();
+  });
+
+  it('shows the backend refusal verbatim when a correction is rejected', async () => {
+    mockedApi.getMyActiveJob.mockResolvedValue({ active_jobs: [ACTIVE_JOB], active_job: ACTIVE_JOB });
+    mockedApi.reduceOperationProduction.mockRejectedValue({
+      response: { data: { detail: "Completed work can't be corrected here -- ask a supervisor" } },
+    });
+    renderKiosk();
+
+    fireEvent.click(await screen.findByTestId('kiosk-active-correct'));
+    fireEvent.click(screen.getByTestId('kiosk-correct-key-1'));
+    fireEvent.click(screen.getByRole('button', { name: 'Scanned twice' }));
+    fireEvent.click(screen.getByTestId('kiosk-correct-confirm'));
+
+    expect(
+      await screen.findByText("Completed work can't be corrected here -- ask a supervisor")
+    ).toBeInTheDocument();
   });
 
   it('says so honestly (with the backend detail verbatim) when clock-out lands but complete is refused', async () => {

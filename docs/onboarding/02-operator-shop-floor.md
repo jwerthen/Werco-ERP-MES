@@ -33,7 +33,7 @@ Some cells have a dedicated wall or machine-side touchscreen that runs a simpler
 
 1. **Scan your badge** (or type your employee number on the on-screen pad and press the arrow). You don't need to tap anything first — just scan.
 2. The screen shows **your station's queue**. Tap a job, then tap **CLOCK IN**. That's it — two taps.
-3. While you're on a job, a banner stays pinned at the top with three big buttons: **REPORT PRODUCTION** (enter good and scrap on the keypad — any scrap makes you pick a reason from the grid, no skipping it), **COMPLETE** (closes your time and finishes the step), and **HOLD** (pick why the job is stopping — material missing, machine down, and so on).
+3. While you're on a job, a banner stays pinned at the top with three big buttons: **REPORT PRODUCTION** (enter good and scrap on the keypad — any scrap makes you pick a reason from the grid, no skipping it), **COMPLETE** (closes your time and finishes the step), and **HOLD** (pick why the job is stopping — material missing, machine down, and so on). A smaller **CORRECT OVER-COUNT** button sits below them for fixing a miscount — see [Fixing an over-count](#fixing-an-over-count-you-entered-too-many).
 4. **It logs you out by itself** after about 4 minutes of no touching, with a countdown warning first — tap anywhere to stay on. Always scan in as yourself; never work under someone else's badge.
 
 If the screen shows a red **OFFLINE** banner, the kiosk lost its connection — what you've typed stays on screen, but nothing saves until it reconnects. If a button refuses with a message (an earlier step isn't done, the job is on hold), that's the same sequence protection described below — run the next job and tell your lead.
@@ -138,6 +138,19 @@ Record what you make as you go. There are three ways, depending on how you like 
 
 > Tip: Always enter scrap when it happens, not at the end of the day from memory. Accurate scrap counts are part of our quality records.
 
+### Fixing an over-count (you entered too many)
+
+If you accidentally recorded **more good parts than you actually made** — a double-scan, a typo, or a count entered twice — you can walk it back yourself while you're still checked in to the job:
+
+- **On the fixed station kiosk:** tap **CORRECT OVER-COUNT** on the pinned banner, enter how many good parts to **remove** on the keypad, pick a **reason** from the grid (Double-counted, Scanned twice, Wrong qty entered, and so on — a reason is required), and confirm. On a crew station you'll scan your badge to sign it.
+- **On the desktop shop floor:** open the **Add Completed Quantity** window (**More**), flip the toggle at the top from **Add completed** to **Correct over-count**, enter the number to remove and a short reason, and tap **Remove from Completed**.
+
+A few things to know:
+
+- **This is a miscount fix, not scrap.** Nothing moves to scrap — you're correcting the good count. If a part is actually bad, report it as **scrap** with a scrap reason instead.
+- **You can only remove what *you* recorded on your current check-in.** The system won't let you go below what you personally entered (so you can't touch a teammate's count on a shared job), and it always asks for a reason — the correction goes on the record.
+- **Only before the step is finished.** Once the operation is complete (or the whole work order is closed), the button stops working and you'll be told to **ask a supervisor** — fixing a finished operation has to be done in the office because it can affect inventory and cost.
+
 ---
 
 ## Reading the operation details and instructions
@@ -194,6 +207,7 @@ Before you leave, leave the floor clean for the next shift:
 | --- | --- |
 | **Check In won't work / shows "Waiting"** | An earlier step (often at another station) isn't done yet, or the job is on hold or blocked. Run the next job and tell your supervisor. |
 | **My completion was rejected** | Make sure the quantity is a whole, non-negative number and isn't more than what's ordered. Try again and add a note. If it keeps failing, get your supervisor. |
+| **Correct over-count won't remove the parts** | You can only remove what *you* recorded on your current check-in, and only before the step is finished. If it says to *ask a supervisor*, the operation is already complete — a supervisor fixes it in the office. If it says you can only remove a smaller number, that's all you personally counted. |
 | **The queue looks wrong or empty** | You probably have a filter on. Tap **All**, turn off **Due Today**, clear the **Search** box, and confirm the right station is selected. Tap **Refresh** if needed. |
 | **Priority looks incorrect** | Don't re-order jobs on your own outside of policy. Raise it to your supervisor with the work order number and the reason. |
 | **The card shows the wrong station** | Tap the correct **Work Center Status** card (or **Change Station**) to re-select your cell. |
