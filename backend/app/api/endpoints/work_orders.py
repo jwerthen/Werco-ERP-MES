@@ -35,10 +35,12 @@ from app.models.bom import BOM, BOMItem
 from app.models.laser_nest import LaserNest
 from app.models.part import Part, PartType
 from app.models.routing import Routing, RoutingOperation
+from app.models.time_entry import TimeEntrySource
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus, WorkOrderType
 from app.schemas.import_kit import WorkOrderImportResponse
+from app.schemas.time_entry import ProductionReductionRequest
 from app.schemas.work_order import (
     LaserNestImportRow,
     LaserNestManualCreate,
@@ -89,6 +91,12 @@ from app.services.laser_nest_service import (
 )
 from app.services.migration_import_service import import_open_work_orders
 from app.services.operational_event_service import OperationalEventService
+from app.services.production_reduction_service import (
+    approved_produced_total,
+    eligible_reduction_entries,
+    load_operation_for_reduction_or_http,
+    perform_production_reduction,
+)
 from app.services.quality_gate_service import (
     QualityException,
     evaluate_and_record_completion_quality_exceptions,
@@ -3082,6 +3090,141 @@ def update_operation(
     db.commit()
     db.refresh(operation)
     return operation
+
+
+@router.post("/operations/{operation_id}/reduce-production")
+def reduce_operation_production_office(
+    operation_id: int,
+    reduction_data: ProductionReductionRequest,
+    db: Session = Depends(get_db),
+    # RBAC matrix (docs/RBAC_PERMISSIONS.md): same gate as update_operation -- this
+    # verb corrects recorded production (other operators' labor records included),
+    # which is a Work Orders Edit power, not operator self-service.
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """
+    Supervisor/office over-count correction -- the role-gated twin of the operator's
+    ``POST /shop-floor/operations/{id}/reduce-production``.
+
+    Scope: walks the delta down ALL UNAPPROVED TimeEntry evidence on the operation
+    (any operator), open entries first then newest-first. APPROVED entries are the
+    immutability boundary (G5-A) and are excluded from the allowance -- unapprove
+    them first via ``POST /shop-floor/time-entries/{id}/unapprove`` (the audited
+    segregation-of-duties front door), then reduce. No open clock-in is required --
+    the supervisor is correcting from the office, not working the operation.
+
+    Everything else is identical to the shop-floor twin (one shared core, see
+    ``production_reduction_service``): before-completion scope only (COMPLETE
+    operation / terminal WO -> 409, re-checked under the op->WO row locks in the
+    completion paths' order), tenant-scoped 404, required correction ``reason``,
+    per-entry audit trail on the tamper-evident chain, best-effort OperationalEvent,
+    optimistic-lock 409, and the RECOMPUTED work-order rollup (max over non-component
+    siblings, only ever lowered). Scrap fields and statuses are never touched.
+    """
+    load_operation_for_reduction_or_http(db, operation_id, company_id)
+
+    # Same loader-channel guard as the labor writes: 'import' is reserved for the
+    # bulk-migration loaders and may never be claimed by an interactive correction.
+    # (Kiosk-scoped tokens are path-fenced away from /work-orders, so no kiosk forcing
+    # is needed here.) Resolved before any mutation.
+    if reduction_data.source == TimeEntrySource.IMPORT:
+        raise HTTPException(
+            status_code=422,
+            detail="source 'import' cannot be set on an interactive correction; "
+            "it is reserved for the bulk-import loaders",
+        )
+    recorded_source = reduction_data.source.value if reduction_data.source else None
+
+    # Eligible evidence: ALL unapproved entries on the operation (any operator), open
+    # first then newest-first. Approved rows are excluded -- unapprove first.
+    entries = eligible_reduction_entries(db, operation_id=operation_id, company_id=company_id, user_id=None)
+    allowance = sum(float(e.quantity_produced or 0) for e in entries)
+
+    if reduction_data.quantity_delta > allowance:
+        approved_qty = approved_produced_total(db, operation_id=operation_id, company_id=company_id, user_id=None)
+        if approved_qty > 0:
+            detail = (
+                f"Only {allowance:g} piece(s) on this operation are unapproved and correctable; "
+                f"{approved_qty:g} piece(s) are on approved labor -- unapprove it first."
+            )
+        else:
+            detail = (
+                f"Only {allowance:g} piece(s) are recorded on this operation's time entries; "
+                "the correction cannot exceed the recorded evidence."
+            )
+        raise HTTPException(status_code=400, detail=detail)
+
+    # Locks, TOCTOU re-check, walk, recomputed WO rollup, audit, event, commit/409 --
+    # shared with the shop-floor twin. notes_entry=None: a supervisor's note belongs on
+    # the audit row (and the event payload), not on another operator's labor record.
+    outcome = perform_production_reduction(
+        db,
+        operation_id=operation_id,
+        company_id=company_id,
+        actor=current_user,
+        audit=audit,
+        entries=entries,
+        delta=reduction_data.quantity_delta,
+        reason=reduction_data.reason,
+        notes=reduction_data.notes,
+        recorded_source=recorded_source,
+        notes_entry=None,
+        event_source_module="work_orders",
+        path="office",
+    )
+    operation = outcome.operation
+    work_order = outcome.work_order
+
+    if operation.work_center_id:
+        safe_broadcast(
+            broadcast_shop_floor_update,
+            operation.work_center_id,
+            {
+                "event": "operation_production_reduced",
+                "work_order_id": work_order.id,
+                "operation_id": operation.id,
+                "quantity_complete": operation.quantity_complete,
+                "quantity_scrapped": operation.quantity_scrapped,
+            },
+            company_id=company_id,
+        )
+    safe_broadcast(
+        broadcast_work_order_update,
+        work_order.id,
+        {
+            "event": "operation_production_reduced",
+            "operation_id": operation.id,
+        },
+        company_id=company_id,
+    )
+    safe_broadcast(
+        broadcast_dashboard_update,
+        {
+            "event": "operation_production_reduced",
+            "work_order_id": work_order.id,
+            "operation_id": operation.id,
+        },
+        company_id=company_id,
+    )
+
+    return {
+        "message": "Production quantity corrected",
+        "operation": {
+            "id": operation.id,
+            "status": operation.status.value,
+            "quantity_complete": operation.quantity_complete,
+            "quantity_scrapped": operation.quantity_scrapped,
+            "quantity_ordered": outcome.target_qty,
+        },
+        "work_order": {
+            "id": work_order.id,
+            "quantity_complete": work_order.quantity_complete,
+        },
+        # Per-entry paper trail of the walk (whose evidence was lowered, by how much).
+        "reduced_time_entries": [s.as_dict() for s in outcome.reduction.time_entry_reductions],
+    }
 
 
 @router.post("/operations/{operation_id}/start")

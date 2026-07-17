@@ -147,11 +147,11 @@ describe('ShopFloorSimple over-count correction', () => {
     expect(mockedApi.reportOperationProduction).not.toHaveBeenCalled();
   });
 
-  it('surfaces the server refusal verbatim and does not optimistically change the count', async () => {
+  it('renders the server refusal verbatim INLINE in the modal and does not optimistically change the count', async () => {
+    const refusal =
+      'You can only remove up to the 2 piece(s) you recorded on this clock-in; ask a supervisor to correct more.';
     mockedApi.reduceOperationProduction.mockRejectedValue({
-      response: {
-        data: { detail: 'You can only remove up to the 2 piece(s) you recorded on this clock-in; ask a supervisor to correct more.' },
-      },
+      response: { data: { detail: refusal } },
     });
     await openCorrectMode();
 
@@ -159,12 +159,51 @@ describe('ShopFloorSimple over-count correction', () => {
     fireEvent.change(screen.getByLabelText(/reason for correction/i), { target: { value: 'oops' } });
     fireEvent.click(screen.getByRole('button', { name: /remove from completed/i }));
 
-    // Verbatim server detail is shown; the modal stays open with the count
-    // unchanged ("Completed now: 5 / 25") because the UI never moved it optimistically.
-    expect(
-      await screen.findByText(/you can only remove up to the 2 piece\(s\)/i)
-    ).toBeInTheDocument();
+    // The refusal renders INLINE inside the open modal, verbatim, as role="alert"
+    // (production feedback: the toast alone sat under the modal overlay and was
+    // unreadable on the shop floor — the inline region is the primary display).
+    const inline = await screen.findByTestId('shopfloor-production-error');
+    expect(inline).toHaveTextContent(refusal);
+    expect(inline).toHaveAttribute('role', 'alert');
+
+    // Modal stays open with form state intact and the count unchanged
+    // ("Completed now: 5 / 25") because the UI never moved it optimistically.
     expect(screen.getByRole('heading', { name: /correct over-count/i })).toBeInTheDocument();
+    expect(screen.getByLabelText(/parts to remove/i)).toHaveValue(9);
     expect(screen.getByText(/completed now: 5 \/ 25/i)).toBeInTheDocument();
+  });
+
+  it('clears the inline refusal when switching back to Add mode', async () => {
+    mockedApi.reduceOperationProduction.mockRejectedValue({
+      response: { data: { detail: 'You must be clocked in to this operation to correct its count' } },
+    });
+    await openCorrectMode();
+
+    fireEvent.change(screen.getByLabelText(/reason for correction/i), { target: { value: 'oops' } });
+    fireEvent.click(screen.getByRole('button', { name: /remove from completed/i }));
+    await screen.findByTestId('shopfloor-production-error');
+
+    // A stale refusal must not linger over the other mode's form.
+    fireEvent.click(screen.getByRole('button', { name: /add completed/i }));
+    expect(screen.queryByTestId('shopfloor-production-error')).not.toBeInTheDocument();
+  });
+
+  it('renders an Add-mode failure inline in the modal too', async () => {
+    mockedApi.reportOperationProduction.mockRejectedValue({
+      response: { data: { detail: 'Operation is on hold' } },
+    });
+    renderShopFloor();
+    await screen.findByTestId('shop-floor-op-101');
+    const row = screen.getByTestId('shop-floor-op-101');
+    fireEvent.click(within(row).getByRole('button', { name: /^more$/i }));
+    await screen.findByRole('heading', { name: /add completed quantity/i });
+
+    // Default 1 good / 0 scrap; submit the additive report and let it fail.
+    fireEvent.click(screen.getByRole('button', { name: /add to completed/i }));
+
+    const inline = await screen.findByTestId('shopfloor-production-error');
+    expect(inline).toHaveTextContent('Operation is on hold');
+    // Modal stays open (the failed report never closes it optimistically).
+    expect(screen.getByRole('heading', { name: /add completed quantity/i })).toBeInTheDocument();
   });
 });

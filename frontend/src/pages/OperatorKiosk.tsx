@@ -112,6 +112,10 @@ export default function OperatorKiosk() {
   const [view, setView] = useState<KioskView>({ name: 'queue' });
   const [busy, setBusy] = useState(false);
   const [holdReason, setHoldReason] = useState<string | null>(null);
+  // Server refusal for the over-count correction, rendered INLINE on the
+  // correction screen (verbatim, next to the confirm button) — mirrors the crew
+  // station's badgeError pattern. A toast alone proved unreadable on the floor.
+  const [correctError, setCorrectError] = useState<string | null>(null);
   const [toasts, setToasts] = useState<KioskToast[]>([]);
   const [nowMs, setNowMs] = useState(() => Date.now());
 
@@ -254,6 +258,7 @@ export default function OperatorKiosk() {
     async (job: ActiveJob, quantity: number, reason: string) => {
       if (!job.operation_id) return;
       setBusy(true);
+      setCorrectError(null);
       try {
         await api.reduceOperationProduction(job.operation_id, {
           quantity_delta: quantity,
@@ -265,8 +270,10 @@ export default function OperatorKiosk() {
         await refresh();
       } catch (err) {
         // Non-optimistic: the count never moved locally. Keep the correction view
-        // (entered quantity retained) and surface the server's refusal verbatim.
-        showToast('error', kioskErrorMessage(err, 'Could not correct the count. Try again.'));
+        // (entered quantity retained) and render the server's refusal verbatim
+        // INLINE on the screen — the primary display (no toast; same pattern as
+        // the crew station's badge-panel error).
+        setCorrectError(kioskErrorMessage(err, 'Could not correct the count. Try again.'));
       } finally {
         setBusy(false);
       }
@@ -505,7 +512,10 @@ export default function OperatorKiosk() {
                     : undefined
                 }
                 onReportProduction={() => setView({ name: 'production', job: activeJob })}
-                onCorrect={() => setView({ name: 'correct', job: activeJob })}
+                onCorrect={() => {
+                  setCorrectError(null);
+                  setView({ name: 'correct', job: activeJob });
+                }}
                 onComplete={() => setView({ name: 'complete', job: activeJob })}
                 onHold={() => {
                   setHoldReason(null);
@@ -616,6 +626,7 @@ export default function OperatorKiosk() {
           <KioskCorrectionScreen
             jobLabel={jobLabel(view.job)}
             busy={mutationsBlocked}
+            error={correctError}
             onConfirm={(quantity, reason) => void handleCorrectProduction(view.job, quantity, reason)}
             onCancel={() => setView({ name: 'queue' })}
           />

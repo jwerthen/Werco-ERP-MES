@@ -22,7 +22,7 @@ import { Breadcrumbs } from '../components/ui/Breadcrumbs';
 import { getBreadcrumbParent } from '../utils/routeMeta';
 import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
 import { ContextualAIStrip } from '../components/ai';
-import { EmptyState, ErrorState, useToast, statusColor, Button } from '../components/ui';
+import { EmptyState, ErrorState, useToast, statusColor, Button, Modal } from '../components/ui';
 import { formatCentralDate, formatCentralDateTime } from '../utils/centralTime';
 import {
   ArrowLeftIcon,
@@ -42,6 +42,8 @@ import {
   PencilSquareIcon,
   CalendarDaysIcon,
   FlagIcon,
+  MinusCircleIcon,
+  XMarkIcon,
   BuildingOffice2Icon,
   HashtagIcon,
   ClockIcon,
@@ -240,6 +242,10 @@ export default function WorkOrderDetail() {
   // the same trio the backend RBAC allows (routings:create maps to exactly that
   // set plus platform_admin).
   const canManageNests = hasPermission(user?.role, 'routings:create');
+  // Office over-count correction is a supervisor-tier action: work_orders:edit
+  // maps to exactly admin/manager/supervisor. The backend enforces RBAC too —
+  // this only keeps the UI honest about what the server will allow.
+  const canCorrectCount = hasPermission(user?.role, 'work_orders:edit') || !!user?.is_superuser;
   const [workOrder, setWorkOrder] = useState<WorkOrder | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -255,6 +261,15 @@ export default function WorkOrderDetail() {
   const [completeTarget, setCompleteTarget] = useState<
     { kind: 'work_order' } | { kind: 'operation'; operation: WorkOrderOperation } | null
   >(null);
+  // Supervisor "Correct count" (office reduce-production): the target operation,
+  // its small quantity+reason form, and the server refusal rendered INLINE in
+  // the modal (verbatim — the whole point of a server-gated correction is that
+  // the user reads WHY it was refused). `null` target = closed. Gated below to
+  // work_orders:edit (admin/manager/supervisor — operators use the shop floor).
+  const [correctTarget, setCorrectTarget] = useState<WorkOrderOperation | null>(null);
+  const [correctData, setCorrectData] = useState({ quantity: 1, reason: '' });
+  const [correctError, setCorrectError] = useState<string | null>(null);
+  const [correctingOpId, setCorrectingOpId] = useState<number | null>(null);
   const [materialReqs, setMaterialReqs] = useState<MaterialRequirementsResponse | null>(null);
   const [blockers, setBlockers] = useState<WorkOrderBlocker[]>([]);
   const [blockerForm, setBlockerForm] = useState<{
@@ -669,6 +684,48 @@ export default function WorkOrderDetail() {
       } finally {
         setCompletingOpId(null);
       }
+    }
+  };
+
+  // Supervisor "Correct count": opens the small quantity+reason modal for an
+  // operation. Server-gated ⇒ NON-optimistic — the on-screen count never moves
+  // locally; success refetches the WO, refusal renders the verbatim `detail`
+  // INLINE in the modal.
+  const openCorrectModal = (operation: WorkOrderOperation) => {
+    setCorrectTarget(operation);
+    setCorrectData({ quantity: 1, reason: '' });
+    setCorrectError(null);
+  };
+
+  const closeCorrectModal = () => {
+    setCorrectTarget(null);
+    setCorrectData({ quantity: 1, reason: '' });
+    setCorrectError(null);
+  };
+
+  const handleCorrectSubmit = async () => {
+    if (!correctTarget || correctingOpId !== null) return;
+    const quantity = Number(correctData.quantity || 0);
+    const reason = correctData.reason.trim();
+    if (quantity <= 0 || !reason) return;
+    setCorrectingOpId(correctTarget.id);
+    setCorrectError(null);
+    try {
+      await api.reduceWOOperationProduction(correctTarget.id, {
+        quantity_delta: quantity,
+        reason,
+        source: 'desktop',
+      });
+      showToast('success', `Removed ${quantity} from operation ${correctTarget.sequence} ${correctTarget.name}`);
+      closeCorrectModal();
+      loadWorkOrder();
+    } catch (err: any) {
+      // Verbatim server refusal, inline (string guard: object details must
+      // never reach the renderer).
+      const detail = err.response?.data?.detail;
+      setCorrectError(typeof detail === 'string' && detail ? detail : 'Failed to correct the completed quantity');
+    } finally {
+      setCorrectingOpId(null);
     }
   };
 
@@ -1814,6 +1871,20 @@ export default function WorkOrderDetail() {
                             {op.status === 'complete' && (
                               <span className="text-slate-500 text-sm">Done</span>
                             )}
+                            {/* Supervisor over-count correction — only when there is
+                                a recorded count to walk back. The server decides what
+                                is actually correctable (non-optimistic). */}
+                            {canCorrectCount && Number(op.quantity_complete || 0) > 0 && (
+                              <button
+                                type="button"
+                                onClick={() => openCorrectModal(op)}
+                                disabled={correctingOpId === op.id}
+                                className="text-amber-400 hover:text-amber-300 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                                title="Correct over-counted quantity"
+                              >
+                                <MinusCircleIcon className="h-5 w-5 inline" /> Correct count
+                              </button>
+                            )}
                           </div>
                         </td>
                       </tr>
@@ -1924,6 +1995,120 @@ export default function WorkOrderDetail() {
           />
         </>
       )}
+
+      {/* Supervisor "Correct count" — office over-count correction (reduce-
+          production). Non-optimistic: the count on screen only changes via the
+          post-success refetch, and a refusal renders verbatim INLINE below. */}
+      <Modal
+        open={correctTarget !== null}
+        onClose={() => {
+          // Don't let the user dismiss mid-request; reflect only server state.
+          if (correctingOpId !== null) return;
+          closeCorrectModal();
+        }}
+        size="md"
+        padded={false}
+        scroll={false}
+      >
+        {correctTarget && (
+          <>
+            <div className="modal-header">
+              <h3 className="text-lg font-semibold">Correct Count — Op {correctTarget.sequence} {correctTarget.name}</h3>
+              <button
+                onClick={closeCorrectModal}
+                disabled={correctingOpId !== null}
+                className="p-2 rounded-lg hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed"
+                aria-label="Close"
+              >
+                <XMarkIcon className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="modal-body space-y-4">
+              <div className="rounded-sm border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200/90">
+                Removes over-reported good quantity from this operation — a miscount correction, not
+                scrap. Recorded on the audit trail with your name and reason.
+              </div>
+
+              <p className="text-sm text-slate-400">
+                Completed now:{' '}
+                <span className="font-semibold text-white">
+                  {correctTarget.quantity_complete} / {Number(correctTarget.component_quantity || workOrder.quantity_ordered || 0)}
+                </span>
+              </p>
+
+              <div>
+                <label htmlFor="wo-correct-qty" className="label">Quantity to remove</label>
+                <input
+                  id="wo-correct-qty"
+                  type="number"
+                  inputMode="decimal"
+                  min={0}
+                  value={correctData.quantity}
+                  onChange={(e) => setCorrectData({ ...correctData, quantity: Number(e.target.value) || 0 })}
+                  className="input h-12 text-center text-xl font-bold"
+                  aria-label="Quantity to remove"
+                  autoFocus
+                />
+              </div>
+
+              <div>
+                <label htmlFor="wo-correct-reason" className="label">
+                  Reason for correction{' '}
+                  <span aria-hidden="true" className="text-fd-red">*</span>
+                </label>
+                <input
+                  id="wo-correct-reason"
+                  type="text"
+                  maxLength={255}
+                  value={correctData.reason}
+                  onChange={(e) => setCorrectData({ ...correctData, reason: e.target.value })}
+                  className="input"
+                  placeholder="e.g. operator double-scanned the tray"
+                  aria-label="Reason for correction"
+                  aria-required="true"
+                />
+                <p className="mt-1 text-xs text-slate-400">Recorded on the audit trail. Required.</p>
+              </div>
+
+              {/* Server refusal, INLINE and verbatim — the primary display. */}
+              {correctError && (
+                <div
+                  role="alert"
+                  data-testid="wo-correct-error"
+                  className="rounded-sm border border-red-500/60 bg-red-500/10 px-4 py-3 text-base font-semibold text-red-300"
+                >
+                  {correctError}
+                </div>
+              )}
+            </div>
+
+            <div className="modal-footer">
+              <Button variant="secondary" onClick={closeCorrectModal} disabled={correctingOpId !== null}>
+                Cancel
+              </Button>
+              <button
+                onClick={handleCorrectSubmit}
+                disabled={
+                  correctingOpId !== null ||
+                  Number(correctData.quantity || 0) <= 0 ||
+                  correctData.reason.trim().length === 0
+                }
+                className="btn-danger disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {correctingOpId !== null ? (
+                  <ArrowPathIcon className="h-5 w-5 animate-spin" />
+                ) : (
+                  <>
+                    <MinusCircleIcon className="h-5 w-5 mr-2 inline" />
+                    Remove from Completed
+                  </>
+                )}
+              </button>
+            </div>
+          </>
+        )}
+      </Modal>
 
       <CompleteWorkModal
         open={completeTarget !== null}

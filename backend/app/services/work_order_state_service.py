@@ -3,7 +3,7 @@
 import math
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Sequence
 
 from sqlalchemy import and_, func
 from sqlalchemy.orm import Session
@@ -355,8 +355,33 @@ def sync_work_order_quantity_complete(
 
 
 @dataclass
+class TimeEntryReduction:
+    """Per-entry slice of a walked-down correction (for the audit row's paper trail)."""
+
+    time_entry_id: Optional[int]
+    entry_type: Optional[str]
+    quantity_produced_before: float
+    quantity_produced_after: float
+
+    def as_dict(self) -> dict:
+        return {
+            "time_entry_id": self.time_entry_id,
+            "entry_type": self.entry_type,
+            "quantity_produced_before": self.quantity_produced_before,
+            "quantity_produced_after": self.quantity_produced_after,
+        }
+
+
+@dataclass
 class OperationQuantityReduction:
-    """Before/after snapshot of a good-count over-report correction (for the audit row)."""
+    """Before/after snapshot of a good-count over-report correction (for the audit row).
+
+    ``time_entry_quantity_produced_before/after`` are the SUMS over the walked
+    entries (a single-entry walk degenerates to that entry's before/after);
+    ``time_entry_reductions`` carries the per-entry slices, in walk order, for
+    the audit row's ``extra_data``. ``rework_delta`` is the portion of the delta
+    walked off REWORK-typed entries (the FPY decrement actually applied).
+    """
 
     delta: float
     operation_quantity_complete_before: float
@@ -365,12 +390,14 @@ class OperationQuantityReduction:
     work_order_quantity_complete_after: float
     time_entry_quantity_produced_before: float
     time_entry_quantity_produced_after: float
+    time_entry_reductions: list[TimeEntryReduction] = field(default_factory=list)
+    rework_delta: float = 0.0
 
 
 def reduce_operation_produced_quantity(
     operation: WorkOrderOperation,
     work_order: WorkOrder,
-    active_entry: TimeEntry,
+    entries: Sequence[TimeEntry],
     delta: float,
     work_order_operations: Iterable[WorkOrderOperation],
 ) -> OperationQuantityReduction:
@@ -387,8 +414,15 @@ def reduce_operation_produced_quantity(
     A correct reduction lowers the operation total and its BACKING EVIDENCE in
     lock-step by the same delta, then RECOMPUTES the WO rollup from the siblings:
 
-    * ``active_entry.quantity_produced`` -- the backing durable EVIDENCE, so the
-      reconcile ``SUM`` drops with it (this is what makes the correction stick).
+    * ``entries`` -- the ordered ELIGIBLE evidence rows (the caller decides
+      eligibility: the operator path passes the caller's own unapproved entries,
+      open first then closed newest-first; the office path passes ALL unapproved
+      entries on the operation). The delta is WALKED across them in the given
+      order: each entry gives up ``min(its quantity_produced, remaining)`` until
+      the whole delta is consumed, so no entry ever goes below zero and the total
+      removed equals ``delta`` exactly. The reconcile ``SUM`` therefore drops by
+      exactly ``delta`` (this is what makes the correction stick). The caller MUST
+      have validated ``delta <= sum(entries' quantity_produced)``.
     * ``operation.quantity_complete`` -- the derived op total, lowered by ``delta``.
     * ``work_order.quantity_complete`` -- the WO rollup, RECOMPUTED (not blindly
       subtracted) from ``work_order_operations``. On a multi-op WO another op may hold
@@ -407,36 +441,66 @@ def reduce_operation_produced_quantity(
 
     Reconcile-safety invariant preserved: before the call
     ``operation.quantity_complete >= SUM(quantity_produced)`` (the floor/reconcile
-    invariant); subtracting the same ``delta`` from both keeps
+    invariant); removing the same ``delta`` from both sides keeps
     ``operation.quantity_complete >= SUM`` afterward, so the read-time reconcile has
-    nothing to re-raise. ``delta`` MUST already be validated by the caller (``> 0``
-    and ``<= active_entry.quantity_produced``); the ``max(0, ...)`` floors are
-    defensive so the persisted values can never go negative. NEVER touches scrap
+    nothing to re-raise. ``delta`` MUST already be validated by the caller (``> 0``,
+    finite, and ``<= sum(entries' quantity_produced)``); the ``max(0, ...)`` floors
+    are defensive so the persisted values can never go negative. NEVER touches scrap
     fields or status -- this is a good-count miscount correction, not a scrap move,
     and the operation / work order stay in progress.
 
     ``work_order_operations`` must be the WO's operations loaded under the same WO row
     lock the caller holds (siblings are only written while holding that lock, so their
-    counts are stable here); it must include ``operation`` itself.
+    counts are stable here); it must include ``operation`` itself. Every mutated
+    ``entries`` row carries ``version_id_col`` -- a concurrent stale write surfaces as
+    ``StaleDataError`` at the caller's commit.
 
     True-inverse rework accounting (FPY): the additive twin
-    ``report_operation_production`` INCREMENTS ``operation.quantity_reworked`` by the
-    good delta when the active entry is a REWORK clock-in; so this reduction
-    symmetrically DECREMENTS it by the same delta under the same condition (REWORK
-    entry, ``delta > 0``), floored at 0. A non-REWORK (RUN) entry leaves
-    ``quantity_reworked`` untouched -- exactly as the twin only touches it for REWORK.
+    ``report_operation_production`` INCREMENTS ``operation.quantity_reworked`` when
+    good quantity is reported on a REWORK clock-in; so this reduction symmetrically
+    DECREMENTS it -- PER ENTRY -- by exactly the portion of the delta walked off
+    REWORK-typed entries, floored at 0. Quantity walked off RUN entries never touches
+    ``quantity_reworked``.
 
-    Mutates the affected rows in place and returns the before/after snapshot for the
-    caller's tamper-evident audit row.
+    Mutates the affected rows in place and returns the before/after snapshot (with
+    per-entry slices) for the caller's tamper-evident audit row.
     """
     op_before = float(operation.quantity_complete or 0)
     wo_before = float(work_order.quantity_complete or 0)
-    entry_before = float(active_entry.quantity_produced or 0)
 
-    entry_after = max(0.0, entry_before - delta)
+    # Walk the delta across the eligible entries in the caller's order. Each entry
+    # gives up min(available, remaining): entries never go negative, and the final
+    # take equals the exact remaining value, so the total removed == delta exactly
+    # (no float drift from repeated subtraction of derived values).
+    remaining = delta
+    slices: list[TimeEntryReduction] = []
+    rework_delta = 0.0
+    entries_before_sum = 0.0
+    entries_after_sum = 0.0
+    for entry in entries:
+        if remaining <= 0:
+            break
+        available = float(entry.quantity_produced or 0)
+        if available <= 0:
+            continue
+        take = min(available, remaining)
+        entry.quantity_produced = available - take
+        entry.updated_at = datetime.utcnow()
+        remaining -= take
+        if entry.entry_type == TimeEntryType.REWORK:
+            rework_delta += take
+        entries_before_sum += available
+        entries_after_sum += available - take
+        slices.append(
+            TimeEntryReduction(
+                time_entry_id=entry.id,
+                entry_type=(entry.entry_type.value if hasattr(entry.entry_type, "value") else entry.entry_type),
+                quantity_produced_before=available,
+                quantity_produced_after=available - take,
+            )
+        )
+
     op_after = max(0.0, op_before - delta)
-
-    active_entry.quantity_produced = entry_after
     operation.quantity_complete = op_after
 
     # Recompute the WO rollup from the (now-updated) siblings rather than subtracting
@@ -457,11 +521,11 @@ def reduce_operation_produced_quantity(
     wo_after = min(wo_before, recomputed_rollup)
     work_order.quantity_complete = wo_after
 
-    # FPY true-inverse: mirror exactly how the additive twin decides to touch
-    # quantity_reworked (entry_type == REWORK and a positive delta), decrementing
-    # instead of incrementing, bounded at 0. RUN entries are left unchanged.
-    if active_entry.entry_type == TimeEntryType.REWORK and delta > 0:
-        operation.quantity_reworked = max(0.0, float(operation.quantity_reworked or 0) - delta)
+    # FPY true-inverse, portioned PER ENTRY: only the quantity walked off REWORK-typed
+    # entries decrements quantity_reworked (the twin only increments it for REWORK
+    # clock-ins), bounded at 0. RUN-entry portions leave it unchanged.
+    if rework_delta > 0:
+        operation.quantity_reworked = max(0.0, float(operation.quantity_reworked or 0) - rework_delta)
 
     return OperationQuantityReduction(
         delta=delta,
@@ -469,8 +533,10 @@ def reduce_operation_produced_quantity(
         operation_quantity_complete_after=op_after,
         work_order_quantity_complete_before=wo_before,
         work_order_quantity_complete_after=wo_after,
-        time_entry_quantity_produced_before=entry_before,
-        time_entry_quantity_produced_after=entry_after,
+        time_entry_quantity_produced_before=entries_before_sum,
+        time_entry_quantity_produced_after=entries_after_sum,
+        time_entry_reductions=slices,
+        rework_delta=rework_delta,
     )
 
 

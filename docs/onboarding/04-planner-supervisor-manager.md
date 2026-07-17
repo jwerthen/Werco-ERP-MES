@@ -120,6 +120,24 @@ The detail page also shows the work order's quantities, due date, priority, cust
 ![Work order detail page with status actions, info, materials, and blockers](images/workorder-detail.png)
 *Everything about one job lives here — release it, run it, print the traveler, and clear blockers.*
 
+### Correct an operator's over-count
+
+Operators can walk back their **own** miscounts from the floor, but two cases need you: a count that's already been **approved**, and a count recorded by **someone else**. For those, each operation row on the work order detail page has a **Correct count** action (shown when the operation has a recorded count; admin/manager/supervisor only):
+
+1. Click **Correct count** on the operation row.
+2. Enter the **quantity to remove** and a **reason** — the reason is required and goes on the audit trail with your name.
+3. Confirm. The operation's completed count (and the work order's rollup) drop by that amount.
+
+What it can and can't do:
+
+- **Any operator's counts** on the operation — you don't need to be clocked in, and it works from the office. It removes from **unapproved** time entries only (newest first).
+- **Approved labor is locked.** If some of the count is on approved entries, the refusal tells you how much is correctable and how much is approved — **unapprove** the entry first (Time Entries approval), then correct.
+- **Only before the operation is complete.** A finished operation (or a completed/closed/cancelled work order) is refused — post-completion corrections affect inventory and cost and aren't done here.
+- **This is a miscount fix, not scrap.** Nothing moves to scrap, and the job's status doesn't change. Bad parts are reported as scrap with a scrap reason instead.
+- **Everything is recorded** — the amount removed, which time entries it came off, your reason, and your name land on the tamper-evident audit trail.
+
+If the correction is refused, the reason shows right in the window — it tells you exactly what's correctable.
+
 You can also browse and filter every job from the **Work Orders** list.
 
 ![Work Orders list filtered by status and customer](images/workorders-list.png)

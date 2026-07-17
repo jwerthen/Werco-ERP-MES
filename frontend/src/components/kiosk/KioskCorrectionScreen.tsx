@@ -13,6 +13,12 @@ interface KioskCorrectionScreenProps {
   tallyBanner?: string;
   busy: boolean;
   /**
+   * Server refusal `detail`, VERBATIM — rendered as a prominent inline alert
+   * right above the confirm button (a toast alone proved unreadable on shop
+   * displays). The caller owns clearing it on retry/open.
+   */
+  error?: string | null;
+  /**
    * Emits the positive quantity to REMOVE plus the required correction reason
    * (verbatim label). The caller submits to reduce-production and stays
    * non-optimistic — nothing here mutates the count.
@@ -33,6 +39,7 @@ export default function KioskCorrectionScreen({
   jobLabel,
   tallyBanner,
   busy,
+  error,
   onConfirm,
   onCancel,
 }: KioskCorrectionScreenProps) {
@@ -53,7 +60,8 @@ export default function KioskCorrectionScreen({
       <h2 className="text-3xl font-bold text-fd-ink">Correct over-count</h2>
       <p className="mt-1 font-mono text-lg text-fd-mute">{jobLabel}</p>
       <p className="mt-3 text-base text-fd-body">
-        Remove good pieces you over-reported on this job. This is a miscount correction, not scrap.
+        Remove good pieces you over-reported on this operation — a miscount correction, not scrap.
+        Approved or another operator&apos;s counts need a supervisor.
       </p>
 
       {tallyBanner && (
@@ -83,6 +91,18 @@ export default function KioskCorrectionScreen({
         <p className="mb-2 text-lg font-semibold text-fd-amber">Reason — required</p>
         <KioskReasonGrid reasons={CORRECTION_REASONS} selected={reason} onSelect={setReason} disabled={busy} tone="amber" />
       </div>
+
+      {/* Server refusal, INLINE and verbatim — big enough for a shop display and
+          announced via role="alert". This is the primary error surface. */}
+      {error && (
+        <p
+          role="alert"
+          data-testid="kiosk-correct-error"
+          className="mt-5 rounded border border-fd-red bg-fd-red/10 px-4 py-3 text-center text-xl font-bold text-fd-red"
+        >
+          {error}
+        </p>
+      )}
 
       <div className="mt-6 grid grid-cols-2 gap-3">
         <button
