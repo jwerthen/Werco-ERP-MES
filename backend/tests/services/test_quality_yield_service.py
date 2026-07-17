@@ -19,7 +19,7 @@ from datetime import date, datetime
 import pytest
 from sqlalchemy.orm import Session
 
-from app.models.work_order import OperationStatus, WorkOrderStatus
+from app.models.work_order import OperationStatus, WorkOrder, WorkOrderStatus, WorkOrderType
 from app.services.quality_yield_service import get_fpy_rty, get_scrap_pareto, get_scrap_rate
 from tests.lean_phase1_helpers import (
     COMPANY_A,
@@ -150,6 +150,70 @@ def test_rty_is_product_of_op_fpys_and_omitted_under_wc_filter(db_session: Sessi
     assert filtered.overall_rty_pct is None
     assert all(row.rty_pct is None for row in filtered.by_part)
     assert filtered.overall_fpy_pct == pytest.approx(60.0)
+
+
+def test_fpy_counts_partless_laser_ops_in_overall_and_wc_but_not_by_part(db_session: Session):
+    """Standalone laser-cutting WOs carry part_id NULL: their completed sheet-run
+    ops must still count in overall FPY and the per-work-center buckets (the Part
+    join is an OUTER join), while producing NO per-part row (nothing to attribute
+    the yield to)."""
+    part = make_part(db_session)
+    wc = make_work_center(db_session, work_center_type="laser")
+
+    part_wo = make_wo(db_session, part, status_=WorkOrderStatus.COMPLETE)
+    # Parted op: 10 clean -> fp 10 / attempted 10.
+    make_op(
+        db_session,
+        part_wo,
+        wc,
+        sequence=10,
+        status_=OperationStatus.COMPLETE,
+        quantity_complete=10,
+        actual_end=IN_WINDOW,
+    )
+
+    laser_wo = WorkOrder(
+        work_order_number="LEAN1-LASER-00001",
+        part_id=None,
+        work_order_type=WorkOrderType.LASER_CUTTING.value,
+        quantity_ordered=4,
+        status=WorkOrderStatus.COMPLETE,
+        priority=5,
+        company_id=COMPANY_A,
+    )
+    db_session.add(laser_wo)
+    db_session.commit()
+    # Part-less sheet-run op: 3 complete, 1 scrapped -> fp 2 / attempted 4.
+    make_op(
+        db_session,
+        laser_wo,
+        wc,
+        sequence=10,
+        status_=OperationStatus.COMPLETE,
+        quantity_complete=3,
+        quantity_scrapped=1,
+        actual_end=IN_WINDOW,
+    )
+
+    result = get_fpy_rty(db_session, COMPANY_A, WINDOW_START, WINDOW_END)
+
+    # Overall counts BOTH WOs: (10 + 2) / (10 + 4) = 85.7%.
+    assert result.overall_fpy_pct == pytest.approx(85.7)
+    # Overall RTY averages BOTH WOs: (1.0 + 0.5) / 2 = 75.0%.
+    assert result.overall_rty_pct == pytest.approx(75.0)
+
+    # The part-less WO contributes NO per-part row...
+    assert [row.key for row in result.by_part] == [part.part_number]
+    part_row = result.by_part[0]
+    assert part_row.units_attempted == pytest.approx(10.0)
+    assert part_row.work_orders == 1
+
+    # ...but its sheet-run ops DO count in the work-center bucket.
+    wc_row = next(row for row in result.by_work_center if row.key == wc.code)
+    assert wc_row.operations == 2
+    assert wc_row.units_attempted == pytest.approx(14.0)
+    assert wc_row.first_pass_units == pytest.approx(12.0)
+    assert wc_row.work_orders == 2
 
 
 def test_fpy_tenant_scoped_and_none_on_empty(db_session: Session):

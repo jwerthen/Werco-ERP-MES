@@ -412,6 +412,10 @@ class WorkOrderUpdate(BaseModel):
 
 class WorkOrderResponse(WorkOrderBase):
     id: int
+    # READ-side relaxation: standalone laser-cutting nest WOs carry no part, so
+    # part_id may be NULL on responses. WorkOrderCreate keeps the base's required
+    # part_id -- part-less WOs are born only via the standalone nest import.
+    part_id: Optional[int] = Field(None, description="Part ID (None for standalone laser-cutting work orders)")
     version: Optional[int] = 0
     work_order_number: str
     status: WorkOrderStatus
@@ -481,7 +485,8 @@ class WorkOrderSummary(UTCModel):
 
     id: int
     work_order_number: str
-    part_id: int
+    # None for standalone laser-cutting nest WOs (no part).
+    part_id: Optional[int] = None
     parent_work_order_id: Optional[int] = None
     work_order_type: str = "production"
     part_number: Optional[str] = None

@@ -23,6 +23,7 @@ import {
   LaserNestPdfExtraction,
   LaserNestPackagePreview,
   LaserNestImportRow,
+  LaserNestPackageImportResult,
 } from '../types';
 import { ScanResolveRequest, ScanResolveResult } from '../types/scan';
 import {
@@ -903,15 +904,57 @@ class ApiService {
       // keep the legacy CNC-program import (server parses the ZIP itself).
       rows?: LaserNestImportRow[];
     }
-  ) {
+  ): Promise<LaserNestPackageImportResult> {
     const formData = new FormData();
     if (data.file) formData.append('file', data.file);
     if (data.source_path) formData.append('source_path', data.source_path);
     if (data.work_center_id) formData.append('work_center_id', String(data.work_center_id));
     if (data.rows) formData.append('rows', JSON.stringify(data.rows));
-    const response = await this.api.post(`/work-orders/${workOrderId}/laser-nest-packages/import`, formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    });
+    const response = await this.api.post<LaserNestPackageImportResult>(
+      `/work-orders/${workOrderId}/laser-nest-packages/import`,
+      formData,
+      { headers: { 'Content-Type': 'multipart/form-data' } }
+    );
+    return response.data;
+  }
+
+  // --- Standalone nest packages (no parent work order) ----------------------
+  // Same wizard flow as the parented endpoints above, but with no WO in the
+  // URL: import creates a fresh RELEASED laser-cutting work order (no parent,
+  // no part) sized to the total planned sheet runs and returns it as
+  // `child_work_order`.
+
+  async previewLaserNestPackageStandalone(data: {
+    file?: File | null;
+    source_path?: string;
+  }): Promise<LaserNestPackagePreview> {
+    const formData = new FormData();
+    if (data.file) formData.append('file', data.file);
+    if (data.source_path) formData.append('source_path', data.source_path);
+    const response = await this.api.post<LaserNestPackagePreview>(
+      '/work-orders/laser-nest-packages/standalone/preview',
+      formData,
+      { headers: { 'Content-Type': 'multipart/form-data' } }
+    );
+    return response.data;
+  }
+
+  async importLaserNestPackageStandalone(data: {
+    file?: File | null;
+    source_path?: string;
+    work_center_id?: number | null;
+    rows?: LaserNestImportRow[];
+  }): Promise<LaserNestPackageImportResult> {
+    const formData = new FormData();
+    if (data.file) formData.append('file', data.file);
+    if (data.source_path) formData.append('source_path', data.source_path);
+    if (data.work_center_id) formData.append('work_center_id', String(data.work_center_id));
+    if (data.rows) formData.append('rows', JSON.stringify(data.rows));
+    const response = await this.api.post<LaserNestPackageImportResult>(
+      '/work-orders/laser-nest-packages/standalone/import',
+      formData,
+      { headers: { 'Content-Type': 'multipart/form-data' } }
+    );
     return response.data;
   }
 

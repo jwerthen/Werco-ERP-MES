@@ -83,7 +83,11 @@ def get_fpy_rty(
             Part.name.label("part_name"),
         )
         .join(WorkOrder, WorkOrderOperation.work_order_id == WorkOrder.id)
-        .join(Part, WorkOrder.part_id == Part.id)
+        # Outer join: standalone laser-cutting WOs carry part_id NULL; their
+        # completed sheet-run ops must still count in the overall and
+        # per-work-center yield (they are skipped from the per-part buckets
+        # below, having no part to attribute to).
+        .outerjoin(Part, WorkOrder.part_id == Part.id)
         .filter(
             WorkOrderOperation.company_id == company_id,
             WorkOrder.company_id == company_id,
@@ -116,14 +120,22 @@ def get_fpy_rty(
         overall_first_pass += first_pass
         overall_attempted += attempted
 
-        part_bucket = by_part.setdefault(
-            op.part_id,
-            {"key": op.part_number, "name": op.part_name, "ops": 0, "attempted": 0.0, "first_pass": 0.0, "wos": set()},
-        )
-        part_bucket["ops"] += 1
-        part_bucket["attempted"] += attempted
-        part_bucket["first_pass"] += first_pass
-        part_bucket["wos"].add(op.work_order_id)
+        if op.part_id is not None:  # part-less laser WOs have no part bucket to land in
+            part_bucket = by_part.setdefault(
+                op.part_id,
+                {
+                    "key": op.part_number,
+                    "name": op.part_name,
+                    "ops": 0,
+                    "attempted": 0.0,
+                    "first_pass": 0.0,
+                    "wos": set(),
+                },
+            )
+            part_bucket["ops"] += 1
+            part_bucket["attempted"] += attempted
+            part_bucket["first_pass"] += first_pass
+            part_bucket["wos"].add(op.work_order_id)
 
         if op.work_center_id:
             wc_bucket = by_wc.setdefault(

@@ -731,10 +731,12 @@ export default function WorkOrderDetail() {
 
   // Called by the import wizard after a successful import. The wizard owns the
   // pick → preview → review → import flow; here we just close it and route to
-  // the freshly-created child laser WO (or refresh in place if none came back).
+  // the freshly-created child laser WO. When THIS work order is itself
+  // laser_cutting the backend imports onto it directly and returns its own id —
+  // navigating to the same route wouldn't remount, so refresh in place instead.
   const handleNestPackageImported = (childWorkOrderId?: number) => {
     setNestImportWizardOpen(false);
-    if (childWorkOrderId) {
+    if (childWorkOrderId && childWorkOrderId !== workOrder?.id) {
       navigate(`/work-orders/${childWorkOrderId}`);
     } else {
       loadWorkOrder();
@@ -967,12 +969,13 @@ export default function WorkOrderDetail() {
     .filter((op): op is WorkOrderOperation & { laser_nest: LaserNestInfo } => Boolean(op.laser_nest))
     .map((op) => ({ operation: op, nest: op.laser_nest }));
   // The Laser Nest Package card renders the full per-nest detail (material,
-  // thickness, sheet, runs, PDF actions) only for non-laser_cutting WOs. When it
-  // is present we de-dup: the Operations table cell collapses to a compact
-  // identifier + cross-link to the panel by stable nest id, rather than
-  // repeating the same fields. For laser_cutting WOs (no package card) the table
-  // cell keeps the full inline detail since there's nowhere else to show it.
-  const nestPanelShown = workOrder.work_order_type !== 'laser_cutting' && laserNests.length > 0;
+  // thickness, sheet, runs, PDF actions) on every WO type — on laser_cutting
+  // WOs (child or standalone) the import/manual endpoints operate on the WO
+  // directly, so the card is the re-import / manual-add surface there too.
+  // When nests exist we de-dup: the Operations table cell collapses to a
+  // compact identifier + cross-link to the panel by stable nest id, rather
+  // than repeating the same fields.
+  const nestPanelShown = laserNests.length > 0;
 
   // Parent crumb resolved from the shared route source (keeps label/href in sync
   // with the sidebar + top-bar title); falls back to the Work Orders list.
@@ -1320,7 +1323,11 @@ export default function WorkOrderDetail() {
         </div>
       </div>
 
-      {workOrder.work_order_type !== 'laser_cutting' && (
+      {/* Rendered for every WO type: on laser_cutting WOs (child or standalone)
+          the backend operates on the WO directly, so this card doubles as the
+          re-import / manual-add surface. Hidden only when there is nothing to
+          show (no nests) AND nothing the viewer could do (no manage rights). */}
+      {(canManageNests || laserNests.length > 0) && (
         <div className="card card-compact">
           <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3 mb-3">
             <div className="flex items-start gap-3 min-w-0">
@@ -1328,7 +1335,9 @@ export default function WorkOrderDetail() {
               <div className="min-w-0">
                 <h2 className="card-title">Laser Nest Package</h2>
                 <p className="card-subtitle truncate">
-                  Import a zipped Ermaksan folder or a server folder path to create the linked laser cutting work order.
+                  {workOrder.work_order_type === 'laser_cutting'
+                    ? 'Import a zipped Ermaksan folder or a server folder path to add nests to this laser work order.'
+                    : 'Import a zipped Ermaksan folder or a server folder path to create the linked laser cutting work order.'}
                 </p>
               </div>
             </div>
@@ -1968,7 +1977,10 @@ export default function WorkOrderDetail() {
         </div>
       )}
 
-      {materialReqs && !materialReqs.has_bom && (
+      {/* Part-less (standalone laser nest) WOs have no part to hang a BOM on —
+          skip the "No BOM" nudge entirely rather than pointing at a part that
+          doesn't exist. */}
+      {materialReqs && !materialReqs.has_bom && workOrder.part_id != null && (
         <div className="card card-compact">
           <EmptyState
             icon={CubeIcon}

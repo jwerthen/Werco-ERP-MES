@@ -796,16 +796,74 @@ def _ensure_laser_child_work_order(
     return child
 
 
+def _resolve_laser_target(
+    db: Session,
+    *,
+    work_order: WorkOrder,
+    company_id: int,
+) -> tuple[Optional[WorkOrder], WorkOrder]:
+    """Resolve the (parent, laser) WO pair for the ``{work_order_id}`` nest endpoints.
+
+    Classic flow: the addressed WO is an assembly parent -> find-or-create its
+    LASER_CUTTING child via ``_ensure_laser_child_work_order`` (which takes the
+    per-parent advisory lock).
+
+    Generalized flow: the addressed WO is ITSELF ``work_order_type='laser_cutting'``
+    (a standalone nest WO, or a laser child addressed directly) -> operate on it
+    directly instead of nesting another child under it. The same advisory-lock
+    discipline applies: lock the laser WO's own key so a concurrent import /
+    manual add targeting it serializes, and ALSO its parent's key (when it has
+    one) so a parent-addressed import racing a child-addressed import serializes
+    too. Lock order (parent key first, then own key) matches the classic flow's
+    single parent-key acquisition, so the two flows cannot deadlock.
+
+    Returns ``(parent_work_order_or_None, laser_work_order)`` -- parent is None
+    for standalone nest WOs.
+    """
+    if work_order.work_order_type == WorkOrderType.LASER_CUTTING.value:
+        if work_order.parent_work_order_id:
+            acquire_generator_lock(db, f"laser_child_work_order:{work_order.parent_work_order_id}", company_id)
+        acquire_generator_lock(db, f"laser_child_work_order:{work_order.id}", company_id)
+        return work_order.parent_work_order, work_order
+    return work_order, _ensure_laser_child_work_order(db, parent_work_order=work_order, company_id=company_id)
+
+
 def _load_parent_work_order(db: Session, work_order_id: int, company_id: int) -> WorkOrder:
+    """Load the WO addressed by a ``{work_order_id}`` laser-nest endpoint.
+
+    In the classic flow this is the parent assembly WO; since the standalone-nest
+    generalization it may also be a laser-cutting WO itself (see
+    ``_resolve_laser_target``).
+    """
     work_order = (
         db.query(WorkOrder)
         .options(joinedload(WorkOrder.part))
-        .filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id)
+        .filter(
+            WorkOrder.id == work_order_id,
+            WorkOrder.company_id == company_id,
+            WorkOrder.is_deleted == False,  # noqa: E712 - never rebuild/RELEASE a soft-deleted WO
+        )
         .first()
     )
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")
     return work_order
+
+
+def _laser_wo_audit_values(work_order: WorkOrder) -> dict:
+    """WO-level audit snapshot for the laser-nest write paths.
+
+    The import/manual endpoints force-set ``status`` and rewrite the quantity
+    fields on the target laser WO; these are the fields whose old->new change
+    the WO-level ``log_update`` records (invariant 2).
+    """
+    status_value = work_order.status.value if hasattr(work_order.status, "value") else work_order.status
+    return {
+        "status": status_value,
+        "quantity_ordered": float(work_order.quantity_ordered or 0),
+        "quantity_complete": float(work_order.quantity_complete or 0),
+        "quantity_scrapped": float(work_order.quantity_scrapped or 0),
+    }
 
 
 def _build_laser_preview_response(package_name: str, nests: list[dict]) -> LaserNestPreviewResponse:
@@ -1010,6 +1068,8 @@ def list_work_orders(
             id=wo.id,
             work_order_number=wo.work_order_number,
             part_id=wo.part_id,
+            parent_work_order_id=wo.parent_work_order_id,
+            work_order_type=wo.work_order_type,
             part_number=wo.part.part_number if wo.part else None,
             part_name=wo.part.name if wo.part else None,
             part_type=wo.part.part_type.value if wo.part and wo.part.part_type else None,
@@ -1604,16 +1664,13 @@ async def import_open_work_orders_endpoint(
     )
 
 
-@router.post("/{work_order_id}/laser-nest-packages/preview", response_model=LaserNestPreviewResponse)
-async def preview_laser_nest_package_import(
-    work_order_id: int,
-    file: Optional[UploadFile] = File(None),
-    source_path: Optional[str] = Form(None),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
-    company_id: int = Depends(get_current_company_id),
-):
-    """Preview nest operations detected from a zipped Ermaksan package or server folder.
+async def _run_laser_nest_preview(
+    *,
+    file: Optional[UploadFile],
+    source_path: Optional[str],
+    company_id: int,
+) -> LaserNestPreviewResponse:
+    """Shared preview flow for the ``{work_order_id}`` and standalone endpoints.
 
     Two package shapes, auto-detected: a ZIP/folder of nest-report **PDFs** (the
     new path -- fields extracted by AI, one LLM call per PDF, parallelized with
@@ -1621,7 +1678,6 @@ async def preview_laser_nest_package_import(
     inferred from filenames). PDFs and CNC extensions are disjoint, so a package
     is treated as a PDF package iff it contains any ``*.pdf``.
     """
-    _load_parent_work_order(db, work_order_id, company_id)
     package_name = _laser_package_name(file, source_path)
     temp_path = None
     try:
@@ -1645,19 +1701,63 @@ async def preview_laser_nest_package_import(
     return _build_laser_preview_response(package_name, nests)
 
 
-@router.post("/{work_order_id}/laser-nest-packages/import")
-async def import_laser_nest_package(
+# NOTE: the two static /laser-nest-packages/standalone/* routes are registered
+# BEFORE the parametrized /{work_order_id}/laser-nest-packages/* routes. Their
+# literal paths cannot collide with the parametrized patterns today, but keeping
+# the static routes first documents the intent and stays robust to path tweaks.
+@router.post("/laser-nest-packages/standalone/preview", response_model=LaserNestPreviewResponse)
+async def preview_standalone_laser_nest_package(
+    file: Optional[UploadFile] = File(None),
+    source_path: Optional[str] = Form(None),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Preview a nest package for a STANDALONE laser-cutting work order.
+
+    Identical parsing/extraction behavior to the ``{work_order_id}`` preview,
+    just not anchored to any existing work order -- the wizard uses this before
+    a standalone import that will create a fresh part-less laser WO.
+    """
+    return await _run_laser_nest_preview(file=file, source_path=source_path, company_id=company_id)
+
+
+@router.post("/{work_order_id}/laser-nest-packages/preview", response_model=LaserNestPreviewResponse)
+async def preview_laser_nest_package_import(
     work_order_id: int,
     file: Optional[UploadFile] = File(None),
     source_path: Optional[str] = Form(None),
-    work_center_id: Optional[int] = Form(None),
-    rows: Optional[str] = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
-    audit: AuditService = Depends(get_audit_service),
 ):
-    """Create or update a child laser work order from one nest package.
+    """Preview nest operations detected from a zipped Ermaksan package or server folder.
+
+    See ``_run_laser_nest_preview`` for the package-shape detection. The addressed
+    WO may be an assembly parent or (since the standalone generalization) a
+    laser-cutting WO itself.
+    """
+    _load_parent_work_order(db, work_order_id, company_id)
+    return await _run_laser_nest_preview(file=file, source_path=source_path, company_id=company_id)
+
+
+async def _run_laser_nest_import(
+    *,
+    db: Session,
+    current_user: User,
+    company_id: int,
+    audit: AuditService,
+    target_work_order: Optional[WorkOrder],
+    file: Optional[UploadFile],
+    source_path: Optional[str],
+    work_center_id: Optional[int],
+    rows: Optional[str],
+) -> dict:
+    """Shared import flow for the ``{work_order_id}`` and standalone endpoints.
+
+    ``target_work_order`` is the WO addressed in the path -- an assembly parent
+    (classic child-laser-WO flow) or a laser-cutting WO itself (operated on
+    directly; see ``_resolve_laser_target``). ``None`` means STANDALONE: create
+    a fresh part-less RELEASED laser-cutting WO (no parent) and import into it.
 
     Two paths, both honoring IMPORT-REPLACES-EVERYTHING:
     - ``rows`` provided (PDF confirm-and-commit): the re-sent ZIP supplies PDF
@@ -1668,10 +1768,10 @@ async def import_laser_nest_package(
       from filenames, no Documents.
 
     Both paths audit (DELETE per superseded nest, CREATE per new nest): the
-    import wipes ALL prior nests/operations for this child WO, so each wipe is
-    recorded before the rebuild and each created nest is recorded after.
+    import wipes ALL prior nests/operations for the laser WO, so each wipe is
+    recorded before the rebuild and each created nest is recorded after. The
+    standalone path additionally audits the CREATE of the fresh work order.
     """
-    parent_work_order = _load_parent_work_order(db, work_order_id, company_id)
     package_name = _laser_package_name(file, source_path)
     temp_path = None
     package_dir = os.path.join(_resolve_laser_upload_root(), str(uuid.uuid4()))
@@ -1731,14 +1831,41 @@ async def import_laser_nest_package(
 
         try:
             with atomic_transaction(db):
-                child_work_order = _ensure_laser_child_work_order(
-                    db,
-                    parent_work_order=parent_work_order,
-                    company_id=company_id,
-                )
+                if target_work_order is None:
+                    # STANDALONE: create the fresh part-less laser WO here so it
+                    # commits (and audits) atomically with the package build.
+                    parent_work_order: Optional[WorkOrder] = None
+                    child_work_order = WorkOrder(
+                        company_id=company_id,
+                        work_order_number=generate_work_order_number(db, company_id),
+                        part_id=None,
+                        parent_work_order_id=None,
+                        work_order_type=WorkOrderType.LASER_CUTTING.value,
+                        # Re-derived to the package's total planned runs by
+                        # build_laser_nest_child_work_order below.
+                        quantity_ordered=1,
+                        status=WorkOrderStatus.RELEASED,
+                        priority=5,
+                        due_date=None,
+                        notes=f"Standalone laser nest work order for package {package_name}",
+                        created_by=current_user.id,
+                    )
+                    db.add(child_work_order)
+                    db.flush()
+                    pre_import_wo_values = None  # fresh WO: creation is audited via log_create below
+                else:
+                    parent_work_order, child_work_order = _resolve_laser_target(
+                        db, work_order=target_work_order, company_id=company_id
+                    )
+                    # Snapshot BEFORE the rebuild mutates the WO: the import
+                    # force-sets RELEASED and zeroes the produced quantities, and
+                    # that WO-level change must be audited (invariant 2) -- the
+                    # per-nest DELETE/CREATE rows alone don't record it.
+                    pre_import_wo_values = _laser_wo_audit_values(child_work_order)
                 child_work_order.status = WorkOrderStatus.RELEASED
                 child_work_order.quantity_complete = 0
                 child_work_order.quantity_scrapped = 0
+                parent_work_order_id = parent_work_order.id if parent_work_order is not None else None
 
                 # IMPORT-REPLACES-EVERYTHING wipes ALL prior non-deleted nests on
                 # this child WO (cascade hard-delete via build_..._child_work_order).
@@ -1776,7 +1903,7 @@ async def import_laser_nest_package(
                         soft_delete=False,
                         extra_data={
                             "reason": "superseded_by_reimport",
-                            "parent_work_order_id": parent_work_order.id,
+                            "parent_work_order_id": parent_work_order_id,
                             "child_work_order_id": child_work_order.id,
                         },
                     )
@@ -1793,6 +1920,47 @@ async def import_laser_nest_package(
                     created_by=current_user.id,
                     saved_storage_keys=saved_storage_keys,
                 )
+
+                if pre_import_wo_values is not None:
+                    # Audit the WO-level effect of the (re)import on an EXISTING
+                    # laser WO: status forced to RELEASED, quantity_complete /
+                    # quantity_scrapped zeroed, quantity_ordered re-derived to
+                    # the package's total planned runs. log_update self-suppresses
+                    # when nothing actually changed (e.g. a classic child WO
+                    # freshly created by this very request), and only flushes, so
+                    # it commits atomically with the rebuild.
+                    audit.log_update(
+                        resource_type="work_order",
+                        resource_id=child_work_order.id,
+                        resource_identifier=child_work_order.work_order_number,
+                        old_values=pre_import_wo_values,
+                        new_values=_laser_wo_audit_values(child_work_order),
+                        extra_data={
+                            "reason": "laser_nest_package_import",
+                            "source": import_source,
+                            "parent_work_order_id": parent_work_order_id,
+                            "package_name": package_name,
+                        },
+                    )
+
+                if target_work_order is None:
+                    # Audit the standalone WO creation AFTER the build so the
+                    # snapshot carries the final quantity_ordered (= total
+                    # planned runs) and the laser_cutting type/RELEASED status.
+                    # AuditService.log only flushes, so this commits atomically
+                    # with the WO + package.
+                    audit.log_create(
+                        resource_type="work_order",
+                        resource_id=child_work_order.id,
+                        resource_identifier=child_work_order.work_order_number,
+                        new_values=child_work_order,
+                        extra_data={
+                            "work_order_type": WorkOrderType.LASER_CUTTING.value,
+                            "quantity": float(child_work_order.quantity_ordered),
+                            "source": "laser_nest_standalone_import",
+                            "package_name": package_name,
+                        },
+                    )
 
                 # Audit each CREATED nest BEFORE commit, for BOTH import shapes
                 # (the legacy CNC path previously created nests with only a WO
@@ -1825,7 +1993,7 @@ async def import_laser_nest_package(
                             "package_id": nest.package_id,
                         },
                         extra_data={
-                            "parent_work_order_id": parent_work_order.id,
+                            "parent_work_order_id": parent_work_order_id,
                             "child_work_order_id": child_work_order.id,
                             "source": import_source,
                         },
@@ -1838,7 +2006,7 @@ async def import_laser_nest_package(
                     work_order=child_work_order,
                     event_type="laser_nest_package_imported",
                     payload={
-                        "parent_work_order_id": parent_work_order.id,
+                        "parent_work_order_id": parent_work_order_id,
                         "package_id": package.id,
                         "nest_count": len(nests),
                         "total_planned_runs": sum(nest.planned_runs for nest in nests),
@@ -1868,6 +2036,8 @@ async def import_laser_nest_package(
         if temp_path and os.path.exists(temp_path):
             os.remove(temp_path)
 
+    # Requery by id: correct for all three flows (classic child, direct laser
+    # target, standalone) -- the laser WO's id is known either way.
     child_work_order = (
         db.query(WorkOrder)
         .options(
@@ -1879,8 +2049,7 @@ async def import_laser_nest_package(
         )
         .filter(
             WorkOrder.company_id == company_id,
-            WorkOrder.parent_work_order_id == parent_work_order.id,
-            WorkOrder.work_order_type == WorkOrderType.LASER_CUTTING.value,
+            WorkOrder.id == child_work_order.id,
         )
         .first()
     )
@@ -1900,7 +2069,7 @@ async def import_laser_nest_package(
         {
             "event": "laser_nest_package_imported",
             "work_order_id": child_work_order.id,
-            "parent_work_order_id": parent_work_order.id,
+            "parent_work_order_id": parent_work_order_id,
         },
         company_id=company_id,
     )
@@ -1909,6 +2078,74 @@ async def import_laser_nest_package(
         "package": _build_laser_preview_response(package_name, [nest.as_dict() for nest in nests]).model_dump(),
         "child_work_order": WorkOrderResponse.model_validate(child_work_order).model_dump(mode="json"),
     }
+
+
+@router.post("/laser-nest-packages/standalone/import")
+async def import_standalone_laser_nest_package(
+    file: Optional[UploadFile] = File(None),
+    source_path: Optional[str] = Form(None),
+    work_center_id: Optional[int] = Form(None),
+    rows: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Import a nest package into a FRESH standalone laser-cutting work order.
+
+    No parent work order and no part: the import creates a RELEASED
+    ``work_order_type='laser_cutting'`` WO with ``part_id`` NULL and
+    ``quantity_ordered`` = total planned sheet runs, sets the package's
+    ``child_work_order_id`` to it (``parent_work_order_id`` NULL), and attaches
+    nest-PDF Documents to the created WO itself. Same request shape and audit
+    behavior as the ``{work_order_id}`` import, minus the WO id; the response
+    exposes the created WO under the same ``child_work_order`` key.
+    """
+    return await _run_laser_nest_import(
+        db=db,
+        current_user=current_user,
+        company_id=company_id,
+        audit=audit,
+        target_work_order=None,
+        file=file,
+        source_path=source_path,
+        work_center_id=work_center_id,
+        rows=rows,
+    )
+
+
+@router.post("/{work_order_id}/laser-nest-packages/import")
+async def import_laser_nest_package(
+    work_order_id: int,
+    file: Optional[UploadFile] = File(None),
+    source_path: Optional[str] = Form(None),
+    work_center_id: Optional[int] = Form(None),
+    rows: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Create or update a laser work order from one nest package.
+
+    Classic flow: the addressed WO is an assembly parent -> its LASER_CUTTING
+    child is found-or-created and rebuilt. Generalized flow: the addressed WO is
+    itself ``laser_cutting`` (e.g. a standalone nest WO) -> it is rebuilt
+    directly, no child is nested under it. See ``_run_laser_nest_import`` for
+    the PDF confirm-and-commit vs legacy CNC paths and the audit contract.
+    """
+    target_work_order = _load_parent_work_order(db, work_order_id, company_id)
+    return await _run_laser_nest_import(
+        db=db,
+        current_user=current_user,
+        company_id=company_id,
+        audit=audit,
+        target_work_order=target_work_order,
+        file=file,
+        source_path=source_path,
+        work_center_id=work_center_id,
+        rows=rows,
+    )
 
 
 @router.post(
@@ -1925,20 +2162,24 @@ def create_manual_laser_nest_endpoint(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Manually key one laser nest onto an assembly WO (standalone creation path).
+    """Manually key one laser nest onto a work order (standalone creation path).
 
-    Resolves (or creates) the child laser WO and an active laser work center via
-    the existing endpoint helpers, then delegates the state change to
-    ``create_manual_laser_nest``. Untouched by, and does not touch, the import flow.
+    Classic flow: the addressed WO is an assembly parent -- the child laser WO is
+    resolved (or created). Generalized flow: the addressed WO is itself
+    ``laser_cutting`` (e.g. a standalone nest WO) -- the nest is appended to it
+    directly. Delegates the state change to ``create_manual_laser_nest``.
+    Untouched by, and does not touch, the import flow.
     """
-    parent_work_order = _load_parent_work_order(db, work_order_id, company_id)
+    target_work_order = _load_parent_work_order(db, work_order_id, company_id)
 
     with atomic_transaction(db):
-        child_work_order = _ensure_laser_child_work_order(
-            db,
-            parent_work_order=parent_work_order,
-            company_id=company_id,
+        parent_work_order, child_work_order = _resolve_laser_target(
+            db, work_order=target_work_order, company_id=company_id
         )
+        # Snapshot BEFORE the mutations: the manual add force-sets RELEASED and
+        # re-derives quantity_ordered; that WO-level change is audited below
+        # (invariant 2). log_update self-suppresses when nothing changed.
+        pre_add_wo_values = _laser_wo_audit_values(child_work_order)
         child_work_order.status = WorkOrderStatus.RELEASED
         # _find_laser_work_center raises 400 when no active laser work center exists.
         laser_work_center = _find_laser_work_center(db, company_id)
@@ -1969,9 +2210,24 @@ def create_manual_laser_nest_endpoint(
                 "package_id": nest.package_id,
             },
             extra_data={
-                "parent_work_order_id": parent_work_order.id,
+                "parent_work_order_id": parent_work_order.id if parent_work_order is not None else None,
                 "child_work_order_id": child_work_order.id,
                 "source": "manual",
+            },
+        )
+        # WO-level audit for the status force-set / quantity re-derivation the
+        # manual add performs on the laser WO (see the pre-mutation snapshot
+        # above). Only flushes, so it commits atomically with the nest.
+        audit.log_update(
+            resource_type="work_order",
+            resource_id=child_work_order.id,
+            resource_identifier=child_work_order.work_order_number,
+            old_values=pre_add_wo_values,
+            new_values=_laser_wo_audit_values(child_work_order),
+            extra_data={
+                "reason": "manual_laser_nest_added",
+                "source": "manual",
+                "parent_work_order_id": parent_work_order.id if parent_work_order is not None else None,
             },
         )
 

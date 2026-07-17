@@ -6,8 +6,13 @@ import api from '../../services/api';
 interface LaserNestImportWizardProps {
   open: boolean;
   onClose: () => void;
-  /** Parent (assembly) work order the laser child WO is created under. */
-  workOrderId: number;
+  /**
+   * Work order the import targets: an assembly WO (a laser child WO is created
+   * under it) or a laser-cutting WO (nests land on it directly). Omit for
+   * STANDALONE mode — the import hits the /standalone endpoints and creates a
+   * fresh released laser-cutting work order with no parent and no part.
+   */
+  workOrderId?: number;
   /**
    * Optional work center to assign the generated laser operations to. Passed
    * straight through to the import call; the backend applies its default when
@@ -15,8 +20,9 @@ interface LaserNestImportWizardProps {
    */
   workCenterId?: number | null;
   /**
-   * Called after a successful import with the created child laser WO id (when
-   * present) so the parent can navigate to it; otherwise the parent refreshes.
+   * Called after a successful import with the id of the laser WO the nests
+   * landed on (the created child / standalone WO, or the target WO itself) so
+   * the parent can navigate to it; otherwise the parent refreshes.
    */
   onImported: (childWorkOrderId?: number) => void;
 }
@@ -74,6 +80,11 @@ function toEditable(row: LaserNestPreviewRow): EditableRow {
  * The same flow handles a ZIP of CNC *program* files: those preview rows carry
  * `cnc_file_name` instead of an AI-read `cnc_number`/`confidence`, and sending
  * them back unchanged preserves the legacy import behavior.
+ *
+ * With no `workOrderId` the wizard runs in STANDALONE mode: preview/import hit
+ * the /work-orders/laser-nest-packages/standalone endpoints and the import
+ * creates a fresh released laser-cutting WO (no parent, no part) sized to the
+ * total planned sheet runs.
  */
 export default function LaserNestImportWizard({
   open,
@@ -114,10 +125,11 @@ export default function LaserNestImportWizard({
     setLoading(true);
     setError('');
     try {
-      const result = await api.previewLaserNestPackage(workOrderId, {
-        file,
-        source_path: sourcePath.trim() || undefined,
-      });
+      const input = { file, source_path: sourcePath.trim() || undefined };
+      const result =
+        workOrderId != null
+          ? await api.previewLaserNestPackage(workOrderId, input)
+          : await api.previewLaserNestPackageStandalone(input);
       setRows(result.nests.map(toEditable));
       setStep('review');
     } catch (err: any) {
@@ -168,12 +180,16 @@ export default function LaserNestImportWizard({
     setLoading(true);
     setError('');
     try {
-      const result = await api.importLaserNestPackage(workOrderId, {
+      const input = {
         file,
         source_path: sourcePath.trim() || undefined,
         work_center_id: workCenterId ?? undefined,
         rows: confirmed,
-      });
+      };
+      const result =
+        workOrderId != null
+          ? await api.importLaserNestPackage(workOrderId, input)
+          : await api.importLaserNestPackageStandalone(input);
       onImported(result?.child_work_order?.id);
     } catch (err: any) {
       setError(err?.response?.data?.detail || 'Failed to import laser nest package.');
@@ -201,6 +217,8 @@ export default function LaserNestImportWizard({
             {step === 'pick'
               ? 'Upload a ZIP of nest report PDFs (or CNC program files). We read the CNC number, material, and size from each sheet so you can review before importing.'
               : 'Review and correct each nest, then import. AI-extracted values are editable — verify low-confidence rows before importing.'}
+            {workOrderId == null &&
+              ' Importing creates a new released laser cutting work order sized to the total sheet runs — no parent work order or part required.'}
           </p>
         </div>
 

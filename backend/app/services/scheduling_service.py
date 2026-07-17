@@ -217,7 +217,10 @@ class SchedulingService:
                 key=lambda op: (
                     op.work_order.priority,  # 1 is highest priority
                     op.work_order.due_date or date.max,  # Earlier due date first
-                    op.work_order.part_id,  # Group same parts together
+                    # Group same parts together. part_id is NULL on standalone
+                    # laser-cutting nest WOs -- coalesce to 0 so the tuple sort
+                    # never compares None with int (all part-less WOs group first).
+                    op.work_order.part_id or 0,
                     op.sequence,  # Operation sequence
                 )
             )

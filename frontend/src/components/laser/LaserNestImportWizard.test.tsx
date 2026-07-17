@@ -9,6 +9,8 @@ jest.mock('../../services/api', () => ({
   default: {
     previewLaserNestPackage: jest.fn(),
     importLaserNestPackage: jest.fn(),
+    previewLaserNestPackageStandalone: jest.fn(),
+    importLaserNestPackageStandalone: jest.fn(),
   },
 }));
 
@@ -46,11 +48,11 @@ const preview: LaserNestPackagePreview = {
 };
 
 /** Pick a ZIP, run Preview, and wait for the editable grid to render. */
-async function previewPackage() {
+async function previewPackage(previewMock: jest.Mock = mockApi.previewLaserNestPackage as unknown as jest.Mock) {
   const zip = new File(['PK'], 'nests.zip', { type: 'application/zip' });
   fireEvent.change(screen.getByLabelText(/zip package/i), { target: { files: [zip] } });
   fireEvent.click(screen.getByRole('button', { name: /^preview$/i }));
-  await waitFor(() => expect(mockApi.previewLaserNestPackage).toHaveBeenCalled());
+  await waitFor(() => expect(previewMock).toHaveBeenCalled());
   // The grid headers only appear on the review step.
   await screen.findByRole('button', { name: /^import 2 nests$/i });
 }
@@ -142,5 +144,56 @@ describe('LaserNestImportWizard', () => {
 
     expect(await screen.findByText(/enter a cnc number for sheet-1\.pdf/i)).toBeInTheDocument();
     expect(mockApi.importLaserNestPackage).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * STANDALONE mode — no workOrderId prop. The wizard must hit the
+ * /work-orders/laser-nest-packages/standalone endpoints (no WO in the URL) and
+ * hand the created released laser WO's id to onImported. The parented
+ * endpoints must never fire.
+ */
+describe('LaserNestImportWizard — standalone mode (no workOrderId)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockApi.previewLaserNestPackageStandalone.mockResolvedValue(preview);
+    mockApi.importLaserNestPackageStandalone.mockResolvedValue({
+      package: preview,
+      child_work_order: { id: 1201, work_order_number: 'WO-1201' },
+    });
+  });
+
+  it('previews via the standalone endpoint and explains that a new laser WO will be created', async () => {
+    render(<LaserNestImportWizard open onClose={jest.fn()} onImported={jest.fn()} />);
+
+    // Standalone copy: the planner is told the import creates a fresh WO.
+    expect(screen.getByText(/creates a new released laser cutting work order/i)).toBeInTheDocument();
+
+    await previewPackage(mockApi.previewLaserNestPackageStandalone as unknown as jest.Mock);
+
+    expect(mockApi.previewLaserNestPackageStandalone).toHaveBeenCalledWith(
+      expect.objectContaining({ file: expect.any(File) })
+    );
+    // The parented endpoint must not be touched in standalone mode.
+    expect(mockApi.previewLaserNestPackage).not.toHaveBeenCalled();
+    // The editable grid still works identically.
+    expect(screen.getByLabelText('CNC number for sheet-1.pdf')).toHaveValue('8001');
+  });
+
+  it('imports via the standalone endpoint and hands back the created WO id', async () => {
+    const onImported = jest.fn();
+    render(<LaserNestImportWizard open workCenterId={7} onClose={jest.fn()} onImported={onImported} />);
+    await previewPackage(mockApi.previewLaserNestPackageStandalone as unknown as jest.Mock);
+
+    fireEvent.click(screen.getByRole('button', { name: /^import 2 nests$/i }));
+
+    await waitFor(() => expect(mockApi.importLaserNestPackageStandalone).toHaveBeenCalledTimes(1));
+    const [payload] = mockApi.importLaserNestPackageStandalone.mock.calls[0];
+    expect(payload.work_center_id).toBe(7);
+    expect(payload.rows).toHaveLength(2);
+    expect(payload.rows?.map((r) => r.source_file)).toEqual(['sheet-1.pdf', 'sheet-2.pdf']);
+    expect(mockApi.importLaserNestPackage).not.toHaveBeenCalled();
+    // The parent gets the standalone WO id so it can navigate to it.
+    await waitFor(() => expect(onImported).toHaveBeenCalledWith(1201));
   });
 });

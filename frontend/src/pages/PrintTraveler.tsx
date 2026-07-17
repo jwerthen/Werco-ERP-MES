@@ -61,8 +61,9 @@ export default function PrintTraveler() {
       setWorkOrder(response);
 
       try {
+        // Standalone laser nest WOs carry no part — skip the part fetch.
         const [partRes, matReqsRes] = await Promise.all([
-          api.getPart(response.part_id),
+          response.part_id != null ? api.getPart(response.part_id) : Promise.resolve(null),
           api.getMaterialRequirements(response.id),
         ]);
         setPart(partRes);
@@ -224,7 +225,7 @@ export default function PrintTraveler() {
             <tbody>
               <tr>
                 <td className="font-medium pr-4">Part Number:</td>
-                <td className="font-mono">{part?.part_number || workOrder.part_id}</td>
+                <td className="font-mono">{part?.part_number || workOrder.part_id || '—'}</td>
               </tr>
               <tr>
                 <td className="font-medium pr-4">Part Name:</td>
@@ -391,7 +392,7 @@ export default function PrintTraveler() {
         </div>
       )}
 
-      {materialReqs && !materialReqs.has_bom && (
+      {materialReqs && !materialReqs.has_bom && workOrder.part_id != null && (
         <div className="border p-3 mb-6 text-sm text-gray-600">
           No BOM defined for this part. Verify required materials manually.
         </div>

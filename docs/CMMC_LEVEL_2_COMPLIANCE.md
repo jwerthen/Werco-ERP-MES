@@ -174,7 +174,9 @@
   row (code `no_labor_recorded`) plus a `quality_exception_on_completion` warning event, so a
   potentially understated cost/hour record is attributable rather than silent.
   AU-3.3.1 coverage also now records **laser-nest package (re-)import** symmetrically (2026-06-23).
-  Importing a nest package onto a child laser WO replaces all prior nests — the
+  Importing a nest package onto a laser WO (the assembly's child laser WO — or, since the
+  standalone-nest feature, a standalone/directly-addressed laser-cutting WO) replaces all prior
+  nests — the
   IMPORT-REPLACES-EVERYTHING product decision. The destructive wipe is now audited: each superseded
   nest is written as a `log_delete` (`reason="superseded_by_reimport"`) **before** the rebuild, and
   each rebuilt nest as a `log_create`, for **both** import shapes — the legacy CNC-program path now
@@ -182,6 +184,12 @@
   (`source="pdf_import"`); previously the legacy path emitted only a websocket event and the wipe was
   unrecorded. All rows are flushed atomically with the rebuild. This closes a prior asymmetry where
   the destructive supersession wipe and the legacy create path left no `audit_log` trail.
+  Coverage expanded further with the standalone-nest work (2026-07): a (re)import onto an existing
+  laser WO also writes a **WO-level `log_update`** (reason `laser_nest_package_import`: forced
+  RELEASED status, zeroed produced quantities, re-derived `quantity_ordered`), the manual nest add
+  writes the same WO-level `log_update` (reason `manual_laser_nest_added`), and the standalone
+  import audits the **creation of the fresh part-less laser work order** (`log_create`,
+  `source="laser_nest_standalone_import"`) — all flushed atomically with their transactions.
   *Known gap (tracked, architectural follow-up):* the supersession wipe is still a **hard
   cascade-delete of soft-deletable `LaserNest` rows** (not a `soft_delete`), so the soft-delete
   invariant is not yet fully satisfied for this path — the improvement here is that the deletion is
