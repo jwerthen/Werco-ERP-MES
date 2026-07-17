@@ -112,12 +112,12 @@ There are three tabs inside Receiving:
 
 ### Step 1 — Receive material against a PO
 
-1. On the **Receive Material** tab, find the delivery's PO in the **Open Purchase Orders** list on the left and click it.
+1. On the **Receive Material** tab, find the delivery's PO in the **Open Purchase Orders** list on the left and click it. The strip above the list counts how many POs are **expected today** (and how many are **overdue**), and the list is sorted by arrival — overdue first, then today, then later — with a **Today** or **Overdue** badge on each card so the deliveries you should be looking for are at the top.
 2. The right panel shows the PO's lines. Each line shows **Ord** (ordered), **Recv** (already received), and **Rem** (remaining), plus a status of **Open**, **Partial**, or **Done**.
 3. Find the line that matches what arrived and click its **Receive** button.
 4. In the **Receive Material** box, fill in:
    - **Quantity Received** — how many actually came in (it pre-fills the remaining amount; change it to match the packing slip).
-   - **Lot Number** — *required.* You cannot save without it.
+   - **Lot Number** — the vendor's lot number, if it's on the packing slip or cert. Leave it blank and the system assigns the receipt number as the lot automatically, so the batch is always traceable.
    - **Heat Number** — for metals, if shown on the cert.
    - **Cert Number** — the certificate of conformance number, if you have one.
    - **Location** — where it's going on the shelf.
@@ -126,7 +126,7 @@ There are three tabs inside Receiving:
 5. Check **Requires Inspection** if the material needs incoming inspection before it can be used. The box always starts **unchecked** — left unchecked, the material goes straight to inventory (dock-to-stock) and the receipt is recorded as **Not Required**. Because no inspection actually happened on that path, the receipt carries **no inspector, method, or inspection time** — it is *not* logged as a passed inspection (that keeps our records honest for an AS9100D audit). If the part's master record is flagged "Inspection Required", an amber hint appears next to the box so you can check it deliberately for this receipt. Check **CoC Attached** if a certificate of conformance came with it.
 6. Click **Receive Material**.
 
-> Heads up: **Lot Number is mandatory.** If you click Receive Material and nothing happens, look for a red message at the top — the most common cause is a missing lot number.
+> Heads up: When the vendor's paperwork shows a lot number, enter it — matching the vendor's own lot makes supplier traceability searches much easier. If there's no lot on the paperwork, leave the field blank and the system's auto-assigned lot (the receipt number) keeps the batch traceable.
 
 **Partial vs. complete receipts.** You don't have to receive a whole line at once. If only part of the order showed up, enter just what arrived. The line turns **Partial** and keeps the rest as **Rem**aining — receive the balance later when it comes in. When everything's in, the line flips to **Done**.
 
@@ -215,7 +215,7 @@ Where your station has a barcode/QR scanner, you can scan a lot or serial label 
 
 | Symptom | What to do |
 | --- | --- |
-| "Receive Material" does nothing | Look for a red message at the top. Almost always it's a missing **Lot Number** — it's required on every receipt. |
+| "Receive Material" does nothing | Look for a red message at the top — it names the problem. Common causes: a quantity of zero, or receiving more than the remaining amount without checking **Approve Over-Receipt**. (A blank Lot Number is fine — the system auto-assigns one.) |
 | It won't let me receive the quantity I have | You're entering more than the line's remaining amount. Either lower the quantity, or check **Approve Over-Receipt** if you truly received extra. |
 | Inspection won't complete | Check three things: **Accepted + Rejected** can't be more than the received quantity; and if you rejected any, both **Defect Type** and **Inspection Notes** are required. |
 | Material I received isn't on the shelf yet | If it was received with **Requires Inspection** checked, it's still in the **Inspection Queue** — it only reaches Inventory after you finish inspection and accept it. |

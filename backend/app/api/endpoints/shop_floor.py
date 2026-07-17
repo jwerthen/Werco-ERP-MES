@@ -1941,6 +1941,10 @@ def shop_floor_dashboard(
                 "id": entry.user.id if entry.user else None,
                 "employee_id": entry.user.employee_id if entry.user else None,
                 "name": entry.user.full_name if entry.user else None,
+                # Public-screen-safe short name ("Jon W.") for dashboard display.
+                "display_name": (
+                    operator_display_name(entry.user.first_name, entry.user.last_name) if entry.user else None
+                ),
                 "role": (
                     entry.user.role.value
                     if entry.user and hasattr(entry.user.role, "value")

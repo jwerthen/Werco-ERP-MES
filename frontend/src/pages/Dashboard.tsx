@@ -136,6 +136,24 @@ const getEntryTypeLabel = (entryType?: string) => {
   return entryType.charAt(0).toUpperCase() + entryType.slice(1);
 };
 
+// Compact operator label for dense rows: backend-provided display_name first,
+// then "First L." derived from the full name, then the full name (single-token
+// names), then the employee id as a last resort.
+const getOperatorDisplayName = (user: ActiveAssignment['user']): string => {
+  if (user.display_name) return user.display_name;
+  const name = (user.name || '').trim();
+  if (name) {
+    const tokens = name.split(/\s+/);
+    if (tokens.length > 1) {
+      return `${tokens[0]} ${tokens[tokens.length - 1].charAt(0).toUpperCase()}.`;
+    }
+    return name;
+  }
+  // employee_id is typed string, but the server serializes null for orphaned
+  // time entries whose user row is gone — don't render "null" as a name.
+  return user.employee_id || 'Unknown';
+};
+
 export default function Dashboard() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -893,8 +911,13 @@ function ActiveAssignmentRow({ assignment, nowMs }: { assignment: ActiveAssignme
   const dueDate = assignment.work_order.due_date;
   const isOverdue = Boolean(dueDate && isDateBeforeTodayInCentral(dueDate));
 
-  // Fields not shown inline are preserved in the row title so no data is lost.
+  // Fields not shown inline (full name, employee id, entry type, due date,
+  // customer, priority, part name) are preserved in the row title so no data
+  // is lost from the compact two-line layout.
   const rowTitle = [
+    assignment.user.employee_id
+      ? `${assignment.user.name || getOperatorDisplayName(assignment.user)} (${assignment.user.employee_id})`
+      : assignment.user.name || getOperatorDisplayName(assignment.user),
     getEntryTypeLabel(assignment.entry_type),
     `Started ${formatCentralTime(assignment.clock_in)}`,
     `Due ${dueDate ? formatCentralDate(dueDate, { year: undefined }) : 'none'}`,
@@ -906,36 +929,37 @@ function ActiveAssignmentRow({ assignment, nowMs }: { assignment: ActiveAssignme
     .join(' · ');
 
   return (
-    <div id={`assign-${assignment.time_entry_id}`} className="flex items-center gap-2 px-4 py-1.5 scroll-mt-10" title={rowTitle}>
-      {isOverdue && <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-fd-red" aria-label="Overdue" />}
-      <div className="flex min-w-0 flex-1 items-center gap-1.5">
-        <span className="truncate font-medium text-slate-200">{assignment.user.name}</span>
-        <span className="flex-shrink-0 text-[10px] text-slate-500 tabular-nums">{assignment.user.employee_id}</span>
+    <div id={`assign-${assignment.time_entry_id}`} className="px-4 py-1.5 scroll-mt-10" title={rowTitle}>
+      {/* Line 1: operator identity + elapsed time */}
+      <div className="flex items-center gap-1.5">
+        {isOverdue && <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-fd-red" aria-label="Overdue" />}
+        <span className="truncate font-medium text-slate-200">{getOperatorDisplayName(assignment.user)}</span>
         <span className={`flex-shrink-0 rounded-sm px-1 py-0.5 text-[10px] font-medium ${getRoleBadgeClass(assignment.user.role)}`}>
           {assignment.user.role.replace('_', ' ')}
         </span>
+        <span className="ml-auto flex-shrink-0 text-xs text-slate-400 tabular-nums">
+          {formatElapsed(assignment.clock_in, nowMs)}
+        </span>
       </div>
-      <Link
-        to={`/work-orders/${assignment.work_order.id}`}
-        className="flex-shrink-0 text-xs font-semibold text-werco-700 hover:text-werco-800"
-      >
-        {assignment.work_order.work_order_number}
-      </Link>
-      <span className="hidden w-24 flex-shrink-0 truncate text-[11px] text-slate-400 sm:block">
-        {assignment.work_order.part_number}
-        {assignment.operation.operation_number ? ` · ${assignment.operation.operation_number}` : ''}
-      </span>
-      <div className="flex w-16 flex-shrink-0 items-center gap-1">
-        <div className="h-1 flex-1 rounded-sm bg-slate-800">
+      {/* Line 2: job identity + progress */}
+      <div className="mt-0.5 flex items-center gap-2">
+        <Link
+          to={`/work-orders/${assignment.work_order.id}`}
+          className="flex-shrink-0 text-xs font-semibold text-werco-700 hover:text-werco-800"
+        >
+          {assignment.work_order.work_order_number}
+        </Link>
+        <span className="min-w-0 flex-1 truncate text-[11px] text-slate-400">
+          {assignment.work_order.part_number}
+          {assignment.operation.operation_number ? ` · Op ${assignment.operation.operation_number}` : ''}
+        </span>
+        <div className="h-1 w-16 flex-shrink-0 rounded-sm bg-slate-800">
           <div className="h-1 rounded-sm bg-werco-500" style={{ width: `${progress}%` }} />
         </div>
+        <span className="flex-shrink-0 whitespace-nowrap text-[10px] text-slate-500 tabular-nums">
+          {completeQty}/{orderedQty || 0} ({progress}%)
+        </span>
       </div>
-      <span className="w-14 flex-shrink-0 text-right text-[10px] text-slate-500 tabular-nums">
-        {completeQty}/{orderedQty || 0} ({progress}%)
-      </span>
-      <span className="w-12 flex-shrink-0 text-right text-xs text-slate-400 tabular-nums">
-        {formatElapsed(assignment.clock_in, nowMs)}
-      </span>
     </div>
   );
 }

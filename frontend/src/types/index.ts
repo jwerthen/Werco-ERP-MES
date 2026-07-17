@@ -361,6 +361,8 @@ export interface ActiveAssignment {
     id: number;
     employee_id: string;
     name: string;
+    /** Short display form ("First L.") supplied by the backend; fall back to deriving from `name`. */
+    display_name?: string | null;
     role: UserRole;
     department?: string;
   };

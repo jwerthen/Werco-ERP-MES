@@ -1607,9 +1607,9 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| GET | `/receiving/open-pos` | List POs available for receiving (sent/partial) | Yes |
+| GET | `/receiving/open-pos` | List POs available for receiving (sent/partial); each PO carries `order_date` / `required_date` / `expected_date` plus its open lines | Yes |
 | GET | `/receiving/po/{po_id}` | Get full PO detail for receiving | Yes |
-| POST | `/receiving/receive` | Receive material against a PO line | Admin / Manager / Supervisor |
+| POST | `/receiving/receive` | Receive material against a PO line (`lot_number` optional — auto-assigned when blank, see below) | Admin / Manager / Supervisor |
 | GET | `/receiving/inspection-queue` | List receipts pending inspection (`days_back` optional, bounded 1–3650; **no date cutoff by default** — pending receipts never age out, so the list matches the `/stats` `pending_inspection` count) | Yes |
 | GET | `/receiving/receipt/{receipt_id}` | Get receipt detail | Yes |
 | POST | `/receiving/inspect/{receipt_id}` | Complete inspection (accept/reject, auto-NCR on rejection) | Admin / Manager / Quality / Supervisor |
@@ -1620,6 +1620,12 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 | GET | `/receiving/print-profile` | Get the company ProxyBox print profile (key masked; **404** until created) | Admin |
 | PUT | `/receiving/print-profile` | Create / update the print profile, incl. the `allow_print_egress` kill switch | Admin |
 
+> **Lot number (`lot_number`).** Optional on `POST /receiving/receive` (max 50 chars): when
+> blank or omitted the server auto-assigns the receipt number (unique, company-scoped) as the
+> lot, so `POReceipt.lot_number` is still always stored non-null and AS9100D lot traceability
+> is preserved — supply the vendor's lot number when it is known. The receipt audit row and
+> the inventory RECEIVE transaction both carry the effective (supplied or auto-assigned) lot.
+>
 > **Incoming-inspection default (`requires_inspection`).** On `POST /receiving/receive` the
 > field defaults to **`false`** when omitted: the receipt is auto-accepted (dock-to-stock) and
 > lands directly in inventory with **`inspection_status = not_required`**. No incoming

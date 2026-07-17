@@ -25,8 +25,11 @@ Top to bottom, all in one tight vertical stack:
    its height and scrolls internally so the page doesn't grow:
    - **Capacity Overview** — per-work-center rows: utilization bar + a 7-day load heatmap (cells link
      to `/scheduling`).
-   - **Live Shop Activity** — one compact row per active time-clock assignment, grouped by work
-     center; the WO links to the work order.
+   - **Live Shop Activity** — one compact two-line row per active time-clock assignment, grouped
+     by work center. Line 1 is the operator — the short `display_name` ("First L.") the backend
+     supplies on the `active_assignments` user payload (fallback: derived from the full name, then
+     the employee id), role badge, elapsed time; line 2 is the job — WO link, part · op, progress
+     bar + qty.
    - **Work Center Status** — one row per station (status, active/queue counts, People count).
    - **Signed In Right Now** — live presence (on-the-job users as chips, idle users as rows).
 6. **Recent Completions** — latest completed operations.
@@ -47,8 +50,9 @@ repeating it:
   gains "· N jobs".
 
 Cross-links are keyed on **stable ids** — `work_center.id` (`#wc-live-<id>`) and `time_entry_id`
-(`#assign-<id>`) — never on display names. Detail fields that don't fit a one-line row (started/elapsed,
-due date, customer, priority, part) are preserved in the row's hover tooltip.
+(`#assign-<id>`) — never on display names. Detail fields that don't fit the compact row (full name +
+employee id, entry type, started time, due date, customer, priority, part name) are preserved in the
+row's hover tooltip.
 
 Regression coverage: [`frontend/src/pages/Dashboard.dedup.test.tsx`](../frontend/src/pages/Dashboard.dedup.test.tsx).
 
@@ -84,4 +88,7 @@ alert widgets reading `/quality/summary`, `/calibration/equipment/due-soon`, and
 Data refreshes on a 30s poll and on WebSocket pushes (`dashboard_update` / `shop_floor_update` /
 `quality_alert` / etc.); live presence is WebSocket-driven. See the `/shop-floor/dashboard` caching +
 bounded-reconcile notes in [`docs/API.md`](API.md). The 2026-06 redesign was **presentation-only** —
-the endpoint payloads are unchanged.
+the endpoint payloads are unchanged. One later additive payload change: the `active_assignments`
+user object also carries `display_name` — the "First L." short form (the wallboard's
+`operator_display_name` helper) — which Live Shop Activity rows display instead of the employee id
+(full name + employee id stay in the payload and the row tooltip).

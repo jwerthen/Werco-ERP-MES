@@ -446,6 +446,12 @@ def test_dashboard_active_assignments_exclude_other_tenants(client: TestClient, 
     resp = client.get("/api/v1/shop-floor/dashboard", headers=headers_for(a_user))
     assert resp.status_code == status.HTTP_200_OK, resp.text
 
-    assignment_user_ids = {a["user"]["id"] for a in resp.json()["active_assignments"]}
+    assignments = resp.json()["active_assignments"]
+    assignment_user_ids = {a["user"]["id"] for a in assignments}
     assert a_user.id in assignment_user_ids, "company A dashboard should include its own active operator"
     assert b_user.id not in assignment_user_ids, "company A dashboard must NOT include company B's active operator"
+
+    # User shape: alongside the full name, the payload carries the public-screen-safe
+    # short display name ("First L.") built by wallboard_service.operator_display_name.
+    a_assignment = next(a for a in assignments if a["user"]["id"] == a_user.id)
+    assert a_assignment["user"]["display_name"] == f"{a_user.first_name} {a_user.last_name[0].upper()}."
