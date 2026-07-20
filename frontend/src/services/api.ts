@@ -942,12 +942,15 @@ class ApiService {
   async importLaserNestPackageStandalone(data: {
     file?: File | null;
     source_path?: string;
+    /** ISO YYYY-MM-DD promise date for the created laser WO. Omit = no due date. */
+    due_date?: string;
     work_center_id?: number | null;
     rows?: LaserNestImportRow[];
   }): Promise<LaserNestPackageImportResult> {
     const formData = new FormData();
     if (data.file) formData.append('file', data.file);
     if (data.source_path) formData.append('source_path', data.source_path);
+    if (data.due_date) formData.append('due_date', data.due_date);
     if (data.work_center_id) formData.append('work_center_id', String(data.work_center_id));
     if (data.rows) formData.append('rows', JSON.stringify(data.rows));
     const response = await this.api.post<LaserNestPackageImportResult>(

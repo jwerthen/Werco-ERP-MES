@@ -22,7 +22,11 @@ from sqlalchemy.orm import Session
 
 from app.models.time_entry import TimeEntry
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation
-from app.services.work_order_state_service import TERMINAL_WO_STATUSES, has_incomplete_predecessors
+from app.services.work_order_state_service import (
+    TERMINAL_WO_STATUSES,
+    has_incomplete_predecessors,
+    is_laser_dispatch_work_order,
+)
 
 # Status lists used by the shop-floor handlers (verbatim).
 CLOCK_IN_ALLOWED_STATUSES = [
@@ -83,7 +87,17 @@ def get_company_open_time_entry(db: Session, user_id: int, operation_id: int, co
 
 
 def operation_blocked_by_predecessors(db: Session, operation: WorkOrderOperation) -> bool:
-    """The out-of-sequence guard, verbatim (same args as every shop-floor call site)."""
+    """The out-of-sequence guard, verbatim (same args as every shop-floor call site).
+
+    Laser-nest WOs are DISPATCH POOLS, not routings (see
+    ``is_laser_dispatch_work_order``): their nest ops never predecessor-block each
+    other, even across work centers -- the same-work-center exemption below stops
+    helping the moment a package's nests are spread across two lasers. The
+    ``operation.work_order`` access is the relationship (already loaded at most
+    call sites; otherwise one cheap lazy load).
+    """
+    if is_laser_dispatch_work_order(operation.work_order):
+        return False
     return has_incomplete_predecessors(
         db,
         operation.work_order_id,

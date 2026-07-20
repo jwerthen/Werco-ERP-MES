@@ -1,7 +1,7 @@
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session, joinedload
 
@@ -14,12 +14,15 @@ from app.core.websocket import (
     broadcast_work_order_update,
 )
 from app.db.database import get_db
+from app.models.time_entry import TimeEntry
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.schemas.scheduling import LoadChartDataPoint, LoadChartRequest, SchedulingConflict, SchedulingRunRequest
+from app.services.audit_service import AuditService
 from app.services.operational_event_service import OperationalEventService
 from app.services.scheduling_service import SchedulingService
+from app.services.work_center_type_service import get_work_center_group
 
 router = APIRouter()
 
@@ -685,7 +688,11 @@ def schedule_operation(
     company_id: int = Depends(get_current_company_id),
 ):
     """Schedule or reschedule an individual operation"""
-    operation = db.query(WorkOrderOperation).filter(WorkOrderOperation.id == operation_id).first()
+    operation = (
+        db.query(WorkOrderOperation)
+        .filter(WorkOrderOperation.id == operation_id, WorkOrderOperation.company_id == company_id)
+        .first()
+    )
     if not operation:
         raise HTTPException(status_code=404, detail="Operation not found")
 
@@ -736,24 +743,82 @@ def schedule_operation(
 def update_operation_work_center(
     operation_id: int,
     update: WorkCenterUpdate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Move an operation to a different work center"""
-    operation = db.query(WorkOrderOperation).filter(WorkOrderOperation.id == operation_id).first()
+    """Move an operation to a different work center.
+
+    Same physical action as the ``work_center_id`` branch of the work-orders
+    ``update_operation`` endpoint, so it enforces the SAME contract (they must
+    not drift): tenant-scoped lookups, refusal while the op is running or has
+    an open time session, refusal on completed ops, ``operation_group`` kept in
+    step with the new work center, and an audited old->new diff (invariant 2).
+    """
+    operation = (
+        db.query(WorkOrderOperation)
+        .filter(WorkOrderOperation.id == operation_id, WorkOrderOperation.company_id == company_id)
+        .first()
+    )
     if not operation:
         raise HTTPException(status_code=404, detail="Operation not found")
 
-    # Verify target work center exists and is active
+    # Verify target work center exists in THIS tenant and is active
     work_center = (
-        db.query(WorkCenter).filter(WorkCenter.id == update.work_center_id, WorkCenter.is_active == True).first()
+        db.query(WorkCenter)
+        .filter(
+            WorkCenter.id == update.work_center_id,
+            WorkCenter.company_id == company_id,
+            WorkCenter.is_active == True,  # noqa: E712
+        )
+        .first()
     )
     if not work_center:
         raise HTTPException(status_code=404, detail="Work center not found or inactive")
 
+    open_session = (
+        db.query(TimeEntry.id)
+        .filter(
+            TimeEntry.operation_id == operation.id,
+            TimeEntry.company_id == company_id,
+            TimeEntry.clock_out.is_(None),
+        )
+        .first()
+    )
+    if operation.status == OperationStatus.IN_PROGRESS or open_session is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Clock out before moving the operation to another work center",
+        )
+    if operation.status == OperationStatus.COMPLETE:
+        raise HTTPException(
+            status_code=409,
+            detail="Completed operations cannot be moved to another work center",
+        )
+
+    audit = AuditService(db, current_user, request)
+    old_values = {
+        "work_center_id": operation.work_center_id,
+        "operation_group": operation.operation_group,
+    }
+
     old_wc_id = operation.work_center_id
     operation.work_center_id = update.work_center_id
+    operation.operation_group = get_work_center_group(work_center)
+
+    db.flush()
+    audit.log_update(
+        resource_type="work_order_operation",
+        resource_id=operation.id,
+        resource_identifier=operation.operation_number,
+        old_values=old_values,
+        new_values={
+            "work_center_id": operation.work_center_id,
+            "operation_group": operation.operation_group,
+        },
+        description=f"Moved operation to work center {work_center.code}",
+    )
     db.commit()
 
     SchedulingService(db, company_id).update_availability_rates(

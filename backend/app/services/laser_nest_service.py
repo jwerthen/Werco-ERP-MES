@@ -12,7 +12,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Iterable, Optional
 
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.models.document import Document, DocumentType
@@ -21,6 +21,7 @@ from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderType
 from app.services.laser_nest_extraction_service import extract_nest_fields_from_pdf
 from app.services.storage_service import get_storage, resolve_upload_dir, sanitize_ext
+from app.services.work_center_type_service import get_work_center_group
 
 if TYPE_CHECKING:
     from app.schemas.work_order import LaserNestManualCreate
@@ -69,6 +70,11 @@ class ParsedLaserNest:
     field_confidence: Optional[dict] = None
     warning: Optional[str] = None
     passes: Optional[int] = None
+    # Per-row work-center override (PDF confirm-and-commit import): when set, the
+    # nest's operation is created on THIS work center instead of the package-level
+    # laser work center. IMPORT-SIDE INSTRUCTION only -- deliberately kept out of
+    # as_dict() so it never appears in a preview response.
+    work_center_id: Optional[int] = None
 
     def as_dict(self) -> dict:
         return {
@@ -316,6 +322,7 @@ def build_laser_nest_child_work_order(
     company_id: int,
     created_by: Optional[int],
     saved_storage_keys: Optional[list[str]] = None,
+    row_work_centers: Optional[dict[int, WorkCenter]] = None,
 ) -> LaserNestPackage:
     """Replace a laser WO's nest tasks with the supplied package plan.
 
@@ -330,6 +337,14 @@ def build_laser_nest_child_work_order(
     the surrounding ``atomic_transaction`` commits, so on rollback the caller must
     reap these refs (they live outside the temp package dir). On commit they are
     durable Documents and must NOT be deleted.
+
+    ``row_work_centers`` resolves per-nest work-center overrides: a nest whose
+    ``work_center_id`` is set lands on that work center (management may spread a
+    package's nests across multiple lasers); nests without one land on the
+    package-level ``laser_work_center``. The CALLER validates each distinct
+    override as an active, company-scoped work center and hands the resolved
+    rows in here -- an override missing from the mapping is a caller bug and
+    raises ``ValueError`` rather than silently falling back.
     """
 
     # IMPORT REPLACES EVERYTHING (by design). Importing a laser package wipes ALL
@@ -338,6 +353,24 @@ def build_laser_nest_child_work_order(
     # intentional: the product decision is "manual OR import per job", the two
     # paths are never mixed, so an import is the authoritative source of truth and
     # cleanly supersedes prior manual entry. Do not soften this into coexistence.
+    #
+    # Capture the operation ids behind this WO's nests BEFORE the packages (and
+    # their nests, via cascade) are deleted: ops now derive operation_group from
+    # THEIR work center, so a nest op on an unusually-named work center may not
+    # carry group "LASER" -- the id list keeps the wipe exhaustive regardless.
+    nest_backed_operation_ids = [
+        row[0]
+        for row in (
+            db.query(LaserNest.work_order_operation_id)
+            .join(WorkOrderOperation, LaserNest.work_order_operation_id == WorkOrderOperation.id)
+            .filter(
+                LaserNest.company_id == company_id,
+                WorkOrderOperation.work_order_id == child_work_order.id,
+            )
+            .all()
+        )
+        if row[0] is not None
+    ]
     existing_packages = (
         db.query(LaserNestPackage)
         .filter(
@@ -350,12 +383,15 @@ def build_laser_nest_child_work_order(
         db.delete(package)
     db.flush()
 
+    operation_wipe_filter = WorkOrderOperation.operation_group == "LASER"
+    if nest_backed_operation_ids:
+        operation_wipe_filter = or_(operation_wipe_filter, WorkOrderOperation.id.in_(nest_backed_operation_ids))
     existing_operations = (
         db.query(WorkOrderOperation)
         .filter(
             WorkOrderOperation.company_id == company_id,
             WorkOrderOperation.work_order_id == child_work_order.id,
-            WorkOrderOperation.operation_group == "LASER",
+            operation_wipe_filter,
         )
         .all()
     )
@@ -375,12 +411,19 @@ def build_laser_nest_child_work_order(
     db.add(package)
     db.flush()
 
+    overrides = row_work_centers or {}
     for index, nest in enumerate(nests, start=1):
         sequence = index * 10
+        if nest.work_center_id:
+            op_work_center = overrides.get(nest.work_center_id)
+            if op_work_center is None:
+                raise ValueError(f"Unresolved nest work-center override: {nest.work_center_id}")
+        else:
+            op_work_center = laser_work_center
         operation = WorkOrderOperation(
             company_id=company_id,
             work_order_id=child_work_order.id,
-            work_center_id=laser_work_center.id,
+            work_center_id=op_work_center.id,
             sequence=sequence,
             operation_number=f"Nest {index}",
             name=f"Laser Cut - {nest.nest_name}",
@@ -389,8 +432,13 @@ def build_laser_nest_child_work_order(
             setup_time_hours=0.0,
             run_time_hours=0.0,
             run_time_per_piece=0.0,
-            status=OperationStatus.READY if index == 1 else OperationStatus.PENDING,
-            operation_group="LASER",
+            # Laser WOs are DISPATCH POOLS, not routings: every nest is startable
+            # (and kiosk-visible) immediately, so all nest ops are born READY.
+            # The distinct sequence values stay -- labels ("Nest N") and stable
+            # ordering depend on them -- but carry no precedence semantics (see
+            # work_order_state_service.is_laser_dispatch_work_order).
+            status=OperationStatus.READY,
+            operation_group=get_work_center_group(op_work_center),
         )
         db.add(operation)
         db.flush()
@@ -584,21 +632,6 @@ def create_manual_laser_nest(
     )
     sequence = int(max_sequence or 0) + 10
 
-    # First-op-READY intent, mirroring the import factory: this nest is READY iff
-    # there is not already a non-deleted manual/imported LASER nest on the child
-    # (i.e. it is the first ready-able laser task), else PENDING.
-    existing_active_nests = (
-        db.query(func.count(LaserNest.id))
-        .join(WorkOrderOperation, LaserNest.work_order_operation_id == WorkOrderOperation.id)
-        .filter(
-            LaserNest.company_id == company_id,
-            LaserNest.is_deleted == False,  # noqa: E712
-            WorkOrderOperation.work_order_id == child_work_order.id,
-        )
-        .scalar()
-    )
-    op_status = OperationStatus.READY if not existing_active_nests else OperationStatus.PENDING
-
     operation = WorkOrderOperation(
         company_id=company_id,
         work_order_id=child_work_order.id,
@@ -617,7 +650,11 @@ def create_manual_laser_nest(
         setup_time_hours=0.0,
         run_time_hours=0.0,
         run_time_per_piece=0.0,
-        status=op_status,
+        # Laser WOs are DISPATCH POOLS, not routings: every nest -- manual ones
+        # included -- is startable (and kiosk-visible) immediately, so nest ops
+        # are born READY regardless of how many nests already exist (see
+        # work_order_state_service.is_laser_dispatch_work_order).
+        status=OperationStatus.READY,
         operation_group="LASER",
     )
     db.add(operation)

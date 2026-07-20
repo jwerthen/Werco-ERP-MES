@@ -21,6 +21,37 @@ DEFAULT_WORK_CENTER_TYPES = [
 ]
 
 
+def get_work_center_group(work_center: WorkCenter) -> str:
+    """Get operation group name from work center type.
+
+    Moved here from the work-orders endpoint module so services (e.g. the laser
+    nest builder, which now derives each nest op's ``operation_group`` from ITS
+    work center) can share it without importing endpoint code.
+    """
+    if not work_center:
+        return "OTHER"
+    wc_type = work_center.work_center_type.upper() if work_center.work_center_type else ""
+    wc_name = work_center.name.upper() if work_center.name else ""
+
+    # Map work center types to groups
+    if "LASER" in wc_type or "LASER" in wc_name:
+        return "LASER"
+    elif "PRESS" in wc_type or "BRAKE" in wc_type or "BEND" in wc_name:
+        return "BEND"
+    elif "WELD" in wc_type or "WELD" in wc_name:
+        return "WELD"
+    elif "PAINT" in wc_type or "POWDER" in wc_type or "COAT" in wc_name:
+        return "FINISH"
+    elif "MACHINE" in wc_type or "CNC" in wc_type or "MILL" in wc_name or "LATHE" in wc_name:
+        return "MACHINE"
+    elif "ASSEMBLY" in wc_type or "ASSEM" in wc_name:
+        return "ASSEMBLY"
+    elif "INSPECT" in wc_type or "QC" in wc_name or "QUALITY" in wc_name:
+        return "INSPECT"
+    else:
+        return wc_type or "OTHER"
+
+
 def normalize_work_center_type(value: str) -> str:
     if not value:
         return ""

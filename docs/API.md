@@ -136,7 +136,7 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 | POST | `/work-orders/{id}/start` | Start production | Yes |
 | POST | `/work-orders/{id}/complete` | Complete work order (409 if the WO is CANCELLED) | Yes |
 | POST | `/work-orders/{id}/operations` | Add an operation to a work order | Admin / Manager / Supervisor |
-| PUT | `/work-orders/operations/{id}` | Update an operation | Yes |
+| PUT | `/work-orders/operations/{id}` | Update an operation (body now also accepts `work_center_id` — move the operation to another work center; see note below) | Admin / Manager / Supervisor |
 | POST | `/work-orders/operations/{id}/start` | Start an operation | Yes |
 | POST | `/work-orders/operations/{id}/complete` | Complete an operation (or record partial progress; 409 if the parent WO is terminal) | Yes |
 | POST | `/work-orders/operations/{id}/reduce-production` | Supervisor/office over-count correction — walk back good-count across **any** operator's **unapproved** labor on the operation, **before** completion; no clock-in required (see note below) | Admin / Manager / Supervisor |
@@ -336,6 +336,32 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > Floor. In the app this is the **Correct count** action on each operation row of the work-order
 > detail page (gated on `work_orders:edit`).
 
+> **Operation work-center reassignment (`PUT /work-orders/operations/{id}`).** The update body
+> (`WorkOrderOperationUpdate`) accepts an optional **`work_center_id`** — a planner move of the
+> operation to another work center (e.g. re-dispatching a laser nest to a different laser, but
+> legitimate for any operation). Checked **before any mutation**:
+> - The operation must be idle: while it is **IN_PROGRESS** or **any open time entry** exists on it
+>   → **409 Conflict** (`"Clock out before moving the operation to another work center"`).
+> - **COMPLETE** operations cannot be moved — a finished run's labor history belongs to the machine
+>   it ran on → **409** (`"Completed operations cannot be moved to another work center"`).
+> - The target must be an **active** work center in the caller's company — inactive or cross-tenant
+>   → **404** (`"Work center not found"`).
+>
+> On success the operation's `operation_group` is re-derived from the new work center (the same
+> derivation used at creation) so queue/grouping views stay consistent, both fields ride the
+> endpoint's tamper-evident `audit_log` row (old → new), and both work centers' persisted
+> availability rates are refreshed. An explicit `null` is ignored (`work_center_id` is non-nullable
+> on the model), and re-sending the current work center is a no-op. In the app this is the per-nest
+> work-center control on the WO detail page's Laser Nest Package card.
+>
+> The Scheduling page's `PUT /scheduling/operations/{id}/work-center` (drag / bulk move) enforces
+> the **same contract** — tenant-scoped lookups, the two 409 refusals, `operation_group` refresh,
+> and an audited old → new diff — so the two reassignment paths cannot disagree.
+>
+> **Laser nest WOs refuse free-form operations.** `POST /work-orders/{id}/operations` returns
+> **400** on a `laser_cutting` work order — dispatch pools are managed exclusively by the nest
+> package import and manual nest entry, so a non-nest op can never ride the laser gating exemption.
+
 #### Work Order Schema
 
 ```json
@@ -379,7 +405,7 @@ mixed**:
 | POST | `/work-orders/{id}/laser-nest-packages/preview` | Preview nests detected from a zipped package, a bare nest-report PDF (single- or multi-page), or a server folder (writes nothing). PDF uploads run AI extraction per sheet | Admin / Manager / Supervisor |
 | POST | `/work-orders/{id}/laser-nest-packages/import` | Import a package — creates/rebuilds the child laser WO (or rebuilds the addressed WO directly when it is itself `laser_cutting`), one nest operation per CNC file (or per confirmed PDF row) | Admin / Manager / Supervisor |
 | POST | `/work-orders/laser-nest-packages/standalone/preview` | Same preview with **no work order in the path** — used before a standalone import | Admin / Manager / Supervisor |
-| POST | `/work-orders/laser-nest-packages/standalone/import` | Import a package into a **fresh standalone laser WO** — creates a released, part-less `laser_cutting` work order (no parent; quantity = total planned sheet runs) | Admin / Manager / Supervisor |
+| POST | `/work-orders/laser-nest-packages/standalone/import` | Import a package into a **fresh standalone laser WO** — creates a released, part-less `laser_cutting` work order (no parent; quantity = total planned sheet runs; optional `due_date`) | Admin / Manager / Supervisor |
 | POST | `/laser-nests/extract` | Auto-extract nest fields (CNC #, material, size) from a single uploaded nest PDF. Stateless — no DB write, no audit | Admin / Manager / Supervisor |
 | POST | `/work-orders/{id}/laser-nests/manual` | Manually add **one** nest to a work order (child laser WO of an assembly, or the addressed `laser_cutting` WO directly). Creates a clock-in-able `LASER` operation | Admin / Manager / Supervisor |
 | PATCH | `/laser-nests/{id}` | Edit a manual nest (all fields optional) | Admin / Manager / Supervisor |
@@ -404,7 +430,10 @@ mixed**:
 > **Standalone nest work orders (no parent, no part).** The `…/standalone` pair runs the same wizard
 > flow with no work order in the path. `preview` is behaviorally identical to the `{id}` preview;
 > `import` takes the same form fields (`file`/`source_path`, optional `work_center_id`, optional
-> `rows`) and creates a **fresh RELEASED `work_order_type='laser_cutting'` work order** with
+> `rows`) plus an optional **`due_date`** form field (ISO date, standalone import only) — the
+> planner-set due date stamped on the created WO; **past dates are allowed** (an open WO can
+> already be overdue at import), and the date is editable later via `PUT /work-orders/{id}` (the
+> WO-detail inline due-date edit). It creates a **fresh RELEASED `work_order_type='laser_cutting'` work order** with
 > **`part_id` NULL** and **no parent**, `quantity_ordered` = **total planned sheet runs**, then
 > builds the package onto it (`laser_nest_packages.parent_work_order_id` NULL,
 > `child_work_order_id` → the new WO). Nest-PDF `DRAWING` Documents attach to the created WO itself
@@ -424,6 +453,42 @@ mixed**:
 > operates **on that WO directly** — no child is nested under it. This is how re-import and manual
 > nest-add work on standalone nest WOs from the WO-detail wizard; for every other WO type the classic
 > find-or-create-child flow is unchanged.
+>
+> **Laser WOs are dispatch pools — every nest READY, no sequence gating.** A laser-cutting WO's
+> nest operations carry sequence numbers for stable labels/ordering only ("Nest N") — they have
+> **no precedence semantics**. Every nest operation is created **READY** (package import and
+> manual add alike), so the whole package is immediately visible and clock-in-able on its work
+> center's kiosk queue, and `work_order_type='laser_cutting'` WOs are **exempt from the
+> predecessor/sequence gate** on every path that enforces it — office
+> `/work-orders/operations/{id}/start|complete`, shop-floor clock-in and
+> `/shop-floor/operations/{id}/start|complete`, and the scanner resolver (which mirrors the live
+> gates) — so operators run nests in **any order**, including across **different work centers**
+> when a package's nests are spread over multiple lasers. The exemption keys off the WO type
+> through one shared predicate (`is_laser_dispatch_work_order` in `work_order_state_service`), and
+> the release helpers promote **all** PENDING laser ops to READY (not just the lowest sequence) —
+> a pre-existing laser WO imported before whole-package-ready self-heals (its stranded PENDING
+> nests go READY) on its next release/lifecycle event. Non-laser WOs keep the classic
+> one-at-a-time READY promotion and predecessor gates unchanged.
+>
+> **Work-center selection (package-level pick, auto-detect order, per-row override).** Each nest's
+> backing operation lands on a work center resolved in this order:
+> 1. The row's **`work_center_id`** (PDF confirm-and-commit `rows` only — see the `rows`
+>    validation below). Per-row overrides let one package be spread across multiple lasers.
+> 2. The import's package-level **`work_center_id`** form field.
+> 3. **Auto-detect** when neither is sent: among active work centers whose name/code/type matches
+>    `%laser%`, the pick prefers entries mentioning **"ermaksan"** or **"fiber"** (the Ermaksan
+>    fiber laser), then any other laser, with entries mentioning **"tube"** ranked **last** — the
+>    HSG tube laser is never the silent default; lowest id breaks ties within a tier. No active
+>    laser work center → **400**.
+>
+> An explicit `work_center_id` (package-level or per-row) always wins over auto-detect and must be
+> an **active** work center in the caller's company (it need not match `%laser%`) — otherwise
+> **404** (`"Laser work center not found"`); every distinct per-row override is validated
+> **before** the atomic build, so a bad override persists nothing. Each operation's
+> `operation_group` derives from **its own** work center. The legacy CNC-program path (no `rows`)
+> is package-level only. In the wizard this is the dispatch strip's work-center select (defaulting
+> to the Ermaksan fiber laser, with "(auto-detect)" available) plus the per-row work-center
+> column; the same auto-detect resolves the manual-create path's laser work center.
 >
 > **PDF auto-extraction (CNC #, material, material size).** Nest-report PDFs (SigmaNEST / Ermaksan
 > style) are read automatically; the planner verifies before saving. Extraction is **layout-aware
@@ -461,7 +526,8 @@ mixed**:
 >   then `import` re-sends the same ZIP
 >   **plus an optional `rows` form field** — a JSON array of confirmed rows
 >   `{source_file, cnc_number, nest_name, planned_runs, material, thickness, sheet_size}` (plus
->   `source_pages` on bare-PDF rows — see below). When
+>   `source_pages` on bare-PDF rows — see below — and an optional per-row `work_center_id`
+>   override — see "Work-center selection" above). When
 >   `rows` is present, the backend matches each row to its PDF by `source_file`, stores each PDF as
 >   a `DRAWING` `Document` (attached via `document_id`), sets `cnc_number`, writes one `log_create`
 >   audit row per nest, and builds the target laser WO — **no second AI call** (the re-sent ZIP only
@@ -470,7 +536,9 @@ mixed**:
 >   `rows` is **strictly validated** before anything is persisted (`LaserNestImportRow`):
 >   `source_file` required (1–1000 chars), `planned_runs` required and **≥ 1**,
 >   `source_pages` optional (required on the bare-PDF path — see below): non-empty, entries
->   **≥ 1**, ascending and consecutive, and
+>   **≥ 1**, ascending and consecutive,
+>   `work_center_id` optional and **> 0** (per-nest override; must resolve to an **active**,
+>   company-scoped work center, else **404** before anything is persisted), and
 >   `cnc_number` / `nest_name` / `material` / `thickness` / `sheet_size` length-bounded as on the
 >   manual path. Import-specific **400** cases: `rows` not valid JSON / not a JSON array; any row
 >   failing validation; a **duplicate `source_file`** across rows; and a DB constraint/length fault
@@ -531,8 +599,10 @@ mixed**:
 > (required, 1–100 chars), `planned_runs` (required, **≥ 1**), and optional `nest_name`,
 > `material`, `thickness`, `sheet_size`. Resolves the target laser WO (find-or-create the child on
 > an assembly WO; the addressed WO itself when it is `laser_cutting`) and an active
-> laser work center — **400** if no active laser work center exists. The first nest on the laser WO
-> is created **READY** (clock-in-able now); subsequent nests are **PENDING**. This is a standalone
+> laser work center — **400** if no active laser work center exists (auto-detected with the same
+> Ermaksan-fiber-first, tube-last preference — see "Work-center selection" above). Every manual
+> nest is created **READY** (clock-in-able now) regardless of how many nests already exist —
+> laser WOs are dispatch pools (see "Laser WOs are dispatch pools" above). This is a standalone
 > creation path that **does not change** the package-import behavior. Returns **201** with the new
 > nest plus its backing operation (`work_order_operation_id`, `operation_status`). Besides the
 > per-nest `log_create`, the add writes a WO-level `log_update` (reason `manual_laser_nest_added`)

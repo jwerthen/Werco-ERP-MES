@@ -194,14 +194,16 @@ class TestManualCreate:
         assert child.work_order_type == "laser_cutting"
         assert float(child.quantity_ordered) == 5.0
 
-    def test_second_nest_is_pending_and_rolls_up_quantity(self, client, db_session, laser_setup):
+    def test_second_nest_is_ready_and_rolls_up_quantity(self, client, db_session, laser_setup):
         headers = headers_for(laser_setup["admin"])
         parent_id = laser_setup["parent"].id
         first = _create_manual_nest(client, headers, parent_id, {"cnc_number": "A", "planned_runs": 3})
         assert first.status_code == status.HTTP_201_CREATED
         second = _create_manual_nest(client, headers, parent_id, {"cnc_number": "B", "planned_runs": 4})
         assert second.status_code == status.HTTP_201_CREATED
-        assert second.json()["operation_status"] == "pending"  # not the first ready-able op
+        # Whole-package-ready: laser WOs are dispatch pools, so EVERY nest op is
+        # born READY (was "pending" when only the first nest was ready-able).
+        assert second.json()["operation_status"] == "ready"
 
         nest = db_session.query(LaserNest).filter(LaserNest.id == second.json()["id"]).first()
         child = db_session.query(WorkOrder).filter(WorkOrder.id == nest.operation.work_order_id).first()

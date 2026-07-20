@@ -225,6 +225,12 @@ class LaserNestImportRow(BaseModel):
     thickness: Optional[str] = Field(None, max_length=50)
     sheet_size: Optional[str] = Field(None, max_length=100)
     confidence: Optional[str] = Field(None, max_length=50)
+    work_center_id: Optional[int] = Field(
+        None,
+        gt=0,
+        description="Per-nest work-center override: this nest's operation is created on this work center "
+        "instead of the package-level laser work center. Must resolve to an active work center.",
+    )
     source_pages: Optional[List[int]] = Field(
         None,
         description=(
@@ -258,6 +264,13 @@ class WorkOrderOperationCreate(WorkOrderOperationBase):
 
 class WorkOrderOperationUpdate(BaseModel):
     version: int = Field(..., ge=0, description="Version for optimistic locking")
+    work_center_id: Optional[int] = Field(
+        None,
+        gt=0,
+        description="Move the operation to another work center (planner reassignment; e.g. re-dispatching a "
+        "laser nest to a different laser). Must be an active work center; refused while the operation is in "
+        "progress or has an open time session.",
+    )
     name: Optional[str] = Field(None, min_length=2, max_length=255)
     description: Optional[DescriptionLong] = None
     setup_instructions: Optional[str] = Field(None, max_length=5000)
