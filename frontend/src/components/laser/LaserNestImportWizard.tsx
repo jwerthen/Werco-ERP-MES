@@ -7,8 +7,10 @@ import {
   LaserNestExtractionConfidence,
   LaserNestConfidenceField,
   LaserNestFieldConfidence,
+  WorkCenter,
 } from '../../types';
 import api from '../../services/api';
+import { defaultLaserWorkCenter, sortWorkCentersForLaserDispatch } from '../../utils/laserWorkCenters';
 
 interface LaserNestImportWizardProps {
   open: boolean;
@@ -55,6 +57,8 @@ interface EditableRow {
   field_confidence: LaserNestFieldConfidence | null;
   warning: string | null;
   edited: Partial<Record<LaserNestConfidenceField, boolean>>;
+  /** Per-nest WC override; null = follow the package-level pick / auto-detect. */
+  work_center_id: number | null;
 }
 
 /** Preview metadata about the uploaded package itself (bare-PDF uploads). */
@@ -93,8 +97,11 @@ function toEditable(row: LaserNestPreviewRow): EditableRow {
     field_confidence: row.field_confidence ?? null,
     warning: row.warning ?? null,
     edited: {},
+    work_center_id: null,
   };
 }
+
+const workCenterLabel = (wc: WorkCenter) => wc.name || wc.code;
 
 function fieldValue(row: EditableRow, field: LaserNestConfidenceField): string {
   switch (field) {
@@ -181,7 +188,18 @@ export default function LaserNestImportWizard({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
-  // Reset everything whenever the wizard (re)opens.
+  // Dispatch controls: active work centers (laser-first order) for the
+  // standalone package-level pick and the per-row overrides, plus the
+  // standalone-only due date ('' = none) and package work-center pick
+  // ('' = auto-detect).
+  const [workCenters, setWorkCenters] = useState<WorkCenter[]>([]);
+  const [dispatchDueDate, setDispatchDueDate] = useState('');
+  const [dispatchWorkCenterId, setDispatchWorkCenterId] = useState('');
+
+  // Reset everything whenever the wizard (re)opens, then load the active work
+  // centers for the dispatch picks. In standalone mode the package pick
+  // defaults to the caller's workCenterId, else the preferred laser (Ermaksan
+  // fiber first — never a tube laser); "(auto-detect)" stays available.
   useEffect(() => {
     if (!open) return;
     setStep('pick');
@@ -192,7 +210,28 @@ export default function LaserNestImportWizard({
     setLoading(false);
     setError('');
     setFileInputKey((k) => k + 1);
-  }, [open]);
+    setDispatchDueDate('');
+    setDispatchWorkCenterId(workCenterId != null ? String(workCenterId) : '');
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const centers = await api.getWorkCenters(true);
+        if (cancelled) return;
+        const sorted = sortWorkCentersForLaserDispatch((centers ?? []).filter((wc) => wc.is_active));
+        setWorkCenters(sorted);
+        if (workOrderId == null && workCenterId == null) {
+          const preferred = defaultLaserWorkCenter(sorted);
+          if (preferred) setDispatchWorkCenterId(String(preferred.id));
+        }
+      } catch {
+        if (!cancelled) setWorkCenters([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [open, workOrderId, workCenterId]);
 
   const hasInput = Boolean(file) || sourcePath.trim().length > 0;
 
@@ -237,6 +276,13 @@ export default function LaserNestImportWizard({
     setRows((prev) => prev.filter((_, i) => i !== index));
   };
 
+  /** Per-row WC override; '' clears back to the package default. */
+  const updateRowWorkCenter = (index: number, value: string) => {
+    setRows((prev) =>
+      prev.map((row, i) => (i === index ? { ...row, work_center_id: value ? Number(value) : null } : row))
+    );
+  };
+
   const handleImport = async () => {
     if (rows.length === 0) {
       setError('Add at least one nest to import.');
@@ -268,6 +314,8 @@ export default function LaserNestImportWizard({
       // PDF uploads: echo the preview's page split back verbatim — the backend
       // re-splits the re-sent PDF by these pages and 400s on a mismatch.
       ...(row.source_pages != null ? { source_pages: row.source_pages } : {}),
+      // Per-nest WC override rides along only when the planner set one.
+      ...(row.work_center_id != null ? { work_center_id: row.work_center_id } : {}),
     }));
 
     setLoading(true);
@@ -276,13 +324,20 @@ export default function LaserNestImportWizard({
       const input = {
         file,
         source_path: sourcePath.trim() || undefined,
-        work_center_id: workCenterId ?? undefined,
         rows: confirmed,
       };
       const result =
         workOrderId != null
-          ? await api.importLaserNestPackage(workOrderId, input)
-          : await api.importLaserNestPackageStandalone(input);
+          ? await api.importLaserNestPackage(workOrderId, {
+              ...input,
+              work_center_id: workCenterId ?? undefined,
+            })
+          : await api.importLaserNestPackageStandalone({
+              ...input,
+              // Standalone dispatch strip: only send concrete picks.
+              due_date: dispatchDueDate || undefined,
+              work_center_id: dispatchWorkCenterId ? Number(dispatchWorkCenterId) : undefined,
+            });
       onImported(result?.child_work_order?.id);
     } catch (err: any) {
       setError(err?.response?.data?.detail || 'Failed to import laser nest package.');
@@ -312,6 +367,7 @@ export default function LaserNestImportWizard({
               : 'Review and correct each nest, then import. AI-extracted values are editable — verify low-confidence rows before importing.'}
             {workOrderId == null &&
               ' Importing creates a new released laser cutting work order sized to the total sheet runs — no parent work order or part required.'}
+            {' Every nest is ready to run the moment the import lands, and the WC picks let you spread them across lasers.'}
           </p>
         </div>
 
@@ -354,6 +410,48 @@ export default function LaserNestImportWizard({
 
         {step === 'review' && (
           <div className="space-y-3">
+            {/* Standalone dispatch strip: due date + package work center for the
+                laser WO the import will create. Parented imports inherit the
+                target WO's dates, so the strip stays standalone-only. */}
+            {workOrderId == null && (
+              <div className="flex flex-wrap items-end gap-x-4 gap-y-2 rounded-none border border-fd-line bg-fd-sunken px-3 py-2">
+                <span className="pb-1.5 text-[11px] font-semibold uppercase tracking-wide text-fd-mute">Dispatch</span>
+                <div>
+                  <label htmlFor="nest-dispatch-due-date" className="block text-xs font-medium text-fd-mute">
+                    Due date
+                  </label>
+                  <input
+                    id="nest-dispatch-due-date"
+                    type="date"
+                    value={dispatchDueDate}
+                    onChange={(e) => setDispatchDueDate(e.target.value)}
+                    className="input mt-1 !py-1 text-sm"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="nest-dispatch-work-center" className="block text-xs font-medium text-fd-mute">
+                    Work center
+                  </label>
+                  <select
+                    id="nest-dispatch-work-center"
+                    value={dispatchWorkCenterId}
+                    onChange={(e) => setDispatchWorkCenterId(e.target.value)}
+                    className="input mt-1 !py-1 text-sm"
+                  >
+                    <option value="">(auto-detect)</option>
+                    {workCenters.map((wc) => (
+                      <option key={wc.id} value={String(wc.id)}>
+                        {workCenterLabel(wc)}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <p className="basis-full text-xs text-fd-faint sm:basis-auto sm:pb-1.5">
+                  Applies to the new laser work order; per-nest WC overrides win.
+                </p>
+              </div>
+            )}
+
             <div className="flex flex-wrap items-center gap-2 text-xs">
               <span className="rounded-none border border-fd-line bg-fd-sunken px-2 py-1 font-semibold text-fd-body">
                 {rows.length} {rows.length === 1 ? 'nest' : 'nests'}
@@ -394,6 +492,7 @@ export default function LaserNestImportWizard({
                     <th className={TH}>Thickness</th>
                     <th className={TH}>Sheet size</th>
                     <th className={`${TH} text-right`}>Runs</th>
+                    <th className={TH}>WC</th>
                     <th className={TH}>Conf.</th>
                     <th className={TH} aria-label="Remove" />
                   </tr>
@@ -401,7 +500,7 @@ export default function LaserNestImportWizard({
                 <tbody>
                   {rows.length === 0 && (
                     <tr>
-                      <td colSpan={8} className="px-3 py-6 text-center text-sm text-fd-mute">
+                      <td colSpan={9} className="px-3 py-6 text-center text-sm text-fd-mute">
                         No nests left to import. Re-preview a package or close.
                       </td>
                     </tr>
@@ -486,6 +585,21 @@ export default function LaserNestImportWizard({
                             aria-label={verifyLabel(`Runs for ${row.source_file}`, verify.planned_runs)}
                             title={verify.planned_runs ? 'Low confidence — verify' : undefined}
                           />
+                        </td>
+                        <td className="px-3 py-2">
+                          <select
+                            value={row.work_center_id != null ? String(row.work_center_id) : ''}
+                            onChange={(e) => updateRowWorkCenter(index, e.target.value)}
+                            className={`${CELL_INPUT} min-w-[8rem]`}
+                            aria-label={`Work center for ${row.source_file}`}
+                          >
+                            <option value="">package default</option>
+                            {workCenters.map((wc) => (
+                              <option key={wc.id} value={String(wc.id)}>
+                                {workCenterLabel(wc)}
+                              </option>
+                            ))}
+                          </select>
                         </td>
                         <td className="px-3 py-2">
                           <span className="inline-flex items-center gap-1">

@@ -35,6 +35,28 @@ class WorkOrderStateError(ValueError):
     """Raised when a requested work-order transition is not valid."""
 
 
+def is_laser_dispatch_work_order(work_order: Optional[WorkOrder]) -> bool:
+    """True when ``work_order`` is a laser-cutting nest WO -- a DISPATCH POOL, not a routing.
+
+    Laser-nest work orders hold one operation per nest sheet, and the nests have
+    no process ordering: operators bump around between nests in any order, and
+    management may spread a package's nests across multiple laser work centers.
+    The sequence numbers on nest ops exist only for stable labels/ordering, so
+    the predecessor gates and the one-at-a-time READY promotion that protect a
+    real routing must NOT apply to these WOs. Every site that exempts laser WOs
+    from sequence rules routes through this predicate so the rule cannot drift.
+
+    ``work_order_type`` is a plain string column; compare against the enum's
+    ``.value`` (defensively unwrapping in case an enum member is ever assigned
+    in memory), matching the existing comparisons elsewhere.
+    """
+    if work_order is None:
+        return False
+    wo_type = work_order.work_order_type
+    wo_type_value = wo_type.value if hasattr(wo_type, "value") else wo_type
+    return wo_type_value == WorkOrderType.LASER_CUTTING.value
+
+
 @dataclass
 class StatusTransition:
     """One reconcile-driven status change, returned so a read handler can audit it.
@@ -183,28 +205,37 @@ def release_first_ready_operation(
     as a pure in-memory rule (and existing call sites/tests without a session keep
     working); the emit helper lives in ``completion_signal_service`` (the
     side-effects module) and is imported locally to preserve that layering.
+
+    Laser-nest WOs are dispatch pools (see ``is_laser_dispatch_work_order``): the
+    whole package must be startable at once, so EVERY PENDING nest op is promoted
+    to READY, not just the lowest-sequence one. This also heals pre-existing laser
+    WOs (imported before whole-package-ready) whose nests 2+ are still PENDING on
+    their next release. Returns the first (lowest-sequence) promoted op either way.
     """
     if not work_order.operations:
         return None
 
-    first_pending = min(
+    pending_ops = sorted(
         (op for op in work_order.operations if op.status == OperationStatus.PENDING),
         key=lambda op: op.sequence,
-        default=None,
     )
-    if first_pending:
-        first_pending.status = OperationStatus.READY
-        if db is not None and first_pending.id is not None:
+    if not pending_ops:
+        return None
+
+    to_promote = pending_ops if is_laser_dispatch_work_order(work_order) else pending_ops[:1]
+    for op in to_promote:
+        op.status = OperationStatus.READY
+        if db is not None and op.id is not None:
             from app.services.completion_signal_service import emit_operation_ready_event
 
             emit_operation_ready_event(
                 db,
                 company_id=work_order.company_id,
                 work_order=work_order,
-                operation=first_pending,
+                operation=op,
                 user_id=user_id,
             )
-    return first_pending
+    return to_promote[0]
 
 
 def release_next_ready_operation(
@@ -237,6 +268,12 @@ def release_next_ready_operation(
     current_operation_id=candidate.id)`` EXACTLY -- "exists an op of THIS work
     order with ``sequence < candidate.sequence`` AND ``status != COMPLETE`` AND
     ``id != candidate.id``" -- so release/start/complete keep the same order gate.
+
+    Laser-nest WOs are dispatch pools (see ``is_laser_dispatch_work_order``): nests
+    carry no process ordering, so EVERY PENDING nest op is promoted to READY here,
+    not just the next-in-sequence. Besides keeping the whole package startable, this
+    self-heals laser WOs imported before whole-package-ready (nests 2+ stranded in
+    PENDING) on their next lifecycle event. Returns the first promoted op.
     """
     db.flush()
     all_ops = (
@@ -247,6 +284,19 @@ def release_next_ready_operation(
     )
     incomplete = [op for op in all_ops if op.status != OperationStatus.COMPLETE]
     pending_ops = [op for op in all_ops if op.status == OperationStatus.PENDING]
+    if is_laser_dispatch_work_order(work_order):
+        from app.services.completion_signal_service import emit_operation_ready_event
+
+        for candidate in pending_ops:
+            candidate.status = OperationStatus.READY
+            emit_operation_ready_event(
+                db,
+                company_id=work_order.company_id,
+                work_order=work_order,
+                operation=candidate,
+                user_id=None,
+            )
+        return pending_ops[0] if pending_ops else None
     for candidate in pending_ops:
         blocked = any(op.sequence < candidate.sequence and op.id != candidate.id for op in incomplete)
         if not blocked:

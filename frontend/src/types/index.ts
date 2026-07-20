@@ -300,6 +300,11 @@ export interface LaserNestImportRow {
    * Omit for ZIP/CNC packages.
    */
   source_pages?: number[] | null;
+  /**
+   * Per-nest work-center override. Omit to fall back to the package-level
+   * pick (or the server's auto-detect when no package pick was made).
+   */
+  work_center_id?: number | null;
 }
 
 /**

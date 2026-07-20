@@ -8,7 +8,7 @@ import shutil
 import tempfile
 import uuid
 from dataclasses import replace as dataclass_replace
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import List, Optional
@@ -37,7 +37,7 @@ from app.models.bom import BOM, BOMItem
 from app.models.laser_nest import LaserNest
 from app.models.part import Part, PartType
 from app.models.routing import Routing, RoutingOperation
-from app.models.time_entry import TimeEntrySource
+from app.models.time_entry import TimeEntry, TimeEntrySource
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus, WorkOrderType
@@ -116,6 +116,7 @@ from app.services.quality_gate_service import (
 from app.services.scheduling_service import SchedulingService
 from app.services.scrap_reason_service import resolve_scrap_reason_code_or_http
 from app.services.storage_service import delete_ref
+from app.services.work_center_type_service import get_work_center_group
 from app.services.work_order_state_service import (
     TERMINAL_WO_STATUSES,
     StatusTransition,
@@ -124,6 +125,7 @@ from app.services.work_order_state_service import (
     finalize_operation_completion,
     find_parent_to_advance,
     has_incomplete_predecessors,
+    is_laser_dispatch_work_order,
     operation_target_quantity,
     reconcile_work_orders_from_completion_evidence,
     release_first_ready_operation,
@@ -719,6 +721,26 @@ def _resolve_laser_upload_root() -> str:
         return root
 
 
+def _laser_work_center_preference(work_center: WorkCenter) -> int:
+    """Rank a %laser% auto-detect candidate: lower is preferred.
+
+    The DEFAULT laser for nest dispatch is the Ermaksan fiber laser, never the
+    HSG tube laser (owner decision): (0) name/code/type mentions "ermaksan" or
+    "fiber", (1) any other laser match, (2) anything mentioning "tube" last.
+    """
+    haystack = " ".join(
+        value.lower() for value in (work_center.name, work_center.code, work_center.work_center_type) if value
+    )
+    # "tube" is checked FIRST so it wins even when the same name also says
+    # "fiber" (tube lasers ARE fiber machines — 'HSG Fiber Tube Laser' must
+    # never rank top tier). Mirrors laserDispatchTier in the frontend.
+    if "tube" in haystack:
+        return 2
+    if "ermaksan" in haystack or "fiber" in haystack:
+        return 0
+    return 1
+
+
 def _find_laser_work_center(db: Session, company_id: int, work_center_id: Optional[int] = None) -> WorkCenter:
     query = db.query(WorkCenter).filter(WorkCenter.company_id == company_id, WorkCenter.is_active == True)
     if work_center_id:
@@ -727,20 +749,19 @@ def _find_laser_work_center(db: Session, company_id: int, work_center_id: Option
             raise HTTPException(status_code=404, detail="Laser work center not found")
         return work_center
 
-    work_center = (
-        query.filter(
-            or_(
-                WorkCenter.name.ilike("%laser%"),
-                WorkCenter.work_center_type.ilike("%laser%"),
-                WorkCenter.code.ilike("%laser%"),
-            )
+    # Auto-detect: prefer the Ermaksan fiber laser over other lasers, and any
+    # tube laser last (see _laser_work_center_preference); id is the
+    # deterministic tiebreak within a preference tier.
+    candidates = query.filter(
+        or_(
+            WorkCenter.name.ilike("%laser%"),
+            WorkCenter.work_center_type.ilike("%laser%"),
+            WorkCenter.code.ilike("%laser%"),
         )
-        .order_by(WorkCenter.id)
-        .first()
-    )
-    if not work_center:
+    ).all()
+    if not candidates:
         raise HTTPException(status_code=400, detail="No active laser work center found")
-    return work_center
+    return min(candidates, key=lambda wc: (_laser_work_center_preference(wc), wc.id))
 
 
 # Byte cap on laser-package uploads (ZIP or bare PDF), enforced while the body
@@ -1140,6 +1161,9 @@ def _build_confirmed_pdf_nests(package_dir: str, rows: list[LaserNestImportRow])
                 cnc_number=cnc_number,
                 pdf_source_path=abs_path,
                 confidence=row.confidence,
+                # Per-row work-center override (import-side instruction; resolved
+                # and validated in _run_laser_nest_import before the atomic build).
+                work_center_id=row.work_center_id,
             )
         )
     return nests
@@ -1372,32 +1396,6 @@ def preview_work_order_operations(
                     )
 
     return result
-
-
-def get_work_center_group(work_center: WorkCenter) -> str:
-    """Get operation group name from work center type"""
-    if not work_center:
-        return "OTHER"
-    wc_type = work_center.work_center_type.upper() if work_center.work_center_type else ""
-    wc_name = work_center.name.upper() if work_center.name else ""
-
-    # Map work center types to groups
-    if "LASER" in wc_type or "LASER" in wc_name:
-        return "LASER"
-    elif "PRESS" in wc_type or "BRAKE" in wc_type or "BEND" in wc_name:
-        return "BEND"
-    elif "WELD" in wc_type or "WELD" in wc_name:
-        return "WELD"
-    elif "PAINT" in wc_type or "POWDER" in wc_type or "COAT" in wc_name:
-        return "FINISH"
-    elif "MACHINE" in wc_type or "CNC" in wc_type or "MILL" in wc_name or "LATHE" in wc_name:
-        return "MACHINE"
-    elif "ASSEMBLY" in wc_type or "ASSEM" in wc_name:
-        return "ASSEMBLY"
-    elif "INSPECT" in wc_type or "QC" in wc_name or "QUALITY" in wc_name:
-        return "INSPECT"
-    else:
-        return wc_type or "OTHER"
 
 
 def _is_inspection_operation(operation: RoutingOperation) -> bool:
@@ -1944,13 +1942,19 @@ async def _run_laser_nest_import(
     source_path: Optional[str],
     work_center_id: Optional[int],
     rows: Optional[str],
+    due_date: Optional[date] = None,
 ) -> dict:
     """Shared import flow for the ``{work_order_id}`` and standalone endpoints.
 
     ``target_work_order`` is the WO addressed in the path -- an assembly parent
     (classic child-laser-WO flow) or a laser-cutting WO itself (operated on
     directly; see ``_resolve_laser_target``). ``None`` means STANDALONE: create
-    a fresh part-less RELEASED laser-cutting WO (no parent) and import into it.
+    a fresh part-less RELEASED laser-cutting WO (no parent) and import into it;
+    ``due_date`` (standalone only) is stamped onto that fresh WO. Past dates are
+    allowed -- an open WO can already be overdue at import, matching the WO
+    import loader posture. On the ``{work_order_id}`` path the WO already exists
+    and its due date is edited via ``PUT /work-orders/{id}``, so ``due_date`` is
+    never passed there.
 
     Two paths, both honoring IMPORT-REPLACES-EVERYTHING:
     - ``rows`` provided (PDF confirm-and-commit): the re-sent upload -- a ZIP of
@@ -2036,6 +2040,16 @@ async def _run_laser_nest_import(
             nests = parse_laser_nest_folder(package_dir)
         laser_work_center = _find_laser_work_center(db, company_id, work_center_id)
 
+        # Resolve every DISTINCT per-row work-center override BEFORE the atomic
+        # build, with the same active + company-scoped semantics (and 404) as the
+        # package-level pick, so a bad override fails cleanly with nothing
+        # persisted. Only the PDF confirm-and-commit path carries overrides; the
+        # legacy CNC-file path has no rows and stays package-level only.
+        row_work_centers: dict[int, WorkCenter] = {}
+        for nest in nests:
+            if nest.work_center_id and nest.work_center_id not in row_work_centers:
+                row_work_centers[nest.work_center_id] = _find_laser_work_center(db, company_id, nest.work_center_id)
+
         import_source = "pdf_import" if is_pdf_import else "cnc_file_import"
 
         try:
@@ -2055,7 +2069,9 @@ async def _run_laser_nest_import(
                         quantity_ordered=1,
                         status=WorkOrderStatus.RELEASED,
                         priority=5,
-                        due_date=None,
+                        # Planner-set at import (may be in the past -- open WOs
+                        # can be overdue); editable later via PUT /work-orders/{id}.
+                        due_date=due_date,
                         notes=f"Standalone laser nest work order for package {package_name}",
                         created_by=current_user.id,
                     )
@@ -2128,6 +2144,7 @@ async def _run_laser_nest_import(
                     company_id=company_id,
                     created_by=current_user.id,
                     saved_storage_keys=saved_storage_keys,
+                    row_work_centers=row_work_centers,
                 )
 
                 if pre_import_wo_values is not None:
@@ -2241,6 +2258,15 @@ async def _run_laser_nest_import(
         if os.path.isdir(package_dir):
             shutil.rmtree(package_dir, ignore_errors=True)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except HTTPException:
+        # A pre-commit HTTPException (per-row work-center 404, laser-WC lookup
+        # failures, ...) raised AFTER the package was extracted would otherwise
+        # orphan the extracted directory on disk forever -- same cleanup as the
+        # ValueError branch, then let the response propagate unchanged.
+        _reap_saved_blobs()
+        if os.path.isdir(package_dir):
+            shutil.rmtree(package_dir, ignore_errors=True)
+        raise
     finally:
         if temp_path and os.path.exists(temp_path):
             os.remove(temp_path)
@@ -2295,6 +2321,7 @@ async def import_standalone_laser_nest_package(
     source_path: Optional[str] = Form(None),
     work_center_id: Optional[int] = Form(None),
     rows: Optional[str] = Form(None),
+    due_date: Optional[date] = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
@@ -2309,6 +2336,9 @@ async def import_standalone_laser_nest_package(
     nest-PDF Documents to the created WO itself. Same request shape and audit
     behavior as the ``{work_order_id}`` import, minus the WO id; the response
     exposes the created WO under the same ``child_work_order`` key.
+
+    ``due_date`` (ISO date) is the planner-set due date for the created WO; past
+    dates are allowed (an open WO can already be overdue at import).
     """
     return await _run_laser_nest_import(
         db=db,
@@ -2320,6 +2350,7 @@ async def import_standalone_laser_nest_package(
         source_path=source_path,
         work_center_id=work_center_id,
         rows=rows,
+        due_date=due_date,
     )
 
 
@@ -3497,6 +3528,17 @@ def add_operation(
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")
 
+    # Laser nest WOs are DISPATCH POOLS whose every op is a nest, exempt from
+    # predecessor gating and promoted all-at-once. A free-form op added here
+    # would inherit that exemption/promotion without being nest-backed --
+    # keep laser WOs managed exclusively by the nest import / manual-nest paths.
+    if work_order.work_order_type == WorkOrderType.LASER_CUTTING.value:
+        raise HTTPException(
+            status_code=400,
+            detail="Laser nest work orders manage operations through the nest package import "
+            "and manual nest entry; add a nest instead of a free-form operation.",
+        )
+
     operation = WorkOrderOperation(
         work_order_id=work_order_id, company_id=work_order.company_id, **operation_in.model_dump()
     )
@@ -3536,6 +3578,76 @@ def update_operation(
     old_values = {c.key: getattr(operation, c.key) for c in operation.__table__.columns}
 
     update_data = operation_in.model_dump(exclude_unset=True)
+
+    # Optimistic locking (invariant 4): the client's version must MATCH the row --
+    # and must never be written through the setattr loop below, or a stale client
+    # could silently overwrite a concurrent edit AND arbitrarily move the
+    # version_id_col counter that SQLAlchemy's StaleDataError protection keys on.
+    client_version = update_data.pop("version")
+    if client_version != operation.version:
+        raise HTTPException(
+            status_code=409,
+            detail="Operation was modified by someone else. Refresh and try again.",
+        )
+
+    # Work-center reassignment (planner action, e.g. re-dispatching a laser nest to
+    # another laser -- but legitimate for any operation between compatible work
+    # centers). Validated BEFORE the blind setattr loop so a bad target mutates
+    # nothing. An explicit null is ignored: work_center_id is NOT NULL on the model.
+    new_work_center_id = update_data.pop("work_center_id", None)
+    if new_work_center_id is not None and new_work_center_id != operation.work_center_id:
+        # Active time sessions are bound to the old work center's queue, so the op
+        # must be idle before it moves: refuse while IN_PROGRESS or while ANY open
+        # time session exists (belt and braces -- an open entry can outlive an
+        # IN_PROGRESS status through manual status edits). 409: state conflict.
+        open_session = (
+            db.query(TimeEntry.id)
+            .filter(
+                TimeEntry.operation_id == operation.id,
+                TimeEntry.company_id == company_id,
+                TimeEntry.clock_out.is_(None),
+            )
+            .first()
+        )
+        if operation.status == OperationStatus.IN_PROGRESS or open_session is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="Clock out before moving the operation to another work center",
+            )
+        # A finished run's labor history belongs to the work center it actually
+        # ran on -- rewriting it after completion would falsify utilization and
+        # traceability records (records-integrity, not just hygiene).
+        if operation.status == OperationStatus.COMPLETE:
+            raise HTTPException(
+                status_code=409,
+                detail="Completed operations cannot be moved to another work center",
+            )
+        new_work_center = (
+            db.query(WorkCenter)
+            .filter(
+                WorkCenter.id == new_work_center_id,
+                WorkCenter.company_id == company_id,
+                WorkCenter.is_active == True,  # noqa: E712
+            )
+            .first()
+        )
+        if not new_work_center:
+            raise HTTPException(status_code=404, detail="Work center not found")
+        old_work_center_id = operation.work_center_id
+        operation.work_center_id = new_work_center.id
+        # Keep the derived grouping in step with the new work center (mirrors how
+        # ops are grouped at creation) so queue/grouping views stay consistent.
+        # Both fields are in the full-row audit snapshot, so the old->new diff
+        # records the move on the tamper-evident chain.
+        operation.operation_group = get_work_center_group(new_work_center)
+        # Reserved load followed the op to the new work center: refresh BOTH
+        # centers' persisted availability (matches the scheduling endpoint's
+        # post-move refresh) so capacity views don't show stale load. Runs after
+        # commit below via the flag -- the service commits its own updates.
+        availability_refresh_wc_ids = {old_work_center_id, new_work_center.id}
+    else:
+        availability_refresh_wc_ids = None
+
     for field, value in update_data.items():
         setattr(operation, field, value)
     sync_laser_nest_from_operation(operation)
@@ -3554,6 +3666,12 @@ def update_operation(
 
     db.commit()
     db.refresh(operation)
+
+    if availability_refresh_wc_ids:
+        SchedulingService(db, company_id).update_availability_rates(
+            work_center_ids=list(availability_refresh_wc_ids), horizon_days=90
+        )
+
     return operation
 
 
@@ -3714,7 +3832,9 @@ def start_operation(
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")
 
-    if has_incomplete_predecessors(
+    # Laser-nest WOs are dispatch pools -- nests never predecessor-block each
+    # other, even across work centers (see is_laser_dispatch_work_order).
+    if not is_laser_dispatch_work_order(work_order) and has_incomplete_predecessors(
         db,
         operation.work_order_id,
         operation.sequence,
@@ -3891,13 +4011,19 @@ def complete_operation(
             detail=f"cannot complete operation: work order is {work_order.status.value}",
         )
 
-    if work_order and has_incomplete_predecessors(
-        db,
-        operation.work_order_id,
-        operation.sequence,
-        operation.id,
-        operation.work_center_id,
-        allow_same_work_center=False,
+    # Laser-nest WOs are dispatch pools -- nests never predecessor-block each
+    # other, even across work centers (see is_laser_dispatch_work_order).
+    if (
+        work_order
+        and not is_laser_dispatch_work_order(work_order)
+        and has_incomplete_predecessors(
+            db,
+            operation.work_order_id,
+            operation.sequence,
+            operation.id,
+            operation.work_center_id,
+            allow_same_work_center=False,
+        )
     ):
         raise HTTPException(status_code=400, detail="Previous operations must be completed first")
 

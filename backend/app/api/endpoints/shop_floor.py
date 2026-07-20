@@ -126,6 +126,7 @@ from app.services.work_order_state_service import (
     find_parent_to_advance,
     floor_operation_quantity_at_evidence,
     has_incomplete_predecessors,
+    is_laser_dispatch_work_order,
     operation_target_quantity,
     reconcile_work_orders_from_completion_evidence,
     resolve_absolute_operation_quantity,
@@ -2406,7 +2407,9 @@ def start_operation(
             detail=f"cannot start operation: work order is {work_order.status.value}",
         )
 
-    if has_incomplete_predecessors(
+    # Laser-nest WOs are dispatch pools -- nests never predecessor-block each
+    # other, even across work centers (see is_laser_dispatch_work_order).
+    if not is_laser_dispatch_work_order(work_order) and has_incomplete_predecessors(
         db,
         operation.work_order_id,
         operation.sequence,
@@ -3052,7 +3055,9 @@ def complete_operation(
     except WorkOrderStateError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    if has_incomplete_predecessors(
+    # Laser-nest WOs are dispatch pools -- nests never predecessor-block each
+    # other, even across work centers (see is_laser_dispatch_work_order).
+    if not is_laser_dispatch_work_order(work_order) and has_incomplete_predecessors(
         db,
         operation.work_order_id,
         operation.sequence,

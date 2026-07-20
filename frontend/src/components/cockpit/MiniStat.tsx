@@ -8,7 +8,8 @@ export interface MiniStatProps {
   /** Tailwind text-color class for the icon, e.g. "text-fd-green". */
   iconColor: string;
   label: string;
-  value: number | string;
+  /** Usually a number/string; ReactNode allows inline affordances (e.g. an edit pencil). */
+  value: React.ReactNode;
   valueColor?: string;
   subtitle?: string;
   /** Navigate on click. Takes precedence over onClick. */

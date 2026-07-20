@@ -134,7 +134,11 @@ predecessor not complete, on-hold, optimistic-lock 409s, qualification warnings)
 surfaced **verbatim** in the error toast and never suppressed or retried around. There is
 no resume-from-hold, inspection, or labor-approval verb on the kiosk.
 
-**Laser nests at clock-in.** For laser-cutting operations the kiosk surfaces the active nest at
+**Laser nests at clock-in.** A laser-cutting WO is a **dispatch pool**: every nest operation is
+created READY, so all of a package's nests appear on their work center's queue at once, and
+operators may run them in **any order** — laser WOs are exempt from the sequence/predecessor gate,
+even when a package's nests are spread across different lasers (see `docs/API.md` → Laser Nests →
+"Laser WOs are dispatch pools"). For laser-cutting operations the kiosk surfaces the active nest at
 all three touch points so the operator can confirm the right sheet before cutting: the queue card
 (`KioskQueueCard` — CNC#/nest name, `completed`/`planned` runs, material•thickness, and a "PDF" chip
 when a reference PDF is attached), the clock-in confirm card, and the active-job banner (both

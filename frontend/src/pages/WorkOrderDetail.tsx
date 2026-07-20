@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import api from '../services/api';
-import { User, WorkOrder, WorkOrderOperation, LaserNestInfo } from '../types';
+import { User, WorkOrder, WorkOrderOperation, LaserNestInfo, WorkCenter } from '../types';
 import { WorkOrderBlocker, WorkOrderBlockerCategory, WorkOrderBlockerSeverity } from '../types/aiForward';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { buildWsUrl, getAccessToken } from '../services/realtime';
@@ -23,7 +23,8 @@ import { getBreadcrumbParent } from '../utils/routeMeta';
 import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
 import { ContextualAIStrip } from '../components/ai';
 import { EmptyState, ErrorState, useToast, statusColor, Button, Modal } from '../components/ui';
-import { formatCentralDate, formatCentralDateTime } from '../utils/centralTime';
+import { formatCentralDate, formatCentralDateTime, getCentralDateStamp } from '../utils/centralTime';
+import { sortWorkCentersForLaserDispatch } from '../utils/laserWorkCenters';
 import {
   ArrowLeftIcon,
   ArrowDownTrayIcon,
@@ -40,6 +41,7 @@ import {
   PaperClipIcon,
   PlusIcon,
   PencilSquareIcon,
+  CheckIcon,
   CalendarDaysIcon,
   FlagIcon,
   MinusCircleIcon,
@@ -246,6 +248,8 @@ export default function WorkOrderDetail() {
   // maps to exactly admin/manager/supervisor. The backend enforces RBAC too —
   // this only keeps the UI honest about what the server will allow.
   const canCorrectCount = hasPermission(user?.role, 'work_orders:edit') || !!user?.is_superuser;
+  // Inline due-date edit shares the same work_orders:edit tier.
+  const canEditDueDate = canCorrectCount;
   const [workOrder, setWorkOrder] = useState<WorkOrder | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -297,6 +301,17 @@ export default function WorkOrderDetail() {
   const [nestActionError, setNestActionError] = useState('');
   const nestAttachInputRef = useRef<HTMLInputElement | null>(null);
   const [nestAttachTargetId, setNestAttachTargetId] = useState<number | null>(null);
+  // Inline due-date edit (pencil in the Due Date tile). NON-optimistic — the
+  // tile shows only what the server returns after the refresh. `version` is
+  // sent because the update schema requires it, but the WO endpoint does not
+  // enforce optimistic locking today — do not rely on it for conflict safety.
+  const [dueDateEditing, setDueDateEditing] = useState(false);
+  const [dueDateDraft, setDueDateDraft] = useState('');
+  const [savingDueDate, setSavingDueDate] = useState(false);
+  // Active work centers (laser-first order) for the per-nest reassign selects,
+  // loaded once when the laser card is manageable and has nest ops.
+  const [workCenters, setWorkCenters] = useState<WorkCenter[]>([]);
+  const [reassigningOpId, setReassigningOpId] = useState<number | null>(null);
   const [workOrderDocuments, setWorkOrderDocuments] = useState<WorkOrderDocument[]>([]);
   const [availablePdfDocuments, setAvailablePdfDocuments] = useState<WorkOrderDocument[]>([]);
   const [documentUploadFile, setDocumentUploadFile] = useState<File | null>(null);
@@ -416,6 +431,7 @@ export default function WorkOrderDetail() {
     setMaterialReqs(null);
     setBlockers([]);
     setNestImportWizardOpen(false);
+    setDueDateEditing(false);
     setWorkOrderDocuments([]);
     setAvailablePdfDocuments([]);
     setDocumentUploadFile(null);
@@ -574,6 +590,30 @@ export default function WorkOrderDetail() {
       cancelled = true;
     };
   }, [isAdminView, workOrder?.work_order_number, workOrder?.updated_at]);
+
+  // Load the active work centers once the laser card is both manageable and
+  // populated — they feed the per-nest reassign selects (laser-first order).
+  const hasNestOps = Boolean(workOrder?.operations?.some((op) => op.laser_nest));
+  useEffect(() => {
+    if (!canManageNests || !hasNestOps) return;
+
+    let cancelled = false;
+
+    const loadWorkCenters = async () => {
+      try {
+        const centers = await api.getWorkCenters(true);
+        if (cancelled) return;
+        setWorkCenters(sortWorkCentersForLaserDispatch((centers ?? []).filter((wc) => wc.is_active)));
+      } catch {
+        if (!cancelled) setWorkCenters([]);
+      }
+    };
+
+    loadWorkCenters();
+    return () => {
+      cancelled = true;
+    };
+  }, [canManageNests, hasNestOps]);
 
   const handleRelease = async () => {
     try {
@@ -740,6 +780,62 @@ export default function WorkOrderDetail() {
       navigate(`/work-orders/${childWorkOrderId}`);
     } else {
       loadWorkOrder();
+    }
+  };
+
+  // --- Inline due-date edit ------------------------------------------------
+  const startDueDateEdit = () => {
+    // getCentralDateStamp passes date-only strings through verbatim and
+    // normalizes datetimes to the Central calendar date.
+    setDueDateDraft(workOrder?.due_date ? getCentralDateStamp(workOrder.due_date) : '');
+    setDueDateEditing(true);
+  };
+
+  const handleDueDateSave = async () => {
+    if (!workOrder || savingDueDate) return;
+    setSavingDueDate(true);
+    try {
+      await api.updateWorkOrder(workOrder.id, {
+        due_date: dueDateDraft || null,
+        version: workOrder.version,
+      });
+      showToast(
+        'success',
+        dueDateDraft ? `Due date set to ${formatCentralDate(dueDateDraft)}` : 'Due date cleared'
+      );
+      setDueDateEditing(false);
+      loadWorkOrder();
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail;
+      showToast('error', typeof detail === 'string' && detail ? detail : 'Failed to update due date');
+    } finally {
+      setSavingDueDate(false);
+    }
+  };
+
+  // --- Per-nest work-center reassign ---------------------------------------
+  // Server-gated (refused while the op is in progress) ⇒ NON-optimistic: the
+  // select stays on the op's current WC until the refetch confirms the move,
+  // and a refusal surfaces the server's verbatim detail.
+  const handleReassignNestWorkCenter = async (operation: WorkOrderOperation, nextWorkCenterId: number) => {
+    if (!nextWorkCenterId || nextWorkCenterId === operation.work_center_id) return;
+    setReassigningOpId(operation.id);
+    try {
+      await api.updateOperation(operation.id, {
+        work_center_id: nextWorkCenterId,
+        version: operation.version,
+      });
+      const target = workCenters.find((wc) => wc.id === nextWorkCenterId);
+      showToast(
+        'success',
+        `Op ${operation.sequence} moved to ${target ? target.name || target.code : `work center #${nextWorkCenterId}`}`
+      );
+      await loadWorkOrder();
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail;
+      showToast('error', typeof detail === 'string' && detail ? detail : 'Failed to reassign work center');
+    } finally {
+      setReassigningOpId(null);
     }
   };
 
@@ -1091,7 +1187,55 @@ export default function WorkOrderDetail() {
           iconBg="bg-fd-amber/15"
           iconColor="text-fd-amber"
           label="Due Date"
-          value={workOrder.due_date ? formatCentralDate(workOrder.due_date) : '-'}
+          value={
+            dueDateEditing ? (
+              <span className="flex items-center gap-1">
+                <label htmlFor="wo-due-date-edit" className="sr-only">
+                  Due date
+                </label>
+                <input
+                  id="wo-due-date-edit"
+                  type="date"
+                  value={dueDateDraft}
+                  onChange={(e) => setDueDateDraft(e.target.value)}
+                  disabled={savingDueDate}
+                  className="input !px-1.5 !py-0.5 text-sm font-normal"
+                />
+                <button
+                  type="button"
+                  onClick={handleDueDateSave}
+                  disabled={savingDueDate}
+                  aria-label="Save due date"
+                  className="text-fd-green hover:text-fd-green/80 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <CheckIcon className="h-4 w-4" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDueDateEditing(false)}
+                  disabled={savingDueDate}
+                  aria-label="Cancel due date edit"
+                  className="text-fd-mute hover:text-fd-red disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <XMarkIcon className="h-4 w-4" />
+                </button>
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1.5">
+                {workOrder.due_date ? formatCentralDate(workOrder.due_date) : '-'}
+                {canEditDueDate && (
+                  <button
+                    type="button"
+                    onClick={startDueDateEdit}
+                    aria-label="Edit due date"
+                    className="text-fd-mute hover:text-fd-blue"
+                  >
+                    <PencilSquareIcon className="h-4 w-4" />
+                  </button>
+                )}
+              </span>
+            )
+          }
         />
         <MiniStat
           icon={FlagIcon}
@@ -1425,11 +1569,51 @@ export default function WorkOrderDetail() {
                             )}
                             {nest.sheet_size && <span>Sheet: {nest.sheet_size}</span>}
                             <span>Op {operation.sequence}</span>
+                            <span>
+                              WC:{' '}
+                              <span className="font-semibold text-fd-body">
+                                {operation.work_center_name || `#${operation.work_center_id}`}
+                              </span>
+                            </span>
                           </div>
                         </div>
 
                         {canManageNests && (
                           <div className="flex flex-wrap items-center gap-1.5">
+                            <select
+                              value={String(operation.work_center_id)}
+                              onChange={(e) => handleReassignNestWorkCenter(operation, Number(e.target.value))}
+                              // A finished run's labor history belongs to the machine it
+                              // ran on — the server 409s completed/in-progress moves, so
+                              // don't offer them.
+                              disabled={
+                                reassigningOpId === operation.id ||
+                                operation.status === 'complete' ||
+                                operation.status === 'in_progress'
+                              }
+                              aria-label={`Work center for ${nest.cnc_number || nest.nest_name}`}
+                              title={
+                                operation.status === 'complete'
+                                  ? 'Completed operations cannot be moved'
+                                  : operation.status === 'in_progress'
+                                    ? 'Clock out before moving the operation'
+                                    : undefined
+                              }
+                              className="input !h-8 !py-0 !px-2 text-xs disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              {/* Keep the current WC selectable even if it fell off the
+                                  active list, so the select never renders blank. */}
+                              {!workCenters.some((wc) => wc.id === operation.work_center_id) && (
+                                <option value={String(operation.work_center_id)}>
+                                  {operation.work_center_name || `WC #${operation.work_center_id}`}
+                                </option>
+                              )}
+                              {workCenters.map((wc) => (
+                                <option key={wc.id} value={String(wc.id)}>
+                                  {wc.name || wc.code}
+                                </option>
+                              ))}
+                            </select>
                             {nest.has_document ? (
                               <>
                                 <button
