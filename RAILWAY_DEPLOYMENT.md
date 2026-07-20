@@ -76,9 +76,24 @@ railway variables set CORS_ORIGINS=https://werco-frontend-production-xxxx.up.rai
 railway up
 ```
 
-### 6. Seed Database
+### 6. Bootstrap the First Company
+
+Production is **not** seeded with demo data. `python -m scripts.seed_data` refuses to run
+when `ENVIRONMENT=production` — or when pointed at the Supabase production database from
+anywhere — because it would plant the well-known `admin123` / `password123` demo accounts. The schema itself is created automatically on first app boot
+(`Base.metadata.create_all`), so no seed step is needed here.
+
+Create the first company and its admin through the sanctioned company-onboarding flow
+(`POST /api/v1/companies/register`), which enforces the password-strength policy on the admin
+password (≥12 chars, with upper- and lower-case letters, a number, and a special character).
+Choose a strong password you control — **do not** reuse the demo credentials:
+
 ```powershell
-railway run --service werco-api python -m scripts.seed_data
+# Set a strong admin password you control (NOT the demo credentials).
+curl.exe -X POST `
+  https://werco-api-production-xxxx.up.railway.app/api/v1/companies/register `
+  -H "Content-Type: application/json" `
+  -d '{ "company_name": "Werco Manufacturing", "admin_email": "admin@yourco.com", "admin_first_name": "Site", "admin_last_name": "Admin", "admin_password": "<strong-password>" }'
 ```
 
 ## Verification
@@ -92,9 +107,11 @@ curl https://werco-api-production-xxxx.up.railway.app/health
 ### Access Application
 Open browser to: https://werco-frontend-production-xxxx.up.railway.app
 
-Default login (from seed data):
-- Email: admin@werco.com
-- Password: admin123
+Log in with the admin account you created via company-onboarding in step 6.
+
+> **Not the demo seed.** The `admin@werco.com` / `admin123` (and `password123`) accounts come
+> from `scripts/seed_data.py` and are for **local / dev / demo / CI / E2E only** — seeding is
+> disabled in production (see step 6). Never use them as a production login.
 
 ## Kiosk Mode (Shop Floor)
 
@@ -197,14 +214,16 @@ railway open
 
 ## Beta Tester Access
 
-After deployment, share with beta testers:
+After deployment, provision a real account for each beta tester under the company you
+onboarded in step 6 (each with its own strong password), then share the URL. Do **not** hand
+out the demo `admin@werco.com` / `admin123` credentials — they are dev/demo only and are not
+created in production.
 
 ```
 Werco ERP Beta Access
 ---------------------
 URL: https://werco-frontend-production-xxxx.up.railway.app
-Email: admin@werco.com
-Password: admin123
+Sign in with the account provisioned for you (credentials sent separately).
 
 Please report issues to: [your email]
 ```
