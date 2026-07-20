@@ -79,8 +79,8 @@ railway up
 ### 6. Bootstrap the First Company
 
 Production is **not** seeded with demo data. `python -m scripts.seed_data` refuses to run
-when `ENVIRONMENT=production` (it would plant the well-known `admin123` / `password123` demo
-accounts). The schema itself is created automatically on first app boot
+when `ENVIRONMENT=production` — or when pointed at the Supabase production database from
+anywhere — because it would plant the well-known `admin123` / `password123` demo accounts. The schema itself is created automatically on first app boot
 (`Base.metadata.create_all`), so no seed step is needed here.
 
 Create the first company and its admin through the sanctioned company-onboarding flow

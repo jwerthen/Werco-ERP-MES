@@ -141,13 +141,21 @@ def seed_database():
     # CUI environment is a CMMC/AS9100D exposure. Prod tenants are bootstrapped via the
     # company-onboarding flow (which enforces the password-strength policy). Set
     # SEED_ALLOW_PRODUCTION=1 only to override deliberately (e.g. a throwaway sandbox).
-    # Read the production flag from `settings` (not os.getenv) so this matches the app's
-    # own signal, which resolves from the .env file too — an os.getenv-only check would
-    # miss a .env-declared ENVIRONMENT=production and seed weak creds into the prod DB.
+    # Both signals come from `settings` (not bare os.getenv) so they match the app's own
+    # resolution, .env file included. Two independent triggers, either one refuses:
+    #   - ENVIRONMENT=production — the deployed-prod invocation (e.g. `railway run`);
+    #   - a Supabase database target — a local shell pointed at the prod Postgres via
+    #     DATABASE_URL would otherwise slip past an ENVIRONMENT-only check, because a
+    #     local environment defaults to "development".
     allow_prod = os.getenv("SEED_ALLOW_PRODUCTION", "").strip().lower() in ("1", "true", "yes")
-    if settings.ENVIRONMENT == "production" and not allow_prod:
+    if (settings.ENVIRONMENT == "production" or settings.is_supabase_database) and not allow_prod:
+        reason = (
+            "ENVIRONMENT=production"
+            if settings.ENVIRONMENT == "production"
+            else f"database host '{settings.safe_database_host}' is Supabase (the production Postgres)"
+        )
         print(
-            "Refusing to seed demo data: ENVIRONMENT=production. Demo accounts use "
+            f"Refusing to seed demo data: {reason}. Demo accounts use "
             "well-known passwords and must not be created in production. Bootstrap prod "
             "through the company-onboarding flow, or set SEED_ALLOW_PRODUCTION=1 to override."
         )

@@ -31,6 +31,69 @@ class TestSeedScriptProductionGuard:
             seed_database()
         assert exc_info.value.code == 1
 
+    @pytest.mark.parametrize("value", ["", "0", "false", "no", "banana"])
+    def test_seed_script_override_fails_closed_on_non_affirmative_values(self, monkeypatch, value):
+        """Only affirmative override values (1/true/yes) open the guard.
+
+        Regression fence for the override parsing: a refactor to a mere
+        presence check (``os.getenv(...) is not None``) would let
+        ``SEED_ALLOW_PRODUCTION=0`` seed prod while the delenv-based test
+        above stayed green. Every non-affirmative value must still exit(1).
+        """
+        monkeypatch.setattr(settings, "ENVIRONMENT", "production")
+        monkeypatch.setenv("SEED_ALLOW_PRODUCTION", value)
+
+        from scripts.seed_data import seed_database
+
+        with pytest.raises(SystemExit) as exc_info:
+            seed_database()
+        assert exc_info.value.code == 1
+
+    def test_seed_script_refuses_supabase_database_target(self, monkeypatch):
+        """A Supabase DATABASE_URL refuses even when ENVIRONMENT is not production.
+
+        The 'local shell pointed at the prod DB' path: ENVIRONMENT defaults to
+        "development" on a workstation, so the guard must also key on the
+        database target itself, not just the environment name.
+        """
+        monkeypatch.setattr(settings, "ENVIRONMENT", "development")
+        monkeypatch.delenv("SEED_ALLOW_PRODUCTION", raising=False)
+        # is_supabase_database is a derived property (parses the resolved URL), so
+        # patch it at the class; the guard's contract is "the app says the DB is
+        # Supabase" — URL-parsing correctness is config's own concern.
+        monkeypatch.setattr(type(settings), "is_supabase_database", property(lambda self: True))
+
+        from scripts.seed_data import seed_database
+
+        with pytest.raises(SystemExit) as exc_info:
+            seed_database()
+        assert exc_info.value.code == 1
+
+    def test_seed_script_proceeds_outside_production(self, monkeypatch):
+        """ENVIRONMENT=development with a non-Supabase DB passes the guard.
+
+        Fails-safe direction: an over-eager guard would break local/CI/E2E
+        seeding (the e2e workflow seeds under ENVIRONMENT=test), and the only
+        automated coverage of that is deliberately non-blocking. Same
+        create_all-sentinel technique as the override test — zero DB work.
+        """
+        monkeypatch.setattr(settings, "ENVIRONMENT", "development")
+        monkeypatch.delenv("SEED_ALLOW_PRODUCTION", raising=False)
+        assert not settings.is_supabase_database  # precondition: test DB is local
+
+        import scripts.seed_data as seed_data
+
+        class _GuardPassed(Exception):
+            """Sentinel raised from the first post-guard statement."""
+
+        def _raise_guard_passed(*args, **kwargs):
+            raise _GuardPassed()
+
+        monkeypatch.setattr(seed_data.Base.metadata, "create_all", _raise_guard_passed)
+
+        with pytest.raises(_GuardPassed):
+            seed_data.seed_database()
+
     def test_seed_script_override_bypasses_production_guard(self, monkeypatch):
         """SEED_ALLOW_PRODUCTION=1 lets seeding proceed PAST the production guard.
 

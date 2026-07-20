@@ -77,8 +77,8 @@ This guide covers development practices, testing, and contribution guidelines fo
      ```
 
    > **Seeding is dev/demo only.** `python -m scripts.seed_data` creates demo accounts with
-   > well-known passwords, so it **refuses to run when `ENVIRONMENT=production`** — the CLI
-   > seeder exits with an error (override for a throwaway sandbox with `SEED_ALLOW_PRODUCTION=1`;
+   > well-known passwords, so it **refuses to run when `ENVIRONMENT=production` or when the
+   > database target is the Supabase production Postgres** — the CLI seeder exits with an error (override for a throwaway sandbox with `SEED_ALLOW_PRODUCTION=1`;
    > see docs/ENVIRONMENT_VARIABLES.md → Seed Data). Production tenants are bootstrapped
    > through the company-onboarding flow (`POST /api/v1/companies/register`), which enforces
    > the password-strength policy.

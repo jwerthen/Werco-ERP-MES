@@ -183,13 +183,14 @@ ALLOWED_HOSTS=api.werco.com,erp.werco.com,*.up.railway.app,healthcheck.railway.a
 (`admin@werco.com` / `admin123`, sample users at `password123`) for local / dev / demo / CI /
 E2E. **It is hard-disabled against a production database** so weak credentials never land in a
 CUI environment (CMMC/AS9100D): the CLI seeder exits with an error when `ENVIRONMENT=production`
-unless the override below is set. Production tenants are bootstrapped through the
+**or when the resolved database URL targets the Supabase production Postgres** (so a local shell
+with `DATABASE_URL` pointed at prod refuses too), unless the override below is set. Production tenants are bootstrapped through the
 company-onboarding flow (`POST /api/v1/companies/register`), which enforces the
 password-strength policy on the admin password.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `SEED_ALLOW_PRODUCTION` | No | (unset → off) | **Dev tooling, discouraged.** Overrides the production guard so `python -m scripts.seed_data` runs even when `ENVIRONMENT=production` (e.g. a throwaway sandbox). Accepts `1` / `true` / `yes`. |
+| `SEED_ALLOW_PRODUCTION` | No | (unset → off) | **Dev tooling, discouraged.** Overrides the production guard so `python -m scripts.seed_data` runs even when `ENVIRONMENT=production` or the database target is Supabase (e.g. a throwaway sandbox). Accepts `1` / `true` / `yes`. |
 
 ### Labor Cost Rollup (work-order completion)
 
