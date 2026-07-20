@@ -192,7 +192,7 @@ def mock_pdf_extraction(monkeypatch):
         },
     }
 
-    def _fake_extract(pdf_path, file_name, company_id=None):
+    def _fake_extract(pdf_path, file_name, company_id=None, **kwargs):
         calls.append((file_name, company_id))
         base = table.get(file_name, {"cnc_number": file_name.rsplit(".", 1)[0], "extraction_confidence": "low"})
         return {**base, "source": "ai", "warning": None}
@@ -285,7 +285,7 @@ class TestPdfPreview:
         one degraded to a filename-only / low-confidence row) at HTTP 200, not a
         500 that loses the whole package."""
 
-        def _flaky_extract(pdf_path, file_name, company_id=None):
+        def _flaky_extract(pdf_path, file_name, company_id=None, **kwargs):
             if file_name == "05750.pdf":
                 raise RuntimeError("extraction blew up on this one PDF")
             return {

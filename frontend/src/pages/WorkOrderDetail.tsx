@@ -1336,8 +1336,8 @@ export default function WorkOrderDetail() {
                 <h2 className="card-title">Laser Nest Package</h2>
                 <p className="card-subtitle truncate">
                   {workOrder.work_order_type === 'laser_cutting'
-                    ? 'Import a zipped Ermaksan folder or a server folder path to add nests to this laser work order.'
-                    : 'Import a zipped Ermaksan folder or a server folder path to create the linked laser cutting work order.'}
+                    ? 'Import a zipped Ermaksan folder, a nest-report PDF, or a server folder path to add nests to this laser work order.'
+                    : 'Import a zipped Ermaksan folder, a nest-report PDF, or a server folder path to create the linked laser cutting work order.'}
                 </p>
               </div>
             </div>

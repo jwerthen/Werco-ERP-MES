@@ -362,11 +362,13 @@ Each nest is backed by a clock-in-able `LASER` operation. There are two ways to
 create nests, and per the product decision they are used **one or the other per job — never
 mixed**:
 
-1. **Package import** — upload a zipped Ermaksan/CNC package (or point at a server folder) and
-   the system extracts one nest per CNC file. The package may be either CNC **program files**
-   (fields inferred from filenames, as before) or nest-report **PDFs** (fields auto-extracted by
-   AI — see "PDF auto-extraction" below). (Mounted under `/work-orders/{id}/laser-nest-packages/…`;
-   the no-WO standalone pair under `/work-orders/laser-nest-packages/standalone/…`.)
+1. **Package import** — upload a zipped Ermaksan/CNC package, a **bare nest-report PDF** (single-
+   or multi-page), or point at a server folder. Three upload shapes, auto-detected: CNC **program
+   files** (fields inferred from filenames, as before), a ZIP of nest-report **PDFs** (fields
+   auto-extracted by AI), or a bare PDF whose pages are first AI-segmented into per-nest page
+   ranges — see "PDF auto-extraction" below. (Mounted under
+   `/work-orders/{id}/laser-nest-packages/…`; the no-WO standalone pair under
+   `/work-orders/laser-nest-packages/standalone/…`.)
 2. **Manual entry** — key one nest at a time, with an optional reference PDF. Dropping a nest-report
    PDF into the create modal auto-fills the fields via `POST /laser-nests/extract` (see below).
    (The `…/manual` create lives under work orders; per-nest edit/delete/PDF routes live under
@@ -374,7 +376,7 @@ mixed**:
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| POST | `/work-orders/{id}/laser-nest-packages/preview` | Preview nests detected from a zipped package or server folder (writes nothing). PDF packages run AI extraction per sheet | Admin / Manager / Supervisor |
+| POST | `/work-orders/{id}/laser-nest-packages/preview` | Preview nests detected from a zipped package, a bare nest-report PDF (single- or multi-page), or a server folder (writes nothing). PDF uploads run AI extraction per sheet | Admin / Manager / Supervisor |
 | POST | `/work-orders/{id}/laser-nest-packages/import` | Import a package — creates/rebuilds the child laser WO (or rebuilds the addressed WO directly when it is itself `laser_cutting`), one nest operation per CNC file (or per confirmed PDF row) | Admin / Manager / Supervisor |
 | POST | `/work-orders/laser-nest-packages/standalone/preview` | Same preview with **no work order in the path** — used before a standalone import | Admin / Manager / Supervisor |
 | POST | `/work-orders/laser-nest-packages/standalone/import` | Import a package into a **fresh standalone laser WO** — creates a released, part-less `laser_cutting` work order (no parent; quantity = total planned sheet runs) | Admin / Manager / Supervisor |
@@ -427,16 +429,25 @@ mixed**:
 > style) are read automatically; the planner verifies before saving. Extraction is **layout-aware
 > (vision)**: the PDF bytes are sent to Claude as a base64 `document` content block so the model
 > reads the rendered sheet with its 2-D layout (PDFs over a ~20 MB native cap, or whose bytes can't
-> be read, fall back to flattened-text extraction). Two entry points, both gated to
-> **Admin / Manager / Supervisor** and both **AI-always** via the shared `run_llm_task` pipeline
-> (prompt `laser_nest_extraction` 1.1.0, `feature="laser_nest_extraction"`, one tenant-scoped
-> `ai_usage_events` row per call — telemetry, not audit):
+> be read, fall back to flattened-text extraction). Extraction is **two-pass** everywhere PDFs are
+> extracted (both entry points below): the extraction pass (prompt `laser_nest_extraction` 1.1.0,
+> `feature="laser_nest_extraction"`) plus an **independent verification pass** (prompt
+> `laser_nest_verification` 1.0.0, `feature="laser_nest_verification"`, same routing task) that
+> re-reads the same sheet; the two reads are merged per field — agreement → **high** confidence, a
+> one-sided null → the non-null value at **medium**, a conflict → the **verifier's** value at
+> **low**, both null → null at **low** — and the overall `confidence` is the minimum across fields.
+> A pass-2 failure of any kind keeps the pass-1 result untouched with a "verification skipped"
+> `warning`; the response field `passes` (1 | 2) records how many AI reads produced the result.
+> Both entry points are gated to **Admin / Manager / Supervisor** and both **AI-always** via the
+> shared `run_llm_task` pipeline (one tenant-scoped `ai_usage_events` row per pass — telemetry,
+> not audit):
 >
 > - **Single-PDF (`POST /laser-nests/extract`).** Multipart `file` (PDF; non-PDF → **400**).
 >   **Stateless — no DB write, no audit**; `company_id` flows through only for usage telemetry.
 >   Used by the manual-create modal to auto-fill fields from a dropped PDF. Returns
->   `{ cnc_number, material, thickness, sheet_size, planned_runs, confidence, source, warning }`
->   where `source` ∈ `{ai, filename}` and `confidence` ∈ `{high, medium, low}` (overall).
+>   `{ cnc_number, material, thickness, sheet_size, planned_runs, confidence, source, warning, passes }`
+>   where `source` ∈ `{ai, filename}`, `confidence` ∈ `{high, medium, low}` (overall — the
+>   per-field minimum when both passes ran), and `passes` ∈ `{1, 2}`.
 >   Declared as a static `/extract` route so it matches ahead of the dynamic `/{laser_nest_id}` routes.
 >
 > - **Batch ZIP (`…/laser-nest-packages/preview` → `…/import`).** A package is treated as a **PDF
@@ -444,17 +455,22 @@ mixed**:
 >   legacy CNC-program path runs unchanged. **Review-before-commit:** `preview` runs AI once per
 >   sheet (parallelized, bounded concurrency) and returns editable rows — beyond the existing
 >   `nest_name` / `cnc_file_name` / `planned_runs` / `material` / `thickness` / `sheet_size`, PDF
->   rows also carry **`source_file`** (the PDF's path within the package), **`cnc_number`**, and
->   **`confidence`**. The planner edits/confirms in the wizard, then `import` re-sends the same ZIP
+>   rows also carry **`source_file`** (the PDF's path within the package), **`cnc_number`**,
+>   **`confidence`**, per-field **`field_confidence`** (`{field: high|medium|low}` from the
+>   two-pass merge), **`warning`**, and **`passes`**. The planner edits/confirms in the wizard,
+>   then `import` re-sends the same ZIP
 >   **plus an optional `rows` form field** — a JSON array of confirmed rows
->   `{source_file, cnc_number, nest_name, planned_runs, material, thickness, sheet_size}`. When
+>   `{source_file, cnc_number, nest_name, planned_runs, material, thickness, sheet_size}` (plus
+>   `source_pages` on bare-PDF rows — see below). When
 >   `rows` is present, the backend matches each row to its PDF by `source_file`, stores each PDF as
 >   a `DRAWING` `Document` (attached via `document_id`), sets `cnc_number`, writes one `log_create`
 >   audit row per nest, and builds the target laser WO — **no second AI call** (the re-sent ZIP only
 >   supplies PDF bytes). When `rows` is absent, the legacy CNC-file import is unchanged.
 >
 >   `rows` is **strictly validated** before anything is persisted (`LaserNestImportRow`):
->   `source_file` required (1–1000 chars), `planned_runs` required and **≥ 1**, and
+>   `source_file` required (1–1000 chars), `planned_runs` required and **≥ 1**,
+>   `source_pages` optional (required on the bare-PDF path — see below): non-empty, entries
+>   **≥ 1**, ascending and consecutive, and
 >   `cnc_number` / `nest_name` / `material` / `thickness` / `sheet_size` length-bounded as on the
 >   manual path. Import-specific **400** cases: `rows` not valid JSON / not a JSON array; any row
 >   failing validation; a **duplicate `source_file`** across rows; and a DB constraint/length fault
@@ -462,12 +478,54 @@ mixed**:
 >   clean **400** rather than a 500). A `source_file` that escapes the package or is missing from the
 >   re-sent ZIP → **400**.
 >
-> - **50-PDF cap.** A package (or `rows` array) with more than **50** PDFs is rejected with **400**.
+> - **Bare nest-report PDF (single- or multi-page).** An upload with `Content-Type:
+>   application/pdf` or a `.pdf` filename is treated as a **bare PDF** rather than a ZIP, on all
+>   four preview/import endpoints. Preview reads the page count locally (`pypdf`; unreadable bytes
+>   → **400** "Could not read the PDF"; over the page cap → **400**, see below), then an **AI
+>   segmentation pass** ("pass 0" — prompt `laser_nest_segmentation` 1.0.0,
+>   `feature="laser_nest_segmentation"`; the whole PDF as a base64 `document` block,
+>   Default/Sonnet tier via `has_pdf_document`) decides which pages form which nest and which to
+>   skip as non-nest cover/summary pages. Single-page PDFs skip the call entirely; **any**
+>   segmentation failure (egress off, unconfigured, > 20 MB, bad JSON, failed validation) degrades
+>   to **one nest per page** at low confidence with a `segmentation_warning` — segmentation can
+>   never fail an upload. The PDF is then split **locally** into per-segment PDFs with
+>   deterministic names (`nest-p{first:03d}.pdf` for one page,
+>   `nest-p{first:03d}-p{last:03d}.pdf` for a range) and each segment runs the same per-nest
+>   two-pass extraction as a ZIP of PDFs. The preview response adds **`source_page_count`**,
+>   **`segmentation_warning`**, and **`skipped_pages`**; each row's `source_file` is its derived
+>   split name and each row carries **`source_pages`** (the segment's 1-based page list in the
+>   original upload).
+>
+>   **Import (confirm-and-commit):** the client re-sends the same PDF plus the confirmed `rows`.
+>   Every row **must** carry `source_pages`, and its `source_file` must exactly equal the name
+>   derived from those pages — a mismatch is a **400** ("The preview is stale; re-run it and
+>   confirm again"). A bare PDF **without** `rows` → **400** ("Preview the PDF first, then confirm
+>   the rows") — the legacy no-`rows` import is CNC-programs-only. The server re-splits the
+>   re-sent PDF by the confirmed page lists (local `pypdf`, **zero AI calls on import**), attaches
+>   each nest's per-segment PDF as its `DRAWING` Document, and otherwise runs the identical
+>   confirmed-rows machinery as the ZIP path (audit `source` stays `"pdf_import"`). Out-of-range,
+>   duplicate, or page-**overlapping** segments (one page claimed by two rows) → **400**. ZIP and
+>   CNC-program imports are unchanged.
+>
+> - **50-PDF cap (`LASER_PDF_PACKAGE_MAX`).** A package (or `rows` array) with more than **50**
+>   PDFs — or a bare PDF with more than **50 pages** — is rejected with **400**.
+> - **Upload size + abuse guards.** The upload body (ZIP or bare PDF) is capped at **50 MB**
+>   (`LASER_UPLOAD_MAX_BYTES`), enforced while the body streams to disk → **413**. The local page
+>   split refuses pathological amplification (pages sharing huge embedded resources that would
+>   multiply on split) → **400**. The per-request AI fan-out shares one **process-global**
+>   concurrency cap (5), and the two standalone routes carry a **10/minute** per-path rate limit.
 > - **Graceful degrade.** A PDF the model can't read falls back to the **filename stem** as the
 >   `cnc_number` (`05749.pdf` → `05749`) with a `warning` and `source="filename"` at low confidence —
->   one bad sheet never hard-fails a batch. The native-PDF (vision) path reads scanned/image-only
->   sheets directly; only when it can't (>20 MB cap or unreadable bytes) does the flattened-text
->   fallback run (with its OCR step in `pdf_service`).
+>   one bad sheet never hard-fails a batch. **Bare-PDF segments are the exception:** their split
+>   names (`nest-p001.pdf`) are synthetic, so a degraded or unpinnable segment leaves `cnc_number`
+>   **null** (`source="none"`) for the planner to fill — the segmentation pass's `cnc_number_hint`
+>   is offered to the model instead of the filename. The native-PDF (vision) path reads
+>   scanned/image-only sheets directly; only when it can't (>20 MB cap or unreadable bytes) does the
+>   flattened-text fallback run (with its OCR step in `pdf_service`). With `allow_ai_egress` **off**,
+>   extraction degrades the same way (pre-filled from the filename for ZIP packages, blank
+>   `cnc_number` for bare-PDF segments; the planner fills the rest manually) and bare-PDF
+>   segmentation defaults to one nest per page — the page split itself is local `pypdf` and keeps
+>   working.
 >
 > **Manual nest create (`POST /work-orders/{id}/laser-nests/manual`).** Body: `cnc_number`
 > (required, 1–100 chars), `planned_runs` (required, **≥ 1**), and optional `nest_name`,

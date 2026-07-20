@@ -87,6 +87,7 @@ async def extract_laser_nest_from_pdf(
         confidence=result.get("extraction_confidence"),
         source=result.get("source", "none"),
         warning=result.get("warning"),
+        passes=result.get("passes"),
     )
 
 

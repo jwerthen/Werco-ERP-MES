@@ -144,7 +144,8 @@ is deterministic and makes no LLM calls.)
 | `qms_clause_extraction` | Default; Reasoning for large documents | `ANTHROPIC_QMS_MODEL` |
 | `copilot_chat` | Default (Sonnet); escalates to Reasoning for long multi-tool conversations | `ANTHROPIC_COPILOT_MODEL` |
 | `nl_search` | Pinned Fast (Haiku) — cheap intent classification | `ANTHROPIC_NL_SEARCH_MODEL` |
-| `laser_nest_extraction` | Default (Sonnet) — the native-PDF path sets `has_pdf_document`, lifting it off the Fast tier; the text fallback escalates for OCR'd/large sheets | `ANTHROPIC_LASER_NEST_MODEL` |
+| `laser_nest_extraction` | Default (Sonnet) — the native-PDF path sets `has_pdf_document`, lifting it off the Fast tier; the text fallback escalates for OCR'd/large sheets. The verification pass (`feature="laser_nest_verification"`) runs under this same task, so the override covers both passes | `ANTHROPIC_LASER_NEST_MODEL` |
+| `laser_nest_segmentation` | Default (Sonnet) — unrouted; the whole-PDF `document` block sets `has_pdf_document` | — (none; tier-level overrides only) |
 - **Laser-nest extraction now sends the PDF natively (vision).** As of prompt
   `laser_nest_extraction` 1.1.0, the primary path hands the rendered nest report to the model as a
   base64 `document` content block (layout-aware vision) instead of flattened extracted text — this
@@ -155,6 +156,18 @@ is deterministic and makes no LLM calls.)
   `ai_usage_events`). PDFs over the **~20 MB** native cap (or whose bytes can't be read) fall back
   to the flattened-text path, which routes by complexity as before. `_extraction_metadata.input_mode`
   records which path produced each result (`native_pdf` | `text`).
+- **Laser-nest extraction is two-pass, and bare multi-page PDFs get a segmentation pass
+  (2026-07-20).** Everywhere nest PDFs are extracted (single-PDF `POST /laser-nests/extract` and
+  the laser-nest-package preview/import), a successful extraction is followed by an **independent
+  verification read** (prompt `laser_nest_verification` 1.0.0, `feature="laser_nest_verification"`,
+  same `laser_nest_extraction` routing task) merged per field — agreement = "high", one-sided null
+  = "medium", conflict = the verifier's value at "low"; a pass-2 failure keeps pass 1 with a
+  warning (`passes` 1|2). Bare multi-page PDF uploads additionally run a page-grouping pass first
+  (prompt `laser_nest_segmentation` 1.0.0, `feature="laser_nest_segmentation"`, the whole PDF as a
+  `document` block; skipped for single-page PDFs), degrading to one-nest-per-page on any failure.
+  Cost note: a verified nest sheet is **two** Sonnet-tier native-PDF calls instead of one, plus one
+  segmentation call per multi-page upload — each visible per feature string in `ai_usage_events`;
+  the bare-PDF import path re-splits by confirmed pages with **zero** AI calls.
 - Routing generation sends its stable prefix (system prompt + schema/allowed work-center types +
   learned-examples context) as `cache_control: ephemeral` system blocks, so repeat generations
   hit the prompt cache and only the drawing content is reprocessed at full input price.
@@ -190,7 +203,9 @@ is deterministic and makes no LLM calls.)
   extraction, Werco Copilot, and NL search.
 - **When egress is OFF:** no request leaves the boundary and **no `ai_usage_events` row is written**
   (the call never reaches telemetry). Callers catch `LLMEgressDisabledError` and **degrade
-  gracefully** rather than 500 — e.g. laser-nest extraction falls back to **filename-only** parsing;
+  gracefully** rather than 500 — e.g. laser-nest extraction falls back to **filename-only** parsing
+  for per-file packages (bare-PDF segments instead leave `cnc_number` blank — their split names are
+  synthetic; bare-PDF segmentation defaults to one-nest-per-page; the local page split keeps working);
   PO/BOM/QMS/routing endpoints return a "disabled for your company" message; the copilot and NL
   search degrade. The check **fails closed**: an unknown tenant or any DB error denies egress.
 - **Flipping the flag:** only via `PUT /api/v1/companies/me/ai-egress` (gated **ADMIN-only**,
@@ -216,7 +231,9 @@ and success/error type.
 
 ### Versioned prompt registry
 - Prompt text lives in `backend/app/services/prompts/` (PO/quote extraction, BOM extraction,
-  routing generation, `laser_nest_extraction` 1.1.0 — laser-nest report PDF field extraction,
+  routing generation, `laser_nest_extraction` 1.1.0 — laser-nest report PDF field extraction —
+  with `laser_nest_verification` 1.0.0 (its independent second read) and
+  `laser_nest_segmentation` 1.0.0 (multi-page bare-PDF page grouping),
   `copilot_chat` 1.0.0 — the Werco Copilot system prompt — and
   `nl_search_intent` 1.0.0 — the `/search/nl` fast-tier intent parser; QMS clause extraction is
   version-registered with its text still at the call site).
