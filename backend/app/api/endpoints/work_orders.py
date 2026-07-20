@@ -2003,7 +2003,12 @@ async def _run_laser_nest_import(
     saved_storage_keys: list[str] = []
 
     def _reap_saved_blobs() -> None:
-        for key in saved_storage_keys:
+        # Idempotent: the list is drained as it is reaped, so nested handlers
+        # can each call this (the DB-error branch reaps, then raises a 400 that
+        # the outer HTTPException handler also cleans up after) without
+        # double-deleting a ref.
+        while saved_storage_keys:
+            key = saved_storage_keys.pop()
             try:
                 delete_ref(key)
             except Exception:  # noqa: BLE001 - cleanup must not mask the original error
