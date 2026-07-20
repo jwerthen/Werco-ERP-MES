@@ -60,6 +60,15 @@ class ParsedLaserNest:
     cnc_number: Optional[str] = None
     pdf_source_path: Optional[str] = None
     confidence: Optional[str] = None
+    # Bare-multi-page-PDF extras (None for ZIP/CNC/folder rows). source_pages is
+    # the segment's 1-based page list in the ORIGINAL uploaded PDF (a tuple --
+    # the dataclass is frozen); field_confidence is the merged per-field
+    # confidence dict from the two-pass extraction; warning surfaces a degraded
+    # extraction / skipped verification; passes records 1 or 2 AI reads.
+    source_pages: Optional[tuple[int, ...]] = None
+    field_confidence: Optional[dict] = None
+    warning: Optional[str] = None
+    passes: Optional[int] = None
 
     def as_dict(self) -> dict:
         return {
@@ -75,6 +84,10 @@ class ParsedLaserNest:
             # For PDFs this is the relative path within the package (the import
             # row key); for CNC-file nests it is the CNC file's relative path.
             "source_file": self.cnc_file_path,
+            "source_pages": list(self.source_pages) if self.source_pages is not None else None,
+            "field_confidence": self.field_confidence,
+            "warning": self.warning,
+            "passes": self.passes,
         }
 
 
@@ -157,6 +170,20 @@ def _coerce_planned_runs(value: object) -> int:
     return 1
 
 
+def _coerce_field_confidence(value: object) -> Optional[dict]:
+    """Sanitize the extraction result's per-field ``confidence`` dict for rows.
+
+    Defensive: on the two-pass merge path this is a well-formed
+    ``{field: "high"|"medium"|"low"}`` dict, but when verification is skipped
+    the pass-1 dict is raw AI output. Only string-ish entries survive; junk
+    shapes collapse to None so one odd response can't 500 a preview batch.
+    """
+    if not isinstance(value, dict):
+        return None
+    coerced = {str(key): str(entry) for key, entry in value.items() if isinstance(entry, (str, int, float))}
+    return coerced or None
+
+
 def build_parsed_nest_from_extraction(result: dict, *, abs_path: str, rel_path: str) -> ParsedLaserNest:
     """Map an ``extract_nest_fields_from_pdf`` result dict to a ``ParsedLaserNest``.
 
@@ -165,6 +192,8 @@ def build_parsed_nest_from_extraction(result: dict, *, abs_path: str, rel_path: 
     """
     cnc_number = result.get("cnc_number")
     file_name = Path(abs_path).name
+    warning = result.get("warning")
+    passes = result.get("passes")
     return ParsedLaserNest(
         nest_name=cnc_number or Path(file_name).stem,
         cnc_file_name=file_name,
@@ -176,6 +205,9 @@ def build_parsed_nest_from_extraction(result: dict, *, abs_path: str, rel_path: 
         cnc_number=cnc_number,
         pdf_source_path=abs_path,
         confidence=result.get("extraction_confidence"),
+        field_confidence=_coerce_field_confidence(result.get("confidence")),
+        warning=warning if isinstance(warning, str) else None,
+        passes=passes if isinstance(passes, int) and not isinstance(passes, bool) else None,
     )
 
 

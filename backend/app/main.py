@@ -744,6 +744,14 @@ if settings.RATE_LIMIT_ENABLED:
         # per client is generous headroom for a human with a scanner.
         ENDPOINT_RATE_LIMITS = {
             "/api/v1/scanner/resolve-action": "60/minute",
+            # Laser nest-package upload surface: preview fans out AI extraction
+            # (up to 2 LLM calls per nest), import does heavy PDF/zip IO. 10/min
+            # is generous for interactive planner use while bounding a runaway
+            # client. Only the static standalone routes can be listed here (the
+            # resolver is exact-match); the /{work_order_id}/ variants are
+            # covered by the process-global extraction semaphore + global limit.
+            "/api/v1/work-orders/laser-nest-packages/standalone/preview": "10/minute",
+            "/api/v1/work-orders/laser-nest-packages/standalone/import": "10/minute",
         }
         # Single merged source of truth for the path-specific resolver below.
         PATH_RATE_LIMITS = {**AUTH_RATE_LIMITS, **ENDPOINT_RATE_LIMITS}

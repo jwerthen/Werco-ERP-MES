@@ -218,6 +218,12 @@ export type LaserNestUpdateInput = Partial<LaserNestManualInput>;
 /** Per-field confidence the extraction pipeline reports for a nest PDF. */
 export type LaserNestExtractionConfidence = 'high' | 'medium' | 'low';
 
+/** The extracted fields that carry a per-field confidence from the two-pass read. */
+export type LaserNestConfidenceField = 'cnc_number' | 'material' | 'thickness' | 'sheet_size' | 'planned_runs';
+
+/** Per-field merged confidence map for one preview row (PDF uploads only). */
+export type LaserNestFieldConfidence = Partial<Record<LaserNestConfidenceField, LaserNestExtractionConfidence>>;
+
 /**
  * Result of `POST /laser-nests/extract` — AI (or filename-fallback) read of a
  * single nest report PDF. Every value is nullable: the model returns what it
@@ -252,6 +258,14 @@ export interface LaserNestPreviewRow {
   thickness?: string | null;
   sheet_size?: string | null;
   confidence?: LaserNestExtractionConfidence | null;
+  /** 1-based page numbers of this nest within an uploaded PDF (null for ZIP/CNC packages). */
+  source_pages?: number[] | null;
+  /** Per-field merged confidence from the two-pass extraction (PDF uploads). */
+  field_confidence?: LaserNestFieldConfidence | null;
+  /** Per-row extraction warning (e.g. verification pass skipped). */
+  warning?: string | null;
+  /** How many AI passes ran for this row (1 or 2). */
+  passes?: number | null;
 }
 
 export interface LaserNestPackagePreview {
@@ -259,6 +273,12 @@ export interface LaserNestPackagePreview {
   nest_count: number;
   total_planned_runs: number;
   nests: LaserNestPreviewRow[];
+  /** Total page count when the upload was a bare (single/multi-page) PDF. */
+  source_page_count?: number | null;
+  /** Pages the AI segmentation classified as non-nest (cover/summary). */
+  skipped_pages?: number[] | null;
+  /** Set when segmentation degraded to one-page-per-nest. */
+  segmentation_warning?: string | null;
 }
 
 /**
@@ -274,6 +294,12 @@ export interface LaserNestImportRow {
   material: string | null;
   thickness: string | null;
   sheet_size: string | null;
+  /**
+   * For PDF uploads: MUST be echoed back verbatim from the preview row — the
+   * backend re-splits the re-sent PDF by these pages and 400s on a mismatch.
+   * Omit for ZIP/CNC packages.
+   */
+  source_pages?: number[] | null;
 }
 
 /**

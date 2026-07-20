@@ -1,4 +1,5 @@
 import asyncio
+import functools
 import json
 import logging
 import math
@@ -6,6 +7,7 @@ import os
 import shutil
 import tempfile
 import uuid
+from dataclasses import replace as dataclass_replace
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -74,7 +76,13 @@ from app.services.completion_signal_service import (
 )
 from app.services.import_service import ImportFileError, parse_import_file
 from app.services.labor_cost_service import is_labor_cost_rollup_enabled
-from app.services.laser_nest_extraction_service import extract_nest_fields_from_pdf
+from app.services.laser_nest_extraction_service import extract_nest_fields_from_pdf, segment_nest_pdf
+from app.services.laser_nest_pdf_split_service import (
+    get_pdf_page_count,
+    is_bare_pdf_upload,
+    segment_file_name,
+    split_pdf_segments,
+)
 from app.services.laser_nest_service import (
     LASER_PDF_PACKAGE_MAX,
     ParsedLaserNest,
@@ -452,6 +460,14 @@ class LaserNestPreviewResponse(BaseModel):
     # (every extra field defaults). Rows arrive as dicts from ParsedLaserNest
     # .as_dict(); Pydantic validates/coerces them on construction.
     nests: list[LaserNestPreviewRow]
+    # Bare-multi-page-PDF preview extras; all default None so ZIP/CNC/folder
+    # previews validate unchanged. source_page_count is the uploaded PDF's page
+    # count; skipped_pages lists pages the segmentation pass classified as
+    # non-nest (cover/summary) pages; segmentation_warning surfaces a degraded
+    # segmentation (one-nest-per-page fallback).
+    source_page_count: Optional[int] = None
+    segmentation_warning: Optional[str] = None
+    skipped_pages: Optional[List[int]] = None
 
 
 def _emit_work_order_event(
@@ -727,12 +743,37 @@ def _find_laser_work_center(db: Session, company_id: int, work_center_id: Option
     return work_center
 
 
-async def _save_upload_to_temp(file: UploadFile) -> str:
+# Byte cap on laser-package uploads (ZIP or bare PDF), enforced while the body
+# streams to the temp file -- BEFORE any pypdf or AI work touches it. Matches
+# the nginx client_max_body_size posture (50M) so the app-layer guard holds on
+# deployments (Railway) that have no fronting proxy limit.
+LASER_UPLOAD_MAX_BYTES = 50 * 1024 * 1024
+
+
+async def _save_upload_to_temp(file: UploadFile, max_bytes: Optional[int] = None) -> str:
+    # Resolved at call time (not def time) so the module-level cap stays the
+    # single tunable source of truth.
+    limit = max_bytes if max_bytes is not None else LASER_UPLOAD_MAX_BYTES
     suffix = os.path.splitext(file.filename or "")[1] or ".zip"
     fd, temp_path = tempfile.mkstemp(suffix=suffix)
-    with os.fdopen(fd, "wb") as handle:
-        shutil.copyfileobj(file.file, handle)
-    await file.close()
+    written = 0
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            while chunk := file.file.read(1024 * 1024):
+                written += len(chunk)
+                if written > limit:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"Upload exceeds the {limit // (1024 * 1024)} MB limit. "
+                        "Split the package into smaller batches.",
+                    )
+                handle.write(chunk)
+    except Exception:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        raise
+    finally:
+        await file.close()
     return temp_path
 
 
@@ -866,28 +907,56 @@ def _laser_wo_audit_values(work_order: WorkOrder) -> dict:
     }
 
 
-def _build_laser_preview_response(package_name: str, nests: list[dict]) -> LaserNestPreviewResponse:
+def _build_laser_preview_response(
+    package_name: str,
+    nests: list[dict],
+    *,
+    source_page_count: Optional[int] = None,
+    segmentation_warning: Optional[str] = None,
+    skipped_pages: Optional[List[int]] = None,
+) -> LaserNestPreviewResponse:
     return LaserNestPreviewResponse(
         package_name=package_name,
         nest_count=len(nests),
         total_planned_runs=sum(int(nest.get("planned_runs") or 0) for nest in nests),
         nests=nests,
+        source_page_count=source_page_count,
+        segmentation_warning=segmentation_warning,
+        skipped_pages=skipped_pages,
     )
 
 
 # Bounded fan-out for the per-PDF AI extraction. extract_nest_fields_from_pdf is
-# sync/blocking, so each call is dispatched to the threadpool; the semaphore caps
-# concurrent in-flight LLM calls (latency vs. provider pressure tradeoff).
+# sync/blocking (now up to TWO sequential LLM calls per file), so each call is
+# dispatched to the threadpool; the semaphore caps concurrent in-flight
+# extractions. Module-level -- i.e. PROCESS-GLOBAL, shared across requests --
+# so concurrent previews can't multiply up to the shared anyio threadpool's
+# ~40 tokens and starve every other sync endpoint for the LLM-call duration.
+# (asyncio.Semaphore binds its loop lazily on 3.10+, so creating it at import
+# time is safe; the app runs a single event loop.)
 _LASER_PDF_EXTRACT_CONCURRENCY = 5
+_laser_pdf_extract_semaphore = asyncio.Semaphore(_LASER_PDF_EXTRACT_CONCURRENCY)
 
 
-async def _parse_laser_nest_pdf_package_async(folder: str, company_id: int) -> list[ParsedLaserNest]:
+async def _parse_laser_nest_pdf_package_async(
+    folder: str,
+    company_id: int,
+    *,
+    cnc_hints: Optional[dict[str, str]] = None,
+    filename_is_cnc_hint: bool = True,
+) -> list[ParsedLaserNest]:
     """Parallelized counterpart to ``parse_laser_nest_pdf_package``.
 
     Globs the PDFs here (enforcing the same cap), then runs the per-file AI
-    extraction concurrently via ``run_in_threadpool`` under a semaphore. Returns
-    rows in stable (sorted-path) order. The sync helper is kept for the offline
-    path and tests; this one is what the async endpoint uses for latency.
+    extraction concurrently via ``run_in_threadpool`` under the process-global
+    semaphore. Returns rows in stable (sorted-path) order. The sync helper is
+    kept for the offline path and tests; this one is what the async endpoint
+    uses for latency.
+
+    The bare-PDF path passes ``filename_is_cnc_hint=False`` (its files carry
+    synthetic ``nest-pNNN`` split names, which must not be offered to the model
+    as CNC numbers) plus optional per-file ``cnc_hints`` keyed by rel path,
+    sourced from the segmentation pass.
     """
     root = Path(folder).expanduser().resolve()
     pdf_paths = sorted(p for p in root.rglob("*.pdf") if p.is_file())
@@ -899,12 +968,19 @@ async def _parse_laser_nest_pdf_package_async(folder: str, company_id: int) -> l
             "Split the package into smaller batches."
         )
 
-    semaphore = asyncio.Semaphore(_LASER_PDF_EXTRACT_CONCURRENCY)
-
     async def _extract(path: Path) -> ParsedLaserNest:
         rel_path = str(path.relative_to(root))
-        async with semaphore:
-            result = await run_in_threadpool(extract_nest_fields_from_pdf, str(path), path.name, company_id)
+        async with _laser_pdf_extract_semaphore:
+            result = await run_in_threadpool(
+                functools.partial(
+                    extract_nest_fields_from_pdf,
+                    str(path),
+                    path.name,
+                    company_id,
+                    cnc_hint=(cnc_hints or {}).get(rel_path),
+                    filename_is_cnc_hint=filename_is_cnc_hint,
+                )
+            )
         return build_parsed_nest_from_extraction(result, abs_path=str(path), rel_path=rel_path)
 
     # return_exceptions=True so one bad PDF can't sink the whole preview batch
@@ -942,6 +1018,70 @@ async def _preview_nests_from_folder(folder: str, company_id: int) -> list[dict]
     else:
         nests = await run_in_threadpool(parse_laser_nest_folder, folder)
     return [nest.as_dict() for nest in nests]
+
+
+async def _read_bare_pdf_page_count_or_400(temp_path: str) -> int:
+    """Page count of an uploaded bare PDF, with the shared 400 translations.
+
+    Unreadable bytes are a client problem (not a 500); the page cap reuses the
+    package cap -- one segmented multi-page PDF costs the same per-nest AI
+    fan-out as a ZIP of that many PDFs, so it gets the same ceiling.
+    """
+    try:
+        page_count = await run_in_threadpool(get_pdf_page_count, temp_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Could not read the PDF") from exc
+    if page_count > LASER_PDF_PACKAGE_MAX:
+        raise HTTPException(
+            status_code=400,
+            detail=f"PDF has {page_count} pages; the limit is {LASER_PDF_PACKAGE_MAX}. "
+            "Split the PDF into smaller batches.",
+        )
+    return page_count
+
+
+def _confirmed_pdf_segments(rows: list[LaserNestImportRow]) -> list[list[int]]:
+    """Derive the deterministic split plan for a bare-PDF import from its rows.
+
+    The commit path re-splits the re-sent PDF by the rows' CONFIRMED page lists
+    -- no AI, no re-segmentation -- so every row must carry ``source_pages``,
+    and its ``source_file`` must equal the name the split will deterministically
+    derive for those pages. A mismatch means the rows came from a different
+    preview (or were hand-mangled): reject as a stale preview rather than
+    attaching the wrong pages to a nest. Out-of-range and duplicate segments
+    are rejected downstream by ``split_pdf_segments`` (ValueError -> 400).
+
+    Rows must also be page-DISJOINT: segmentation guarantees every page lands in
+    at most one nest, so overlapping-but-distinct ranges (e.g. [1,2] and [2,3])
+    can only come from a hand-crafted payload -- without this check one source
+    page would silently land in two nests' Documents.
+    """
+    segments: list[list[int]] = []
+    claimed_pages: set[int] = set()
+    for row in rows:
+        if not row.source_pages:
+            raise HTTPException(
+                status_code=400,
+                detail="Each nest row must include source_pages for a bare-PDF import. "
+                "Preview the PDF first, then confirm the rows.",
+            )
+        expected_name = segment_file_name(list(row.source_pages))
+        if row.source_file.strip() != expected_name:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Nest row source_file '{row.source_file}' does not match its source_pages "
+                f"(expected '{expected_name}'). The preview is stale; re-run it and confirm again.",
+            )
+        overlap = claimed_pages.intersection(row.source_pages)
+        if overlap:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Nest rows overlap on page(s) {sorted(overlap)}; each PDF page may belong to "
+                "at most one nest. The preview is stale; re-run it and confirm again.",
+            )
+        claimed_pages.update(row.source_pages)
+        segments.append(list(row.source_pages))
+    return segments
 
 
 def _resolve_package_pdf(package_dir: str, source_file: str) -> str:
@@ -1672,16 +1812,63 @@ async def _run_laser_nest_preview(
 ) -> LaserNestPreviewResponse:
     """Shared preview flow for the ``{work_order_id}`` and standalone endpoints.
 
-    Two package shapes, auto-detected: a ZIP/folder of nest-report **PDFs** (the
-    new path -- fields extracted by AI, one LLM call per PDF, parallelized with
-    bounded concurrency) or the legacy ZIP/folder of CNC **program files** (fields
-    inferred from filenames). PDFs and CNC extensions are disjoint, so a package
-    is treated as a PDF package iff it contains any ``*.pdf``.
+    Three upload shapes, auto-detected: a **bare PDF** (single- or multi-page --
+    AI segmentation decides which pages form which nest, the PDF is split into
+    per-segment files, and each segment runs the per-nest AI extraction), a
+    ZIP/folder of nest-report **PDFs** (fields extracted by AI, one extraction
+    per PDF, parallelized with bounded concurrency), or the legacy ZIP/folder of
+    CNC **program files** (fields inferred from filenames). PDFs and CNC
+    extensions are disjoint, so a package is treated as a PDF package iff it
+    contains any ``*.pdf``.
     """
     package_name = _laser_package_name(file, source_path)
     temp_path = None
+    source_page_count: Optional[int] = None
+    segmentation_warning: Optional[str] = None
+    skipped_pages: Optional[List[int]] = None
     try:
-        if file:
+        if file and is_bare_pdf_upload(file.filename or "", file.content_type):
+            # Bare (possibly multi-page) PDF: segment (AI pass 0, degrades to
+            # one-nest-per-page) -> deterministic split -> the same bounded
+            # parallel per-segment extraction the ZIP path uses. Rows carry the
+            # segment's page list so import can re-split without AI.
+            temp_path = await _save_upload_to_temp(file)
+            page_count = await _read_bare_pdf_page_count_or_400(temp_path)
+            segmentation = await run_in_threadpool(
+                segment_nest_pdf, temp_path, file.filename or "nests.pdf", page_count, company_id
+            )
+            segments = [list(nest["pages"]) for nest in segmentation["nests"]]
+            with TemporaryDirectory() as scan_dir:
+                segment_names = await run_in_threadpool(split_pdf_segments, temp_path, segments, scan_dir)
+                # Split names are synthetic ('nest-p001.pdf'), NOT CNC numbers:
+                # extraction must not use them as hints or fallbacks. The
+                # segmentation pass's per-nest cnc_number_hint (when it saw one
+                # in a title block) is offered instead, keyed by split name.
+                cnc_hints = {
+                    name: nest["cnc_number_hint"]
+                    for name, nest in zip(segment_names, segmentation["nests"])
+                    if nest.get("cnc_number_hint")
+                }
+                parsed_nests = await _parse_laser_nest_pdf_package_async(
+                    scan_dir, company_id, cnc_hints=cnc_hints, filename_is_cnc_hint=False
+                )
+            # Attach each segment's page list to its row. Split names are the
+            # rows' rel paths, and both orders are ascending-first-page, so the
+            # name->pages map realigns them even if glob order ever shifts.
+            pages_by_name = dict(zip(segment_names, segments))
+            nests = [
+                dataclass_replace(
+                    nest,
+                    source_pages=(
+                        tuple(pages_by_name[nest.cnc_file_path]) if nest.cnc_file_path in pages_by_name else None
+                    ),
+                ).as_dict()
+                for nest in parsed_nests
+            ]
+            source_page_count = page_count
+            segmentation_warning = segmentation.get("warning")
+            skipped_pages = list(segmentation.get("skipped_pages") or [])
+        elif file:
             temp_path = await _save_upload_to_temp(file)
             # Extract once into a temp dir so we can inspect contents (PDF vs CNC)
             # and run the AI extraction over the materialized files.
@@ -1698,7 +1885,13 @@ async def _run_laser_nest_preview(
         if temp_path and os.path.exists(temp_path):
             os.remove(temp_path)
 
-    return _build_laser_preview_response(package_name, nests)
+    return _build_laser_preview_response(
+        package_name,
+        nests,
+        source_page_count=source_page_count,
+        segmentation_warning=segmentation_warning,
+        skipped_pages=skipped_pages,
+    )
 
 
 # NOTE: the two static /laser-nest-packages/standalone/* routes are registered
@@ -1730,7 +1923,7 @@ async def preview_laser_nest_package_import(
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Preview nest operations detected from a zipped Ermaksan package or server folder.
+    """Preview nest operations from a zipped Ermaksan package, a bare nest-report PDF, or a server folder.
 
     See ``_run_laser_nest_preview`` for the package-shape detection. The addressed
     WO may be an assembly parent or (since the standalone generalization) a
@@ -1760,12 +1953,14 @@ async def _run_laser_nest_import(
     a fresh part-less RELEASED laser-cutting WO (no parent) and import into it.
 
     Two paths, both honoring IMPORT-REPLACES-EVERYTHING:
-    - ``rows`` provided (PDF confirm-and-commit): the re-sent ZIP supplies PDF
-      bytes; the persisted field values are the planner-CONFIRMED ones from the
-      JSON ``rows`` (no second AI call). Each nest's PDF is stored as a DRAWING
-      Document and attached.
+    - ``rows`` provided (PDF confirm-and-commit): the re-sent upload -- a ZIP of
+      per-nest PDFs, or a bare (possibly multi-page) PDF that is re-split
+      deterministically by each row's confirmed ``source_pages`` -- supplies the
+      PDF bytes only; the persisted field values are the planner-CONFIRMED ones
+      from the JSON ``rows`` (no second AI call). Each nest's PDF (segment) is
+      stored as a DRAWING Document and attached.
     - ``rows`` absent (legacy CNC-program import): unchanged -- fields inferred
-      from filenames, no Documents.
+      from filenames, no Documents. A bare PDF without ``rows`` is rejected.
 
     Both paths audit (DELETE per superseded nest, CREATE per new nest): the
     import wipes ALL prior nests/operations for the laser WO, so each wipe is
@@ -1813,7 +2008,21 @@ async def _run_laser_nest_import(
     try:
         if file:
             temp_path = await _save_upload_to_temp(file)
-            extract_laser_nest_zip(temp_path, package_dir)
+            if is_bare_pdf_upload(file.filename or "", file.content_type):
+                # Bare-PDF confirm-and-commit: rows are REQUIRED (the legacy
+                # no-rows import is CNC-programs-only), and the re-sent PDF is
+                # re-split deterministically by the rows' confirmed page lists
+                # -- no AI call and no re-segmentation on the commit path. The
+                # split writes the per-segment PDFs into package_dir under the
+                # exact names the preview issued, so the confirmed-rows
+                # machinery below resolves them like any PDF package.
+                if not is_pdf_import:
+                    raise HTTPException(status_code=400, detail="Preview the PDF first, then confirm the rows")
+                await _read_bare_pdf_page_count_or_400(temp_path)
+                segments = _confirmed_pdf_segments(confirmed_rows)
+                await run_in_threadpool(split_pdf_segments, temp_path, segments, package_dir)
+            else:
+                extract_laser_nest_zip(temp_path, package_dir)
         elif source_path:
             copy_laser_nest_folder(source_path, package_dir)
         else:

@@ -1,6 +1,13 @@
 import React, { useEffect, useState } from 'react';
+import { ExclamationTriangleIcon } from '@heroicons/react/24/outline';
 import { Modal } from '../ui/Modal';
-import { LaserNestImportRow, LaserNestPreviewRow, LaserNestExtractionConfidence } from '../../types';
+import {
+  LaserNestImportRow,
+  LaserNestPreviewRow,
+  LaserNestExtractionConfidence,
+  LaserNestConfidenceField,
+  LaserNestFieldConfidence,
+} from '../../types';
 import api from '../../services/api';
 
 interface LaserNestImportWizardProps {
@@ -30,7 +37,10 @@ interface LaserNestImportWizardProps {
 type WizardStep = 'pick' | 'review';
 
 /** Local, editable mirror of a preview row. Keeps `source_file` as the stable
- *  key the backend matches PDFs by; everything else the planner can correct. */
+ *  key the backend matches PDFs by; everything else the planner can correct.
+ *  `source_pages` is carried verbatim so PDF imports can echo it back, and
+ *  `edited` tracks which fields the planner has touched (clears the
+ *  low-confidence highlight for that field). */
 interface EditableRow {
   source_file: string;
   cnc_number: string;
@@ -41,6 +51,17 @@ interface EditableRow {
   thickness: string;
   sheet_size: string;
   confidence: LaserNestExtractionConfidence | null;
+  source_pages: number[] | null;
+  field_confidence: LaserNestFieldConfidence | null;
+  warning: string | null;
+  edited: Partial<Record<LaserNestConfidenceField, boolean>>;
+}
+
+/** Preview metadata about the uploaded package itself (bare-PDF uploads). */
+interface PackageMeta {
+  source_page_count: number | null;
+  skipped_pages: number[];
+  segmentation_warning: string | null;
 }
 
 const CONFIDENCE_BADGE: Record<LaserNestExtractionConfidence, { label: string; className: string }> = {
@@ -50,8 +71,12 @@ const CONFIDENCE_BADGE: Record<LaserNestExtractionConfidence, { label: string; c
 };
 
 const TH = 'px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wide text-fd-mute';
-const CELL_INPUT =
-  'w-full rounded-none border border-fd-line bg-fd-sunken px-2 py-1 text-sm text-fd-ink focus:border-fd-blue focus:outline-none';
+// Border/background split from the base so the low-confidence variant never
+// fights the default colors on Tailwind specificity.
+const CELL_INPUT_BASE =
+  'w-full rounded-none border px-2 py-1 text-sm text-fd-ink focus:border-fd-blue focus:outline-none';
+const CELL_INPUT = `${CELL_INPUT_BASE} border-fd-line bg-fd-sunken`;
+const CELL_INPUT_VERIFY = `${CELL_INPUT_BASE} border-fd-amber bg-fd-amber/10`;
 
 function toEditable(row: LaserNestPreviewRow): EditableRow {
   return {
@@ -64,18 +89,70 @@ function toEditable(row: LaserNestPreviewRow): EditableRow {
     thickness: row.thickness ?? '',
     sheet_size: row.sheet_size ?? '',
     confidence: row.confidence ?? null,
+    source_pages: row.source_pages ?? null,
+    field_confidence: row.field_confidence ?? null,
+    warning: row.warning ?? null,
+    edited: {},
   };
 }
 
+function fieldValue(row: EditableRow, field: LaserNestConfidenceField): string {
+  switch (field) {
+    case 'cnc_number':
+      return row.cnc_number;
+    case 'material':
+      return row.material;
+    case 'thickness':
+      return row.thickness;
+    case 'sheet_size':
+      return row.sheet_size;
+    case 'planned_runs':
+      return row.planned_runs;
+  }
+}
+
+/** A field needs the amber verify highlight when the extractor marked it low
+ *  confidence, or when a PDF-upload row left it blank — until the planner
+ *  edits it. */
+function fieldNeedsVerify(row: EditableRow, field: LaserNestConfidenceField): boolean {
+  if (row.edited[field]) return false;
+  if (row.field_confidence?.[field] === 'low') return true;
+  const isPdfRow = row.source_pages != null && row.source_pages.length > 0;
+  return isPdfRow && fieldValue(row, field).trim() === '';
+}
+
+/** `[3]` → `p. 3`, `[3,4]` → `p. 3–4`, `[3,4,7]` → `p. 3–4, 7`. */
+function formatPageRange(pages: number[]): string {
+  const sorted = [...pages].sort((a, b) => a - b);
+  const parts: string[] = [];
+  let start = sorted[0];
+  let prev = sorted[0];
+  for (const page of sorted.slice(1)) {
+    if (page === prev + 1) {
+      prev = page;
+      continue;
+    }
+    parts.push(start === prev ? String(start) : `${start}–${prev}`);
+    start = page;
+    prev = page;
+  }
+  parts.push(start === prev ? String(start) : `${start}–${prev}`);
+  return `p. ${parts.join(', ')}`;
+}
+
 /**
- * Two-step wizard for importing a ZIP of laser-nest sheets onto an assembly WO.
+ * Two-step wizard for importing a ZIP of laser-nest sheets — or a bare
+ * single/multi-page nest-report PDF — onto an assembly WO.
  *
- *   1. Pick a ZIP (or, when the server supports it, a folder path).
+ *   1. Pick a ZIP or PDF (or, when the server supports it, a folder path).
  *   2. Preview runs AI extraction server-side and returns editable rows; the
  *      planner reviews/corrects them, removing any that shouldn't be imported.
- *   3. Import re-sends the SAME ZIP plus the confirmed rows — the backend matches
- *      each row to its PDF by `source_file` and persists the confirmed values
- *      without a second AI call.
+ *      Bare-PDF uploads are segmented server-side into one row per nest, each
+ *      carrying its `source_pages` plus per-field confidence.
+ *   3. Import re-sends the SAME ZIP/PDF plus the confirmed rows — the backend
+ *      matches each row to its PDF by `source_file` (re-splitting a bare PDF by
+ *      the echoed `source_pages`) and persists the confirmed values without a
+ *      second AI call.
  *
  * The same flow handles a ZIP of CNC *program* files: those preview rows carry
  * `cnc_file_name` instead of an AI-read `cnc_number`/`confidence`, and sending
@@ -99,6 +176,7 @@ export default function LaserNestImportWizard({
   const [fileInputKey, setFileInputKey] = useState(0);
 
   const [rows, setRows] = useState<EditableRow[]>([]);
+  const [packageMeta, setPackageMeta] = useState<PackageMeta | null>(null);
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -110,6 +188,7 @@ export default function LaserNestImportWizard({
     setFile(null);
     setSourcePath('');
     setRows([]);
+    setPackageMeta(null);
     setLoading(false);
     setError('');
     setFileInputKey((k) => k + 1);
@@ -119,7 +198,7 @@ export default function LaserNestImportWizard({
 
   const handlePreview = async () => {
     if (!hasInput) {
-      setError('Choose a ZIP package or enter a folder path.');
+      setError('Choose a ZIP package or a nest-report PDF (single or multi-page), or enter a folder path.');
       return;
     }
     setLoading(true);
@@ -131,6 +210,11 @@ export default function LaserNestImportWizard({
           ? await api.previewLaserNestPackage(workOrderId, input)
           : await api.previewLaserNestPackageStandalone(input);
       setRows(result.nests.map(toEditable));
+      setPackageMeta({
+        source_page_count: result.source_page_count ?? null,
+        skipped_pages: result.skipped_pages ?? [],
+        segmentation_warning: result.segmentation_warning ?? null,
+      });
       setStep('review');
     } catch (err: any) {
       setError(err?.response?.data?.detail || 'Failed to preview laser nest package.');
@@ -139,8 +223,14 @@ export default function LaserNestImportWizard({
     }
   };
 
-  const updateRow = (index: number, patch: Partial<EditableRow>) => {
-    setRows((prev) => prev.map((row, i) => (i === index ? { ...row, ...patch } : row)));
+  /** Edit one extracted field: applies the value and marks the field as
+   *  planner-touched so its low-confidence highlight clears. */
+  const updateField = (index: number, field: LaserNestConfidenceField, value: string) => {
+    setRows((prev) =>
+      prev.map((row, i) =>
+        i === index ? { ...row, [field]: value, edited: { ...row.edited, [field]: true } } : row
+      )
+    );
   };
 
   const removeRow = (index: number) => {
@@ -175,6 +265,9 @@ export default function LaserNestImportWizard({
       material: row.material.trim() || null,
       thickness: row.thickness.trim() || null,
       sheet_size: row.sheet_size.trim() || null,
+      // PDF uploads: echo the preview's page split back verbatim — the backend
+      // re-splits the re-sent PDF by these pages and 400s on a mismatch.
+      ...(row.source_pages != null ? { source_pages: row.source_pages } : {}),
     }));
 
     setLoading(true);
@@ -215,7 +308,7 @@ export default function LaserNestImportWizard({
           </h2>
           <p className="mt-1 text-sm text-fd-mute">
             {step === 'pick'
-              ? 'Upload a ZIP of nest report PDFs (or CNC program files). We read the CNC number, material, and size from each sheet so you can review before importing.'
+              ? 'Upload a ZIP package of nest report PDFs (or CNC program files), or a nest-report PDF — single or multi-page. We read the CNC number, material, and size from each sheet so you can review before importing.'
               : 'Review and correct each nest, then import. AI-extracted values are editable — verify low-confidence rows before importing.'}
             {workOrderId == null &&
               ' Importing creates a new released laser cutting work order sized to the total sheet runs — no parent work order or part required.'}
@@ -225,12 +318,12 @@ export default function LaserNestImportWizard({
         {step === 'pick' && (
           <div className="space-y-3">
             <label className="block">
-              <span className="text-xs font-medium text-fd-mute">ZIP package</span>
+              <span className="text-xs font-medium text-fd-mute">ZIP package or nest-report PDF</span>
               <input
                 key={fileInputKey}
                 type="file"
-                accept=".zip"
-                aria-label="ZIP package"
+                accept=".zip,.pdf"
+                aria-label="ZIP package or nest-report PDF"
                 onChange={(e) => {
                   setFile(e.target.files?.[0] || null);
                   setError('');
@@ -253,7 +346,8 @@ export default function LaserNestImportWizard({
               />
             </label>
             <p className="text-xs text-fd-faint">
-              AI extraction runs on preview and can take a few seconds per sheet for large packages.
+              AI extraction runs on preview and can take a few seconds per sheet for large packages. A multi-page PDF is
+              split into its individual nests automatically.
             </p>
           </div>
         )}
@@ -267,9 +361,25 @@ export default function LaserNestImportWizard({
               <span className="rounded-none border border-fd-line bg-fd-sunken px-2 py-1 font-semibold text-fd-body">
                 {totalRuns} total runs
               </span>
+              {packageMeta?.source_page_count != null && (
+                <span className="rounded-none border border-fd-line bg-fd-sunken px-2 py-1 font-semibold text-fd-body">
+                  {packageMeta.source_page_count} {packageMeta.source_page_count === 1 ? 'page' : 'pages'} →{' '}
+                  {rows.length} {rows.length === 1 ? 'nest' : 'nests'}
+                </span>
+              )}
               {lowConfidenceCount > 0 && (
                 <span className="rounded-none border border-fd-red/40 bg-fd-red/10 px-2 py-1 font-semibold text-fd-red">
                   {lowConfidenceCount} low-confidence — double-check
+                </span>
+              )}
+              {packageMeta?.segmentation_warning && (
+                <span className="rounded-none border border-fd-amber/40 bg-fd-amber/10 px-2 py-1 font-semibold text-fd-amber">
+                  {packageMeta.segmentation_warning}
+                </span>
+              )}
+              {packageMeta != null && packageMeta.skipped_pages.length > 0 && (
+                <span className="px-1 py-1 text-fd-mute">
+                  Pages skipped as non-nest: {packageMeta.skipped_pages.join(', ')}
                 </span>
               )}
             </div>
@@ -278,7 +388,7 @@ export default function LaserNestImportWizard({
               <table className="min-w-full border-collapse">
                 <thead className="sticky top-0 z-10 bg-fd-panel">
                   <tr className="border-b border-fd-line">
-                    <th className={TH}>Source file</th>
+                    <th className={TH}>Source</th>
                     <th className={TH}>CNC #</th>
                     <th className={TH}>Material</th>
                     <th className={TH}>Thickness</th>
@@ -298,11 +408,26 @@ export default function LaserNestImportWizard({
                   )}
                   {rows.map((row, index) => {
                     const badge = row.confidence ? CONFIDENCE_BADGE[row.confidence] : null;
+                    // Per-field verify state: amber highlight + "verify" affordance
+                    // until the planner edits the field.
+                    const verify = {
+                      cnc_number: fieldNeedsVerify(row, 'cnc_number'),
+                      material: fieldNeedsVerify(row, 'material'),
+                      thickness: fieldNeedsVerify(row, 'thickness'),
+                      sheet_size: fieldNeedsVerify(row, 'sheet_size'),
+                      planned_runs: fieldNeedsVerify(row, 'planned_runs'),
+                    };
+                    const verifyLabel = (base: string, needsVerify: boolean) =>
+                      needsVerify ? `${base} — low confidence, verify` : base;
+                    const pageRange =
+                      row.source_pages && row.source_pages.length > 0 ? formatPageRange(row.source_pages) : null;
                     return (
                       <tr key={row.source_file} className="border-b border-fd-line align-top">
                         <td className="px-3 py-2 text-xs text-fd-mute">
+                          {/* For PDF uploads the generated file name is noise — show the
+                              page range and keep the file name as the tooltip. */}
                           <span className="block max-w-[16rem] truncate" title={row.source_file}>
-                            {row.source_file}
+                            {pageRange ?? row.source_file}
                           </span>
                           {row.cnc_file_name && (
                             <span className="block max-w-[16rem] truncate text-fd-faint" title={row.cnc_file_name}>
@@ -314,36 +439,40 @@ export default function LaserNestImportWizard({
                           <input
                             type="text"
                             value={row.cnc_number}
-                            onChange={(e) => updateRow(index, { cnc_number: e.target.value })}
-                            className={CELL_INPUT}
-                            aria-label={`CNC number for ${row.source_file}`}
+                            onChange={(e) => updateField(index, 'cnc_number', e.target.value)}
+                            className={verify.cnc_number ? CELL_INPUT_VERIFY : CELL_INPUT}
+                            aria-label={verifyLabel(`CNC number for ${row.source_file}`, verify.cnc_number)}
+                            title={verify.cnc_number ? 'Low confidence — verify' : undefined}
                           />
                         </td>
                         <td className="px-3 py-2">
                           <input
                             type="text"
                             value={row.material}
-                            onChange={(e) => updateRow(index, { material: e.target.value })}
-                            className={CELL_INPUT}
-                            aria-label={`Material for ${row.source_file}`}
+                            onChange={(e) => updateField(index, 'material', e.target.value)}
+                            className={verify.material ? CELL_INPUT_VERIFY : CELL_INPUT}
+                            aria-label={verifyLabel(`Material for ${row.source_file}`, verify.material)}
+                            title={verify.material ? 'Low confidence — verify' : undefined}
                           />
                         </td>
                         <td className="px-3 py-2">
                           <input
                             type="text"
                             value={row.thickness}
-                            onChange={(e) => updateRow(index, { thickness: e.target.value })}
-                            className={CELL_INPUT}
-                            aria-label={`Thickness for ${row.source_file}`}
+                            onChange={(e) => updateField(index, 'thickness', e.target.value)}
+                            className={verify.thickness ? CELL_INPUT_VERIFY : CELL_INPUT}
+                            aria-label={verifyLabel(`Thickness for ${row.source_file}`, verify.thickness)}
+                            title={verify.thickness ? 'Low confidence — verify' : undefined}
                           />
                         </td>
                         <td className="px-3 py-2">
                           <input
                             type="text"
                             value={row.sheet_size}
-                            onChange={(e) => updateRow(index, { sheet_size: e.target.value })}
-                            className={CELL_INPUT}
-                            aria-label={`Sheet size for ${row.source_file}`}
+                            onChange={(e) => updateField(index, 'sheet_size', e.target.value)}
+                            className={verify.sheet_size ? CELL_INPUT_VERIFY : CELL_INPUT}
+                            aria-label={verifyLabel(`Sheet size for ${row.source_file}`, verify.sheet_size)}
+                            title={verify.sheet_size ? 'Low confidence — verify' : undefined}
                           />
                         </td>
                         <td className="px-3 py-2">
@@ -352,21 +481,34 @@ export default function LaserNestImportWizard({
                             min={1}
                             step={1}
                             value={row.planned_runs}
-                            onChange={(e) => updateRow(index, { planned_runs: e.target.value })}
-                            className={`${CELL_INPUT} w-20 text-right tabular-nums`}
-                            aria-label={`Runs for ${row.source_file}`}
+                            onChange={(e) => updateField(index, 'planned_runs', e.target.value)}
+                            className={`${verify.planned_runs ? CELL_INPUT_VERIFY : CELL_INPUT} w-20 text-right tabular-nums`}
+                            aria-label={verifyLabel(`Runs for ${row.source_file}`, verify.planned_runs)}
+                            title={verify.planned_runs ? 'Low confidence — verify' : undefined}
                           />
                         </td>
                         <td className="px-3 py-2">
-                          {badge ? (
-                            <span
-                              className={`rounded-none border px-1.5 py-0.5 text-[10px] font-semibold uppercase ${badge.className}`}
-                            >
-                              {badge.label}
-                            </span>
-                          ) : (
-                            <span className="text-xs text-fd-faint">—</span>
-                          )}
+                          <span className="inline-flex items-center gap-1">
+                            {badge ? (
+                              <span
+                                className={`rounded-none border px-1.5 py-0.5 text-[10px] font-semibold uppercase ${badge.className}`}
+                              >
+                                {badge.label}
+                              </span>
+                            ) : (
+                              <span className="text-xs text-fd-faint">—</span>
+                            )}
+                            {row.warning && (
+                              <span
+                                role="img"
+                                aria-label={`Warning for ${row.source_file}: ${row.warning}`}
+                                title={row.warning}
+                                className="inline-flex cursor-help text-fd-amber"
+                              >
+                                <ExclamationTriangleIcon className="h-4 w-4" aria-hidden="true" />
+                              </span>
+                            )}
+                          </span>
                         </td>
                         <td className="px-3 py-2 text-right">
                           <button

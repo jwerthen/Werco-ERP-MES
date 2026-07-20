@@ -128,8 +128,9 @@ class TestNativeDocumentRequest:
 
         result = extract_nest_fields_from_pdf("/tmp/05749.pdf", "05749.pdf", company_id=1)
 
-        # The LLM was called once, on the native path.
-        assert recorder.calls == 1
+        # Two LLM calls on the native path: the extraction read plus the
+        # independent verification read (both carry the same document block).
+        assert recorder.calls == 2
 
         # Context flags lift model selection off the FAST tier without any prompt text.
         assert recorder.ctx.task == "laser_nest_extraction"
@@ -372,7 +373,9 @@ class TestS3Ref:
         finally:
             monkeypatch.setattr(builtins, "open", real_open)
 
-        assert recorder.calls == 1
+        # Extraction + verification reads; the s3 bytes were read exactly once
+        # (pass 2 reuses the already-encoded document, never re-opens the ref).
+        assert recorder.calls == 2
         assert result["cnc_number"] == "05749"
         assert result["_extraction_metadata"]["input_mode"] == "native_pdf"
         block = _document_block(recorder.kwargs["messages"])
@@ -467,3 +470,47 @@ class TestNeverRaises:
         # It is the egress branch, not the catch-all "Extraction failed".
         assert "Extraction failed" not in result["warning"]
         assert result["_extraction_metadata"]["input_mode"] == "native_pdf"
+
+
+class TestSyntheticSegmentNames:
+    """The bare-PDF path passes ``filename_is_cnc_hint=False``: synthetic split
+    names ('nest-p001.pdf') must never be stamped in as CNC numbers, on either
+    the degrade path or the both-passes-null merge path."""
+
+    def test_degrade_leaves_cnc_null_for_synthetic_names(self, monkeypatch):
+        _stub_pdf_bytes(monkeypatch)
+        _stub_llm_raises(monkeypatch, LLMEgressDisabledError(company_id=1))
+
+        result = extract_nest_fields_from_pdf(
+            "/tmp/nest-p001.pdf", "nest-p001.pdf", company_id=1, filename_is_cnc_hint=False
+        )
+
+        # NOT 'nest-p001' -- the row stays blank for the planner to fill.
+        assert result["cnc_number"] is None
+        assert result["source"] == "none"
+        assert result["extraction_confidence"] == "low"
+        assert "disabled" in result["warning"].lower()
+
+    def test_both_passes_null_cnc_stays_null_for_synthetic_names(self, monkeypatch):
+        # Both passes see the same fixed response: cnc null, material pinned.
+        _stub_pdf_bytes(monkeypatch)
+        _stub_llm_text(monkeypatch, '{"cnc_number": null, "material": "A36", "confidence": {}}')
+
+        result = extract_nest_fields_from_pdf("/tmp/nest-p003.pdf", "nest-p003.pdf", filename_is_cnc_hint=False)
+
+        assert result["cnc_number"] is None
+        assert result["source"] == "ai"
+        assert result["confidence"]["cnc_number"] == "low"
+        # The other fields still merge normally (agreement -> high).
+        assert result["material"] == "A36"
+        assert result["confidence"]["material"] == "high"
+
+    def test_default_filename_fallback_unchanged(self, monkeypatch):
+        """Per-file packages (real CNC filenames) keep the stem fallback."""
+        _stub_pdf_bytes(monkeypatch)
+        _stub_llm_raises(monkeypatch, LLMEgressDisabledError(company_id=1))
+
+        result = extract_nest_fields_from_pdf("/tmp/05749.pdf", "05749.pdf", company_id=1)
+
+        assert result["cnc_number"] == "05749"
+        assert result["source"] == "filename"

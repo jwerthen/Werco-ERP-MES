@@ -4,6 +4,29 @@ Bump a prompt's semver `version` and add an entry here whenever its text or
 request layout changes. The version string is recorded on `AIUsageEvent`
 (every API call) and on `AIInteractionEvent`/`AIRecommendation` learning rows.
 
+## 2026-07-20
+
+- `laser_nest_segmentation` 1.0.0 — new prompt (pass 0 of the multi-page bare-PDF
+  laser-nest upload). The whole multi-page PDF travels as a base64 `document`
+  content block; the system prompt instructs page grouping ONLY (which pages form
+  which nest, which to skip as cover/summary pages), with the safety rule that an
+  uncertain continuation page becomes its own nest. Response is strict JSON
+  `{nests: [{pages, cnc_number_hint}], skipped_pages, confidence}`; any failure
+  (egress off, unconfigured, bad JSON, failed validation) degrades to one nest
+  per page with `confidence "low"` — segmentation can never sink an upload.
+  Task `laser_nest_segmentation` is unrouted; `has_pdf_document` lifts it to the
+  DEFAULT (Sonnet) tier. Single-page PDFs skip the call entirely.
+- `laser_nest_verification` 1.0.0 — new prompt (pass 2 of laser-nest extraction).
+  An independent second read of the SAME nest PDF (same `document` block; the
+  flattened text on the text-fallback path) plus pass 1's extracted JSON,
+  explicitly instructed NOT to rubber-stamp pass 1 and to return null/"low" for
+  anything it cannot itself pin. Per-field merge in code: agree → "high"; one
+  null → non-null value, "medium"; conflict → verifier's value, "low"; both null
+  → null, "low". Telemetry records the call under feature
+  `laser_nest_verification` (context task stays `laser_nest_extraction`); a
+  pass-2 failure keeps the pass-1 result untouched (`passes = 1`, warning noting
+  verification was skipped).
+
 ## 2026-07-08
 
 - `auto_execute_decision` 1.0.0 — new prompt for the always-on agent that selects

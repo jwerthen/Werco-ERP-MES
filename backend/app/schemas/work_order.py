@@ -1,7 +1,7 @@
 import json
 from datetime import date, datetime
 from decimal import Decimal
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_serializer, field_validator, model_validator
 
@@ -163,6 +163,9 @@ class LaserNestPdfExtractionResponse(BaseModel):
     confidence: Optional[str] = None
     source: str
     warning: Optional[str] = None
+    # Number of AI reads behind the result: 2 when the independent verification
+    # pass ran and was merged, 1 when it was skipped (or the extraction degraded).
+    passes: Optional[int] = None
 
 
 class LaserNestPreviewRow(BaseModel):
@@ -190,6 +193,16 @@ class LaserNestPreviewRow(BaseModel):
     # for CNC-file nests). It is the frontend's row-matching / React key, so it is
     # a required ``str`` to match the frontend's non-optional typing.
     source_file: str
+    # Bare-multi-page-PDF extras; all default None so ZIP/CNC rows validate
+    # unchanged. source_pages is the segment's 1-based page list in the original
+    # upload (echoed back on import so the server can re-split deterministically);
+    # field_confidence is the merged per-field confidence from the two-pass
+    # extraction; warning surfaces a degraded/partially-verified extraction;
+    # passes is the number of AI reads (1 or 2) behind the row.
+    source_pages: Optional[List[int]] = None
+    field_confidence: Optional[Dict[str, str]] = None
+    warning: Optional[str] = None
+    passes: Optional[int] = None
 
 
 class LaserNestImportRow(BaseModel):
@@ -212,6 +225,31 @@ class LaserNestImportRow(BaseModel):
     thickness: Optional[str] = Field(None, max_length=50)
     sheet_size: Optional[str] = Field(None, max_length=100)
     confidence: Optional[str] = Field(None, max_length=50)
+    source_pages: Optional[List[int]] = Field(
+        None,
+        description=(
+            "1-based page numbers of this nest's segment in the uploaded bare PDF "
+            "(ascending, consecutive). Required for every row of a bare-PDF import; "
+            "absent for ZIP-package rows."
+        ),
+    )
+
+    @field_validator("source_pages")
+    @classmethod
+    def _validate_source_pages(cls, value: Optional[List[int]]) -> Optional[List[int]]:
+        # The server re-splits the re-sent PDF by these page lists with NO AI
+        # re-segmentation, so a malformed list must die here as a clean 400: a
+        # non-empty, >=1, ascending-consecutive run is the only shape
+        # ``split_pdf_segments`` (and its deterministic naming) accepts.
+        if value is None:
+            return value
+        if not value:
+            raise ValueError("source_pages must not be empty when provided")
+        if any(page < 1 for page in value):
+            raise ValueError("source_pages entries must be >= 1")
+        if any(later != earlier + 1 for earlier, later in zip(value, value[1:])):
+            raise ValueError("source_pages must be ascending and consecutive")
+        return value
 
 
 class WorkOrderOperationCreate(WorkOrderOperationBase):
