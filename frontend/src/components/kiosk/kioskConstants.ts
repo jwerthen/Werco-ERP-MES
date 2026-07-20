@@ -94,6 +94,10 @@ export interface KioskQueueItem {
   // 0/0 means the operation has no gating steps — the chip is hidden.
   steps_total?: number | null;
   steps_recorded?: number | null;
+  // Manager-dictated run order (Dispatch Board), 1..N per work center; null when
+  // unranked. ADVISORY: the server already returns the queue in this order and any
+  // job may still be started, so the kiosk only DISPLAYS it (no client-side sort).
+  run_order?: number | null;
 }
 
 /** "Steps 2/6" — the process-steps chip label (call only when steps_total > 0). */

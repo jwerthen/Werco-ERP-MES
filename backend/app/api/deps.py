@@ -29,13 +29,23 @@ KIOSK_TOKEN_PATH_PREFIXES = ("/api/v1/shop-floor",)
 KIOSK_TOKEN_EXACT_PATHS = ("/api/v1/auth/employee-logout",)
 # Deny-list carved out of the shop-floor prefix: the crew station never needs
 # these, and a badge-minted 5-minute token for a MANAGER/ADMIN must not be able
-# to persist access (station PIN reset/revoke) or approve labor (G5-A is a
-# desktop supervisor workflow) from the shared terminal. The public
-# kiosk-stations/station-login route never reaches get_current_user, so
-# excluding the whole prefix is safe.
-KIOSK_TOKEN_DENIED_PREFIXES = ("/api/v1/shop-floor/kiosk-stations",)
+# to persist access (station PIN reset/revoke), approve labor (G5-A is a
+# desktop supervisor workflow) or drive the manager dispatch board from the
+# shared terminal. The public kiosk-stations/station-login route never reaches
+# get_current_user, so excluding the whole prefix is safe. The dispatch board is
+# an exact route rather than a subtree, but the same prefix test covers it.
+KIOSK_TOKEN_DENIED_PREFIXES = (
+    "/api/v1/shop-floor/kiosk-stations",
+    "/api/v1/shop-floor/dispatch-board",
+)
 _KIOSK_DENIED_APPROVAL_MARKER = "/time-entries/"
 _KIOSK_DENIED_APPROVAL_SUFFIXES = ("/approve", "/unapprove")
+# The run-order rewrite (PUT /shop-floor/work-centers/{id}/run-order) is a
+# planner tool: dictating what the whole shop runs next must not be reachable
+# from a shared crew terminal, even on a scanned manager badge. Operators keep
+# READING their rank — the queue endpoint is a different path and stays allowed.
+_KIOSK_DENIED_RUN_ORDER_MARKER = "/work-centers/"
+_KIOSK_DENIED_RUN_ORDER_SUFFIXES = ("/run-order",)
 
 
 def _is_kiosk_scope_allowed_path(path: str) -> bool:
@@ -44,6 +54,8 @@ def _is_kiosk_scope_allowed_path(path: str) -> bool:
         if path == denied or path.startswith(denied + "/"):
             return False
     if _KIOSK_DENIED_APPROVAL_MARKER in path and path.endswith(_KIOSK_DENIED_APPROVAL_SUFFIXES):
+        return False
+    if _KIOSK_DENIED_RUN_ORDER_MARKER in path and path.endswith(_KIOSK_DENIED_RUN_ORDER_SUFFIXES):
         return False
     for prefix in KIOSK_TOKEN_PATH_PREFIXES:
         if path == prefix or path.startswith(prefix + "/"):

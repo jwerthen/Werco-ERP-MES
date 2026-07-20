@@ -459,7 +459,63 @@ export interface QueueItem {
   due_date?: string;
   setup_time_hours: number;
   run_time_hours: number;
+  /**
+   * Manager-dictated run order (Dispatch Board), 1..N per work center.
+   * `null`/absent = unranked; the server already sorts ranked work first, so
+   * the kiosks render server order and only DISPLAY this rank.
+   */
+  run_order?: number | null;
 }
+
+/**
+ * One queued operation on the Dispatch Board (GET /shop-floor/dispatch-board).
+ *
+ * Rows arrive server-sorted: ranked work first by `run_order`, then unranked by
+ * priority -> due date -> sequence. `version` is the operation's optimistic-lock
+ * version, required by the cross-machine move (PUT /work-orders/operations/{id}).
+ */
+export interface DispatchBoardRow {
+  operation_id: number;
+  run_order: number | null;
+  version: number;
+  work_order_id: number;
+  work_order_number: string;
+  operation_number: string | number | null;
+  operation_name: string | null;
+  part_number: string | null;
+  part_name: string | null;
+  status: string;
+  priority: number | null;
+  /** Date-only ISO string (YYYY-MM-DD) — format via centralTime, never `new Date()`. */
+  due_date: string | null;
+  quantity_ordered: number;
+  quantity_complete: number;
+  setup_time_hours: number | null;
+  run_time_hours: number | null;
+}
+
+/** One work center column on the Dispatch Board. */
+export interface DispatchBoardColumn {
+  id: number;
+  name: string;
+  code: string;
+  work_center_type: WorkCenterType;
+  queue: DispatchBoardRow[];
+}
+
+export interface DispatchBoardResponse {
+  work_centers: DispatchBoardColumn[];
+}
+
+/**
+ * PUT /shop-floor/work-centers/{id}/run-order returns the refreshed queue for
+ * that work center. Accepts the bare row array or a wrapped column/queue object
+ * so the client survives either envelope; `extractDispatchQueue` normalizes it.
+ */
+export type RunOrderUpdateResponse =
+  | DispatchBoardRow[]
+  | { queue: DispatchBoardRow[] }
+  | DispatchBoardColumn;
 
 export interface ActiveJob {
   time_entry_id: number;

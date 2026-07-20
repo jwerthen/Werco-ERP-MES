@@ -48,6 +48,11 @@ from app.models.work_order_blocker import (
     WorkOrderBlockerSeverity,
     WorkOrderBlockerStatus,
 )
+from app.schemas.dispatch import (
+    DispatchBoardColumn,
+    DispatchBoardResponse,
+    RunOrderUpdateRequest,
+)
 from app.schemas.kiosk_station import (
     KioskStationCreate,
     KioskStationInfo,
@@ -69,7 +74,7 @@ from app.schemas.process_sheet import (
 from app.schemas.time_entry import ClockIn, ClockOut, ProductionReductionRequest, TimeEntryResponse
 from app.schemas.wallboard import WallboardResponse
 from app.schemas.work_order_blocker import WorkOrderBlockerCreate
-from app.services import kiosk_station_service, process_sheet_service
+from app.services import dispatch_service, kiosk_station_service, process_sheet_service
 from app.services.audit_service import AuditService
 from app.services.completion_cost_service import (
     apply_completion_cost_rollup,
@@ -1568,26 +1573,23 @@ def get_work_center_queue(
         # never the client) — it can never read another work center's queue.
         raise HTTPException(status_code=403, detail="Kiosk station may only read its own work center queue")
 
-    operations = (
-        db.query(WorkOrderOperation)
-        .options(
+    # Shared with the manager dispatch board (dispatch_service.queued_operations_query)
+    # so the operator's tablet and the manager's board can never disagree on WHAT is
+    # queued or in WHAT order. The sort leads with run_order (NULLS LAST, portably),
+    # then the canonical priority/due_date/sequence fallback, then id -- replacing a
+    # bare ORDER BY scheduled_start that was nullable, tiebreak-less and therefore
+    # dialect-dependent. run_order is ADVISORY: it sorts the queue, it never gates a
+    # start (that stays with operation_action_gates / the predecessor rules).
+    operations = dispatch_service.queued_operations(
+        db,
+        company_id,
+        [work_center_id],
+        load_options=(
             joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part),
             # Eager-load the nest + its reference PDF so _laser_nest_payload below
             # doesn't issue per-row SELECTs (N+1) for each queued laser operation.
             joinedload(WorkOrderOperation.laser_nest).joinedload(LaserNest.document),
-        )
-        .join(WorkOrder)
-        .filter(
-            and_(
-                WorkOrder.company_id == company_id,
-                WorkOrder.is_deleted == False,  # noqa: E712
-                WorkOrder.status.not_in([WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED, WorkOrderStatus.CANCELLED]),
-                WorkOrderOperation.work_center_id == work_center_id,
-                WorkOrderOperation.status.in_([OperationStatus.READY, OperationStatus.IN_PROGRESS]),
-            )
-        )
-        .order_by(WorkOrderOperation.scheduled_start)
-        .all()
+        ),
     )
 
     # Crew roster: open labor TimeEntries for the queued operations, one bucket
@@ -1628,6 +1630,10 @@ def get_work_center_queue(
     # counts as recorded when its live conforming records cover every WO serial.
     step_counts = process_sheet_service.step_counts_for_operations(db, company_id, operations)
 
+    # Gap-free rank for the RUN chip: stored ranks go sparse as jobs complete or
+    # move away, and "RUN 4" on a three-job queue reads as a missing job.
+    run_positions = dispatch_service.display_positions(operations)
+
     queue = []
     for op in operations:
         wo = op.work_order
@@ -1643,6 +1649,11 @@ def get_work_center_queue(
                 "operation_number": op.operation_number,
                 "operation_name": op.name,
                 "work_center_id": op.work_center_id,
+                # Manager-dictated dispatch rank at THIS work center as the shop
+                # should SEE it -- position within the ordered queue (1..N, no
+                # gaps), null when unranked. Advisory: it drives the order above
+                # and the kiosk's RUN chip; it never gates a start.
+                "run_order": run_positions.get(op.id),
                 "status": op.status,
                 "quantity_ordered": target_qty,
                 "work_order_quantity_ordered": wo.quantity_ordered,
@@ -1697,6 +1708,103 @@ def get_work_center_queue(
         # Active scrap reason codes for the crew-station scrap picker (see above).
         "scrap_reason_codes": scrap_reason_codes,
     }
+
+
+# Planner tier: the dispatch board and the run-order rewrite are manager tools,
+# gated like the other scheduling/planning verbs (docs/RBAC_PERMISSIONS.md).
+# Operators consume the resulting order through the kiosk queue read; they never
+# set it.
+_DISPATCH_PLANNER_ROLES = [UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]
+
+
+@router.get("/dispatch-board", response_model=DispatchBoardResponse)
+def get_dispatch_board(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(_DISPATCH_PLANNER_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Manager dispatch board: every active work center with its live queue, in one call.
+
+    One column per ACTIVE work center in the company -- including work centers
+    with an EMPTY queue, so a manager can drag work onto an idle machine. Each
+    column's queue is built by the same shared helper the operator kiosk uses
+    (``dispatch_service.queued_operations_query``), so the board and the tablet
+    can never disagree on what is queued or in what order.
+
+    The ``run_order`` on each row is the manager's dictated rank at that work
+    center (dense 1..N, null = unranked and sorted last). It is ADVISORY: it
+    orders and labels the queue and NEVER gates whether an operation can start.
+    Do not confuse it with ``sequence``, which is routing precedence within one
+    work order and does gate.
+
+    Read-only: no reconcile, no writes, no audit rows.
+    """
+    columns, generated_at = dispatch_service.build_dispatch_board(db, company_id)
+    return DispatchBoardResponse(work_centers=columns, generated_at=generated_at)
+
+
+@router.put("/work-centers/{work_center_id}/run-order", response_model=DispatchBoardColumn)
+def set_work_center_run_order(
+    work_center_id: int,
+    payload: RunOrderUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(_DISPATCH_PLANNER_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Rewrite the manual run order of ONE work center's dispatch column.
+
+    The body carries the FULL desired order (``operation_ids``, rank 1 first).
+    Every id must be a live queued operation at this work center or the whole
+    request is refused with a 400 naming the offending id -- a stale board must
+    not silently half-apply. Operations at the work center that are omitted are
+    set back to unranked (NULL) so the column ends up exactly as submitted. An
+    empty list clears the column. Omitted operations are unranked whatever their
+    status -- a rewrite is authoritative for the WHOLE column, so an off-queue
+    (e.g. ON_HOLD) row cannot come back later carrying a stale rank.
+
+    ADVISORY, NOT A GATE: the rank sorts and labels the queue; start eligibility
+    is untouched (``operation_action_gates`` and the predecessor rules own that).
+    ``run_order`` is per-work-center and cross-work-order; ``sequence`` is
+    routing precedence inside one work order and is a different thing entirely.
+
+    The ranks are written with Core UPDATEs, so a reorder does NOT bump the
+    operations' optimistic-lock ``version``: a display-only change must never
+    409 an operator's concurrent post on a running job.
+
+    Audited as ONE ``log_update`` against the WORK CENTER (old order -> new
+    order) rather than N per-operation rows: it is one manager action. The audit
+    row is written before the terminal commit so it lands atomically with the
+    rank rewrite (invariant 2).
+    """
+    work_center = dispatch_service.resolve_active_work_center_or_http(db, company_id, work_center_id)
+
+    # The StaleDataError handler encloses the SERVICE CALL as well as the commit:
+    # the versioned UPDATEs of this transaction are emitted at the service's
+    # flush, not at commit, so a handler around db.commit() alone would be dead
+    # code and a real race would escape as a 500.
+    try:
+        old_order, new_order, refreshed = dispatch_service.apply_run_order_or_http(
+            db, company_id, work_center, payload.operation_ids
+        )
+
+        audit.log_update(
+            resource_type="work_center",
+            resource_id=work_center.id,
+            resource_identifier=work_center.code,
+            old_values={"run_order": old_order},
+            new_values={"run_order": new_order},
+            description=f"Set dispatch run order for work center {work_center.code} ({len(new_order)} ranked)",
+        )
+        # Project the response BEFORE the commit: commit expires every loaded row,
+        # which would re-issue the whole queue read (and its part joins) lazily.
+        column = dispatch_service.board_column(work_center, refreshed)
+        db.commit()
+    except StaleDataError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=dispatch_service.RUN_ORDER_CONFLICT_DETAIL)
+
+    return column
 
 
 def _dashboard_state_fingerprint(

@@ -24,6 +24,31 @@ export function KioskStepsChip({ item }: { item: Pick<KioskQueueItem, 'steps_tot
   );
 }
 
+/**
+ * "RUN 1" — the manager-dictated run order for this operation (Dispatch Board).
+ *
+ * Advisory only: the server already sorts the queue by it and ANY job can still
+ * be started, so the chip only DISPLAYS the rank — it never reorders client-side.
+ * Renders nothing when the operation is unranked (`run_order` null/absent).
+ * Deliberately oversized/high-contrast: read at arm's length on a shop tablet.
+ */
+export function KioskRunOrderChip({ item }: { item: Pick<KioskQueueItem, 'run_order'> }) {
+  const rank = item.run_order;
+  if (rank === null || rank === undefined) return null;
+  const numeric = Number(rank);
+  if (!Number.isFinite(numeric)) return null;
+  return (
+    <span
+      data-testid="kiosk-run-order-chip"
+      aria-label={`Run order ${numeric}`}
+      className="inline-flex items-center gap-2 rounded border-2 border-fd-amber bg-fd-amber/15 px-3 py-1 font-mono text-xl font-bold uppercase tracking-widest text-fd-amber"
+    >
+      <span className="text-sm tracking-widest">Run</span>
+      <span className="text-2xl leading-none tabular-nums">{numeric}</span>
+    </span>
+  );
+}
+
 interface KioskQueueCardProps {
   item: KioskQueueItem;
   onSelect: (item: KioskQueueItem) => void;
@@ -55,6 +80,7 @@ export default function KioskQueueCard({ item, onSelect, disabled = false }: Kio
     >
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-3">
+          <KioskRunOrderChip item={item} />
           <span className="font-mono text-3xl font-bold tracking-tight text-fd-ink">{item.work_order_number}</span>
           <span
             className={`rounded border px-2 py-1 font-mono text-xs font-semibold uppercase tracking-widest ${

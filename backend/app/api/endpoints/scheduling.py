@@ -19,6 +19,7 @@ from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.schemas.scheduling import LoadChartDataPoint, LoadChartRequest, SchedulingConflict, SchedulingRunRequest
+from app.services import dispatch_service
 from app.services.audit_service import AuditService
 from app.services.operational_event_service import OperationalEventService
 from app.services.scheduling_service import SchedulingService
@@ -36,9 +37,18 @@ class WorkCenterUpdate(BaseModel):
     work_center_id: int
 
 
-def _load_work_order_for_scheduling(db: Session, work_order_id: int) -> WorkOrder:
+def _load_work_order_for_scheduling(db: Session, work_order_id: int, company_id: int) -> WorkOrder:
+    """Load a schedulable work order, TENANT-SCOPED.
+
+    ``company_id`` is not optional: without it these scheduling routes would
+    happily reschedule (and reassign the work center of) another tenant's work
+    order. A foreign id is indistinguishable from a missing one -> 404.
+    """
     work_order = (
-        db.query(WorkOrder).options(joinedload(WorkOrder.operations)).filter(WorkOrder.id == work_order_id).first()
+        db.query(WorkOrder)
+        .options(joinedload(WorkOrder.operations))
+        .filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id)
+        .first()
     )
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")
@@ -55,8 +65,17 @@ def _get_current_operation(work_order: WorkOrder) -> Tuple[List[WorkOrderOperati
     return operations, current_op
 
 
-def _resolve_work_center(db: Session, work_center_id: int) -> WorkCenter:
-    work_center = db.query(WorkCenter).filter(WorkCenter.id == work_center_id, WorkCenter.is_active == True).first()
+def _resolve_work_center(db: Session, work_center_id: int, company_id: int) -> WorkCenter:
+    """Resolve an ACTIVE work center in the caller's company. Foreign -> 404."""
+    work_center = (
+        db.query(WorkCenter)
+        .filter(
+            WorkCenter.id == work_center_id,
+            WorkCenter.company_id == company_id,
+            WorkCenter.is_active == True,  # noqa: E712
+        )
+        .first()
+    )
     if not work_center:
         raise HTTPException(status_code=404, detail="Work center not found or inactive")
     return work_center
@@ -203,6 +222,7 @@ def _build_daily_load_for_work_center(
 
 def _find_earliest_capacity_date(
     db: Session,
+    company_id: int,
     operation: WorkOrderOperation,
     operations: Optional[List[WorkOrderOperation]],
     work_center_id: int,
@@ -211,7 +231,7 @@ def _find_earliest_capacity_date(
     forward_schedule: bool = False,
 ) -> date:
     start = max(start_date or date.today(), date.today())
-    wc = _resolve_work_center(db, work_center_id)
+    wc = _resolve_work_center(db, work_center_id, company_id)
     daily_capacity = max(0.1, float(wc.capacity_hours_per_day or 8.0))
 
     if forward_schedule and operations:
@@ -544,11 +564,17 @@ def schedule_work_order(
     Schedule an entire work order by scheduling its first operation.
     The work order will automatically flow through subsequent operations as each completes.
     """
-    work_order = _load_work_order_for_scheduling(db, work_order_id)
+    work_order = _load_work_order_for_scheduling(db, work_order_id, company_id)
     operations, current_op = _get_current_operation(work_order)
 
     if schedule.work_center_id:
-        _resolve_work_center(db, schedule.work_center_id)
+        _resolve_work_center(db, schedule.work_center_id, company_id)
+        # A reschedule that also moves the operation is still a move: the manual
+        # dispatch rank belongs to the column it was dictated in, so it is dropped
+        # here exactly as on the dedicated move endpoints. Without this the op
+        # would arrive at the destination already outranking work the manager
+        # actually ordered there.
+        dispatch_service.clear_run_order_on_move(current_op, schedule.work_center_id)
         current_op.work_center_id = schedule.work_center_id
 
     schedule_result = _apply_work_order_schedule(
@@ -609,18 +635,23 @@ def schedule_work_order_earliest(
     company_id: int = Depends(get_current_company_id),
 ):
     """Schedule a work order at the earliest available date with capacity."""
-    work_order = _load_work_order_for_scheduling(db, work_order_id)
+    work_order = _load_work_order_for_scheduling(db, work_order_id, company_id)
     operations, current_op = _get_current_operation(work_order)
 
     target_work_center_id = request.work_center_id or current_op.work_center_id
     if not target_work_center_id:
         raise HTTPException(status_code=400, detail="Current operation has no work center")
 
-    _resolve_work_center(db, target_work_center_id)
+    _resolve_work_center(db, target_work_center_id, company_id)
+    # Same rule as the explicit reschedule above: if this call actually moves the
+    # operation to another work center, its manual dispatch rank is dropped (a
+    # no-op re-send of the current work center leaves the rank alone).
+    dispatch_service.clear_run_order_on_move(current_op, target_work_center_id)
     current_op.work_center_id = target_work_center_id
 
     earliest_start = _find_earliest_capacity_date(
         db=db,
+        company_id=company_id,
         operation=current_op,
         operations=operations,
         work_center_id=target_work_center_id,
@@ -801,9 +832,15 @@ def update_operation_work_center(
     old_values = {
         "work_center_id": operation.work_center_id,
         "operation_group": operation.operation_group,
+        "run_order": operation.run_order,
     }
 
     old_wc_id = operation.work_center_id
+    # The manual dispatch rank is scoped to the work center it was ranked IN, so it
+    # is meaningless at the destination: the shared helper clears it and the op lands
+    # unranked at the tail of the new column. Called BEFORE the reassignment (it
+    # compares against the current work center) and carried in the audit diff below.
+    dispatch_service.clear_run_order_on_move(operation, update.work_center_id)
     operation.work_center_id = update.work_center_id
     operation.operation_group = get_work_center_group(work_center)
 
@@ -816,6 +853,7 @@ def update_operation_work_center(
         new_values={
             "work_center_id": operation.work_center_id,
             "operation_group": operation.operation_group,
+            "run_order": operation.run_order,
         },
         description=f"Moved operation to work center {work_center.code}",
     )
@@ -1197,7 +1235,7 @@ def unschedule_work_order(
     company_id: int = Depends(get_current_company_id),
 ):
     """Clear the schedule for a work order (reset all non-complete operations)."""
-    work_order = _load_work_order_for_scheduling(db, work_order_id)
+    work_order = _load_work_order_for_scheduling(db, work_order_id, company_id)
     operations = sorted(work_order.operations, key=lambda op: op.sequence)
 
     cleared_count = 0
@@ -1245,7 +1283,7 @@ def get_capacity_for_date(
     company_id: int = Depends(get_current_company_id),
 ):
     """Get capacity details for a specific work center on a specific date."""
-    wc = _resolve_work_center(db, request.work_center_id)
+    wc = _resolve_work_center(db, request.work_center_id, company_id)
     daily_capacity = max(0.1, float(wc.capacity_hours_per_day or 8.0))
 
     scheduled_ops = (
@@ -1267,7 +1305,7 @@ def get_capacity_for_date(
     projected_total_hours = 0.0
     projected_jobs_on_date = []
     if request.work_order_id:
-        work_order = _load_work_order_for_scheduling(db, request.work_order_id)
+        work_order = _load_work_order_for_scheduling(db, request.work_order_id, company_id)
         if work_order.company_id != company_id:
             raise HTTPException(status_code=404, detail="Work order not found")
         operations, current_op = _get_current_operation(work_order)
@@ -1352,7 +1390,7 @@ def bulk_schedule_earliest(
 
     for wo_id in request.work_order_ids:
         try:
-            work_order = _load_work_order_for_scheduling(db, wo_id)
+            work_order = _load_work_order_for_scheduling(db, wo_id, company_id)
             operations, current_op = _get_current_operation(work_order)
 
             target_wc_id = current_op.work_center_id
@@ -1362,6 +1400,7 @@ def bulk_schedule_earliest(
 
             earliest_start = _find_earliest_capacity_date(
                 db=db,
+                company_id=company_id,
                 operation=current_op,
                 operations=operations,
                 work_center_id=target_wc_id,

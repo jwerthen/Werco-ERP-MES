@@ -87,8 +87,10 @@ def test_single_head_and_revision_chain():
     scripts = _script_directory()
     heads = scripts.get_heads()
     assert len(heads) == 1, f"multiple alembic heads: {heads}"
-    assert heads[0] == REVISION_067
-
+    # NOTE: deliberately does NOT assert heads[0] == REVISION_067 -- 067 is no
+    # longer the head once a later revision lands (068 added run_order). What is
+    # invariant is that there is exactly ONE head and that 067 sits on 066
+    # (precedent: the 063/064 migration tests assert only these two things).
     revision = scripts.get_revision(REVISION_067)
     assert revision.down_revision == DOWN_REVISION
 

@@ -32,6 +32,7 @@ export const routeTitles: Record<string, string> = {
   '/shop-floor/operations': 'Operations',
   '/downtime': 'Downtime',
   '/scheduling': 'Scheduling',
+  '/dispatch': 'Dispatch Board',
   '/work-orders': 'Work Orders',
   '/work-orders/new': 'New Work Order',
   '/maintenance': 'Maintenance',

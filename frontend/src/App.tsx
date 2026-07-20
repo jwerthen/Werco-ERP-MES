@@ -48,6 +48,7 @@ const Quality = lazyWithRetry(() => import('./pages/Quality'));
 const CustomFields = lazyWithRetry(() => import('./pages/CustomFields'));
 const Purchasing = lazyWithRetry(() => import('./pages/Purchasing'));
 const Scheduling = lazyWithRetry(() => import('./pages/Scheduling'));
+const DispatchBoard = lazyWithRetry(() => import('./pages/DispatchBoard'));
 const Documents = lazyWithRetry(() => import('./pages/Documents'));
 const Reports = lazyWithRetry(() => import('./pages/Reports'));
 const Quotes = lazyWithRetry(() => import('./pages/Quotes'));
@@ -153,6 +154,10 @@ const routeAccessRequirements: RouteAccessRequirement[] = [
   { prefix: '/rfq-packages', permission: 'purchasing:create' },
   { prefix: '/customers', permission: 'purchasing:view' },
   { prefix: '/scheduling', permission: 'work_orders:view' },
+  // Dispatch Board is a dispatching WRITE tool (it sets the run order operators
+  // see), so it is gated on work_orders:edit — admin / manager / supervisor —
+  // rather than the read-only work_orders:view that Scheduling uses.
+  { prefix: '/dispatch', permission: 'work_orders:edit' },
   { prefix: '/documents', permission: 'work_orders:view' },
   { prefix: '/downtime', permission: 'work_orders:view' },
   { prefix: '/maintenance', permission: 'work_orders:view' },
@@ -546,6 +551,15 @@ function AppRoutes() {
         <PrivateRoute>
           <Layout>
             <LazyRoute><Scheduling /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
+
+      {/* Dispatch Board — manager-controlled run order (write tool) */}
+      <Route path="/dispatch" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><DispatchBoard /></LazyRoute>
           </Layout>
         </PrivateRoute>
       } />

@@ -59,6 +59,7 @@ import {
   BellAlertIcon,
   UserPlusIcon,
   UserGroupIcon,
+  QueueListIcon,
 } from '@heroicons/react/24/outline';
 
 interface LayoutProps {
@@ -107,6 +108,9 @@ const navSections: NavSection[] = [
         ],
       },
       { name: 'Scheduling', href: '/scheduling', icon: CalendarDaysIcon },
+      // Route-gated on work_orders:edit in App.tsx (admin/manager/supervisor);
+      // operator/kiosk navs are already streamlined below.
+      { name: 'Dispatch Board', href: '/dispatch', icon: QueueListIcon },
       { name: 'Work Orders', href: '/work-orders', icon: ClipboardDocumentListIcon },
       { name: 'Maintenance', href: '/maintenance', icon: WrenchIcon2 },
       { name: 'Tool Management', href: '/tool-management', icon: WrenchScrewdriverIcon },
