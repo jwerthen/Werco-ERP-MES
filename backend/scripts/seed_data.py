@@ -12,6 +12,7 @@ from sqlalchemy import text
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from app.core.config import settings
 from app.core.security import get_password_hash
 from app.db.database import Base, SessionLocal, engine
 from app.models.company import Company
@@ -135,6 +136,23 @@ def _get_or_create_work_order(db, company_id: int, work_order_number: str, data:
 
 
 def seed_database():
+    # Demo seed data uses well-known throwaway passwords (admin123 / password123),
+    # so refuse to run against a production database — planting weak credentials in a
+    # CUI environment is a CMMC/AS9100D exposure. Prod tenants are bootstrapped via the
+    # company-onboarding flow (which enforces the password-strength policy). Set
+    # SEED_ALLOW_PRODUCTION=1 only to override deliberately (e.g. a throwaway sandbox).
+    # Read the production flag from `settings` (not os.getenv) so this matches the app's
+    # own signal, which resolves from the .env file too — an os.getenv-only check would
+    # miss a .env-declared ENVIRONMENT=production and seed weak creds into the prod DB.
+    allow_prod = os.getenv("SEED_ALLOW_PRODUCTION", "").strip().lower() in ("1", "true", "yes")
+    if settings.ENVIRONMENT == "production" and not allow_prod:
+        print(
+            "Refusing to seed demo data: ENVIRONMENT=production. Demo accounts use "
+            "well-known passwords and must not be created in production. Bootstrap prod "
+            "through the company-onboarding flow, or set SEED_ALLOW_PRODUCTION=1 to override."
+        )
+        sys.exit(1)
+
     Base.metadata.create_all(bind=engine)
 
     db = SessionLocal()
