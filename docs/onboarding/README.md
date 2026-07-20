@@ -32,6 +32,35 @@ Find your job in the left column and read the guides listed next to it.
 | 05 | Administrator & IT | Creating users and roles, badge provisioning, admin settings, audit log, setup and import tools | [Markdown](./05-administrator-it.md) | [PDF](./pdf/05-administrator-it.pdf) |
 | — | Glossary | Plain-language definitions of the terms and acronyms used across the system | [Markdown](./glossary.md) | [PDF](./pdf/glossary.pdf) |
 
+## Quick-reference pack (print these)
+
+Where the guides above *teach* the system, the [`quick-reference/`](./quick-reference/) pack is the set of **one-page printable handouts** for workstations, kiosks, and the lobby — role cards, posters, cheat sheets, offline paper-fallback forms, and the cutover-day runsheet. Content was verified against the runbooks and code on 2026-07-12 (Rev A); regenerate after system changes with:
+
+```bash
+backend/.venv311/bin/python docs/onboarding/generate_onboarding_pdfs.py          # handouts 01-16
+backend/.venv311/bin/python docs/onboarding/generate_admin_master_checklist.py   # 00 master checklist
+```
+
+| # | Handout | Post it at / give it to |
+|---|---|---|
+| 00 | [Admin go-live master checklist](./quick-reference/00-ADMIN-MASTER-CHECKLIST.pdf) | The admin — the ordered end-to-end go-live runsheet (setup → import → verify → cutover) |
+| 01 | [Operator — single kiosk](./quick-reference/01-role-card-operator-kiosk.pdf) | Every single-operator kiosk |
+| 02 | [Operator — crew station](./quick-reference/02-role-card-operator-crew-station.pdf) | Every crew station |
+| 03 | [Production planner](./quick-reference/03-role-card-production-planner.pdf) | Planners / supervisors |
+| 04 | [Purchasing](./quick-reference/04-role-card-purchasing.pdf) | Buyers |
+| 05 | [Receiving](./quick-reference/05-role-card-receiving.pdf) | Receiving desk |
+| 06 | [Shipping](./quick-reference/06-role-card-shipping.pdf) | Shipping desk |
+| 07 | [Quality](./quick-reference/07-role-card-quality.pdf) | Quality staff |
+| 08 | [Estimating & sales](./quick-reference/08-role-card-estimating-sales.pdf) | Estimators |
+| 09 | [Front desk](./quick-reference/09-role-card-front-desk.pdf) | Reception |
+| 10 | [Poster: Five things the system will refuse](./quick-reference/10-poster-five-refusals.pdf) | **Every kiosk** (tours don't run in kiosk mode) |
+| 11 | [Cheat sheet: known sharp edges](./quick-reference/11-cheatsheet-known-sharp-edges.pdf) | Office leads & floor champions |
+| 12 | [Logging in & staying in](./quick-reference/12-card-login-and-sessions.pdf) | Everyone, day 1 |
+| 13 | [Getting help / escalation](./quick-reference/13-card-support-escalation.pdf) | Everyone, day 1 |
+| 14 | [Paper fallback: production recording](./quick-reference/14-form-production-fallback.pdf) | Every kiosk (offline contingency) |
+| 15 | [Paper fallback: visitor log](./quick-reference/15-form-visitor-fallback.pdf) | Lobby (offline contingency) |
+| 16 | [Cutover-day checklist](./quick-reference/16-checklist-cutover-day.pdf) | The admin running the migration |
+
 ## How training works
 
 A good path through your first week:

@@ -163,7 +163,7 @@ For each type:
 3. Choose your file and click **Validate file (dry run)**. Nothing is written yet — you get a preview of how many rows **would** be created, plus a per-row error table.
 4. Fix any errors and validate again until clean, then click **Commit import**. Rows with errors are skipped and reported; good rows are created.
 
-> Tip: For employees, operators can be imported without an email or password (they'll use badge login). Non-operators need a password in the row, or set a **Default Password** for the whole import.
+> Tip: For employees, operators can be imported without an email or password (they'll use badge login) — the system auto-generates a strong password for them. Non-operators need a password in the row, or set a **Default Password** for the whole import. Any password you supply must meet the same strength rules as the Add User form (12+ characters, upper and lowercase, a number, a special character, no common words) — rows with a weak password are rejected in the dry-run/commit error table, so fix them before committing.
 
 > Moving the whole shop off Excel for go-live? Follow the step-by-step load order, rehearsal plan, and cutover checklist in the [Excel migration runbook](../EXCEL_MIGRATION_RUNBOOK.md).
 
