@@ -2,7 +2,7 @@ import React from 'react';
 import { FireIcon, PaperClipIcon, UserIcon } from '@heroicons/react/24/outline';
 import { formatCentralDate, isDateBeforeTodayInCentral, isDateTodayInCentral } from '../../utils/centralTime';
 import { KioskCrewQueueItem, UNKNOWN_OPERATOR_LABEL, formatCrewTally, formatElapsed } from './kioskConstants';
-import { KioskStepsChip } from './KioskQueueCard';
+import { KioskRunOrderChip, KioskStepsChip } from './KioskQueueCard';
 
 interface KioskCrewJobCardProps {
   item: KioskCrewQueueItem;
@@ -41,6 +41,7 @@ export default function KioskCrewJobCard({ item, nowMs, onSelect, disabled = fal
     >
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-3">
+          <KioskRunOrderChip item={item} />
           <span className="font-mono text-3xl font-bold tracking-tight text-fd-ink">{item.work_order_number}</span>
           <span
             className={`rounded border px-2 py-1 font-mono text-xs font-semibold uppercase tracking-widest ${

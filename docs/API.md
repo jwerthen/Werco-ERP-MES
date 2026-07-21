@@ -111,9 +111,13 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 
 > **Path fence.** A `scope="kiosk"` operator token is honored only on `/api/v1/shop-floor/*` and
 > `POST /api/v1/auth/employee-logout`; `get_current_user` rejects it with **403** everywhere else
-> (the token is valid — it just cannot reach the resource). Two shop-floor carve-outs are also
+> (the token is valid — it just cannot reach the resource). Three shop-floor carve-outs are also
 > **denied** to kiosk-scoped tokens regardless of role: `/shop-floor/kiosk-stations/*` (station
-> lifecycle admin) and `/shop-floor/time-entries/{id}/approve|unapprove` (G5-A labor approval).
+> lifecycle admin), `/shop-floor/time-entries/{id}/approve|unapprove` (G5-A labor approval), and the
+> manager dispatch tools — `GET /shop-floor/dispatch-board` plus
+> `PUT /shop-floor/work-centers/{id}/run-order` (a shared crew terminal must not read the whole
+> shop's board or dictate what every machine runs next). Operators keep **reading** their `RUN`
+> chips: the work-center-queue endpoint is a different path and stays allowed.
 > Tokens without a `scope` claim are
 > unaffected. On the allowed paths the operator IS `current_user`, so audit attribution, tenant
 > isolation, and RBAC apply unchanged. Known residual: the WebSocket auth path
@@ -348,15 +352,30 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 >   → **404** (`"Work center not found"`).
 >
 > On success the operation's `operation_group` is re-derived from the new work center (the same
-> derivation used at creation) so queue/grouping views stay consistent, both fields ride the
-> endpoint's tamper-evident `audit_log` row (old → new), and both work centers' persisted
-> availability rates are refreshed. An explicit `null` is ignored (`work_center_id` is non-nullable
-> on the model), and re-sending the current work center is a no-op. In the app this is the per-nest
-> work-center control on the WO detail page's Laser Nest Package card.
+> derivation used at creation) so queue/grouping views stay consistent, its **`run_order` is cleared
+> to `null`** (the manual dispatch rank is scoped to the work center it was ranked in, so the
+> operation lands unranked at the tail of the new column — see "Dispatch run order" under Shop
+> Floor), all three fields ride the endpoint's tamper-evident `audit_log` row (old → new), and both
+> work centers' persisted availability rates are refreshed. An explicit `null` is ignored
+> (`work_center_id` is non-nullable on the model), and re-sending the current work center is a
+> no-op. In the app this is the per-nest work-center control on the WO detail page's Laser Nest
+> Package card, and the Dispatch Board's per-card machine select / cross-column drag.
 >
 > The Scheduling page's `PUT /scheduling/operations/{id}/work-center` (drag / bulk move) enforces
 > the **same contract** — tenant-scoped lookups, the two 409 refusals, `operation_group` refresh,
-> and an audited old → new diff — so the two reassignment paths cannot disagree.
+> the `run_order` clear, and an audited old → new diff — so the two reassignment paths cannot
+> disagree.
+>
+> **Every reassignment path clears the rank, including the reschedule routes.**
+> `PUT /scheduling/work-orders/{id}/schedule` and `POST /scheduling/work-orders/{id}/schedule-earliest`
+> both accept a `work_center_id` that reassigns the work order's current operation — that is a move,
+> and it drops the rank too. (Re-sending the operation's current work center is a no-op and leaves
+> the rank alone.) All four call sites share one helper, `dispatch_service.clear_run_order_on_move`,
+> so a rank can never be carried into a column where it would outrank work the manager actually
+> ordered there.
+>
+> **Completion deliberately does *not* clear `run_order`.** A completed operation is already
+> filtered off every queue, and the historical rank is evidence of what the shop was told to run.
 >
 > **Laser nest WOs refuse free-form operations.** `POST /work-orders/{id}/operations` returns
 > **400** on a `laser_cutting` work order — dispatch pools are managed exclusively by the nest
@@ -954,7 +973,9 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 | POST | `/shop-floor/operations/{id}/inspection` | Record operation inspection complete (sets `inspection_complete`) | Admin / Manager / Supervisor / Quality |
 | POST | `/shop-floor/time-entries/{id}/approve` | Approve a TimeEntry (sets `approved` / `approved_by`) | Admin / Manager / Supervisor / Quality |
 | POST | `/shop-floor/time-entries/{id}/unapprove` | Clear approval on a TimeEntry | Admin / Manager / Supervisor / Quality |
-| GET | `/shop-floor/work-center-queue/{id}` | Get work center queue, each row carrying the live crew `roster` (see note below) | User **or** kiosk station token |
+| GET | `/shop-floor/work-center-queue/{id}` | Get work center queue, each row carrying the live crew `roster` and the manager-set `run_order` (see notes below) | User **or** kiosk station token |
+| GET | `/shop-floor/dispatch-board` | Manager dispatch board — every **active** work center with its live queue, including work centers with an **empty** queue (see note below) | Admin / Manager / Supervisor |
+| PUT | `/shop-floor/work-centers/{id}/run-order` | Rewrite one work center's manual run order (dense 1..N; omitted operations become unranked) → that work center's refreshed column (see note below) | Admin / Manager / Supervisor |
 | GET | `/shop-floor/wallboard` | Read-only TV wallboard snapshot (`?dept=` narrows to one work-center type, case-insensitive — scopes the work centers, the job wall (by each WO's **current** operation's work center), **and** the late/blocked lists + totals; ship/today/quality stay plant-wide) | User **or** display token |
 | POST | `/shop-floor/kiosk-stations/station-login` | Unlock a crew tablet with the shared station PIN. Body `{"station_id", "pin"}` (PIN 4–8 digits) → `{"access_token", "token_type", "expires_in", "station": {"id", "label", "work_center_id", "work_center_code", "work_center_name"}}` (24 h scoped `type="kiosk"` JWT). Bad/revoked station or wrong PIN → **401** (indistinguishable; failed attempt audited) | **Public** (PIN-gated, 5/minute per IP) |
 | POST | `/shop-floor/kiosk-stations` | Create a PIN-protected crew-station kiosk bound to a work center. Body `{"label", "work_center_id", "pin"}` → **201** `KioskStationResponse` (PIN hashed, never echoed; a work center outside the active company → **404**) | Admin / Manager |
@@ -1028,6 +1049,80 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > best-effort.
 > Token issuance/revocation: see Authentication → Display tokens. Operating a TV:
 > see [docs/WALLBOARD.md](WALLBOARD.md).
+
+> **Dispatch run order (`run_order`) — advisory, never a gate.** `WorkOrderOperation.run_order`
+> (nullable int, indexed; migration `068`) is a manager-dictated **dense 1..N rank within the
+> operation's current work center**. `null` = unranked. It orders and labels the queue and it
+> **never** gates a start — operators may start any queued job, the same posture as the laser
+> dispatch pool. It is **not** `sequence`: `sequence` is routing-step precedence *within one work
+> order* and does drive predecessor gating; `run_order` is cross-work-order, scoped to one work
+> center, and gates nothing.
+>
+> **Queue ordering (`GET /shop-floor/work-center-queue/{id}`, kiosk *and* crew station).** The queue
+> previously ordered by `scheduled_start` alone — nullable, no tiebreaker, and usually `null`, so
+> the operator's order was effectively arbitrary *and* dialect-dependent (PostgreSQL sorts nulls
+> last, SQLite first). It now orders by:
+> 1. `run_order IS NULL` ascending — ranked work first, unranked last (an explicit boolean key, so
+>    PostgreSQL and SQLite agree without a `NULLS LAST` clause);
+> 2. `run_order` ascending;
+> 3. `WorkOrder.priority`, then `WorkOrder.due_date`, then `WorkOrderOperation.sequence` — the
+>    repo's canonical fallback for unranked work;
+> 4. `WorkOrderOperation.id` as a final deterministic tiebreak.
+>
+> Each queue row now carries **`run_order`** (int or `null`) alongside the existing keys; the kiosk
+> renders **server order** and only *displays* the rank (`RUN n` chip) — it never re-sorts
+> client-side. The filter set is unchanged (operation `READY`/`IN_PROGRESS`, parent WO not
+> `COMPLETE`/`CLOSED`/`CANCELLED` and not soft-deleted) and is now shared with the dispatch board
+> below, so the manager's board and the operator's tablet can never disagree. See
+> [docs/KIOSK.md](KIOSK.md).
+>
+> **`GET /shop-floor/dispatch-board`** (Admin / Manager / Supervisor, tenant-scoped) — the whole
+> board in one read. Response:
+> `{"work_centers": [{"id", "code", "name", "work_center_type", "current_status", "queue": [row…]}],
+> "generated_at"}`, one column per **active** work center in code order, **including work centers
+> whose queue is empty** so a manager can dispatch to an idle machine. Each row:
+> `{operation_id, run_order, version, work_order_id, work_order_number, operation_number,
+> operation_name, part_number, part_name, status, priority, due_date, quantity_ordered,
+> quantity_complete, setup_time_hours, run_time_hours}` — `version` is the operation's
+> optimistic-lock counter, which the cross-machine move (`PUT /work-orders/operations/{id}`)
+> requires. Rows arrive in the queue order above. **Zero-write read**: no reconcile, no audit rows,
+> no events.
+>
+> **`PUT /shop-floor/work-centers/{id}/run-order`** (Admin / Manager / Supervisor, tenant-scoped) —
+> body `{"operation_ids": [11, 9, 14]}`, the **full** desired order for that column, rank 1 first.
+> The listed ids get dense ranks `1..N` in that order; every **other** operation at the work center
+> is set back to `null` (it falls to the unranked tail), so the column ends up exactly as submitted
+> with no leftover drift. An empty list is valid and clears the whole column. Returns that
+> work center's **refreshed column** (the `DispatchBoardColumn` shape above). Refusals — the request
+> is all-or-nothing, a stale board never half-applies:
+>
+> | Status | Cause |
+> |--------|-------|
+> | **404** | Work center is inactive, or belongs to another company (indistinguishable from missing, by design) |
+> | **400** | An id that is not a **live queued operation at this work center** — names the offending id and says to refresh the board |
+> | **400** | A duplicate id in `operation_ids` — names the offending id |
+> | **422** | More than **500** ids (`operation_ids` `max_length`; the service re-checks the same bound) |
+> | **409** | Stale-write conflict — the queue changed mid-reorder; refresh and retry |
+>
+> **A rewrite is authoritative for the whole column, not just its live rows.** The submitted ids
+> must be *live queued* operations (400 otherwise — a manager can only rank what is on the board),
+> but the un-ranking half reaches **every** operation at that work center whatever its status. An
+> `ON_HOLD` row that kept a stale rank would otherwise re-enter the column on resume ahead of the
+> jobs the manager ranked after it. A held row therefore comes back **unranked, at the tail**, if
+> the column was rewritten while it was off the queue — a hold on its own still preserves the rank.
+>
+> **A reorder does not bump `version`.** The ranks are written with Core `UPDATE`s that bypass the
+> ORM's optimistic-lock counter, because a rank is display metadata: bumping `version` would 409 an
+> operator's concurrent production post or clock-out on a job that is running right now, and would
+> stale every card `version` the board just handed the client. The **409** above stays a real
+> handler (it wraps the rank write *and* the commit, not just the commit) — a stale write is
+> refused with "the queue changed while you were reordering", never a 500.
+>
+> Audited as **one** `AuditService.log_update` against the **`work_center`** resource
+> (`old_values: {"run_order": [old ids…]}` → `new_values: {"run_order": [new ids…]}` — the ids that
+> carried a rank in the column before, in rank order, including any off-queue ones the rewrite
+> clears), not N per-operation rows: one manager action is one audit row. The audit row is written
+> before the terminal commit so it lands atomically with the rank rewrite (invariant 2).
 
 > **Crew roster on `GET /shop-floor/work-center-queue/{id}` (crew-station kiosk).** The queue read
 > accepts **either** a normal user access token **or** a crew-station kiosk token (the dedicated

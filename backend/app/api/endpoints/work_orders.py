@@ -56,7 +56,7 @@ from app.schemas.work_order import (
     WorkOrderSummary,
     WorkOrderUpdate,
 )
-from app.services import process_sheet_service
+from app.services import dispatch_service, process_sheet_service
 from app.services.audit_service import AuditService
 from app.services.completion_cost_service import (
     apply_completion_cost_rollup,
@@ -3639,6 +3639,13 @@ def update_operation(
         if not new_work_center:
             raise HTTPException(status_code=404, detail="Work center not found")
         old_work_center_id = operation.work_center_id
+        # The manual dispatch rank is scoped to the work center it was ranked IN,
+        # so it is meaningless at the destination: the shared helper clears it and
+        # the op lands unranked at the tail of the new column (a manager re-ranks
+        # it there). Called BEFORE the reassignment -- it compares against the
+        # operation's current work center. run_order is in the full-row audit
+        # snapshot above, so the clear shows up in this endpoint's old->new diff.
+        dispatch_service.clear_run_order_on_move(operation, new_work_center.id)
         operation.work_center_id = new_work_center.id
         # Keep the derived grouping in step with the new work center (mirrors how
         # ops are grouped at creation) so queue/grouping views stay consistent.

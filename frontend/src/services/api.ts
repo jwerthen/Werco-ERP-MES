@@ -24,6 +24,8 @@ import {
   LaserNestPackagePreview,
   LaserNestImportRow,
   LaserNestPackageImportResult,
+  DispatchBoardResponse,
+  RunOrderUpdateResponse,
 } from '../types';
 import { ScanResolveRequest, ScanResolveResult } from '../types/scan';
 import {
@@ -1107,6 +1109,32 @@ class ApiService {
 
   async getWorkCenterQueue(workCenterId: number) {
     const response = await this.api.get(`/shop-floor/work-center-queue/${workCenterId}`);
+    return response.data;
+  }
+
+  // --- Dispatch Board (manager-controlled run order) ------------------------
+  // The board is one column per work center; rows arrive server-sorted (ranked
+  // work first by run_order, then unranked by priority -> due date -> sequence).
+
+  async getDispatchBoard(): Promise<DispatchBoardResponse> {
+    const response = await this.api.get<DispatchBoardResponse>('/shop-floor/dispatch-board');
+    return response.data;
+  }
+
+  /**
+   * Assign run-order ranks 1..N at one work center, in the order given.
+   * Operations omitted stay unranked (`run_order: null`) and sort after.
+   * Returns that work center's refreshed queue.
+   */
+  async setWorkCenterRunOrder(workCenterId: number, operationIds: number[]): Promise<RunOrderUpdateResponse> {
+    const response = await this.api.put<RunOrderUpdateResponse>(
+      `/shop-floor/work-centers/${workCenterId}/run-order`,
+      { operation_ids: operationIds }
+    );
+    // The board reads through the same shop-floor surface the kiosks do; drop the
+    // cached queue/dashboard bodies so the next fetch revalidates instead of 304ing.
+    this.invalidateCache('/shop-floor/dispatch-board');
+    this.invalidateDashboardCache();
     return response.data;
   }
 

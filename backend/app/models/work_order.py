@@ -188,6 +188,18 @@ class WorkOrderOperation(Base, TenantMixin):
     actual_start = Column(DateTime, nullable=True)
     actual_end = Column(DateTime, nullable=True)
 
+    # Manual dispatch rank within this operation's CURRENT work center, set by a
+    # manager on the dispatch board: dense 1..N per work center, NULL = unranked
+    # (the kiosk queue sorts unranked work AFTER all ranked work). NOT the same
+    # thing as ``sequence``: ``sequence`` is routing-step precedence WITHIN one
+    # work order and drives predecessor gating, while ``run_order`` is
+    # cross-work-order, ADVISORY only, and never gates anything. Deliberately
+    # NOT unique-constrained -- ranks are rewritten wholesale for a work center
+    # in a single transaction and transient duplicates during that rewrite are
+    # acceptable; a partial unique index would fight the rewrite. Indexed
+    # because the kiosk/dispatch queue orders by it (migration 068).
+    run_order = Column(Integer, nullable=True, index=True)
+
     # Quality requirements
     requires_inspection = Column(Boolean, default=False)
     inspection_type = Column(String(100))  # first_article, in_process, final

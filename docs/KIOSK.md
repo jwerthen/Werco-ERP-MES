@@ -134,11 +134,30 @@ predecessor not complete, on-hold, optimistic-lock 409s, qualification warnings)
 surfaced **verbatim** in the error toast and never suppressed or retried around. There is
 no resume-from-hold, inspection, or labor-approval verb on the kiosk.
 
+**Queue order and the RUN chip.** Both kiosk modes list the work center's queue in the order the
+server returns it — the kiosk never re-sorts client-side. That order is:
+
+1. jobs a manager ranked on the **Dispatch Board** (`/dispatch`), in rank order — these carry a
+   `run_order` and render a **`RUN n`** chip (`KioskRunOrderChip`) on the queue card and the crew
+   job card;
+2. then everything unranked, by work-order priority, then due date, then operation sequence.
+
+Unranked jobs therefore always sort **after** every ranked job, and carry no chip. The rank is
+**advisory**: it tells the operator what the shop wants run next, but **any** queued job can still
+be started. The rank itself never gates a clock-in; the existing backend gating (sequence /
+predecessor, on-hold, locks) is unchanged and stays the only thing that refuses one, still surfaced
+verbatim as described above. Moving an operation to a different machine clears its rank; it lands
+unranked at the tail of the new work center's queue until a manager re-ranks it there. Full
+ordering rule and the endpoint contract: `docs/API.md` → Shop Floor → "Dispatch run order" /
+"Queue ordering".
+
 **Laser nests at clock-in.** A laser-cutting WO is a **dispatch pool**: every nest operation is
 created READY, so all of a package's nests appear on their work center's queue at once, and
 operators may run them in **any order** — laser WOs are exempt from the sequence/predecessor gate,
 even when a package's nests are spread across different lasers (see `docs/API.md` → Laser Nests →
-"Laser WOs are dispatch pools"). For laser-cutting operations the kiosk surfaces the active nest at
+"Laser WOs are dispatch pools"). A manager can still rank nests on the Dispatch Board; as
+everywhere else, that only orders the queue and shows a `RUN n` chip — it never gates which nest an
+operator picks up. For laser-cutting operations the kiosk surfaces the active nest at
 all three touch points so the operator can confirm the right sheet before cutting: the queue card
 (`KioskQueueCard` — CNC#/nest name, `completed`/`planned` runs, material•thickness, and a "PDF" chip
 when a reference PDF is attached), the clock-in confirm card, and the active-job banner (both
@@ -401,11 +420,14 @@ every station-login failure write tamper-evident audit rows.
   token** — a shared terminal never holds a long-lived personal credential. The token lives in
   memory only (never persisted) and is **path-fenced in `get_current_user`** to
   `/api/v1/shop-floor/*` plus `/api/v1/auth/employee-logout`; any other path returns **403**.
-  Two carve-outs inside the shop-floor prefix are **denied** to kiosk-scoped tokens even for
+  Three carve-outs inside the shop-floor prefix are **denied** to kiosk-scoped tokens even for
   MANAGER/ADMIN badges: the station lifecycle endpoints (`/shop-floor/kiosk-stations/*` — a
-  scanned manager badge must not be able to reset a station PIN from the shared terminal) and
-  the labor-approval pair (`/shop-floor/time-entries/{id}/approve|unapprove` — G5-A approval is
-  a desktop supervisor workflow).
+  scanned manager badge must not be able to reset a station PIN from the shared terminal), the
+  labor-approval pair (`/shop-floor/time-entries/{id}/approve|unapprove` — G5-A approval is
+  a desktop supervisor workflow), and the manager dispatch tools
+  (`GET /shop-floor/dispatch-board` and `PUT /shop-floor/work-centers/{id}/run-order` — reading
+  the whole shop's board, or dictating what every machine runs next, is a desk workflow). The
+  crew station keeps its own work-center queue read, so operators still see the `RUN n` chips.
   Badge lookup is fenced to the station's company; unknown / inactive / locked / foreign-tenant
   badges are a uniform **401 "Invalid badge"**. Mints and failures are audited
   (`KIOSK_BADGE_TOKEN_ISSUED` / `KIOSK_BADGE_TOKEN_FAILED`).

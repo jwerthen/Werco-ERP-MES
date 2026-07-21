@@ -1,0 +1,617 @@
+/**
+ * Dispatch Board — manager-controlled run order.
+ *
+ * Covers:
+ *  - the board renders one column per work center from the mocked response,
+ *    with ranks, an empty (idle) column, and server order preserved;
+ *  - the keyboard path (Move up / Move down buttons) reorders optimistically and
+ *    PUTs the full new `operation_ids` order for that work center, announcing the
+ *    resulting position on the aria-live status line;
+ *  - a rejected reorder rolls the board back and surfaces the server's `detail`;
+ *  - the machine select performs a cross-machine move via `updateOperation` with
+ *    `work_center_id` + `version`, and a 409 is surfaced VERBATIM with the board
+ *    left unchanged (non-optimistic);
+ *  - an in-progress card is held in place: its controls are disabled and it isn't
+ *    draggable, and the tooltips claim only what is actually enforced;
+ *  - the HTML5 drag path drops BEFORE the target card within a column, and onto
+ *    another column routes through the same server-gated cross-machine move;
+ *  - drop geometry: the gap between two cards inserts BETWEEN them (it does not
+ *    silently append), the tail is only chosen below the last card, and the slot
+ *    is shown as a drop line before release;
+ *  - the reorder seq guard is PER COLUMN — reordering one column must not discard
+ *    another column's authoritative reconcile;
+ *  - a refused reorder re-reads the board instead of trusting a client snapshot,
+ *    and a second reorder can't stack on an unresolved one;
+ *  - a cross-machine move whose re-read fails reports the failure, not success;
+ *  - a keyboard reorder that disables the pressed button keeps focus in the card.
+ *
+ * services/api and usePermissions are mocked at the module boundary.
+ */
+
+import React from 'react';
+import { act, createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { MemoryRouter } from 'react-router-dom';
+import DispatchBoard, { insertionIndexFromPointer } from './DispatchBoard';
+import api from '../services/api';
+import { ToastProvider } from '../components/ui';
+import type { DispatchBoardColumn, DispatchBoardRow } from '../types';
+
+jest.mock('../services/api', () => ({
+  __esModule: true,
+  default: {
+    getDispatchBoard: jest.fn(),
+    setWorkCenterRunOrder: jest.fn(),
+    updateOperation: jest.fn(),
+  },
+}));
+
+jest.mock('../hooks/usePermissions', () => ({
+  __esModule: true,
+  usePermissions: () => ({ can: () => true, canAny: () => true, canAll: () => true, isAdmin: true }),
+}));
+
+const mockApi = api as jest.Mocked<typeof api>;
+
+const makeRow = (overrides: Partial<DispatchBoardRow> & { operation_id: number }): DispatchBoardRow => ({
+  run_order: null,
+  version: 0,
+  work_order_id: 7,
+  work_order_number: 'WO-20260720-001',
+  operation_number: '10',
+  operation_name: 'Operation',
+  part_number: null,
+  part_name: null,
+  status: 'ready',
+  priority: 5,
+  due_date: null,
+  quantity_ordered: 10,
+  quantity_complete: 0,
+  setup_time_hours: 0.5,
+  run_time_hours: 1.25,
+  ...overrides,
+});
+
+const LASER_ROWS: DispatchBoardRow[] = [
+  makeRow({
+    operation_id: 11,
+    run_order: 1,
+    work_order_number: 'WO-20260720-001',
+    operation_number: 'Nest 1',
+    operation_name: 'Laser Cut - nest-p001',
+    due_date: '2026-07-24',
+  }),
+  makeRow({
+    operation_id: 9,
+    run_order: 2,
+    version: 3,
+    work_order_id: 5,
+    work_order_number: 'WO-20260719-004',
+    operation_number: 'Nest 2',
+    operation_name: 'Laser Cut - nest-p002',
+    part_number: 'PN-2231',
+    part_name: 'Bracket',
+  }),
+  makeRow({
+    operation_id: 14,
+    work_order_id: 8,
+    work_order_number: 'WO-20260720-003',
+    operation_number: '20',
+    operation_name: 'Deburr',
+  }),
+];
+
+const MILL_ROWS: DispatchBoardRow[] = [
+  makeRow({
+    operation_id: 21,
+    run_order: 1,
+    status: 'in_progress',
+    work_order_id: 4,
+    work_order_number: 'WO-20260718-002',
+    operation_number: '30',
+    operation_name: 'Mill Face',
+  }),
+];
+
+/** Two reorderable ready rows on the mill, for the per-column seq-guard test. */
+const MILL_QUEUE_ROWS: DispatchBoardRow[] = [
+  makeRow({
+    operation_id: 31,
+    run_order: 1,
+    work_order_id: 12,
+    work_order_number: 'WO-20260718-005',
+    operation_number: '10',
+    operation_name: 'Drill',
+  }),
+  makeRow({
+    operation_id: 32,
+    run_order: 2,
+    work_order_id: 13,
+    work_order_number: 'WO-20260718-006',
+    operation_number: '20',
+    operation_name: 'Tap',
+  }),
+];
+
+const board = (): { work_centers: DispatchBoardColumn[] } => ({
+  work_centers: [
+    { id: 2, name: 'Ermaksan Fiber Laser', code: 'ERM-FL', work_center_type: 'laser', queue: LASER_ROWS.map((r) => ({ ...r })) },
+    { id: 5, name: 'Haas VF-2', code: 'HAAS-2', work_center_type: 'milling', queue: MILL_ROWS.map((r) => ({ ...r })) },
+    { id: 7, name: 'Press Brake 1', code: 'PB-1', work_center_type: 'forming', queue: [] },
+  ],
+});
+
+/** Same board, but the mill column is reorderable too (two ready rows). */
+const twoQueueBoard = (): { work_centers: DispatchBoardColumn[] } => ({
+  work_centers: [
+    {
+      id: 2,
+      name: 'Ermaksan Fiber Laser',
+      code: 'ERM-FL',
+      work_center_type: 'laser',
+      queue: LASER_ROWS.map((r) => ({ ...r })),
+    },
+    {
+      id: 5,
+      name: 'Haas VF-2',
+      code: 'HAAS-2',
+      work_center_type: 'milling',
+      queue: MILL_QUEUE_ROWS.map((r) => ({ ...r })),
+    },
+  ],
+});
+
+const cardOrder = (workCenterId: number): number[] =>
+  Array.from(
+    screen.getByTestId(`dispatch-column-${workCenterId}`).querySelectorAll('[data-testid^="dispatch-card-"]')
+  ).map((el) => Number(el.getAttribute('data-testid')!.replace('dispatch-card-', '')));
+
+/** The columns' work-center names also appear inside every machine <select>, so
+ *  address columns by their labelled region, not by bare text. */
+const findColumn = (name: string) => screen.findByRole('region', { name: `${name} run order` });
+
+/** jsdom has no DataTransfer — the handlers only touch effectAllowed/dropEffect/setData. */
+const makeDataTransfer = () => ({ effectAllowed: '', dropEffect: '', setData: jest.fn(), getData: jest.fn() });
+
+/**
+ * jsdom implements neither `DragEvent` nor pointer coordinates on the `Event`
+ * fallback testing-library uses in its place, so `clientY` has to be pinned onto
+ * the native event by hand. Without this every drag reads as y=undefined and the
+ * geometry under test never runs.
+ */
+const fireDrag = (kind: 'dragStart' | 'dragOver' | 'drop', element: Element, clientY = 0) => {
+  const event = createEvent[kind](element, { dataTransfer: makeDataTransfer() });
+  Object.defineProperty(event, 'clientY', { value: clientY });
+  fireEvent(element, event);
+};
+
+const CARD_HEIGHT = 90;
+const CARD_GAP = 10;
+
+/**
+ * jsdom lays nothing out — every rect is 0×0 — so the drop geometry can only be
+ * exercised by stubbing the cards' rects. Card i occupies [i*100, i*100+90], so
+ * the 10px gap under card i is y ∈ (i*100+90, i*100+100).
+ */
+const stubCardGeometry = (workCenterId: number) => {
+  const container = screen.getByTestId(`dispatch-column-${workCenterId}`);
+  container.querySelectorAll<HTMLElement>('[data-dispatch-card]').forEach((card, index) => {
+    const top = index * (CARD_HEIGHT + CARD_GAP);
+    card.getBoundingClientRect = () =>
+      ({
+        top,
+        bottom: top + CARD_HEIGHT,
+        height: CARD_HEIGHT,
+        left: 0,
+        right: 320,
+        width: 320,
+        x: 0,
+        y: top,
+        toJSON: () => ({}),
+      }) as DOMRect;
+  });
+};
+
+const renderBoard = () =>
+  render(
+    <MemoryRouter>
+      <ToastProvider>
+        <DispatchBoard />
+      </ToastProvider>
+    </MemoryRouter>
+  );
+
+describe('DispatchBoard', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockApi.getDispatchBoard.mockResolvedValue(board());
+  });
+
+  it('renders a column per work center with ranks, cards in server order, and a quiet idle column', async () => {
+    renderBoard();
+
+    expect(await findColumn('Ermaksan Fiber Laser')).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Haas VF-2 run order' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Press Brake 1 run order' })).toBeInTheDocument();
+
+    // Server order is preserved (ranked first, unranked after) — no client sort.
+    expect(cardOrder(2)).toEqual([11, 9, 14]);
+
+    expect(screen.getByTestId('dispatch-rank-11')).toHaveTextContent('1');
+    expect(screen.getByTestId('dispatch-rank-9')).toHaveTextContent('2');
+    // Unranked rows show a dash, not a fabricated rank.
+    expect(screen.getByTestId('dispatch-rank-14')).toHaveTextContent('–');
+
+    expect(screen.getByText(/Laser Cut - nest-p001/)).toBeInTheDocument();
+    expect(screen.getByText('PN-2231')).toBeInTheDocument();
+    expect(within(screen.getByTestId('dispatch-column-7')).getByText(/Idle — no queued work/)).toBeInTheDocument();
+  });
+
+  it('Move down reorders optimistically, PUTs the full operation_ids order, and announces the new position', async () => {
+    const user = userEvent.setup();
+    // Hold the PUT open so the pre-server (optimistic) DOM can be asserted.
+    let resolvePut: (value: DispatchBoardRow[]) => void = () => undefined;
+    mockApi.setWorkCenterRunOrder.mockReturnValue(
+      new Promise<DispatchBoardRow[]>((resolve) => {
+        resolvePut = resolve;
+      })
+    );
+    renderBoard();
+
+    await findColumn('Ermaksan Fiber Laser');
+    await user.click(screen.getByLabelText('Move WO-20260720-001 Laser Cut - nest-p001 down'));
+
+    // Optimistic: the DOM shows the new order (and re-ranks) before the server answers.
+    expect(cardOrder(2)).toEqual([9, 11, 14]);
+    expect(screen.getByTestId('dispatch-rank-11')).toHaveTextContent('2');
+    expect(screen.getByTestId('dispatch-rank-9')).toHaveTextContent('1');
+    expect(screen.getByTestId('dispatch-status')).toHaveTextContent(
+      'WO-20260720-001 Laser Cut - nest-p001 moved to position 2 of 3 on Ermaksan Fiber Laser'
+    );
+
+    // The PUT carries the FULL new id order for that work center.
+    expect(mockApi.setWorkCenterRunOrder).toHaveBeenCalledTimes(1);
+    expect(mockApi.setWorkCenterRunOrder).toHaveBeenCalledWith(2, [9, 11, 14]);
+
+    // The server's refreshed queue reconciles the optimistic guess.
+    const refreshed = [
+      { ...LASER_ROWS[1], run_order: 1 },
+      { ...LASER_ROWS[0], run_order: 2 },
+      { ...LASER_ROWS[2], run_order: 3 },
+    ];
+    await act(async () => {
+      resolvePut(refreshed);
+    });
+    expect(cardOrder(2)).toEqual([9, 11, 14]);
+    expect(screen.getByTestId('dispatch-rank-14')).toHaveTextContent('3');
+  });
+
+  it('Move up is disabled for the first card and Move down for the last', async () => {
+    renderBoard();
+    await findColumn('Ermaksan Fiber Laser');
+
+    expect(screen.getByLabelText('Move WO-20260720-001 Laser Cut - nest-p001 up')).toBeDisabled();
+    expect(screen.getByLabelText('Move WO-20260720-003 Deburr down')).toBeDisabled();
+    expect(screen.getByLabelText('Move WO-20260720-003 Deburr up')).toBeEnabled();
+  });
+
+  it('rolls the board back, shows the server detail verbatim, and RE-READS the board when a reorder is refused', async () => {
+    const user = userEvent.setup();
+    mockApi.setWorkCenterRunOrder.mockRejectedValue({
+      response: { status: 400, data: { detail: 'Operation 11 is not queued at work center 2' } },
+    });
+    renderBoard();
+
+    await findColumn('Ermaksan Fiber Laser');
+    await user.click(screen.getByLabelText('Move WO-20260720-001 Laser Cut - nest-p001 down'));
+
+    expect(await screen.findByText('Operation 11 is not queued at work center 2')).toBeInTheDocument();
+    await waitFor(() => expect(cardOrder(2)).toEqual([11, 9, 14]));
+    expect(screen.getByTestId('dispatch-rank-11')).toHaveTextContent('1');
+    // The restored snapshot is a client guess — the column is re-read from the
+    // server rather than left sitting on it indefinitely.
+    await waitFor(() => expect(mockApi.getDispatchBoard).toHaveBeenCalledTimes(2));
+  });
+
+  it('raises a retryable stale banner when the re-read after a refused reorder also fails', async () => {
+    const user = userEvent.setup();
+    mockApi.setWorkCenterRunOrder.mockRejectedValue({ response: { data: { detail: 'Run order rejected' } } });
+    mockApi.getDispatchBoard.mockResolvedValueOnce(board()).mockRejectedValueOnce({
+      response: { data: { detail: 'Board read failed' } },
+    });
+    renderBoard();
+
+    await findColumn('Ermaksan Fiber Laser');
+    await user.click(screen.getByLabelText('Move WO-20260720-001 Laser Cut - nest-p001 down'));
+
+    const notice = await screen.findByTestId('dispatch-stale-notice');
+    expect(notice).toHaveTextContent('This board may be out of date');
+    expect(notice).toHaveTextContent('Board read failed');
+
+    // The banner's Retry re-reads, and a successful read clears it.
+    mockApi.getDispatchBoard.mockResolvedValue(board());
+    await user.click(within(notice).getByRole('button', { name: 'Retry refresh' }));
+    await waitFor(() => expect(screen.queryByTestId('dispatch-stale-notice')).not.toBeInTheDocument());
+  });
+
+  it('does not let a second reorder of the same column stack on an unresolved one', async () => {
+    const user = userEvent.setup();
+    mockApi.setWorkCenterRunOrder.mockReturnValue(new Promise(() => undefined)); // never settles
+    renderBoard();
+
+    await findColumn('Ermaksan Fiber Laser');
+    const down = screen.getByLabelText('Move WO-20260720-001 Laser Cut - nest-p001 down');
+    await user.click(down);
+    expect(mockApi.setWorkCenterRunOrder).toHaveBeenCalledTimes(1);
+
+    // Still focusable (so focus is never yanked mid-action) but inert while the
+    // first reorder is unresolved.
+    expect(down).toHaveAttribute('aria-disabled', 'true');
+    expect(down).toBeEnabled();
+    await user.click(down);
+    expect(mockApi.setWorkCenterRunOrder).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('dispatch-card-11')).toHaveAttribute('draggable', 'false');
+  });
+
+  it("reordering one column does not discard another column's authoritative reconcile", async () => {
+    const user = userEvent.setup();
+    mockApi.getDispatchBoard.mockResolvedValue(twoQueueBoard());
+    const resolvers = new Map<number, (queue: DispatchBoardRow[]) => void>();
+    mockApi.setWorkCenterRunOrder.mockImplementation(
+      (workCenterId: number) =>
+        new Promise<DispatchBoardRow[]>((resolve) => {
+          resolvers.set(workCenterId, resolve);
+        })
+    );
+    renderBoard();
+    await findColumn('Ermaksan Fiber Laser');
+
+    // Column A (laser) reorder goes in flight...
+    await user.click(screen.getByLabelText('Move WO-20260720-001 Laser Cut - nest-p001 down'));
+    // ...then an unrelated column B (mill) reorder is started before A answers.
+    await user.click(screen.getByLabelText('Move WO-20260718-005 Drill down'));
+    expect(resolvers.has(2)).toBe(true);
+    expect(resolvers.has(5)).toBe(true);
+
+    // A's server answer is authoritative and must still be applied: with a
+    // board-global seq counter, B's reorder made this reconcile a no-op and the
+    // column kept client-side ranks and stale versions.
+    const serverQueue = [
+      { ...LASER_ROWS[2], run_order: 1 },
+      { ...LASER_ROWS[1], run_order: 2 },
+      { ...LASER_ROWS[0], run_order: 3 },
+    ];
+    await act(async () => {
+      resolvers.get(2)!(serverQueue);
+    });
+    expect(cardOrder(2)).toEqual([14, 9, 11]);
+    expect(screen.getByTestId('dispatch-rank-14')).toHaveTextContent('1');
+  });
+
+  it('moves a card across machines with work_center_id + version and refetches the board', async () => {
+    const user = userEvent.setup();
+    mockApi.updateOperation.mockResolvedValue({});
+    renderBoard();
+
+    await findColumn('Ermaksan Fiber Laser');
+    await user.selectOptions(
+      screen.getByLabelText('Move WO-20260719-004 Laser Cut - nest-p002 to another machine'),
+      '5'
+    );
+
+    await waitFor(() => expect(mockApi.updateOperation).toHaveBeenCalledWith(9, { work_center_id: 5, version: 3 }));
+    // Non-optimistic: the board only changes after a successful re-read.
+    await waitFor(() => expect(mockApi.getDispatchBoard).toHaveBeenCalledTimes(2));
+    expect(mockApi.setWorkCenterRunOrder).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a refused cross-machine move verbatim and leaves the board unchanged', async () => {
+    const user = userEvent.setup();
+    mockApi.updateOperation.mockRejectedValue({
+      response: { status: 409, data: { detail: 'Cannot move an operation that is in progress' } },
+    });
+    renderBoard();
+
+    await findColumn('Ermaksan Fiber Laser');
+    await user.selectOptions(
+      screen.getByLabelText('Move WO-20260719-004 Laser Cut - nest-p002 to another machine'),
+      '5'
+    );
+
+    expect(await screen.findByText('Cannot move an operation that is in progress')).toBeInTheDocument();
+    expect(cardOrder(2)).toEqual([11, 9, 14]);
+    expect(mockApi.getDispatchBoard).toHaveBeenCalledTimes(1);
+  });
+
+  it('holds an in-progress card in place, and its tooltips claim only what is enforced', async () => {
+    renderBoard();
+    await findColumn('Haas VF-2');
+
+    const runningCard = screen.getByTestId('dispatch-card-21');
+    expect(within(runningCard).getByText('Running')).toBeInTheDocument();
+    expect(runningCard).toHaveAttribute('draggable', 'false');
+
+    const up = screen.getByLabelText('Move WO-20260718-002 Mill Face up');
+    const down = screen.getByLabelText('Move WO-20260718-002 Mill Face down');
+    const machineSelect = screen.getByLabelText('Move WO-20260718-002 Mill Face to another machine');
+    expect(up).toBeDisabled();
+    expect(down).toBeDisabled();
+    expect(machineSelect).toBeDisabled();
+
+    // The reorder controls describe a BOARD rule (the server does not refuse a
+    // re-rank of a running op, and neighbours really do shift its position)...
+    expect(up).toHaveAttribute(
+      'title',
+      "This job is running, so the board won't pick it up. Its position still shifts as the jobs around it are reordered."
+    );
+    // ...while only the cross-machine control claims a server refusal, which is
+    // the one thing the server actually enforces (409 "Clock out before moving").
+    expect(machineSelect).toHaveAttribute(
+      'title',
+      'This job is running. The server refuses to move an in-progress operation — clock out first.'
+    );
+    expect(within(runningCard).getByText('Held in place while running')).toBeInTheDocument();
+  });
+
+  it('drag within a column reorders and PUTs the new order (drop lands BEFORE the target card)', async () => {
+    mockApi.setWorkCenterRunOrder.mockResolvedValue([]);
+    renderBoard();
+    await findColumn('Ermaksan Fiber Laser');
+    stubCardGeometry(2);
+
+    const dragged = screen.getByTestId('dispatch-card-14'); // last, unranked
+    const target = screen.getByTestId('dispatch-card-11'); // first, y 0..90
+    fireDrag('dragStart', dragged);
+    // Released in the TOP half of card 11 -> insert before it.
+    fireDrag('dragOver', target, 20);
+    fireDrag('drop', target, 20);
+
+    await waitFor(() => expect(mockApi.setWorkCenterRunOrder).toHaveBeenCalledWith(2, [14, 11, 9]));
+  });
+
+  it('dropping in the GAP between two cards inserts between them, not at the end of the column', async () => {
+    mockApi.setWorkCenterRunOrder.mockReturnValue(new Promise(() => undefined));
+    renderBoard();
+    await findColumn('Ermaksan Fiber Laser');
+    stubCardGeometry(2);
+
+    const dragged = screen.getByTestId('dispatch-card-14'); // last card
+    const surface = screen.getByTestId('dispatch-column-2');
+    fireDrag('dragStart', dragged);
+    // y=95 is the 8px gap between card 11 (0..90) and card 9 (100..190) — the
+    // column's own drop surface, which used to mean "append to the tail".
+    fireDrag('dragOver', surface, 95);
+    // The slot is shown before release, tail slots included.
+    expect(screen.getByTestId('dispatch-drop-line-2-1')).toBeInTheDocument();
+
+    fireDrag('drop', surface, 95);
+    await waitFor(() => expect(mockApi.setWorkCenterRunOrder).toHaveBeenCalledWith(2, [11, 14, 9]));
+  });
+
+  it('dropping below the last card is what appends to the end of the column', async () => {
+    mockApi.setWorkCenterRunOrder.mockReturnValue(new Promise(() => undefined));
+    renderBoard();
+    await findColumn('Ermaksan Fiber Laser');
+    stubCardGeometry(2);
+
+    const dragged = screen.getByTestId('dispatch-card-11'); // first card
+    const surface = screen.getByTestId('dispatch-column-2');
+    fireDrag('dragStart', dragged);
+    fireDrag('dragOver', surface, 400);
+    expect(screen.getByTestId('dispatch-drop-line-2-3')).toBeInTheDocument(); // the tail slot
+
+    fireDrag('drop', surface, 400);
+    await waitFor(() => expect(mockApi.setWorkCenterRunOrder).toHaveBeenCalledWith(2, [9, 14, 11]));
+  });
+
+  it('drag onto another column performs the server-gated cross-machine move', async () => {
+    mockApi.updateOperation.mockResolvedValue({});
+    renderBoard();
+    await findColumn('Ermaksan Fiber Laser');
+
+    const dragged = screen.getByTestId('dispatch-card-9');
+    const idleColumn = screen.getByTestId('dispatch-column-7');
+    fireDrag('dragStart', dragged);
+    fireDrag('dragOver', idleColumn, 40);
+    fireDrag('drop', idleColumn, 40);
+
+    await waitFor(() => expect(mockApi.updateOperation).toHaveBeenCalledWith(9, { work_center_id: 7, version: 3 }));
+    expect(mockApi.setWorkCenterRunOrder).not.toHaveBeenCalled();
+  });
+
+  it('does NOT report a successful cross-machine move when the board re-read fails', async () => {
+    const user = userEvent.setup();
+    mockApi.updateOperation.mockResolvedValue({});
+    mockApi.getDispatchBoard
+      .mockResolvedValueOnce(board())
+      .mockRejectedValueOnce({ response: { data: { detail: 'Board read failed' } } });
+    renderBoard();
+
+    await findColumn('Ermaksan Fiber Laser');
+    await user.selectOptions(
+      screen.getByLabelText('Move WO-20260719-004 Laser Cut - nest-p002 to another machine'),
+      '5'
+    );
+
+    // The card is still drawn in its old column, so the UI must not say it moved.
+    expect(
+      await screen.findByText(
+        'WO-20260719-004 Laser Cut - nest-p002 moved to Haas VF-2 on the server, but the board could not be re-read. Refresh to see where it is.'
+      )
+    ).toBeInTheDocument();
+    expect(screen.queryByText('WO-20260719-004 Laser Cut - nest-p002 moved to Haas VF-2.')).not.toBeInTheDocument();
+    expect(cardOrder(2)).toEqual([11, 9, 14]);
+    expect(screen.getByTestId('dispatch-stale-notice')).toBeInTheDocument();
+    expect(screen.getByTestId('dispatch-status')).toHaveTextContent('may be out of date');
+  });
+
+  it('keeps focus inside the moved card when a keyboard reorder disables the pressed button', async () => {
+    const user = userEvent.setup();
+    mockApi.setWorkCenterRunOrder.mockReturnValue(new Promise(() => undefined));
+    renderBoard();
+    await findColumn('Ermaksan Fiber Laser');
+
+    // Card 9 is second; Move up puts it first, which DISABLES the very button
+    // that was pressed — the browser blurs it and focus used to land on <body>.
+    await user.click(screen.getByLabelText('Move WO-20260719-004 Laser Cut - nest-p002 up'));
+
+    expect(cardOrder(2)).toEqual([9, 11, 14]);
+    const movedCard = screen.getByTestId('dispatch-card-9');
+    expect(movedCard).toContainElement(document.activeElement as HTMLElement);
+    expect(document.activeElement).toBe(
+      screen.getByLabelText('Move WO-20260719-004 Laser Cut - nest-p002 down')
+    );
+    expect(document.activeElement).not.toBe(document.body);
+  });
+
+  it('keeps focus on the pressed control when a keyboard reorder does not hit a boundary', async () => {
+    const user = userEvent.setup();
+    mockApi.setWorkCenterRunOrder.mockReturnValue(new Promise(() => undefined));
+    renderBoard();
+    await findColumn('Ermaksan Fiber Laser');
+
+    // Card 14 is last; Move up lands it in the middle, where Move up survives.
+    const up = screen.getByLabelText('Move WO-20260720-003 Deburr up');
+    await user.click(up);
+
+    expect(cardOrder(2)).toEqual([11, 14, 9]);
+    expect(document.activeElement).toBe(up);
+  });
+
+  it('renders a retryable error state when the board fails to load', async () => {
+    const user = userEvent.setup();
+    mockApi.getDispatchBoard.mockRejectedValueOnce({ response: { data: { detail: 'Dispatch board unavailable' } } });
+    renderBoard();
+
+    expect(await screen.findByText('Dispatch board unavailable')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(await findColumn('Ermaksan Fiber Laser')).toBeInTheDocument();
+  });
+});
+
+describe('insertionIndexFromPointer', () => {
+  // Card i occupies [i*100, i*100+90]; the gaps are the 10px between them.
+  const rects = [0, 1, 2].map((i) => ({ top: i * 100, bottom: i * 100 + 90 }));
+
+  it('inserts before a card while the pointer is in its top half', () => {
+    expect(insertionIndexFromPointer(rects, 0)).toBe(0);
+    expect(insertionIndexFromPointer(rects, 44)).toBe(0);
+    expect(insertionIndexFromPointer(rects, 120)).toBe(1);
+  });
+
+  it('inserts after a card once the pointer passes its midpoint', () => {
+    expect(insertionIndexFromPointer(rects, 46)).toBe(1);
+    expect(insertionIndexFromPointer(rects, 160)).toBe(2);
+  });
+
+  it('treats the gap between two cards as the slot between them, never the tail', () => {
+    expect(insertionIndexFromPointer(rects, 95)).toBe(1); // gap under card 0
+    expect(insertionIndexFromPointer(rects, 195)).toBe(2); // gap under card 1
+  });
+
+  it('only returns the tail below the last card, and handles an empty column', () => {
+    expect(insertionIndexFromPointer(rects, 246)).toBe(3);
+    expect(insertionIndexFromPointer(rects, 5000)).toBe(3);
+    expect(insertionIndexFromPointer([], 0)).toBe(0);
+  });
+});

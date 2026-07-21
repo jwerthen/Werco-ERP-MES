@@ -102,6 +102,24 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > drawing — read-only and still tenant-scoped (a cross-tenant or soft-deleted nest → **404**). All
 > writes are audited; nests are soft-deleted, never hard-deleted. See `docs/API.md` → Laser Nests.
 
+> **Dispatch run order — endpoint mapping.** Setting the order operators see work in is a planner
+> act, gated to the Work Orders **Edit** row above —
+> `require_role([ADMIN, MANAGER, SUPERVISOR])`, tenant-scoped:
+> `GET /api/v1/shop-floor/dispatch-board` (the manager board — every active work center with its
+> live queue; a **zero-write read**, no audit rows) and
+> `PUT /api/v1/shop-floor/work-centers/{id}/run-order` (rewrite one work center's dense 1..N rank;
+> a work center outside the active company or inactive → **404**, indistinguishable from missing).
+> The rewrite writes **one** tamper-evident `audit_log` row per manager action — a `work_center`
+> `log_update` carrying the old → new operation-id lists — not one row per operation. Operators
+> **consume** the resulting order through the read-broad
+> `GET /api/v1/shop-floor/work-center-queue/{id}` (unchanged gate: any authenticated user, or a
+> crew-station kiosk token for its own work center) and can never set it. `run_order` is
+> **advisory**: it orders and labels the queue and adds **no** gate — start eligibility stays
+> entirely with the existing operation gates and predecessor rules. In the UI this is the
+> **Dispatch Board** page (`/dispatch`), route-gated on **`work_orders:edit`** (admin / manager /
+> supervisor) rather than the read-only `work_orders:view` that `/scheduling` uses. See
+> `docs/API.md` → Shop Floor → "Dispatch run order" and [docs/KIOSK.md](KIOSK.md).
+
 > **Scanner resolve-action is read-only and open to any authenticated user (A0.4).**
 > `POST /api/v1/scanner/resolve-action` (the QR traveler / badge scan resolver,
 > `app/api/endpoints/scanner.py`) carries no role gate (`get_current_user` only) — it mirrors the

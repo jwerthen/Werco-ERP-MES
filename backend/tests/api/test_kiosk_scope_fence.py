@@ -22,8 +22,10 @@ from tests.api.kiosk_test_helpers import (
     COMPANY_A,
     bearer,
     make_user,
+    make_wo_with_operation,
     make_work_center,
     queue_url,
+    user_headers,
 )
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
@@ -157,6 +159,50 @@ def test_kiosk_scoped_token_403_on_denied_shop_floor_paths(client: TestClient, d
         resp = client.get(path, headers=bearer(token))
     assert resp.status_code == status.HTTP_403_FORBIDDEN, f"{method} {path}: {resp.status_code} {resp.text}"
     assert resp.json()["detail"] == FENCE_DETAIL
+
+
+def test_kiosk_scoped_token_403_on_the_manager_dispatch_tools(client: TestClient, db_session: Session):
+    """The dispatch board and the run-order rewrite live UNDER ``/shop-floor``,
+    so the prefix fence alone would have let a shared crew station read the whole
+    shop's board and dictate what every machine runs next. Both are denied, on a
+    real work-center id so this cannot pass by accident on a 404."""
+    admin = make_user(db_session, company_id=COMPANY_A, role=UserRole.ADMIN)
+    token = _kiosk_scoped_token(admin)
+    wc = make_work_center(db_session, company_id=COMPANY_A)
+
+    board = client.get("/api/v1/shop-floor/dispatch-board", headers=bearer(token))
+    assert board.status_code == status.HTTP_403_FORBIDDEN, board.text
+    assert board.json()["detail"] == FENCE_DETAIL
+
+    rewrite = client.put(
+        f"/api/v1/shop-floor/work-centers/{wc.id}/run-order",
+        headers=bearer(token),
+        json={"operation_ids": []},
+    )
+    assert rewrite.status_code == status.HTTP_403_FORBIDDEN, rewrite.text
+    assert rewrite.json()["detail"] == FENCE_DETAIL
+
+
+def test_operators_keep_reading_the_run_chips(client: TestClient, db_session: Session):
+    """The deny-list must not cost the shop its RUN chips: the queue read is a
+    different path and stays reachable, both for a normal operator token and for
+    a badge-minted kiosk-scoped one."""
+    manager = make_user(db_session, company_id=COMPANY_A, role=UserRole.MANAGER)
+    operator = make_user(db_session, company_id=COMPANY_A, role=UserRole.OPERATOR)
+    wc = make_work_center(db_session, company_id=COMPANY_A)
+    _, op = make_wo_with_operation(db_session, company_id=COMPANY_A, work_center=wc)
+
+    ranked = client.put(
+        f"/api/v1/shop-floor/work-centers/{wc.id}/run-order",
+        headers=user_headers(manager),
+        json={"operation_ids": [op.id]},
+    )
+    assert ranked.status_code == status.HTTP_200_OK, ranked.text
+
+    for headers in (user_headers(operator), bearer(_kiosk_scoped_token(operator))):
+        queue = client.get(queue_url(wc.id), headers=headers)
+        assert queue.status_code == status.HTTP_200_OK, queue.text
+        assert [row["run_order"] for row in queue.json()["queue"]] == [1]
 
 
 def test_unscoped_admin_still_reaches_station_admin(client: TestClient, db_session: Session):

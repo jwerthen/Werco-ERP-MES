@@ -9,7 +9,7 @@ Planners, buyers, supervisors, shop managers, and quality leads — anyone who s
 - Run a daily opening check across the Dashboard, schedule, shop floor, and your queues.
 - Set up the data a job needs to run: parts, BOMs, and routings.
 - Create, release, and complete work orders, and print travelers.
-- Schedule and dispatch jobs, set priority (with a reason on the record), and rebalance overloaded machines.
+- Schedule and dispatch jobs, set priority (with a reason on the record), set the run order operators see at each machine, and rebalance overloaded machines.
 - Create purchase orders, send them to vendors, and run MRP to catch shortages.
 - Turn customer RFQs into quotes and quotes into work orders.
 - Oversee quality: NCRs, CARs, FAIs, scrap reason codes, calibration, traceability, and complaints.
@@ -178,6 +178,23 @@ The **Dispatch Queue** sorts jobs by an urgency score so the most important work
 3. Search by WO# or part, and filter by work center, to focus the list.
 
 > Tip: When a capacity chip is red (over 100%), the machine is overbooked that day. Drag a job off it, shift its dates, or move it to another work center to rebalance before the day arrives.
+
+### Tell the floor what to run first (Dispatch Board)
+
+Scheduling decides *what week* a job runs. The **Dispatch Board** (sidebar → **Production → Dispatch Board**, or `/dispatch`) decides **what order** the operators at a machine run their jobs in today. Don't confuse it with the Dispatch Queue panel above — that one sets priority and dates; this one sets the running order operators actually see.
+
+The board shows **one column per machine**, with every job currently queued at it. Machines with nothing queued still get a column, so you can hand work to an idle machine.
+
+1. **Drag a card up or down** inside a column to set the order. The number on the left of each card is the run order — 1 runs first.
+2. **Drag a card to another column** (or use the card's **Move to machine…** dropdown) to move that job to a different machine.
+3. **No mouse?** Every card has **Move up** and **Move down** buttons that do exactly what dragging does, and the machine dropdown covers the across-columns move. Each change is announced so it's usable start to finish from the keyboard.
+4. **Refresh** re-reads the board. A job an operator is clocked into is held in place: you can't pick that card up or send it to another machine until they clock out. Its position still shifts as the jobs around it are reordered — moving the job above it down moves it up.
+
+**What operators see.** On the kiosk and crew station, the jobs you ranked show a **`RUN 1`, `RUN 2`, …** chip and sit at the top of the queue, in your order. Jobs you haven't ranked come after them, sorted by priority, then due date, then operation number.
+
+> **The run order is a recommendation, not a lock.** Operators still see every queued job and can start any of them. Use it to say "run these three first" — not to stop someone from picking up the right job when plans change on the floor.
+
+> **Moving a job to another machine unranks it.** The order you set belongs to the machine you set it on, so a moved job lands at the bottom of the new machine's column with no number. Re-rank it there if it needs to go first.
 
 ---
 
