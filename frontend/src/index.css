@@ -1039,6 +1039,53 @@
     touch-action: manipulation;
   }
 
+  /* Always-visible horizontal scrollbar for wide boards (Dispatch Board).
+     The OS overlay scrollbar on macOS stays hidden until you already scrolled,
+     so a 24-column board read as "there is nothing else here". This forces a
+     real, instrument-panel-styled track that is visible at rest and draggable
+     with a mouse. */
+  .board-scroll-x {
+    /* daisyUI sets a global `scrollbar-color`, and Chrome ≥121 drops EVERY
+       ::-webkit-scrollbar rule on an element whose `scrollbar-color` /
+       `scrollbar-width` is non-auto — which is why the styling below (and the
+       app-wide scrollbar theme) had no effect and macOS kept its hidden
+       overlay bar. Resetting to `auto` hands the element back to the
+       ::-webkit rules, i.e. a real 10px scrollbar that is visible at rest. */
+    scrollbar-color: auto;
+  }
+
+  .board-scroll-x::-webkit-scrollbar {
+    height: 10px;
+    -webkit-appearance: none;
+  }
+
+  .board-scroll-x::-webkit-scrollbar-track {
+    background: var(--fd-sunken);
+    border-top: 1px solid var(--fd-line);
+  }
+
+  .board-scroll-x::-webkit-scrollbar-thumb {
+    background: var(--fd-line-bright);
+    border-radius: 0; /* sharp corners — instrument panel */
+    border: 2px solid var(--fd-sunken);
+  }
+
+  .board-scroll-x::-webkit-scrollbar-thumb:hover {
+    background: var(--fd-blue);
+  }
+
+  /* Firefox only. Chrome ≥121 IGNORES every ::-webkit-scrollbar rule above the
+     moment `scrollbar-width`/`scrollbar-color` are set, which on macOS puts the
+     hidden overlay scrollbar straight back — the exact defect this class exists
+     to fix. So the standard properties are applied only where the ::-webkit
+     pseudo-element does not exist. */
+  @supports not selector(::-webkit-scrollbar) {
+    .board-scroll-x {
+      scrollbar-width: thin;
+      scrollbar-color: var(--fd-line-bright) var(--fd-sunken);
+    }
+  }
+
   /* Hide scrollbar but keep functionality */
   .scrollbar-hide {
     -ms-overflow-style: none;

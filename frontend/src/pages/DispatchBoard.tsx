@@ -23,6 +23,18 @@
  *    center) -> NON-optimistic: loading state on the card, and the board only
  *    changes to reflect what the server actually returned.
  *
+ * Scale (24 work centers, 14 queued jobs — the real shop):
+ *  - the board renders MACHINES WITH WORK first and hides the idle ones behind a
+ *    disclosure, because in code order the alphabetically-early idle machines
+ *    filled the first screen and pushed every actual job off to the right;
+ *  - the horizontal scroll is made explicit — an always-visible styled scrollbar,
+ *    Scroll left / Scroll right buttons, and a right-edge fade while more columns
+ *    exist — because the macOS overlay scrollbar made 7,680px of board read as
+ *    "I cannot reach my other work centers".
+ * Hiding idle machines costs nothing operationally: each card's machine <select>
+ * still lists EVERY machine, so a job can be sent to a quiet one without showing
+ * its column (the disclosure says so).
+ *
  * Accessibility: drag is a pointer-only enhancement. Every card also carries real
  * <button> Move up / Move down controls and a labeled machine <select> — the
  * accessible equivalent of both drag axes — and every resulting position is
@@ -39,6 +51,8 @@ import {
   ArrowDownIcon,
   ArrowPathIcon,
   ArrowUpIcon,
+  ChevronLeftIcon,
+  ChevronRightIcon,
   QueueListIcon,
 } from '@heroicons/react/24/outline';
 import api from '../services/api';
@@ -117,6 +131,21 @@ const RUNNING_PIN_REASON =
 
 const RUNNING_MOVE_REASON =
   'This job is running. The server refuses to move an in-progress operation — clock out first.';
+
+/** The disclosure's region — `aria-controls` must name a real element id. */
+const IDLE_REGION_ID = 'dispatch-idle-machines';
+
+/**
+ * Hiding the idle columns must not hide the ABILITY to move work to a quiet
+ * machine, so the disclosure states where that affordance still lives.
+ */
+const IDLE_HELP =
+  'Idle machines have no queued work. You can still send a job to one without showing them — every card’s “Move to machine…” list includes every machine.';
+
+// One column is `w-80` (320px) with a `gap-3` (12px) gutter; a press of the
+// scroll buttons moves two columns, which is a deliberate step rather than a
+// nudge on a 7,680px board.
+const COLUMN_STEP_PX = (320 + 12) * 2;
 
 interface DragSource {
   operationId: number;
@@ -204,7 +233,15 @@ export default function DispatchBoard() {
   // Where focus must land once a keyboard reorder commits (the pressed button
   // can be disabled by the move itself — see focusAfterReorder below).
   const pendingFocusRef = useRef<{ operationId: number; direction: 'up' | 'down' } | null>(null);
+  // The horizontally scrolling board element: both the card-focus lookup and the
+  // Scroll left/right buttons operate on it.
   const boardRef = useRef<HTMLDivElement | null>(null);
+  // Idle machines are collapsed by DEFAULT and deliberately not persisted: the
+  // board's job on open is to show the work.
+  const [showIdle, setShowIdle] = useState(false);
+  // Whether the board is scrolled to each end — drives the scroll buttons and the
+  // "there is more over here" edge fade.
+  const [scrollEdges, setScrollEdges] = useState({ atStart: true, atEnd: true });
 
   const nextReorderSeq = useCallback((workCenterId: number) => {
     const seq = (reorderSeqRef.current.get(workCenterId) || 0) + 1;
@@ -245,14 +282,74 @@ export default function DispatchBoard() {
     load();
   }, [load]);
 
+  /**
+   * Work first. The server returns work centers in code order, which put the
+   * alphabetically-early IDLE machines on the first screen and the actual jobs
+   * off the right edge. The partition is purely a frontend concern — order
+   * WITHIN each group is still the server's code order.
+   */
+  const { busyColumns, idleColumns } = useMemo(() => {
+    const all = columns || [];
+    return {
+      busyColumns: all.filter((column) => column.queue.length > 0),
+      idleColumns: all.filter((column) => column.queue.length === 0),
+    };
+  }, [columns]);
+
+  // A board of nothing but idle machines must not collapse to nothing: with no
+  // busy columns there is no disclosure and the idle machines simply render.
+  const idleCollapsible = busyColumns.length > 0 && idleColumns.length > 0;
+  const idleVisible = !idleCollapsible || showIdle;
+
   const totals = useMemo(() => {
     const all = (columns || []).flatMap((column) => column.queue);
+    const machines = (columns || []).length;
+    const busy = (columns || []).filter((column) => column.queue.length > 0).length;
     return {
-      machines: (columns || []).length,
+      machines,
+      busy,
+      idle: machines - busy,
       jobs: all.length,
       ranked: all.filter((row) => row.run_order != null).length,
     };
   }, [columns]);
+
+  /**
+   * Recompute which ends of the board are reached. Bails out when nothing
+   * changed, so it is safe to call from the layout effect that runs after EVERY
+   * render (columns arriving, the disclosure opening, and a reorder all change
+   * the board's width).
+   */
+  const syncScrollEdges = useCallback(() => {
+    const el = boardRef.current;
+    const max = el ? el.scrollWidth - el.clientWidth : 0;
+    const left = el ? el.scrollLeft : 0;
+    // 1px slack: fractional layout means scrollLeft rarely equals max exactly.
+    const next = { atStart: left <= 1, atEnd: left >= max - 1 };
+    setScrollEdges((prev) => (prev.atStart === next.atStart && prev.atEnd === next.atEnd ? prev : next));
+  }, []);
+
+  useLayoutEffect(syncScrollEdges);
+
+  useEffect(() => {
+    window.addEventListener('resize', syncScrollEdges);
+    return () => window.removeEventListener('resize', syncScrollEdges);
+  }, [syncScrollEdges]);
+
+  const scrollBoard = useCallback(
+    (direction: -1 | 1) => {
+      const el = boardRef.current;
+      if (!el) return;
+      const left = direction * COLUMN_STEP_PX;
+      if (typeof el.scrollBy === 'function') {
+        el.scrollBy({ left, behavior: 'smooth' });
+      } else {
+        el.scrollLeft += left; // environments without scrollBy (jsdom)
+      }
+      syncScrollEdges();
+    },
+    [syncScrollEdges]
+  );
 
   // --- Reorder within a column (OPTIMISTIC) ---------------------------------
   const { run: runReorder } = useOptimisticMutation<RunOrderUpdateResponse, ReorderCtx>({
@@ -509,6 +606,8 @@ export default function DispatchBoard() {
           canEdit={canEdit}
           // The full ErrorState below already owns the failure here.
           staleNotice={null}
+          // Nothing to scroll: there is no board on screen.
+          scroll={null}
         />
         <ErrorState title="Couldn't load the dispatch board" message={error} onRetry={() => load()} />
       </div>
@@ -516,6 +615,115 @@ export default function DispatchBoard() {
   }
 
   const boardColumns = columns || [];
+
+  /**
+   * One work-center column. Shared by the busy group and the idle disclosure, so
+   * a machine looks and behaves identically on either side of the partition — a
+   * revealed idle column is a full drop target, not a summary.
+   */
+  const renderColumn = (column: DispatchBoardColumn) => {
+    const empty = column.queue.length === 0;
+    const columnTargeted = dropSlot?.workCenterId === column.id;
+    // Recomputed from the queue on every render, so an optimistic reorder
+    // updates the cost of the order at the same moment the cards move — that
+    // immediacy is the whole feedback loop.
+    const nestSummary = nestQueueSummary(column.queue);
+    return (
+      <section
+        key={column.id}
+        aria-label={`${column.name} run order`}
+        className={`flex w-80 shrink-0 flex-col rounded-sm border ${
+          empty ? 'border-slate-800/80 bg-fd-panel/40' : 'border-fd-line bg-fd-panel'
+        } ${columnTargeted ? 'ring-1 ring-blue-400/70' : ''}`}
+      >
+        <header className="flex items-center justify-between gap-2 border-b border-fd-line px-3 py-2">
+          <div className="min-w-0">
+            <p className={`truncate text-sm font-semibold ${empty ? 'text-slate-400' : 'text-slate-100'}`}>
+              {column.name}
+            </p>
+            <p className="truncate font-mono text-[11px] uppercase tracking-widest text-slate-500">
+              {column.code}
+              {column.work_center_type ? ` · ${String(column.work_center_type).replace(/_/g, ' ')}` : ''}
+            </p>
+            {nestSummary.nests > 0 && (
+              <p
+                data-testid={`dispatch-changeovers-${column.id}`}
+                className="truncate font-mono text-[11px] text-slate-400"
+              >
+                {nestSummary.nests} nest{nestSummary.nests === 1 ? '' : 's'} · {nestSummary.changeovers} changeover
+                {nestSummary.changeovers === 1 ? '' : 's'}
+              </p>
+            )}
+          </div>
+          <span
+            className={`shrink-0 rounded border px-2 py-0.5 font-mono text-xs ${
+              empty ? 'border-slate-800 text-slate-500' : 'border-fd-line text-slate-300'
+            }`}
+          >
+            {column.queue.length}
+          </span>
+        </header>
+
+        {/* Drop surface. Plain div: the accessible equivalent of dropping
+            here is each card's Move up/down buttons + machine select, so
+            the surface itself is presentational (POUpload.tsx precedent). */}
+        <div
+          role="presentation"
+          data-testid={`dispatch-column-${column.id}`}
+          className="flex min-h-[7rem] flex-1 flex-col gap-2 p-2"
+          onDragOver={(e) => handleColumnDragOver(e, column.id)}
+          onDragLeave={handleDragLeave}
+          onDrop={(e) => handleColumnDrop(e, column.id)}
+        >
+          {empty ? (
+            <p className="px-1 py-6 text-center text-xs text-slate-500">
+              Idle — no queued work. Drag a job here (or use a card&apos;s machine select) to move it to this machine.
+            </p>
+          ) : (
+            <>
+              {column.queue.map((row, index) => (
+                <React.Fragment key={row.operation_id}>
+                  <DropLine columnId={column.id} index={index} dropSlot={dropSlot} />
+                  <ChangeoverMarker
+                    operationId={row.operation_id}
+                    // Only a nest-to-nest boundary is a changeover; the
+                    // helper returns null for the first card and for any
+                    // pair where either side isn't a nest.
+                    kind={index === 0 ? null : nestChangeover(column.queue[index - 1].laser_nest, row.laser_nest)}
+                  />
+                  <DispatchCard
+                    row={row}
+                    index={index}
+                    column={column}
+                    // EVERY machine, busy or idle, stays in the card's move
+                    // list — that is what makes hiding the idle columns
+                    // cost-free.
+                    columns={boardColumns}
+                    canEdit={canEdit}
+                    moving={movingOperationId === row.operation_id}
+                    moveDisabled={movingOperationId != null}
+                    reorderBusy={reorderingColumn(column.id)}
+                    dragging={dragSource?.operationId === row.operation_id}
+                    onDragStart={handleDragStart}
+                    onDragEnd={handleDragEnd}
+                    onDragOver={handleCardDragOver}
+                    onDragLeave={handleDragLeave}
+                    onDrop={handleCardDrop}
+                    onMove={moveWithinColumn}
+                    onMoveToWorkCenter={moveToWorkCenter}
+                  />
+                </React.Fragment>
+              ))}
+              {/* The tail slot gets a line of its own — "goes to the
+                  bottom" must be something the manager SEES before
+                  releasing, never a silent consequence of the gap. */}
+              <DropLine columnId={column.id} index={column.queue.length} dropSlot={dropSlot} />
+            </>
+          )}
+        </div>
+      </section>
+    );
+  };
 
   return (
     <div className="space-y-3">
@@ -526,6 +734,16 @@ export default function DispatchBoard() {
         refreshing={refreshing}
         canEdit={canEdit}
         staleNotice={staleNotice}
+        scroll={
+          boardColumns.length === 0
+            ? null
+            : {
+                atStart: scrollEdges.atStart,
+                atEnd: scrollEdges.atEnd,
+                onScrollLeft: () => scrollBoard(-1),
+                onScrollRight: () => scrollBoard(1),
+              }
+        }
       />
 
       {boardColumns.length === 0 ? (
@@ -535,114 +753,56 @@ export default function DispatchBoard() {
           description="Released work assigned to an active work center shows up here as a run-order column."
         />
       ) : (
-        // The BOARD scrolls sideways, never the page body.
-        <div className="overflow-x-auto pb-2" data-testid="dispatch-board-scroll" ref={boardRef}>
-          <div className="flex min-w-max items-start gap-3">
-            {boardColumns.map((column) => {
-              const empty = column.queue.length === 0;
-              const columnTargeted = dropSlot?.workCenterId === column.id;
-              // Recomputed from the queue on every render, so an optimistic
-              // reorder updates the cost of the order at the same moment the
-              // cards move — that immediacy is the whole feedback loop.
-              const nestSummary = nestQueueSummary(column.queue);
-              return (
-                <section
-                  key={column.id}
-                  aria-label={`${column.name} run order`}
-                  className={`flex w-80 shrink-0 flex-col rounded-sm border ${
-                    empty ? 'border-slate-800/80 bg-fd-panel/40' : 'border-fd-line bg-fd-panel'
-                  } ${columnTargeted ? 'ring-1 ring-blue-400/70' : ''}`}
-                >
-                  <header className="flex items-center justify-between gap-2 border-b border-fd-line px-3 py-2">
-                    <div className="min-w-0">
-                      <p className={`truncate text-sm font-semibold ${empty ? 'text-slate-400' : 'text-slate-100'}`}>
-                        {column.name}
-                      </p>
-                      <p className="truncate font-mono text-[11px] uppercase tracking-widest text-slate-500">
-                        {column.code}
-                        {column.work_center_type ? ` · ${String(column.work_center_type).replace(/_/g, ' ')}` : ''}
-                      </p>
-                      {nestSummary.nests > 0 && (
-                        <p
-                          data-testid={`dispatch-changeovers-${column.id}`}
-                          className="truncate font-mono text-[11px] text-slate-400"
-                        >
-                          {nestSummary.nests} nest{nestSummary.nests === 1 ? '' : 's'} · {nestSummary.changeovers}{' '}
-                          changeover{nestSummary.changeovers === 1 ? '' : 's'}
-                        </p>
-                      )}
-                    </div>
-                    <span
-                      className={`shrink-0 rounded border px-2 py-0.5 font-mono text-xs ${
-                        empty ? 'border-slate-800 text-slate-500' : 'border-fd-line text-slate-300'
-                      }`}
-                    >
-                      {column.queue.length}
-                    </span>
-                  </header>
+        <>
+          {idleCollapsible && (
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                variant="secondary"
+                size="sm"
+                data-testid="dispatch-idle-toggle"
+                aria-expanded={showIdle}
+                aria-controls={IDLE_REGION_ID}
+                title={IDLE_HELP}
+                onClick={() => setShowIdle((shown) => !shown)}
+              >
+                {showIdle
+                  ? 'Hide idle machines'
+                  : `Show ${idleColumns.length} idle machine${idleColumns.length === 1 ? '' : 's'}`}
+              </Button>
+              <span className="text-xs text-slate-500">{IDLE_HELP}</span>
+            </div>
+          )}
 
-                  {/* Drop surface. Plain div: the accessible equivalent of dropping
-                      here is each card's Move up/down buttons + machine select, so
-                      the surface itself is presentational (POUpload.tsx precedent). */}
-                  <div
-                    role="presentation"
-                    data-testid={`dispatch-column-${column.id}`}
-                    className="flex min-h-[7rem] flex-1 flex-col gap-2 p-2"
-                    onDragOver={(e) => handleColumnDragOver(e, column.id)}
-                    onDragLeave={handleDragLeave}
-                    onDrop={(e) => handleColumnDrop(e, column.id)}
-                  >
-                    {empty ? (
-                      <p className="px-1 py-6 text-center text-xs text-slate-500">
-                        Idle — no queued work. Drag a job here (or use a card&apos;s machine select) to move it to
-                        this machine.
-                      </p>
-                    ) : (
-                      <>
-                        {column.queue.map((row, index) => (
-                          <React.Fragment key={row.operation_id}>
-                            <DropLine columnId={column.id} index={index} dropSlot={dropSlot} />
-                            <ChangeoverMarker
-                              operationId={row.operation_id}
-                              // Only a nest-to-nest boundary is a changeover; the
-                              // helper returns null for the first card and for any
-                              // pair where either side isn't a nest.
-                              kind={
-                                index === 0 ? null : nestChangeover(column.queue[index - 1].laser_nest, row.laser_nest)
-                              }
-                            />
-                            <DispatchCard
-                              row={row}
-                              index={index}
-                              column={column}
-                              columns={boardColumns}
-                              canEdit={canEdit}
-                              moving={movingOperationId === row.operation_id}
-                              moveDisabled={movingOperationId != null}
-                              reorderBusy={reorderingColumn(column.id)}
-                              dragging={dragSource?.operationId === row.operation_id}
-                              onDragStart={handleDragStart}
-                              onDragEnd={handleDragEnd}
-                              onDragOver={handleCardDragOver}
-                              onDragLeave={handleDragLeave}
-                              onDrop={handleCardDrop}
-                              onMove={moveWithinColumn}
-                              onMoveToWorkCenter={moveToWorkCenter}
-                            />
-                          </React.Fragment>
-                        ))}
-                        {/* The tail slot gets a line of its own — "goes to the
-                            bottom" must be something the manager SEES before
-                            releasing, never a silent consequence of the gap. */}
-                        <DropLine columnId={column.id} index={column.queue.length} dropSlot={dropSlot} />
-                      </>
-                    )}
+          {/* The BOARD scrolls sideways, never the page body. */}
+          <div className="relative">
+            <div
+              className="board-scroll-x overflow-x-auto pb-2"
+              data-testid="dispatch-board-scroll"
+              ref={boardRef}
+              onScroll={syncScrollEdges}
+            >
+              <div className="flex min-w-max items-start gap-3">
+                {busyColumns.map(renderColumn)}
+                {idleColumns.length > 0 && (
+                  // Always in the DOM so `aria-controls` names a real element;
+                  // the columns themselves are only rendered when revealed.
+                  <div id={IDLE_REGION_ID} className={idleVisible ? 'flex items-start gap-3' : 'hidden'}>
+                    {idleVisible ? idleColumns.map(renderColumn) : null}
                   </div>
-                </section>
-              );
-            })}
+                )}
+              </div>
+            </div>
+            {/* "The board continues over here" — the affordance the hidden macOS
+                overlay scrollbar never gave. Gone at the end of the scroll. */}
+            {!scrollEdges.atEnd && (
+              <div
+                aria-hidden="true"
+                data-testid="dispatch-board-more"
+                className="pointer-events-none absolute bottom-3 right-0 top-0 w-16 bg-gradient-to-l from-fd-canvas via-fd-canvas/80 to-transparent"
+              />
+            )}
           </div>
-        </div>
+        </>
       )}
     </div>
   );
@@ -687,34 +847,100 @@ function ChangeoverMarker({ operationId, kind }: { operationId: number; kind: Ne
   );
 }
 
+/** Board-panning controls; null when there is no board to pan. */
+interface BoardScroll {
+  atStart: boolean;
+  atEnd: boolean;
+  onScrollLeft: () => void;
+  onScrollRight: () => void;
+}
+
 interface BoardHeaderProps {
-  totals: { machines: number; jobs: number; ranked: number };
+  totals: { machines: number; busy: number; idle: number; jobs: number; ranked: number };
   statusMessage: string;
   onRefresh: () => void;
   refreshing: boolean;
   canEdit: boolean;
   /** Set when a re-read failed: what's on screen may not be what the server has. */
   staleNotice: string | null;
+  scroll: BoardScroll | null;
 }
 
-function BoardHeader({ totals, statusMessage, onRefresh, refreshing, canEdit, staleNotice }: BoardHeaderProps) {
+function BoardHeader({
+  totals,
+  statusMessage,
+  onRefresh,
+  refreshing,
+  canEdit,
+  staleNotice,
+  scroll,
+}: BoardHeaderProps) {
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div>
           <h1 className="text-2xl font-bold text-white">Dispatch Board</h1>
-          <p className="mt-0.5 text-sm text-slate-400">
+          <p className="mt-0.5 text-sm text-slate-400" data-testid="dispatch-totals">
+            {/* The totals describe the SHOP, not what happens to be rendered —
+                the busy/idle split is what says why the board looks shorter. */}
             {totals.jobs} queued job{totals.jobs === 1 ? '' : 's'} across {totals.machines} machine
-            {totals.machines === 1 ? '' : 's'} · {totals.ranked} ranked ·{' '}
+            {totals.machines === 1 ? '' : 's'} · {totals.ranked} ranked
+            {totals.machines > 0 && (
+              <>
+                {' '}
+                · {totals.busy} machine{totals.busy === 1 ? '' : 's'} with work, {totals.idle} idle
+              </>
+            )}{' '}
+            ·{' '}
             <span className="text-slate-500">
               run order is advisory — operators see the rank but can still start any job
             </span>
           </p>
         </div>
-        <Button variant="secondary" size="sm" onClick={onRefresh} disabled={refreshing}>
-          <ArrowPathIcon className={`mr-1.5 inline h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} aria-hidden="true" />
-          {refreshing ? 'Refreshing…' : 'Refresh'}
-        </Button>
+        <div className="flex items-center gap-1">
+          {scroll && (
+            // End-of-travel gating is `aria-disabled` + an inert click, not
+            // `disabled`: a keyboard user panning to the end must not have the
+            // control blurred out from under them onto <body> (same rule the
+            // card controls follow).
+            <>
+              <Button
+                variant="secondary"
+                size="sm"
+                data-testid="dispatch-scroll-left"
+                aria-label="Scroll board left"
+                title={scroll.atStart ? 'Already at the first machine' : 'Scroll left'}
+                aria-disabled={scroll.atStart || undefined}
+                className={scroll.atStart ? 'opacity-40' : undefined}
+                onClick={() => {
+                  if (scroll.atStart) return;
+                  scroll.onScrollLeft();
+                }}
+              >
+                <ChevronLeftIcon className="h-4 w-4" aria-hidden="true" />
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                data-testid="dispatch-scroll-right"
+                aria-label="Scroll board right"
+                title={scroll.atEnd ? 'Already at the last machine' : 'Scroll right'}
+                aria-disabled={scroll.atEnd || undefined}
+                className={scroll.atEnd ? 'opacity-40' : undefined}
+                onClick={() => {
+                  if (scroll.atEnd) return;
+                  scroll.onScrollRight();
+                }}
+              >
+                <ChevronRightIcon className="h-4 w-4" aria-hidden="true" />
+              </Button>
+            </>
+          )}
+          <Button variant="secondary" size="sm" onClick={onRefresh} disabled={refreshing}>
+            <ArrowPathIcon className={`mr-1.5 inline h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} aria-hidden="true" />
+            {refreshing ? 'Refreshing…' : 'Refresh'}
+          </Button>
+        </div>
       </div>
       {!canEdit && (
         <p className="rounded-sm border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-xs text-amber-300">
