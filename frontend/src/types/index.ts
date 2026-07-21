@@ -525,6 +525,8 @@ export interface DispatchBoardColumn {
   name: string;
   code: string;
   work_center_type: WorkCenterType;
+  /** false = deactivated WC that still has queued work; read-only on the board. */
+  is_active: boolean;
   queue: DispatchBoardRow[];
 }
 

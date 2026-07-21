@@ -38,7 +38,7 @@ from datetime import datetime
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from fastapi import HTTPException
-from sqlalchemy import and_, case, update
+from sqlalchemy import and_, case, select, update
 from sqlalchemy.orm import Query, Session, joinedload
 from sqlalchemy.orm.exc import StaleDataError
 
@@ -245,7 +245,12 @@ def dispatch_queue_row(operation: WorkOrderOperation, display_position: Optional
 
 
 def board_column(work_center: WorkCenter, operations: Iterable[WorkOrderOperation]) -> DispatchBoardColumn:
-    """One board column: a work center plus its (already-ordered) queue rows."""
+    """One board column: a work center plus its (already-ordered) queue rows.
+
+    ``is_active`` is read straight off the work center: a deactivated work
+    center that still holds queued work renders as a flagged read-only column
+    (see :func:`inactive_work_centers_with_work`).
+    """
     ordered = list(operations)
     positions = display_positions(ordered)
     return DispatchBoardColumn(
@@ -254,6 +259,7 @@ def board_column(work_center: WorkCenter, operations: Iterable[WorkOrderOperatio
         name=work_center.name,
         work_center_type=work_center.work_center_type,
         current_status=work_center.current_status,
+        is_active=bool(work_center.is_active),
         queue=[dispatch_queue_row(op, positions.get(op.id)) for op in ordered],
     )
 
@@ -274,8 +280,59 @@ def active_work_centers(db: Session, company_id: int) -> List[WorkCenter]:
     )
 
 
+def inactive_work_centers_with_work(db: Session, company_id: int) -> List[WorkCenter]:
+    """Deactivated work centers that still hold queued work, code-ordered.
+
+    A work center deactivated while operations were still queued must not
+    vanish from the board: the kiosk keeps serving that queue (deliberately --
+    operators finish stranded work there), so the board renders it as a flagged
+    read-only column (``is_active=false``) until the queue drains. Deactivation
+    now REFUSES while live work references the machine (see
+    ``work_centers._live_work_refusal``), so this surfaces pre-guard strays and
+    any state that slips past the guard, rather than being the normal path.
+
+    The subquery mirrors :func:`queued_operations_query`'s filter set --
+    READY/IN_PROGRESS operations on non-deleted, non-terminal work orders --
+    WITHOUT touching that shared query: its work-center seam stays the caller's
+    id list, and this helper decides only WHICH inactive work centers matter.
+    """
+    queued_wc_ids = (
+        select(WorkOrderOperation.work_center_id)
+        .join(WorkOrder)
+        .where(
+            and_(
+                WorkOrder.company_id == company_id,
+                WorkOrder.is_deleted == False,  # noqa: E712
+                WorkOrder.status.not_in(TERMINAL_WO_STATUSES),
+                WorkOrderOperation.status.in_(QUEUE_OPERATION_STATUSES),
+            )
+        )
+        .distinct()
+    )
+    return (
+        db.query(WorkCenter)
+        .filter(
+            WorkCenter.company_id == company_id,
+            # isnot(True) rather than == False: the column is nullable, and a
+            # legacy NULL row must surface flagged here rather than vanish from
+            # both board halves (the update endpoint drops explicit nulls, so
+            # NULL is only ever pre-existing data).
+            WorkCenter.is_active.isnot(True),
+            WorkCenter.id.in_(queued_wc_ids),
+        )
+        .order_by(WorkCenter.code)
+        .all()
+    )
+
+
 def build_dispatch_board(db: Session, company_id: int) -> Tuple[List[DispatchBoardColumn], datetime]:
-    """Every active work center with its live queue, in ONE operations query.
+    """Every board-worthy work center with its live queue, in ONE operations query.
+
+    Columns are every ACTIVE work center (empty queue included, so a manager can
+    drag work onto an idle machine) PLUS any DEACTIVATED work center that still
+    has queued work (:func:`inactive_work_centers_with_work`), flagged
+    ``is_active=false`` for read-only rendering. One list, code-ordered --
+    the same stable contract as before; the client decides prominence.
 
     Avoids N+1: the operations for ALL columns are fetched once and bucketed in
     Python, preserving the query's canonical order within each bucket, and every
@@ -283,7 +340,10 @@ def build_dispatch_board(db: Session, company_id: int) -> Tuple[List[DispatchBoa
     :func:`queue_row_load_options`. The board's cost must stay flat in the number
     of cards -- a per-row SELECT here is multiplied by the whole shop's queue.
     """
-    work_centers = active_work_centers(db, company_id)
+    work_centers = sorted(
+        active_work_centers(db, company_id) + inactive_work_centers_with_work(db, company_id),
+        key=lambda wc: wc.code,
+    )
     by_work_center: Dict[int, List[WorkOrderOperation]] = {wc.id: [] for wc in work_centers}
     if work_centers:
         operations = queued_operations(
