@@ -407,7 +407,9 @@ Two migrations back the work-order-completion concurrency fixes (see
   `server_default '1'`. The column itself is owned by `004_add_optimistic_locking`; this migration
   only normalizes data, so its `downgrade` is a deliberate no-op (it does not drop the column).
   Idempotent and safe to re-run. Plain transactional DDL/DML — intentionally split from `039` so it
-  can run inside a transaction.
+  can run inside a transaction. `069_work_order_version_guard` (2026-07-21) later applies the
+  identical guard to `work_orders`, backing the `version_id_col` mapping on `WorkOrder` itself
+  (header-level `PUT /work-orders/{id}` optimistic locking) — run it with or before that code deploy.
 
 - **`039_uq_open_time_entry`** — adds the partial unique index
   `uq_open_time_entry ON time_entries (user_id, operation_id) WHERE clock_out IS NULL` (at most one

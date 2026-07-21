@@ -410,12 +410,14 @@ def test_update_work_order_cancelled_to_in_progress_is_409(client: TestClient, d
     admin = make_user(db_session)
     wo, _op, _wc = make_wo_with_op(db_session, wo_status=WorkOrderStatus.CANCELLED)
 
-    # WorkOrderUpdate requires `version` (>=0); the WO model is not version-mapped so
-    # the value is inert here, and the G6-A terminal guard runs before any persist.
+    # WorkOrderUpdate requires `version` and it is REAL optimistic locking now (the
+    # WO model maps version_id_col): a mismatch would 409 on staleness before the
+    # G6-A terminal guard runs. Send the row's live version so the 409 asserted
+    # below provably comes from the terminal guard, not the version check.
     resp = client.put(
         f"/api/v1/work-orders/{wo.id}",
         headers=headers_for(admin),
-        json={"version": 0, "status": "in_progress"},
+        json={"version": wo.version, "status": "in_progress"},
     )
     assert resp.status_code == status.HTTP_409_CONFLICT, resp.text
     assert "terminal" in resp.json()["detail"].lower()
@@ -428,10 +430,12 @@ def test_update_work_order_closed_to_in_progress_is_409(client: TestClient, db_s
     admin = make_user(db_session)
     wo, _op, _wc = make_wo_with_op(db_session, wo_status=WorkOrderStatus.CLOSED)
 
+    # Live version (see the comment in the CANCELLED variant above): the asserted
+    # 409 must come from the terminal guard, not the optimistic-lock check.
     resp = client.put(
         f"/api/v1/work-orders/{wo.id}",
         headers=headers_for(admin),
-        json={"version": 0, "status": "in_progress"},
+        json={"version": wo.version, "status": "in_progress"},
     )
     assert resp.status_code == status.HTTP_409_CONFLICT, resp.text
     assert "terminal" in resp.json()["detail"].lower()
@@ -449,7 +453,7 @@ def test_update_work_order_terminal_to_terminal_is_allowed(client: TestClient, d
     resp = client.put(
         f"/api/v1/work-orders/{wo.id}",
         headers=headers_for(admin),
-        json={"version": 0, "status": "closed"},
+        json={"version": wo.version, "status": "closed"},
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
     wo_after = _reload(db_session, WorkOrder, wo.id)

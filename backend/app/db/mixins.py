@@ -63,8 +63,8 @@ class OptimisticLockMixin:
     ``__mapper_args__={'version_id_col': version}``. Enabling SQLAlchemy's native
     version_id_col globally here would change commit behavior (StaleDataError on
     concurrent writes) for every model that uses this mixin. Optimistic locking
-    is instead enabled per-model on the contended completion write path —
-    ``WorkOrderOperation`` and ``TimeEntry`` map ``version_id_col`` directly (see
+    is instead enabled per-model on the contended write paths — ``WorkOrder``,
+    ``WorkOrderOperation``, and ``TimeEntry`` map ``version_id_col`` directly (see
     those models). Other consumers of this mixin keep the column for
     application-managed comparisons without SQLAlchemy enforcement.
     """

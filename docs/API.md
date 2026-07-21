@@ -134,7 +134,7 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 | GET | `/work-orders/` | List all work orders | Yes |
 | POST | `/work-orders/` | Create work order | Yes |
 | GET | `/work-orders/{id}` | Get work order by ID | Yes |
-| PUT | `/work-orders/{id}` | Update work order (409 if it moves a terminal WO back to a non-terminal status) | Yes |
+| PUT | `/work-orders/{id}` | Update work order (body requires the WO's current `version` — stale → 409; also 409 if it moves a terminal WO back to a non-terminal status) | Yes |
 | DELETE | `/work-orders/{id}` | Delete work order | Admin |
 | POST | `/work-orders/{id}/release` | Release to production | Yes |
 | POST | `/work-orders/{id}/start` | Start production | Yes |
@@ -163,6 +163,18 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > the update; the client should re-fetch and retry. The server also takes a row lock
 > (`SELECT … FOR UPDATE`) around the over-completion check so two simultaneous completions cannot
 > double-count quantity.
+>
+> **Optimistic locking on the work-order header (`PUT /work-orders/{id}`).** The update body's
+> required `version` is enforced: it must equal the work order's current `version` (returned on every
+> work-order response) or the update is rejected with **409 Conflict**
+> (`{"detail": "Work order was modified by someone else. Refresh and try again."}`) before any field
+> is written. On 409 the client should re-fetch the WO (picking up the fresh `version`) and retry.
+> `version` is never client-writable — a successful update increments it server-side (SQLAlchemy
+> `version_id_col` on `WorkOrder`), and responses carry the real counter. Beyond this endpoint, the
+> mapping makes **every** WorkOrder write path conflict-checked: a genuinely concurrent stale write on
+> any other path (priority updates, kiosk status flips, soft delete) surfaces as **409 Conflict**
+> (`{"detail": "This record was modified by someone else. Refresh and try again."}`) via an app-wide
+> `StaleDataError` handler instead of silently losing the write.
 >
 > **Completion contract (shared finalizer).** Operation completion rolls up into the work order
 > through one shared finalizer, so all completion paths behave identically. On the absolute
@@ -392,11 +404,15 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
   "quantity": 100,
   "status": "planned",
   "priority": 2,
+  "version": 3,
   "due_date": "2024-01-31",
   "created_at": "2024-01-01T10:00:00Z",
   "updated_at": "2024-01-01T10:00:00Z"
 }
 ```
+
+> `version` is the work order's optimistic-lock counter — echo it back in the `PUT /work-orders/{id}`
+> body (see "Optimistic locking on the work-order header" above).
 
 ### Laser Nests
 

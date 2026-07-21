@@ -127,6 +127,13 @@ Findings: SFI-1, SFI-2, SFI-3, LOCK-1.
 > index with `CREATE INDEX CONCURRENTLY`; idempotent + reversible; logs the closed-row ids to the
 > deploy/migration output for AS9100D labor traceability rather than to the tamper-evident
 > `audit_log`). See `docs/DEVELOPMENT.md` → Database Migrations for the bootstrap-path caveat.
+
+> **Update (2026-07-21).** The "targeted on `WorkOrderOperation` and `TimeEntry` only" scope above
+> describes Batch 2 as shipped. `WorkOrder` itself now maps `version_id_col` the same way (direct
+> mapping, mixin still inert), enforcing the previously-inert `WorkOrderUpdate.version` on
+> `PUT /work-orders/{id}` (stale → 409) with an app-wide `StaleDataError`→409 handler as the safety
+> net; migration `069_work_order_version_guard` mirrors `038` for `work_orders`. See
+> `docs/API.md` → Work Orders → "Optimistic locking on the work-order header".
 >
 > **Residual follow-up A1 — ✅ RESOLVED (2026-06-09, branch `fix/wo-followups-round2`).**
 > `audit_log.sequence_number` was allocated by `max()+1` and was **not** serialized by the `FOR UPDATE`

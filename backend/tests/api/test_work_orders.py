@@ -3,6 +3,7 @@ from datetime import datetime
 import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
+from sqlalchemy.orm.exc import StaleDataError
 
 from app.models.audit_log import AuditLog
 from app.models.bom import BOM, BOMItem
@@ -640,7 +641,8 @@ class TestWorkOrdersAPI:
 
     def test_update_work_order(self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder):
         """Test updating an existing work order."""
-        update_data = {"version": 0, "status": "released", "priority": 1}
+        # version must MATCH the row (real optimistic locking) — a fresh row is 1.
+        update_data = {"version": test_work_order.version, "status": "released", "priority": 1}
         response = client.put(
             f"/api/v1/work-orders/{test_work_order.id}",
             headers=auth_headers,
@@ -1881,3 +1883,114 @@ class TestWorkOrdersValidation:
         wo_number_two = response_two.json()["work_order_number"]
 
         assert wo_number_one != wo_number_two
+
+
+@pytest.mark.api
+@pytest.mark.requires_db
+class TestWorkOrderVersionEnforcement:
+    """Optimistic locking (invariant 4) is REAL on PUT /work-orders/{id}: a stale
+    client version is a 409, and the client can never write the version counter.
+
+    Mirrors TestOperationVersionEnforcement (test_laser_nest_dispatch_import.py)
+    now that the WorkOrder model maps migration 004's ``version`` column as a
+    ``version_id_col`` (fresh row -> version 1) and update_work_order pops the
+    client version and compares BEFORE the setattr loop.
+    """
+
+    def test_stale_version_is_409_and_mutates_nothing(
+        self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder, db_session
+    ):
+        wo_id = test_work_order.id
+        real_version = test_work_order.version
+        old_priority = test_work_order.priority
+
+        response = client.put(
+            f"/api/v1/work-orders/{wo_id}",
+            headers=auth_headers,
+            json={"version": real_version + 41, "priority": 1},
+        )
+
+        assert response.status_code == status.HTTP_409_CONFLICT, response.text
+        assert "modified" in response.json()["detail"]
+        db_session.expire_all()
+        fresh = db_session.get(WorkOrder, wo_id)
+        assert fresh.priority == old_priority
+        assert fresh.version == real_version  # counter never moved by the client
+
+    def test_matching_version_succeeds_and_response_carries_incremented_version(
+        self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder
+    ):
+        # Fresh row: the mapped ORM default applies -> version 1.
+        assert test_work_order.version == 1
+
+        response = client.put(
+            f"/api/v1/work-orders/{test_work_order.id}",
+            headers=auth_headers,
+            json={"version": 1, "priority": 1},
+        )
+
+        assert response.status_code == status.HTTP_200_OK, response.text
+        data = response.json()
+        assert data["priority"] == 1
+        # WorkOrderResponse serializes the REAL post-update counter (1 -> 2),
+        # not the hardwired 0 the unmapped model used to produce.
+        assert data["version"] == 2
+
+    def test_replaying_the_old_version_after_a_successful_update_is_409(
+        self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder, db_session
+    ):
+        wo_id = test_work_order.id
+        original_version = test_work_order.version
+
+        first = client.put(
+            f"/api/v1/work-orders/{wo_id}",
+            headers=auth_headers,
+            json={"version": original_version, "priority": 1},
+        )
+        assert first.status_code == status.HTTP_200_OK, first.text
+
+        replay = client.put(
+            f"/api/v1/work-orders/{wo_id}",
+            headers=auth_headers,
+            json={"version": original_version, "priority": 9},
+        )
+
+        assert replay.status_code == status.HTTP_409_CONFLICT, replay.text
+        assert "modified" in replay.json()["detail"]
+        db_session.expire_all()
+        fresh = db_session.get(WorkOrder, wo_id)
+        assert fresh.priority == 1, "the stale replay must not overwrite the first writer's change"
+        assert fresh.version == original_version + 1
+
+    def test_unguarded_stale_flush_surfaces_as_409_not_500(
+        self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder, db_session, monkeypatch
+    ):
+        """The app-wide StaleDataError handler (app.main) is the safety net for
+        write paths WITHOUT a local except-StaleDataError block. PUT
+        /work-orders/{id}/priority is such a path: with version_id_col mapped, a
+        genuinely-concurrent stale flush must come back as a clean 409, not a 500.
+
+        Follows the flush-monkeypatch precedent in test_dispatch_run_order.py
+        (test_service_turns_a_stale_write_into_409_not_500), but through HTTP.
+        """
+        wo_id = test_work_order.id
+        old_priority = test_work_order.priority
+
+        def _stale_flush(*args, **kwargs):
+            raise StaleDataError("simulated concurrent write")
+
+        monkeypatch.setattr(db_session, "flush", _stale_flush)
+
+        response = client.put(
+            f"/api/v1/work-orders/{wo_id}/priority",
+            headers=auth_headers,
+            json={"priority": 1},
+        )
+
+        assert response.status_code == status.HTTP_409_CONFLICT, response.text
+        assert "modified" in response.json()["detail"]
+
+        # atomic_transaction rolled the half-applied change back.
+        monkeypatch.undo()
+        db_session.expire_all()
+        assert db_session.get(WorkOrder, wo_id).priority == old_priority
