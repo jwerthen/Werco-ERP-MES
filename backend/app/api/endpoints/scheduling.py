@@ -1,11 +1,11 @@
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session, joinedload
 
-from app.api.deps import get_current_company_id, get_current_user, require_role
+from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.core.queue import enqueue_job
 from app.core.realtime import safe_broadcast
 from app.core.websocket import (
@@ -79,6 +79,37 @@ def _resolve_work_center(db: Session, work_center_id: int, company_id: int) -> W
     if not work_center:
         raise HTTPException(status_code=404, detail="Work center not found or inactive")
     return work_center
+
+
+def _audit_schedule_value(value):
+    """Normalize a schedule value for the audit diff.
+
+    ``scheduled_start``/``scheduled_end`` are DateTime columns, so the OLD side
+    of a snapshot is a ``datetime`` while the NEW side is the ``date`` the API
+    accepted -- str()-serialized those can never compare equal, which would make
+    every call log a format-artifact "change" and defeat ``log_update``'s
+    genuine no-op self-suppression. One ISO form (midnight-anchored datetime)
+    keeps the comparison honest in both directions: a same-day re-submit
+    suppresses, a real time-of-day difference still surfaces.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return datetime.combine(value, time.min).isoformat()
+    return str(value)
+
+
+def _operation_audit_snapshot(operation: WorkOrderOperation) -> dict:
+    """The five-key audit diff for the scheduling endpoints (invariant 2)."""
+    return {
+        "work_center_id": operation.work_center_id,
+        "run_order": operation.run_order,
+        "scheduled_start": _audit_schedule_value(operation.scheduled_start),
+        "scheduled_end": _audit_schedule_value(operation.scheduled_end),
+        "status": operation.status,
+    }
 
 
 def _operation_total_hours(operation: WorkOrderOperation) -> float:
@@ -559,16 +590,26 @@ def schedule_work_order(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """
     Schedule an entire work order by scheduling its first operation.
     The work order will automatically flow through subsequent operations as each completes.
+
+    Writes an audit_log UPDATE row for the current operation (work center / run
+    order / schedule / status old->new diff), same as the dedicated move
+    endpoints (invariant 2). A genuine no-op self-suppresses.
     """
     work_order = _load_work_order_for_scheduling(db, work_order_id, company_id)
     operations, current_op = _get_current_operation(work_order)
 
+    # Snapshot BEFORE any mutation: clear_run_order_on_move rewrites run_order and
+    # _apply_work_order_schedule rewrites the schedule (and may flip status).
+    old_values = _operation_audit_snapshot(current_op)
+
+    target_work_center: Optional[WorkCenter] = None
     if schedule.work_center_id:
-        _resolve_work_center(db, schedule.work_center_id, company_id)
+        target_work_center = _resolve_work_center(db, schedule.work_center_id, company_id)
         # A reschedule that also moves the operation is still a move: the manual
         # dispatch rank belongs to the column it was dictated in, so it is dropped
         # here exactly as on the dedicated move endpoints. Without this the op
@@ -601,6 +642,28 @@ def schedule_work_order(
         },
     )
     work_center_ids = schedule_result["work_center_ids"]
+    # Audit the current operation only — it is the actor-visible object of this
+    # endpoint. Downstream ops rewritten by _apply_work_order_schedule are not
+    # individually audited (deliberate scope); their count rides in extra_data.
+    if target_work_center is not None and old_values["work_center_id"] != current_op.work_center_id:
+        audit_description = f"Scheduled operation and moved it to work center {target_work_center.code}"
+    else:
+        audit_description = "Rescheduled operation"
+    db.flush()
+    audit.log_update(
+        resource_type="work_order_operation",
+        resource_id=current_op.id,
+        resource_identifier=current_op.operation_number,
+        old_values=old_values,
+        new_values=_operation_audit_snapshot(current_op),
+        description=audit_description,
+        extra_data={
+            "via": "schedule",
+            "work_order_id": work_order.id,
+            "forward_schedule": schedule.forward_schedule,
+            "downstream_operations_scheduled": len(schedule_result["scheduled_operations"]) - 1,
+        },
+    )
     db.commit()
 
     if work_center_ids:
@@ -633,8 +696,14 @@ def schedule_work_order_earliest(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Schedule a work order at the earliest available date with capacity."""
+    """Schedule a work order at the earliest available date with capacity.
+
+    Writes an audit_log UPDATE row for the current operation (work center / run
+    order / schedule / status old->new diff), same as the dedicated move
+    endpoints (invariant 2). A genuine no-op self-suppresses.
+    """
     work_order = _load_work_order_for_scheduling(db, work_order_id, company_id)
     operations, current_op = _get_current_operation(work_order)
 
@@ -642,7 +711,12 @@ def schedule_work_order_earliest(
     if not target_work_center_id:
         raise HTTPException(status_code=400, detail="Current operation has no work center")
 
-    _resolve_work_center(db, target_work_center_id, company_id)
+    target_work_center = _resolve_work_center(db, target_work_center_id, company_id)
+
+    # Snapshot BEFORE any mutation: clear_run_order_on_move rewrites run_order and
+    # _apply_work_order_schedule rewrites the schedule (and may flip status).
+    old_values = _operation_audit_snapshot(current_op)
+
     # Same rule as the explicit reschedule above: if this call actually moves the
     # operation to another work center, its manual dispatch rank is dropped (a
     # no-op re-send of the current work center leaves the rank alone).
@@ -685,6 +759,30 @@ def schedule_work_order_earliest(
         },
     )
     work_center_ids = schedule_result["work_center_ids"]
+    # Audit the current operation only — it is the actor-visible object of this
+    # endpoint. Downstream ops rewritten by _apply_work_order_schedule are not
+    # individually audited (deliberate scope); their count rides in extra_data.
+    if old_values["work_center_id"] != current_op.work_center_id:
+        audit_description = (
+            f"Scheduled operation at earliest capacity and moved it to work center {target_work_center.code}"
+        )
+    else:
+        audit_description = "Rescheduled operation at earliest capacity"
+    db.flush()
+    audit.log_update(
+        resource_type="work_order_operation",
+        resource_id=current_op.id,
+        resource_identifier=current_op.operation_number,
+        old_values=old_values,
+        new_values=_operation_audit_snapshot(current_op),
+        description=audit_description,
+        extra_data={
+            "via": "schedule_earliest",
+            "work_order_id": work_order.id,
+            "forward_schedule": request.forward_schedule,
+            "downstream_operations_scheduled": len(schedule_result["scheduled_operations"]) - 1,
+        },
+    )
     db.commit()
 
     if work_center_ids:
