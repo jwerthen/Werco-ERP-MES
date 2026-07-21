@@ -32,8 +32,17 @@
  *    exist — because the macOS overlay scrollbar made 7,680px of board read as
  *    "I cannot reach my other work centers".
  * Hiding idle machines costs nothing operationally: each card's machine <select>
- * still lists EVERY machine, so a job can be sent to a quiet one without showing
- * its column (the disclosure says so).
+ * still lists every ACTIVE machine, so a job can be sent to a quiet one without
+ * showing its column (the disclosure says so).
+ *
+ * Deactivated machines: a column arrives with `is_active: false` only when the
+ * work center was deactivated while it still had queued work (the server never
+ * sends a deactivated machine with an empty queue). Those columns render FIRST —
+ * they are the anomaly demanding action — flagged DEACTIVATED and read-only:
+ * their cards can't be re-ranked or dragged, the column is not a drop target,
+ * and no card anywhere lists a deactivated machine as a move target. The ONE
+ * affordance a stranded card keeps is "Move to machine…" (active targets only),
+ * because moving the work out is the remedy.
  *
  * Accessibility: drag is a pointer-only enhancement. Every card also carries real
  * <button> Move up / Move down controls and a labeled machine <select> — the
@@ -132,6 +141,18 @@ const RUNNING_PIN_REASON =
 const RUNNING_MOVE_REASON =
   'This job is running. The server refuses to move an in-progress operation — clock out first.';
 
+/**
+ * Why a card on a deactivated machine can't be re-ranked. Ordering work on a
+ * machine that can't run it is planning theatre; the run-order PUT would 404 the
+ * inactive work center anyway. Moving OUT stays available — that's the remedy.
+ */
+const DEACTIVATED_PIN_REASON =
+  'This machine is deactivated — its run order is read-only. Move this work to an active machine.';
+
+const ROLE_PIN_REASON = 'Your role cannot change the run order.';
+
+const SAVING_REASON = 'Waiting for the last change to save…';
+
 /** The disclosure's region — `aria-controls` must name a real element id. */
 const IDLE_REGION_ID = 'dispatch-idle-machines';
 
@@ -140,7 +161,7 @@ const IDLE_REGION_ID = 'dispatch-idle-machines';
  * machine, so the disclosure states where that affordance still lives.
  */
 const IDLE_HELP =
-  'Idle machines have no queued work. You can still send a job to one without showing them — every card’s “Move to machine…” list includes every machine.';
+  'Idle machines have no queued work. You can still send a job to one without showing them — every card’s “Move to machine…” list includes every active machine.';
 
 // One column is `w-80` (320px) with a `gap-3` (12px) gutter; a press of the
 // scroll buttons moves two columns, which is a deliberate step rather than a
@@ -283,34 +304,43 @@ export default function DispatchBoard() {
   }, [load]);
 
   /**
-   * Work first. The server returns work centers in code order, which put the
-   * alphabetically-early IDLE machines on the first screen and the actual jobs
-   * off the right edge. The partition is purely a frontend concern — order
-   * WITHIN each group is still the server's code order.
+   * Anomalies first, then work. Deactivated machines that still hold queued
+   * work render before everything else — they exist only to be emptied — then
+   * the active machines with work, then the idle disclosure. The server returns
+   * work centers in code order, which put the alphabetically-early IDLE machines
+   * on the first screen and the actual jobs off the right edge. The partition is
+   * purely a frontend concern — order WITHIN each group is still the server's
+   * code order.
    */
-  const { busyColumns, idleColumns } = useMemo(() => {
+  const { deactivatedColumns, busyColumns, idleColumns } = useMemo(() => {
     const all = columns || [];
+    const active = all.filter((column) => column.is_active !== false);
     return {
-      busyColumns: all.filter((column) => column.queue.length > 0),
-      idleColumns: all.filter((column) => column.queue.length === 0),
+      deactivatedColumns: all.filter((column) => column.is_active === false),
+      busyColumns: active.filter((column) => column.queue.length > 0),
+      idleColumns: active.filter((column) => column.queue.length === 0),
     };
   }, [columns]);
 
   // A board of nothing but idle machines must not collapse to nothing: with no
-  // busy columns there is no disclosure and the idle machines simply render.
-  const idleCollapsible = busyColumns.length > 0 && idleColumns.length > 0;
+  // busy (or deactivated) columns there is no disclosure and the idle machines
+  // simply render.
+  const idleCollapsible = busyColumns.length + deactivatedColumns.length > 0 && idleColumns.length > 0;
   const idleVisible = !idleCollapsible || showIdle;
 
   const totals = useMemo(() => {
-    const all = (columns || []).flatMap((column) => column.queue);
-    const machines = (columns || []).length;
-    const busy = (columns || []).filter((column) => column.queue.length > 0).length;
+    const all = columns || [];
+    const rows = all.flatMap((column) => column.queue);
+    const active = all.filter((column) => column.is_active !== false);
     return {
-      machines,
-      busy,
-      idle: machines - busy,
-      jobs: all.length,
-      ranked: all.filter((row) => row.run_order != null).length,
+      machines: all.length,
+      busy: active.filter((column) => column.queue.length > 0).length,
+      // Only ACTIVE machines can be idle — a deactivated one is neither "with
+      // work" nor "idle"; it gets its own callout in the header.
+      idle: active.filter((column) => column.queue.length === 0).length,
+      deactivated: all.length - active.length,
+      jobs: rows.length,
+      ranked: rows.filter((row) => row.run_order != null).length,
     };
   }, [columns]);
 
@@ -404,7 +434,9 @@ export default function DispatchBoard() {
       // first's reconcile and rollback against each other.
       if (reorderingColumn(workCenterId) || movingOperationId != null) return;
       const column = columns.find((candidate) => candidate.id === workCenterId);
-      if (!column) return;
+      // A deactivated column's run order is read-only (the server would 404 the
+      // rewrite on an inactive work center anyway).
+      if (!column || column.is_active === false) return;
       const fromIndex = column.queue.findIndex((row) => row.operation_id === operationId);
       if (fromIndex < 0) return;
       const row = column.queue[fromIndex];
@@ -461,7 +493,9 @@ export default function DispatchBoard() {
     async (row: DispatchBoardRow, targetWorkCenterId: number) => {
       if (!canEdit || movingOperationId != null) return;
       const target = (columns || []).find((column) => column.id === targetWorkCenterId);
-      if (!target) return;
+      // A deactivated machine is never a move TARGET (the server would 404 it);
+      // the selects don't list one, this is the belt to that suspender.
+      if (!target || target.is_active === false) return;
       const label = jobLabel(row);
 
       setMovingOperationId(row.operation_id);
@@ -623,7 +657,11 @@ export default function DispatchBoard() {
    */
   const renderColumn = (column: DispatchBoardColumn) => {
     const empty = column.queue.length === 0;
-    const columnTargeted = dropSlot?.workCenterId === column.id;
+    // Deactivated = the WC was turned off while work was still queued on it.
+    // The column is read-only: never a drop target, cards can't be re-ranked;
+    // the only live affordance is each card's move-out select.
+    const deactivated = column.is_active === false;
+    const columnTargeted = !deactivated && dropSlot?.workCenterId === column.id;
     // Recomputed from the queue on every render, so an optimistic reorder
     // updates the cost of the order at the same moment the cards move — that
     // immediacy is the whole feedback loop.
@@ -633,14 +671,35 @@ export default function DispatchBoard() {
         key={column.id}
         aria-label={`${column.name} run order`}
         className={`flex w-80 shrink-0 flex-col rounded-sm border ${
-          empty ? 'border-slate-800/80 bg-fd-panel/40' : 'border-fd-line bg-fd-panel'
+          deactivated
+            ? 'border-red-500/60 bg-fd-panel'
+            : empty
+              ? 'border-slate-800/80 bg-fd-panel/40'
+              : 'border-fd-line bg-fd-panel'
         } ${columnTargeted ? 'ring-1 ring-blue-400/70' : ''}`}
       >
-        <header className="flex items-center justify-between gap-2 border-b border-fd-line px-3 py-2">
+        <header
+          className={`flex items-center justify-between gap-2 border-b px-3 py-2 ${
+            deactivated ? 'border-red-500/40' : 'border-fd-line'
+          }`}
+        >
           <div className="min-w-0">
-            <p className={`truncate text-sm font-semibold ${empty ? 'text-slate-400' : 'text-slate-100'}`}>
-              {column.name}
-            </p>
+            <div className="flex items-center gap-1.5">
+              <p className={`truncate text-sm font-semibold ${empty ? 'text-slate-400' : 'text-slate-100'}`}>
+                {column.name}
+              </p>
+              {/* NOT aria-hidden: the section keeps its "{name} run order"
+                  label, so this badge is what tells a screen-reader user the
+                  machine is deactivated. */}
+              {deactivated && (
+                <span
+                  data-testid={`dispatch-deactivated-${column.id}`}
+                  className="shrink-0 rounded border border-red-500/60 bg-red-500/10 px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase tracking-widest text-red-300"
+                >
+                  Deactivated
+                </span>
+              )}
+            </div>
             <p className="truncate font-mono text-[11px] uppercase tracking-widest text-slate-500">
               {column.code}
               {column.work_center_type ? ` · ${String(column.work_center_type).replace(/_/g, ' ')}` : ''}
@@ -657,27 +716,44 @@ export default function DispatchBoard() {
           </div>
           <span
             className={`shrink-0 rounded border px-2 py-0.5 font-mono text-xs ${
-              empty ? 'border-slate-800 text-slate-500' : 'border-fd-line text-slate-300'
+              deactivated
+                ? 'border-red-500/60 text-red-300'
+                : empty
+                  ? 'border-slate-800 text-slate-500'
+                  : 'border-fd-line text-slate-300'
             }`}
           >
             {column.queue.length}
           </span>
         </header>
 
+        {deactivated && (
+          <p
+            data-testid={`dispatch-deactivated-remedy-${column.id}`}
+            className="border-b border-red-500/40 bg-red-500/5 px-3 py-1.5 text-[11px] text-red-300"
+          >
+            Move this work to an active machine.
+          </p>
+        )}
+
         {/* Drop surface. Plain div: the accessible equivalent of dropping
             here is each card's Move up/down buttons + machine select, so
-            the surface itself is presentational (POUpload.tsx precedent). */}
+            the surface itself is presentational (POUpload.tsx precedent).
+            A deactivated column gets no drag handlers at all — nothing can
+            land on a machine that can't run it. */}
         <div
           role="presentation"
           data-testid={`dispatch-column-${column.id}`}
           className="flex min-h-[7rem] flex-1 flex-col gap-2 p-2"
-          onDragOver={(e) => handleColumnDragOver(e, column.id)}
-          onDragLeave={handleDragLeave}
-          onDrop={(e) => handleColumnDrop(e, column.id)}
+          onDragOver={deactivated ? undefined : (e) => handleColumnDragOver(e, column.id)}
+          onDragLeave={deactivated ? undefined : handleDragLeave}
+          onDrop={deactivated ? undefined : (e) => handleColumnDrop(e, column.id)}
         >
           {empty ? (
             <p className="px-1 py-6 text-center text-xs text-slate-500">
-              Idle — no queued work. Drag a job here (or use a card&apos;s machine select) to move it to this machine.
+              {deactivated
+                ? 'Deactivated — no queued work remains.'
+                : "Idle — no queued work. Drag a job here (or use a card's machine select) to move it to this machine."}
             </p>
           ) : (
             <>
@@ -695,9 +771,10 @@ export default function DispatchBoard() {
                     row={row}
                     index={index}
                     column={column}
-                    // EVERY machine, busy or idle, stays in the card's move
-                    // list — that is what makes hiding the idle columns
-                    // cost-free.
+                    // Every ACTIVE machine, busy or idle, stays in the card's
+                    // move list — that is what makes hiding the idle columns
+                    // cost-free. Deactivated machines are filtered out inside
+                    // the card: they can't accept work.
                     columns={boardColumns}
                     canEdit={canEdit}
                     moving={movingOperationId === row.operation_id}
@@ -782,6 +859,7 @@ export default function DispatchBoard() {
               onScroll={syncScrollEdges}
             >
               <div className="flex min-w-max items-start gap-3">
+                {deactivatedColumns.map(renderColumn)}
                 {busyColumns.map(renderColumn)}
                 {idleColumns.length > 0 && (
                   // Always in the DOM so `aria-controls` names a real element;
@@ -856,7 +934,7 @@ interface BoardScroll {
 }
 
 interface BoardHeaderProps {
-  totals: { machines: number; busy: number; idle: number; jobs: number; ranked: number };
+  totals: { machines: number; busy: number; idle: number; deactivated: number; jobs: number; ranked: number };
   statusMessage: string;
   onRefresh: () => void;
   refreshing: boolean;
@@ -889,6 +967,16 @@ function BoardHeader({
               <>
                 {' '}
                 · {totals.busy} machine{totals.busy === 1 ? '' : 's'} with work, {totals.idle} idle
+              </>
+            )}
+            {totals.deactivated > 0 && (
+              <>
+                {' '}
+                ·{' '}
+                <span className="font-semibold text-red-300" data-testid="dispatch-deactivated-total">
+                  {totals.deactivated} deactivated machine{totals.deactivated === 1 ? '' : 's'} still{' '}
+                  {totals.deactivated === 1 ? 'has' : 'have'} work
+                </span>
               </>
             )}{' '}
             ·{' '}
@@ -1011,7 +1099,10 @@ function DispatchCard({
 }: DispatchCardProps) {
   const running = isRunning(row);
   const label = jobLabel(row);
-  const pinned = running || !canEdit;
+  // A deactivated column's cards are pinned like running ones: no drag, no
+  // re-rank. The machine select stays live — moving OUT is the remedy.
+  const columnDeactivated = column.is_active === false;
+  const pinned = running || !canEdit || columnDeactivated;
   // In-flight gating is `aria-disabled`, NOT `disabled`: a control that becomes
   // `disabled` under the user's finger is blurred by the browser, which is how a
   // keyboard reorder used to throw focus to <body>. The click handler no-ops
@@ -1019,14 +1110,21 @@ function DispatchCard({
   const busy = reorderBusy || moveDisabled;
   const disabledReason = running
     ? RUNNING_PIN_REASON
-    : !canEdit
-      ? 'Your role cannot change the run order.'
-      : busy
-        ? 'Waiting for the last change to save…'
-        : undefined;
+    : columnDeactivated
+      ? DEACTIVATED_PIN_REASON
+      : !canEdit
+        ? ROLE_PIN_REASON
+        : busy
+          ? SAVING_REASON
+          : undefined;
+  // The select's own gate: a deactivated COLUMN does not block it (that select
+  // is the one live control on such a column), so it must not inherit `pinned`.
+  const moveReason = running ? RUNNING_MOVE_REASON : !canEdit ? ROLE_PIN_REASON : busy ? SAVING_REASON : undefined;
   const pastDue = row.due_date ? isDateBeforeTodayInCentral(row.due_date) : false;
   const dueToday = row.due_date ? isDateTodayInCentral(row.due_date) : false;
-  const otherMachines = columns.filter((candidate) => candidate.id !== column.id);
+  // Move targets are ACTIVE machines only — the server 404s a move to a
+  // deactivated work center, so the board must never offer one.
+  const otherMachines = columns.filter((candidate) => candidate.id !== column.id && candidate.is_active !== false);
   const nestSegments = nestDetailSegments(row.laser_nest);
 
   return (
@@ -1040,9 +1138,11 @@ function DispatchCard({
       draggable={!pinned && !busy}
       onDragStart={(e) => onDragStart(e, row, column.id)}
       onDragEnd={onDragEnd}
-      onDragOver={(e) => onDragOver(e, column.id, index)}
-      onDragLeave={onDragLeave}
-      onDrop={(e) => onDrop(e, column.id, index)}
+      // On a deactivated column the card is not a drop surface either — no
+      // handlers, so a dragged card can't slot between stranded ones.
+      onDragOver={columnDeactivated ? undefined : (e) => onDragOver(e, column.id, index)}
+      onDragLeave={columnDeactivated ? undefined : onDragLeave}
+      onDrop={columnDeactivated ? undefined : (e) => onDrop(e, column.id, index)}
       className={`rounded-sm border px-2.5 py-2 outline-none transition-colors focus-visible:ring-1 focus-visible:ring-blue-400 ${
         running ? 'border-blue-400/60 bg-blue-500/5' : 'border-fd-line bg-fd-sunken'
       } ${dragging ? 'opacity-50' : ''} ${moving ? 'opacity-60' : ''}`}
@@ -1154,12 +1254,14 @@ function DispatchCard({
         </Button>
         <select
           aria-label={`Move ${label} to another machine`}
-          title={(running ? RUNNING_MOVE_REASON : disabledReason) || 'Move this job to another machine'}
-          // Structural reasons (running job, nowhere to move it) really are
-          // `disabled`; the in-flight gate is `aria-disabled` + a no-op, so a
-          // keyboard user holding this control isn't blurred to <body> the
-          // instant their own move starts -- same rule as the Move buttons.
-          disabled={pinned || otherMachines.length === 0}
+          title={moveReason || (columnDeactivated ? 'Move this job to an active machine' : 'Move this job to another machine')}
+          // Structural reasons (running job, no permission, nowhere to move it)
+          // really are `disabled`; the in-flight gate is `aria-disabled` + a
+          // no-op, so a keyboard user holding this control isn't blurred to
+          // <body> the instant their own move starts -- same rule as the Move
+          // buttons. Deliberately NOT `pinned`: a deactivated column pins the
+          // card but this select is the way OUT, so it stays live there.
+          disabled={running || !canEdit || otherMachines.length === 0}
           aria-disabled={busy || undefined}
           value=""
           onChange={(e) => {

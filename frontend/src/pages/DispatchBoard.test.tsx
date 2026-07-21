@@ -33,7 +33,13 @@
  *    a material or thickness change is marked between the two cards that cause it
  *    (never above the first card or against a non-nest job), the column header
  *    summarises "N nests · M changeovers", and that count follows the optimistic
- *    reorder so batching shows its payoff immediately.
+ *    reorder so batching shows its payoff immediately;
+ *  - DEACTIVATED machines (is_active: false, only sent when queued work is still
+ *    stranded on them): the column renders FIRST, flagged with a badge, a remedy
+ *    strip and a header callout, its cards are pinned (no drag/re-rank) and the
+ *    column is not a drop target, no other card's move list offers it — while
+ *    each stranded card's own "Move to machine…" select stays LIVE with active
+ *    targets only, because moving the work out is the remedy.
  *
  * services/api and usePermissions are mocked at the module boundary.
  */
@@ -165,9 +171,47 @@ const MILL_QUEUE_ROWS: DispatchBoardRow[] = [
 
 const board = (): { work_centers: DispatchBoardColumn[] } => ({
   work_centers: [
-    { id: 2, name: 'Ermaksan Fiber Laser', code: 'ERM-FL', work_center_type: 'laser', queue: LASER_ROWS.map((r) => ({ ...r })) },
-    { id: 5, name: 'Haas VF-2', code: 'HAAS-2', work_center_type: 'milling', queue: MILL_ROWS.map((r) => ({ ...r })) },
-    { id: 7, name: 'Press Brake 1', code: 'PB-1', work_center_type: 'forming', queue: [] },
+    { id: 2, name: 'Ermaksan Fiber Laser', code: 'ERM-FL', work_center_type: 'laser', is_active: true, queue: LASER_ROWS.map((r) => ({ ...r })) },
+    { id: 5, name: 'Haas VF-2', code: 'HAAS-2', work_center_type: 'milling', is_active: true, queue: MILL_ROWS.map((r) => ({ ...r })) },
+    { id: 7, name: 'Press Brake 1', code: 'PB-1', work_center_type: 'forming', is_active: true, queue: [] },
+  ],
+});
+
+/**
+ * Two stranded jobs on a machine that was deactivated while they were queued.
+ * Two rows on purpose: with a single card every Move button is disabled by the
+ * index boundary anyway, which would make the "pinned" assertions vacuous.
+ */
+const STRANDED_ROWS: DispatchBoardRow[] = [
+  makeRow({
+    operation_id: 41,
+    run_order: 1,
+    version: 2,
+    work_order_id: 20,
+    work_order_number: 'WO-20260715-009',
+    operation_number: '40',
+    operation_name: 'Punch',
+  }),
+  makeRow({
+    operation_id: 42,
+    work_order_id: 21,
+    work_order_number: 'WO-20260716-011',
+    operation_number: '10',
+    operation_name: 'Form',
+  }),
+];
+
+/**
+ * The board with a deactivated machine still holding work. Its code (ZPU-9)
+ * sorts LAST in the server's code order — the array reflects that — so the
+ * column rendering FIRST proves the client partition, not the server sort.
+ */
+const deactivatedBoard = (): { work_centers: DispatchBoardColumn[] } => ({
+  work_centers: [
+    { id: 2, name: 'Ermaksan Fiber Laser', code: 'ERM-FL', work_center_type: 'laser', is_active: true, queue: LASER_ROWS.map((r) => ({ ...r })) },
+    { id: 5, name: 'Haas VF-2', code: 'HAAS-2', work_center_type: 'milling', is_active: true, queue: MILL_ROWS.map((r) => ({ ...r })) },
+    { id: 7, name: 'Press Brake 1', code: 'PB-1', work_center_type: 'forming', is_active: true, queue: [] },
+    { id: 9, name: 'Retired Punch', code: 'ZPU-9', work_center_type: 'punching', is_active: false, queue: STRANDED_ROWS.map((r) => ({ ...r })) },
   ],
 });
 
@@ -214,6 +258,7 @@ const nestBoard = (): { work_centers: DispatchBoardColumn[] } => ({
       name: 'Ermaksan Fiber Laser',
       code: 'ERM-FL',
       work_center_type: 'laser',
+      is_active: true,
       queue: NEST_ROWS.map((r) => ({ ...r })),
     },
   ],
@@ -227,6 +272,7 @@ const twoQueueBoard = (): { work_centers: DispatchBoardColumn[] } => ({
       name: 'Ermaksan Fiber Laser',
       code: 'ERM-FL',
       work_center_type: 'laser',
+      is_active: true,
       queue: LASER_ROWS.map((r) => ({ ...r })),
     },
     {
@@ -234,6 +280,7 @@ const twoQueueBoard = (): { work_centers: DispatchBoardColumn[] } => ({
       name: 'Haas VF-2',
       code: 'HAAS-2',
       work_center_type: 'milling',
+      is_active: true,
       queue: MILL_QUEUE_ROWS.map((r) => ({ ...r })),
     },
   ],
@@ -246,25 +293,26 @@ const twoQueueBoard = (): { work_centers: DispatchBoardColumn[] } => ({
  */
 const scaleBoard = (): { work_centers: DispatchBoardColumn[] } => ({
   work_centers: [
-    { id: 1, name: 'Assembly 1', code: 'ASM-01', work_center_type: 'assembly', queue: [] },
-    { id: 3, name: 'Bandsaw 1', code: 'BND-01', work_center_type: 'sawing', queue: [] },
+    { id: 1, name: 'Assembly 1', code: 'ASM-01', work_center_type: 'assembly', is_active: true, queue: [] },
+    { id: 3, name: 'Bandsaw 1', code: 'BND-01', work_center_type: 'sawing', is_active: true, queue: [] },
     {
       id: 2,
       name: 'Ermaksan Fiber Laser',
       code: 'ERM-FL',
       work_center_type: 'laser',
+      is_active: true,
       queue: LASER_ROWS.map((r) => ({ ...r })),
     },
-    { id: 6, name: 'Grinder 1', code: 'GRD-01', work_center_type: 'grinding', queue: [] },
-    { id: 5, name: 'Haas VF-2', code: 'HAAS-2', work_center_type: 'milling', queue: MILL_ROWS.map((r) => ({ ...r })) },
+    { id: 6, name: 'Grinder 1', code: 'GRD-01', work_center_type: 'grinding', is_active: true, queue: [] },
+    { id: 5, name: 'Haas VF-2', code: 'HAAS-2', work_center_type: 'milling', is_active: true, queue: MILL_ROWS.map((r) => ({ ...r })) },
   ],
 });
 
 /** Every machine quiet — the board must still render them, with no disclosure. */
 const allIdleBoard = (): { work_centers: DispatchBoardColumn[] } => ({
   work_centers: [
-    { id: 1, name: 'Assembly 1', code: 'ASM-01', work_center_type: 'assembly', queue: [] },
-    { id: 3, name: 'Bandsaw 1', code: 'BND-01', work_center_type: 'sawing', queue: [] },
+    { id: 1, name: 'Assembly 1', code: 'ASM-01', work_center_type: 'assembly', is_active: true, queue: [] },
+    { id: 3, name: 'Bandsaw 1', code: 'BND-01', work_center_type: 'sawing', is_active: true, queue: [] },
   ],
 });
 
@@ -897,6 +945,93 @@ describe('DispatchBoard', () => {
     await waitFor(() => expect(right).toHaveAttribute('aria-disabled', 'true'));
     expect(left).not.toHaveAttribute('aria-disabled');
     expect(screen.queryByTestId('dispatch-board-more')).not.toBeInTheDocument();
+  });
+
+  // --- Deactivated machines that still hold work ----------------------------
+
+  it('renders a deactivated machine with work FIRST, flagged, with the header callout', async () => {
+    mockApi.getDispatchBoard.mockResolvedValue(deactivatedBoard());
+    renderBoard();
+    await findColumn('Retired Punch');
+
+    // ZPU-9 sorts LAST in the server's code order, yet the anomaly renders
+    // before every busy machine (idle Press Brake stays behind the disclosure).
+    expect(columnOrder()).toEqual([
+      'Retired Punch run order',
+      'Ermaksan Fiber Laser run order',
+      'Haas VF-2 run order',
+    ]);
+
+    // The badge is what tells a screen-reader user the machine is deactivated,
+    // and the remedy strip says what to do about it.
+    expect(screen.getByTestId('dispatch-deactivated-9')).toHaveTextContent('Deactivated');
+    expect(screen.getByTestId('dispatch-deactivated-remedy-9')).toHaveTextContent(
+      'Move this work to an active machine.'
+    );
+
+    const totals = screen.getByTestId('dispatch-totals');
+    expect(screen.getByTestId('dispatch-deactivated-total')).toHaveTextContent(
+      '1 deactivated machine still has work'
+    );
+    // The machines total is the whole shop; busy/idle count ACTIVE machines only.
+    expect(totals).toHaveTextContent('across 4 machines');
+    expect(totals).toHaveTextContent('2 machines with work, 1 idle');
+  });
+
+  it('pins a deactivated column: no re-rank, no drag, not a drop target, never a move target', async () => {
+    mockApi.getDispatchBoard.mockResolvedValue(deactivatedBoard());
+    renderBoard();
+    await findColumn('Retired Punch');
+
+    // Its cards cannot be dragged or re-ranked (card 41 is first of TWO, so
+    // Move down would be enabled if only the index boundary applied)...
+    expect(screen.getByTestId('dispatch-card-41')).toHaveAttribute('draggable', 'false');
+    const down = screen.getByLabelText('Move WO-20260715-009 Punch down');
+    expect(down).toBeDisabled();
+    expect(down).toHaveAttribute(
+      'title',
+      'This machine is deactivated — its run order is read-only. Move this work to an active machine.'
+    );
+    expect(screen.getByLabelText('Move WO-20260716-011 Form up')).toBeDisabled();
+
+    // ...the column is not a drop target: dragging a live card over it shows no
+    // slot, and releasing performs no move of any kind...
+    fireDrag('dragStart', screen.getByTestId('dispatch-card-9'));
+    const surface = screen.getByTestId('dispatch-column-9');
+    fireDrag('dragOver', surface, 40);
+    expect(screen.queryByTestId('dispatch-drop-line-9-0')).not.toBeInTheDocument();
+    fireDrag('drop', surface, 40);
+    expect(mockApi.updateOperation).not.toHaveBeenCalled();
+    expect(mockApi.setWorkCenterRunOrder).not.toHaveBeenCalled();
+
+    // ...and no other card's machine list offers it (the server would 404 it).
+    const laserSelect = screen.getByLabelText('Move WO-20260719-004 Laser Cut - nest-p002 to another machine');
+    expect(within(laserSelect).queryByRole('option', { name: 'Retired Punch' })).not.toBeInTheDocument();
+    expect(within(laserSelect).getByRole('option', { name: 'Haas VF-2' })).toBeInTheDocument();
+  });
+
+  it("keeps a stranded card's own move-out select LIVE, listing active machines only", async () => {
+    const user = userEvent.setup();
+    mockApi.getDispatchBoard.mockResolvedValue(deactivatedBoard());
+    mockApi.updateOperation.mockResolvedValue({});
+    renderBoard();
+    await findColumn('Retired Punch');
+
+    // The one affordance a stranded card keeps: moving OUT is the remedy, so
+    // the select does not inherit the column's pinning.
+    const select = screen.getByLabelText('Move WO-20260715-009 Punch to another machine');
+    expect(select).toBeEnabled();
+    expect(select).toHaveAttribute('title', 'Move this job to an active machine');
+    // Every ACTIVE machine (hidden idle ones included), never a deactivated one.
+    expect(within(select).getAllByRole('option').map((option) => option.textContent)).toEqual([
+      'Move to machine…',
+      'Ermaksan Fiber Laser',
+      'Haas VF-2',
+      'Press Brake 1',
+    ]);
+
+    await user.selectOptions(select, '5');
+    await waitFor(() => expect(mockApi.updateOperation).toHaveBeenCalledWith(41, { work_center_id: 5, version: 2 }));
   });
 
   it('renders a retryable error state when the board fails to load', async () => {

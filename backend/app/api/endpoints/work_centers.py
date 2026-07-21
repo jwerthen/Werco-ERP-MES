@@ -3,9 +3,10 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, ValidationError
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_company_id, get_current_user, require_role
+from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.core.cache import (
     cache_work_centers_list,
     get_cached_work_centers_list,
@@ -17,12 +18,65 @@ from app.core.websocket import broadcast_dashboard_update, broadcast_shop_floor_
 from app.db.database import get_db
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
+from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation
 from app.schemas.work_center import WorkCenterCreate, WorkCenterResponse, WorkCenterUpdate
 from app.services.audit_service import AuditService
 from app.services.import_service import ImportFileError, parse_import_file
 from app.services.work_center_type_service import get_work_center_types, normalize_work_center_type
+from app.services.work_order_state_service import TERMINAL_WO_STATUSES
 
 router = APIRouter()
+
+# Breakdown order for the deactivation refusal message: most-actionable first.
+# COMPLETE is the one operation status that never blocks a deactivation.
+_LIVE_OPERATION_STATUS_ORDER = (
+    OperationStatus.READY,
+    OperationStatus.IN_PROGRESS,
+    OperationStatus.PENDING,
+    OperationStatus.ON_HOLD,
+)
+
+
+def _live_work_refusal(db: Session, company_id: int, work_center: WorkCenter) -> Optional[str]:
+    """Refusal detail when live operations still reference the work center, else None.
+
+    Deactivating a work center that still has work parked on it hides that work
+    from the dispatch board (columns are active work centers) while the operator
+    kiosk keeps serving it -- stranded, invisible to the planner. So deactivation
+    is refused until the queue is drained.
+
+    "Live" mirrors the work-order-side filters of the dispatch queue
+    (``dispatch_service.queued_operations_query``: non-deleted, non-terminal work
+    order) but deliberately counts EVERY incomplete operation status -- PENDING
+    and ON_HOLD are off the dispatch queue today, yet they still need this
+    machine and would be stranded on it just the same.
+    """
+    counts = dict(
+        db.query(WorkOrderOperation.status, func.count(WorkOrderOperation.id))
+        .join(WorkOrder)
+        .filter(
+            WorkOrder.company_id == company_id,
+            WorkOrder.is_deleted == False,  # noqa: E712
+            WorkOrder.status.not_in(TERMINAL_WO_STATUSES),
+            WorkOrderOperation.work_center_id == work_center.id,
+            WorkOrderOperation.status != OperationStatus.COMPLETE,
+        )
+        .group_by(WorkOrderOperation.status)
+        .all()
+    )
+    total = sum(counts.values())
+    if not total:
+        return None
+    breakdown = ", ".join(
+        f"{counts[op_status]} {op_status.value.replace('_', ' ')}"
+        for op_status in _LIVE_OPERATION_STATUS_ORDER
+        if counts.get(op_status)
+    )
+    noun, verb, pronoun = ("operation", "has", "it") if total == 1 else ("operations", "have", "them")
+    return (
+        f"Cannot deactivate {work_center.code}: {total} {noun} still {verb} live work here ({breakdown}). "
+        f"Move {pronoun} to another machine (Dispatch Board -> Move to machine) or complete {pronoun} first."
+    )
 
 
 class WorkCenterCsvImportError(BaseModel):
@@ -283,8 +337,14 @@ def update_work_center(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Update a work center"""
+    """Update a work center.
+
+    Flipping ``is_active`` to false here is the same action as DELETE, so the
+    same live-work guard applies: refused with a 409 while any live operation
+    still references the machine. Reactivation (false -> true) is always allowed.
+    """
     work_center = (
         db.query(WorkCenter).filter(WorkCenter.id == work_center_id, WorkCenter.company_id == company_id).first()
     )
@@ -292,9 +352,42 @@ def update_work_center(
         raise HTTPException(status_code=404, detail="Work center not found")
 
     update_data = work_center_in.model_dump(exclude_unset=True)
+
+    # An explicit `"is_active": null` is treated as no-change, never written: the
+    # column is a nullable Boolean, and a SQL NULL matches NEITHER board query
+    # (active columns filter `== True`, flagged columns `.isnot(True)`) while
+    # also slipping past the `is False` deactivation guard below.
+    if "is_active" in update_data and update_data["is_active"] is None:
+        del update_data["is_active"]
+
+    # Deactivation guard -- checked BEFORE anything mutates, so a refusal leaves
+    # the row untouched.
+    if update_data.get("is_active") is False and work_center.is_active:
+        refusal = _live_work_refusal(db, company_id, work_center)
+        if refusal:
+            raise HTTPException(status_code=409, detail=refusal)
+
+    # Full-row snapshot BEFORE the setattr loop (mirrors update_work_order): this
+    # endpoint previously committed state changes with no audit row at all. The
+    # schema's `version` field has no model column, so the setattr below leaves
+    # only a transient attribute -- __table__.columns has no `version`, so it
+    # cannot leak into the audit diff.
+    old_values = {c.key: getattr(work_center, c.key) for c in work_center.__table__.columns}
+
     for field, value in update_data.items():
         setattr(work_center, field, value)
 
+    # Logged BEFORE the terminal commit so the audit row commits atomically with
+    # the change (AuditService.log() only flushes). log_update self-suppresses
+    # when nothing actually changed.
+    db.flush()
+    audit.log_update(
+        resource_type="work_center",
+        resource_id=work_center.id,
+        resource_identifier=work_center.code,
+        old_values=old_values,
+        new_values=work_center,
+    )
     db.commit()
     db.refresh(work_center)
 
@@ -310,15 +403,38 @@ def delete_work_center(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Soft delete a work center"""
+    """Deactivate a work center (``WorkCenter`` has no soft-delete mixin; ``is_active`` is the flag).
+
+    Refused with a 409 while any live operation still references the machine:
+    deactivating it would hide that queue from the dispatch board while the
+    operator kiosk kept serving it. Drain the queue first (move or complete).
+    """
     work_center = (
         db.query(WorkCenter).filter(WorkCenter.id == work_center_id, WorkCenter.company_id == company_id).first()
     )
     if not work_center:
         raise HTTPException(status_code=404, detail="Work center not found")
 
+    refusal = _live_work_refusal(db, company_id, work_center)
+    if refusal:
+        raise HTTPException(status_code=409, detail=refusal)
+
+    old_values = {"is_active": work_center.is_active}
     work_center.is_active = False
+    # Logged BEFORE the terminal commit so the audit row commits atomically with
+    # the flip (AuditService.log() only flushes). log_update self-suppresses when
+    # the work center was already inactive (empty diff).
+    db.flush()
+    audit.log_update(
+        resource_type="work_center",
+        resource_id=work_center.id,
+        resource_identifier=work_center.code,
+        old_values=old_values,
+        new_values={"is_active": work_center.is_active},
+        description=f"Deactivated work center {work_center.code}",
+    )
     db.commit()
 
     # Invalidate cache

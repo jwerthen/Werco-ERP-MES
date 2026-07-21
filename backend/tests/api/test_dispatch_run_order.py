@@ -159,8 +159,14 @@ class TestDispatchBoard:
         assert [row["operation_id"] for row in _column(payload, busy.id)["queue"]] == [op.id]
         # An idle machine must still render a column so work can be dragged onto it.
         assert _column(payload, idle.id)["queue"] == []
+        # Active columns say so -- the client's read-only rendering keys off this.
+        assert _column(payload, busy.id)["is_active"] is True
+        assert _column(payload, idle.id)["is_active"] is True
 
-    def test_inactive_work_center_is_omitted(self, client: TestClient, db_session: Session):
+    def test_inactive_work_center_with_empty_queue_is_omitted(self, client: TestClient, db_session: Session):
+        """A deactivated machine with NOTHING queued has no reason to be on the
+        board. Only a deactivated machine still HOLDING queued work earns a
+        flagged column (next test)."""
         manager = make_user(db_session, role=UserRole.MANAGER)
         retired = make_work_center(db_session)
         retired.is_active = False
@@ -169,6 +175,45 @@ class TestDispatchBoard:
         resp = client.get(BOARD_URL, headers=user_headers(manager))
         ids = [c["id"] for c in resp.json()["work_centers"]]
         assert retired.id not in ids
+
+    def test_deactivated_work_center_with_queued_work_is_a_flagged_column(
+        self, client: TestClient, db_session: Session
+    ):
+        """Deactivating a machine must not hide queued work from the planner:
+        the column stays on the board flagged ``is_active: false``, and its rows
+        are exactly what the kiosk still serves for that machine (one shared
+        query -- the operator's tablet and the flagged column cannot disagree)."""
+        manager = make_user(db_session, role=UserRole.MANAGER)
+        wc = make_work_center(db_session)
+        _, op = make_wo_with_operation(db_session, work_center=wc)
+        wc.is_active = False
+        db_session.commit()
+
+        resp = client.get(BOARD_URL, headers=user_headers(manager))
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        column = _column(resp.json(), wc.id)
+        assert column["is_active"] is False
+        board_ids = [row["operation_id"] for row in column["queue"]]
+        assert board_ids == [op.id]
+        assert board_ids == _queue_ids(client, wc.id, user_headers(manager))
+
+    def test_legacy_null_is_active_with_queued_work_surfaces_flagged(self, client: TestClient, db_session: Session):
+        """A legacy SQL-NULL ``is_active`` row must surface as a flagged column,
+        not vanish from both board halves (``.isnot(True)``, not ``== False``).
+        The update endpoint drops explicit nulls, so NULL is only ever
+        pre-existing data -- but pre-existing data is exactly what the flagged
+        column exists to repair."""
+        manager = make_user(db_session, role=UserRole.MANAGER)
+        wc = make_work_center(db_session)
+        _, op = make_wo_with_operation(db_session, work_center=wc)
+        wc.is_active = None
+        db_session.commit()
+
+        resp = client.get(BOARD_URL, headers=user_headers(manager))
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        column = _column(resp.json(), wc.id)
+        assert column["is_active"] is False
+        assert [row["operation_id"] for row in column["queue"]] == [op.id]
 
     def test_queue_filters_match_the_kiosk_queue(self, client: TestClient, db_session: Session):
         """Pending ops, completed ops, terminal WOs and deleted WOs stay off the board."""
@@ -325,13 +370,20 @@ class TestSetRunOrder:
         assert resp.status_code == status.HTTP_404_NOT_FOUND
 
     def test_inactive_work_center_is_404(self, client: TestClient, db_session: Session):
+        """Holds even when the deactivated machine still HAS queued work: that
+        queue renders as a flagged read-only board column, and read-only means
+        the rewrite refuses it -- ordering work on a machine that can't run it
+        is planning theatre."""
         manager = make_user(db_session, role=UserRole.MANAGER)
         wc = make_work_center(db_session)
+        _, op = make_wo_with_operation(db_session, work_center=wc)
         wc.is_active = False
         db_session.commit()
 
-        resp = client.put(run_order_url(wc.id), json={"operation_ids": []}, headers=user_headers(manager))
+        resp = client.put(run_order_url(wc.id), json={"operation_ids": [op.id]}, headers=user_headers(manager))
         assert resp.status_code == status.HTTP_404_NOT_FOUND
+        db_session.expire_all()
+        assert db_session.get(WorkOrderOperation, op.id).run_order is None
 
     def test_payload_length_is_capped(self, client: TestClient, db_session: Session):
         manager = make_user(db_session, role=UserRole.MANAGER)

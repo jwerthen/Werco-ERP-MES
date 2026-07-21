@@ -185,6 +185,8 @@ Scheduling decides *what week* a job runs. The **Dispatch Board** (sidebar → *
 
 The board shows **one column per machine**, with every job currently queued at it. Machines with nothing queued still get a column, so you can hand work to an idle machine.
 
+If a machine was deactivated while it still had jobs queued, the board doesn't hide that work: the machine shows up first, marked **DEACTIVATED**, with a red callout in the header. Its column is read-only — you can't re-order its cards or drop new work on it — but each card's **Move to machine…** dropdown still works (listing active machines only), so you can move the stranded jobs off it. The column disappears once its queue is empty. (Deactivating a machine that still has live jobs is now refused outright, so this mostly covers machines deactivated before that rule existed.)
+
 1. **Drag a card up or down** inside a column to set the order. The number on the left of each card is the run order — 1 runs first.
 2. **Drag a card to another column** (or use the card's **Move to machine…** dropdown) to move that job to a different machine.
 3. **No mouse?** Every card has **Move up** and **Move down** buttons that do exactly what dragging does, and the machine dropdown covers the across-columns move. Each change is announced so it's usable start to finish from the keyboard.
