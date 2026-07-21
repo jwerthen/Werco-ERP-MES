@@ -468,6 +468,25 @@ export interface QueueItem {
 }
 
 /**
+ * Laser-nest details carried on a Dispatch Board row.
+ *
+ * Deliberately mirrors the kiosk queue's `laser_nest` block (shape + naming) so
+ * the two payloads stay recognisably the same thing; the board only needs the
+ * sequencing-relevant subset, so this is NOT `LaserNestInfo` (no id, file, or
+ * document fields). Every field is optional — a non-laser operation has
+ * `laser_nest: null` rather than an empty object.
+ */
+export interface DispatchNestInfo {
+  cnc_number?: string | null;
+  material?: string | null;
+  thickness?: string | null;
+  sheet_size?: string | null;
+  planned_runs?: number | null;
+  completed_runs?: number | null;
+  remaining_runs?: number | null;
+}
+
+/**
  * One queued operation on the Dispatch Board (GET /shop-floor/dispatch-board).
  *
  * Rows arrive server-sorted: ranked work first by `run_order`, then unranked by
@@ -492,6 +511,12 @@ export interface DispatchBoardRow {
   quantity_complete: number;
   setup_time_hours: number | null;
   run_time_hours: number | null;
+  /**
+   * Laser-nest details for a nest operation; `null`/absent for every other
+   * operation. This is what a planner sequences nests by (material + thickness
+   * drive sheet swaps, assist-gas and nozzle/lens changes).
+   */
+  laser_nest?: DispatchNestInfo | null;
 }
 
 /** One work center column on the Dispatch Board. */

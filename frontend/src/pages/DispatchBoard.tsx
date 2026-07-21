@@ -8,6 +8,13 @@
  * Product posture: the run order is ADVISORY. The kiosks sort by it and show the
  * rank, but any job can still be started — the board never blocks the floor.
  *
+ * Laser nests: a nest card carries the data an order is actually chosen by —
+ * material, thickness, sheet size, sheets left — and each boundary where the
+ * material or thickness changes is marked between the cards, with the count
+ * summarised in the column header. That makes the COST of an ordering visible
+ * (six changeovers vs two) without the board ever reordering anything itself:
+ * auto-batching is deliberately out of scope.
+ *
  * Optimistic vs server-gated (CLAUDE.md convention):
  *  - Reordering WITHIN a column is rarely rejected -> optimistic via
  *    `useOptimisticMutation`, rolling back with the server's verbatim `detail`.
@@ -39,6 +46,13 @@ import { usePermissions } from '../hooks/usePermissions';
 import { useOptimisticMutation } from '../hooks/useOptimisticMutation';
 import { Button, EmptyState, ErrorState, StatusBadge, useToast } from '../components/ui';
 import { formatCentralDate, isDateBeforeTodayInCentral, isDateTodayInCentral } from '../utils/centralTime';
+import {
+  changeoverLabel,
+  nestChangeover,
+  nestDetailSegments,
+  nestQueueSummary,
+  type NestChangeover,
+} from '../utils/nestChangeover';
 import type { DispatchBoardColumn, DispatchBoardRow, RunOrderUpdateResponse } from '../types';
 
 /** Surface the backend's message verbatim (a refusal must not be reworded). */
@@ -527,6 +541,10 @@ export default function DispatchBoard() {
             {boardColumns.map((column) => {
               const empty = column.queue.length === 0;
               const columnTargeted = dropSlot?.workCenterId === column.id;
+              // Recomputed from the queue on every render, so an optimistic
+              // reorder updates the cost of the order at the same moment the
+              // cards move — that immediacy is the whole feedback loop.
+              const nestSummary = nestQueueSummary(column.queue);
               return (
                 <section
                   key={column.id}
@@ -544,6 +562,15 @@ export default function DispatchBoard() {
                         {column.code}
                         {column.work_center_type ? ` · ${String(column.work_center_type).replace(/_/g, ' ')}` : ''}
                       </p>
+                      {nestSummary.nests > 0 && (
+                        <p
+                          data-testid={`dispatch-changeovers-${column.id}`}
+                          className="truncate font-mono text-[11px] text-slate-400"
+                        >
+                          {nestSummary.nests} nest{nestSummary.nests === 1 ? '' : 's'} · {nestSummary.changeovers}{' '}
+                          changeover{nestSummary.changeovers === 1 ? '' : 's'}
+                        </p>
+                      )}
                     </div>
                     <span
                       className={`shrink-0 rounded border px-2 py-0.5 font-mono text-xs ${
@@ -575,6 +602,15 @@ export default function DispatchBoard() {
                         {column.queue.map((row, index) => (
                           <React.Fragment key={row.operation_id}>
                             <DropLine columnId={column.id} index={index} dropSlot={dropSlot} />
+                            <ChangeoverMarker
+                              operationId={row.operation_id}
+                              // Only a nest-to-nest boundary is a changeover; the
+                              // helper returns null for the first card and for any
+                              // pair where either side isn't a nest.
+                              kind={
+                                index === 0 ? null : nestChangeover(column.queue[index - 1].laser_nest, row.laser_nest)
+                              }
+                            />
                             <DispatchCard
                               row={row}
                               index={index}
@@ -624,6 +660,30 @@ function DropLine({ columnId, index, dropSlot }: { columnId: number; index: numb
       data-testid={active ? `dispatch-drop-line-${columnId}-${index}` : undefined}
       className={`-my-1 h-0.5 rounded-sm ${active ? 'bg-blue-400' : 'bg-transparent'}`}
     />
+  );
+}
+
+/**
+ * The setup a boundary costs, drawn between the two cards that cause it.
+ *
+ * Purely presentational: the glyph and the rule are `aria-hidden`, but the words
+ * stay in the accessible name of the column's content so a screen-reader user
+ * hears "material change" in position between the two jobs. It is deliberately
+ * not focusable and carries no interactive role — there is nothing to activate;
+ * the fix for a changeover is to reorder the cards around it.
+ */
+function ChangeoverMarker({ operationId, kind }: { operationId: number; kind: NestChangeover | null }) {
+  if (!kind) return null;
+  return (
+    <div data-testid={`dispatch-changeover-marker-${operationId}`} className="-my-0.5 flex items-center gap-1.5 px-1">
+      <span aria-hidden="true" className="font-mono text-[10px] leading-none text-amber-400/80">
+        ▸
+      </span>
+      <span className="whitespace-nowrap font-mono text-[10px] uppercase tracking-wider text-amber-300/90">
+        {changeoverLabel(kind)}
+      </span>
+      <span aria-hidden="true" className="h-px flex-1 bg-amber-400/30" />
+    </div>
   );
 }
 
@@ -741,6 +801,7 @@ function DispatchCard({
   const pastDue = row.due_date ? isDateBeforeTodayInCentral(row.due_date) : false;
   const dueToday = row.due_date ? isDateTodayInCentral(row.due_date) : false;
   const otherMachines = columns.filter((candidate) => candidate.id !== column.id);
+  const nestSegments = nestDetailSegments(row.laser_nest);
 
   return (
     <div
@@ -789,6 +850,25 @@ function DispatchCard({
             <p className="truncate font-mono text-[11px] text-slate-400">
               {row.part_number}
               {row.part_name ? <span className="font-sans"> · {row.part_name}</span> : null}
+            </p>
+          )}
+          {/* One dense line — material and thickness carry the sequencing weight,
+              so they read brighter than the sheet size and the sheets left. The
+              card must stay short enough that a column still shows a queue. */}
+          {nestSegments.length > 0 && (
+            <p data-testid={`dispatch-nest-${row.operation_id}`} className="truncate font-mono text-[11px]">
+              {nestSegments.map((segment, segmentIndex) => (
+                <React.Fragment key={segment.key}>
+                  {segmentIndex > 0 && <span className="text-slate-600"> · </span>}
+                  <span
+                    className={
+                      segment.key === 'material' || segment.key === 'thickness' ? 'text-slate-200' : 'text-slate-400'
+                    }
+                  >
+                    {segment.text}
+                  </span>
+                </React.Fragment>
+              ))}
             </p>
           )}
           <div className="mt-1 flex flex-wrap items-center gap-1.5">
