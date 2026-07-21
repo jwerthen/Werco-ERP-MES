@@ -109,6 +109,21 @@ class WorkOrder(Base, SoftDeleteMixin, TenantMixin):
     released_by = Column(Integer, nullable=True)
     released_at = Column(DateTime, nullable=True)
 
+    # Optimistic locking. The ``version`` column was added at the DB level by
+    # migration ``004_add_optimistic_locking`` but was never mapped, leaving the
+    # PUT-level locking inert: WorkOrderUpdate.version was required and the update
+    # endpoint blind-setattr'd it as a transient attribute while the row's counter
+    # never moved. Mapped here in the WorkOrderOperation/TimeEntry style (directly,
+    # NOT via the shared OptimisticLockMixin — the mixin also declares a tz-aware
+    # ``updated_at`` with server_default that collides with this model's existing
+    # tz-naive ``updated_at``) so SQLAlchemy enforces ``version_id_col`` on UPDATE:
+    # a concurrent stale write raises StaleDataError, translated to HTTP 409 by the
+    # endpoint layer / the app-wide handler in ``app.main``. Requires every row to
+    # have a non-null version; migration 004 set server_default='1' and migration
+    # 069 backfills any residual NULLs and re-asserts NOT NULL + server_default.
+    version = Column(Integer, nullable=False, server_default="1", default=1)
+    __mapper_args__ = {"version_id_col": version}
+
     # Relationships
     part = relationship("Part")
     parent_work_order = relationship("WorkOrder", remote_side=[id], backref="child_work_orders")

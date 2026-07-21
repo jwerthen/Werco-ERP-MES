@@ -248,7 +248,7 @@ def test_update_work_order_emits_committed_update_audit(client: TestClient, db_s
     resp = client.put(
         f"/api/v1/work-orders/{work_order.id}",
         headers=_headers_for(admin),
-        json={"version": 0, "priority": 3},
+        json={"version": work_order.version, "priority": 3},
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
 

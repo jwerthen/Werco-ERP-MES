@@ -145,7 +145,7 @@ These are the rules that make this system AS9100D/CMMC-viable. Treat violations 
 
 3. **Soft delete, not hard delete.** Models using `SoftDeleteMixin` are deleted via `.soft_delete(user_id)` (sets `is_deleted` / `deleted_at` / `deleted_by`). Queries must filter `is_deleted == False`. Don't issue physical `DELETE` on these.
 
-4. **Optimistic locking.** Models with `OptimisticLockMixin` carry a `version` column — respect it on concurrent updates rather than blind overwrites.
+4. **Optimistic locking.** Models with `OptimisticLockMixin` carry a `version` column — respect it on concurrent updates rather than blind overwrites. On the contended write paths the lock is SQLAlchemy-enforced: `WorkOrder`, `WorkOrderOperation`, and `TimeEntry` map `version_id_col` directly (deliberately not via the mixin — see its docstring in `app/db/mixins.py`), so a concurrent stale write raises `StaleDataError`, translated to HTTP 409 by endpoint-local handlers plus an app-wide handler in `app/main.py`.
 
 5. **Traceability & revisions.** Parts/BOM carry revision control and critical-characteristic flags; lot/serial traceability is a product requirement. Preserve historical records — prefer new revisions over mutating shipped data.
 
