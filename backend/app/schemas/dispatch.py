@@ -84,10 +84,14 @@ class DispatchQueueRow(UTCModel):
 class DispatchBoardColumn(UTCModel):
     """One work center and its live queue -- a column on the board.
 
-    Emitted for EVERY active work center, including ones with an empty queue,
-    so a manager can drag work onto an idle machine. The work-center identity
-    fields use the repo's ``id`` / ``code`` / ``name`` shape (matching
-    ``WallboardWorkCenter``), not a ``work_center_*`` prefix.
+    Emitted for every ACTIVE work center -- including ones with an empty queue,
+    so a manager can drag work onto an idle machine -- PLUS any DEACTIVATED work
+    center that still has queued work, flagged ``is_active=false`` so the client
+    renders it read-only (drain-only: work can be moved OFF it, but it is not a
+    drop target and its run order is not editable -- the run-order rewrite 404s
+    inactive work centers). The work-center identity fields use the repo's
+    ``id`` / ``code`` / ``name`` shape (matching ``WallboardWorkCenter``), not a
+    ``work_center_*`` prefix.
     """
 
     id: int
@@ -95,6 +99,9 @@ class DispatchBoardColumn(UTCModel):
     name: str
     work_center_type: Optional[str] = None
     current_status: Optional[str] = None
+    # False = a deactivated work center still holding queued work; render the
+    # column flagged and read-only until its queue drains.
+    is_active: bool = True
     queue: List[DispatchQueueRow] = []
 
 

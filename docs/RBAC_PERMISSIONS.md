@@ -106,7 +106,8 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > act, gated to the Work Orders **Edit** row above —
 > `require_role([ADMIN, MANAGER, SUPERVISOR])`, tenant-scoped:
 > `GET /api/v1/shop-floor/dispatch-board` (the manager board — every active work center with its
-> live queue; a **zero-write read**, no audit rows) and
+> live queue, plus any deactivated work center still holding queued work as a flagged
+> `is_active: false` read-only column; a **zero-write read**, no audit rows) and
 > `PUT /api/v1/shop-floor/work-centers/{id}/run-order` (rewrite one work center's dense 1..N rank;
 > a work center outside the active company or inactive → **404**, indistinguishable from missing).
 > The rewrite writes **one** tamper-evident `audit_log` row per manager action — a `work_center`

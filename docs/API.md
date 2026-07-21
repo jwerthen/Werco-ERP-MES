@@ -770,8 +770,31 @@ uploads go through text extraction + LLM. See
 | GET | `/work-centers/` | List all work centers | Yes |
 | POST | `/work-centers/` | Create work center | Yes |
 | GET | `/work-centers/{id}` | Get work center by ID | Yes |
-| PUT | `/work-centers/{id}` | Update work center | Yes |
-| DELETE | `/work-centers/{id}` | Delete work center | Admin |
+| PUT | `/work-centers/{id}` | Update work center (an `is_active: false` flip is guarded — see note below) | Admin / Manager |
+| DELETE | `/work-centers/{id}` | Deactivate work center (`is_active` → `false`; `WorkCenter` has no soft-delete mixin) — guarded, see note below | Admin |
+
+> **Deactivation is refused while live work still references the machine (409).** `DELETE
+> /work-centers/{id}` and a `PUT /work-centers/{id}` that flips `is_active` `true → false` both
+> count the work center's **incomplete operations** (every operation status except `COMPLETE` —
+> deliberately broader than the dispatch queue: `PENDING`/`ON_HOLD` work is off the queue today but
+> would be stranded on the machine just the same) on **live** work orders (non-deleted, not
+> `COMPLETE`/`CLOSED`/`CANCELLED`). Any such work → **409** with a plain-string detail carrying the
+> total, a per-status breakdown (ready → in progress → pending → on hold), and the remedy:
+> `"Cannot deactivate LSR-1: 3 operations still have live work here (2 ready, 1 in progress). Move
+> them to another machine (Dispatch Board -> Move to machine) or complete them first."` (singular
+> grammar when the count is 1). The guard runs **before** anything mutates — a refusal leaves the
+> row untouched — and a repeat `DELETE` of an **already-inactive** work center that still holds
+> live work also 409s (previously an unconditional 200; nothing endorses the stranded state).
+> Reactivation (`false → true`) is never guarded. Work stranded by a pre-guard deactivation
+> surfaces on the dispatch board as a flagged read-only column — see Shop Floor →
+> `GET /shop-floor/dispatch-board`.
+>
+> **Both endpoints now write tamper-evident `audit_log` rows** (previously neither did): `PUT`
+> logs a `work_center` `log_update` with a full before/after column diff; `DELETE` logs the
+> `is_active` flip. Both self-suppress when nothing actually changed (a no-op update, or a
+> `DELETE` of an already-inactive row — no fabricated diff on the hash chain). Still unaudited:
+> interactive `POST /work-centers/` (create) and `POST /work-centers/{id}/status` (the status
+> dropdown); CSV import was already audited.
 
 #### Work Center Schema
 
@@ -974,7 +997,7 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 | POST | `/shop-floor/time-entries/{id}/approve` | Approve a TimeEntry (sets `approved` / `approved_by`) | Admin / Manager / Supervisor / Quality |
 | POST | `/shop-floor/time-entries/{id}/unapprove` | Clear approval on a TimeEntry | Admin / Manager / Supervisor / Quality |
 | GET | `/shop-floor/work-center-queue/{id}` | Get work center queue, each row carrying the live crew `roster` and the manager-set `run_order` (see notes below) | User **or** kiosk station token |
-| GET | `/shop-floor/dispatch-board` | Manager dispatch board — every **active** work center with its live queue, including work centers with an **empty** queue (see note below) | Admin / Manager / Supervisor |
+| GET | `/shop-floor/dispatch-board` | Manager dispatch board — every **active** work center with its live queue, including work centers with an **empty** queue, plus any **deactivated** work center still holding queued work, flagged `is_active: false` (see note below) | Admin / Manager / Supervisor |
 | PUT | `/shop-floor/work-centers/{id}/run-order` | Rewrite one work center's manual run order (dense 1..N; omitted operations become unranked) → that work center's refreshed column (see note below) | Admin / Manager / Supervisor |
 | GET | `/shop-floor/wallboard` | Read-only TV wallboard snapshot (`?dept=` narrows to one work-center type, case-insensitive — scopes the work centers, the job wall (by each WO's **current** operation's work center), **and** the late/blocked lists + totals; ship/today/quality stay plant-wide) | User **or** display token |
 | POST | `/shop-floor/kiosk-stations/station-login` | Unlock a crew tablet with the shared station PIN. Body `{"station_id", "pin"}` (PIN 4–8 digits) → `{"access_token", "token_type", "expires_in", "station": {"id", "label", "work_center_id", "work_center_code", "work_center_name"}}` (24 h scoped `type="kiosk"` JWT). Bad/revoked station or wrong PIN → **401** (indistinguishable; failed attempt audited) | **Public** (PIN-gated, 5/minute per IP) |
@@ -1078,9 +1101,22 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 >
 > **`GET /shop-floor/dispatch-board`** (Admin / Manager / Supervisor, tenant-scoped) — the whole
 > board in one read. Response:
-> `{"work_centers": [{"id", "code", "name", "work_center_type", "current_status", "queue": [row…]}],
-> "generated_at"}`, one column per **active** work center in code order, **including work centers
-> whose queue is empty** so a manager can dispatch to an idle machine. Each row:
+> `{"work_centers": [{"id", "code", "name", "work_center_type", "current_status", "is_active",
+> "queue": [row…]}], "generated_at"}`, one column per **active** work center in code order,
+> **including work centers whose queue is empty** so a manager can dispatch to an idle machine —
+> **plus** any **deactivated** work center that still holds queued work, flagged
+> **`is_active: false`** and merged into the same code-sorted list. A flagged column is
+> **drain-only**: the client renders it read-only — its cards can be moved **off** it (the
+> cross-machine move validates only the *target* is active), but it is not a drop/re-rank target,
+> and the run-order `PUT` below still **404s** an inactive work center. A deactivated work center
+> whose *queue* is empty emits no column — the column subquery mirrors the shared queue filter set
+> (`READY`/`IN_PROGRESS` on live WOs), so a machine holding only `PENDING`/`ON_HOLD` work shows no
+> column (matching the kiosk) even though that work still blocks deactivation (see Work Centers).
+> Deactivation now **refuses (409)** while live work references the machine, so flagged columns
+> surface pre-guard strays rather than being a normal state; the operator kiosk queue
+> (`GET /shop-floor/work-center-queue/{id}`) deliberately keeps serving a deactivated work
+> center's queue so a crew station bound to it can finish stranded work. `is_active` defaults
+> `true` — older clients ignore it. Each row:
 > `{operation_id, run_order, version, work_order_id, work_order_number, operation_number,
 > operation_name, part_number, part_name, status, priority, due_date, quantity_ordered,
 > quantity_complete, setup_time_hours, run_time_hours, laser_nest}` — `version` is the operation's
