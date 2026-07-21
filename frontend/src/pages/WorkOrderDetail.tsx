@@ -303,8 +303,9 @@ export default function WorkOrderDetail() {
   const [nestAttachTargetId, setNestAttachTargetId] = useState<number | null>(null);
   // Inline due-date edit (pencil in the Due Date tile). NON-optimistic — the
   // tile shows only what the server returns after the refresh. `version` is
-  // sent because the update schema requires it, but the WO endpoint does not
-  // enforce optimistic locking today — do not rely on it for conflict safety.
+  // real optimistic locking: the WO endpoint rejects a stale version with 409
+  // ("modified by someone else"). On 409 we refetch the work order so the
+  // next save attempt carries a fresh version.
   const [dueDateEditing, setDueDateEditing] = useState(false);
   const [dueDateDraft, setDueDateDraft] = useState('');
   const [savingDueDate, setSavingDueDate] = useState(false);
@@ -808,6 +809,12 @@ export default function WorkOrderDetail() {
     } catch (err: any) {
       const detail = err?.response?.data?.detail;
       showToast('error', typeof detail === 'string' && detail ? detail : 'Failed to update due date');
+      if (err?.response?.status === 409) {
+        // Stale version — someone else changed the WO. Refetch so the next
+        // save attempt carries a fresh version; keep the editor open with the
+        // user's draft so their retry can go through.
+        await loadWorkOrder();
+      }
     } finally {
       setSavingDueDate(false);
     }

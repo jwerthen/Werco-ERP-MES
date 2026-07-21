@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
+from sqlalchemy.orm.exc import StaleDataError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -914,6 +915,25 @@ async def global_exception_handler(request: Request, exc: Exception):
         sentry_sdk.capture_exception(exc)
     response = JSONResponse(status_code=500, content={"detail": "Internal server error"})
     # Add CORS headers so browser doesn't mask the error as CORS failure
+    origin = request.headers.get("origin")
+    return add_cors_headers(response, origin)
+
+
+# Optimistic-lock conflict handler - version_id_col on WorkOrder/WorkOrderOperation/
+# TimeEntry means ANY concurrent stale flush raises StaleDataError; endpoint-local
+# handlers stay authoritative where they exist (work_orders.py complete/reduce-qty/
+# operation-complete paths). This is the safety net that turns the remaining unguarded
+# races (priority updates, kiosk status flips, soft delete) into a clean 409 instead of
+# a 500. Registered more specifically than the global Exception handler above, so
+# Starlette's MRO lookup picks it first; it only RETURNS a JSONResponse (never raises),
+# so the get_db yield-dependency teardown still rolls the session back normally.
+@app.exception_handler(StaleDataError)
+async def stale_data_exception_handler(request: Request, exc: StaleDataError):
+    logger.warning(f"Optimistic-lock conflict (StaleDataError) on {request.method} {request.url.path}: {exc}")
+    response = JSONResponse(
+        status_code=409,
+        content={"detail": "This record was modified by someone else. Refresh and try again."},
+    )
     origin = request.headers.get("origin")
     return add_cors_headers(response, origin)
 

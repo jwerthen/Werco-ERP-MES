@@ -2574,7 +2574,16 @@ def update_work_order(
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Update a work order"""
+    """Update a work order.
+
+    Optimistic locking: the required body ``version`` must equal the work order's
+    current version (as returned on every work-order response) or the update is
+    rejected with **409 Conflict** ("Work order was modified by someone else.
+    Refresh and try again.") before any field is written — re-fetch and retry.
+    A successful update increments ``version`` server-side. Also returns **409**
+    when moving a terminal WO (COMPLETE/CLOSED/CANCELLED) back to a non-terminal
+    status.
+    """
     work_order = db.query(WorkOrder).filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id).first()
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")
@@ -2584,6 +2593,17 @@ def update_work_order(
     old_values = {c.key: getattr(work_order, c.key) for c in work_order.__table__.columns}
 
     update_data = work_order_in.model_dump(exclude_unset=True)
+
+    # Optimistic locking (invariant 4): the client's version must MATCH the row --
+    # and must never be written through the setattr loop below, or a stale client
+    # could silently overwrite a concurrent edit AND arbitrarily move the
+    # version_id_col counter that SQLAlchemy's StaleDataError protection keys on.
+    client_version = update_data.pop("version")
+    if client_version != work_order.version:
+        raise HTTPException(
+            status_code=409,
+            detail="Work order was modified by someone else. Refresh and try again.",
+        )
 
     # G6-A: this generic update applies `status` via a blind setattr with no
     # transition validation. Block the one dangerous transition -- resurrecting a

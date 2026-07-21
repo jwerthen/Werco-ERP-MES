@@ -424,7 +424,14 @@ class WorkOrderCreate(WorkOrderBase):
 
 
 class WorkOrderUpdate(BaseModel):
-    version: int = Field(..., ge=0, description="Version for optimistic locking")
+    version: int = Field(
+        ...,
+        ge=0,
+        description=(
+            "Optimistic-lock version: must equal the work order's current version "
+            "(from any work-order response) or the update is rejected with 409."
+        ),
+    )
     quantity_ordered: Optional[Decimal] = Field(None, gt=Decimal("0"))
     priority: Optional[int] = Field(None, ge=1, le=10)
     status: Optional[WorkOrderStatus] = None
@@ -467,7 +474,10 @@ class WorkOrderResponse(WorkOrderBase):
     # part_id may be NULL on responses. WorkOrderCreate keeps the base's required
     # part_id -- part-less WOs are born only via the standalone nest import.
     part_id: Optional[int] = Field(None, description="Part ID (None for standalone laser-cutting work orders)")
-    version: Optional[int] = 0
+    version: Optional[int] = Field(
+        0,
+        description="Optimistic-lock version counter; echo this value back in PUT /work-orders/{id}.",
+    )
     work_order_number: str
     status: WorkOrderStatus
     quantity_complete: MoneySmall

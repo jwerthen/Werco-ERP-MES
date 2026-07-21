@@ -193,6 +193,27 @@ describe('inline due-date edit', () => {
     expect(screen.getByLabelText('Due date')).toBeInTheDocument();
   });
 
+  it('on a 409 stale-version conflict it toasts the verbatim detail, keeps the editor open, and refetches', async () => {
+    const conflict = 'Work order was modified by someone else. Refresh and try again.';
+    mockedApi.updateWorkOrder.mockRejectedValue({
+      response: { status: 409, data: { detail: conflict } },
+    });
+    renderDetail();
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit due date' }));
+    const loadsBefore = mockedApi.getWorkOrder.mock.calls.length;
+
+    fireEvent.change(screen.getByLabelText('Due date'), { target: { value: '2026-08-01' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save due date' }));
+
+    // The server's refusal surfaces verbatim...
+    expect(await screen.findByText(conflict)).toBeInTheDocument();
+    // ...and the 409 branch self-heals: the WO is refetched so the NEXT save
+    // attempt carries a fresh version (non-409 failures do not refetch).
+    await waitFor(() => expect(mockedApi.getWorkOrder.mock.calls.length).toBeGreaterThan(loadsBefore));
+    // The editor stays open with the user's draft intact for the retry.
+    expect(screen.getByLabelText('Due date')).toHaveValue('2026-08-01');
+  });
+
   it('cancel closes the editor without calling the API', async () => {
     renderDetail();
     fireEvent.click(await screen.findByRole('button', { name: 'Edit due date' }));

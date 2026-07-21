@@ -357,7 +357,7 @@ def test_put_work_order_scrap_with_reason_succeeds_and_persists_reason(client: T
 
     resp = client.put(
         f"/api/v1/work-orders/{wo_id}",
-        json={"version": 0, "quantity_scrapped": 4, "scrap_reason": "Material out of spec"},
+        json={"version": wo.version, "quantity_scrapped": 4, "scrap_reason": "Material out of spec"},
         headers=headers_for(operator),
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
@@ -379,7 +379,7 @@ def test_put_work_order_zero_scrap_no_reason_succeeds(client: TestClient, db_ses
 
     resp = client.put(
         f"/api/v1/work-orders/{wo_id}",
-        json={"version": 0, "quantity_scrapped": 0},
+        json={"version": wo.version, "quantity_scrapped": 0},
         headers=headers_for(operator),
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
@@ -399,7 +399,7 @@ def test_put_work_order_partial_update_without_scrap_field_succeeds(client: Test
 
     resp = client.put(
         f"/api/v1/work-orders/{wo_id}",
-        json={"version": 0, "priority": 1},
+        json={"version": wo.version, "priority": 1},
         headers=headers_for(operator),
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
