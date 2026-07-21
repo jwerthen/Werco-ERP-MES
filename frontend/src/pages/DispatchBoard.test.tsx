@@ -24,6 +24,11 @@
  *    and a second reorder can't stack on an unresolved one;
  *  - a cross-machine move whose re-read fails reports the failure, not success;
  *  - a keyboard reorder that disables the pressed button keeps focus in the card;
+ *  - SCALE (24 work centers): machines with work render BEFORE idle ones, the idle
+ *    ones are collapsed behind a disclosure by default (aria-expanded / aria-controls),
+ *    an all-idle board still renders with no disclosure at all, the header reports
+ *    the busy/idle split, hidden idle machines stay in every card's move list, and
+ *    the Scroll left/right buttons go inert at each end of the board;
  *  - laser nests: the card carries the material/thickness/sheet/sheets-left line,
  *    a material or thickness change is marked between the two cards that cause it
  *    (never above the first card or against a non-nest job), the column header
@@ -234,6 +239,56 @@ const twoQueueBoard = (): { work_centers: DispatchBoardColumn[] } => ({
   ],
 });
 
+/**
+ * The real shop's shape in miniature: the idle machines sort FIRST in code order
+ * (ASM-01, BND-01…), which is exactly what pushed every actual job off the right
+ * edge of the board.
+ */
+const scaleBoard = (): { work_centers: DispatchBoardColumn[] } => ({
+  work_centers: [
+    { id: 1, name: 'Assembly 1', code: 'ASM-01', work_center_type: 'assembly', queue: [] },
+    { id: 3, name: 'Bandsaw 1', code: 'BND-01', work_center_type: 'sawing', queue: [] },
+    {
+      id: 2,
+      name: 'Ermaksan Fiber Laser',
+      code: 'ERM-FL',
+      work_center_type: 'laser',
+      queue: LASER_ROWS.map((r) => ({ ...r })),
+    },
+    { id: 6, name: 'Grinder 1', code: 'GRD-01', work_center_type: 'grinding', queue: [] },
+    { id: 5, name: 'Haas VF-2', code: 'HAAS-2', work_center_type: 'milling', queue: MILL_ROWS.map((r) => ({ ...r })) },
+  ],
+});
+
+/** Every machine quiet — the board must still render them, with no disclosure. */
+const allIdleBoard = (): { work_centers: DispatchBoardColumn[] } => ({
+  work_centers: [
+    { id: 1, name: 'Assembly 1', code: 'ASM-01', work_center_type: 'assembly', queue: [] },
+    { id: 3, name: 'Bandsaw 1', code: 'BND-01', work_center_type: 'sawing', queue: [] },
+  ],
+});
+
+/** Column regions in DOM order — the partition is an ORDER claim. */
+const columnOrder = (): string[] =>
+  screen
+    .getAllByRole('region')
+    .map((el) => el.getAttribute('aria-label') || '')
+    .filter((label) => label.endsWith('run order'));
+
+/**
+ * jsdom lays nothing out, so the scroll geometry the buttons key off has to be
+ * stubbed. `scrollBy` is stubbed too — jsdom does not implement it.
+ */
+const stubScrollGeometry = (scrollLeft: number, scrollWidth = 3000, clientWidth = 1000) => {
+  const el = screen.getByTestId('dispatch-board-scroll');
+  Object.defineProperty(el, 'scrollLeft', { value: scrollLeft, configurable: true, writable: true });
+  Object.defineProperty(el, 'scrollWidth', { value: scrollWidth, configurable: true });
+  Object.defineProperty(el, 'clientWidth', { value: clientWidth, configurable: true });
+  const scrollBy = jest.fn();
+  (el as HTMLElement & { scrollBy: jest.Mock }).scrollBy = scrollBy;
+  return { el, scrollBy };
+};
+
 const cardOrder = (workCenterId: number): number[] =>
   Array.from(
     screen.getByTestId(`dispatch-column-${workCenterId}`).querySelectorAll('[data-testid^="dispatch-card-"]')
@@ -300,12 +355,14 @@ describe('DispatchBoard', () => {
     mockApi.getDispatchBoard.mockResolvedValue(board());
   });
 
-  it('renders a column per work center with ranks, cards in server order, and a quiet idle column', async () => {
+  it('renders a column per machine WITH WORK, with ranks and cards in server order', async () => {
     renderBoard();
 
     expect(await findColumn('Ermaksan Fiber Laser')).toBeInTheDocument();
     expect(screen.getByRole('region', { name: 'Haas VF-2 run order' })).toBeInTheDocument();
-    expect(screen.getByRole('region', { name: 'Press Brake 1 run order' })).toBeInTheDocument();
+    // Press Brake 1 is idle, so it starts behind the disclosure rather than
+    // taking a 320px slice of the first screen.
+    expect(screen.queryByRole('region', { name: 'Press Brake 1 run order' })).not.toBeInTheDocument();
 
     // Server order is preserved (ranked first, unranked after) — no client sort.
     expect(cardOrder(2)).toEqual([11, 9, 14]);
@@ -317,7 +374,6 @@ describe('DispatchBoard', () => {
 
     expect(screen.getByText(/Laser Cut - nest-p001/)).toBeInTheDocument();
     expect(screen.getByText('PN-2231')).toBeInTheDocument();
-    expect(within(screen.getByTestId('dispatch-column-7')).getByText(/Idle — no queued work/)).toBeInTheDocument();
   });
 
   it('Move down reorders optimistically, PUTs the full operation_ids order, and announces the new position', async () => {
@@ -578,9 +634,12 @@ describe('DispatchBoard', () => {
   });
 
   it('drag onto another column performs the server-gated cross-machine move', async () => {
+    const user = userEvent.setup();
     mockApi.updateOperation.mockResolvedValue({});
     renderBoard();
     await findColumn('Ermaksan Fiber Laser');
+    // A revealed idle machine is a full drop target, not a summary.
+    await user.click(screen.getByTestId('dispatch-idle-toggle'));
 
     const dragged = screen.getByTestId('dispatch-card-9');
     const idleColumn = screen.getByTestId('dispatch-column-7');
@@ -719,6 +778,125 @@ describe('DispatchBoard', () => {
     expect(screen.getByTestId('dispatch-changeovers-2')).toHaveTextContent('4 nests · 2 changeovers');
     expect(screen.queryByTestId('dispatch-changeover-marker-103')).not.toBeInTheDocument();
     expect(screen.getByTestId('dispatch-changeover-marker-104')).toHaveTextContent('material + thickness change');
+  });
+
+  // --- Scale: 24 machines, 14 jobs ------------------------------------------
+
+  it('renders machines with work before idle ones, which stay collapsed by default', async () => {
+    mockApi.getDispatchBoard.mockResolvedValue(scaleBoard());
+    renderBoard();
+    await findColumn('Ermaksan Fiber Laser');
+
+    // Code order put ASM-01 and BND-01 first; only the machines with work show.
+    expect(columnOrder()).toEqual(['Ermaksan Fiber Laser run order', 'Haas VF-2 run order']);
+    expect(screen.queryByRole('region', { name: 'Assembly 1 run order' })).not.toBeInTheDocument();
+
+    const toggle = screen.getByTestId('dispatch-idle-toggle');
+    expect(toggle).toHaveTextContent('Show 3 idle machines');
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    // The disclosure names the region it controls, so it is announced as one.
+    expect(toggle).toHaveAttribute('aria-controls', 'dispatch-idle-machines');
+    expect(document.getElementById('dispatch-idle-machines')).toBeInTheDocument();
+  });
+
+  it('reveals the idle machines after the busy ones, in code order, and flips aria-expanded', async () => {
+    const user = userEvent.setup();
+    mockApi.getDispatchBoard.mockResolvedValue(scaleBoard());
+    renderBoard();
+    await findColumn('Ermaksan Fiber Laser');
+
+    await user.click(screen.getByTestId('dispatch-idle-toggle'));
+
+    expect(columnOrder()).toEqual([
+      'Ermaksan Fiber Laser run order',
+      'Haas VF-2 run order',
+      // Idle machines follow the busy ones, still in the server's code order.
+      'Assembly 1 run order',
+      'Bandsaw 1 run order',
+      'Grinder 1 run order',
+    ]);
+    const toggle = screen.getByTestId('dispatch-idle-toggle');
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    expect(toggle).toHaveTextContent('Hide idle machines');
+    expect(within(screen.getByTestId('dispatch-column-1')).getByText(/Idle — no queued work/)).toBeInTheDocument();
+
+    // ...and collapsing puts them away again.
+    await user.click(toggle);
+    expect(columnOrder()).toEqual(['Ermaksan Fiber Laser run order', 'Haas VF-2 run order']);
+    expect(screen.getByTestId('dispatch-idle-toggle')).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('keeps a hidden idle machine reachable from every card’s move list', async () => {
+    const user = userEvent.setup();
+    mockApi.getDispatchBoard.mockResolvedValue(scaleBoard());
+    mockApi.updateOperation.mockResolvedValue({});
+    renderBoard();
+    await findColumn('Ermaksan Fiber Laser');
+
+    // Grinder 1 has no column on screen, but the job can still be sent to it —
+    // which is what makes collapsing the idle machines cost-free.
+    const select = screen.getByLabelText('Move WO-20260719-004 Laser Cut - nest-p002 to another machine');
+    expect(within(select).getByRole('option', { name: 'Grinder 1' })).toBeInTheDocument();
+    await user.selectOptions(select, '6');
+    await waitFor(() => expect(mockApi.updateOperation).toHaveBeenCalledWith(9, { work_center_id: 6, version: 3 }));
+  });
+
+  it('renders an all-idle board in full, with no disclosure to hide it behind', async () => {
+    mockApi.getDispatchBoard.mockResolvedValue(allIdleBoard());
+    renderBoard();
+
+    expect(await findColumn('Assembly 1')).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Bandsaw 1 run order' })).toBeInTheDocument();
+    expect(screen.queryByTestId('dispatch-idle-toggle')).not.toBeInTheDocument();
+    // Still a board, not the "no machines" empty state.
+    expect(screen.queryByText('No machines to dispatch')).not.toBeInTheDocument();
+  });
+
+  it('reports the busy/idle split alongside the shop-wide totals', async () => {
+    mockApi.getDispatchBoard.mockResolvedValue(scaleBoard());
+    renderBoard();
+    await findColumn('Ermaksan Fiber Laser');
+
+    const totals = screen.getByTestId('dispatch-totals');
+    // The totals still describe the SHOP (4 jobs across all 5 machines)...
+    expect(totals).toHaveTextContent('4 queued jobs across 5 machines');
+    expect(totals).toHaveTextContent('3 ranked');
+    // ...and the split says why only two columns are on screen.
+    expect(totals).toHaveTextContent('2 machines with work, 3 idle');
+  });
+
+  it('scrolls the board by two columns and goes inert at each end', async () => {
+    const user = userEvent.setup();
+    mockApi.getDispatchBoard.mockResolvedValue(scaleBoard());
+    renderBoard();
+    await findColumn('Ermaksan Fiber Laser');
+
+    const left = screen.getByTestId('dispatch-scroll-left');
+    const right = screen.getByTestId('dispatch-scroll-right');
+
+    // At the left end: only "scroll right" can do anything.
+    const { el, scrollBy } = stubScrollGeometry(0);
+    fireEvent.scroll(el);
+    await waitFor(() => expect(right).not.toHaveAttribute('aria-disabled'));
+    expect(left).toHaveAttribute('aria-disabled', 'true');
+    // Inert, NOT `disabled` — a keyboard user panning the board must not be
+    // blurred onto <body> the moment they reach an end.
+    expect(left).toBeEnabled();
+    expect(right).toBeEnabled();
+    // ...and the edge fade says the board continues.
+    expect(screen.getByTestId('dispatch-board-more')).toBeInTheDocument();
+
+    await user.click(left);
+    expect(scrollBy).not.toHaveBeenCalled();
+    await user.click(right);
+    expect(scrollBy).toHaveBeenCalledWith({ left: 664, behavior: 'smooth' });
+
+    // At the right end the mirror image holds, and the fade is gone.
+    stubScrollGeometry(2000);
+    fireEvent.scroll(el);
+    await waitFor(() => expect(right).toHaveAttribute('aria-disabled', 'true'));
+    expect(left).not.toHaveAttribute('aria-disabled');
+    expect(screen.queryByTestId('dispatch-board-more')).not.toBeInTheDocument();
   });
 
   it('renders a retryable error state when the board fails to load', async () => {
