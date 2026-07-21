@@ -18,14 +18,45 @@ from pydantic import BaseModel, Field
 from app.schemas.base import UTCModel
 
 
+class DispatchNestInfo(UTCModel):
+    """The laser-nest facts a planner sequences a nest by.
+
+    A deliberate SUBSET of the kiosk queue's ``laser_nest`` block (see
+    ``_laser_nest_payload`` in ``app/api/endpoints/shop_floor.py``), using the
+    same field names and the same meanings so the two payloads stay
+    recognisably the same thing. The kiosk-only bits -- the nest id, the CNC
+    file name/path, and the reference-PDF document fields -- are omitted: the
+    board sequences work, it does not open programs or drawings.
+
+    Every field is optional/defaulted because a nest may be keyed manually with
+    only a CNC number, and the board must render what it has.
+    """
+
+    # Operator-/machine-facing program number keyed on the laser.
+    cnc_number: Optional[str] = None
+    # The three changeover drivers: swapping any of these costs a setup.
+    material: Optional[str] = None
+    thickness: Optional[str] = None
+    sheet_size: Optional[str] = None
+    # Sheet counts. ``completed_runs`` is the operation's completed quantity and
+    # ``remaining_runs`` is ``max(0, planned - completed)`` -- exactly the
+    # kiosk's numbers (see ``dispatch_service.dispatch_nest_info``).
+    planned_runs: int = 0
+    completed_runs: float = 0.0
+    remaining_runs: float = 0.0
+
+
 class DispatchQueueRow(UTCModel):
     """One live queued operation as the dispatch board / kiosk sees it.
 
     Mirrors the ``GET /shop-floor/work-center-queue/{id}`` row (minus the
-    kiosk-only roster / laser-nest / process-step blocks) and adds the two
-    fields the board needs to reorder safely: ``run_order`` (current rank) and
-    ``version`` (the operation's optimistic-lock counter, so a client can tell
-    a stale card from a fresh one).
+    kiosk-only roster / process-step blocks) and adds the two fields the board
+    needs to reorder safely: ``run_order`` (current rank) and ``version`` (the
+    operation's optimistic-lock counter, so a client can tell a stale card from
+    a fresh one).
+
+    ``laser_nest`` is populated only for a laser-nest operation whose nest is
+    live (not soft-deleted); every other row carries ``null``.
     """
 
     operation_id: int
@@ -46,6 +77,8 @@ class DispatchQueueRow(UTCModel):
     quantity_complete: float = 0.0
     setup_time_hours: float = 0.0
     run_time_hours: float = 0.0
+    # Nest details for laser rows; null for every non-laser operation.
+    laser_nest: Optional[DispatchNestInfo] = None
 
 
 class DispatchBoardColumn(UTCModel):

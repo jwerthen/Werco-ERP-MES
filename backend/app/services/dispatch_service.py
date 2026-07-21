@@ -44,7 +44,8 @@ from sqlalchemy.orm.exc import StaleDataError
 
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation
-from app.schemas.dispatch import DispatchBoardColumn, DispatchQueueRow
+from app.schemas.dispatch import DispatchBoardColumn, DispatchNestInfo, DispatchQueueRow
+from app.services.laser_nest_service import active_laser_nest
 from app.services.work_order_state_service import TERMINAL_WO_STATUSES, operation_target_quantity
 
 # Operation statuses that count as "on the machine's queue" -- work an operator
@@ -59,6 +60,25 @@ MAX_RUN_ORDER_IDS = 500
 # The 409 body for a stale-write conflict on the rewrite. Shared so the service
 # and the endpoint cannot drift from each other (or from docs/API.md).
 RUN_ORDER_CONFLICT_DETAIL = "The queue changed while you were reordering. Refresh the dispatch board and try again."
+
+
+def queue_row_load_options() -> Tuple:
+    """Eager loads every :func:`dispatch_queue_row` needs -- ONE query, no N+1.
+
+    The board renders EVERY active work center's queue at once, so a lazy load
+    per row is not a minor cost: ``work_order`` -> ``part`` (part number/name)
+    and ``laser_nest`` (the nest details a planner sequences by) would each cost
+    one SELECT per card. Every caller that serializes rows must pass these.
+
+    Returns a fresh tuple per call so a caller can extend it without mutating
+    shared state. ``laser_nest`` is loaded WITHOUT an is-deleted filter on
+    purpose: the soft-delete decision lives in :func:`dispatch_nest_info`, which
+    is the same accessor the kiosk uses (``active_laser_nest``).
+    """
+    return (
+        joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part),
+        joinedload(WorkOrderOperation.laser_nest),
+    )
 
 
 def queue_order_by() -> List:
@@ -155,6 +175,44 @@ def display_positions(operations: Iterable[WorkOrderOperation]) -> Dict[int, Opt
     return positions
 
 
+def dispatch_nest_info(operation: WorkOrderOperation) -> Optional[DispatchNestInfo]:
+    """The operation's live laser-nest details, or None when it has none.
+
+    WHICH NEST IS LIVE is decided by ``laser_nest_service.active_laser_nest`` --
+    the same accessor the kiosk queue uses -- so a SOFT-DELETED nest surfaces on
+    neither surface. ``WorkOrderOperation.laser_nest`` loads whatever row points
+    at the operation, deleted or not, so reading the relationship directly here
+    would leak a deleted nest onto the board.
+
+    READ-ONLY, deliberately. The kiosk's ``_laser_nest_payload`` first calls
+    ``sync_laser_nest_from_operation``, which WRITES ``nest.completed_runs`` from
+    the operation. This projection must not: ``GET /shop-floor/dispatch-board``
+    documents itself as "no reconcile, no writes", and the same row builder also
+    serves ``PUT .../run-order``, which DOES commit -- a reorder would silently
+    persist a nest reconcile as a side effect.
+
+    Instead it computes the same numbers the sync would have produced:
+    ``completed_runs`` is the operation's completed quantity and
+    ``remaining_runs`` is ``max(0, planned - completed)`` (the model's
+    ``LaserNest.remaining_runs`` formula). So the board and the kiosk always show
+    identical counts, without the board writing anything.
+    """
+    nest = active_laser_nest(operation)
+    if nest is None:
+        return None
+    planned = int(nest.planned_runs or 0)
+    completed = float(operation.quantity_complete or 0.0)
+    return DispatchNestInfo(
+        cnc_number=nest.cnc_number,
+        material=nest.material,
+        thickness=nest.thickness,
+        sheet_size=nest.sheet_size,
+        planned_runs=planned,
+        completed_runs=completed,
+        remaining_runs=max(0.0, float(planned) - completed),
+    )
+
+
 def dispatch_queue_row(operation: WorkOrderOperation, display_position: Optional[int] = None) -> DispatchQueueRow:
     """Project one queued operation onto the board/kiosk row shape.
 
@@ -182,6 +240,7 @@ def dispatch_queue_row(operation: WorkOrderOperation, display_position: Optional
         quantity_complete=float(operation.quantity_complete or 0.0),
         setup_time_hours=float(operation.setup_time_hours or 0.0),
         run_time_hours=float(operation.run_time_hours or 0.0),
+        laser_nest=dispatch_nest_info(operation),
     )
 
 
@@ -219,7 +278,10 @@ def build_dispatch_board(db: Session, company_id: int) -> Tuple[List[DispatchBoa
     """Every active work center with its live queue, in ONE operations query.
 
     Avoids N+1: the operations for ALL columns are fetched once and bucketed in
-    Python, preserving the query's canonical order within each bucket.
+    Python, preserving the query's canonical order within each bucket, and every
+    relationship the row builder touches is eager-loaded via
+    :func:`queue_row_load_options`. The board's cost must stay flat in the number
+    of cards -- a per-row SELECT here is multiplied by the whole shop's queue.
     """
     work_centers = active_work_centers(db, company_id)
     by_work_center: Dict[int, List[WorkOrderOperation]] = {wc.id: [] for wc in work_centers}
@@ -228,7 +290,7 @@ def build_dispatch_board(db: Session, company_id: int) -> Tuple[List[DispatchBoa
             db,
             company_id,
             list(by_work_center.keys()),
-            load_options=(joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part),),
+            load_options=queue_row_load_options(),
         )
         for operation in operations:
             # Defensive: the query already restricts to these ids.
@@ -435,6 +497,6 @@ def apply_run_order_or_http(
         db,
         company_id,
         [work_center.id],
-        load_options=(joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part),),
+        load_options=queue_row_load_options(),
     )
     return old_order, ids, refreshed

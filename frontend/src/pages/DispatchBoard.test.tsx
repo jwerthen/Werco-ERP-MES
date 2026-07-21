@@ -23,7 +23,12 @@
  *  - a refused reorder re-reads the board instead of trusting a client snapshot,
  *    and a second reorder can't stack on an unresolved one;
  *  - a cross-machine move whose re-read fails reports the failure, not success;
- *  - a keyboard reorder that disables the pressed button keeps focus in the card.
+ *  - a keyboard reorder that disables the pressed button keeps focus in the card;
+ *  - laser nests: the card carries the material/thickness/sheet/sheets-left line,
+ *    a material or thickness change is marked between the two cards that cause it
+ *    (never above the first card or against a non-nest job), the column header
+ *    summarises "N nests · M changeovers", and that count follows the optimistic
+ *    reorder so batching shows its payoff immediately.
  *
  * services/api and usePermissions are mocked at the module boundary.
  */
@@ -69,6 +74,7 @@ const makeRow = (overrides: Partial<DispatchBoardRow> & { operation_id: number }
   quantity_complete: 0,
   setup_time_hours: 0.5,
   run_time_hours: 1.25,
+  laser_nest: null,
   ...overrides,
 });
 
@@ -80,6 +86,15 @@ const LASER_ROWS: DispatchBoardRow[] = [
     operation_number: 'Nest 1',
     operation_name: 'Laser Cut - nest-p001',
     due_date: '2026-07-24',
+    laser_nest: {
+      cnc_number: 'nest-p001',
+      material: 'A36',
+      thickness: '0.25in',
+      sheet_size: '48x96',
+      planned_runs: 5,
+      completed_runs: 2,
+      remaining_runs: 3,
+    },
   }),
   makeRow({
     operation_id: 9,
@@ -91,6 +106,16 @@ const LASER_ROWS: DispatchBoardRow[] = [
     operation_name: 'Laser Cut - nest-p002',
     part_number: 'PN-2231',
     part_name: 'Bracket',
+    // Same thickness, different material -> a material-only changeover from Nest 1.
+    laser_nest: {
+      cnc_number: 'nest-p002',
+      material: '304SS',
+      thickness: '0.25in',
+      sheet_size: '48x96',
+      planned_runs: 2,
+      completed_runs: 0,
+      remaining_runs: 2,
+    },
   }),
   makeRow({
     operation_id: 14,
@@ -138,6 +163,54 @@ const board = (): { work_centers: DispatchBoardColumn[] } => ({
     { id: 2, name: 'Ermaksan Fiber Laser', code: 'ERM-FL', work_center_type: 'laser', queue: LASER_ROWS.map((r) => ({ ...r })) },
     { id: 5, name: 'Haas VF-2', code: 'HAAS-2', work_center_type: 'milling', queue: MILL_ROWS.map((r) => ({ ...r })) },
     { id: 7, name: 'Press Brake 1', code: 'PB-1', work_center_type: 'forming', queue: [] },
+  ],
+});
+
+/**
+ * Four nests on one laser, ordered so the current sequence costs THREE
+ * changeovers and moving one card removes one — the feedback loop under test.
+ */
+const NEST_ROWS: DispatchBoardRow[] = [
+  makeRow({
+    operation_id: 101,
+    run_order: 1,
+    work_order_number: 'WO-N-101',
+    operation_name: 'Laser Cut - n101',
+    laser_nest: { material: 'A36', thickness: '0.25in', planned_runs: 1, completed_runs: 0, remaining_runs: 1 },
+  }),
+  makeRow({
+    operation_id: 102,
+    run_order: 2,
+    work_order_number: 'WO-N-102',
+    operation_name: 'Laser Cut - n102',
+    laser_nest: { material: '304SS', thickness: '0.25in', planned_runs: 1, completed_runs: 0, remaining_runs: 1 },
+  }),
+  makeRow({
+    operation_id: 103,
+    run_order: 3,
+    work_order_number: 'WO-N-103',
+    operation_name: 'Laser Cut - n103',
+    // Whitespace + casing noise: still the SAME material as 101.
+    laser_nest: { material: ' a36 ', thickness: '0.25in', planned_runs: 1, completed_runs: 0, remaining_runs: 1 },
+  }),
+  makeRow({
+    operation_id: 104,
+    run_order: 4,
+    work_order_number: 'WO-N-104',
+    operation_name: 'Laser Cut - n104',
+    laser_nest: { material: 'A36', thickness: '0.5in', planned_runs: 1, completed_runs: 0, remaining_runs: 1 },
+  }),
+];
+
+const nestBoard = (): { work_centers: DispatchBoardColumn[] } => ({
+  work_centers: [
+    {
+      id: 2,
+      name: 'Ermaksan Fiber Laser',
+      code: 'ERM-FL',
+      work_center_type: 'laser',
+      queue: NEST_ROWS.map((r) => ({ ...r })),
+    },
   ],
 });
 
@@ -576,6 +649,76 @@ describe('DispatchBoard', () => {
 
     expect(cardOrder(2)).toEqual([11, 14, 9]);
     expect(document.activeElement).toBe(up);
+  });
+
+  it('carries the nest detail line on a nest card and nothing extra on a plain operation', async () => {
+    renderBoard();
+    await findColumn('Ermaksan Fiber Laser');
+
+    // Material and thickness first — they are what an order is chosen by.
+    expect(screen.getByTestId('dispatch-nest-11')).toHaveTextContent('A36 · 0.25in · 48x96 · 3 of 5 sheets left');
+    expect(screen.getByTestId('dispatch-nest-9')).toHaveTextContent('304SS · 0.25in · 48x96 · 2 of 2 sheets left');
+    // The deburr op has no nest, so the card gains no line at all.
+    expect(screen.queryByTestId('dispatch-nest-14')).not.toBeInTheDocument();
+  });
+
+  it('marks the boundary where the material changes, and never against a non-nest job', async () => {
+    renderBoard();
+    await findColumn('Ermaksan Fiber Laser');
+
+    // Nest 1 (A36) -> Nest 2 (304SS): the boundary is drawn ON the lower card.
+    const marker = screen.getByTestId('dispatch-changeover-marker-9');
+    expect(marker).toHaveTextContent('material change');
+    // Presentational only: nothing to activate, nothing to focus.
+    expect(marker).not.toHaveAttribute('role');
+    expect(marker).not.toHaveAttribute('tabindex');
+
+    // No marker above the first card, and none against the non-nest deburr job
+    // even though its neighbour is a nest.
+    expect(screen.queryByTestId('dispatch-changeover-marker-11')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('dispatch-changeover-marker-14')).not.toBeInTheDocument();
+  });
+
+  it("summarises the column's nests and the changeovers its current order costs", async () => {
+    renderBoard();
+    await findColumn('Ermaksan Fiber Laser');
+
+    expect(screen.getByTestId('dispatch-changeovers-2')).toHaveTextContent('2 nests · 1 changeover');
+    // A column with no nest work says nothing rather than "0 nests".
+    expect(screen.queryByTestId('dispatch-changeovers-5')).not.toBeInTheDocument();
+  });
+
+  it('names material-only, thickness-only and combined changeovers distinctly', async () => {
+    mockApi.getDispatchBoard.mockResolvedValue(nestBoard());
+    renderBoard();
+    await findColumn('Ermaksan Fiber Laser');
+
+    expect(screen.getByTestId('dispatch-changeover-marker-102')).toHaveTextContent('material change');
+    // 102 (304SS) -> 103 (' a36 ') is a material change despite the case/whitespace...
+    expect(screen.getByTestId('dispatch-changeover-marker-103')).toHaveTextContent('material change');
+    // ...and 103 -> 104 is the same material at a new thickness.
+    expect(screen.getByTestId('dispatch-changeover-marker-104')).toHaveTextContent('thickness change');
+    expect(screen.getByTestId('dispatch-changeovers-2')).toHaveTextContent('4 nests · 3 changeovers');
+  });
+
+  it('re-counts changeovers as the order changes, so batching shows its own payoff', async () => {
+    const user = userEvent.setup();
+    mockApi.getDispatchBoard.mockResolvedValue(nestBoard());
+    mockApi.setWorkCenterRunOrder.mockReturnValue(new Promise(() => undefined));
+    renderBoard();
+    await findColumn('Ermaksan Fiber Laser');
+
+    expect(screen.getByTestId('dispatch-changeovers-2')).toHaveTextContent('4 nests · 3 changeovers');
+
+    // Batch the two A36/0.25in nests together: 101,103,102,104 costs one less.
+    await user.click(screen.getByLabelText('Move WO-N-103 Laser Cut - n103 up'));
+
+    expect(cardOrder(2)).toEqual([101, 103, 102, 104]);
+    // The count follows the OPTIMISTIC order — the payoff is visible immediately,
+    // before the server answers.
+    expect(screen.getByTestId('dispatch-changeovers-2')).toHaveTextContent('4 nests · 2 changeovers');
+    expect(screen.queryByTestId('dispatch-changeover-marker-103')).not.toBeInTheDocument();
+    expect(screen.getByTestId('dispatch-changeover-marker-104')).toHaveTextContent('material + thickness change');
   });
 
   it('renders a retryable error state when the board fails to load', async () => {

@@ -1083,10 +1083,22 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > whose queue is empty** so a manager can dispatch to an idle machine. Each row:
 > `{operation_id, run_order, version, work_order_id, work_order_number, operation_number,
 > operation_name, part_number, part_name, status, priority, due_date, quantity_ordered,
-> quantity_complete, setup_time_hours, run_time_hours}` — `version` is the operation's
+> quantity_complete, setup_time_hours, run_time_hours, laser_nest}` — `version` is the operation's
 > optimistic-lock counter, which the cross-machine move (`PUT /work-orders/operations/{id}`)
 > requires. Rows arrive in the queue order above. **Zero-write read**: no reconcile, no audit rows,
 > no events.
+>
+> `laser_nest` is `null` for every non-laser row. For a laser-nest operation whose nest is live
+> (**soft-deleted nests are never surfaced**, same `active_laser_nest` rule as the kiosk) it carries
+> `{cnc_number, material, thickness, sheet_size, planned_runs, completed_runs, remaining_runs}` —
+> a field-for-field **subset** of the kiosk queue's `laser_nest` block (the kiosk-only nest id, CNC
+> file name/path and reference-PDF fields are omitted: the board sequences work, it does not open
+> programs). Material, thickness and sheet size are what a planner batches nests by, so like work
+> runs together and sheet/gas/nozzle changeovers are visible before the order is committed.
+> `completed_runs` is the operation's completed quantity and `remaining_runs` is
+> `max(0, planned − completed)` — the same numbers the kiosk shows, but derived read-only: unlike
+> the kiosk payload the board never writes `nest.completed_runs` back (the same row builder serves
+> the run-order `PUT`, which commits). The same block rides the column that `PUT` returns.
 >
 > **`PUT /shop-floor/work-centers/{id}/run-order`** (Admin / Manager / Supervisor, tenant-scoped) —
 > body `{"operation_ids": [11, 9, 14]}`, the **full** desired order for that column, rank 1 first.
