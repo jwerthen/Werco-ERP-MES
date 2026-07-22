@@ -1,39 +1,48 @@
 /**
- * /wallboard — full-screen, read-only shop-floor TV board ("ANDON WALL").
+ * /wallboard — full-screen, read-only shop-floor TV board (Foundry design
+ * handoff 2026-07-22): HUD command bar, 4×3 work-order grid + overflow
+ * strip, right rail (SHIP TODAY / LATE / BLOCKED·DOWN / NCRs·holds), and
+ * the TODAY KPI bar. Blueprint-grid canvas, JetBrains Mono throughout,
+ * tabular numerals everywhere.
  *
- * Designed for an unattended TV at ~4–5m viewing distance:
+ * Designed for an unattended TV at ~3–6m viewing distance:
  *  - NO Layout chrome, NO PrivateRoute. Auth comes from a scoped display
  *    token passed once as #token=<jwt> (captured to sessionStorage and
  *    scrubbed from the URL) or a logged-in user's session token.
  *  - All requests go through services/wallboardClient — the display token is
  *    never placed in the global axios client.
- *  - 30s polling (deliberately no WebSocket — reliability first).
- *  - On fetch failure: keep showing the last good data; a STEADY amber chip
- *    after 1 failed poll escalates to a steady red fill chip after 4
- *    (~2 min). Never flashing — flashing is reserved for newly-raised events.
- *  - ?dept=<work_center_type> narrows the board to one department's centers.
- *
- * Layout (spec): Z1 header 9% / Z2 job wall (open WOs + current op; machine
- * FloorGrid fallback for old backends) 72.5%w + Z3 exception rail 27.5%w at
- * 82%h / Z4 today band 9%. NO scroll containers anywhere —
- * every zone has computed capacity, a "+N more" overflow, and a designed
- * empty state. Fixed geography: panels keep their slots at all data values.
+ *  - 30s polling (deliberately no WebSocket — reliability first). On fetch
+ *    failure the last good data stays up; the HUD sync chip steps SYNC OK →
+ *    SYNC STALE (1 failed poll) → SYNC LOST (>=4, ~2 min), steady, never
+ *    flashing. A revoked/expired token gets its own full-screen state and
+ *    polling stops.
+ *  - ?dept=<work_center_type> narrows the board to one department.
+ *  - The ONLY animation on the board is fdPulse on DOWN dots. Nothing else
+ *    animates, nothing scrolls, and every zone keeps its slot at all data
+ *    values (fixed geography).
  *
  * Scaling: the root sets fontSize calc(100vh / 67.5) → 1rem = 16px @1080p,
- * 32px @4K (identical angular size). EVERY size in this tree is rem. NOTE:
- * rem resolves against the <html> element, not this container, so a mount
- * effect mirrors the same calc() onto document.documentElement (restored on
- * unmount) — the inline container fontSize alone would not scale rem units.
+ * 32px @4K (identical angular size), so the handoff's px values render
+ * exactly at 1080p as px/16 rem. EVERY size in this tree is rem — inline
+ * styles included. NOTE: rem resolves against the <html> element, not this
+ * container, so a mount effect mirrors the same calc() onto
+ * document.documentElement (restored on unmount).
+ *
+ * Display settings (clock24h / clockSeconds / nightDim, all default false)
+ * persist per display in localStorage; URL params clock24 / seconds / dim
+ * (each 1/0) override AND re-persist them.
  */
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import ExceptionRail from '../components/wallboard/ExceptionRail';
-import FloorGrid from '../components/wallboard/FloorGrid';
-import JobWall from '../components/wallboard/JobWall';
-import TodayBand from '../components/wallboard/TodayBand';
-import WallboardHeader from '../components/wallboard/WallboardHeader';
-import { useNewEventFlash } from '../hooks/useNewEventFlash';
+import BlockedDownPanel from '../components/wallboard/BlockedDownPanel';
+import HudBar from '../components/wallboard/HudBar';
+import LatePanel from '../components/wallboard/LatePanel';
+import QualitySplitRow from '../components/wallboard/QualitySplitRow';
+import ShipTodayPanel from '../components/wallboard/ShipTodayPanel';
+import TodayKpiBar from '../components/wallboard/TodayKpiBar';
+import WoGrid from '../components/wallboard/WoGrid';
+import { FD } from '../components/wallboard/wallboardTokens';
 import {
   captureWallboardTokenFromUrl,
   clearWallboardToken,
@@ -44,27 +53,53 @@ import type { WallboardResponse } from '../types/wallboard';
 import { getCentralMinutesOfDay } from '../utils/centralTime';
 
 const POLL_INTERVAL_MS = 30_000;
-/** Failed polls before the offline chip escalates amber → red fill (~2 min). */
+/** Failed polls before the sync chip escalates STALE → LOST (~2 min). */
 const OFFLINE_RED_THRESHOLD = 4;
 const ROOT_FONT_SIZE = 'calc(100vh / 67.5)';
+/** localStorage key for the per-display clock/dim settings. */
+const SETTINGS_STORAGE_KEY = 'wallboard_display_settings';
 
 /**
- * Motion budget (spec §7) — the exhaustive list; anything not here does not move:
- * 1s wall clock · minute counters between polls · 2s heartbeat (frozen offline)
- * · 600ms numeral/bar transitions + 200ms payload-swap fade at poll boundaries
- * · ~10s new-event flash (1.2s steps ×8) · instant tile resort on class change.
- * No marquees, no tickers, no rotation, no ambient motion.
+ * Motion budget: fdPulse on DOWN dots (header chip when down > 0, DOWN card
+ * chips) is the ONLY animation on the board. Nothing else animates — no
+ * heartbeat, no new-event flash, no payload-swap fade (design rule: no
+ * ambient motion on data).
  */
 const WALLBOARD_CSS = `
-  @keyframes wb-heartbeat { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
-  .wb-heartbeat { animation: wb-heartbeat 2s ease-in-out infinite; }
-  .wb-heartbeat-frozen { animation-play-state: paused; }
-  @keyframes wb-flash-new { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
-  .wb-flash-new { animation: wb-flash-new 1.2s steps(1, end) 8; }
-  @keyframes wb-swap { from { opacity: 0.6; } to { opacity: 1; } }
-  .wb-swap { animation: wb-swap 200ms ease; }
-  .wb-num { transition: color 600ms ease; }
+  @keyframes fdPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
 `;
+
+interface DisplaySettings {
+  clock24h: boolean;
+  clockSeconds: boolean;
+  nightDim: boolean;
+}
+
+/**
+ * URL params (clock24 / seconds / dim, each "1"/"0") override the stored
+ * settings; anything the URL doesn't mention loads from localStorage;
+ * everything defaults false.
+ */
+function resolveDisplaySettings(params: URLSearchParams): DisplaySettings {
+  let stored: Partial<DisplaySettings> = {};
+  try {
+    const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
+    if (raw) stored = JSON.parse(raw) as Partial<DisplaySettings>;
+  } catch {
+    stored = {};
+  }
+  const read = (param: string, fallback: boolean | undefined): boolean => {
+    const raw = params.get(param);
+    if (raw === '1') return true;
+    if (raw === '0') return false;
+    return fallback ?? false;
+  };
+  return {
+    clock24h: read('clock24', stored.clock24h),
+    clockSeconds: read('seconds', stored.clockSeconds),
+    nightDim: read('dim', stored.nightDim),
+  };
+}
 
 export default function Wallboard() {
   const [searchParams] = useSearchParams();
@@ -77,7 +112,19 @@ export default function Wallboard() {
   const [revoked, setRevoked] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [now, setNow] = useState<Date>(new Date());
-  const [swapping, setSwapping] = useState(false);
+
+  const settings = useMemo(() => resolveDisplaySettings(searchParams), [searchParams]);
+
+  // A URL that mentions any display setting also persists the resolved set,
+  // so the next unparameterized boot keeps the same behavior.
+  useEffect(() => {
+    if (!searchParams.has('clock24') && !searchParams.has('seconds') && !searchParams.has('dim')) return;
+    try {
+      localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+    } catch {
+      // Storage unavailable — the settings still apply for this page load.
+    }
+  }, [searchParams, settings]);
 
   // rem units resolve against <html>, so the vh-based scale must live there
   // for the whole tree's rem sizing to track the TV's resolution.
@@ -98,34 +145,37 @@ export default function Wallboard() {
 
   // `stale` is the owning effect's cancellation probe — a fetch that resolves
   // after a dept change (or unmount) must not paint the old dept's data.
-  const load = useCallback(async (stale: () => boolean = () => false) => {
-    try {
-      const payload = await fetchWallboard(dept);
-      if (stale()) return;
-      setData(payload);
-      setLastUpdated(new Date());
-      setOffline(false);
-      setConsecutiveFailures(0);
-      setNoToken(false);
-    } catch (err: any) {
-      if (stale()) return;
-      if (err?.message === 'NO_TOKEN') {
-        setNoToken(true);
-      } else if (err?.message === 'UNAUTHORIZED') {
-        // Revoked or expired display token: stale data + an "offline" badge
-        // would lie forever on an unattended TV. Drop the dead credential,
-        // stop polling, and show the distinct full-screen state.
-        clearWallboardToken();
-        setRevoked(true);
+  const load = useCallback(
+    async (stale: () => boolean = () => false) => {
+      try {
+        const payload = await fetchWallboard(dept);
+        if (stale()) return;
+        setData(payload);
+        setLastUpdated(new Date());
         setOffline(false);
-      } else {
-        // Keep the last good board on screen; just flag it (steady chip,
-        // amber → red fill after OFFLINE_RED_THRESHOLD consecutive misses).
-        setOffline(true);
-        setConsecutiveFailures(count => count + 1);
+        setConsecutiveFailures(0);
+        setNoToken(false);
+      } catch (err: any) {
+        if (stale()) return;
+        if (err?.message === 'NO_TOKEN') {
+          setNoToken(true);
+        } else if (err?.message === 'UNAUTHORIZED') {
+          // Revoked or expired display token: stale data + an "offline" badge
+          // would lie forever on an unattended TV. Drop the dead credential,
+          // stop polling, and show the distinct full-screen state.
+          clearWallboardToken();
+          setRevoked(true);
+          setOffline(false);
+        } else {
+          // Keep the last good board on screen; just step the sync chip
+          // (STALE → LOST after OFFLINE_RED_THRESHOLD consecutive misses).
+          setOffline(true);
+          setConsecutiveFailures(count => count + 1);
+        }
       }
-    }
-  }, [dept]);
+    },
+    [dept]
+  );
 
   // Poll every 30s (suspended once the token is known-dead — every further
   // poll would just 401 again until someone provisions a new link).
@@ -147,24 +197,12 @@ export default function Wallboard() {
     return () => clearInterval(id);
   }, []);
 
-  // 200ms opacity fade at each payload swap (motion budget item 4).
-  useEffect(() => {
-    if (!data) return undefined;
-    setSwapping(true);
-    const id = setTimeout(() => setSwapping(false), 250);
-    return () => clearTimeout(id);
-  }, [data]);
-
-  // New-event flash: diffed by stable ids, suppressed on first paint and on
-  // ?dept= change (a token re-mint is a fresh page load = first paint).
-  const flashKeys = useNewEventFlash(data, dept ?? '');
-
   // Minute counters tick client-side between polls (downtime, job elapsed).
   // Derived directly from lastUpdated (not a ref) so the render where a fresh
   // payload lands can never pair new server minutes with a stale baseline.
   const extraMinutes = lastUpdated ? Math.max(0, Math.floor((now.getTime() - lastUpdated.getTime()) / 60_000)) : 0;
 
-  // True uncapped totals for the hero + rail; fallback to list lengths /
+  // True uncapped totals for the HUD chips + rail; fallback to list lengths /
   // derived counts against an old backend (degraded but rendering).
   const totals = useMemo(() => {
     if (!data) return { down: 0, blocked: 0, late: 0 };
@@ -176,121 +214,103 @@ export default function Wallboard() {
     };
   }, [data]);
 
-  const offShift = useMemo(() => {
-    if (!data) return false;
-    return data.today?.operators_on_clock === 0 && data.work_centers.every(wc => wc.active_jobs.length === 0);
-  }, [data]);
-
-  // days_late by WO number, for the tile job rows' "LATE Nd" suffix chips.
-  const lateDaysByWo = useMemo(() => {
-    const map = new Map<string, number>();
-    for (const wo of data?.late_wos ?? []) map.set(wo.wo_number, wo.days_late);
-    return map;
-  }, [data]);
-
   const offlineLevel: 0 | 1 | 2 = !offline ? 0 : consecutiveFailures >= OFFLINE_RED_THRESHOLD ? 2 : 1;
 
   return (
     <div
-      className="fixed inset-0 flex flex-col overflow-hidden bg-[#070a0f] font-sans text-[#f0f4f9]"
-      style={{ fontSize: ROOT_FONT_SIZE, padding: '2%' }}
+      className="fixed inset-0 flex flex-col overflow-hidden font-mono tabular-nums"
+      style={{
+        fontSize: ROOT_FONT_SIZE,
+        gap: '0.875rem',
+        padding: '1.375rem 1.5rem',
+        color: FD.ink,
+        backgroundColor: FD.canvas,
+        // Blueprint texture: two hairline grids at 28px spacing + a soft
+        // radial glow top-right, all in rem so 4K doubles with the type.
+        backgroundImage:
+          'linear-gradient(rgba(47,129,247,0.03) 0.0625rem, transparent 0.0625rem),' +
+          'linear-gradient(90deg, rgba(47,129,247,0.03) 0.0625rem, transparent 0.0625rem),' +
+          'radial-gradient(43.75rem 31.25rem at 88% 0%, rgba(47,129,247,0.06), transparent 65%)',
+        backgroundSize: '1.75rem 1.75rem, 1.75rem 1.75rem, auto',
+      }}
     >
       <style>{WALLBOARD_CSS}</style>
-
-      {/* Z1 HEADER — 9%h */}
-      <div className="min-h-0 shrink-0 grow-0 basis-[9%]">
-        <WallboardHeader
-          dept={dept}
-          totals={totals}
-          offShift={offShift}
-          hasData={data !== null}
-          offline={offline}
-          offlineLevel={offlineLevel}
-          lastUpdated={lastUpdated}
-          now={now}
-        />
-      </div>
 
       {revoked ? (
         <div
           className="flex flex-1 flex-col items-center justify-center gap-[1rem] text-center"
           data-testid="revoked-screen"
         >
-          <p className="text-[2.5rem] font-bold text-[#f04438]">Display access revoked or expired</p>
-          <p className="max-w-[48rem] text-[1.5rem] text-[#8b98a9]">
+          <p className="text-[2.5rem] font-bold tracking-[0.04em]" style={{ color: FD.red }}>
+            Display access revoked or expired
+          </p>
+          <p className="max-w-[48rem] text-[1.5rem]" style={{ color: FD.mute }}>
             Create a new display link or setup code in Admin Settings → Wallboard Displays, then open /tv on this
             screen and enter the code.
           </p>
         </div>
       ) : noToken && !data ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-[1rem] text-center">
-          <p className="text-[2.5rem] font-bold">No display token</p>
-          <p className="max-w-[48rem] text-[1.5rem] text-[#8b98a9]">
+          <p className="text-[2.5rem] font-bold" style={{ color: FD.ink }}>
+            No display token
+          </p>
+          <p className="max-w-[48rem] text-[1.5rem]" style={{ color: FD.mute }}>
             Get a setup code from Admin Settings → Wallboard Displays and enter it at /tv on this screen. (Or use the
             one-time wallboard link from the same page, or sign in first.)
           </p>
         </div>
       ) : !data ? (
         <div className="flex flex-1 items-center justify-center">
-          <p className="text-[1.875rem] text-[#8b98a9]" data-testid="wallboard-loading">
+          <p className="text-[1.875rem]" style={{ color: FD.mute }} data-testid="wallboard-loading">
             Loading board…
           </p>
         </div>
       ) : (
         <>
-          {/* Z2 FLOOR WALL 72.5%w + Z3 EXCEPTION RAIL 27.5%w — 82%h */}
-          <div
-            className={`flex min-h-0 shrink-0 grow-0 basis-[82%] gap-[0.75rem] py-[0.75rem] ${
-              swapping ? 'wb-swap' : ''
-            }`}
-          >
-            <div className="min-w-0 basis-[72.5%]">
-              {/* Job wall (WOs + current op) when the backend sends `jobs`;
-                  otherwise the original machine wall — old-backend grace. */}
-              {Array.isArray(data.jobs) ? (
-                <JobWall
-                  key={dept ?? 'all'}
-                  jobs={data.jobs}
-                  jobsTotal={data.jobs_total}
-                  pollKey={data.generated_at}
-                  flashKeys={flashKeys}
-                  extraMinutes={extraMinutes}
-                />
-              ) : (
-                <FloorGrid
-                  key={dept ?? 'all'}
-                  workCenters={data.work_centers}
-                  pollKey={data.generated_at}
-                  dept={dept}
-                  flashKeys={flashKeys}
-                  extraMinutes={extraMinutes}
-                  lateDaysByWo={lateDaysByWo}
-                />
-              )}
-            </div>
-            <div className="min-w-0 basis-[27.5%]">
-              <ExceptionRail
+          <HudBar
+            dept={dept}
+            downCount={totals.down}
+            blockedCount={totals.blocked}
+            lateCount={totals.late}
+            offlineLevel={offlineLevel}
+            lastUpdated={lastUpdated}
+            now={now}
+            clock24h={settings.clock24h}
+            clockSeconds={settings.clockSeconds}
+          />
+
+          <div className="flex min-h-0 flex-1 gap-[0.875rem]">
+            <WoGrid
+              jobs={data.jobs ?? null}
+              jobsTotal={data.jobs_total ?? null}
+              workCenters={data.work_centers}
+              blockedWos={data.blocked_wos}
+              extraMinutes={extraMinutes}
+            />
+            <aside className="flex min-h-0 w-[26.875rem] flex-none flex-col gap-[0.8125rem]">
+              <ShipTodayPanel ship={data.ship ?? null} centralMinutes={getCentralMinutesOfDay(now)} />
+              <LatePanel lateWos={data.late_wos} lateTotal={totals.late} />
+              <BlockedDownPanel
                 workCenters={data.work_centers}
-                lateWos={data.late_wos}
                 blockedWos={data.blocked_wos}
-                ship={data.ship ?? null}
-                quality={data.quality ?? null}
-                lateTotal={totals.late}
                 blockedTotal={totals.blocked}
                 downTotal={totals.down}
-                hasDept={!!dept}
-                centralMinutes={getCentralMinutesOfDay(now)}
-                flashKeys={flashKeys}
                 extraMinutes={extraMinutes}
               />
-            </div>
+              <QualitySplitRow quality={data.quality ?? null} />
+            </aside>
           </div>
 
-          {/* Z4 TODAY BAND — 9%h */}
-          <div className={`min-h-0 shrink-0 grow-0 basis-[9%] ${swapping ? 'wb-swap' : ''}`}>
-            <TodayBand today={data.today ?? null} />
-          </div>
+          <TodayKpiBar today={data.today ?? null} now={now} />
         </>
+      )}
+
+      {settings.nightDim && (
+        <div
+          className="pointer-events-none absolute inset-0 z-50"
+          data-testid="night-dim-overlay"
+          style={{ background: 'rgba(0,0,0,0.38)' }}
+        />
       )}
     </div>
   );
