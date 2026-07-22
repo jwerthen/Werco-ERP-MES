@@ -386,6 +386,17 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > so a rank can never be carried into a column where it would outrank work the manager actually
 > ordered there.
 >
+> **Both reschedule routes are audited like the dedicated move endpoints.** Each writes a
+> tamper-evident `audit_log` row (`log_update`, resource type `work_order_operation`) on the work
+> order's current operation with the `work_center_id` / `run_order` / `scheduled_start` /
+> `scheduled_end` / `status` old → new diff — previously they emitted only operational events. A
+> `PENDING → READY` flip triggered by scheduling rides the same row's `status` diff, and the row
+> commits atomically with the schedule write. Downstream operations rewritten by the schedule
+> cascade are **not** individually audited (deliberate scope) — their count rides in the row's
+> `extra_data` (`downstream_operations_scheduled`, alongside `via: "schedule" |
+> "schedule_earliest"`, `work_order_id`, `forward_schedule`). A re-submit that changes nothing
+> self-suppresses (no row is written).
+>
 > **Completion deliberately does *not* clear `run_order`.** A completed operation is already
 > filtered off every queue, and the historical rank is evidence of what the shop was told to run.
 >
