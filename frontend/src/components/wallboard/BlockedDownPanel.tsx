@@ -44,7 +44,8 @@ export default function BlockedDownPanel({
     .map(wc => ({
       key: `down:${wc.id}`,
       duration: formatDownDuration(wc.down!.minutes + extraMinutes).toUpperCase(),
-      name: wc.code ?? wc.name,
+      // Machine identity name-first, matching the card's machine row.
+      name: wc.name || wc.code || '',
       reason: blockerLabel(wc.down!.category).toUpperCase(),
       durationColor: FD.red,
       reasonColor: FD.red,

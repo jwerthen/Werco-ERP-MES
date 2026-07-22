@@ -311,7 +311,8 @@ describe('Wallboard', () => {
     expect(screen.getByTestId('down-total')).toHaveTextContent('1');
     const blockedDown = within(screen.getByTestId('blocked-down-panel'));
     expect(blockedDown.getByText('2H14M')).toBeInTheDocument();
-    expect(blockedDown.getByText('MILL-1')).toBeInTheDocument();
+    // Machine identity is name-first (matching the card's machine row).
+    expect(blockedDown.getByText('Haas VF-4')).toBeInTheDocument();
     expect(blockedDown.getByText('MAINTENANCE')).toBeInTheDocument();
     expect(blockedDown.getByText('22H')).toBeInTheDocument();
     expect(blockedDown.getByText('WAITING INSPECT')).toBeInTheDocument();

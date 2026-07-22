@@ -46,7 +46,8 @@ export function blockerLabel(category: string): string {
   return category.replace(/_/g, ' ');
 }
 
-/** Scope line renders title-cased, never the raw query param: "machining" → "Machining". */
+/** Sanitize the raw ?dept= param for display: "cnc_machining" → "Cnc Machining"
+ *  (the HUD scope line uppercases the result — this mainly strips separators). */
 export function titleCaseDept(dept: string): string {
   return dept
     .replace(/[_-]+/g, ' ')

@@ -162,7 +162,7 @@ export interface WallboardResponse {
   today?: WallboardToday | null;
   quality?: WallboardQuality | null;
   /** Priority-sorted open WOs (cap 24), server order. undefined/null = old
-   *  backend → the page falls back to the machine-tile FloorGrid. */
+   *  backend → the board renders its "BOARD DATA UNAVAILABLE" grid zone. */
   jobs?: WallboardJob[] | null;
   /** Uncapped open-WO count for the "+N more" line. */
   jobs_total?: number | null;

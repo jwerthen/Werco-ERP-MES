@@ -84,7 +84,10 @@ function resolveDisplaySettings(params: URLSearchParams): DisplaySettings {
   let stored: Partial<DisplaySettings> = {};
   try {
     const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
-    if (raw) stored = JSON.parse(raw) as Partial<DisplaySettings>;
+    // "null" is valid JSON, so a null parse would escape the catch and crash
+    // the field reads below — guard the shape, not just the parse.
+    const parsed: unknown = raw ? JSON.parse(raw) : null;
+    if (parsed !== null && typeof parsed === 'object') stored = parsed as Partial<DisplaySettings>;
   } catch {
     stored = {};
   }
@@ -92,7 +95,8 @@ function resolveDisplaySettings(params: URLSearchParams): DisplaySettings {
     const raw = params.get(param);
     if (raw === '1') return true;
     if (raw === '0') return false;
-    return fallback ?? false;
+    // Strict comparison: hand-edited storage may hold non-boolean junk.
+    return fallback === true;
   };
   return {
     clock24h: read('clock24', stored.clock24h),
