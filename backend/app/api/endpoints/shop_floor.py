@@ -2349,6 +2349,17 @@ def get_all_operations(
     Returns paginated operations that are not complete or cancelled.
     Default: 50 items per page, max 200.
 
+    Rows come back in the canonical dispatch order: work centers in code order
+    (the Dispatch Board's column order; operations without a work center last),
+    and within each work center the dispatch-queue sort (manager-dictated
+    ``run_order`` first with NULLs last, then priority / due date / sequence /
+    id). A single-work-center filter therefore lists the queue rows exactly as
+    the work-center-queue endpoint and the kiosk do. Each row carries
+    ``run_order``: the gap-free display position (1..N) of the operation within
+    its work center's live dispatch queue — identical to the kiosk RUN chip —
+    or null when the operation is unranked or not currently queued
+    (e.g. pending or on hold). Advisory only: it never gates a start.
+
     Response includes pagination metadata for building UI controls.
     """
     from app.core.pagination import paginate_query
@@ -2361,6 +2372,9 @@ def get_all_operations(
             selectinload(WorkOrderOperation.laser_nest).selectinload(LaserNest.document),
         )
         .join(WorkOrder)
+        # Outer join (ORDER BY only): operations with no work center must still
+        # appear -- they sort last via the IS NULL key below, not drop out.
+        .outerjoin(WorkCenter, WorkOrderOperation.work_center_id == WorkCenter.id)
     )
 
     # Scope to company and exclude completed/cancelled and soft-deleted work orders
@@ -2399,8 +2413,19 @@ def get_all_operations(
     if due_today:
         query = query.filter(WorkOrder.due_date == date.today())
 
-    # Order by priority, then due date
-    query = query.order_by(WorkOrder.priority, WorkOrder.due_date, WorkOrderOperation.sequence)
+    # Canonical dispatch order (owner decision: the manager-dictated run order is
+    # the order operators see EVERYWHERE work is listed). Across work centers:
+    # WorkCenter.code -- the Dispatch Board's column order -- with no-work-center
+    # rows last (explicit IS NULL key: SQLite sorts NULLs first, Postgres last).
+    # Within a work center: dispatch_service.queue_order_by(), the same sort the
+    # kiosk queue and the board use, so a single-work-center filter yields the
+    # work-center-queue order exactly. Must be applied in SQL -- pagination
+    # (LIMIT/OFFSET) happens in SQL below.
+    query = query.order_by(
+        WorkCenter.code.is_(None).asc(),
+        WorkCenter.code.asc(),
+        *dispatch_service.queue_order_by(),
+    )
 
     # Apply pagination
     paginated_query, pagination_meta = paginate_query(query, page, page_size)
@@ -2413,6 +2438,25 @@ def get_all_operations(
     _reconcile_and_commit(db, work_orders, current_user, company_id)
     if not status:
         operations = [op for op in operations if op.status != OperationStatus.COMPLETE]
+
+    # Gap-free RUN rank, same contract as the kiosk queue payload: position of the
+    # operation within its work center's LIVE dispatch queue (queued_operations --
+    # READY/IN_PROGRESS, non-terminal WO), None when unranked or not queued. The
+    # positions are computed over each work center's FULL queue, never this page
+    # or this endpoint's filtered subset, so the number always matches the kiosk
+    # RUN chip and survives pagination/filtering. Computed AFTER the reconcile
+    # commit so a WO that just went terminal drops its ranks here too. One extra
+    # query, no load options (only run_order/work_center_id/id are read).
+    run_positions: dict[int, Optional[int]] = {}
+    queue_work_center_ids = {op.work_center_id for op in operations if op.work_center_id is not None}
+    if queue_work_center_ids:
+        queue_rows_by_wc: dict[int, list[WorkOrderOperation]] = defaultdict(list)
+        for queue_row in dispatch_service.queued_operations(db, company_id, sorted(queue_work_center_ids)):
+            # Stable regroup: the global sort keys don't involve the work center,
+            # so each bucket keeps its per-work-center canonical queue order.
+            queue_rows_by_wc[queue_row.work_center_id].append(queue_row)
+        for wc_queue_rows in queue_rows_by_wc.values():
+            run_positions.update(dispatch_service.display_positions(wc_queue_rows))
 
     # Build response data
     result = []
@@ -2433,6 +2477,11 @@ def get_all_operations(
                 "description": op.description,
                 "work_center_id": wc.id if wc else None,
                 "work_center_name": wc.name if wc else None,
+                # Manager-dictated dispatch rank at this work center as the shop
+                # should SEE it -- gap-free position (1..N) in the live queue,
+                # identical to the kiosk RUN chip; null when unranked/not queued.
+                # Advisory: it drives the row order, it never gates a start.
+                "run_order": run_positions.get(op.id),
                 "status": op.status.value,
                 "quantity_ordered": target_qty,
                 "work_order_quantity_ordered": wo.quantity_ordered,

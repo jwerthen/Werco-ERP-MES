@@ -171,7 +171,7 @@ The **Scheduling** screen (titled **Production Schedule**) is where you decide w
 
 ### Prioritize and bulk-edit from the Dispatch Queue
 
-The **Dispatch Queue** sorts jobs by an urgency score so the most important work is at the top. From here you can:
+The **Dispatch Queue** lists open jobs with the most important work at the top — priority first, then due date (WO number breaks ties). The order comes from the system, not your screen. Jobs whose current step has a running order on the Dispatch Board also show the same **`RUN 1`, `RUN 2`, …** chip the operators see, in the **Run** column — that's context so you can see the floor order from here; it doesn't change how this list is sorted, because a RUN number belongs to one machine and this list spans all of them. From here you can:
 
 1. **Set priority** per job (1–10). When you change priority you can enter an optional **Priority reason** — that reason is saved with the change, which keeps the record clear for traceability.
 2. Use the **Bulk** panel to select several jobs and **Apply** a priority, **Move** them to another work center, **Shift Dates** by a number of days, or **Schedule Selected Earliest**.
@@ -192,7 +192,7 @@ If a machine was deactivated while it still had jobs queued, the board doesn't h
 3. **No mouse?** Every card has **Move up** and **Move down** buttons that do exactly what dragging does, and the machine dropdown covers the across-columns move. Each change is announced so it's usable start to finish from the keyboard.
 4. **Refresh** re-reads the board. A job an operator is clocked into is held in place: you can't pick that card up or send it to another machine until they clock out. Its position still shifts as the jobs around it are reordered — moving the job above it down moves it up.
 
-**What operators see.** On the kiosk and crew station, the jobs you ranked show a **`RUN 1`, `RUN 2`, …** chip and sit at the top of the queue, in your order. Jobs you haven't ranked come after them, sorted by priority, then due date, then operation number.
+**What operators see.** Everywhere work is listed as a queue — the kiosk, the crew station, and the desktop Shop Floor pages (**Time Clock** and **Operations**) — the jobs you ranked show a **`RUN 1`, `RUN 2`, …** chip and sit at the top of the queue, in your order. Jobs you haven't ranked come after them, sorted by priority, then due date, then operation number. On the Operations page viewed across all machines, jobs group by machine in the board's column order, with each machine's jobs in the order you set.
 
 > **The run order is a recommendation, not a lock.** Operators still see every queued job and can start any of them. Use it to say "run these three first" — not to stop someone from picking up the right job when plans change on the floor.
 

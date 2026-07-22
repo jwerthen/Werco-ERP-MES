@@ -147,9 +147,13 @@ Unranked jobs therefore always sort **after** every ranked job, and carry no chi
 be started. The rank itself never gates a clock-in; the existing backend gating (sequence /
 predecessor, on-hold, locks) is unchanged and stays the only thing that refuses one, still surfaced
 verbatim as described above. Moving an operation to a different machine clears its rank; it lands
-unranked at the tail of the new work center's queue until a manager re-ranks it there. Full
-ordering rule and the endpoint contract: `docs/API.md` → Shop Floor → "Dispatch run order" /
-"Queue ordering".
+unranked at the tail of the new work center's queue until a manager re-ranks it there. This order
+is not kiosk-only: the desktop shop-floor pages (`/shop-floor` "Time Clock" and
+`/shop-floor/operations` "Operations") render the same server order verbatim and reuse the same
+chip (`KioskRunOrderChip`, compact `size="sm"` — one implementation, do not fork), so an operator
+sees one queue order everywhere: kiosk, crew station, desktop, and the manager's Dispatch Board.
+Full ordering rule and the endpoint contract: `docs/API.md` → Shop Floor → "Dispatch run order" /
+"Queue ordering" / "Desktop parity".
 
 **Laser nests at clock-in.** A laser-cutting WO is a **dispatch pool**: every nest operation is
 created READY, so all of a package's nests appear on their work center's queue at once, and

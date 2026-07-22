@@ -47,7 +47,11 @@ def _load_work_order_for_scheduling(db: Session, work_order_id: int, company_id:
     work_order = (
         db.query(WorkOrder)
         .options(joinedload(WorkOrder.operations))
-        .filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id)
+        .filter(
+            WorkOrder.id == work_order_id,
+            WorkOrder.company_id == company_id,
+            WorkOrder.is_deleted == False,  # noqa: E712 -- invariant 3: soft-deleted WOs must not be schedulable
+        )
         .first()
     )
     if not work_order:
@@ -429,17 +433,41 @@ def get_schedulable_work_orders(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Get work orders for scheduling view (shows WO with its current/first operation)"""
+    """Get work orders for scheduling view (one row per WO with its current/first incomplete operation).
+
+    Rows come back in the server's canonical planner order: ``WorkOrder.priority``,
+    then ``due_date``, then ``work_order_number`` as a final deterministic
+    tiebreak. The client renders this order verbatim (no client-side re-sort) --
+    a per-machine dispatch rank is NOT a sort key on this cross-machine list.
+
+    Each row carries the current operation's ``work_center_id`` /
+    ``work_center_code`` plus ``run_order``: the gap-free display position
+    (1..N) of the current operation within its work center's LIVE dispatch
+    queue -- identical to the kiosk / shop-floor / Dispatch Board RUN chip --
+    or null when the operation is unranked or not currently queued (e.g.
+    pending or on hold). Positions are computed from each work center's FULL
+    queue, never this endpoint's row set, so the number always matches the
+    other surfaces. Advisory only: it never gates scheduling or a start.
+    """
     query = (
         db.query(WorkOrder)
-        .filter(WorkOrder.company_id == company_id)
-        .options(joinedload(WorkOrder.part), joinedload(WorkOrder.operations))
+        .filter(
+            WorkOrder.company_id == company_id,
+            WorkOrder.is_deleted == False,  # noqa: E712 -- invariant 3: soft-deleted WOs must not list for scheduling
+        )
+        .options(
+            joinedload(WorkOrder.part),
+            joinedload(WorkOrder.operations).joinedload(WorkOrderOperation.work_center),
+        )
         .filter(WorkOrder.status.in_([WorkOrderStatus.RELEASED, WorkOrderStatus.IN_PROGRESS, WorkOrderStatus.ON_HOLD]))
     )
 
-    work_orders = query.order_by(WorkOrder.priority, WorkOrder.due_date).all()
+    work_orders = query.order_by(WorkOrder.priority, WorkOrder.due_date, WorkOrder.work_order_number).all()
 
-    result = []
+    # First pass: the Python-side filters (skip all-complete WOs, optional
+    # current-op work-center filter), so run-order positions are computed over
+    # the rows this endpoint actually emits.
+    emitted: List[Tuple[WorkOrder, List[WorkOrderOperation], WorkOrderOperation]] = []
     for wo in work_orders:
         if not wo.operations:
             continue
@@ -462,6 +490,29 @@ def get_schedulable_work_orders(
         if work_center_id and current_op.work_center_id != work_center_id:
             continue
 
+        emitted.append((wo, operations, current_op))
+
+    # Gap-free RUN rank, same contract as the shop-floor/kiosk payloads: the
+    # position of the current operation within its work center's LIVE dispatch
+    # queue (dispatch_service.queued_operations -- READY/IN_PROGRESS ops on
+    # non-terminal WOs), None when unranked or not queued. Positions come from
+    # each work center's FULL queue, never this endpoint's filtered row set, so
+    # they always equal the kiosk/board RUN chips. One extra query over the
+    # emitted rows' distinct work centers, no load options (only
+    # run_order/work_center_id/id are read).
+    run_positions: Dict[int, Optional[int]] = {}
+    queue_work_center_ids = {op.work_center_id for _, _, op in emitted if op.work_center_id is not None}
+    if queue_work_center_ids:
+        queue_rows_by_wc: Dict[int, List[WorkOrderOperation]] = {}
+        for queue_row in dispatch_service.queued_operations(db, company_id, sorted(queue_work_center_ids)):
+            # Stable regroup: the global queue sort keys don't involve the work
+            # center, so each bucket keeps its per-work-center canonical order.
+            queue_rows_by_wc.setdefault(queue_row.work_center_id, []).append(queue_row)
+        for wc_queue_rows in queue_rows_by_wc.values():
+            run_positions.update(dispatch_service.display_positions(wc_queue_rows))
+
+    result = []
+    for wo, operations, current_op in emitted:
         # Calculate total remaining hours
         remaining_hours = sum(
             float(op.setup_time_hours or 0) + float(op.run_time_hours or 0)
@@ -481,6 +532,12 @@ def get_schedulable_work_orders(
                 "current_operation_number": current_op.operation_number,
                 "current_operation_sequence": current_op.sequence,
                 "work_center_id": current_op.work_center_id,
+                "work_center_code": current_op.work_center.code if current_op.work_center else None,
+                # Manager-dictated dispatch rank of the current op at its work
+                # center -- gap-free position (1..N) in the live queue, identical
+                # to the kiosk/board RUN chip; null when unranked/not queued.
+                # Advisory context on this cross-machine list, never a sort key.
+                "run_order": run_positions.get(current_op.id),
                 "status": wo.status.value if hasattr(wo.status, 'value') else wo.status,
                 "operation_status": (
                     current_op.status.value if hasattr(current_op.status, 'value') else current_op.status
