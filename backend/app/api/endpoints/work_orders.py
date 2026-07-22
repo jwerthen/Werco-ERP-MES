@@ -3736,7 +3736,8 @@ def reduce_operation_production_office(
     completion paths' order), tenant-scoped 404, required correction ``reason``,
     per-entry audit trail on the tamper-evident chain, best-effort OperationalEvent,
     optimistic-lock 409, and the RECOMPUTED work-order rollup (max over non-component
-    siblings, only ever lowered). Scrap fields and statuses are never touched.
+    siblings -- or, on a laser dispatch-pool WO, the pooled SUM of per-nest progress --
+    only ever lowered). Scrap fields and statuses are never touched.
     """
     load_operation_for_reduction_or_http(db, operation_id, company_id)
 

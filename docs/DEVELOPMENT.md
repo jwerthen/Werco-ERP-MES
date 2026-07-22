@@ -494,7 +494,10 @@ re-implementing the op → work-order rollup:
 
 The finalizer owns **only** the state transition — remaining-ops decision (reusing the loaded
 `work_order.operations` relationship), the COMPLETE-vs-`RELEASED`→`IN_PROGRESS` branch, the
-`max()`-guarded finished-quantity sync (floored at durable `TimeEntry` evidence, capped at target),
+`max()`-guarded finished-quantity sync (floored at durable `TimeEntry` evidence, capped at target;
+on a laser dispatch-pool WO the synced value is the pooled **sum** of per-nest progress via
+`pooled_quantity_complete`, never snapped to `quantity_ordered` —
+see `docs/WORK_ORDER_COMPLETION_REMEDIATION.md` → Rank 6 → Update 2026-07-22),
 the `actual_start`/`actual_end` stamping (clamped so `actual_start ≤ actual_end`), the self-healing
 next-`READY` release, and maintaining `current_operation_id` — and returns the set of affected
 `work_center_id`s. The **caller** keeps auth, tenant lookup, row locks, audit, scheduling refresh and

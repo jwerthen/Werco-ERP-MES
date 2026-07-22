@@ -224,6 +224,45 @@ Findings: DUP-2, DUP-3, DUP-4, DUP-5, SFI-4, SFI-5, RUP-1, RUP-4, RUP-6, QG-5, B
 >    built** — Batch 4 records (does not clear) an unsatisfied gate, and the ON_HOLD 409 refusal from
 >    Batch 3 stands unchanged. See the Batch 4 status note under Rank 7.
 
+> **Update (2026-07-22) — laser dispatch-pool WOs roll up as a SUM, not a max (branch
+> `fix/nest-pool-quantity-rollup`).** The Batch-3 rollup rule above ("Work-order `quantity_complete`
+> is rolled up with a `max()` guard") assumes a **sequential routing** — every operation processes
+> the whole order, so the WO's finished count is one operation's count. A **laser dispatch-pool WO**
+> (`is_laser_dispatch_work_order`, `work_order_type='laser_cutting'`) breaks that assumption: each
+> operation is a sibling **nest** whose count caps at its **own** `component_quantity` (= that
+> nest's `planned_runs`), and `quantity_ordered` is the **sum** of planned runs over all nests — so
+> the single-op rule structurally froze the header at the largest single nest's sheet count until
+> every nest completed (the prod "9/149 never advances" defect; per-nest counters stayed healthy,
+> only the WO header was wrong). Pool WOs now derive WO `quantity_complete` as the **SUM over
+> non-component operations of `min(op.quantity_complete, per-op target)`, capped at
+> `quantity_ordered`** — the shared helper `pooled_quantity_complete` in
+> `work_order_state_service.py` — everywhere the rollup is computed:
+> - **`sync_work_order_quantity_complete`** takes `max(existing, pooled sum)` in **both** the
+>   not-all-complete and all-complete branches. The all-complete branch deliberately does **not**
+>   snap a pool WO to `quantity_ordered`: a nest completed short must not assert sheets that were
+>   never cut (production-records honesty). Sequential WOs keep the prior behavior byte-for-byte.
+> - **Reduce-over-count walk-down mirror** (`reduce_operation_produced_quantity`) recomputes
+>   `wo_after = min(wo_before, pooled sum)` on pool WOs — lowering one nest's evidence lowers the
+>   pool header by the same delta, where the sequential `max()` mirror would leave it pinned at the
+>   largest untouched nest. `production_reduction_service` needed no change (it flows through this
+>   function with `work_order.operations` loaded under the WO row lock).
+> - **Reconcile-on-read** (`_sync_work_order_status_from_operations`) heals a stale pool header up
+>   to the pooled sum on **every** read — raise-only, inside the existing best-effort read-safe
+>   transaction semantics — so a WO stuck under the old rule self-heals on its next detail/list
+>   read with no production post and no data migration. The all-complete snap-to-`quantity_ordered`
+>   on this path is now gated to non-pool WOs (same no-snap honesty rule).
+>
+> Unchanged: the monotonic-up guard, the per-op `TimeEntry` evidence floor
+> (`floor_operation_quantity_at_evidence`), component-op exclusion (component ops still never
+> contribute until route completion; nest ops are not component ops), and all sequential-WO
+> behavior. **Known residual (pre-existing, deliberately untouched):**
+> `_copy_slot_completion_evidence` still raises a COMPLETE-but-short op's count to its own target on
+> reconcile reads, so a pool nest force-completed short (e.g. the office `/work-orders/{id}/complete`
+> override) can be bumped to its full `planned_runs` at the OP level and then counted by the pooled
+> sum — whether pool nest ops should be exempt from that slot evidence-copy bump is an open
+> follow-up decision. See `docs/API.md` → Laser Nests → "Pool WO header progress" and the
+> reduce-production notes there. Tests: `backend/tests/api/test_laser_nest_pool_quantity_rollup.py`.
+
 ### Rank 7 — Quality gates on completion (warn-and-record) ☑ (Batch 4)
 > **Posture change from the original plan.** The original action proposed a hard block
 > (`assert_operation_completable(op)` refusing COMPLETE) with an audited QUALITY-role override. The
