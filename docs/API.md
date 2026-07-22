@@ -1049,7 +1049,7 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 | GET | `/shop-floor/work-center-queue/{id}` | Get work center queue, each row carrying the live crew `roster` and the manager-set `run_order` (see notes below) | User **or** kiosk station token |
 | GET | `/shop-floor/dispatch-board` | Manager dispatch board — every **active** work center with its live queue, including work centers with an **empty** queue, plus any **deactivated** work center still holding queued work, flagged `is_active: false` (see note below) | Admin / Manager / Supervisor |
 | PUT | `/shop-floor/work-centers/{id}/run-order` | Rewrite one work center's manual run order (dense 1..N; omitted operations become unranked) → that work center's refreshed column (see note below) | Admin / Manager / Supervisor |
-| GET | `/shop-floor/wallboard` | Read-only TV wallboard snapshot (`?dept=` narrows to one work-center type, case-insensitive — scopes the work centers, the job wall (by each WO's **current** operation's work center), **and** the late/blocked lists + totals; ship/today/quality stay plant-wide) | User **or** display token |
+| GET | `/shop-floor/wallboard` | Read-only TV wallboard snapshot (`?dept=` narrows to one work-center type, case-insensitive — scopes the work centers, the `jobs` grid (by each WO's **current** operation's work center), **and** the late/blocked lists + totals; ship/today/quality stay plant-wide) | User **or** display token |
 | POST | `/shop-floor/kiosk-stations/station-login` | Unlock a crew tablet with the shared station PIN. Body `{"station_id", "pin"}` (PIN 4–8 digits) → `{"access_token", "token_type", "expires_in", "station": {"id", "label", "work_center_id", "work_center_code", "work_center_name"}}` (24 h scoped `type="kiosk"` JWT). Bad/revoked station or wrong PIN → **401** (indistinguishable; failed attempt audited) | **Public** (PIN-gated, 5/minute per IP) |
 | POST | `/shop-floor/kiosk-stations` | Create a PIN-protected crew-station kiosk bound to a work center. Body `{"label", "work_center_id", "pin"}` → **201** `KioskStationResponse` (PIN hashed, never echoed; a work center outside the active company → **404**) | Admin / Manager |
 | GET | `/shop-floor/kiosk-stations` | List this company's kiosk stations (no PIN/`pin_hash`) → `{"stations"}` | Admin / Manager |
@@ -1076,9 +1076,11 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 >   (back-compat alias of `crew[0]`)`, elapsed_minutes` (earliest open clock-in)`, qty_done,
 >   qty_target, is_late}`. `is_late` is server-computed: promise (`coalesce(must_ship_by,
 >   due_date)`, the OTD precedence) before today's Central date on a live, non-terminal WO — the
->   same predicate as `late_wos` / `late_total`. Still shipped in full: old TV bundles render it,
->   and a new TV falls back to it when `jobs` is absent.
-> - **`jobs[]` / `jobs_total`** — the main-wall **job wall** (2026-07-15 redesign): open
+>   same predicate as `late_wos` / `late_total`. Still shipped in full: old TV bundles render it
+>   as the machine wall, and the current (Foundry, 2026-07-22) board joins `work_centers[].down`
+>   for its card stop reasons/durations and the BLOCKED·DOWN rail rows.
+> - **`jobs[]` / `jobs_total`** — the main work-order grid (the 2026-07-15 job wall, rendered
+>   since 2026-07-22 as the Foundry 4×3 card grid): open
 >   (**RELEASED / IN_PROGRESS**) WOs — **ON_HOLD deliberately excluded** (the quality rail counts
 >   holds) — priority-sorted server-side (blocked/down → most-late → running → promise date asc),
 >   capped at **24**, with `jobs_total` the true uncapped count for `+N more`; **dept-scoped**
@@ -1091,8 +1093,9 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 >   are complete — is `{sequence, name, work_center_code, work_center_name, status, qty_done,
 >   qty_target, crew[]` (≤3 "First L.")`, crew_count, elapsed_minutes}`. Job tiles carry WO/part/op
 >   identifiers, dates, quantities, and "First L." crew names only — never customer names,
->   dollars, or notes. Absent only from a pre-job-wall backend (the TV then falls back to the
->   `work_centers` machine wall).
+>   dollars, or notes. Absent only from a pre-job-wall backend (the current TV then renders a
+>   `BOARD DATA UNAVAILABLE` state; only pre-redesign TV bundles still render the `work_centers`
+>   machine wall).
 > - `late_wos[]` (worst-first), `blocked_wos[]` (oldest-first) — capped at **12**; `late_wos[].due_date`
 >   carries the promise date under the original field name. **Dept-scoped** when `?dept=` is passed
 >   (late via any open op routed to a dept work center; blocked via the blocker's operation's work
@@ -1116,9 +1119,10 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 >   [docs/WALLBOARD.md](WALLBOARD.md) → KPI strip — deprecated), and `generated_at`.
 >
 > Every block/field added after A0.5 v1 is **optional** (old TVs ignore them; a new TV against an
-> old backend renders em-dashes — or the machine wall, when `jobs` is absent), and `ship` /
+> old backend renders em-dashes — or the `BOARD DATA UNAVAILABLE` grid state, when `jobs` is
+> absent), and `ship` /
 > `today` / `quality` are each independently best-effort — a failed block is `null` on that poll,
-> never a failed payload. The job wall is core like `work_centers` — computed inline, not
+> never a failed payload. The `jobs` block is core like `work_centers` — computed inline, not
 > best-effort.
 > Token issuance/revocation: see Authentication → Display tokens. Operating a TV:
 > see [docs/WALLBOARD.md](WALLBOARD.md).

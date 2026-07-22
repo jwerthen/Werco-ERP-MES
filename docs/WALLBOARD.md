@@ -1,12 +1,14 @@
 # Shop-Floor TV Wallboard
 
-Read-only, full-screen status board (`/wallboard`) for unattended shop TVs (A0.5) — the "Andon
-Wall". Four fixed zones: a computed shop-state headline, a priority-sorted **job wall** of open
-work-order tiles (each showing its current operation; the pre-redesign machine wall remains as
-the old-backend fallback), a four-panel exception rail (SHIP / LATE / BLOCKED·DOWN / QUALITY),
-and a TODAY band. Nothing on the board scrolls, rotates, or requires interaction —
-every zone has a fixed capacity, a `+N more` overflow, and a designed empty state, and every panel
-keeps its slot at all data values so a habitual glance lands on a memorized coordinate.
+Read-only, full-screen status board (`/wallboard`) for unattended shop TVs (A0.5), built to the
+high-fidelity **"Foundry"** TV design (2026-07-22 redesign — near-black instrument panel,
+JetBrains Mono, tabular numerals, authored at 1920×1080). Four fixed zones: a **HUD command bar**
+(DOWN / BLOCKED / LATE alert chips, sync status, Central wall clock), a fixed **4×3 grid of
+work-order cards** with a `+N MORE WORK ORDERS IN QUEUE` overflow strip, a **430px right rail**
+(SHIP TODAY, LATE — OLDEST FIRST, BLOCKED·DOWN, OPEN NCRS + ON HOLD), and a **TODAY KPI footer**.
+Nothing on the board scrolls, rotates, or requires interaction — every zone has a fixed capacity,
+a `+N more` overflow, and a designed empty state, and every panel keeps its slot at all data
+values so a habitual glance lands on a memorized coordinate.
 
 This is **not** the interactive operator kiosk (`/shop-floor/operations?kiosk=1`, badge login —
 see `docs/onboarding/02-operator-shop-floor.md`). The wallboard takes no input and writes nothing;
@@ -38,9 +40,25 @@ it authenticates with a **scoped display token** instead of a user session.
    safe as the browser homepage (an already-paired display bounces straight to the board), e.g.
    `chromium --kiosk 'https://<host>/tv'`, or the smart-TV browser's full-screen setting. The page
    is self-contained — no app chrome, no login screen. Everything is sized in
-   `rem` off a viewport-scaled root (1rem = 16px at 1080p, 32px at 4K — identical angular size),
-   with a 2% safe-area pad for TV overscan; verify legibility on the actual hardware at viewing
-   distance, especially the orange (BLOCKED) vs amber (LATE) discrimination.
+   `rem` off the viewport-scaled root `calc(100vh / 67.5)` (1rem = 16px at 1080p, 32px at 4K —
+   identical angular size; the design is authored at 1920×1080 with a 22×24px page margin);
+   verify legibility on the actual hardware at viewing distance, especially the orange (BLOCKED)
+   vs amber (LATE) discrimination.
+
+### Per-display settings (URL params)
+
+Three optional display settings, all **off by default**, set via URL params (`1` on, `0` off) and
+**persisted per device** to `localStorage['wallboard_display_settings']` whenever any of the three
+appears in the URL — so you can open `/wallboard?clock24=1` once at pairing time and drop the
+param afterwards; a `0` clears the stored setting the same way. Params the URL doesn't mention
+load from the stored settings.
+
+- `clock24=1` — 24-hour wall clock (the `UPDATED` time follows the same format).
+- `seconds=1` — show seconds on the wall clock.
+- `dim=1` — night-dim: a full-screen `rgba(0,0,0,0.38)` overlay (`pointer-events: none`) for
+  unmanned/night shifts.
+
+All times stay **Central** regardless of format.
 
 ### Fallback: the one-time `#token=` URL
 
@@ -62,120 +80,136 @@ Set the **department preset** on the display at issuance and a TV paired via `/t
 `/wallboard?dept=<type>` automatically. For URL-based setups, append `dept=<work_center_type>` as
 a query param (before the `#token=` fragment) to narrow the board to one department, e.g.
 `/wallboard?dept=machining#token=<jwt>`. `dept` matches the work-center type case-insensitively;
-the header chip renders it title-cased.
+the HUD identity line renders it upper-cased (`LIVE WALLBOARD // MACHINING`).
 
 **What `dept` scopes — and what it never scopes:**
 
-- **Dept-scoped:** the **job wall** — a work order belongs to a dept TV via its **current
-  operation's** work-center type (a WO whose ops are all complete has no current op and drops off
-  dept boards) — the work-center tiles (fallback wall), and the LATE and BLOCKED·DOWN rail panels
-  — both their visible rows **and** their true totals (`late_total` / `blocked_total` /
-  `down_total`) — and therefore the Z1 hero headline (a machining TV headlines machining's
-  truth). Rail attribution rules: a WO is *late for a dept* when it has ≥1 open (non-complete)
-  operation routed to a work center of that type; a blocker belongs to a dept via **its
-  operation's** work center; a work center is *down for a dept* by its own type.
+- **Dept-scoped:** the **work-order grid** (`jobs`) — a work order belongs to a dept TV via its
+  **current operation's** work-center type (a WO whose ops are all complete has no current op and
+  drops off dept boards) — the `work_centers` block (the board's DOWN join source), and the LATE
+  and BLOCKED·DOWN rail panels — both their visible rows **and** their true totals (`late_total`
+  / `blocked_total` / `down_total`) — and therefore the HUD's DOWN / BLOCKED / LATE alert chips
+  (a machining TV headlines machining's truth). Rail attribution rules: a WO is *late for a dept*
+  when it has ≥1 open (non-complete) operation routed to a work center of that type; a blocker
+  belongs to a dept via **its operation's** work center; a work center is *down for a dept* by
+  its own type.
 - **Consequences:** a late WO with open operations in two departments appears on **both** dept
-  TVs' LATE rails, but its job tile shows only where its *current* op lives; a blocker filed
+  TVs' LATE rails, but its card shows only where its *current* op lives; a blocker filed
   without an operation (and a late WO with no routed open operations) cannot be dept-attributed
-  and shows only on the **unfiltered** board. A job tile's BLOCKED band is **WO-level**
+  and shows only on the **unfiltered** board. A card's BLOCKED state is **WO-level**
   (any unresolved blocker, wherever it's routed), so a dept TV can legitimately show a BLOCKED
-  tile while its dept-scoped hero/rail count blockers routed elsewhere — the tile answers
+  card while its dept-scoped chip/rail count blockers routed elsewhere — the card answers
   "can this job proceed?", the rail answers "what's stuck in *this* department?".
-- **Always plant-wide:** the SHIP panel, the QUALITY panel, and the TODAY cells. The SHIP and
-  QUALITY panels render a small `PLANT` tag whenever `dept` is set so a dept TV never mislabels
-  company-wide numbers as departmental.
+- **Always plant-wide:** the SHIP panel, the NCR/HOLD split row, and the TODAY cells — `dept`
+  never scopes them server-side (semantics unchanged from the previous design). The Foundry board
+  no longer renders the small `PLANT` tag the previous design put on the SHIP and QUALITY panels;
+  the numbers remain plant-wide, and the HUD identity line (`LIVE WALLBOARD // <DEPT>`) is the
+  only dept marker on screen.
 
 ## Layout — the four zones
 
-Fixed geography (1080p-relative): header 9% / body 82% (job wall 72.5% wide + exception rail
-27.5%) / bottom band 9%. Layout never reflows on data — zero-value panels dim in place.
+Fixed geography, authored at 1920×1080: HUD bar (86px) / body (work-order grid + the fixed 430px
+right rail) / TODAY KPI bar (102px), 22×24px page margin, 13–14px gaps. Every size on the board
+is `rem` against the `calc(100vh / 67.5)` root — 1rem = 16px at 1080p, 32px at 4K — so the whole
+board scales as one unit. Layout never reflows on data — zero-value chips and panels dim in
+place.
 
-### Z1 — Header
+### Z1 — HUD command bar
 
-- **Left:** `WERCO·FLOOR` wordmark + the title-cased dept chip (hidden when no `?dept=`).
-- **Center — the hero headline:** one computed shop-state sentence with a status dot, from the
-  true totals: red `● 1 DOWN · 3 BLOCKED · 12 LATE` when anything is down (zero-count segments
-  omitted), orange/amber when only blocked/late, green `● ALL SYSTEMS NORMAL` when all three are
-  zero, dim slate `● OFF SHIFT` when additionally `today.operators_on_clock` is 0 and no jobs are
-  active. Dept-scoped totals drive it on a dept TV. Against an old backend (totals absent) the
-  hero derives counts from `work_centers` + the capped lists — degraded but rendering.
-- **Heartbeat:** the status dot pulses opacity on a 2s cycle while the board is live and
-  **freezes when offline** — a stopped heartbeat is the staleness cue.
-- **Right:** `Updated <time>` + a Central wall clock (1s tick), and the offline chip (below).
+- **Left:** the white Werco logo, a hairline divider, and the board identity — `SHOP FLOOR` over
+  `LIVE WALLBOARD // ALL WORK CENTERS` (or `// <DEPT>` under `?dept=`).
+- **Center — the alert chips:** `N DOWN` (red), `N BLOCKED` (orange), `N LATE` (amber), driven by
+  the true uncapped totals (`down_total` / `blocked_total` / `late_total`); against an old
+  backend (totals absent) they fall back to the down work-center count and the capped list
+  lengths — degraded but rendering. Dept-scoped totals drive them on a dept TV. A zero-count
+  chip keeps its exact geometry and dims in place (slate text, hairline edge, no tinted fill, no
+  glow). The DOWN chip's dot pulses opacity (1.6s ease-in-out) while `down > 0` — part of the
+  only animation on the board.
+- **Right:** the sync status — `SYNC OK` (green) / `SYNC STALE` (amber) / `SYNC LOST` (red), see
+  Behavior — over `UPDATED h:mm` (the last successful poll), a divider, and the Central wall
+  clock (1s tick; `h:mm` + AM/PM by default — see the display settings above).
 
-### Z2 — Job wall
+### Z2 — Work-order grid
 
-A deterministic grid of **open work-order tiles** (owner feedback 2026-07-15: the main wall shows
-work orders with their current operation, not machines). Population: every **RELEASED /
-IN_PROGRESS** WO — **ON_HOLD is deliberately excluded** from the wall (the QUALITY rail panel
-already counts holds); DRAFT and terminal statuses are off the board as everywhere else. Grid
-shape always exactly fills: `rows = max(1, round(sqrt(N/1.6)))`, `cols = ceil(N/rows)`; trailing
-empty cells render as plain background, bottom-right.
+A **fixed 4×3 grid — always 12 card slots** — showing the first 12 of the server-sorted `jobs`
+(the server sends ≤24). Population: every **RELEASED / IN_PROGRESS** WO — **ON_HOLD is
+deliberately excluded** (the NCR/HOLD split row already counts holds); DRAFT and terminal
+statuses are off the board as everywhere else.
 
 - **Server-side priority sort** (the client never re-sorts): blocked/down first, then late —
   worst `days_late` first — then running, then everything else by promise date ascending (no
-  promise sorts last); WO number breaks every tie. The server caps the wall at **24** tiles;
-  `jobs_total` carries the true uncapped count for the `+N more work orders` line.
+  promise sorts last); WO number breaks every tie. Overflow beyond the 12 visible cards goes to
+  the full-width strip under the grid — `+N MORE WORK ORDERS IN QUEUE`, counted against the
+  uncapped `jobs_total` (`ALL OPEN WORK ORDERS ON BOARD` when nothing is hidden). Fewer than 12
+  jobs → trailing cells stay plain background; the grid geometry never changes. There are no
+  density tiers, no tier hysteresis, and no grid math — the 4×3 shape is constant.
+- **Card state** is classified client-side with strict precedence **DOWN > BLOCKED > LATE >
+  RUNNING > WAITING** (`classifyJob`): DOWN = the current op's work center has an open downtime
+  event; BLOCKED = any unresolved blocker on the WO, routed or not; RUNNING = the current op has
+  open labor. The state drives the card's left status edge, its chip (the LATE chip carries the
+  age: `LATE 14D`), its time value, its stop reason, and its progress-bar color. DOWN cards get
+  a red-washed background; WAITING cards de-emphasize (grey edge, muted part number, no glow).
 - **Current operation** = the WO's lowest-sequence IN_PROGRESS op, else its lowest READY op, else
-  its lowest PENDING op — none when all ops are complete.
-- **Tile anatomy:** the header is a **solid filled color band** — the andon signal (state is
-  never a hairline border) — carrying the WO number and a state word, strict precedence red
-  DOWN > orange BLOCKED > amber LATE > green RUNNING > slate WAITING (black text on fills).
-  DOWN = the current op's work center has an open downtime event (the body then leads with red
-  `MACHINE DOWN · <work center>`); BLOCKED = any unresolved blocker on the WO, routed or not;
-  RUNNING = the current op has open labor. Body: the part number leads (amber + `LATE Nd` chip
-  when the WO is late), WO-level `done/ordered` qty right; the second line answers "what op is it
-  on?" — `Op n/total · <op name> · <work center>` with a `First L. +N` crew suffix when someone
-  is clocked in — with live elapsed time right while running (minutes tick client-side between
-  polls); a thin WO-level progress bar underneath (green, amber when late). A tile newly entering
-  DOWN/BLOCKED flashes its fill for ~10s, then settles steady.
-- **Density tiers** (by tile count, header height only in job mode) are damped with the same
-  2-poll hysteresis as before, so a WO flapping on/off the wall can't thrash the grid. **No idle
-  strip in job mode** — idle machines surface only through the exception rail.
-- **Empty state:** nothing released or in progress → a calm full-zone `No open work orders`
-  panel, not an error.
+  its lowest PENDING op — none when all ops are complete (the card then reads `ALL OPS
+  COMPLETE`).
+- **Card anatomy — five fixed rows:**
+  1. WO number ←→ status chip (glowing dot + state word; only DOWN dots pulse);
+  2. part number ←→ WO-level `done/ordered` qty;
+  3. `OP n/total · <op name>` ←→ the state's **time value** — red downtime duration on DOWN,
+     orange blocked age on BLOCKED, green elapsed cycle on RUNNING, muted elapsed on a LATE card
+     that is also running (minutes tick client-side between polls);
+  4. work center ←→ the **stop reason** — the downtime category on DOWN, the blocker category on
+     BLOCKED, `IN QUEUE` on WAITING;
+  5. a thin WO-level progress bar (`qty_complete / qty_ordered`) + percent.
+- **Stoppage detail is joined client-side:** DOWN duration + category come from
+  `work_centers[].down` via the current op's work-center code; BLOCKED age + category come from
+  `blocked_wos[]` by WO number. When a join misses (e.g. a blocked WO that fell outside the
+  capped `blocked_wos` list), the cell renders **blank** — a blank cell is part of the design,
+  never an error.
+- **Empty / degraded states:** nothing released or in progress → a calm full-zone `NO OPEN WORK
+  ORDERS` panel, not an error. A payload with no `jobs` field at all (a backend predating the
+  job wall) → a full-zone `BOARD DATA UNAVAILABLE — BACKEND UPDATE REQUIRED` state: **the
+  machine-wall fallback is removed** — the Foundry board never renders work-center tiles. (The
+  `work_centers` block still ships in full on every payload: old TV bundles render it as the
+  pre-redesign machine wall, and the current board consumes its `down` blocks for the joins
+  above.)
 
-**Machine-wall fallback (old backends).** When the payload has no `jobs` field (a backend that
-predates the job wall), the page renders the previous machine wall unchanged — the alarm-first
-grid of non-idle work-center tiles with per-operation crew-grouped job rows, queue chips, the
-3/2/1 job-row density tiers, the idle-chip strip, and the `FLOOR IDLE` all-idle state. The
-`work_centers` block still ships in full on every payload, so old TV bundles pointed at a new
-backend keep rendering the machine wall too.
+### Z3 — Right rail
 
-### Z3 — Exception rail
+A fixed **430px** column of four panels, each with a colored top accent bar. Rows are pinned
+worst-first with a `+N MORE` count; every exception row leads with a fixed-width magnitude column
+(`14D`, `38H`, `2H14M`) so severity scans vertically from across the shop. Zero-value panels keep
+their slot and dim in place with a green zero-line (`ON TIME — NOTHING LATE`, `NOTHING BLOCKED OR
+DOWN`) — the board visibly rewards a clean day without any layout reflow.
 
-Four **fixed** panels (SHIP 22% / LATE 30% / BLOCKED·DOWN 28% / QUALITY 20% of the rail height),
-replacing the v1 rotating ticker outright — nothing in the rail rotates. Rows are pinned
-worst-first with a `+N more` count; every exception row leads with a fixed-width magnitude column
-(`14d`, `38h`, `2h14m`) so severity scans vertically from across the shop. Zero-value panels keep
-their slot and dim in place with a green zero-line (`LATE 0 — ON TIME`, `NOTHING BLOCKED OR
-DOWN`); when late, blocked, and down are all zero the zero-lines render large — the board visibly
-rewards a clean day without any layout reflow.
-
-- **P1 SHIP** (navy header rule — brand, not status): the `shipped / due` fraction for **one
+- **P1 SHIP TODAY** (blue top accent — brand, not status): the `shipped / due` fraction for **one
   population** — WOs *promised today* (promise = `must_ship_by || due_date`, the OTD precedence).
-  Sub-line: amber `N TO GO` when behind, green `COMPLETE` when everything promised today has
-  shipped, dim `NONE DUE` when nothing is promised today. The fraction turns **red when
-  incomplete due-today WOs remain past 12:00 Central**. Also `THIS WEEK N` (promised in the next
-  7 days, not yet fully shipped), then up to 2 open due-today rows (`WO · part`, largest
-  remaining first) + `+N more today`. Empty state: `Next due: <day> (N WOs)` instead of a bare
-  zero. Plant-wide; `PLANT` tag under `?dept=`.
-- **P2 LATE:** the **true total** (`late_total`, never the capped list length) as the amber
-  headline, then up to 6 pinned rows worst-first: `14d  WO-0991  4471-002`. `+N more` footer.
+  Fraction color: **mute** when nothing is due, **green** once shipped ≥ due, **amber** when
+  behind before 12:00 Central, **red** when still behind at/after noon. Up to 2 open due-today
+  rows (`WO · part` ←→ `N LEFT` qty remaining, largest remaining first) + `+N MORE TODAY`; when
+  nothing is promised today, `NEXT DUE <day> (N WOS)` instead of a bare zero. `THIS WEEK N`
+  footer (promised in the next 7 days, not yet fully shipped). Plant-wide.
+- **P2 LATE — OLDEST FIRST** (amber top accent; takes the rail's flexible height): the **true
+  total** (`late_total`, never the capped list length) as the amber headline, then up to 6
+  pinned rows worst-first: `14D  WO-0885  PLT-2093`. `+N MORE` footer against the true total.
   Dept-scoped under `?dept=`.
-- **P3 BLOCKED·DOWN:** twin headline counts — `BLOCKED N` (orange) and `DOWN N` (red; the DOWN
-  half never disappears, it dims to slate at zero). Up to 5 rows, down centers first
-  (`2h14m  MILL-2 · MAINTENANCE`) then blocked WOs oldest-first (`38h  WO-1077 · WAITING
-  MATERIAL`), `+N more`. Dept-scoped under `?dept=`.
-- **P4 QUALITY:** `OPEN NCRs N · newest Nd` and `ON HOLD N` — **counts and ages only**, never NCR
-  titles or free text (which can name customers/suppliers). Amber-filled value chips when >0, dim
-  slate zeros. Plant-wide; `PLANT` tag under `?dept=`.
+- **P3 BLOCKED / DOWN** (orange top accent): twin headline counts — `BLOCKED N` (orange) and
+  `DOWN N` (red) — which dim to faint at zero but never disappear. Up to 4 rows, down work
+  centers first (`2H14M  MILL-2  MAINTENANCE`, live minutes ticking between polls) then blocked
+  WOs oldest-first (`38H  WO-1108  MATERIAL MISSING`), `+N MORE` against the true totals.
+  Dept-scoped under `?dept=`.
+- **P4 OPEN NCRS / ON HOLD:** a split row of two half panels — `OPEN NCRS` with a `NEWEST Nd AGO`
+  sub-line (only when the age is known) and an amber count (dim at zero), and `ON HOLD` —
+  **counts and ages only**, never NCR titles or free text (which can name customers/suppliers).
+  Plant-wide.
 
-### Z4 — TODAY band
+### Z4 — TODAY KPI bar
 
-Six full-width hairline-divided cells — `OPS DONE`, `PIECES`, `ON CLOCK`, `HRS`, `RECEIPTS`,
-`SCRAP EVT` — live, resetting at **Central midnight**, from the `today` block. Semantics in the
-payload section below. Missing block (old backend) → `—` values; the band never disappears. (The
+A fixed-height footer panel: a lead cell — blue `TODAY` eyebrow over the live Central date — then
+six equal hairline-divided cells: `OPS DONE`, `PIECES`, `ON CLOCK` (green), `LABOR HRS`
+(1 decimal), `RECEIPTS`, `SCRAP EVENTS` (amber when > 0) — live, resetting at **Central
+midnight**, from the `today` block. Semantics in the
+payload section below. Missing block (old backend) → `—` values; the bar never disappears. (The
 `PLANT 30d` KPI cluster that used to occupy the right ~40% of this band was removed on owner
 feedback 2026-07-15 — see the KPI-strip deprecation note below.)
 
@@ -187,25 +221,28 @@ TV against an old backend renders `—` values and falls back to list lengths fo
 blocks below share the payload's privacy posture: counts, ages, WO/part numbers and dates only —
 no customer names, no ship-to addresses, no dollar figures, no NCR text, operators as "First L.".
 
-- **`jobs[]` / `jobs_total`** — the Z2 job wall. Population: open (**RELEASED / IN_PROGRESS**)
-  WOs only — **ON_HOLD is deliberately excluded** (the QUALITY rail counts holds). Server-side
+- **`jobs[]` / `jobs_total`** — the Z2 work-order grid. Population: open (**RELEASED /
+  IN_PROGRESS**) WOs only — **ON_HOLD is deliberately excluded** (the NCR/HOLD split row counts
+  holds). Server-side
   priority sort (blocked/down → most-late → running → promise date asc, WO number tiebreak),
   capped at **24**; `jobs_total` is the true uncapped count for `+N more`. Both are
   **dept-scoped** when `dept` is passed — a job belongs to a dept via its **current op's**
   work-center type. Each job carries `wo_number`, `part_number`, `status`, WO-level
   `qty_complete` / `qty_ordered`, `promise_date` (`must_ship_by || due_date`), `is_late` /
-  `days_late` (the same shared lateness predicate as the rail — the tile and the LATE panel
+  `days_late` (the same shared lateness predicate as the rail — the card and the LATE panel
   cannot disagree), `blocked` (any unresolved blocker on the WO), `down` (current op's work
   center has an open downtime event), `running` (current op has ≥1 open labor entry),
   `ops_completed` / `ops_total`, and `current_op` — chosen by the IN_PROGRESS > READY > PENDING
   lowest-sequence precedence, `null` when all ops are complete — with `sequence`, `name`,
   `work_center_code` / `work_center_name`, `status`, `qty_done` / `qty_target`, `crew` (up to 3
   "First L." names), `crew_count` (true headcount), `elapsed_minutes` (earliest open clock-in).
-  **Privacy:** a job tile carries WO/part/op identifiers, dates, quantities, and "First L." crew
+  **Privacy:** a card carries WO/part/op identifiers, dates, quantities, and "First L." crew
   names only — never customer names, dollar figures, or notes. `jobs` is absent (`null`) only
-  from a pre-job-wall backend, which makes the TV fall back to the machine wall.
-- **`work_centers[].active_jobs[]`** (the machine wall — still shipped in full: old TV bundles
-  render it, and a new TV renders it as the fallback when `jobs` is absent) — **one row per
+  from a pre-job-wall backend, which makes the TV render the Z2 `BOARD DATA UNAVAILABLE` state
+  (the machine-wall fallback is gone from the Foundry board).
+- **`work_centers[].active_jobs[]`** (still shipped in full: old TV bundles render it as the
+  pre-redesign machine wall, and the current board joins `work_centers[].down` for the card
+  stop reasons/durations and the BLOCKED·DOWN rail rows) — **one row per
   operation** (crew-station grouping), not
   one per time entry: `crew` (up to 3 "First L." names), `crew_count` (true headcount for the
   `+N` suffix), `elapsed_minutes` (from the crew's earliest open clock-in), and server-computed
@@ -215,8 +252,8 @@ no customer names, no ship-to addresses, no dollar figures, no NCR text, operato
   `late_wos[].due_date` carries the **promise date** (`must_ship_by || due_date`) under the
   original field name for wire back-compat.
 - **`late_total` / `blocked_total` / `down_total`** — true **uncapped** totals for the rail
-  headlines and hero sentence; dept-scoped with the lists. `None` (absent) from an old backend —
-  never a fake 0.
+  headlines and the HUD alert chips; dept-scoped with the lists. `None` (absent) from an old
+  backend — never a fake 0.
 - **"Late", everywhere on the board** = promise date (`coalesce(must_ship_by, due_date)`, the OTD
   precedence) strictly before today's **Central** date, on a live, non-terminal WO. One shared
   predicate drives the late list, `late_total`, and per-job `is_late`, so they cannot disagree.
@@ -237,23 +274,23 @@ no customer names, no ship-to addresses, no dollar figures, no NCR text, operato
 - **`kpi_strip`** — **deprecated, always `null`** (see the deprecation note below).
 - **Best-effort blocks:** `ship` / `today` / `quality` are each computed independently; a failed
   block is `null` on that poll (and logged) — a broken panel never blanks the whole TV, and the
-  endpoint stays a zero-write read. The job wall is **core** like `work_centers` — computed
+  endpoint stays a zero-write read. The `jobs` block is **core** like `work_centers` — computed
   inline, not best-effort.
 
 ## Behavior
 
 - **Refresh:** polls every **30 seconds** (deliberately no WebSocket — reliability first).
-  Numerals and progress bars transition at poll boundaries; elapsed/downtime minute counters tick
+  Numerals and progress bars update at poll boundaries; elapsed/downtime minute counters tick
   client-side between polls.
-- **Offline (staged, never flashing):** after **1 failed poll** a **steady amber** chip appears —
-  `OFFLINE — data as of <time>` — and the heartbeat dot freezes; after **4 consecutive failures**
-  (~2 minutes) the chip escalates to a **steady red fill**. The last good board stays on screen
-  throughout and recovers automatically on the next successful poll.
-- **Motion budget:** the only things that move are the wall clock, the minute counters, the
-  heartbeat, poll-boundary value transitions, and a ~10s **new-event flash** on a tile newly
-  entering DOWN/BLOCKED or a rail row newly appearing (diffed by stable ids; suppressed on first
-  paint and on `?dept=` change, so a fresh load never lights up the whole board). Steady state
-  never flashes — including offline. No marquees, no tickers, no rotation.
+- **Offline (staged, never flashing):** the HUD sync status steps green `SYNC OK` → **steady
+  amber `SYNC STALE`** after **1 failed poll** → **steady red `SYNC LOST`** after **4 consecutive
+  failures** (~2 minutes), with `UPDATED h:mm` showing the last-good time throughout. The last
+  good board stays on screen and recovers automatically on the next successful poll.
+- **Motion budget:** the only things that move are the wall clock (1s), the minute counters
+  between polls, and the **1.6s opacity pulse on DOWN dots** (the HUD chip's dot while
+  `down > 0`, and DOWN card chip dots) — nothing else. The previous board's heartbeat,
+  new-event flash, and payload-swap fade are gone (design rule: no ambient motion on data).
+  Steady state never flashes — including offline. No marquees, no tickers, no rotation.
 - **No scrolling, anywhere:** every list is capped server- or client-side worst-first with a
   `+N more` count, so anything hidden is by definition less severe than everything shown.
 - **No token:** without a valid token (or signed-in session) the page shows guidance instead of
@@ -313,8 +350,11 @@ carries no user identity, and can write nothing. Still:
   `backend/app/services/display_token_service.py` (issue / setup-code reissue / public claim),
   `backend/app/services/wallboard_service.py` (payload builder + the shared lateness predicate),
   `frontend/src/pages/Wallboard.tsx`, `frontend/src/pages/TvPair.tsx` (the `/tv` pairing screen),
-  `frontend/src/components/wallboard/` (zone components — `JobWall.tsx` / `JobTile.tsx` for Z2,
-  `FloorGrid.tsx` for the machine-wall fallback),
-  `frontend/src/utils/wallboardLayout.ts` (grid math / job-state classification / machine-wall
-  sort / tier hysteresis),
-  `frontend/src/hooks/useNewEventFlash.ts`, `frontend/src/services/wallboardClient.ts`.
+  `frontend/src/components/wallboard/` (zone components — `HudBar.tsx` (Z1), `WoGrid.tsx` /
+  `WoCard.tsx` (Z2), `ShipTodayPanel.tsx` / `LatePanel.tsx` / `BlockedDownPanel.tsx` /
+  `QualitySplitRow.tsx` (Z3), `TodayKpiBar.tsx` (Z4), and `wallboardTokens.ts` — the
+  board-local Foundry palette, deliberately not the app shell's `--fd-*` variables),
+  `frontend/src/utils/wallboardLayout.ts` (pure classification + formatting helpers only —
+  `classifyJob`'s strict state precedence, duration/age/label formatting, dept title-casing;
+  the grid math, machine-wall sort, and tier hysteresis were deleted with the old layout),
+  `frontend/src/services/wallboardClient.ts`.
