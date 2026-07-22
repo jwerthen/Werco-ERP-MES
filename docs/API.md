@@ -181,7 +181,11 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > completion verbs (`/operations/{id}/complete`, both here and on the shop floor) the stored
 > `quantity_complete` is `clamp(max(existing, requested, recorded production evidence), 0, target)`:
 > it never drops below the value already recorded or below durable production evidence, and never
-> exceeds the operation target. The work order's `quantity_complete` only ever moves forward. Scrap
+> exceeds the operation target. The work order's `quantity_complete` only ever moves forward. On a
+> **laser dispatch-pool WO** (`work_order_type='laser_cutting'`) the work-order rollup is the
+> **sum** of per-nest progress rather than the sequential single-operation rule, and completing all
+> nests does **not** snap the header to `quantity_ordered` — see "Pool WO header progress" under
+> Laser Nests. Scrap
 > is **opt-in on update**: `quantity_scrapped` is optional on both `/work-orders/{id}/complete` and
 > `/work-orders/operations/{id}/complete` — omit it to leave previously-recorded scrap untouched;
 > send an explicit value (including `0`) to overwrite it. When the value written is **> 0** a
@@ -338,7 +342,8 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > **before-completion only** (COMPLETE operation / terminal WO → **409** `"Completed work can't be
 > corrected here -- ask a supervisor"`, re-checked under the op→WO row locks), **row-locked +
 > optimistic-locked** (concurrent stale write → **409**), the same **recomputed WO rollup** (max
-> over non-component siblings, only ever lowered), a **tamper-evident `audit_log` row** (action
+> over non-component siblings — or, on a laser dispatch-pool WO, the **sum** of per-nest progress
+> capped at the WO total — only ever lowered), a **tamper-evident `audit_log` row** (action
 > `reduce_operation_production`, old→new quantities, the reason, and the per-entry before/after
 > slices in walk order), an `operation_production_reduced` operational event, and the shop-floor /
 > work-order / dashboard broadcasts. The bound refusal is **400** with an explanatory message:
@@ -515,6 +520,24 @@ mixed**:
 > a pre-existing laser WO imported before whole-package-ready self-heals (its stranded PENDING
 > nests go READY) on its next release/lifecycle event. Non-laser WOs keep the classic
 > one-at-a-time READY promotion and predecessor gates unchanged.
+>
+> **Pool WO header progress is the SUM of per-nest progress.** On a `laser_cutting` WO the header
+> `quantity_complete` (sheets complete) is derived as the **sum over its nest operations of
+> `min(operation quantity_complete, that nest's planned runs)`, capped at `quantity_ordered`** —
+> not the sequential single-operation rollup routed WOs use (where every operation processes the
+> whole order). Every completion/production path and the read-time reconcile compute this pooled
+> sum, so the header advances as **each** nest's sheets are cut rather than freezing at the largest
+> single nest's count until every nest completes. Two consequences:
+> - **No snap at completion.** When all nests reach COMPLETE the header is **not** snapped to
+>   `quantity_ordered` — a nest completed short keeps the honest as-cut total (routed WOs keep
+>   their existing complete-at-target behavior).
+> - **Raise-only self-heal on read.** A pool WO whose header is stale-low is healed up to the
+>   pooled sum by reconcile-on-read on its next work-order detail/list read — best-effort, never
+>   lowers, no production post required.
+>
+> The header stays monotonic-up except through the sanctioned reduce-production verbs, where
+> lowering one nest's evidence lowers the pool header by the same delta (see "Over-count
+> correction" under Work Orders and Shop Floor).
 >
 > **Work-center selection (package-level pick, auto-detect order, per-row override).** Each nest's
 > backing operation lands on a work center resolved in this order:
@@ -1337,7 +1360,10 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > entries), then **recomputes** the work order's `quantity_complete` from its operations — the max
 > over non-component operations (capped at the WO target), only ever lowered — so a multi-operation
 > WO whose finished count is held by a different operation is never pulled below it (reducing a
-> non-defining or a component operation leaves the WO total unchanged). Lowering the operation total
+> non-defining or a component operation leaves the WO total unchanged). On a **laser dispatch-pool
+> WO** the recomputed rollup is instead the **sum** of per-nest progress (each nest capped at its
+> own planned runs, the sum capped at the WO total), so lowering one nest lowers the pool header by
+> the same delta — see "Pool WO header progress" under Laser Nests. Lowering the operation total
 > together with its **backing evidence** is what makes the correction **reconcile-safe**: produced
 > quantity is monotonic-up and re-derived from time-entry evidence on every WO read, so lowering the
 > operation total alone would be re-raised on the next read — lowering the backing evidence with it

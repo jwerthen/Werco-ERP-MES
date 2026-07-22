@@ -381,6 +381,40 @@ def floor_operation_quantity_at_evidence(
     return max(0.0, floored)
 
 
+def pooled_quantity_complete(
+    work_order: WorkOrder,
+    operations: Iterable[WorkOrderOperation],
+) -> float:
+    """SUM of per-nest progress on a laser dispatch pool WO (the pool rollup rule).
+
+    On a laser dispatch pool (``is_laser_dispatch_work_order``) each operation is a
+    sibling NEST whose ``quantity_complete`` caps at its OWN ``component_quantity``
+    (= that nest's planned_runs, via ``operation_target_quantity``), and
+    ``work_order.quantity_ordered`` is the SUM of planned_runs over all nests. The
+    pool total is therefore the SUM over non-component ops of
+    ``min(op.quantity_complete, per-op target)`` -- the sequential routing rule
+    (every op processes the whole order, so WO qty = one op's count) structurally
+    freezes the header at the LARGEST SINGLE NEST's sheet count instead. Capped at
+    ``quantity_ordered`` when it is positive; each per-op cap applies only when that
+    op's target is positive (mirrors the sequential candidate cap, so a target-less
+    op is never zeroed). Pure/read-only -- callers own the monotonic-up ``max()`` /
+    walk-down ``min()`` guard against the WO's current value.
+    """
+    total = 0.0
+    for op in operations or []:
+        if op.component_part_id:
+            continue
+        candidate = float(op.quantity_complete or 0)
+        op_target = operation_target_quantity(op, work_order)
+        if op_target > 0:
+            candidate = min(candidate, op_target)
+        total += candidate
+    ordered = float(work_order.quantity_ordered or 0)
+    if ordered > 0:
+        total = min(total, ordered)
+    return total
+
+
 def sync_work_order_quantity_complete(
     work_order: WorkOrder,
     operation: WorkOrderOperation,
@@ -392,10 +426,20 @@ def sync_work_order_quantity_complete(
     earlier-stage / out-of-sequence operation can never pull finished quantity
     *backward* across completion events. Component operations do not contribute to
     finished WO quantity until the whole route is complete.
+
+    Laser dispatch pool WOs (``is_laser_dispatch_work_order``) roll up as the SUM
+    of per-nest progress (``pooled_quantity_complete``) in BOTH branches -- the
+    single-op rule would freeze the header at the largest nest, and the
+    all-complete branch must NOT snap to ``quantity_ordered``: a nest completed
+    short would then assert sheets that were never cut (AS9100D production-records
+    honesty). Still ``max()``-guarded (monotonic-up).
     """
     existing = float(work_order.quantity_complete or 0)
     target = float(work_order.quantity_ordered or 0)
-    if all_operations_complete:
+    if is_laser_dispatch_work_order(work_order):
+        pooled = pooled_quantity_complete(work_order, work_order.operations or [])
+        work_order.quantity_complete = max(existing, pooled)
+    elif all_operations_complete:
         work_order.quantity_complete = max(existing, target)
     elif not operation.component_part_id:
         candidate = float(operation.quantity_complete or 0)
@@ -481,10 +525,12 @@ def reduce_operation_produced_quantity(
       (``_sync_work_order_status_from_operations`` only re-derives WO qty when ALL ops
       are complete). Instead mirror ``sync_work_order_quantity_complete``'s invariant --
       ``WO qty == max`` over NON-component ops of ``min(op.quantity_complete, target)``
-      -- but only ever LOWER: ``work_order.quantity_complete = min(wo_before,
-      recomputed_max)``. This naturally handles every case: reducing a non-max op
-      leaves the WO unchanged; reducing the max op drops it to the next-highest;
-      reducing a COMPONENT op leaves it unchanged (component-op production never rolled
+      (or, on a laser dispatch pool WO, ``pooled_quantity_complete``'s SUM over sibling
+      nests) -- but only ever LOWER: ``work_order.quantity_complete = min(wo_before,
+      recomputed_rollup)``. This naturally handles every case: reducing a non-max op
+      leaves the WO unchanged; reducing the max op drops it to the next-highest (on a
+      pool WO, any nest's reduction lowers the sum by the same delta); reducing a
+      COMPONENT op leaves it unchanged (component-op production never rolled
       into the WO rollup, so component ops are excluded from the max). The ``min``
       guards against ever raising the WO (a reduction must not increase it) and against
       a stale-low prior WO value.
@@ -557,6 +603,12 @@ def reduce_operation_produced_quantity(
     # delta -- see the docstring. max over NON-component ops of min(op qty, target),
     # capped only when target > 0 (mirrors sync_work_order_quantity_complete), then only
     # LOWER via min(wo_before, ...). Empty non-component set defaults to 0.0.
+    # Laser dispatch pool WOs mirror ``pooled_quantity_complete`` instead: the rollup is
+    # the SUM over sibling nests of min(nest qty, that nest's own target), capped at the
+    # WO ordered total -- lowering one nest's evidence lowers the pool sum by the same
+    # delta, whereas the sequential max() rule would leave the header pinned at the
+    # largest untouched nest.
+    is_pool = is_laser_dispatch_work_order(work_order)
     target = float(work_order.quantity_ordered or 0)
     non_component_caps: list[float] = []
     for sibling in work_order_operations:
@@ -564,10 +616,19 @@ def reduce_operation_produced_quantity(
             continue
         # Use the freshly-lowered value for the corrected op (it may not be flushed yet).
         candidate = op_after if sibling.id == operation.id else float(sibling.quantity_complete or 0)
-        if target > 0:
+        if is_pool:
+            sibling_target = operation_target_quantity(sibling, work_order)
+            if sibling_target > 0:
+                candidate = min(candidate, sibling_target)
+        elif target > 0:
             candidate = min(candidate, target)
         non_component_caps.append(candidate)
-    recomputed_rollup = max(non_component_caps) if non_component_caps else 0.0
+    if is_pool:
+        recomputed_rollup = sum(non_component_caps)
+        if target > 0:
+            recomputed_rollup = min(recomputed_rollup, target)
+    else:
+        recomputed_rollup = max(non_component_caps) if non_component_caps else 0.0
     wo_after = min(wo_before, recomputed_rollup)
     work_order.quantity_complete = wo_after
 
@@ -678,7 +739,7 @@ def finalize_operation_completion(
       ``operation`` must already be flipped to COMPLETE by the caller (it stamps
       ``actual_end``/``completed_by`` with the acting user before calling).
     * COMPLETE branch: ALWAYS stamp ``work_order.actual_start`` (min op actual_start,
-      falling back to now) BEFORE flipping the WO to COMPLETE (DUP-2 — fixes the
+      falling back to now) BEFORE flipping the WO to COMPLETE (DUP-2 -- fixes the
       ``actual_end``-without-``actual_start`` rows), set ``actual_end`` = max op
       actual_end (falling back to now), sync finished qty via the ``max()`` guard
       (RUP-6) and CLEAR ``current_operation_id`` (RUP-1).
@@ -899,7 +960,7 @@ def reconcile_work_orders_from_completion_evidence(
             latest_entry_by_operation[entry.operation_id] = entry
 
     # Process-sheet completion gate (PR 3): evidence-at-target must not auto-complete
-    # an operation whose required snapshot steps lack live conforming records — the
+    # an operation whose required snapshot steps lack live conforming records -- the
     # same predicate the /complete endpoints and the clock-out path enforce; without
     # it, this read-time reconcile would undo their refusals on the next page load.
     # Quantities still reconcile below; only the COMPLETE flip is withheld. Function-
@@ -1025,7 +1086,7 @@ def _sync_operation_status_from_quantity(
     """Reconcile an operation's status from its quantities + closed labor evidence.
 
     ``completion_gated`` (PR 3): True when the operation's required process-sheet
-    steps are missing conforming records — the evidence-driven COMPLETE flip is then
+    steps are missing conforming records -- the evidence-driven COMPLETE flip is then
     withheld (quantities and the PENDING/READY -> IN_PROGRESS lift still apply), so
     the read-time reconcile can never complete an operation the /complete endpoints
     and the clock-out path would refuse.
@@ -1076,7 +1137,7 @@ def _copy_slot_completion_evidence(
     """Copy completion evidence across regenerated operation rows sharing a progress key.
 
     PR 4 (re-audit note a): a TARGET operation whose required process-sheet steps lack
-    conforming records (``step_gated_operation_ids``) is SKIPPED entirely — copying a
+    conforming records (``step_gated_operation_ids``) is SKIPPED entirely -- copying a
     sibling row's completion onto it would flip it COMPLETE (or stamp
     ``actual_end``/``completed_by``, which reads as completion evidence on the next
     pass) around the same gate every /complete path enforces. The gated row keeps its
@@ -1160,6 +1221,21 @@ def _sync_work_order_status_from_operations(
         or float(operation.quantity_complete or 0) > 0
         for operation in operations
     )
+    is_pool = is_laser_dispatch_work_order(work_order)
+
+    # Laser dispatch pool WOs: heal the header to the SUM of per-nest progress on
+    # every read, raise-only (never lower), whether or not all nests are complete.
+    # The sequential rules below only re-derive WO quantity when ALL ops are
+    # COMPLETE, so a pool WO whose header froze at the largest single nest (the
+    # pre-fix max() rollup) would otherwise stay stuck until the next production
+    # post. Applies in the all-complete case too, INSTEAD of the snap-to-ordered
+    # below -- a nest completed short must not assert sheets that were never cut
+    # (AS9100D production-records honesty). Best-effort/read-safe: never raises.
+    if is_pool:
+        pooled = pooled_quantity_complete(work_order, operations)
+        if pooled > float(work_order.quantity_complete or 0):
+            work_order.quantity_complete = pooled
+            changed = True
 
     if all_operations_complete:
         # DUP-2: stamp actual_end first, then actual_start clamped at actual_end,
@@ -1185,8 +1261,10 @@ def _sync_work_order_status_from_operations(
             work_order.status = WorkOrderStatus.COMPLETE
             changed = True
             _record_wo_complete_transition(work_order, operations, transitions, entry_ids_by_operation, old_wo_status)
+        # Pool WOs already healed to the pooled SUM above and must NOT snap to
+        # quantity_ordered (no-snap honesty rule -- see the is_pool block).
         target_qty = float(work_order.quantity_ordered or 0)
-        if target_qty > 0 and float(work_order.quantity_complete or 0) < target_qty:
+        if not is_pool and target_qty > 0 and float(work_order.quantity_complete or 0) < target_qty:
             work_order.quantity_complete = target_qty
             changed = True
         # RUP-1: a completed WO is no longer sitting on any operation.
