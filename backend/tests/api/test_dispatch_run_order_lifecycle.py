@@ -16,6 +16,10 @@ the rank is *lived with*:
 * the load-bearing product guarantee: ``run_order`` is ADVISORY. A last-ranked
   or entirely unranked operation can still be started and clocked into. If a
   future change makes the rank gate anything, these are the tests that fail.
+* RANK-SURFACE PARITY for the desktop pages: ``GET /shop-floor/operations``
+  (what /shop-floor and /shop-floor/operations render VERBATIM — owner decision:
+  no client re-sort) serves the canonical order and the same gap-free per-column
+  position the kiosk RUN chip shows, without changing its filter semantics.
 """
 
 from datetime import date, timedelta
@@ -26,7 +30,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from app.models.user import UserRole
-from app.models.work_order import OperationStatus, WorkOrderOperation
+from app.models.work_order import OperationStatus, WorkOrderOperation, WorkOrderStatus
 from tests.api.kiosk_test_helpers import (
     bearer,
     kiosk_token_for,
@@ -42,6 +46,7 @@ from tests.api.kiosk_test_helpers import (
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
 
 BOARD_URL = "/api/v1/shop-floor/dispatch-board"
+OPERATIONS_URL = "/api/v1/shop-floor/operations"
 
 
 def run_order_url(work_center_id: int) -> str:
@@ -67,6 +72,12 @@ def _column(payload: dict, work_center_id: int) -> dict:
         if column["id"] == work_center_id:
             return column
     raise AssertionError(f"work center {work_center_id} missing from board")
+
+
+def _operations_rows(client: TestClient, headers: dict, **params) -> list:
+    resp = client.get(OPERATIONS_URL, headers=headers, params=params)
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    return resp.json()["operations"]
 
 
 # --------------------------------------------------------------------------
@@ -541,3 +552,127 @@ class TestDisplayedRankIsGapFree:
         rows = _queue_rows(client, laser.id, headers)
         assert [row["run_order"] for row in rows] == [1, 2, None]
         assert rows[-1]["operation_id"] == op_ids[0]
+
+
+# --------------------------------------------------------------------------
+# 6. Rank-surface parity: GET /shop-floor/operations (the desktop pages)
+# --------------------------------------------------------------------------
+
+
+class TestDesktopOperationsRankSurfaceParity:
+    """The two desktop pages (/shop-floor and /shop-floor/operations) render the
+    ``GET /shop-floor/operations`` payload VERBATIM — owner decision, no client
+    re-sort — so this endpoint IS the desktop's run order. These tests pin the
+    contract end to end through the REAL rewrite endpoint, plus the pre-existing
+    filter semantics the ordering change must not disturb.
+    (``test_dispatch_run_order.py::TestDesktopOperationsRunOrder`` pins the
+    direct-DB variants: kiosk-order parity, sparse ranks, code grouping, and the
+    stale-rank-on-a-PENDING-op case.)"""
+
+    def test_ranked_cold_job_leads_the_unranked_hot_job(self, client: TestClient, db_session: Session):
+        """The exact divergence class the desktop fix closes: the old client
+        dispatch-score sort would promote an unranked OVERDUE priority-1 job to
+        the top; the manager's rank on a far-due priority-9 job must win —
+        pairwise identical to what the kiosk serves."""
+        manager = make_user(db_session, role=UserRole.MANAGER)
+        wc = make_work_center(db_session)
+        _, hot = make_wo_with_operation(db_session, work_center=wc)
+        _, cold = make_wo_with_operation(db_session, work_center=wc)
+        hot.work_order.priority = 1
+        hot.work_order.due_date = date.today() - timedelta(days=7)  # overdue
+        cold.work_order.priority = 9
+        cold.work_order.due_date = date.today() + timedelta(days=60)
+        db_session.commit()
+
+        # The manager ranks ONLY the cold job — through the real board endpoint.
+        assert _set_run_order(client, wc.id, [cold.id], user_headers(manager)).status_code == status.HTTP_200_OK
+
+        rows = _operations_rows(client, user_headers(manager), work_center_id=wc.id)
+        assert [(row["id"], row["run_order"]) for row in rows] == [(cold.id, 1), (hot.id, None)]
+
+        kiosk = _queue_rows(client, wc.id, user_headers(manager))
+        assert [(row["operation_id"], row["run_order"]) for row in kiosk] == [
+            (row["id"], row["run_order"]) for row in rows
+        ]
+
+    def test_multi_work_center_rows_group_by_code_with_per_column_positions(
+        self, client: TestClient, db_session: Session
+    ):
+        """Unfiltered, rows group by WorkCenter.code (the board's column order),
+        keep the canonical order within each group, and each group's positions
+        are its own gap-free 1..N: a rank stored as 7, alone in its column,
+        displays as 1 — and two columns may both show a RUN 1."""
+        manager = make_user(db_session, role=UserRole.MANAGER)
+        first_col = make_work_center(db_session)
+        second_col = make_work_center(db_session)
+        first_col.code = "AAA-0001"
+        second_col.code = "ZZZ-9999"
+        # AAA column: sparse stored ranks (2, 5) plus an unranked tail row.
+        _, aaa_second = make_wo_with_operation(db_session, work_center=first_col)
+        _, aaa_first = make_wo_with_operation(db_session, work_center=first_col)
+        _, aaa_unranked = make_wo_with_operation(db_session, work_center=first_col)
+        aaa_first.run_order = 2
+        aaa_second.run_order = 5
+        # ZZZ column: a lone job whose stored rank drifted to 7.
+        _, zzz_lone = make_wo_with_operation(db_session, work_center=second_col)
+        zzz_lone.run_order = 7
+        db_session.commit()
+
+        rows = _operations_rows(client, user_headers(manager))
+        assert [(row["id"], row["run_order"]) for row in rows] == [
+            (aaa_first.id, 1),
+            (aaa_second.id, 2),
+            (aaa_unranked.id, None),
+            (zzz_lone.id, 1),  # per-column position, not the stored 7
+        ]
+
+    def test_positions_come_from_the_full_queue_not_the_page(self, client: TestClient, db_session: Session):
+        """A paginated read must still label the third-ranked job RUN 3: the
+        position is computed over the work center's FULL live queue, never the
+        LIMIT/OFFSET page, so the number always matches the kiosk chip."""
+        manager = make_user(db_session, role=UserRole.MANAGER)
+        wc = make_work_center(db_session)
+        ops = [make_wo_with_operation(db_session, work_center=wc)[1] for _ in range(3)]
+        ids = [op.id for op in ops]
+        assert _set_run_order(client, wc.id, ids, user_headers(manager)).status_code == status.HTTP_200_OK
+
+        rows = _operations_rows(client, user_headers(manager), work_center_id=wc.id, page=3, page_size=1)
+        assert [(row["id"], row["run_order"]) for row in rows] == [(ids[2], 3)]
+
+    def test_default_view_still_excludes_complete_ops_and_terminal_or_deleted_work_orders(
+        self, client: TestClient, db_session: Session
+    ):
+        """Filter-semantics pin: the ordering change must return the SAME rows as
+        before — the default view keeps excluding COMPLETE operations and
+        cancelled/soft-deleted work orders."""
+        manager = make_user(db_session, role=UserRole.MANAGER)
+        wc = make_work_center(db_session)
+        _, live = make_wo_with_operation(db_session, work_center=wc)
+        _, done = make_wo_with_operation(db_session, work_center=wc, op_status=OperationStatus.COMPLETE)
+        cancelled_wo, cancelled_op = make_wo_with_operation(db_session, work_center=wc)
+        cancelled_wo.status = WorkOrderStatus.CANCELLED
+        deleted_wo, deleted_op = make_wo_with_operation(db_session, work_center=wc)
+        deleted_wo.is_deleted = True
+        db_session.commit()
+
+        rows = _operations_rows(client, user_headers(manager), work_center_id=wc.id)
+        assert [row["id"] for row in rows] == [live.id]
+        for excluded in (done.id, cancelled_op.id, deleted_op.id):
+            assert excluded not in {row["id"] for row in rows}
+
+    def test_status_filter_still_returns_only_that_status_and_off_queue_rows_carry_no_position(
+        self, client: TestClient, db_session: Session
+    ):
+        """Filter-semantics pin #2: ``status=on_hold`` still subsets to held rows
+        only — and a held row is off the live queue, so its ``run_order`` is null
+        even when a stale stored rank survives underneath."""
+        manager = make_user(db_session, role=UserRole.MANAGER)
+        wc = make_work_center(db_session)
+        _, ready = make_wo_with_operation(db_session, work_center=wc)
+        _, held = make_wo_with_operation(db_session, work_center=wc, op_status=OperationStatus.ON_HOLD)
+        held.run_order = 1  # stale rank left behind by the hold
+        db_session.commit()
+
+        rows = _operations_rows(client, user_headers(manager), work_center_id=wc.id, status="on_hold")
+        assert [(row["id"], row["run_order"]) for row in rows] == [(held.id, None)]
+        assert ready.id not in {row["id"] for row in rows}

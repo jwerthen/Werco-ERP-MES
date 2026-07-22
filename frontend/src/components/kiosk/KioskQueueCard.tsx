@@ -30,21 +30,35 @@ export function KioskStepsChip({ item }: { item: Pick<KioskQueueItem, 'steps_tot
  * Advisory only: the server already sorts the queue by it and ANY job can still
  * be started, so the chip only DISPLAYS the rank — it never reorders client-side.
  * Renders nothing when the operation is unranked (`run_order` null/absent).
- * Deliberately oversized/high-contrast: read at arm's length on a shop tablet.
+ *
+ * The ONE run-chip implementation for every surface that lists work as a queue:
+ * the kiosk/crew cards AND the desktop shop-floor pages (ShopFloor,
+ * ShopFloorSimple). The default `kiosk` size is deliberately oversized /
+ * high-contrast — read at arm's length on a shop tablet; `sm` is the same chip
+ * scaled for dense desktop rows. Do not fork a second implementation.
  */
-export function KioskRunOrderChip({ item }: { item: Pick<KioskQueueItem, 'run_order'> }) {
+export function KioskRunOrderChip({
+  item,
+  size = 'kiosk',
+}: {
+  item: Pick<KioskQueueItem, 'run_order'>;
+  size?: 'kiosk' | 'sm';
+}) {
   const rank = item.run_order;
   if (rank === null || rank === undefined) return null;
   const numeric = Number(rank);
   if (!Number.isFinite(numeric)) return null;
+  const compact = size === 'sm';
   return (
     <span
       data-testid="kiosk-run-order-chip"
       aria-label={`Run order ${numeric}`}
-      className="inline-flex items-center gap-2 rounded border-2 border-fd-amber bg-fd-amber/15 px-3 py-1 font-mono text-xl font-bold uppercase tracking-widest text-fd-amber"
+      className={`inline-flex items-center rounded border-fd-amber bg-fd-amber/15 font-mono font-bold uppercase tracking-widest text-fd-amber ${
+        compact ? 'gap-1 border px-1.5 py-0.5' : 'gap-2 border-2 px-3 py-1 text-xl'
+      }`}
     >
-      <span className="text-sm tracking-widest">Run</span>
-      <span className="text-2xl leading-none tabular-nums">{numeric}</span>
+      <span className={compact ? 'text-[10px] tracking-widest' : 'text-sm tracking-widest'}>Run</span>
+      <span className={`leading-none tabular-nums ${compact ? 'text-sm' : 'text-2xl'}`}>{numeric}</span>
     </span>
   );
 }

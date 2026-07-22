@@ -1036,6 +1036,7 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 |--------|----------|-------------|---------------|
 | GET | `/shop-floor/dashboard` | Shop floor dashboard | Yes |
 | GET | `/shop-floor/my-active-job` | Get current user's active job | Yes |
+| GET | `/shop-floor/operations` | List not-complete/cancelled operations for the desktop shop-floor pages (paginated, max 200/page; filters `work_center_id` / `status` / `search` / `due_today`) — rows in the **canonical dispatch order**, each carrying the advisory `run_order` display rank (see "Desktop parity" under the Dispatch run order note below) | Yes |
 | POST | `/shop-floor/clock-in` | Clock in to operation | Yes |
 | POST | `/shop-floor/clock-out/{id}` | Clock out with production data | Yes |
 | POST | `/shop-floor/operations/{id}/start` | Start an operation | Yes |
@@ -1142,12 +1143,47 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 >    repo's canonical fallback for unranked work;
 > 4. `WorkOrderOperation.id` as a final deterministic tiebreak.
 >
-> Each queue row now carries **`run_order`** (int or `null`) alongside the existing keys; the kiosk
-> renders **server order** and only *displays* the rank (`RUN n` chip) — it never re-sorts
-> client-side. The filter set is unchanged (operation `READY`/`IN_PROGRESS`, parent WO not
-> `COMPLETE`/`CLOSED`/`CANCELLED` and not soft-deleted) and is now shared with the dispatch board
-> below, so the manager's board and the operator's tablet can never disagree. See
-> [docs/KIOSK.md](KIOSK.md).
+> Each queue row now carries **`run_order`** (int or `null`) alongside the existing keys. The served
+> value is the **gap-free display position** (1..N) within the ordered queue, not the raw stored
+> rank — stored ranks go sparse in normal use (completing or moving a job takes its rank out of the
+> column, leaving e.g. 1, 2, 4), and "RUN 4" on a three-job queue reads as a missing job. Unranked
+> rows are `null` and take no position. The kiosk renders **server order** and only *displays* the
+> rank (`RUN n` chip) — it never re-sorts client-side. The filter set is unchanged (operation
+> `READY`/`IN_PROGRESS`, parent WO not `COMPLETE`/`CLOSED`/`CANCELLED` and not soft-deleted) and is
+> now shared with the dispatch board below, so the manager's board and the operator's tablet can
+> never disagree. See [docs/KIOSK.md](KIOSK.md).
+>
+> **Desktop parity (`GET /shop-floor/operations` — the Time Clock and Operations pages).** The same
+> order is what the desktop surfaces show. `GET /shop-floor/operations` (any authenticated user;
+> pagination and filter semantics unchanged) returns rows in the **canonical dispatch order**:
+> across work centers by `WorkCenter.code` — the Dispatch Board's column order, operations with no
+> work center last — and within each work center by the queue sort above, so a single
+> `work_center_id` filter lists the queue rows in exactly the `work-center-queue/{id}` order. Each
+> row carries **`run_order`**: the same gap-free position in that work center's **live** dispatch
+> queue, computed over the full queue — never the returned page or the endpoint's filtered subset —
+> so the number always equals the kiosk `RUN` chip and survives pagination/filtering; `null` when
+> the operation is unranked or not currently queued. One nuance, because this endpoint also returns
+> non-queued rows (`PENDING`/`ON_HOLD` by default, `COMPLETE` under `?status=complete`): a
+> non-queued row that retains a **stale stored rank** still sorts by it inside its work-center
+> group, but its `run_order` field is `null` — it shows no chip and steals no position from the
+> live queue. The two desktop pages (`/shop-floor` "Time Clock" — fed by `work-center-queue/{id}` —
+> and `/shop-floor/operations` "Operations") render the server order **verbatim** and display the
+> rank with the same `RUN n` chip as the kiosk; the client-side dispatch-score re-sort both pages
+> previously applied is removed, so the board, the kiosks, and the desktop can no longer disagree
+> on what runs next. As everywhere, advisory only: the rank never gates a start.
+>
+> **Planner parity (`GET /scheduling/work-orders` — the Scheduling page's Dispatch Queue).** The
+> planner list is **cross-machine**, so the per-machine rank is deliberately *not* a sort key
+> there. Rows come back in the server's canonical planner order — `WorkOrder.priority`, then
+> `due_date`, then `work_order_number` as a final deterministic tiebreak — and the Scheduling page
+> renders that order verbatim (its client-side dispatch-score re-sort is removed, along with the
+> score itself, which no longer exists anywhere in the product). Each row now also carries
+> **`run_order`** — the current operation's gap-free position in its work center's **live**
+> dispatch queue, computed over the full queue exactly as above so it always equals the
+> kiosk/board/desktop chips; `null` when the operation is unranked or not currently queued (e.g.
+> pending / on hold) — plus **`work_center_code`** for chip context on a cross-machine list. The
+> page shows the rank as the same `RUN n` chip in its **Run** column: advisory context only, never
+> an ordering input.
 >
 > **`GET /shop-floor/dispatch-board`** (Admin / Manager / Supervisor, tenant-scoped) — the whole
 > board in one read. Response:
