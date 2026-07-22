@@ -9,6 +9,13 @@
  * that keeps the last good data; the ?dept= scope line; the degraded states
  * (jobs empty / jobs missing); and the no-token / revoked screens.
  *
+ * Extended coverage (2026-07-22): display-settings hardening (JSON-null /
+ * junk storage, URL override + re-persist); sparse payload degradation
+ * (null ship/today/quality, absent totals, zero qty, null current_op);
+ * blank cells on join misses; the 12-card grid cap in server order; the
+ * SHIP fraction's Central-noon escalation; the fdPulse motion budget; and
+ * the client-side minute tick between polls.
+ *
  * services/wallboardClient is mocked at the module boundary — the page must
  * never touch the global axios client (a display token cannot enter it).
  */
@@ -17,6 +24,7 @@ import React from 'react';
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import Wallboard from './Wallboard';
+import { FD } from '../components/wallboard/wallboardTokens';
 import {
   captureWallboardTokenFromUrl,
   clearWallboardToken,
@@ -156,6 +164,32 @@ const jobs: WallboardJob[] = [
     },
   },
 ];
+
+/** Minimal WAITING job for grid-cap tests — WO-A01, WO-A02, … */
+function waitingJob(n: number): WallboardJob {
+  return {
+    wo_number: `WO-A${String(n).padStart(2, '0')}`,
+    part_number: `PART-${n}`,
+    status: 'released',
+    qty_complete: 0,
+    qty_ordered: 10,
+    is_late: false,
+    days_late: 0,
+    blocked: false,
+    down: false,
+    running: false,
+    ops_completed: 0,
+    ops_total: 2,
+    current_op: {
+      sequence: 10,
+      name: 'Saw',
+      work_center_code: `SAW-${n}`,
+      work_center_name: `Saw ${n}`,
+      status: 'pending',
+      elapsed_minutes: 0,
+    },
+  };
+}
 
 const payload: WallboardResponse = {
   work_centers: [
@@ -393,12 +427,14 @@ describe('Wallboard', () => {
       expect(screen.getByTestId('sync-status')).toHaveTextContent('SYNC LOST');
       expect(screen.getByTestId('wo-card-WO-1042')).toBeInTheDocument();
 
-      // Recovery: one good poll resets to SYNC OK and clears the count.
-      mockFetchWallboard.mockResolvedValue(payload);
+      // Recovery: one good poll resets to SYNC OK, clears the count, AND the
+      // fresh payload swaps in (the board must not keep serving stale data).
+      mockFetchWallboard.mockResolvedValue({ ...payload, late_total: 9 });
       await act(async () => {
         jest.advanceTimersByTime(30_000);
       });
       expect(screen.getByTestId('sync-status')).toHaveAttribute('data-offline-level', '0');
+      expect(screen.getByTestId('hud-chip-late')).toHaveTextContent('9');
 
       // …so the next single failure starts over at STALE, not LOST.
       mockFetchWallboard.mockRejectedValue(new Error('HTTP_500'));
@@ -474,6 +510,324 @@ describe('Wallboard', () => {
       clock24h: true,
       clockSeconds: false,
       nightDim: true,
+    });
+  });
+
+  describe('display settings hardening', () => {
+    it('renders with all-false defaults when storage holds JSON null (regression: "null" parses clean)', async () => {
+      window.localStorage.setItem('wallboard_display_settings', 'null');
+      mockFetchWallboard.mockResolvedValue(payload);
+      renderWallboard();
+
+      // The board comes up instead of crashing on the null field reads.
+      expect(await screen.findByTestId('wo-grid')).toBeInTheDocument();
+      expect(screen.queryByTestId('night-dim-overlay')).not.toBeInTheDocument();
+      // 12h clock (meridiem shown), no seconds — the all-false defaults.
+      expect(screen.getByText(/^(AM|PM)$/)).toBeInTheDocument();
+      expect(screen.getByTestId('hud-clock')).toHaveTextContent(/^\d{1,2}:\d{2}$/);
+      // A URL with no settings params never re-persists over the stored value.
+      expect(window.localStorage.getItem('wallboard_display_settings')).toBe('null');
+    });
+
+    it('coerces non-boolean junk in stored settings to false', async () => {
+      window.localStorage.setItem(
+        'wallboard_display_settings',
+        JSON.stringify({ clock24h: 'yes', clockSeconds: 1, nightDim: 'on' })
+      );
+      mockFetchWallboard.mockResolvedValue(payload);
+      renderWallboard();
+
+      expect(await screen.findByTestId('wo-grid')).toBeInTheDocument();
+      // Truthy-but-not-true junk must NOT enable anything.
+      expect(screen.queryByTestId('night-dim-overlay')).not.toBeInTheDocument();
+      expect(screen.getByText(/^(AM|PM)$/)).toBeInTheDocument();
+      expect(screen.getByTestId('hud-clock')).toHaveTextContent(/^\d{1,2}:\d{2}$/);
+    });
+
+    it('URL params override stored true values and persist the merged resolved set', async () => {
+      window.localStorage.setItem(
+        'wallboard_display_settings',
+        JSON.stringify({ clock24h: true, clockSeconds: true, nightDim: true })
+      );
+      mockFetchWallboard.mockResolvedValue(payload);
+      renderWallboard('/wallboard?clock24=0');
+
+      expect(await screen.findByTestId('wo-grid')).toBeInTheDocument();
+      // Unmentioned settings load from storage (dim + seconds stay on)…
+      expect(screen.getByTestId('night-dim-overlay')).toBeInTheDocument();
+      expect(screen.getByTestId('hud-clock')).toHaveTextContent(/^\d{1,2}:\d{2}:\d{2}$/);
+      // …while clock24=0 beats the stored true (12h → meridiem shown).
+      expect(screen.getByText(/^(AM|PM)$/)).toBeInTheDocument();
+      // The RESOLVED set re-persists, so the next unparameterized boot keeps it.
+      expect(JSON.parse(window.localStorage.getItem('wallboard_display_settings') ?? '{}')).toEqual({
+        clock24h: false,
+        clockSeconds: true,
+        nightDim: true,
+      });
+    });
+  });
+
+  describe('sparse / degraded payloads', () => {
+    it('degrades ship, today, and quality to em-dashes when all three are null', async () => {
+      mockFetchWallboard.mockResolvedValue({ ...payload, ship: null, today: null, quality: null });
+      renderWallboard();
+
+      // The grid still renders — a partial payload never blanks the board.
+      expect(await screen.findByTestId('wo-grid')).toBeInTheDocument();
+
+      // SHIP TODAY: em-dash fraction, em-dash body, em-dash week — same slots.
+      expect(screen.getByTestId('ship-panel')).toHaveTextContent('—/—');
+      expect(screen.getByTestId('ship-panel')).toHaveTextContent(/THIS WEEK—/);
+
+      // NCRs / holds: both counts em-dash, no NEWEST sub-line.
+      const quality = within(screen.getByTestId('quality-row'));
+      expect(quality.getAllByText('—')).toHaveLength(2);
+      expect(quality.queryByText(/NEWEST/)).not.toBeInTheDocument();
+
+      // TODAY bar: all six KPI cells em-dash; the bar keeps its slot.
+      expect(within(screen.getByTestId('today-kpis')).getAllByText('—')).toHaveLength(6);
+    });
+
+    it('falls back to derived counts when the true totals are absent (old backend)', async () => {
+      mockFetchWallboard.mockResolvedValue({
+        ...payload,
+        late_total: undefined,
+        blocked_total: undefined,
+        down_total: undefined,
+      });
+      renderWallboard();
+
+      expect(await screen.findByTestId('wo-grid')).toBeInTheDocument();
+      // down ← work_centers with an open downtime (1), blocked ← blocked_wos
+      // length (1), late ← late_wos length (2).
+      expect(screen.getByTestId('hud-chip-down')).toHaveTextContent('1');
+      expect(screen.getByTestId('hud-chip-blocked')).toHaveTextContent('1');
+      expect(screen.getByTestId('hud-chip-late')).toHaveTextContent('2');
+      expect(screen.getByTestId('late-total')).toHaveTextContent('2');
+      expect(screen.getByTestId('blocked-total')).toHaveTextContent('1');
+      expect(screen.getByTestId('down-total')).toHaveTextContent('1');
+      // Derived totals equal the rendered rows — no phantom "+N MORE".
+      expect(within(screen.getByTestId('late-panel')).queryByText(/\+\d+ MORE/)).not.toBeInTheDocument();
+      expect(within(screen.getByTestId('blocked-down-panel')).queryByText(/\+\d+ MORE/)).not.toBeInTheDocument();
+    });
+
+    it('renders 0% (never NaN) for a job with qty_ordered 0', async () => {
+      const zeroJob = { ...jobs[4], wo_number: 'WO-ZERO', qty_complete: 0, qty_ordered: 0 };
+      mockFetchWallboard.mockResolvedValue({ ...payload, jobs: [zeroJob], jobs_total: 1 });
+      renderWallboard();
+
+      const card = await screen.findByTestId('wo-card-WO-ZERO');
+      expect(within(card).getByText('0%')).toBeInTheDocument();
+      expect(card.textContent).not.toMatch(/NaN/);
+    });
+
+    it('renders ALL OPS COMPLETE and a blank machine row when current_op is null', async () => {
+      const doneJob = { ...jobs[4], wo_number: 'WO-DONE', current_op: null };
+      mockFetchWallboard.mockResolvedValue({ ...payload, jobs: [doneJob], jobs_total: 1 });
+      renderWallboard();
+
+      const card = await screen.findByTestId('wo-card-WO-DONE');
+      expect(within(card).getByText('ALL OPS COMPLETE')).toBeInTheDocument();
+      // The waiting stop reason still renders; the machine cell is just blank.
+      expect(within(card).getByText('IN QUEUE')).toBeInTheDocument();
+      expect(card.textContent).not.toMatch(/undefined|NaN/i);
+    });
+  });
+
+  describe('join misses degrade to blank cells', () => {
+    it('a DOWN job whose work center code matches no work_centers entry gets blank stoppage cells', async () => {
+      // work_centers still carries the MILL-1 downtime — the join is strictly
+      // by the CURRENT OP's code, so GHOST-9 must not borrow another WC's data.
+      const ghostJob = {
+        ...jobs[0],
+        wo_number: 'WO-GHOST',
+        current_op: { ...jobs[0].current_op!, work_center_code: 'GHOST-9', work_center_name: 'Ghost Cell' },
+      };
+      mockFetchWallboard.mockResolvedValue({ ...payload, jobs: [ghostJob], jobs_total: 1 });
+      renderWallboard();
+
+      const card = await screen.findByTestId('wo-card-WO-GHOST');
+      expect(within(card).getByText('DOWN')).toBeInTheDocument();
+      // No duration, no reason, no "undefined" — blank cells are the design.
+      expect(within(card).queryByText('2H14M')).not.toBeInTheDocument();
+      expect(within(card).queryByText('MAINTENANCE')).not.toBeInTheDocument();
+      expect(card.textContent).not.toMatch(/undefined|NaN/i);
+    });
+
+    it('a BLOCKED job absent from blocked_wos gets blank age/reason cells', async () => {
+      const orphanJob = { ...jobs[1], wo_number: 'WO-7777' };
+      mockFetchWallboard.mockResolvedValue({ ...payload, jobs: [orphanJob], jobs_total: 1 });
+      renderWallboard();
+
+      const card = await screen.findByTestId('wo-card-WO-7777');
+      expect(within(card).getByText('BLOCKED')).toBeInTheDocument();
+      expect(within(card).queryByText('22H')).not.toBeInTheDocument();
+      expect(within(card).queryByText('WAITING INSPECT')).not.toBeInTheDocument();
+      expect(card.textContent).not.toMatch(/undefined|NaN/i);
+    });
+  });
+
+  describe('overflow strip arithmetic', () => {
+    it('caps the grid at the first 12 jobs in server order and counts overflow from jobs_total', async () => {
+      // Descending WO numbers: any client-side re-sort would flip the order.
+      const manyJobs = Array.from({ length: 14 }, (_, i) => waitingJob(14 - i));
+      mockFetchWallboard.mockResolvedValue({ ...payload, jobs: manyJobs, jobs_total: 17 });
+      renderWallboard();
+
+      expect(await screen.findByTestId('wo-grid')).toBeInTheDocument();
+      const cardIds = screen.getAllByTestId(/^wo-card-/).map(el => el.getAttribute('data-testid'));
+      expect(cardIds).toEqual(
+        Array.from({ length: 12 }, (_, i) => `wo-card-WO-A${String(14 - i).padStart(2, '0')}`)
+      );
+      // 17 total − 12 rendered = +5 (from the uncapped total, not jobs.length).
+      expect(screen.getByTestId('wo-overflow-strip')).toHaveTextContent('+5 MORE WORK ORDERS IN QUEUE');
+    });
+  });
+
+  describe('SHIP TODAY fraction states', () => {
+    const shipFraction = (text: string) =>
+      within(screen.getByTestId('ship-panel')).getByText(
+        (_, el) => !!el && el.tagName === 'SPAN' && el.textContent === text
+      );
+
+    it('shows NONE DUE when nothing is due today and there is no next promise date', async () => {
+      mockFetchWallboard.mockResolvedValue({
+        ...payload,
+        ship: { due_today: 0, shipped_today: 0, due_this_week: 0, due_today_rows: [], next_due_date: null, next_due_count: 0 },
+      });
+      renderWallboard();
+
+      expect(await screen.findByText('NONE DUE')).toBeInTheDocument();
+    });
+
+    it('shows the next promise date when nothing is due today', async () => {
+      mockFetchWallboard.mockResolvedValue({
+        ...payload,
+        ship: {
+          due_today: 0,
+          shipped_today: 0,
+          due_this_week: 4,
+          due_today_rows: [],
+          next_due_date: '2026-07-25',
+          next_due_count: 3,
+        },
+      });
+      renderWallboard();
+
+      expect(await screen.findByText('NEXT DUE SAT JUL 25 (3 WOS)')).toBeInTheDocument();
+    });
+
+    it('colors a behind fraction amber before noon Central', async () => {
+      // 15:00Z on 2026-07-22 = 10:00 CDT — behind (5/8) but morning.
+      jest.useFakeTimers({ now: new Date('2026-07-22T15:00:00Z') });
+      try {
+        mockFetchWallboard.mockResolvedValue(payload);
+        renderWallboard();
+
+        expect(await screen.findByTestId('ship-panel')).toBeInTheDocument();
+        expect(shipFraction('5/8')).toHaveStyle({ color: FD.amber });
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('escalates a behind fraction to red at/after noon Central', async () => {
+      // 18:30Z on 2026-07-22 = 13:30 CDT — still behind past the noon gate.
+      jest.useFakeTimers({ now: new Date('2026-07-22T18:30:00Z') });
+      try {
+        mockFetchWallboard.mockResolvedValue(payload);
+        renderWallboard();
+
+        expect(await screen.findByTestId('ship-panel')).toBeInTheDocument();
+        expect(shipFraction('5/8')).toHaveStyle({ color: FD.red });
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('colors a complete fraction green regardless of the clock', async () => {
+      mockFetchWallboard.mockResolvedValue({ ...payload, ship: { ...payload.ship!, shipped_today: 8 } });
+      renderWallboard();
+
+      expect(await screen.findByTestId('ship-panel')).toBeInTheDocument();
+      expect(shipFraction('8/8')).toHaveStyle({ color: FD.green });
+    });
+
+    it('clamps +N MORE TODAY at zero when the rows already cover the remainder', async () => {
+      // due 3 − shipped 2 − 2 rendered rows = −1 → clamps to 0 → no line.
+      mockFetchWallboard.mockResolvedValue({
+        ...payload,
+        ship: { ...payload.ship!, due_today: 3, shipped_today: 2 },
+      });
+      renderWallboard();
+
+      expect(await screen.findByTestId('ship-panel')).toBeInTheDocument();
+      expect(within(screen.getByTestId('ship-panel')).queryByText(/MORE TODAY/)).not.toBeInTheDocument();
+    });
+  });
+
+  describe('pulse discipline (the board motion budget)', () => {
+    const pulsingElements = () => Array.from(document.querySelectorAll('[style*="fdPulse"]'));
+
+    it('fdPulse animates exactly the DOWN dots: the header chip dot and the DOWN card chip dot', async () => {
+      mockFetchWallboard.mockResolvedValue(payload);
+      renderWallboard();
+
+      expect(await screen.findByTestId('wo-grid')).toBeInTheDocument();
+      const pulsing = pulsingElements();
+      expect(pulsing).toHaveLength(2);
+      expect(screen.getByTestId('hud-chip-down').contains(pulsing[0])).toBe(true);
+      expect(screen.getByTestId('wo-card-WO-1042').contains(pulsing[1])).toBe(true);
+    });
+
+    it('nothing pulses when nothing is down — even with BLOCKED and LATE alarms active', async () => {
+      mockFetchWallboard.mockResolvedValue({
+        ...payload,
+        down_total: 0,
+        work_centers: payload.work_centers.map(wc => ({ ...wc, down: null })),
+        jobs: jobs.map(job => (job.wo_number === 'WO-1042' ? { ...job, down: false } : job)),
+      });
+      renderWallboard();
+
+      expect(await screen.findByTestId('wo-grid')).toBeInTheDocument();
+      // BLOCKED (3) and LATE (7) chips are lit, but only DOWN may ever pulse.
+      expect(screen.getByTestId('hud-chip-blocked')).toHaveTextContent('3');
+      expect(pulsingElements()).toHaveLength(0);
+    });
+  });
+
+  describe('minute counters between polls', () => {
+    it('elapsed and downtime values tick by whole client-side minutes while polls fail', async () => {
+      jest.useFakeTimers();
+      try {
+        mockFetchWallboard.mockResolvedValueOnce(payload);
+        renderWallboard();
+
+        expect(await screen.findByTestId('wo-grid')).toBeInTheDocument();
+        // Baseline: downtime 134m on the DOWN card + the rail row; running 24m.
+        expect(screen.getAllByText('2H14M')).toHaveLength(2);
+        expect(screen.getByText('24M')).toBeInTheDocument();
+
+        // Fail the next polls so lastUpdated (the tick baseline) stays put.
+        mockFetchWallboard.mockRejectedValue(new Error('HTTP_500'));
+
+        // 59s: still the same values — the counters move in WHOLE minutes.
+        await act(async () => {
+          jest.advanceTimersByTime(59_000);
+        });
+        expect(screen.getAllByText('2H14M')).toHaveLength(2);
+        expect(screen.getByText('24M')).toBeInTheDocument();
+
+        // Cross the minute: 134→135 (card + rail), 24→25, late elapsed 137→138.
+        await act(async () => {
+          jest.advanceTimersByTime(2_000);
+        });
+        expect(screen.getAllByText('2H15M')).toHaveLength(2);
+        expect(screen.getByText('25M')).toBeInTheDocument();
+        expect(screen.getByText('2H18M')).toBeInTheDocument();
+      } finally {
+        jest.useRealTimers();
+      }
     });
   });
 });
