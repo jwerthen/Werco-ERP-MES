@@ -118,16 +118,32 @@ describe('OperatorKiosk', () => {
     expect(await screen.findByText('Previous operations must be completed first')).toBeInTheDocument();
   });
 
-  it('requires a scrap reason before production can be saved, then reports it structurally with source:"kiosk"', async () => {
+  it('GOOD tab reports an additive good delta with source:"kiosk"', async () => {
     mockedApi.getMyActiveJob.mockResolvedValue({ active_jobs: [ACTIVE_JOB], active_job: ACTIVE_JOB });
     mockedApi.reportOperationProduction.mockResolvedValue({});
     renderKiosk();
 
+    // REPORT PRODUCTION opens the tabbed overlay on the GOOD tab.
     fireEvent.click(await screen.findByRole('button', { name: /report production/i }));
-
-    // Enter 3 good, 2 scrap on the keypad.
     fireEvent.click(screen.getByTestId('kiosk-key-3'));
-    fireEvent.click(screen.getByTestId('kiosk-qty-scrap'));
+    fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
+
+    await waitFor(() =>
+      expect(mockedApi.reportOperationProduction).toHaveBeenCalledWith(31, {
+        quantity_complete_delta: 3,
+        quantity_scrapped_delta: 0,
+        source: 'kiosk',
+      })
+    );
+  });
+
+  it('requires a scrap reason before scrap can be saved, then reports it structurally with source:"kiosk"', async () => {
+    mockedApi.getMyActiveJob.mockResolvedValue({ active_jobs: [ACTIVE_JOB], active_job: ACTIVE_JOB });
+    mockedApi.reportOperationProduction.mockResolvedValue({});
+    renderKiosk();
+
+    // SCRAP / NCR opens the same overlay directly on the scrap tab.
+    fireEvent.click(await screen.findByTestId('kiosk-active-scrap'));
     fireEvent.click(screen.getByTestId('kiosk-key-2'));
 
     // Scrap entered but no reason chosen → save must be blocked.
@@ -140,13 +156,52 @@ describe('OperatorKiosk', () => {
 
     await waitFor(() =>
       expect(mockedApi.reportOperationProduction).toHaveBeenCalledWith(31, {
-        quantity_complete_delta: 3,
+        quantity_complete_delta: 0,
         quantity_scrapped_delta: 2,
         // Structured field, not the old `notes: 'Scrap reason: …'` workaround.
+        scrap_reason: 'Material defect',
+        // "Material defect" is quality-related → the OPEN NCR toggle defaults ON.
+        open_ncr: true,
+        source: 'kiosk',
+      })
+    );
+  });
+
+  it('the OPEN NCR toggle can be switched off — the scrap report then omits open_ncr', async () => {
+    mockedApi.getMyActiveJob.mockResolvedValue({ active_jobs: [ACTIVE_JOB], active_job: ACTIVE_JOB });
+    mockedApi.reportOperationProduction.mockResolvedValue({});
+    renderKiosk();
+
+    fireEvent.click(await screen.findByTestId('kiosk-active-scrap'));
+    fireEvent.click(screen.getByTestId('kiosk-key-2'));
+    fireEvent.click(screen.getByRole('button', { name: 'Material defect' }));
+    // Defaulted ON by the quality-related reason — the operator turns it off.
+    const toggle = screen.getByTestId('kiosk-report-ncr-toggle');
+    expect(toggle).toHaveAttribute('aria-checked', 'true');
+    fireEvent.click(toggle);
+    fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
+
+    await waitFor(() =>
+      expect(mockedApi.reportOperationProduction).toHaveBeenCalledWith(31, {
+        quantity_complete_delta: 0,
+        quantity_scrapped_delta: 2,
         scrap_reason: 'Material defect',
         source: 'kiosk',
       })
     );
+  });
+
+  it('quotes the ncr_number from the response in the success toast', async () => {
+    mockedApi.getMyActiveJob.mockResolvedValue({ active_jobs: [ACTIVE_JOB], active_job: ACTIVE_JOB });
+    mockedApi.reportOperationProduction.mockResolvedValue({ ncr: { id: 9, ncr_number: 'NCR-000321' } });
+    renderKiosk();
+
+    fireEvent.click(await screen.findByTestId('kiosk-active-scrap'));
+    fireEvent.click(screen.getByTestId('kiosk-key-2'));
+    fireEvent.click(screen.getByRole('button', { name: 'Material defect' }));
+    fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
+
+    expect(await screen.findByText(/NCR-000321 filed/i)).toBeInTheDocument();
   });
 
   it('COMPLETE clocks out first (with quantities + source) then completes at the target qty', async () => {
@@ -155,7 +210,7 @@ describe('OperatorKiosk', () => {
     mockedApi.completeOperation.mockResolvedValue({});
     renderKiosk();
 
-    fireEvent.click(await screen.findByRole('button', { name: /^complete$/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /^complete op$/i }));
     // GOOD prefills with the remaining quantity (50 - 5 = 45); confirm as-is.
     fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
 
@@ -178,10 +233,12 @@ describe('OperatorKiosk', () => {
     renderKiosk();
 
     fireEvent.click(await screen.findByRole('button', { name: /^hold$/i }));
-    expect(screen.getByRole('button', { name: /^hold job$/i })).toBeDisabled();
+    expect(screen.getByTestId('kiosk-hold-confirm')).toBeDisabled();
 
     fireEvent.click(screen.getByRole('button', { name: 'Machine down' }));
-    fireEvent.click(screen.getByRole('button', { name: /^hold job$/i }));
+    // The confirm CTA echoes the selected reason.
+    expect(screen.getByTestId('kiosk-hold-confirm')).toHaveTextContent(/place on hold — machine down/i);
+    fireEvent.click(screen.getByTestId('kiosk-hold-confirm'));
 
     await waitFor(() =>
       expect(mockedApi.holdOperation).toHaveBeenCalledWith(31, {
@@ -203,7 +260,7 @@ describe('OperatorKiosk', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: /^hold$/i }));
     fireEvent.click(screen.getByRole('button', { name: 'Other' }));
-    fireEvent.click(screen.getByRole('button', { name: /^hold job$/i }));
+    fireEvent.click(screen.getByTestId('kiosk-hold-confirm'));
 
     await waitFor(() =>
       expect(mockedApi.holdOperation).toHaveBeenCalledWith(31, {
@@ -271,7 +328,7 @@ describe('OperatorKiosk', () => {
     });
     renderKiosk();
 
-    fireEvent.click(await screen.findByRole('button', { name: /^complete$/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /^complete op$/i }));
     fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
 
     expect(
@@ -292,7 +349,7 @@ describe('OperatorKiosk', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: /^hold$/i }));
     fireEvent.click(screen.getByRole('button', { name: 'Machine down' }));
-    fireEvent.click(screen.getByRole('button', { name: /^hold job$/i }));
+    fireEvent.click(screen.getByTestId('kiosk-hold-confirm'));
 
     // Mid-mutation: logging out now would 401 the in-flight write and bounce
     // the tablet off /kiosk.
@@ -305,7 +362,7 @@ describe('OperatorKiosk', () => {
   it('shows the badge login screen when unauthenticated', async () => {
     authAs(null);
     renderKiosk();
-    expect(await screen.findByText(/scan your badge/i)).toBeInTheDocument();
+    expect(await screen.findByText(/scan badge or enter id/i)).toBeInTheDocument();
     expect(mockedApi.getWorkCenterQueue).not.toHaveBeenCalled();
   });
 
@@ -340,7 +397,7 @@ describe('OperatorKiosk', () => {
       // Online first: the active-job actions are enabled.
       const report = await screen.findByRole('button', { name: /report production/i });
       expect(report).toBeEnabled();
-      expect(screen.getByRole('button', { name: /^complete$/i })).toBeEnabled();
+      expect(screen.getByRole('button', { name: /^complete op$/i })).toBeEnabled();
       expect(screen.getByRole('button', { name: /^hold$/i })).toBeEnabled();
 
       await goOffline();
@@ -348,7 +405,7 @@ describe('OperatorKiosk', () => {
       // The OFFLINE banner appears and the mutation actions are hard-disabled.
       expect(await screen.findByText(/actions are disabled until the connection is restored/i)).toBeInTheDocument();
       expect(screen.getByRole('button', { name: /report production/i })).toBeDisabled();
-      expect(screen.getByRole('button', { name: /^complete$/i })).toBeDisabled();
+      expect(screen.getByRole('button', { name: /^complete op$/i })).toBeDisabled();
       expect(screen.getByRole('button', { name: /^hold$/i })).toBeDisabled();
     });
 

@@ -56,6 +56,7 @@
   --fd-line-bright: #32415a;
   --fd-ink: #f0f4f9;
   --fd-body: #b7c3d4;
+  --fd-body-2: #cbd5e1;
   --fd-mute: #8a98ab;
   --fd-faint: #616f82;
   --fd-blue: #2f81f7;
@@ -66,6 +67,28 @@
   --fd-cyan: #39c5cf;
   --fd-radius: 3px;
   --fd-radius-lg: 4px;
+}
+
+/* ============================================
+   KIOSK PALETTE SCOPE (Kiosk Foundry Redesign)
+   The Tailwind `fd-*` utilities resolve var(--fd-*), so applying this class on
+   a subtree root (OperatorKiosk / CrewStationKiosk wrappers — every render
+   path) re-themes every fd token inside it to the darker design-handoff
+   values. Everywhere else `:root` wins → zero visual change off-kiosk.
+   Accents (--fd-blue/red/amber/green/cyan) and --fd-body-2 are deliberately
+   NOT overridden — they are identical in both scopes and inherit from :root.
+   ============================================ */
+.fd-scope-kiosk {
+  --fd-canvas: #080a0f;
+  --fd-panel: #0c1017;
+  --fd-raised: #10151e;
+  --fd-sunken: #070910;
+  --fd-line: #1a212c;
+  --fd-line-bright: #243044;
+  --fd-ink: #e6edf3;
+  --fd-body: #9aa7b8;
+  --fd-mute: #5b6677;
+  --fd-faint: #3f4856;
 }
 
 /* ============================================
@@ -1159,6 +1182,33 @@
 
 .animate-scale-in {
   animation: scaleIn 0.2s ease-out forwards;
+}
+
+/* ============================================
+   KIOSK FOUNDRY MICRO-ANIMATIONS
+   ============================================ */
+
+/* Badge-well rejection shake (Foundry 1a: failed scan shakes the well). */
+@keyframes kiosk-shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-6px); }
+  40% { transform: translateX(6px); }
+  60% { transform: translateX(-4px); }
+  80% { transform: translateX(4px); }
+}
+
+.animate-kiosk-shake {
+  animation: kiosk-shake 0.35s ease-out;
+}
+
+/* Badge-entry caret blink + glow (Foundry 1a). */
+@keyframes kiosk-caret {
+  0%, 45% { opacity: 1; }
+  55%, 100% { opacity: 0.15; }
+}
+
+.animate-kiosk-caret {
+  animation: kiosk-caret 1.1s ease-in-out infinite;
 }
 
 /* ============================================

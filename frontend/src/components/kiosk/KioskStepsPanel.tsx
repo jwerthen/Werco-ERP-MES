@@ -416,7 +416,16 @@ function KioskSupersedeModal({ step, record, serialized, blocked, onCancel, onSu
   };
 
   return (
-    <Modal open onClose={onCancel} size="lg" closeOnBackdrop={false} ariaLabelledBy="kiosk-supersede-title">
+    <Modal
+      open
+      onClose={onCancel}
+      size="lg"
+      closeOnBackdrop={false}
+      ariaLabelledBy="kiosk-supersede-title"
+      // Portals to document.body — outside .fd-scope-kiosk — so the scope class
+      // rides the panel to keep the kiosk palette inside the dialog.
+      className="fd-scope-kiosk"
+    >
       <h2 id="kiosk-supersede-title" className="text-3xl font-bold text-fd-ink">
         Correct record
       </h2>
@@ -881,8 +890,8 @@ export default function KioskStepsPanel({
     <section aria-label="Process steps" className="mx-auto w-full max-w-3xl">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="min-w-0">
-          <h2 className="text-3xl font-bold text-fd-ink">Process steps</h2>
-          <p className="mt-1 font-mono text-lg text-fd-mute">{jobLabel}</p>
+          <h2 className="font-mono text-2xl font-bold uppercase tracking-[0.06em] text-fd-ink">Process steps</h2>
+          <p className="mt-1 font-mono text-base uppercase text-fd-mute">{jobLabel}</p>
           {recordingAs && (
             <p className="mt-1 text-base font-semibold text-fd-blue">Recording as {recordingAs}</p>
           )}
@@ -1001,12 +1010,14 @@ export default function KioskStepsPanel({
                 key={step.id}
                 id={`kiosk-step-${step.id}`}
                 data-testid={`kiosk-step-${step.id}`}
-                className={`rounded border bg-fd-panel ${
+                className={`rounded-[4px] border bg-fd-panel ${
                   satisfied
-                    ? 'border-fd-green/50'
+                    ? 'border-fd-line border-l-2 border-l-fd-green'
                     : hasUnsatisfiedRecord
-                      ? 'border-fd-red/60'
-                      : 'border-fd-line'
+                      ? 'border-fd-red/60 border-l-2 border-l-fd-red'
+                      : expanded
+                        ? 'border-fd-cyan/50 border-l-2 border-l-fd-cyan shadow-[0_0_20px_rgba(57,197,207,0.08)]'
+                        : 'border-fd-line'
                 }`}
               >
                 <button
@@ -1017,12 +1028,14 @@ export default function KioskStepsPanel({
                 >
                   <span
                     aria-hidden="true"
-                    className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full border-2 font-mono text-lg font-bold ${
+                    className={`flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-[3px] border font-mono text-[13px] font-bold ${
                       satisfied
-                        ? 'border-fd-green bg-fd-green/15 text-fd-green'
+                        ? 'border-fd-green/50 bg-fd-green/12 text-fd-green'
                         : hasUnsatisfiedRecord
                           ? 'border-fd-red bg-fd-red/10 text-fd-red'
-                          : 'border-fd-line-bright text-fd-body'
+                          : expanded
+                            ? 'border-fd-cyan/50 bg-fd-cyan/10 text-fd-cyan'
+                            : 'border-fd-line-bright bg-fd-raised text-fd-body'
                     }`}
                   >
                     {satisfied ? '✓' : index + 1}

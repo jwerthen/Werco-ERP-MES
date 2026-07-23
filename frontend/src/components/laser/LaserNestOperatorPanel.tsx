@@ -9,6 +9,14 @@ interface LaserNestOperatorPanelProps {
   size?: 'compact' | 'kiosk';
   /** Allow expanding the inline PDF preview (off inside the small queue card). */
   allowPreview?: boolean;
+  /**
+   * Optional transport override for the nest PDF, threaded to
+   * LaserNestPdfPreview's `fetchBlob`. Kiosk surfaces (crew station) inject a
+   * fence-safe fetcher here (badge-token shop-floor inline route) so the
+   * preview never drives the global axios client. Omit on desktop callers —
+   * behavior is unchanged (api.fetchLaserNestDocument).
+   */
+  fetchNestPdf?: () => Promise<string>;
 }
 
 /**
@@ -21,6 +29,7 @@ export default function LaserNestOperatorPanel({
   nest,
   size = 'compact',
   allowPreview = true,
+  fetchNestPdf,
 }: LaserNestOperatorPanelProps) {
   const [showPreview, setShowPreview] = useState(false);
   const kiosk = size === 'kiosk';
@@ -88,6 +97,7 @@ export default function LaserNestOperatorPanel({
             laserNestId={nest.id}
             fileName={nest.document_file_name}
             heightClassName={kiosk ? 'h-[520px]' : 'h-[360px]'}
+            fetchBlob={fetchNestPdf}
           />
         </div>
       )}

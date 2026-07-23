@@ -44,7 +44,7 @@ describe('KioskQueueCard laser-nest surfacing', () => {
     );
 
     expect(screen.getByText(/CNC# 4455/)).toBeInTheDocument();
-    expect(screen.getByText(/3 \/ 8 runs/)).toBeInTheDocument();
+    expect(screen.getByText(/3\/8 runs/)).toBeInTheDocument();
     expect(screen.getByText(/AL 6061/)).toBeInTheDocument();
     // A "PDF" chip flags that a reference drawing is attached.
     expect(screen.getByText('PDF')).toBeInTheDocument();

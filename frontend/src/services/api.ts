@@ -26,6 +26,7 @@ import {
   LaserNestPackageImportResult,
   DispatchBoardResponse,
   RunOrderUpdateResponse,
+  OperationDocumentsResponse,
 } from '../types';
 import { ScanResolveRequest, ScanResolveResult } from '../types/scan';
 import {
@@ -269,18 +270,32 @@ class ApiService {
           } catch (refreshError) {
             // Refresh failed, logout and redirect
             this.logout();
-            window.location.href = '/login';
+            this.redirectToLoginUnlessKiosk();
             return Promise.reject(refreshError);
           }
         }
-        
+
         if (error.response?.status === 401 && !isAuthEndpoint) {
           this.logout();
-          window.location.href = '/login';
+          this.redirectToLoginUnlessKiosk();
         }
         return Promise.reject(error);
       }
     );
+  }
+
+  /**
+   * Hard-redirect to the login page after a dead session — EXCEPT on the
+   * /kiosk surface. The kiosk is an unattended shop terminal: navigating it to
+   * /login would strand the station on the office login form. There we only
+   * clear the session (logout() above already dispatched
+   * `werco:auth-token-changed`, which AuthContext listens for to flip
+   * `isAuthenticated`, so OperatorKiosk falls back to its badge screen without
+   * a reload) and let the caller's promise reject.
+   */
+  private redirectToLoginUnlessKiosk(): void {
+    if (window.location.pathname.startsWith('/kiosk')) return;
+    window.location.href = '/login';
   }
 
   private async refreshAccessToken(): Promise<void> {
@@ -1110,6 +1125,31 @@ class ApiService {
   async getWorkCenterQueue(workCenterId: number) {
     const response = await this.api.get(`/shop-floor/work-center-queue/${workCenterId}`);
     return response.data;
+  }
+
+  // --- Kiosk doc viewer (shop-floor-fenced document reads) ------------------
+
+  /**
+   * GET /shop-floor/operations/{id}/documents — drawing / nest / critical-dims
+   * discovery for the kiosk doc viewer (read-only, no state change).
+   */
+  async getOperationDocuments(operationId: number): Promise<OperationDocumentsResponse> {
+    const response = await this.api.get<OperationDocumentsResponse>(
+      `/shop-floor/operations/${operationId}/documents`
+    );
+    return response.data;
+  }
+
+  /**
+   * Fetch a shop-floor-served document PDF (GET /shop-floor/documents/{id}/inline)
+   * through the authenticated Axios client as a blob and return a same-origin
+   * object URL — mirrors fetchLaserNestDocument. The endpoint requires the JWT,
+   * so a bare `src="/api/..."` would NOT send the auth header. Callers must
+   * revoke the URL when done.
+   */
+  async fetchShopFloorDocumentBlob(documentId: number): Promise<string> {
+    const response = await this.api.get(`/shop-floor/documents/${documentId}/inline`, { responseType: 'blob' });
+    return window.URL.createObjectURL(new Blob([response.data], { type: 'application/pdf' }));
   }
 
   // --- Dispatch Board (manager-controlled run order) ------------------------

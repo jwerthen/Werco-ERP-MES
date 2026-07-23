@@ -95,7 +95,7 @@ requests get **HTTP 429** with a `Retry-After` header and body `{"detail": "Rate
 | `/api/v1/auth/register` | 3/minute |
 | `/api/v1/auth/register-public` | 3/minute |
 | `/api/v1/auth/refresh` | 30/minute |
-| `/api/v1/auth/employee-login` | 3/minute |
+| `/api/v1/auth/employee-login` | 10/minute |
 | `/api/v1/visitor-logs/station-login` | 5/minute |
 | `/api/v1/scanner/resolve-action` | 60/minute |
 
@@ -103,6 +103,13 @@ These limits are not configurable by env var — they are defined in `backend/ap
 (`AUTH_RATE_LIMITS` / `ENDPOINT_RATE_LIMITS`). Enforcement **fails open**: if the limiter
 backend errors, the request is allowed (the global default limit still applies) and a warning
 is logged. Blocked attempts emit a `logger.warning`.
+
+`/api/v1/auth/employee-login` additionally carries a **per-IP failed-attempt throttle**
+(`backend/app/core/login_throttle.py`, not env-configurable) as the compensating control for its
+10/minute limit: 8 FAILED attempts from one IP within 15 minutes → 429 with a 15-minute cooldown.
+Successful logins never count. Uses Redis when `REDIS_URL` is set (cross-worker), else an
+in-process counter; a storage outage fails open with a logged
+`employee_login_throttle_fail_open` warning.
 
 ### CORS (Cross-Origin Resource Sharing)
 

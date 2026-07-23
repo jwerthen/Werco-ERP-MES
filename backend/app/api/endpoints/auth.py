@@ -16,6 +16,7 @@ from app.api.deps import (
     require_role,
 )
 from app.core.config import settings
+from app.core.login_throttle import client_ip_from_request, employee_login_throttle
 from app.core.security import (
     create_access_token,
     create_refresh_token,
@@ -299,10 +300,36 @@ def employee_login(request: Request, payload: EmployeeLoginRequest, db: Session 
     """
     Authenticate a user by employee ID or 4-digit badge ID and receive JWT tokens.
     Intended for shop floor job stations and kiosks.
+
+    **Rate limited**: 10 requests/minute per IP (slowapi), PLUS a per-IP
+    failed-attempt throttle — 8 failures within 15 minutes locks the IP out for
+    15 minutes (429). Successful logins never count toward the throttle.
     """
+    # Compensating control for the 10/min slowapi limit (see
+    # app/core/login_throttle.py): checked BEFORE the user lookup so a
+    # throttled IP does zero account probing.
+    client_ip = client_ip_from_request(request)
+    retry_after = employee_login_throttle.blocked_retry_after(client_ip)
+    if retry_after is not None:
+        log_auth_event(
+            db,
+            "EMPLOYEE_LOGIN_BLOCKED",
+            email=None,
+            success=False,
+            request=request,
+            error="Throttled: too many failed attempts from this address",
+        )
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed sign-in attempts — wait a few minutes",
+            headers={"Retry-After": str(retry_after)},
+        )
+
     user = _find_user_by_employee_id(db, payload.employee_id)
 
     if not user:
+        employee_login_throttle.register_failure(client_ip)
         # Log the audit row, then commit so it persists before raising
         # (AuditService only flushes; get_db never commits).
         log_auth_event(
@@ -312,6 +339,7 @@ def employee_login(request: Request, payload: EmployeeLoginRequest, db: Session 
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid employee ID")
 
     if user.locked_until and user.locked_until > datetime.utcnow():
+        employee_login_throttle.register_failure(client_ip)
         log_auth_event(db, "EMPLOYEE_LOGIN_BLOCKED", user=user, success=False, request=request, error="Account locked")
         db.commit()
         raise HTTPException(
@@ -319,6 +347,7 @@ def employee_login(request: Request, payload: EmployeeLoginRequest, db: Session 
         )
 
     if not user.is_active:
+        employee_login_throttle.register_failure(client_ip)
         log_auth_event(db, "EMPLOYEE_LOGIN_FAILED", user=user, success=False, request=request, error="Account disabled")
         db.commit()
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User account is disabled")

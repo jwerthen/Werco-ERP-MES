@@ -19,7 +19,7 @@
  *   kiosk hold files a blocker.
  */
 
-import { LaserNestInfo } from '../../types';
+import { KioskLastReport, KioskQueueWorkCenter, LaserNestInfo } from '../../types';
 
 export const KIOSK_SOURCE = 'kiosk';
 
@@ -98,6 +98,24 @@ export interface KioskQueueItem {
   // unranked. ADVISORY: the server already returns the queue in this order and any
   // job may still be started, so the kiosk only DISPLAYS it (no client-side sort).
   run_order?: number | null;
+  // Part.revision — the REV chip (Kiosk Foundry Redesign, backend B1).
+  part_revision?: string | null;
+  // Last production-evidence telemetry for this operation (backend B4).
+  last_report?: KioskLastReport | null;
+}
+
+/**
+ * GET /shop-floor/work-center-queue/{id} envelope for the single-operator
+ * kiosk (JWT-authed api client). The crew-station twin is
+ * `KioskCrewQueueResponse` (types/kioskStation.ts). All non-queue fields are
+ * optional so pre-redesign backend payloads still typecheck.
+ */
+export interface KioskWorkCenterQueueResponse {
+  queue: KioskQueueItem[];
+  /** UTC ISO server clock at response time — timer skew anchor. */
+  server_time?: string;
+  /** The queue's work center (backend B3) — feeds the kiosk top bar. */
+  work_center?: KioskQueueWorkCenter | null;
 }
 
 /** "Steps 2/6" — the process-steps chip label (call only when steps_total > 0). */

@@ -232,7 +232,10 @@ test.describe('Process sheets — author → release → attach → serialized W
     // evidence first, and the follow-up complete call then refuses with
     // "work order is complete" — an error toast for a successful outcome.
     await page.getByRole('button', { name: /back/i }).first().click();
-    await page.getByRole('button', { name: /^complete$/i }).click();
+    // Foundry redesign: COMPLETE OP opens the summary modal; tapping the GOOD
+    // well reveals the keypad, CLR zeroes the prefilled remaining quantity.
+    await page.getByRole('button', { name: /^complete op$/i }).click();
+    await page.getByTestId('kiosk-qty-good').click();
     await page.getByTestId('kiosk-key-clear').click();
     await page.getByTestId('kiosk-qty-confirm').click();
     await expect(page.getByText(new RegExp(`Completed ${woNumber}`)).first()).toBeVisible({ timeout: 15_000 });

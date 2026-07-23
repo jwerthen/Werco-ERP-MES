@@ -544,6 +544,51 @@ export type RunOrderUpdateResponse =
   | { queue: DispatchBoardRow[] }
   | DispatchBoardColumn;
 
+// ---------------------------------------------------------------------------
+// Kiosk shop-floor payload blocks (Kiosk Foundry Redesign, backend B1–B8).
+// All additive + optional so pre-redesign backend payloads (and existing
+// tests) still typecheck.
+// ---------------------------------------------------------------------------
+
+/**
+ * Last production-evidence telemetry for an operation ("LAST REPORT" tile).
+ * Rides work-center-queue rows AND the my-active-job job dict. `at` is UTC
+ * ISO — render via utils/centralTime.
+ */
+export interface KioskLastReport {
+  at: string;
+  good: number;
+  scrap: number;
+}
+
+/**
+ * The next operation in the WO routing after the current one ("ROUTES TO"
+ * row). Rides the my-active-job job dict and the /complete response; null
+ * when the current op is the last.
+ */
+export interface KioskNextOperation {
+  operation_number: string | number | null;
+  name: string | null;
+  status: string;
+  work_center: {
+    id: number;
+    code: string | null;
+    name: string | null;
+  } | null;
+}
+
+/**
+ * Top-level `work_center` block on the work-center-queue response — feeds the
+ * kiosk top bar (machine code + `name · description` line).
+ */
+export interface KioskQueueWorkCenter {
+  id: number;
+  code: string | null;
+  name: string | null;
+  description?: string | null;
+  current_status?: string | null;
+}
+
 export interface ActiveJob {
   time_entry_id: number;
   clock_in: string;
@@ -562,4 +607,80 @@ export interface ActiveJob {
   component_quantity?: number | null;
   quantity_complete?: number;
   laser_nest?: LaserNestInfo | null;
+  /** Part.revision — the REV chip next to the part line (backend B1). */
+  part_revision?: string | null;
+  /** Last production-evidence telemetry for this operation (backend B4). */
+  last_report?: KioskLastReport | null;
+  /** Next op in the WO routing after this one; null when last (backend B5). */
+  next_operation?: KioskNextOperation | null;
+  /** Σ blocker downtime for this operation, minutes (backend B8). */
+  downtime_minutes?: number;
+  /** THIS open entry's session good count (backend B7) — AVG PER PC tile. */
+  quantity_produced?: number;
+  /** THIS open entry's session scrap count (backend B7). */
+  quantity_scrapped?: number;
+}
+
+/**
+ * GET /shop-floor/my-active-job envelope. `server_time` (backend B2) anchors
+ * the skew-corrected cycle timer/clock — compute skew once per poll.
+ */
+export interface MyActiveJobResponse {
+  active_jobs?: ActiveJob[];
+  /** Legacy single-job shape some callers still normalize from. */
+  active_job?: ActiveJob | null;
+  /** UTC ISO server clock at response time. */
+  server_time?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Kiosk doc viewer discovery (backend A1) — GET /shop-floor/operations/{id}/documents
+// ---------------------------------------------------------------------------
+
+export interface OperationDocumentsPart {
+  id: number;
+  part_number: string;
+  name: string | null;
+  revision: string | null;
+}
+
+/** Newest approved/released DRAWING Document for the operation's part. */
+export interface OperationDocumentsDrawing {
+  document_id: number;
+  revision: string | null;
+  title: string | null;
+  status: string;
+  /** UTC ISO, when present — the RELEASED right-rail row. */
+  released_at: string | null;
+  file_name: string | null;
+}
+
+/** The operation's active laser nest document reference, when one exists. */
+export interface OperationDocumentsNest {
+  laser_nest_id: number;
+  nest_name: string | null;
+  cnc_number: string | null;
+  /** Null when the nest has no attached PDF. */
+  document_id: number | null;
+  file_name: string | null;
+}
+
+/** One critical SPC characteristic for the CRITICAL DIMS right-rail list. */
+export interface OperationCriticalDim {
+  id: number;
+  name: string;
+  nominal: number | null;
+  usl: number | null;
+  lsl: number | null;
+  unit_of_measure: string | null;
+}
+
+/** Response of GET /shop-floor/operations/{id}/documents (viewer discovery). */
+export interface OperationDocumentsResponse {
+  part: OperationDocumentsPart | null;
+  drawing: OperationDocumentsDrawing | null;
+  nest: OperationDocumentsNest | null;
+  /** LaserNest.material when a nest is present — the MATERIAL rail row. */
+  material: string | null;
+  critical_dims: OperationCriticalDim[];
 }
