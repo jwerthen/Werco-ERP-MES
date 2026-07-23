@@ -1083,6 +1083,7 @@ class AnalyticsService:
             self.db.query(func.count(NonConformanceReport.id))
             .filter(
                 NonConformanceReport.company_id == self.company_id,
+                NonConformanceReport.is_deleted == False,  # noqa: E712
                 NonConformanceReport.status.in_(
                     [NCRStatus.OPEN, NCRStatus.UNDER_REVIEW, NCRStatus.PENDING_DISPOSITION]
                 ),
@@ -1096,6 +1097,7 @@ class AnalyticsService:
             self.db.query(func.count(NonConformanceReport.id))
             .filter(
                 NonConformanceReport.company_id == self.company_id,
+                NonConformanceReport.is_deleted == False,  # noqa: E712
                 NonConformanceReport.created_at <= datetime.combine(prior_end, datetime.max.time()),
                 or_(NonConformanceReport.closed_date.is_(None), NonConformanceReport.closed_date > prior_end),
             )
@@ -1584,6 +1586,7 @@ class AnalyticsService:
             self.db.query(NonConformanceReport.disposition, func.count(NonConformanceReport.id).label('count'))
             .filter(
                 NonConformanceReport.company_id == self.company_id,
+                NonConformanceReport.is_deleted == False,  # noqa: E712
                 NonConformanceReport.created_at >= datetime.combine(start_date, datetime.min.time()),
                 NonConformanceReport.created_at <= datetime.combine(end_date, datetime.max.time()),
             )

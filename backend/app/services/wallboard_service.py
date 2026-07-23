@@ -581,6 +581,7 @@ def _compute_today(db: Session, company_id: int) -> WallboardToday:
         db.query(POReceipt)
         .filter(
             POReceipt.company_id == company_id,
+            POReceipt.is_deleted == False,  # noqa: E712
             POReceipt.received_at >= day_start,
             POReceipt.received_at <= day_end,
         )
@@ -616,6 +617,7 @@ def _compute_quality(db: Session, company_id: int) -> WallboardQuality:
     """Quality panel: counts and ages ONLY — never NCR titles/descriptions."""
     open_ncr_filters = [
         NonConformanceReport.company_id == company_id,
+        NonConformanceReport.is_deleted == False,  # noqa: E712
         NonConformanceReport.status.not_in([NCRStatus.CLOSED, NCRStatus.VOID]),
     ]
     open_ncr_count = db.query(NonConformanceReport).filter(*open_ncr_filters).count()

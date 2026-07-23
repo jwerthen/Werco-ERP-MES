@@ -94,7 +94,10 @@ def list_vendors(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    query = db.query(Vendor).filter(Vendor.company_id == company_id)
+    query = db.query(Vendor).filter(
+        Vendor.company_id == company_id,
+        Vendor.is_deleted == False,  # noqa: E712
+    )
     if active_only:
         query = query.filter(Vendor.is_active == True)
     if approved_only:
@@ -257,7 +260,15 @@ def get_vendor(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    vendor = db.query(Vendor).filter(Vendor.id == vendor_id, Vendor.company_id == company_id).first()
+    vendor = (
+        db.query(Vendor)
+        .filter(
+            Vendor.id == vendor_id,
+            Vendor.company_id == company_id,
+            Vendor.is_deleted == False,  # noqa: E712
+        )
+        .first()
+    )
     if not vendor:
         raise HTTPException(status_code=404, detail="Vendor not found")
     return vendor
@@ -327,6 +338,91 @@ def update_vendor(
     return vendor
 
 
+@router.delete("/vendors/{vendor_id}")
+def delete_vendor(
+    vendor_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Soft delete a vendor (compliance invariant #3 -- no hard delete). Refuses while any
+    live (not closed/cancelled) purchase order still references the vendor."""
+    vendor = db.query(Vendor).filter(Vendor.id == vendor_id, Vendor.company_id == company_id).first()
+    if not vendor:
+        raise HTTPException(status_code=404, detail="Vendor not found")
+
+    # Re-delete guard (symmetric with restore_vendor's "not deleted" check): a double
+    # DELETE must not reset deleted_at/deleted_by or write a duplicate audit row.
+    if vendor.is_deleted:
+        raise HTTPException(status_code=400, detail=f"Vendor {vendor.name} is already deleted")
+
+    # Guardrail: don't orphan open purchasing activity behind a deleted vendor.
+    active_po_count = (
+        db.query(PurchaseOrder)
+        .filter(
+            PurchaseOrder.vendor_id == vendor.id,
+            PurchaseOrder.company_id == company_id,
+            PurchaseOrder.is_deleted == False,  # noqa: E712
+            PurchaseOrder.status.not_in([POStatus.CLOSED, POStatus.CANCELLED]),
+        )
+        .count()
+    )
+    if active_po_count > 0:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Cannot delete vendor {vendor.name}: {active_po_count} active purchase order(s) "
+                "reference it. Close or cancel them first."
+            ),
+        )
+
+    audit = AuditService(db, current_user, request)
+
+    vendor.soft_delete(current_user.id)
+    vendor.is_active = False
+    # Log BEFORE the terminal commit so the audit row commits atomically with the
+    # delete (AuditService.log only flushes; get_db never commits).
+    audit.log_delete("vendor", vendor.id, vendor.name, soft_delete=True)
+    db.commit()
+    return {"message": f"Vendor {vendor.name} deleted", "can_restore": True}
+
+
+@router.post("/vendors/{vendor_id}/restore", summary="Restore a soft-deleted vendor")
+def restore_vendor(
+    vendor_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Restore a soft-deleted vendor. Raw lookup so it can see the soft-deleted row."""
+    vendor = db.query(Vendor).filter(Vendor.id == vendor_id, Vendor.company_id == company_id).first()
+    if not vendor:
+        raise HTTPException(status_code=404, detail="Vendor not found")
+
+    if not vendor.is_deleted:
+        raise HTTPException(status_code=400, detail="Vendor is not deleted")
+
+    audit = AuditService(db, current_user, request)
+
+    vendor.restore()
+    vendor.is_active = True
+    # Log BEFORE the terminal commit so the audit row commits atomically with the
+    # restore (AuditService.log only flushes; get_db never commits).
+    audit.log_update(
+        "vendor",
+        vendor.id,
+        vendor.name,
+        old_values={"is_deleted": True},
+        new_values={"is_deleted": False},
+        action="restore",
+    )
+    db.commit()
+
+    return {"message": f"Vendor {vendor.name} restored"}
+
+
 # ============ PURCHASE ORDERS ============
 
 
@@ -364,7 +460,10 @@ def list_purchase_orders(
 ):
     query = (
         db.query(PurchaseOrder)
-        .filter(PurchaseOrder.company_id == company_id)
+        .filter(
+            PurchaseOrder.company_id == company_id,
+            PurchaseOrder.is_deleted == False,  # noqa: E712
+        )
         .options(joinedload(PurchaseOrder.vendor), selectinload(PurchaseOrder.lines))
     )
 
@@ -408,8 +507,18 @@ def create_purchase_order(
 ):
     """Create a purchase order with its lines. Writes one tamper-evident audit_log CREATE
     row for the PO (line_count in extra_data; no per-line rows for document creation)."""
-    # Verify vendor
-    vendor = db.query(Vendor).filter(Vendor.id == po_in.vendor_id, Vendor.company_id == company_id).first()
+    # Verify vendor -- must be a live, active vendor (can't open a PO against a
+    # deleted or deactivated supplier).
+    vendor = (
+        db.query(Vendor)
+        .filter(
+            Vendor.id == po_in.vendor_id,
+            Vendor.company_id == company_id,
+            Vendor.is_deleted == False,  # noqa: E712
+            Vendor.is_active == True,  # noqa: E712
+        )
+        .first()
+    )
     if not vendor:
         raise HTTPException(status_code=404, detail="Vendor not found")
 
@@ -551,7 +660,11 @@ def get_purchase_order(
             joinedload(PurchaseOrder.vendor),
             joinedload(PurchaseOrder.lines).joinedload(PurchaseOrderLine.part),
         )
-        .filter(PurchaseOrder.id == po_id, PurchaseOrder.company_id == company_id)
+        .filter(
+            PurchaseOrder.id == po_id,
+            PurchaseOrder.company_id == company_id,
+            PurchaseOrder.is_deleted == False,  # noqa: E712
+        )
         .first()
     )
 
@@ -752,6 +865,89 @@ def add_po_line(
     db.commit()
     db.refresh(line)
     return line
+
+
+@router.delete("/purchase-orders/{po_id}")
+def delete_purchase_order(
+    po_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Soft delete a purchase order (compliance invariant #3 -- no hard delete). Refuses if any
+    line has received material so voided receipts/inventory aren't stranded."""
+    po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id, PurchaseOrder.company_id == company_id).first()
+    if not po:
+        raise HTTPException(status_code=404, detail="Purchase order not found")
+
+    # Re-delete guard (symmetric with restore_purchase_order's "not deleted" check): a
+    # double DELETE must not reset deleted_at/deleted_by or write a duplicate audit row.
+    if po.is_deleted:
+        raise HTTPException(status_code=400, detail=f"Purchase order {po.po_number} is already deleted")
+
+    # Guardrail: a PO with received material must have its receipt(s) voided first
+    # (via receiving) so inventory/receipt rows aren't orphaned behind a deleted PO.
+    received_line_count = (
+        db.query(PurchaseOrderLine)
+        .filter(
+            PurchaseOrderLine.purchase_order_id == po.id,
+            PurchaseOrderLine.company_id == company_id,
+            PurchaseOrderLine.quantity_received > 0,
+        )
+        .count()
+    )
+    if received_line_count > 0:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Cannot delete purchase order {po.po_number}: it has received material. "
+                "Void the receipt(s) first, then delete."
+            ),
+        )
+
+    audit = AuditService(db, current_user, request)
+
+    po.soft_delete(current_user.id)
+    # Log BEFORE the terminal commit so the audit row commits atomically with the
+    # delete (AuditService.log only flushes; get_db never commits).
+    audit.log_delete("purchase_order", po.id, po.po_number, soft_delete=True)
+    db.commit()
+    return {"message": f"Purchase order {po.po_number} deleted", "can_restore": True}
+
+
+@router.post("/purchase-orders/{po_id}/restore", summary="Restore a soft-deleted purchase order")
+def restore_purchase_order(
+    po_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Restore a soft-deleted purchase order. Raw lookup so it can see the soft-deleted row."""
+    po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id, PurchaseOrder.company_id == company_id).first()
+    if not po:
+        raise HTTPException(status_code=404, detail="Purchase order not found")
+
+    if not po.is_deleted:
+        raise HTTPException(status_code=400, detail="Purchase order is not deleted")
+
+    audit = AuditService(db, current_user, request)
+
+    po.restore()
+    # Log BEFORE the terminal commit so the audit row commits atomically with the
+    # restore (AuditService.log only flushes; get_db never commits).
+    audit.log_update(
+        "purchase_order",
+        po.id,
+        po.po_number,
+        old_values={"is_deleted": True},
+        new_values={"is_deleted": False},
+        action="restore",
+    )
+    db.commit()
+
+    return {"message": f"Purchase order {po.po_number} restored"}
 
 
 # ============ RECEIVING ============

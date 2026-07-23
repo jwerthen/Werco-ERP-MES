@@ -176,13 +176,17 @@ def trace_lot(
             )
         )
 
-    # Check PO receipts
+    # Check PO receipts (exclude voided -- a voided receipt must not show in the active trace)
     receipts = (
         db.query(POReceipt)
         .options(
             joinedload(POReceipt.po_line).joinedload(PurchaseOrderLine.purchase_order).joinedload(PurchaseOrder.vendor)
         )
-        .filter(POReceipt.lot_number == lot_number, POReceipt.company_id == company_id)
+        .filter(
+            POReceipt.lot_number == lot_number,
+            POReceipt.company_id == company_id,
+            POReceipt.is_deleted == False,  # noqa: E712
+        )
         .all()
     )
 
@@ -209,12 +213,13 @@ def trace_lot(
             )
         )
 
-    # Check NCRs with this lot
+    # Check NCRs with this lot (exclude voided -- a voided NCR must not show in the active trace)
     ncrs = (
         db.query(NonConformanceReport)
         .filter(
             NonConformanceReport.lot_number == lot_number,
             NonConformanceReport.company_id == company_id,
+            NonConformanceReport.is_deleted == False,  # noqa: E712
         )
         .all()
     )
@@ -388,6 +393,7 @@ def trace_serial(
         .filter(
             NonConformanceReport.serial_number == serial_number,
             NonConformanceReport.company_id == company_id,
+            NonConformanceReport.is_deleted == False,  # noqa: E712
         )
         .all()
     )

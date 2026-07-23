@@ -60,6 +60,20 @@ class NCRUpdate(BaseModel):
         return self
 
 
+class NCRVoidRequest(BaseModel):
+    """Void justification captured on the tamper-evident audit trail (AS9100D)."""
+
+    reason: str = Field(..., min_length=1, description="Why this NCR is being voided")
+
+    @field_validator('reason')
+    @classmethod
+    def _reason_not_blank(cls, value: str) -> str:
+        # Whitespace-only is meaningless for the void audit trail; treat it as missing.
+        if not value.strip():
+            raise ValueError('reason is required')
+        return value.strip()
+
+
 class PartSummary(BaseModel):
     id: int
     part_number: str

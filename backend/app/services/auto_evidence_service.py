@@ -52,13 +52,19 @@ def _recent_cutoff() -> datetime:
 def _query_ncrs(db: Session, company_id: int) -> dict:
     cutoff = _recent_cutoff()
     total = (
-        db.query(func.count(NonConformanceReport.id)).filter(NonConformanceReport.company_id == company_id).scalar()
+        db.query(func.count(NonConformanceReport.id))
+        .filter(
+            NonConformanceReport.company_id == company_id,
+            NonConformanceReport.is_deleted == False,  # noqa: E712
+        )
+        .scalar()
         or 0
     )
     recent = (
         db.query(func.count(NonConformanceReport.id))
         .filter(
             NonConformanceReport.company_id == company_id,
+            NonConformanceReport.is_deleted == False,  # noqa: E712
             NonConformanceReport.created_at >= cutoff,
         )
         .scalar()
@@ -68,6 +74,7 @@ def _query_ncrs(db: Session, company_id: int) -> dict:
         db.query(func.count(NonConformanceReport.id))
         .filter(
             NonConformanceReport.company_id == company_id,
+            NonConformanceReport.is_deleted == False,  # noqa: E712
             NonConformanceReport.status.in_([NCRStatus.OPEN, NCRStatus.UNDER_REVIEW, NCRStatus.PENDING_DISPOSITION]),
         )
         .scalar()
@@ -77,7 +84,10 @@ def _query_ncrs(db: Session, company_id: int) -> dict:
 
     examples = (
         db.query(NonConformanceReport)
-        .filter(NonConformanceReport.company_id == company_id)
+        .filter(
+            NonConformanceReport.company_id == company_id,
+            NonConformanceReport.is_deleted == False,  # noqa: E712
+        )
         .order_by(NonConformanceReport.created_at.desc())
         .limit(5)
         .all()

@@ -271,6 +271,52 @@ class ReceiptCreate(BaseModel):
     over_receive_approved: bool = False
 
 
+class ReceiptCorrection(BaseModel):
+    """Correct a mis-keyed received quantity (and optional traceability fields).
+
+    Only valid for a receipt that is still PENDING_INSPECTION or was dock-to-stock
+    accepted (never inspected) — the endpoint enforces the state model and refuses
+    anything ambiguous. ``quantity_received`` is the NEW total received quantity for
+    the receipt (not a delta); the endpoint reconciles the PO line, PO status, and
+    (dock-to-stock only) inventory to match. ``reason`` is mandatory and recorded on
+    the tamper-evident audit trail.
+    """
+
+    quantity_received: MoneySmall = Field(..., gt=Decimal("0"), description="Corrected total received quantity")
+    # lot_number is only editable BEFORE stock is placed (PENDING_INSPECTION). For a
+    # dock-to-stock receipt the endpoint refuses a lot change (void and re-receive).
+    lot_number: Optional[str] = Field(None, max_length=50)
+    heat_number: Optional[str] = Field(None, max_length=50)
+    cert_number: Optional[str] = Field(None, max_length=50)
+    serial_numbers: Optional[str] = Field(None, max_length=500)
+    notes: Optional[str] = Field(None, max_length=2000)
+    reason: str = Field(..., min_length=1, max_length=500, description="Why the receipt is being corrected (required)")
+
+    @field_validator("reason")
+    @classmethod
+    def reason_not_blank(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("reason must not be blank")
+        return v.strip()
+
+
+class ReceiptVoidRequest(BaseModel):
+    """Void (soft-delete) a receipt, unwinding everything it propagated.
+
+    Terminal: a voided receipt is not restorable — to redo, re-receive. ``reason`` is
+    mandatory and recorded on the tamper-evident audit trail.
+    """
+
+    reason: str = Field(..., min_length=1, max_length=500, description="Why the receipt is being voided (required)")
+
+    @field_validator("reason")
+    @classmethod
+    def reason_not_blank(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("reason must not be blank")
+        return v.strip()
+
+
 class ReceiptInspection(BaseModel):
     quantity_accepted: MoneySmall = Field(..., ge=Decimal("0"))
     quantity_rejected: MoneySmall = Field(default=Decimal("0"), ge=Decimal("0"))
