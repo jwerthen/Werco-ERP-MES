@@ -1124,12 +1124,19 @@ def test_wallboard_build_is_zero_write(db_session: Session):
 
 
 def test_payload_privacy_no_identities_costs_or_customers(client: TestClient, db_session: Session):
-    """Serialize a fully-populated payload — including a JOB WALL tile built
-    from a WO that carries a customer_name, notes, and dollars — and prove the
-    public-TV contract: no customer identity, no ship-to, no dollars, no
-    notes, no NCR narrative, no full last names — every rendered name is
-    'First L.'-shaped."""
-    viewer = make_user(db_session)
+    """Serialize a fully-populated payload for an UNAUTHORIZED principal —
+    including a JOB WALL tile built from a WO that carries a customer_name,
+    notes, and dollars — and prove the public-safe (redacted) contract: no
+    customer identity, no ship-to, no dollars, no notes, no NCR narrative, no
+    full last names — every rendered name is 'First L.'-shaped.
+
+    The viewer is an OPERATOR: since the customer-name gate landed, the
+    ``customer_name`` FIELD is always serialized on a job tile, but its VALUE is
+    populated only for an authorized principal (a MANAGER/ADMIN/PLATFORM_ADMIN
+    user, or a display token flagged ``show_customer_names``). An OPERATOR — like
+    every public shop-floor TV — must get it back as null. (The authorized
+    positive paths live in tests/api/test_wallboard_customer_names.py.)"""
+    viewer = make_user(db_session, role=UserRole.OPERATOR)
     part = make_part(db_session)
     wc = make_work_center(db_session)
     central_today = datetime.now(CENTRAL_TIME_ZONE).date()
@@ -1168,8 +1175,7 @@ def test_payload_privacy_no_identities_costs_or_customers(client: TestClient, db
     assert response.status_code == 200, response.text
     raw = response.text
     for forbidden in (
-        "Sensitive Customer",  # customer identity is OMITTED (product ruling)
-        "customer_name",
+        "Sensitive Customer",  # customer VALUE stays redacted for an unauthorized principal
         "customer_po",
         "ship_to",
         "estimated_cost",
@@ -1187,6 +1193,9 @@ def test_payload_privacy_no_identities_costs_or_customers(client: TestClient, db
     # against a payload where the customer_name-carrying row was serialized.
     tile = next(job for job in payload["jobs"] if job["wo_number"] == wo.work_order_number)
     assert tile["part_number"] == part.part_number
+    # The customer_name field IS on the tile (it is always serialized), but the
+    # gate keeps its value null for this unauthorized OPERATOR principal.
+    assert tile["customer_name"] is None
 
     name_shape = re.compile(r"^\S+ [A-Z]\.$")
     names = []

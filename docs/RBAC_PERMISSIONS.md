@@ -758,7 +758,12 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > and carries no user identity** — it is a single-endpoint credential for an unattended TV. What it
 > **can** do: authenticate the read-only `GET /shop-floor/wallboard` (via the dedicated
 > `get_display_or_user` dependency), scoped to the issuing company (taken from the `display_tokens`
-> DB row, never from the client). What it **cannot** do: reach any other endpoint (`verify_token`
+> DB row, never from the client). A per-display **`show_customer_names`** flag (Boolean, default
+> `false`; migration `072`) additionally gates whether the board reveals work-order **customer
+> names**; for **signed-in** callers of the same endpoint that content is gated by **role** —
+> only **Platform Admin / Admin / Manager** see customer names, and every other role (Supervisor /
+> Operator / Quality / Shipping / Viewer) plus every un-flagged display token gets the redacted,
+> public-safe board (`docs/WALLBOARD.md` → Customer names — gated). What it **cannot** do: reach any other endpoint (`verify_token`
 > accepts only `type == "access"` JWTs, so a display token gets **401** everywhere else), write
 > anything (the wallboard endpoint performs zero writes), or outlive revocation/expiry (the DB row
 > is re-checked on every request; a revoked token dies on the TV's next ~30s poll). As with AI

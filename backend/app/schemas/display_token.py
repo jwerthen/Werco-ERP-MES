@@ -28,6 +28,14 @@ class DisplayTokenCreate(BaseModel):
         max_length=50,
         description="Optional work-center-type preset the TV opens with (e.g. 'machining').",
     )
+    show_customer_names: bool = Field(
+        False,
+        description=(
+            "Allow this display to render work-order customer names on the wallboard. "
+            "Default False keeps the screen public-safe (no customer names); set True ONLY "
+            "for a trusted executive-office TV. Enforced server-side."
+        ),
+    )
 
 
 class DisplayTokenResponse(UTCModel):
@@ -36,6 +44,10 @@ class DisplayTokenResponse(UTCModel):
     id: int
     label: str
     dept: Optional[str] = None
+    # Whether this display reveals customer names on the wallboard (default
+    # False = public-safe). Surfaced so the admin list can flag which screens
+    # are executive vs. public.
+    show_customer_names: bool = False
     expires_at: datetime
     revoked: bool
     revoked_at: Optional[datetime] = None

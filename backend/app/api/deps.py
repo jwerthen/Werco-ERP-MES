@@ -175,6 +175,12 @@ def get_audit_service(
     return AuditService(db, current_user, request)
 
 
+# Signed-in roles allowed to see customer names on the wallboard: the office
+# roles that also manage displays, plus platform admins. Everyone else gets the
+# public-safe (redacted) board — matching an un-flagged public display token.
+_WALLBOARD_CUSTOMER_ROLES = (UserRole.PLATFORM_ADMIN, UserRole.ADMIN, UserRole.MANAGER)
+
+
 @dataclass
 class WallboardPrincipal:
     """Resolved caller identity for the TV wallboard read endpoint (A0.5).
@@ -183,12 +189,19 @@ class WallboardPrincipal:
     unattended TV holding a scoped display token). ``company_id`` is the ONLY
     field tenant scoping may use — for display tokens it comes from the
     ``display_tokens`` DB row, never from the client.
+
+    ``show_customer`` gates whether the wallboard payload may reveal work-order
+    customer names (default False = public-safe). For a display token it is the
+    row's ``show_customer_names`` opt-in; for a user it is True only for the
+    privileged office roles that also manage displays — everyone else, and every
+    un-flagged/public TV, sees a redacted board.
     """
 
     company_id: int
     kind: str
     user: Optional[User] = None
     display_label: Optional[str] = None
+    show_customer: bool = False
 
 
 def get_display_or_user(
@@ -222,7 +235,13 @@ def get_display_or_user(
     # (active flag, platform-admin company context, read-only context).
     if verify_token(token) is not None:
         user = get_current_user(request=request, db=db, token=token)
-        return WallboardPrincipal(company_id=user._active_company_id, kind="user", user=user)
+        # Customer names on the board are for the privileged office roles that
+        # also provision displays; operators/quality/shipping/viewers previewing
+        # the board in-app see the same redacted view a public TV does.
+        show_customer = user.role in _WALLBOARD_CUSTOMER_ROLES
+        return WallboardPrincipal(
+            company_id=user._active_company_id, kind="user", user=user, show_customer=show_customer
+        )
 
     claims = verify_display_token(token)
     if claims is None or not claims.get("jti"):
@@ -236,7 +255,14 @@ def get_display_or_user(
     if claims.get("company_id") != record.company_id:
         raise credentials_exception
 
-    return WallboardPrincipal(company_id=record.company_id, kind="display", display_label=record.label)
+    # Display path: customer names appear ONLY when the row explicitly opted in.
+    # ``bool(...)`` coerces a NULL from a pre-migration row to False (public-safe).
+    return WallboardPrincipal(
+        company_id=record.company_id,
+        kind="display",
+        display_label=record.label,
+        show_customer=bool(record.show_customer_names),
+    )
 
 
 @dataclass
