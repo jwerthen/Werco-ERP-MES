@@ -15,6 +15,7 @@ import {
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import {
   Button,
+  ConfirmDialog,
   EmptyState,
   ErrorState,
   FormField,
@@ -94,6 +95,9 @@ export default function Purchasing() {
   const canCreatePO = hasPermission(user?.role, 'purchasing:create');
   const canSendPO = hasPermission(user?.role, 'purchasing:approve');
   const canCreateVendor = hasPermission(user?.role, 'purchasing:approve');
+  // Soft-delete of POs and vendors is admin/manager only (DELETE endpoints use
+  // require_role([ADMIN, MANAGER])); a superuser qualifies too.
+  const canDeletePurchasing = user?.role === 'admin' || user?.role === 'manager' || !!user?.is_superuser;
   const [searchParams] = useSearchParams();
   const [activeTab, setActiveTab] = useState<TabType>('orders');
   const [vendors, setVendors] = useState<Vendor[]>([]);
@@ -114,6 +118,15 @@ export default function Purchasing() {
   const [vendorDocuments, setVendorDocuments] = useState<VendorDocument[]>([]);
   const [documentTypes, setDocumentTypes] = useState<DocumentType[]>([]);
   const [vendorDocsLoading, setVendorDocsLoading] = useState(false);
+
+  // Soft-delete confirm targets + in-flight guards. These deletes are
+  // server-GATED (a PO with received material / a vendor with active POs is
+  // refused with an actionable 400), so the flow stays non-optimistic: await
+  // the call, then reflect only what the server returns.
+  const [deletePOTarget, setDeletePOTarget] = useState<PurchaseOrder | null>(null);
+  const [deletePOPending, setDeletePOPending] = useState(false);
+  const [deleteVendorTarget, setDeleteVendorTarget] = useState<Vendor | null>(null);
+  const [deleteVendorPending, setDeleteVendorPending] = useState(false);
 
   const [newPO, setNewPO] = useState({
     vendor_id: 0,
@@ -416,6 +429,39 @@ export default function Purchasing() {
     window.open(`/print/purchase-order/${poId}?autoprint=1`, '_blank');
   };
 
+  // ConfirmDialog.onConfirm is synchronous, so it fires this async handler and
+  // returns. The dialog closes only on success; a server refusal keeps the row
+  // untouched and surfaces the verbatim detail as an error toast.
+  const handleConfirmDeletePO = async () => {
+    if (!deletePOTarget || deletePOPending) return;
+    setDeletePOPending(true);
+    try {
+      await api.deletePurchaseOrder(deletePOTarget.id);
+      showToast('success', `Purchase order ${deletePOTarget.po_number} deleted`);
+      setDeletePOTarget(null);
+      loadData();
+    } catch (err: any) {
+      showToast('error', err.response?.data?.detail || 'Failed to delete purchase order');
+    } finally {
+      setDeletePOPending(false);
+    }
+  };
+
+  const handleConfirmDeleteVendor = async () => {
+    if (!deleteVendorTarget || deleteVendorPending) return;
+    setDeleteVendorPending(true);
+    try {
+      await api.deleteVendor(deleteVendorTarget.id);
+      showToast('success', `Vendor ${deleteVendorTarget.name} deleted`);
+      setDeleteVendorTarget(null);
+      loadData();
+    } catch (err: any) {
+      showToast('error', err.response?.data?.detail || 'Failed to delete vendor');
+    } finally {
+      setDeleteVendorPending(false);
+    }
+  };
+
   const handleCreateVendor = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
@@ -565,6 +611,14 @@ export default function Purchasing() {
               Send
             </button>
           )}
+          {canDeletePurchasing && (
+            <button
+              onClick={() => setDeletePOTarget(po)}
+              className="text-red-400 hover:text-red-300 text-sm"
+            >
+              Delete
+            </button>
+          )}
         </div>
       ),
     },
@@ -599,6 +653,14 @@ export default function Purchasing() {
               className="text-werco-primary hover:underline text-sm"
             >
               Send
+            </button>
+          )}
+          {canDeletePurchasing && (
+            <button
+              onClick={() => setDeletePOTarget(po)}
+              className="text-red-400 hover:text-red-300 text-sm"
+            >
+              Delete
             </button>
           )}
         </div>
@@ -784,12 +846,22 @@ export default function Purchasing() {
                     </td>
                     <td className="px-4 py-3 text-sm">{vendor.payment_terms || '-'}</td>
                     <td className="px-4 py-3 text-right">
-                      <button
-                        onClick={() => openEditVendorModal(vendor)}
-                        className="text-werco-primary hover:underline text-sm"
-                      >
-                        Edit
-                      </button>
+                      <div className="flex items-center justify-end gap-3">
+                        <button
+                          onClick={() => openEditVendorModal(vendor)}
+                          className="text-werco-primary hover:underline text-sm"
+                        >
+                          Edit
+                        </button>
+                        {canDeletePurchasing && (
+                          <button
+                            onClick={() => setDeleteVendorTarget(vendor)}
+                            className="text-red-400 hover:text-red-300 text-sm"
+                          >
+                            Delete
+                          </button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -1472,6 +1544,40 @@ export default function Purchasing() {
               </div>
             </form>
       </Modal>
+
+      {/* Delete PO confirm */}
+      <ConfirmDialog
+        open={!!deletePOTarget}
+        title="Delete Purchase Order"
+        message={
+          deletePOTarget
+            ? `Delete purchase order ${deletePOTarget.po_number}? This removes it from active lists while preserving the record for audit/restore.`
+            : ''
+        }
+        confirmLabel={deletePOPending ? 'Deleting…' : 'Delete'}
+        variant="danger"
+        onConfirm={handleConfirmDeletePO}
+        onCancel={() => {
+          if (!deletePOPending) setDeletePOTarget(null);
+        }}
+      />
+
+      {/* Delete Vendor confirm */}
+      <ConfirmDialog
+        open={!!deleteVendorTarget}
+        title="Delete Vendor"
+        message={
+          deleteVendorTarget
+            ? `Delete vendor ${deleteVendorTarget.name}? This removes it from active lists while preserving the record for audit/restore.`
+            : ''
+        }
+        confirmLabel={deleteVendorPending ? 'Deleting…' : 'Delete'}
+        variant="danger"
+        onConfirm={handleConfirmDeleteVendor}
+        onCancel={() => {
+          if (!deleteVendorPending) setDeleteVendorTarget(null);
+        }}
+      />
     </div>
   );
 }

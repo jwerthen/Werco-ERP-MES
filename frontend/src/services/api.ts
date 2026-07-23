@@ -1770,6 +1770,19 @@ class ApiService {
     return response.data;
   }
 
+  // Void (soft-delete) an NCR. The reason is REQUIRED and rides in the DELETE
+  // body (recorded on the tamper-evident audit trail). Server-gated: 400 (with
+  // actionable detail) when the NCR is blocking work order(s) — show verbatim.
+  async voidNCR(id: number, reason: string): Promise<{ message: string; can_restore: boolean }> {
+    const response = await this.api.delete(`/quality/ncr/${id}`, { data: { reason } });
+    return response.data;
+  }
+
+  async restoreNCR(id: number) {
+    const response = await this.api.post(`/quality/ncr/${id}/restore`);
+    return response.data;
+  }
+
   async getCARs(params?: { status?: string }) {
     const response = await this.api.get('/quality/car', { params });
     return response.data;
@@ -1904,6 +1917,18 @@ class ApiService {
     return response.data;
   }
 
+  // Soft-delete a vendor. Server-gated: 400 (with actionable detail) when the
+  // vendor still has active purchase orders — surface the detail verbatim.
+  async deleteVendor(id: number): Promise<{ message: string; can_restore: boolean }> {
+    const response = await this.api.delete(`/purchasing/vendors/${id}`);
+    return response.data;
+  }
+
+  async restoreVendor(id: number) {
+    const response = await this.api.post(`/purchasing/vendors/${id}/restore`);
+    return response.data;
+  }
+
   async getPurchaseOrders(params?: { status?: string; vendor_id?: number }) {
     const response = await this.api.get('/purchasing/purchase-orders', { params });
     return response.data;
@@ -1936,6 +1961,18 @@ class ApiService {
 
   async getPurchaseOrderPrintData(poId: number) {
     const response = await this.api.get(`/print/purchase-orders/${poId}/print-data`);
+    return response.data;
+  }
+
+  // Soft-delete a purchase order. Server-gated: 400 (with actionable detail) when
+  // the PO has received material (void the receipt(s) first) — show it verbatim.
+  async deletePurchaseOrder(id: number): Promise<{ message: string; can_restore: boolean }> {
+    const response = await this.api.delete(`/purchasing/purchase-orders/${id}`);
+    return response.data;
+  }
+
+  async restorePurchaseOrder(id: number) {
+    const response = await this.api.post(`/purchasing/purchase-orders/${id}/restore`);
     return response.data;
   }
 
@@ -3044,6 +3081,34 @@ class ApiService {
 
   async getReceiptDetail(receiptId: number) {
     const response = await this.api.get(`/receiving/receipt/${receiptId}`);
+    return response.data;
+  }
+
+  // Correct a mis-keyed receipt. `quantity_received` is the NEW total (>0), not a
+  // delta; the endpoint reconciles the PO line / PO status / (dock-to-stock)
+  // inventory. `reason` is required. Server-gated: 400/409 (already inspected,
+  // lot change after stock placed, stock consumed, etc.) — show detail verbatim.
+  async correctReceipt(
+    receiptId: number,
+    data: {
+      quantity_received: number;
+      lot_number?: string;
+      heat_number?: string;
+      cert_number?: string;
+      serial_numbers?: string;
+      notes?: string;
+      reason: string;
+    }
+  ) {
+    const response = await this.api.patch(`/receiving/receipt/${receiptId}`, data);
+    return response.data;
+  }
+
+  // Void (soft-delete) a receipt, unwinding everything it propagated. Terminal —
+  // a voided receipt is not restorable; re-receive to redo. `reason` is required.
+  // Same class of 400/409 refusals as correctReceipt — surface detail verbatim.
+  async voidReceipt(receiptId: number, reason: string): Promise<{ message: string }> {
+    const response = await this.api.post(`/receiving/receipt/${receiptId}/void`, { reason });
     return response.data;
   }
 

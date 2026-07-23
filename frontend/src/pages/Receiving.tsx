@@ -15,6 +15,8 @@ import {
   DocumentCheckIcon,
   ClockIcon,
   PrinterIcon,
+  PencilSquareIcon,
+  XCircleIcon,
 } from '@heroicons/react/24/outline';
 import { Modal } from '../components/ui/Modal';
 import {
@@ -26,6 +28,7 @@ import {
   StatusBadge,
   MobileDataCard,
   Button,
+  LoadingButton,
   FormField,
   statusColor,
 } from '../components/ui';
@@ -244,6 +247,27 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
   // Receipt currently being sent to the printer (disables that row's button).
   const [printingReceiptId, setPrintingReceiptId] = useState<number | null>(null);
 
+  // Correct-receipt modal state. The full receipt detail is fetched on open so
+  // the traceability fields pre-fill even when the list row doesn't carry them.
+  const [correctTarget, setCorrectTarget] = useState<{ receiptId: number; receiptNumber: string } | null>(null);
+  const [correctDetailLoading, setCorrectDetailLoading] = useState(false);
+  const [correctSaving, setCorrectSaving] = useState(false);
+  const [correctForm, setCorrectForm] = useState({
+    quantity_received: 0,
+    lot_number: '',
+    heat_number: '',
+    cert_number: '',
+    serial_numbers: '',
+    notes: '',
+    reason: '',
+  });
+
+  // Void-receipt confirm modal state (needs a required reason, so it's a Modal,
+  // not the plain ConfirmDialog).
+  const [voidTarget, setVoidTarget] = useState<{ receiptId: number; receiptNumber: string } | null>(null);
+  const [voidReason, setVoidReason] = useState('');
+  const [voidSaving, setVoidSaving] = useState(false);
+
   const { user } = useAuth();
   // Label printing is gated to the same roles that can receive (ADMIN / MANAGER
   // / SUPERVISOR) so the UI matches what the backend will allow.
@@ -252,6 +276,12 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
   // inspect endpoint (admin / manager / supervisor / quality) so users without
   // it never see an Inspect button that would 403.
   const canInspect = hasPermission(user?.role, 'receiving:inspect');
+  // Receipt corrections mirror PATCH /receiving/receipt/{id} (ADMIN / MANAGER /
+  // SUPERVISOR); voids mirror POST .../void (ADMIN / MANAGER only). Superuser
+  // qualifies for both, matching the backend require_role behavior.
+  const canCorrectReceipt =
+    (!!user && ['admin', 'manager', 'supervisor'].includes(user.role)) || !!user?.is_superuser;
+  const canVoidReceipt = (!!user && ['admin', 'manager'].includes(user.role)) || !!user?.is_superuser;
 
   const isPartialLine = (line: POLine) => !line.is_closed && line.quantity_received > 0 && line.quantity_remaining > 0;
 
@@ -545,6 +575,145 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
     }
   };
 
+  // After a correction/void, re-pull every surface that could be showing the
+  // receipt (queue + history lists and, if a PO is open on the Receive tab, its
+  // lines + receipt-history sub-table) so the UI reflects only what the server
+  // did — this is a server-GATED action, so it is non-optimistic by design.
+  const refreshReceiptSurfaces = () => {
+    loadData();
+    loadInspectionQueue();
+    loadHistory();
+    if (selectedPO) {
+      refreshSelectedPO(selectedPO.po_id);
+    }
+  };
+
+  const handleOpenCorrect = async (receiptId: number, receiptNumber: string) => {
+    setCorrectTarget({ receiptId, receiptNumber });
+    setCorrectForm({
+      quantity_received: 0,
+      lot_number: '',
+      heat_number: '',
+      cert_number: '',
+      serial_numbers: '',
+      notes: '',
+      reason: '',
+    });
+    setCorrectDetailLoading(true);
+    try {
+      const detail = await api.getReceiptDetail(receiptId);
+      setCorrectForm({
+        quantity_received: Number(detail.quantity_received) || 0,
+        lot_number: detail.lot_number || '',
+        heat_number: detail.heat_number || '',
+        cert_number: detail.cert_number || '',
+        serial_numbers: detail.serial_numbers || '',
+        notes: detail.notes || '',
+        reason: '',
+      });
+    } catch (err) {
+      console.error('Failed to load receipt details:', err);
+      showToast('error', 'Failed to load receipt details');
+      setCorrectTarget(null);
+    } finally {
+      setCorrectDetailLoading(false);
+    }
+  };
+
+  const handleSubmitCorrection = async () => {
+    if (!correctTarget) return;
+    if (!(correctForm.quantity_received > 0)) {
+      showToast('error', 'Quantity received must be greater than 0');
+      return;
+    }
+    if (!correctForm.reason.trim()) {
+      showToast('error', 'A reason is required to correct a receipt');
+      return;
+    }
+    setCorrectSaving(true);
+    try {
+      await api.correctReceipt(correctTarget.receiptId, {
+        quantity_received: correctForm.quantity_received,
+        lot_number: correctForm.lot_number.trim() || undefined,
+        heat_number: correctForm.heat_number.trim() || undefined,
+        cert_number: correctForm.cert_number.trim() || undefined,
+        serial_numbers: correctForm.serial_numbers.trim() || undefined,
+        notes: correctForm.notes.trim() || undefined,
+        reason: correctForm.reason.trim(),
+      });
+      showToast('success', `Receipt ${correctTarget.receiptNumber} corrected`);
+      setCorrectTarget(null);
+      refreshReceiptSurfaces();
+    } catch (err: any) {
+      // Keep the modal open on a server refusal; show the actionable detail.
+      showToast('error', err.response?.data?.detail || 'Failed to correct receipt');
+    } finally {
+      setCorrectSaving(false);
+    }
+  };
+
+  const handleSubmitVoid = async () => {
+    if (!voidTarget) return;
+    if (!voidReason.trim()) {
+      showToast('error', 'A reason is required to void a receipt');
+      return;
+    }
+    setVoidSaving(true);
+    try {
+      const result = await api.voidReceipt(voidTarget.receiptId, voidReason.trim());
+      showToast('success', result?.message || `Receipt ${voidTarget.receiptNumber} voided`);
+      setVoidTarget(null);
+      setVoidReason('');
+      refreshReceiptSurfaces();
+    } catch (err: any) {
+      showToast('error', err.response?.data?.detail || 'Failed to void receipt');
+    } finally {
+      setVoidSaving(false);
+    }
+  };
+
+  // Correct / Void row controls, shared by the inspection-queue rows, the
+  // history rows, and the per-PO receipt-history sub-table. Each control stops
+  // click propagation so it never triggers a row click-through.
+  const renderReceiptRowActions = (receiptId: number, receiptNumber: string) => {
+    if (!canCorrectReceipt && !canVoidReceipt) return null;
+    return (
+      <>
+        {canCorrectReceipt && (
+          <button
+            type="button"
+            onClick={e => {
+              e.stopPropagation();
+              handleOpenCorrect(receiptId, receiptNumber);
+            }}
+            title="Correct receipt"
+            aria-label={`Correct receipt ${receiptNumber}`}
+            className="inline-flex items-center gap-1.5 border border-slate-600 text-slate-200 hover:border-werco-primary hover:text-werco-primary text-sm px-3 py-1 transition-colors"
+          >
+            <PencilSquareIcon className="h-4 w-4" aria-hidden="true" />
+            Correct
+          </button>
+        )}
+        {canVoidReceipt && (
+          <button
+            type="button"
+            onClick={e => {
+              e.stopPropagation();
+              setVoidReason('');
+              setVoidTarget({ receiptId, receiptNumber });
+            }}
+            title="Void receipt"
+            aria-label={`Void receipt ${receiptNumber}`}
+            className="inline-flex items-center gap-1.5 border border-red-500/40 text-red-300 hover:border-red-500 hover:text-red-200 text-sm px-3 py-1 transition-colors"
+          >
+            <XCircleIcon className="h-4 w-4" aria-hidden="true" />
+            Void
+          </button>
+        )}
+      </>
+    );
+  };
+
   const defectTypes = [
     { value: 'dimensional', label: 'Dimensional' },
     { value: 'cosmetic', label: 'Cosmetic' },
@@ -685,11 +854,12 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                 Inspect
               </button>
             )}
+            {renderReceiptRowActions(item.receipt_id, item.receipt_number)}
           </div>
         ),
       },
     ],
-    [canPrintLabel, canInspect, printingReceiptId]
+    [canPrintLabel, canInspect, canCorrectReceipt, canVoidReceipt, printingReceiptId]
   );
 
   const renderQueueCard = (item: InspectionQueueItem) => (
@@ -738,6 +908,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
               Inspect
             </button>
           )}
+          {renderReceiptRowActions(item.receipt_id, item.receipt_number)}
         </>
       }
     />
@@ -820,8 +991,22 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
         // Export what the cell shows (Central date-time), not the raw UTC ISO.
         csv: item => formatCentralDateTime(item.received_at),
       },
+      ...(canCorrectReceipt || canVoidReceipt
+        ? [
+            {
+              key: 'actions',
+              header: 'Action',
+              align: 'right' as const,
+              render: (item: HistoryItem) => (
+                <div className="flex items-center justify-end gap-2">
+                  {renderReceiptRowActions(item.receipt_id, item.receipt_number)}
+                </div>
+              ),
+            },
+          ]
+        : []),
     ],
-    []
+    [canCorrectReceipt, canVoidReceipt]
   );
 
   const renderHistoryCard = (item: HistoryItem) => (
@@ -838,6 +1023,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
         { label: 'Received By', value: item.received_by_name || '-' },
         { label: 'Date', value: formatCentralDateTime(item.received_at), fullWidth: true },
       ]}
+      actions={renderReceiptRowActions(item.receipt_id, item.receipt_number)}
     />
   );
 
@@ -1258,6 +1444,12 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                                 <th className="px-3 py-2 text-left text-xs font-semibold text-slate-400 uppercase">
                                   Date
                                 </th>
+                                {(canCorrectReceipt || canVoidReceipt) && (
+                                  <th
+                                    className="px-3 py-2 text-right text-xs font-semibold text-slate-400 uppercase"
+                                    aria-label="Actions"
+                                  ></th>
+                                )}
                               </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-700">
@@ -1280,6 +1472,13 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                                     <td className="px-3 py-1.5 text-sm text-slate-400">
                                       {r.received_at ? formatCentralDate(r.received_at) : '-'}
                                     </td>
+                                    {(canCorrectReceipt || canVoidReceipt) && (
+                                      <td className="px-3 py-1.5 text-right">
+                                        <div className="flex items-center justify-end gap-2">
+                                          {renderReceiptRowActions(r.receipt_id, r.receipt_number)}
+                                        </div>
+                                      </td>
+                                    )}
                                   </tr>
                                 ))
                               )}
@@ -1798,6 +1997,196 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
               <Button className="px-6" onClick={handleInspect}>
                 Complete Inspection
               </Button>
+            </div>
+          </>
+        )}
+      </Modal>
+
+      {/* CORRECT RECEIPT MODAL */}
+      <Modal open={!!correctTarget} onClose={() => setCorrectTarget(null)} size="lg" closeOnBackdrop={false}>
+        {correctTarget && (
+          <>
+            <div className="flex justify-between items-center mb-4">
+              <h2 className="text-xl font-bold">Correct Receipt {correctTarget.receiptNumber}</h2>
+              <button type="button" onClick={() => setCorrectTarget(null)} aria-label="Close">
+                <XMarkIcon className="h-6 w-6 text-slate-400 hover:text-slate-300" />
+              </button>
+            </div>
+
+            {correctDetailLoading ? (
+              <div className="flex items-center justify-center py-12">
+                <div className="animate-spin rounded-full h-8 w-8 border-4 border-werco-primary border-t-transparent"></div>
+              </div>
+            ) : (
+              <>
+                <p className="text-sm text-slate-400 mb-4">
+                  Quantity Received is the NEW total for this receipt (not a delta). A reason is required and recorded
+                  on the audit trail. The server may refuse a change that conflicts with inspection or placed stock.
+                </p>
+                <div className="space-y-4">
+                  <div className="grid grid-cols-2 gap-4">
+                    <FormField
+                      label="Quantity Received"
+                      required
+                      labelClassName="block text-sm font-medium text-slate-300 mb-1"
+                    >
+                      {field => (
+                        <input
+                          {...field}
+                          type="number"
+                          value={correctForm.quantity_received}
+                          onChange={e =>
+                            setCorrectForm({ ...correctForm, quantity_received: parseFloat(e.target.value) || 0 })
+                          }
+                          className="input w-full"
+                          min="0"
+                          step="1"
+                        />
+                      )}
+                    </FormField>
+                    <FormField label="Lot Number" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                      {field => (
+                        <input
+                          {...field}
+                          type="text"
+                          value={correctForm.lot_number}
+                          onChange={e => setCorrectForm({ ...correctForm, lot_number: e.target.value })}
+                          className="input w-full"
+                        />
+                      )}
+                    </FormField>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <FormField label="Heat Number" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                      {field => (
+                        <input
+                          {...field}
+                          type="text"
+                          value={correctForm.heat_number}
+                          onChange={e => setCorrectForm({ ...correctForm, heat_number: e.target.value })}
+                          className="input w-full"
+                        />
+                      )}
+                    </FormField>
+                    <FormField label="Cert Number" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                      {field => (
+                        <input
+                          {...field}
+                          type="text"
+                          value={correctForm.cert_number}
+                          onChange={e => setCorrectForm({ ...correctForm, cert_number: e.target.value })}
+                          className="input w-full"
+                        />
+                      )}
+                    </FormField>
+                  </div>
+
+                  <FormField label="Serial Numbers" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                    {field => (
+                      <input
+                        {...field}
+                        type="text"
+                        value={correctForm.serial_numbers}
+                        onChange={e => setCorrectForm({ ...correctForm, serial_numbers: e.target.value })}
+                        className="input w-full"
+                        placeholder="Comma-separated (serialized parts)"
+                      />
+                    )}
+                  </FormField>
+
+                  <FormField label="Notes" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                    {field => (
+                      <textarea
+                        {...field}
+                        value={correctForm.notes}
+                        onChange={e => setCorrectForm({ ...correctForm, notes: e.target.value })}
+                        className="input w-full"
+                        rows={2}
+                      />
+                    )}
+                  </FormField>
+
+                  <FormField
+                    label="Reason for Correction"
+                    required
+                    labelClassName="block text-sm font-medium text-slate-300 mb-1"
+                  >
+                    {field => (
+                      <textarea
+                        {...field}
+                        value={correctForm.reason}
+                        onChange={e => setCorrectForm({ ...correctForm, reason: e.target.value })}
+                        className="input w-full"
+                        rows={2}
+                        placeholder="Why is this receipt being corrected?"
+                      />
+                    )}
+                  </FormField>
+                </div>
+
+                <div className="flex justify-end gap-3 mt-6 pt-4 border-t">
+                  <Button variant="secondary" className="px-6" onClick={() => setCorrectTarget(null)}>
+                    Cancel
+                  </Button>
+                  <LoadingButton
+                    variant="primary"
+                    className="px-6"
+                    loading={correctSaving}
+                    loadingText="Saving…"
+                    onClick={handleSubmitCorrection}
+                  >
+                    Save Correction
+                  </LoadingButton>
+                </div>
+              </>
+            )}
+          </>
+        )}
+      </Modal>
+
+      {/* VOID RECEIPT MODAL */}
+      <Modal open={!!voidTarget} onClose={() => setVoidTarget(null)} size="md" closeOnBackdrop={false}>
+        {voidTarget && (
+          <>
+            <div className="flex items-start gap-3 mb-4">
+              <div className="p-2 rounded-full bg-red-500/20 flex-shrink-0">
+                <ExclamationTriangleIcon className="h-5 w-5 text-red-500" aria-hidden="true" />
+              </div>
+              <div>
+                <h2 className="text-lg font-semibold text-white">Void Receipt {voidTarget.receiptNumber}</h2>
+                <p className="text-sm text-slate-300 mt-1">
+                  This reverses the receipt — unwinding the PO line, PO status, and any inventory it created. It cannot
+                  be undone; re-receive to redo. A reason is required and recorded on the audit trail.
+                </p>
+              </div>
+            </div>
+
+            <FormField label="Reason for Void" required labelClassName="block text-sm font-medium text-slate-300 mb-1">
+              {field => (
+                <textarea
+                  {...field}
+                  value={voidReason}
+                  onChange={e => setVoidReason(e.target.value)}
+                  className="input w-full"
+                  rows={3}
+                  placeholder="Why is this receipt being voided?"
+                />
+              )}
+            </FormField>
+
+            <div className="flex justify-end gap-3 mt-6">
+              <Button variant="secondary" onClick={() => setVoidTarget(null)}>
+                Cancel
+              </Button>
+              <LoadingButton
+                variant="danger"
+                loading={voidSaving}
+                loadingText="Voiding…"
+                onClick={handleSubmitVoid}
+              >
+                Void Receipt
+              </LoadingButton>
             </div>
           </>
         )}

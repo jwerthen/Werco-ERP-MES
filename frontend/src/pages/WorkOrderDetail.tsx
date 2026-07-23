@@ -240,6 +240,10 @@ export default function WorkOrderDetail() {
   const { user } = useAuth();
   const { showToast } = useToast();
   const isAdminView = user?.role === 'admin' || !!user?.is_superuser;
+  // Soft-deleting a WO is admin/manager (plus superuser) — the backend widened
+  // the DELETE gate to include manager. Kept separate from isAdminView so only
+  // the Delete button opens to managers; other admin-only chrome is unchanged.
+  const canDeleteWorkOrder = user?.role === 'admin' || user?.role === 'manager' || !!user?.is_superuser;
   // Manual laser-nest manage actions are limited to admin/manager/supervisor —
   // the same trio the backend RBAC allows (routings:create maps to exactly that
   // set plus platform_admin).
@@ -1143,7 +1147,7 @@ export default function WorkOrderDetail() {
             <PrinterIcon className="h-5 w-5 mr-2" />
             Print Traveler
           </Button>
-          {isAdminView && (
+          {canDeleteWorkOrder && (
             <Button
               variant="secondary"
               onClick={handleDelete}
