@@ -1,7 +1,7 @@
 """Add show_customer_names opt-in to display_tokens
 
-Revision ID: 072_display_token_show_customer
-Revises: 071_soft_delete_purchasing_ncr
+Revision ID: 071_display_token_show_customer
+Revises: 070_operation_last_report
 Create Date: 2026-07-23
 
 Context
@@ -20,6 +20,16 @@ Adds ONE NOT-NULL boolean column to the existing ``display_tokens`` table
 
 The server default backfills every existing row to False in place, so no data
 migration is needed and the tamper-evident ``audit_log`` table is untouched.
+
+Numbering note
+--------------
+This revision chains off ``070_operation_last_report`` (the head on ``main``).
+A concurrently-open branch (PR #149) introduces its own
+``071_soft_delete_purchasing_ncr`` off the same ``070`` parent; whichever of the
+two lands on ``main`` first takes ``071`` and the other must re-parent onto it —
+this wallboard change is independent of #149 and merges on its own, so it takes
+``071`` here. (Two migrations off one parent = two Alembic heads until the
+second is re-parented; the migration-graph tests enforce a single head.)
 
 Shape / compliance
 ------------------
@@ -45,7 +55,7 @@ PostgreSQL 11+ (no table rewrite; brief ACCESS EXCLUSIVE lock), and
 ``display_tokens`` holds only a handful of rows per tenant. Deploy ordering: run
 before app code that reads/writes the column; old code simply ignores it.
 
-Revision id ``072_display_token_show_customer`` is 31 chars (<= 32) per the
+Revision id ``071_display_token_show_customer`` is 31 chars (<= 32) per the
 create_all -> stamp -> upgrade bootstrap constraint (alembic_version.version_num
 is varchar(32) on a freshly bootstrapped DB); see docs/DEVELOPMENT.md.
 """
@@ -55,8 +65,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision = "072_display_token_show_customer"
-down_revision = "071_soft_delete_purchasing_ncr"
+revision = "071_display_token_show_customer"
+down_revision = "070_operation_last_report"
 branch_labels = None
 depends_on = None
 
