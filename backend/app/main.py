@@ -729,7 +729,15 @@ if settings.RATE_LIMIT_ENABLED:
             "/api/v1/auth/register": "3/minute",  # Prevent mass registration
             "/api/v1/auth/register-public": "3/minute",  # Prevent mass self-registration
             "/api/v1/auth/refresh": "30/minute",  # Allow reasonable token refreshes
-            "/api/v1/auth/employee-login": "3/minute",  # Employee ID kiosk login
+            # Employee ID kiosk login. 10/min (was 3) so a shift change can cycle
+            # several badges through ONE shared station within a minute. On its own
+            # 10/min is NOT a sufficient guessing control for an unauthenticated
+            # endpoint that mints a full token from a bare badge ID — the endpoint
+            # therefore adds a per-IP FAILED-attempt throttle as the compensating
+            # control (app/core/login_throttle.py: 8 failures/15 min -> 429 with a
+            # 15-min cooldown; successes never count). This entry stays the hard
+            # per-IP request ceiling either way.
+            "/api/v1/auth/employee-login": "10/minute",
             "/api/v1/visitor-logs/station-login": "5/minute",  # Shared-PIN visitor tablet unlock
             "/api/v1/shop-floor/kiosk-stations/station-login": "5/minute",  # Shared-PIN crew kiosk unlock
             # Badge → 5-min kiosk-scoped operator token. Generous (a whole crew
@@ -860,7 +868,7 @@ if settings.RATE_LIMIT_ENABLED:
         )
         logger.info(
             "Auth rate limits enforced: login=5/min, register=3/min, register-public=3/min, "
-            "refresh=30/min, employee-login=3/min, station-login=5/min, "
+            "refresh=30/min, employee-login=10/min, station-login=5/min, "
             "kiosk-station-login=5/min, kiosk-badge-token=30/min, display-token-claim=10/min"
         )
         logger.info("Per-route rate limits enforced: scanner resolve-action=60/min")
@@ -941,7 +949,12 @@ async def stale_data_exception_handler(request: Request, exc: StaleDataError):
 # HTTP exception handler - ensures CORS headers on HTTP errors (401, 403, 404, etc.)
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(request: Request, exc: StarletteHTTPException):
-    response = JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+    # Preserve the exception's own headers (FastAPI's default handler does):
+    # dropping them silently stripped WWW-Authenticate off 401s and Retry-After
+    # off the employee-login throttle's 429.
+    response = JSONResponse(
+        status_code=exc.status_code, content={"detail": exc.detail}, headers=getattr(exc, "headers", None)
+    )
     origin = request.headers.get("origin")
     return add_cors_headers(response, origin)
 

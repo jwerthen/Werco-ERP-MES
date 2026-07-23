@@ -1,12 +1,12 @@
 import React from 'react';
-import { FireIcon, PaperClipIcon } from '@heroicons/react/24/outline';
+import { ArrowUpRightIcon } from '@heroicons/react/24/outline';
 import { formatCentralDate, isDateBeforeTodayInCentral, isDateTodayInCentral } from '../../utils/centralTime';
 import { KioskQueueItem, formatStepsChip } from './kioskConstants';
 
 /**
  * "Steps 2/6" — required process-step progress for the operation. Hidden when
  * the snapshot has no gating steps (0/0). Green once every required step has
- * a satisfying record, cyan while work remains.
+ * a satisfying record, quiet gray while work remains (Foundry 1b).
  */
 export function KioskStepsChip({ item }: { item: Pick<KioskQueueItem, 'steps_total' | 'steps_recorded'> }) {
   const total = Number(item.steps_total || 0);
@@ -15,8 +15,8 @@ export function KioskStepsChip({ item }: { item: Pick<KioskQueueItem, 'steps_tot
   return (
     <span
       data-testid="kiosk-steps-chip"
-      className={`rounded border px-2 py-1 font-mono text-xs font-semibold uppercase tracking-widest ${
-        recorded >= total ? 'border-fd-green/50 text-fd-green' : 'border-fd-cyan/50 text-fd-cyan'
+      className={`rounded-[3px] border px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-[0.08em] ${
+        recorded >= total ? 'border-fd-green/40 text-fd-green' : 'border-fd-line text-fd-mute'
       }`}
     >
       {formatStepsChip(item)}
@@ -30,9 +30,15 @@ export function KioskStepsChip({ item }: { item: Pick<KioskQueueItem, 'steps_tot
  * Advisory only: the server already sorts the queue by it and ANY job can still
  * be started, so the chip only DISPLAYS the rank — it never reorders client-side.
  * Renders nothing when the operation is unranked (`run_order` null/absent).
- * Deliberately oversized/high-contrast: read at arm's length on a shop tablet.
+ * `active` = this op is the operator's running job → solid green (Foundry 1b).
  */
-export function KioskRunOrderChip({ item }: { item: Pick<KioskQueueItem, 'run_order'> }) {
+export function KioskRunOrderChip({
+  item,
+  active = false,
+}: {
+  item: Pick<KioskQueueItem, 'run_order'>;
+  active?: boolean;
+}) {
   const rank = item.run_order;
   if (rank === null || rank === undefined) return null;
   const numeric = Number(rank);
@@ -41,10 +47,14 @@ export function KioskRunOrderChip({ item }: { item: Pick<KioskQueueItem, 'run_or
     <span
       data-testid="kiosk-run-order-chip"
       aria-label={`Run order ${numeric}`}
-      className="inline-flex items-center gap-2 rounded border-2 border-fd-amber bg-fd-amber/15 px-3 py-1 font-mono text-xl font-bold uppercase tracking-widest text-fd-amber"
+      className={`inline-flex items-center gap-1 rounded-[3px] px-2 py-1 font-mono text-[11px] font-bold uppercase tracking-[0.06em] ${
+        active
+          ? 'bg-fd-green text-[#04101f]'
+          : 'border border-fd-line-bright bg-fd-raised text-fd-ink'
+      }`}
     >
-      <span className="text-sm tracking-widest">Run</span>
-      <span className="text-2xl leading-none tabular-nums">{numeric}</span>
+      <span>Run</span>
+      <span className="tabular-nums">{numeric}</span>
     </span>
   );
 }
@@ -52,98 +62,135 @@ export function KioskRunOrderChip({ item }: { item: Pick<KioskQueueItem, 'run_or
 interface KioskQueueCardProps {
   item: KioskQueueItem;
   onSelect: (item: KioskQueueItem) => void;
+  /** True when this op is the operator's active (clocked-in) job — 1b active card chrome. */
+  active?: boolean;
   disabled?: boolean;
+  /** Foundry doc-viewer entry: renders the CNC-strip PDF chip as a real button. */
+  onOpenPdf?: (item: KioskQueueItem) => void;
 }
 
 /**
- * One queued operation as a single giant tap target (full-width, ~7rem tall).
- * Tap → confirm screen → CLOCK IN: two taps for the 90% path.
+ * One queued operation as a Foundry 1b queue card. The whole card is one tap
+ * target (→ the existing confirm→clock-in flow — ANY job stays startable, per
+ * the advisory run-order convention); the CNC strip's PDF chip is a nested
+ * doc-viewer entry, so the card is a role="button" div (the sanctioned wrapper
+ * pattern) and the chip stops propagation.
  */
-export default function KioskQueueCard({ item, onSelect, disabled = false }: KioskQueueCardProps) {
+export default function KioskQueueCard({ item, onSelect, active = false, disabled = false, onOpenPdf }: KioskQueueCardProps) {
   const pastDue = item.due_date ? isDateBeforeTodayInCentral(item.due_date) : false;
   const dueToday = item.due_date ? isDateTodayInCentral(item.due_date) : false;
   const inProgress = String(item.status).toLowerCase() === 'in_progress';
   const done = Number(item.quantity_complete || 0);
   const ordered = Number(item.quantity_ordered || 0);
+  const nest = item.laser_nest;
+
+  const select = () => {
+    if (!disabled) onSelect(item);
+  };
 
   return (
-    <button
-      type="button"
-      disabled={disabled}
-      onClick={() => onSelect(item)}
+    <div
+      role="button"
+      tabIndex={disabled ? -1 : 0}
+      aria-disabled={disabled || undefined}
+      onClick={select}
+      onKeyDown={(e) => {
+        if (e.target !== e.currentTarget) return;
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          select();
+        }
+      }}
       aria-label={`Work order ${item.work_order_number}, operation ${item.operation_name || item.operation_number || ''}`}
-      className={`grid w-full grid-cols-[1fr_auto] items-center gap-4 rounded border px-5 py-5 text-left transition-colors active:translate-y-px disabled:opacity-40 ${
-        pastDue
-          ? 'border-fd-red/60 bg-fd-red/5 hover:border-fd-red'
-          : 'border-fd-line bg-fd-panel hover:border-fd-line-bright'
-      }`}
+      className={`w-full rounded-[4px] border bg-fd-panel px-4 py-3.5 text-left transition-transform duration-150 ease-out active:scale-[0.99] ${
+        active
+          ? 'border-fd-line-bright border-l-2 border-l-fd-green'
+          : pastDue
+            ? 'border-fd-line border-l-2 border-l-fd-red'
+            : 'border-fd-line'
+      } ${disabled ? 'cursor-not-allowed opacity-40' : 'cursor-pointer'}`}
     >
-      <div className="min-w-0">
-        <div className="flex flex-wrap items-center gap-3">
-          <KioskRunOrderChip item={item} />
-          <span className="font-mono text-3xl font-bold tracking-tight text-fd-ink">{item.work_order_number}</span>
-          <span
-            className={`rounded border px-2 py-1 font-mono text-xs font-semibold uppercase tracking-widest ${
-              inProgress ? 'border-fd-amber/50 text-fd-amber' : 'border-fd-blue/50 text-fd-blue'
-            }`}
-          >
-            {inProgress ? 'In progress' : 'Ready'}
-          </span>
-          <KioskStepsChip item={item} />
-        </div>
-        <div className="mt-2 truncate text-xl text-fd-body">
-          <span className="font-mono font-semibold text-fd-ink">{item.part_number || '—'}</span>
-          {item.part_name ? <span className="text-fd-mute"> · {item.part_name}</span> : null}
-        </div>
-        <div className="mt-1 truncate text-lg text-fd-mute">
-          Op {item.operation_number ?? '—'} · {item.operation_name || 'Operation'}
-        </div>
-        {item.laser_nest && (
-          <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 rounded border border-fd-red/40 bg-fd-red/5 px-3 py-2">
-            <span className="flex items-center gap-1.5 font-mono text-xl font-bold text-fd-ink">
-              <FireIcon className="h-5 w-5 text-fd-red" />
-              {item.laser_nest.cnc_number ? `CNC# ${item.laser_nest.cnc_number}` : item.laser_nest.nest_name}
-            </span>
-            <span className="font-mono text-base text-fd-body">
-              {Number(item.laser_nest.completed_runs)} / {Number(item.laser_nest.planned_runs)} runs
-            </span>
-            {(item.laser_nest.material || item.laser_nest.thickness) && (
-              <span className="text-base text-fd-mute">
-                {[item.laser_nest.material, item.laser_nest.thickness].filter(Boolean).join(' • ')}
-              </span>
-            )}
-            {item.laser_nest.has_document && (
-              <span className="inline-flex items-center gap-1 text-sm font-semibold uppercase tracking-wide text-fd-blue">
-                <PaperClipIcon className="h-4 w-4" />
-                PDF
-              </span>
-            )}
-          </div>
-        )}
+      <div className="flex flex-wrap items-center gap-2.5">
+        <KioskRunOrderChip item={item} active={active} />
+        <span className="font-mono text-lg font-bold text-fd-ink">{item.work_order_number}</span>
+        <span
+          className={`rounded-[3px] border px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-[0.08em] ${
+            active
+              ? 'border-fd-green/40 text-fd-green'
+              : inProgress
+                ? 'border-fd-amber/50 text-fd-amber'
+                : 'border-fd-blue/40 text-fd-blue'
+          }`}
+        >
+          {active ? 'On machine' : inProgress ? 'In progress' : 'Ready'}
+        </span>
+        <KioskStepsChip item={item} />
+        <div className="flex-1" />
+        <span className="font-mono text-[15px] font-bold tabular-nums text-fd-ink">
+          {done}
+          <span className="font-normal text-fd-mute">/{ordered}</span>
+        </span>
       </div>
 
-      <div className="text-right">
-        <div className="font-mono text-2xl font-bold text-fd-ink">
-          {done}
-          <span className="text-fd-faint"> / </span>
-          {ordered}
-        </div>
-        <div className="mt-1 text-sm uppercase tracking-widest text-fd-faint">pcs</div>
+      <div className="mt-2 flex flex-wrap items-center gap-2 text-[13px] text-fd-body">
+        <span className="min-w-0 truncate">
+          <span className="font-mono font-semibold text-fd-body-2">{item.part_number || '—'}</span>
+          {item.part_name ? ` ${item.part_name}` : ''} · Op {item.operation_number ?? '—'}
+        </span>
+        <div className="flex-1" />
         {item.due_date && (
-          <div
-            className={`mt-2 inline-block rounded border px-2 py-1 font-mono text-sm font-bold uppercase tracking-wider ${
+          <span
+            className={`shrink-0 rounded-[3px] border px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-[0.08em] ${
               pastDue
-                ? 'border-fd-red bg-fd-red/15 text-fd-red'
+                ? 'border-fd-red/50 bg-fd-red/8 font-bold text-fd-red'
                 : dueToday
-                  ? 'border-fd-amber bg-fd-amber/15 text-fd-amber'
+                  ? 'border-fd-amber/45 bg-fd-amber/8 text-fd-amber'
                   : 'border-fd-line text-fd-mute'
             }`}
           >
-            {pastDue ? 'Past due ' : dueToday ? 'Due today' : `Due ${formatCentralDate(item.due_date)}`}
-            {pastDue ? formatCentralDate(item.due_date) : ''}
-          </div>
+            {pastDue
+              ? `Past due · ${formatCentralDate(item.due_date, { year: undefined })}`
+              : dueToday
+                ? 'Due today'
+                : `Due ${formatCentralDate(item.due_date, { year: undefined })}`}
+          </span>
         )}
       </div>
-    </button>
+
+      {nest && (
+        <div className="mt-2.5 flex items-center gap-2.5 rounded-[3px] border border-fd-line bg-fd-sunken px-2.5 py-2 font-mono text-[11px] text-fd-body">
+          <span className="min-w-0 truncate uppercase">
+            {nest.cnc_number ? `CNC# ${nest.cnc_number}` : nest.nest_name}
+            {` · ${Number(nest.completed_runs)}/${Number(nest.planned_runs)} runs`}
+            {nest.material ? ` · ${nest.material}` : ''}
+            {nest.thickness ? ` · ${nest.thickness}` : ''}
+          </span>
+          <div className="flex-1" />
+          {nest.has_document &&
+            (onOpenPdf ? (
+              <button
+                type="button"
+                aria-label={`Open nest PDF for ${item.work_order_number}`}
+                disabled={disabled}
+                onClick={(e) => {
+                  // The card's own tap target starts the clock-in confirm —
+                  // opening the viewer must not also fire it.
+                  e.stopPropagation();
+                  onOpenPdf(item);
+                }}
+                className="inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-[3px] px-2 font-mono text-[11px] font-semibold uppercase tracking-[0.06em] text-fd-blue transition-transform duration-150 ease-out active:scale-[0.98] disabled:opacity-40"
+              >
+                PDF
+                <ArrowUpRightIcon className="h-3 w-3" aria-hidden="true" />
+              </button>
+            ) : (
+              <span className="inline-flex shrink-0 items-center gap-1.5 font-semibold uppercase tracking-[0.06em] text-fd-blue">
+                PDF
+                <ArrowUpRightIcon className="h-3 w-3" aria-hidden="true" />
+              </span>
+            ))}
+        </div>
+      )}
+    </div>
   );
 }

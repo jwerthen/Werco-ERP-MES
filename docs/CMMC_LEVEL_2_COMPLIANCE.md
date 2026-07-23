@@ -537,9 +537,17 @@
 - [x] CORS controls
 - [x] Input validation
 - [x] API rate limiting (global default per client IP, plus **enforced** stricter per-path limits on
-  sensitive auth endpoints — login `5/min`, register/register-public/employee-login `3/min`, refresh
-  `30/min`, visitor `station-login` `5/min`, scanner `resolve-action` `60/min`; over-limit → **429 +
-  `Retry-After`**, fail-open if the limiter backend errors)
+  sensitive auth endpoints — login `5/min`, register/register-public `3/min`, employee-login `10/min`,
+  refresh `30/min`, visitor `station-login` `5/min`, scanner `resolve-action` `60/min`; over-limit →
+  **429 + `Retry-After`**, fail-open if the limiter backend errors). Employee-login's raise from
+  `3/min` to `10/min` (kiosk shift-change badge cycling, 2026-07-23) is paired with a
+  **compensating control**: a per-IP FAILED-attempt throttle
+  (`backend/app/core/login_throttle.py`) — 8 failed attempts from one IP within 15 minutes →
+  **429** with a 15-minute cooldown, checked **before** any user lookup so a throttled IP does
+  zero account probing; successful logins never count toward the window, every throttled rejection
+  writes an `EMPLOYEE_LOGIN_BLOCKED` audit event, and a counter-storage outage fails open (logged
+  with the SIEM-greppable marker `employee_login_throttle_fail_open`) with the slowapi `10/min`
+  cap still in force.
 - [x] Outbound webhook dispatch is **tenant-scoped and CUI-minimized** (SC-3.13.1 boundary /
   CUI-egress control). The work-order completion webhook (`work_order.completed` /
   `work_order.closed`) is dispatched only to the **owning company's** registered endpoints

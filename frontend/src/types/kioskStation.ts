@@ -11,6 +11,7 @@
  */
 
 import type { KioskCrewQueueItem } from '../components/kiosk/kioskConstants';
+import type { KioskQueueWorkCenter } from './index';
 import type { ScrapReasonCodeOption } from './scrapReason';
 
 // ---- Station tier (PIN → 24h scoped station token) ----
@@ -55,6 +56,11 @@ export interface KioskCrewQueueResponse {
    * fallback. Optional so a pre-Lean backend payload cannot crash the board.
    */
   scrap_reason_codes?: ScrapReasonCodeOption[];
+  /**
+   * The queue's work center (Kiosk Foundry Redesign, backend B3) — feeds the
+   * kiosk top bar. Optional so pre-redesign payloads still typecheck.
+   */
+  work_center?: KioskQueueWorkCenter | null;
 }
 
 // ---- Operator tier (badge → 5-minute scope:"kiosk" access token) ----

@@ -10,6 +10,7 @@
     "ajv-keywords": "^5.1.0",
     "axios": "^1.18.1",
     "date-fns": "^4.1.0",
+    "pdfjs-dist": "^6.1.200",
     "qrcode": "^1.5.4",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",

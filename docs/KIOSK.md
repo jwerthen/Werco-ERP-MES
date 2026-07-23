@@ -16,6 +16,22 @@ labor approval, resume-from-hold, or any override) exist on this screen.
   unlock, a live per-job crew roster, and per-badge JOIN/LEAVE/report/complete/hold/steps. See
   [Crew station mode](#crew-station-mode-kioskkiosk1stationid) at the end of this doc.
 
+**Foundry redesign (2026-07-23).** Both modes render in a kiosk-scoped Foundry
+instrument-panel theme: the `fd-*` Tailwind tokens are CSS-var-backed and a `.fd-scope-kiosk`
+class on every kiosk root swaps in a darker palette — zero visual change anywhere else in the
+app. The single-operator mode is fully redesigned: a **split running-job + queue hero** at
+≥ 1100 px (stacked in portrait), a tabbed **GOOD | SCRAP** report overlay, hold and complete
+overlay modals, a restyled two-column badge sign-in, and a bottom compliance strip
+(`AS9100D · ISO 9001 · ITAR · SYNC` — SYNC reads OK when online, `—` when offline). The header
+clock and all timers run on **server-corrected time** (`server_time` rides both operator
+reads). The crew station keeps its own layout and gains the palette, the restyled shared
+components, and the badge-gated document viewer (see
+[Drawing / nest viewer](#drawing--nest-viewer)). The badge-screen fallback is now also
+enforced at the HTTP layer: the app's global 401 interceptor is kiosk-aware — on `/kiosk`
+paths a dead session clears client-side and the request rejects **without navigating to
+`/login`**, so the kiosk lands on its badge screen (this closed the old gap where an
+unauthenticated nest-PDF preview bounced the terminal to the office login form).
+
 Frontend: `frontend/src/pages/OperatorKiosk.tsx` and `frontend/src/pages/CrewStationKiosk.tsx`
 (+ `frontend/src/components/kiosk/`, `frontend/src/utils/kiosk.ts`,
 `frontend/src/hooks/useKioskIdleLogout.ts`, `frontend/src/services/kioskStationClient.ts`).
@@ -54,6 +70,9 @@ URL is all the station setup there is.
   field). Manual entry uses the on-screen number pad.
 - Badge = identity: one operator per login, no shared accounts. Backend error details
   (invalid ID, locked account, ambiguous badge → 409) are shown verbatim on the badge screen.
+- Rate limit: **10/minute per IP** (raised from 3/minute for the Foundry redesign — a shift
+  change cycles several badges through one shared station within a minute; still tight enough
+  to keep online employee-id guessing impractical).
 
 ## Idle auto-logout
 
@@ -73,26 +92,50 @@ URL is all the station setup there is.
    process-sheet steps, the confirm card adds a **REVIEW STEPS 2/6** button so the
    operator can read the steps before starting (see
    [Process steps](#process-steps-process-sheets-capture)).
-2. **Active-job banner** (pinned while clocked in), with three verbs — plus a
-   **PROCESS STEPS · 2/6 RECORDED** button when the operation carries steps:
+2. **Running-job panel** (the split hero's left column while clocked in): WO number, part +
+   **REV** chip (the new `part_revision` payload), quantity + progress bar, the laser-nest
+   strip with its **VIEW NEST** button, a process-steps row (**PROCESS STEPS · 2/6 RECORDED**,
+   when the operation carries steps) beside a **SCRAP / NCR** shortcut straight to the report
+   overlay's scrap tab, and four telemetry tiles — **LAST REPORT** (time + good/scrap deltas
+   of the operation's most recent report, from the new `last_report` payload), **AVG PER PC**
+   (this session's pieces vs server-corrected elapsed time), **EST OP FINISH** (remaining ×
+   average; "—" when unknowable), and **DOWNTIME** (the operation's blocker minutes, from
+   `downtime_minutes`; amber when > 0). Its three verbs:
    - **REPORT PRODUCTION** — `POST /shop-floor/operations/{id}/production` with good/scrap
-     deltas. Any scrap quantity **requires** an explicit reason picked from the scrap grid
-     (no default; see "Scrap reason picker" below for what the grid contains and what is
-     sent). This is no longer a kiosk-only guardrail: the server rejects a positive scrap
-     delta with no reason (and the same rule on clock-out) with **422**, so reasonless scrap
-     can't be posted around the UI.
+     deltas, entered in a tabbed **GOOD PCS | SCRAP / NCR** overlay (numpad, quick-adds
+     `+1 +5 +25` plus **FULL NEST n** when the operation's `component_quantity` is > 1, and a
+     reported-so-far totals bar). Any scrap quantity **requires** an explicit reason picked
+     from the scrap grid (no default; see "Scrap reason picker" below for what the grid
+     contains and what is sent). This is no longer a kiosk-only guardrail: the server rejects
+     a positive scrap delta with no reason (and the same rule on clock-out) with **422**, so
+     reasonless scrap can't be posted around the UI. The scrap tab also carries an **OPEN
+     NCR** toggle (pre-selected when the chosen scrap code is material/supplier-category —
+     the operator can flip it either way): confirming sends `open_ncr` and the server files an
+     **IN_PROCESS NCR** for exactly this report's scrap **in the same transaction** — no hold,
+     no blocker, the machine keeps running (deliberate contrast with the process-step
+     out-of-tolerance quality-hold, which does hold the job) — and the success toast quotes
+     the real NCR number from the response. See `docs/API.md` → Shop Floor → "Scrap → NCR on
+     the production report".
    - **COMPLETE** — clock-out first (`POST /shop-floor/clock-out/{id}` with final counts and,
      when any scrap is entered, the same scrap-grid reason), then
-     `POST /shop-floor/operations/{id}/complete` at the target quantity. If the clock-out
+     `POST /shop-floor/operations/{id}/complete` at the target quantity. The verb opens a
+     summary modal: GOOD / SCRAP tiles (naming any NCR filed this session), sheet runs and
+     run time, a steps banner, and a **ROUTES TO** row from the new `next_operation` payload
+     (the next routing step; omitted on the last operation). Final-entry good defaults to the
+     remaining quantity. When the queue holds a next job the CTA chains it — after a
+     successful complete the kiosk attempts clock-in to that job, and a refusal is surfaced
+     verbatim (non-optimistic) with the operator landing on the queue. If the clock-out
      lands but the completion is refused, the kiosk says so — labor is closed either way.
      A completion refused with **409 `STEPS_INCOMPLETE`** (required process-sheet steps
      missing conforming records) opens the steps view with the outstanding steps rendered
      inline (see [Process steps](#process-steps-process-sheets-capture)).
    - **HOLD** — a required blocker-category grid (material missing, machine down, tooling
-     missing, quality hold, …), then `PUT /shop-floor/operations/{id}/hold` at `medium`
+     missing, quality hold, …; two-line reason tiles) plus an **optional note** field (sent
+     as the blocker note whenever non-empty, any category), then
+     `PUT /shop-floor/operations/{id}/hold` at `medium`
      severity. A kiosk hold files the same structured `WorkOrderBlocker` a supervisor would.
 
-   Below the three primary verbs the banner carries a **lower-emphasis** fourth action —
+   Below the three primary verbs the panel carries a **lower-emphasis** fourth action —
    deliberately styled apart so it can't be tapped by mistake:
    - **CORRECT OVER-COUNT** — opens a touch `KioskCorrectionScreen` (digits-only keypad, **no
      minus key**, plus a **required** correction-reason tile from a set **distinct from the scrap
@@ -159,14 +202,51 @@ even when a package's nests are spread across different lasers (see `docs/API.md
 everywhere else, that only orders the queue and shows a `RUN n` chip — it never gates which nest an
 operator picks up. For laser-cutting operations the kiosk surfaces the active nest at
 all three touch points so the operator can confirm the right sheet before cutting: the queue card
-(`KioskQueueCard` — CNC#/nest name, `completed`/`planned` runs, material•thickness, and a "PDF" chip
-when a reference PDF is attached), the clock-in confirm card, and the active-job banner (both
-rendering `LaserNestOperatorPanel`, which previews the PDF inline). The data is the `laser_nest` object that
+(`KioskQueueCard` — CNC#/nest name, `completed`/`planned` runs, material•thickness, and a **PDF**
+chip when a reference PDF is attached — tapping the chip opens the full-screen
+[drawing / nest viewer](#drawing--nest-viewer) on the NEST tab without also firing the card's
+clock-in confirm), the clock-in confirm card, and the running panel's nest strip (CNC#/nest,
+material · thickness · sheet size, sheet-run count, and the **VIEW NEST** button into the same
+viewer). The data is the `laser_nest` object that
 `GET /shop-floor/work-center-queue/{id}` puts on each queue row and `GET /shop-floor/my-active-job`
 puts on the active job — `null` for non-laser operations, and a soft-deleted manual nest never
 appears (see `docs/API.md` → Shop Floor → "Laser-nest payload on operator reads" for the full
-shape). The optional reference PDF is fetched **inline** from `GET /laser-nests/{id}/document`
-when the operator opens it (no approval workflow, and it never gates clock-in).
+shape). The optional reference PDF is fetched **inline** through the fence-safe
+`GET /shop-floor/documents/{id}/inline` on kiosk surfaces (the old `GET /laser-nests/{id}/document`
+route remains for desktop callers); there is no approval workflow, and it never gates clock-in.
+
+## Drawing / nest viewer
+
+The Foundry redesign adds a **full-screen document viewer** (`KioskDocViewer`) shared by both
+kiosk modes: segmented **DRAWING | NEST** tabs (a tab hides when that document doesn't exist),
+pdf.js canvas rendering (lazy-loaded so the kiosk bundle stays lean) with zoom 50–300% in 25%
+steps, **FIT** (fit-to-width), and a page pager for multi-page documents — falling back to a
+plain `<object>` embed if pdf.js fails — plus a right rail and a permanent
+**CONTROLLED COPY · UNCONTROLLED IF PRINTED · ITAR** watermark strip. The right rail shows the
+DOCUMENT key-values (part, revision, released date, nest material where applicable) and a
+**CRITICAL DIMS** list — the part's critical SPC characteristics with their tolerance limits
+(omitted when the part has none).
+
+Data comes from two shop-floor-fenced reads (both open to any authenticated user, tenant-scoped,
+read-only; badge-minted kiosk tokens reach them with zero fence changes — see `docs/API.md` →
+Shop Floor → "Kiosk doc viewer"):
+
+- `GET /shop-floor/operations/{id}/documents` — discovery: the newest approved/released part
+  **drawing**, the operation's live **nest** reference PDF, the nest **material**, and the
+  **critical dims**.
+- `GET /shop-floor/documents/{id}/inline` — the guarded byte-serving route: only a DRAWING-type
+  document or a live nest's reference PDF in the caller's tenant is served; anything else is a
+  uniform **404**.
+
+**Entry points.** Single-operator kiosk: the running panel's **VIEW NEST** button and the queue
+card's **PDF** chip (both land on the NEST tab; the DRAWING tab is available when a released
+drawing exists). Crew station: a **View nest / drawing** button on the job screen that is
+**badge-gated** exactly like steps — the document reads need an operator (badge) token, so the
+button opens a "scan badge to view documents" gate first, mints the 5-minute operator token, and
+opens the viewer bound to it; a mid-view 401 (expired badge token) renders "Badge session
+expired — rescan to view" **inline**. The crew job card's inline nest preview is deliberately
+info-only now (no embedded PDF fetch pre-badge), so a nest preview can never 401 its way toward
+`/login`. Every viewer failure renders inline with a retry — the component never navigates.
 
 ## Process steps (Process Sheets capture)
 
@@ -369,6 +449,9 @@ Either way, kiosk step records count as `kiosk` on the adoption dashboard.
 - There is **no offline write queue**: because mutations are disabled rather than queued, the
   operator retries them once the banner clears. Error toasts linger 12 s so they are readable
   from arm's length.
+- The [drawing / nest viewer](#drawing--nest-viewer) is a pure read surface and follows the
+  same posture: a failed document load renders an **inline** error with a retry (never a
+  navigation, never a toastless blank), and nothing is queued.
 
 ## Crew station mode (`/kiosk?kiosk=1&station=<id>`)
 
@@ -495,6 +578,12 @@ token scope was widened. An empty array means no active codes → the legacy gri
   `STEPS_INCOMPLETE`, lands the signing operator in the same steps view with the missing
   steps inline. Like every other flow, the 90 s idle reset abandons a half-entered steps
   screen back to the board; a mid-flow 401 (expired badge token) returns to the badge scan.
+- **DOCS (badge-gated).** The job screen's **View nest / drawing** button (present when the
+  operation's nest carries a reference PDF) opens a badge scan — "drawings and nests are
+  controlled documents" — then the shared full-screen viewer bound to that badge-minted token
+  (see [Drawing / nest viewer](#drawing--nest-viewer)). The job card's inline nest panel is
+  info-only (no pre-badge PDF fetch); an expired badge token mid-view renders "Badge session
+  expired — rescan to view" inline, never a navigation.
 
 Every verb is server-gated and therefore **non-optimistic** — the kiosk shows a loading state,
 reflects only what the server returns, and surfaces rejections verbatim.
@@ -549,4 +638,5 @@ same tenant. The crew station itself does not use WebSockets (v1 is poll-only, 1
 | `POST /shop-floor/kiosk-stations/station-login` | 5/minute per IP | Same posture as the visitor tablet's PIN unlock |
 | `POST /auth/kiosk-badge-token` | 30/minute per IP | Generous — a whole crew taps one terminal — but safe: the endpoint is station-token-gated, not public |
 
-The public `POST /auth/employee-login` (3/minute) is untouched — the crew station never uses it.
+The public `POST /auth/employee-login` (10/minute — see Badge login above) is not used by the
+crew station at all.

@@ -40,6 +40,7 @@ import KioskReasonGrid from '../components/kiosk/KioskReasonGrid';
 import KioskCompleteConfirmModal from '../components/kiosk/KioskCompleteConfirmModal';
 import KioskNcrFiledScreen from '../components/kiosk/KioskNcrFiledScreen';
 import KioskStepsPanel, { StepsTransport } from '../components/kiosk/KioskStepsPanel';
+import KioskDocViewer, { KioskDocTransport } from '../components/kiosk/KioskDocViewer';
 import { useBadgeCapture } from '../components/kiosk/useBadgeCapture';
 import LaserNestOperatorPanel from '../components/laser/LaserNestOperatorPanel';
 import {
@@ -112,6 +113,11 @@ type CrewView =
   // the badge-identified operator (5-minute token; a 401 mid-flow re-scans).
   | { name: 'stepsSign'; operationId: number; missing?: MissingStepInfo[] | null }
   | { name: 'steps'; operationId: number; operator: OperatorSession; missing?: MissingStepInfo[] | null }
+  // Drawing/nest viewer: the doc reads live inside the shop-floor fence and
+  // need an OPERATOR (badge) token — the station token is honored only by the
+  // queue read + badge mint — so entry is badge-gated exactly like steps.
+  | { name: 'docsSign'; operationId: number }
+  | { name: 'docs'; operationId: number; operator: OperatorSession }
   // One-tap OOT hold succeeded: NO operationId on purpose — the held op leaves
   // the queue and the ghost-guard must not yank the NCR number off the screen.
   | { name: 'ncrFiled'; result: QualityHoldResult; jobLabel: string };
@@ -146,6 +152,14 @@ function crewStepsTransport(operatorToken: string): StepsTransport {
     // token is authoritative — the server records "kiosk" regardless.
     qualityHold: (operationId, stepId, data) =>
       kioskClient.raiseStepQualityHold(operatorToken, operationId, stepId, data),
+  };
+}
+
+/** Doc-viewer transport bound to a badge-minted operator token (never navigates). */
+function crewDocTransport(operatorToken: string): KioskDocTransport {
+  return {
+    fetchOperationDocuments: (operationId) => kioskClient.getOperationDocuments(operatorToken, operationId),
+    fetchDocumentBlob: (documentId) => kioskClient.fetchDocumentBlob(operatorToken, documentId),
   };
 }
 
@@ -658,6 +672,25 @@ export default function CrewStationKiosk() {
     [view, mutationsBlocked]
   );
 
+  /** DOCS — badge scan gates the viewer (the doc reads need an operator token). */
+  const handleDocsBadge = useCallback(
+    async (badgeId: string) => {
+      if (view.name !== 'docsSign' || mutationsBlocked) return;
+      const { operationId } = view;
+      setBusy(true);
+      setBadgeError(null);
+      try {
+        const minted = await kioskClient.mintBadgeToken(badgeId);
+        setView({ name: 'docs', operationId, operator: { token: minted.access_token, user: minted.user } });
+      } catch (err) {
+        setBadgeError(kioskErrorMessage(err, 'Could not read that badge. Try again.'));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [view, mutationsBlocked]
+  );
+
   /** HOLD — reason first, then badge signature. */
   const handleHoldBadge = useCallback(
     async (badgeId: string) => {
@@ -703,7 +736,7 @@ export default function CrewStationKiosk() {
   // --- Guard: no station id in the URL -----------------------------------------
   if (stationId == null) {
     return (
-      <div className="flex min-h-screen flex-col items-center justify-center bg-fd-canvas px-6 text-center">
+      <div className="fd-scope-kiosk flex min-h-screen flex-col items-center justify-center bg-fd-canvas px-6 text-center">
         <ExclamationTriangleIcon className="h-16 w-16 text-fd-amber" />
         <h1 className="mt-4 text-3xl font-bold text-fd-ink">Station not configured</h1>
         <p className="mt-3 max-w-xl text-lg text-fd-body">
@@ -720,7 +753,7 @@ export default function CrewStationKiosk() {
   // --- PIN unlock screen --------------------------------------------------------
   if (!hasToken || station == null) {
     return (
-      <div className="flex min-h-screen flex-col items-center justify-center bg-fd-canvas px-6 py-10">
+      <div className="fd-scope-kiosk flex min-h-screen flex-col items-center justify-center bg-fd-canvas px-6 py-10">
         <div className="w-full max-w-md">
           <div className="mb-8 text-center">
             <p className="font-mono text-sm uppercase tracking-[0.3em] text-fd-mute">{stationLabel}</p>
@@ -761,7 +794,7 @@ export default function CrewStationKiosk() {
             type="button"
             onClick={() => void submitPin()}
             disabled={pinSubmitting || pin.length < PIN_MIN}
-            className="mt-4 flex min-h-20 w-full items-center justify-center gap-3 rounded border border-werco-navy-600 bg-werco-navy-600 text-2xl font-bold uppercase tracking-wider text-white transition-colors hover:bg-werco-navy-700 disabled:cursor-not-allowed disabled:opacity-40"
+            className="mt-4 flex min-h-20 w-full items-center justify-center gap-3 rounded-[4px] bg-fd-blue font-mono text-2xl font-bold uppercase tracking-wider text-[#04101f] transition-transform duration-150 ease-out active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40"
           >
             {pinSubmitting ? 'Unlocking…' : 'Unlock'}
           </button>
@@ -772,7 +805,7 @@ export default function CrewStationKiosk() {
 
   // --- Unlocked crew station ------------------------------------------------------
   return (
-    <div className="flex min-h-screen flex-col bg-fd-canvas">
+    <div className="fd-scope-kiosk flex min-h-screen flex-col bg-fd-canvas">
       {/* Station header — always visible */}
       <header className="sticky top-0 z-30 border-b border-fd-line bg-fd-panel px-5 py-3">
         <div className="mx-auto flex max-w-5xl items-center justify-between gap-4">
@@ -823,12 +856,12 @@ export default function CrewStationKiosk() {
           <div
             key={toast.id}
             role={toast.type === 'error' ? 'alert' : 'status'}
-            className={`flex w-full items-center gap-3 rounded border px-5 py-4 text-xl font-semibold shadow-lg ${
+            className={`flex w-full items-center gap-3 rounded-[4px] border px-5 py-4 text-xl font-semibold shadow-[0_12px_40px_rgba(0,0,0,0.5)] ${
               toast.type === 'success'
-                ? 'border-fd-green bg-[#0c2415] text-fd-green'
+                ? 'border-fd-green/60 bg-fd-panel text-fd-green'
                 : toast.type === 'error'
-                  ? 'border-fd-red bg-[#2a0f0c] text-fd-red'
-                  : 'border-fd-blue bg-[#0c1a2e] text-fd-blue'
+                  ? 'border-fd-red bg-fd-panel text-fd-red'
+                  : 'border-fd-blue/60 bg-fd-panel text-fd-blue'
             }`}
           >
             {toast.type === 'success' ? (
@@ -841,6 +874,17 @@ export default function CrewStationKiosk() {
         ))}
       </div>
 
+      {/* DOCS viewer renders full-bleed (it brings its own top bar); everything
+          else lives in the standard centered main column. */}
+      {view.name === 'docs' && viewItem ? (
+        <KioskDocViewer
+          operationId={view.operationId}
+          initialTab="nest"
+          transport={crewDocTransport(view.operator.token)}
+          sessionExpiredMessage="Badge session expired — rescan to view"
+          onBack={() => setView({ name: 'job', operationId: view.operationId })}
+        />
+      ) : (
       <main className="mx-auto w-full max-w-5xl flex-1 space-y-5 px-4 py-5">
         {/* CREW BOARD */}
         {view.name === 'board' && (
@@ -950,7 +994,26 @@ export default function CrewStationKiosk() {
 
               {viewItem.laser_nest && (
                 <div className="mt-4">
-                  <LaserNestOperatorPanel nest={viewItem.laser_nest} size="kiosk" />
+                  {/* Info only — the inline preview would fetch with NO operator
+                      token here (pre-badge). The VIEW NEST button below routes
+                      through the badge gate into the doc viewer instead, so a
+                      nest preview can never 401 its way toward /login. */}
+                  <LaserNestOperatorPanel nest={viewItem.laser_nest} size="kiosk" allowPreview={false} />
+                  {viewItem.laser_nest.has_document && (
+                    <button
+                      type="button"
+                      data-testid="crew-view-nest"
+                      disabled={mutationsBlocked}
+                      aria-describedby={!online ? OFFLINE_HINT_ID : undefined}
+                      onClick={() => {
+                        setBadgeError(null);
+                        setView({ name: 'docsSign', operationId: viewItem.operation_id });
+                      }}
+                      className="mt-3 flex min-h-14 w-full items-center justify-center rounded border border-fd-blue/40 bg-fd-blue/10 px-4 font-mono text-base font-bold uppercase tracking-wide text-fd-blue transition-colors hover:bg-fd-blue/20 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      View nest / drawing
+                    </button>
+                  )}
                 </div>
               )}
             </div>
@@ -1272,6 +1335,27 @@ export default function CrewStationKiosk() {
           </section>
         )}
 
+        {/* DOCS — badge scan gates the drawing/nest viewer (operator-token reads) */}
+        {view.name === 'docsSign' && viewItem && (
+          <section aria-label="Open documents" className="mx-auto w-full max-w-2xl">
+            <h2 className="text-3xl font-bold text-fd-ink">Scan badge to view documents</h2>
+            <p className="mt-1 font-mono text-lg text-fd-mute">{crewJobLabel(viewItem)}</p>
+            <p className="mt-3 text-lg text-fd-body">
+              Drawings and nests are controlled documents — scan your badge to open them.
+            </p>
+            <BadgeScanPanel
+              busy={busy}
+              blocked={mutationsBlocked}
+              offlineHintId={!online ? OFFLINE_HINT_ID : undefined}
+              error={badgeError}
+              idPrefix="crew-docs"
+              prompt="Scan badge to view — or type ID"
+              onBadge={(id) => void handleDocsBadge(id)}
+              onCancel={() => setView({ name: 'job', operationId: view.operationId })}
+            />
+          </section>
+        )}
+
         {/* STEPS — the shared panel bound to the badge-minted operator token */}
         {view.name === 'steps' && viewItem && (
           <KioskStepsPanel
@@ -1454,6 +1538,7 @@ export default function CrewStationKiosk() {
           </section>
         )}
       </main>
+      )}
 
       {/* COMPLETE confirm — crew-wide, badge-signed, roster re-derived live. */}
       {view.name === 'completeConfirm' && viewItem && (

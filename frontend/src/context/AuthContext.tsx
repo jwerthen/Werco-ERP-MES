@@ -103,6 +103,34 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, [user, sessionWarning, resetIdleTimer, clearTimers]);
 
+  // Kiosk badge-screen fallback wiring: on /kiosk paths the axios 401
+  // interceptor clears the session WITHOUT navigating to /login
+  // (services/api.ts → redirectToLoginUnlessKiosk). React to the token
+  // clearing here so `isAuthenticated` actually flips and OperatorKiosk
+  // re-renders to its badge login screen without a reload. api.setToken /
+  // setTokens dispatch the same event with a token present — no-ops here.
+  useEffect(() => {
+    const handleTokenChanged = () => {
+      let token: string | null = null;
+      try {
+        token = sessionStorage.getItem('token');
+      } catch {
+        // sessionStorage unavailable — treat as signed out
+      }
+      if (!token) {
+        setUser(null);
+        setSessionWarning(false);
+        try {
+          sessionStorage.removeItem('user');
+        } catch {
+          // nothing to clear
+        }
+      }
+    };
+    window.addEventListener('werco:auth-token-changed', handleTokenChanged);
+    return () => window.removeEventListener('werco:auth-token-changed', handleTokenChanged);
+  }, []);
+
   useEffect(() => {
     // Check for existing token on mount
     const token = sessionStorage.getItem('token');

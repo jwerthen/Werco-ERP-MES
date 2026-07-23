@@ -83,23 +83,31 @@ module.exports = {
           900: '#f6f8fb',  // strongest text
           950: '#ffffff',  // maximum contrast text
         },
-        // Foundry tactical accents (instrument-panel status palette)
+        // Foundry tactical accents (instrument-panel status palette).
+        // Values resolve the `--fd-*` CSS variables from index.css `:root`
+        // (NOT baked hex) so a scope class can re-theme a subtree — the kiosk
+        // surfaces override them via `.fd-scope-kiosk`. Outside that scope the
+        // `:root` values are byte-identical to the old literals, so every
+        // existing `bg-fd-*` / `text-fd-*` utility renders exactly as before.
+        // Tailwind v4 emits color-mix() for opacity modifiers (bg-fd-red/10),
+        // which composes with var()-based colors at runtime.
         fd: {
-          canvas: '#0d1117',
-          panel: '#141b26',
-          raised: '#1b2330',
-          sunken: '#0a0e15',
-          line: '#243042',
-          'line-bright': '#32415a',
-          ink: '#f0f4f9',
-          body: '#b7c3d4',
-          mute: '#8a98ab',
-          faint: '#616f82',
-          blue: '#2f81f7',
-          red: '#f04438',
-          amber: '#d29922',
-          green: '#3fb950',
-          cyan: '#39c5cf',
+          canvas: 'var(--fd-canvas)',
+          panel: 'var(--fd-panel)',
+          raised: 'var(--fd-raised)',
+          sunken: 'var(--fd-sunken)',
+          line: 'var(--fd-line)',
+          'line-bright': 'var(--fd-line-bright)',
+          ink: 'var(--fd-ink)',
+          body: 'var(--fd-body)',
+          'body-2': 'var(--fd-body-2)',
+          mute: 'var(--fd-mute)',
+          faint: 'var(--fd-faint)',
+          blue: 'var(--fd-blue)',
+          red: 'var(--fd-red)',
+          amber: 'var(--fd-amber)',
+          green: 'var(--fd-green)',
+          cyan: 'var(--fd-cyan)',
         },
         // Status colors - high contrast for quick scanning (Foundry tactical)
         status: {

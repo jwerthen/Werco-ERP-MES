@@ -687,8 +687,11 @@ mixed**:
 > drawing** — optional, with **no approval workflow**, and it **never gates clock-in**. Attach
 > references a Document already uploaded via `POST /documents/upload`; non-PDF documents are
 > rejected with **400**. `GET /laser-nests/{id}/document` serves it `Content-Type: application/pdf`,
-> `Content-Disposition: inline` so the kiosk/operator station can preview it; **404** if none is
-> attached. Detach only clears the FK — the Document row and its stored bytes survive.
+> `Content-Disposition: inline` so the operator can preview it; **404** if none is attached. Kiosk
+> surfaces preview through the fence-safe `GET /shop-floor/documents/{document_id}/inline` twin
+> instead (badge-minted kiosk tokens can't reach `/laser-nests` — see Shop Floor → "Kiosk doc
+> viewer"); this route remains the desktop path. Detach only clears the FK — the Document row and
+> its stored bytes survive.
 >
 > **Soft delete (`DELETE /laser-nests/{id}`).** Soft-deletes the nest (`SoftDeleteMixin`; never a
 > hard delete) and sets its operation to **`ON_HOLD`**, which removes it from the operator/work-center
@@ -1036,6 +1039,8 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 |--------|----------|-------------|---------------|
 | GET | `/shop-floor/dashboard` | Shop floor dashboard | Yes |
 | GET | `/shop-floor/my-active-job` | Get current user's active job | Yes |
+| GET | `/shop-floor/operations/{id}/documents` | Kiosk doc-viewer discovery: the operation's controlled part drawing, live nest reference PDF, nest material, and critical SPC characteristics (see note below) | Yes |
+| GET | `/shop-floor/documents/{id}/inline` | Serve a kiosk-viewable document PDF inline — DRAWING-type or live-nest-referenced only, tenant-scoped, uniform **404** on any miss (see note below) | Yes |
 | POST | `/shop-floor/clock-in` | Clock in to operation | Yes |
 | POST | `/shop-floor/clock-out/{id}` | Clock out with production data | Yes |
 | POST | `/shop-floor/operations/{id}/start` | Start an operation | Yes |
@@ -1254,6 +1259,71 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > update — so the crew kiosk can toast who was auto-clocked-out. Read-only addition; the
 > auto-close mutation is unchanged.
 
+> **Kiosk telemetry / routing payload additions (Foundry redesign, 2026-07-23).** Read-only field
+> additions feeding the redesigned kiosk's top bar, telemetry tiles, and complete modal — old
+> clients ignore them, no shapes changed:
+>
+> - **`GET /shop-floor/work-center-queue/{id}`** — top-level **`work_center`**
+>   (`{id, code, name, description, current_status}`, the kiosk top bar's machine identity;
+>   `null` — never 404 — when the id is unknown or cross-tenant, and deliberately not filtered on
+>   `is_active`: a deactivated work center keeps serving its queued work). Each queue row adds
+>   **`part_revision`** (the part's revision letter; `null` on a part-less WO, e.g. a standalone
+>   laser-nest WO) and **`last_report`** (below).
+> - **`GET /shop-floor/my-active-job`** — top-level **`server_time`** (UTC ISO, on the empty
+>   payload too — the kiosk clock and cycle timer run on server-corrected time, same contract as
+>   the queue read). Each job dict adds **`part_revision`**; the open entry's own session counts
+>   **`quantity_produced`** / **`quantity_scrapped`** (this clock-in's deltas, distinct from the
+>   operation totals — feeds the AVG PER PC tile); **`last_report`**; **`downtime_minutes`**
+>   (float — Σ over the operation's `WorkOrderBlocker`s of `(resolved_at or now) − reported_at`,
+>   tenant-scoped; no shift math); and **`next_operation`**.
+> - **`last_report`** — `{at, good, scrap} | null`: the operation's most recent production-evidence
+>   report — the **deltas of that single report, not totals** — stamped by
+>   `POST /operations/{id}/production` and by a quantity-carrying clock-out (backed by the new
+>   nullable `work_order_operations.last_reported_at/_good/_scrapped` columns, migration `070`;
+>   **correct-forward, no backfill** — `null` until the first post-migration report lands).
+> - **`next_operation`** — `{operation_number, name, status, work_center: {id, code, name} | null}
+>   | null`: the next routing step by `sequence` (id tiebreak) in the same WO **regardless of
+>   status** — "where the job goes", not "what is startable" — `null` on the last operation. Rides
+>   the my-active-job job dict **and** the `POST /operations/{id}/complete` response (the complete
+>   modal's "ROUTES TO" row).
+
+> **Kiosk doc viewer — `GET /shop-floor/operations/{operation_id}/documents` +
+> `GET /shop-floor/documents/{document_id}/inline` (Foundry redesign).** The full-screen
+> drawing/nest viewer's two reads. Both live under `/shop-floor` **on purpose** — badge-minted
+> kiosk-scoped operator tokens are path-fenced to that prefix, so the crew station reaches them
+> with zero fence changes — and both are open to **any authenticated user** with no role gate
+> (operators must preview the shop drawing; mirrors the documented laser-nest inline stance).
+> Pure reads: no state change, no audit rows.
+>
+> **Discovery** (`/operations/{id}/documents`, tenant-scoped **404** on a cross-tenant/missing
+> operation):
+>
+> ```json
+> {
+>   "part": {"id", "part_number", "name", "revision"},
+>   "drawing": {"document_id", "revision", "title", "status", "released_at", "file_name"},
+>   "nest": {"laser_nest_id", "nest_name", "cnc_number", "document_id", "file_name"},
+>   "material": "304 SS",
+>   "critical_dims": [{"id", "name", "nominal", "usl", "lsl", "unit_of_measure"}]
+> }
+> ```
+>
+> `part` / `drawing` / `nest` / `material` are each `null` when absent. `drawing` is the newest
+> **approved/released `DRAWING`** Document for the WO's part (`released_at DESC NULLS LAST`, then
+> `id DESC`); `nest` routes through `active_laser_nest` (a soft-deleted nest never appears), and
+> `material` is that nest's material. `critical_dims` are the part's **critical, active**
+> `SPCCharacteristic` rows — rows scoped to this routing operation's number or unscoped
+> (`operation_number` null) are preferred; when none match, all critical rows are returned rather
+> than hidden.
+>
+> **Byte serving** (`/documents/{id}/inline`) — the **single kiosk byte-serving route** (the kiosk
+> token fence blocks `/laser-nests/*` and `/documents/*`). Guard: the document must belong to the
+> active company **and** be either `document_type == DRAWING` or the reference PDF of a **live**
+> (non-deleted) laser nest in the same tenant. Any miss — cross-tenant, missing, or a document
+> that is neither — is a uniform **404**, never a 403, so the route leaks no existence
+> information. Serves exactly like `GET /laser-nests/{id}/document`: S3 stream or local file,
+> `Content-Type: application/pdf`, `Content-Disposition: inline`.
+
 > **Laser-nest payload on operator reads (`/work-center-queue/{id}`, `/my-active-job`).** So the
 > kiosk/operator station can surface the laser nest at clock-in, **every `/work-center-queue/{id}` row
 > now carries a `laser_nest` object** (it returned none before), and the `laser_nest` that
@@ -1266,7 +1336,9 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > (nullable)`, has_document` (bool — true when a reference PDF is attached)`, document_file_name`
 > (nullable) `}`. The attached PDF is served **inline** by `GET /laser-nests/{id}/document` (see Laser
 > Nests above), so `has_document` / `document_file_name` let the kiosk flag that a reference PDF is
-> attached and label it without a second round-trip.
+> attached and label it without a second round-trip. Kiosk surfaces now fetch the bytes through the
+> fence-safe `GET /shop-floor/documents/{document_id}/inline` instead (same serving, guarded — see
+> "Kiosk doc viewer" above); the `/laser-nests/{id}/document` route remains for desktop callers.
 
 > **Tenant isolation on clock/operation endpoints.** Clock-in, clock-out, and the shop-floor
 > operation start/complete endpoints scope every operation, work-order, and `TimeEntry` lookup to
@@ -1423,6 +1495,22 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > **optional** and may be omitted (e.g. the kiosk COMPLETE flow clocks out with zero scrap and no
 > reason). This invariant is enforced at the data boundary, so a scripted/API client can no longer
 > record reasonless scrap that the kiosk/desktop UIs already block.
+>
+> **Scrap → NCR on the production report (Foundry redesign).**
+> `POST /shop-floor/operations/{id}/production` (`ProductionReportRequest`) also accepts
+> **`open_ncr: bool = false`** and **`ncr_description`** (optional, ≤ 2000): when `open_ncr` is
+> true and the report carries scrap, the endpoint files a **`NonConformanceReport`
+> (`source=IN_PROCESS`)** for that scrap **in the same transaction** as the production write —
+> `quantity_affected` = the report's scrap delta, part/WO/lot from the work order,
+> `detected_by` = the caller, description = `ncr_description` or a generated line quoting the
+> scrap reason. Deliberately **no hold and no blocker** — the machine keeps running; Quality is
+> notified through the NCR itself plus a high-severity `ncr_created` operational event
+> (deliberate contrast with the process-step OOT quality-hold, which does hold the job). The NCR
+> create is audited (`log_create`, hash-chained). Response gains
+> **`ncr: {id, ncr_number} | null`** — the kiosk success toast quotes the real `ncr_number`;
+> `null` whenever no NCR was requested. `open_ncr` with `quantity_scrapped_delta <= 0` is a
+> **400** before any mutation (an NCR documents scrap; a scrapless one is a client bug). The
+> scrap-reason-required **422** above is unchanged and evaluated first.
 >
 > **Completion contract.** The shop-floor `/operations/{id}/complete` shares the same finalizer as
 > the office endpoint (see "Completion contract" under Work Orders): the absolute verb stores
@@ -3139,7 +3227,7 @@ the global default applied):
 | `POST /auth/register` | 3/minute |
 | `POST /auth/register-public` | 3/minute |
 | `POST /auth/refresh` | 30/minute |
-| `POST /auth/employee-login` | 3/minute |
+| `POST /auth/employee-login` | 10/minute |
 | `POST /auth/kiosk-badge-token` | 30/minute |
 | `POST /auth/display-token/claim` | 10/minute |
 | `POST /visitor-logs/station-login` | 5/minute |
@@ -3153,6 +3241,15 @@ resets) and body:
 ```
 Enforcement fails open: if the limiter backend errors, the request is allowed (the global default
 limit still applies).
+
+**`POST /auth/employee-login` additionally carries a per-IP failed-attempt throttle** — the
+compensating control for its 10/minute limit (raised from 3/minute for shift-change badge cycling
+on a shared kiosk): **8 FAILED attempts from one IP within 15 minutes → 429** ("Too many failed
+sign-in attempts — wait a few minutes") with a `Retry-After` header and a 15-minute cooldown.
+Successful logins never count toward the window; the check runs before any user lookup; each
+throttled rejection is audited as `EMPLOYEE_LOGIN_BLOCKED`; a counter-storage outage fails open
+with a logged warning (the 10/minute cap above still applies). Implementation:
+`backend/app/core/login_throttle.py`.
 
 ## CORS
 

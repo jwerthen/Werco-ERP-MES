@@ -58,7 +58,16 @@ export default function KioskCompleteConfirmModal({
   });
 
   return (
-    <Modal open={open} onClose={onCancel} size="xl" closeOnBackdrop={false} ariaLabelledBy="kiosk-complete-title">
+    <Modal
+      open={open}
+      onClose={onCancel}
+      size="xl"
+      closeOnBackdrop={false}
+      ariaLabelledBy="kiosk-complete-title"
+      // The shared Modal portals to document.body — outside the page's
+      // .fd-scope-kiosk wrapper — so the scope class rides the panel itself.
+      className="fd-scope-kiosk"
+    >
       <h2 id="kiosk-complete-title" className="text-3xl font-bold text-fd-ink">
         Complete job?
       </h2>

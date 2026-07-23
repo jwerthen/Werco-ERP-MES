@@ -52,4 +52,28 @@ describe('LaserNestPdfPreview', () => {
     render(<LaserNestPdfPreview laserNestId={2} />);
     expect(await screen.findByText(/could not load the nest pdf/i)).toBeInTheDocument();
   });
+
+  // Kiosk transport injection (Kiosk Foundry Redesign): a provided fetchBlob
+  // fully replaces the global-axios default so fenced kiosk surfaces never
+  // drive the /login-redirecting client.
+  it('uses an injected fetchBlob instead of the api client when provided', async () => {
+    const fetchBlob = jest.fn().mockResolvedValue('blob:kiosk-transport');
+
+    const { container } = render(
+      <LaserNestPdfPreview laserNestId={7} fileName="nest-7.pdf" fetchBlob={fetchBlob} />
+    );
+
+    await waitFor(() =>
+      expect(container.querySelector('object')).toHaveAttribute('data', 'blob:kiosk-transport')
+    );
+    expect(fetchBlob).toHaveBeenCalledTimes(1);
+    expect(mockApi.fetchLaserNestDocument).not.toHaveBeenCalled();
+  });
+
+  it('shows the error state when the injected fetchBlob rejects (never navigates)', async () => {
+    const fetchBlob = jest.fn().mockRejectedValue(new Error('badge session expired'));
+    render(<LaserNestPdfPreview laserNestId={8} fetchBlob={fetchBlob} />);
+    expect(await screen.findByText(/could not load the nest pdf/i)).toBeInTheDocument();
+    expect(mockApi.fetchLaserNestDocument).not.toHaveBeenCalled();
+  });
 });
