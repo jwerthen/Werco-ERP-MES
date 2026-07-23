@@ -80,6 +80,7 @@ def issue_display_token(
     created_by: int,
     audit: AuditService,
     dept: Optional[str] = None,
+    show_customer_names: bool = False,
 ) -> Tuple[DisplayToken, str, str]:
     """Create a display_tokens row + matching JWT + one-time setup code.
 
@@ -88,6 +89,11 @@ def issue_display_token(
     on every request), so revocation/expiry hold even for an already-minted
     JWT. The setup code (15-min, single-use) lets the TV pair by typing 8
     chars instead of the full JWT URL; only its SHA-256 lands in the row.
+
+    ``show_customer_names`` (default False = public-safe) records whether this
+    display is allowed to reveal work-order customer names on the wallboard; it
+    is stored on the row, audited, and enforced server-side in the wallboard
+    payload builder.
     """
     expires_at = datetime.utcnow() + timedelta(days=expires_days)
     jti = secrets.token_urlsafe(32)
@@ -102,6 +108,7 @@ def issue_display_token(
         created_by=created_by,
         company_id=company_id,
         dept=dept,
+        show_customer_names=show_customer_names,
         setup_code_hash=_hash_setup_code(setup_code),
         setup_code_expires_at=setup_code_expires_at,
         setup_code_used_at=None,
@@ -121,6 +128,7 @@ def issue_display_token(
             "expires_at": to_utc_iso(expires_at),
             "company_id": company_id,
             "dept": dept,
+            "show_customer_names": show_customer_names,
             "setup_code_expires_at": to_utc_iso(setup_code_expires_at),
         },
         description=f"Issued wallboard display token '{label}' (expires {expires_at.date().isoformat()})",

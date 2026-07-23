@@ -857,6 +857,7 @@ def create_display_token_endpoint(
         created_by=current_user.id,
         audit=audit,
         dept=payload.dept,
+        show_customer_names=payload.show_customer_names,
     )
     return DisplayTokenIssueResponse(
         **DisplayTokenResponse.model_validate(record).model_dump(),

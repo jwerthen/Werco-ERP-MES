@@ -2,8 +2,8 @@
  * One work-order card on the Foundry TV board's 4×3 grid (design handoff
  * 2026-07-22, zone 2).
  *
- * Five fixed rows — header (WO + status chip) / part + qty / op + time /
- * machine + stop reason / progress — all keyed off classifyJob's strict
+ * Five fixed rows — header (WO + status chip) / part + qty / customer OR op +
+ * time / machine + stop reason / progress — all keyed off classifyJob's strict
  * DOWN > BLOCKED > LATE > RUNNING > WAITING precedence. Stoppage detail is
  * JOINED client-side by the caller (downtime from work_centers by
  * work-center code, blocked age from blocked_wos by WO number) and degrades
@@ -114,6 +114,10 @@ export default function WoCard({
   const spec = STATE_SPECS[state];
   const waiting = state === 'waiting';
 
+  // Gated customer name (executive displays only). Blank/absent → fall back to
+  // the op line, which is what every public shop-floor board shows.
+  const customer = job.customer_name?.trim() || null;
+
   const qtyOrdered = job.qty_ordered ?? 0;
   const qtyComplete = job.qty_complete ?? 0;
   const pct = qtyOrdered > 0 ? Math.min(100, Math.max(0, Math.round((100 * qtyComplete) / qtyOrdered))) : 0;
@@ -195,16 +199,28 @@ export default function WoCard({
         </span>
       </div>
 
-      {/* Row 3 — op position + the state's time value */}
+      {/* Row 3 — customer (executive boards) or op position + the state's time
+          value. customer_name is gated server-side: present only on an
+          authorized display, so a public board falls back to the op line. */}
       <div className="flex items-center justify-between gap-[0.5rem] text-[1rem]">
-        <span
-          className="min-w-0 truncate tracking-[0.05em]"
-          style={{ color: job.current_op ? (waiting ? FD.mute : FD.body) : FD.mute }}
-        >
-          {job.current_op
-            ? `OP ${(job.ops_completed ?? 0) + 1}/${job.ops_total ?? 0} · ${(job.current_op.name ?? '').toUpperCase()}`
-            : 'ALL OPS COMPLETE'}
-        </span>
+        {customer ? (
+          <span
+            className="min-w-0 truncate font-semibold tracking-[0.05em]"
+            data-testid="wo-card-customer"
+            style={{ color: FD.body }}
+          >
+            {customer.toUpperCase()}
+          </span>
+        ) : (
+          <span
+            className="min-w-0 truncate tracking-[0.05em]"
+            style={{ color: job.current_op ? (waiting ? FD.mute : FD.body) : FD.mute }}
+          >
+            {job.current_op
+              ? `OP ${(job.ops_completed ?? 0) + 1}/${job.ops_total ?? 0} · ${(job.current_op.name ?? '').toUpperCase()}`
+              : 'ALL OPS COMPLETE'}
+          </span>
+        )}
         {timeValue ? (
           <span
             className={`shrink-0 ${timeValue.bold ? 'font-bold' : 'font-semibold'}`}

@@ -108,11 +108,19 @@ export interface WallboardJobOp {
 /**
  * One open work order tile on the job wall (owner feedback 2026-07-15: the
  * main wall shows WORK ORDERS with their CURRENT OPERATION, not machines).
- * NO customer_name, NO dollars, NO notes.
+ * NO dollars, NO notes.
+ *
+ * `customer_name` is GATED server-side: it is only populated for a principal
+ * authorized to see it (an executive display token opted in via
+ * `show_customer_names`, or a signed-in privileged office role). It is
+ * null/undefined on every public shop-floor TV — the card falls back to the
+ * op line in that case.
  */
 export interface WallboardJob {
   wo_number: string;
   part_number?: string | null;
+  /** Gated — present only for authorized (executive) displays; else absent. */
+  customer_name?: string | null;
   /** released | in_progress */
   status?: string;
   /** WO-level quantities (the tile progress bar). */
@@ -180,6 +188,9 @@ export interface DisplayToken {
   /** Department the display is pinned to (wallboard ?dept=). Optional so a
    *  list payload from an older backend can't break the tab. */
   dept?: string | null;
+  /** Whether this display reveals work-order customer names on the wallboard
+   *  (default false = public-safe). Optional for old-backend back-compat. */
+  show_customer_names?: boolean;
 }
 
 /**
@@ -219,4 +230,7 @@ export interface DisplayTokenCreateInput {
   label: string;
   expires_days?: number;
   dept?: string;
+  /** Opt this display in to showing customer names on the wallboard. Default
+   *  false — set true ONLY for a trusted executive-office TV. */
+  show_customer_names?: boolean;
 }

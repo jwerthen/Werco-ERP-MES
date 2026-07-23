@@ -69,6 +69,14 @@ class DisplayToken(Base, TenantMixin):
     # query param.
     dept = Column(String(50), nullable=True)
 
+    # Executive-office TVs opt IN to showing customer names on the wallboard.
+    # Default False keeps every existing display AND every public shop-floor TV
+    # redacted — the wallboard payload's long-standing "no customer names on a
+    # public screen" posture (CUI/AS9100D). Enforced server-side in
+    # ``build_wallboard_payload`` (via the WallboardPrincipal); a display token
+    # can never widen its own scope past this flag.
+    show_customer_names = Column(Boolean, nullable=False, default=False, server_default='false')
+
     created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 

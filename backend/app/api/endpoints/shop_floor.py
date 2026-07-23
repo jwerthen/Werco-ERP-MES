@@ -2650,8 +2650,13 @@ def shop_floor_wallboard(
     DELIBERATELY side-effect free: no reconcile-on-read, no audit rows, no
     events — an unattended TV polling every 30s must never mutate state, and
     a display token has no user identity to attribute writes to.
+
+    Customer names are redacted UNLESS the principal is authorized to see them
+    (``principal.show_customer`` — a display token opted in via
+    ``show_customer_names``, or a signed-in privileged office role); the default
+    keeps public shop-floor TVs customer-free.
     """
-    return build_wallboard_payload(db, principal.company_id, dept=dept)
+    return build_wallboard_payload(db, principal.company_id, dept=dept, include_customer=principal.show_customer)
 
 
 @router.get("/active-users")
