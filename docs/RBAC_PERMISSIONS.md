@@ -40,6 +40,13 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 | Complete | ✓ | ✓ | ✓ | ✓ | ✓ | | |
 | Approve labor (TimeEntry) | ✓ | ✓ | ✓ | | ✓ | | |
 
+> **Delete — code now matches the matrix (Admin + Manager).** `DELETE /api/v1/work-orders/{id}`
+> (`app/api/endpoints/work_orders.py`) was previously gated **stricter than this matrix** —
+> `require_role([ADMIN])` — while the **Delete** row above already listed Admin **and** Manager. The
+> gate is now `require_role([ADMIN, MANAGER])`, so a Manager can soft-delete a work order as documented.
+> Soft/hard-delete and restore behavior is otherwise unchanged (default soft delete; `hard_delete=true`
+> only for draft/cancelled WOs). See `docs/API.md` → Work Orders.
+
 > **Approve labor — endpoint mapping (Batch 11B / G5-A).** The shop-floor labor sign-off
 > `POST /api/v1/shop-floor/time-entries/{id}/approve` and `…/unapprove` (which set / clear
 > `TimeEntry.approved` + `approved_by`, the field the opt-in `REQUIRE_APPROVED_LABOR_FOR_COST` flag
@@ -234,6 +241,8 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 | View | ✓ | ✓ | ✓ | | | | ✓ |
 | Create | ✓ | ✓ | ✓ | | | | |
 | Approve | ✓ | ✓ | | | | | |
+| Delete / restore vendor (soft) | ✓ | ✓ | | | | | |
+| Delete / restore purchase order (soft) | ✓ | ✓ | | | | | |
 
 > **Read enforcement:** Per the [Access enforcement model](#access-enforcement-model),
 > Purchasing list/detail reads (`list_vendors`, `list_purchase_orders`, and the
@@ -243,6 +252,18 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > restriction. Only the write/approve actions (Create, Approve, send, line edits) are
 > role-gated. Receiving (below) follows the same read-broad / write-restricted pattern.
 
+> **Vendor / PO soft-delete + restore — endpoint mapping.** `DELETE /purchasing/vendors/{id}`,
+> `POST /purchasing/vendors/{id}/restore`, `DELETE /purchasing/purchase-orders/{id}`, and
+> `POST /purchasing/purchase-orders/{id}/restore` (`app/api/endpoints/purchasing.py`) are enforced **in
+> code** to the two **Delete / restore** rows above — `require_role([ADMIN, MANAGER])`. `Vendor` and
+> `PurchaseOrder` gained `SoftDeleteMixin` (migration `071_soft_delete_purchasing_ncr`), so these are
+> **soft** deletes (never physical — invariant #3): the row is flagged `is_deleted`, drops out of all
+> reads, and is restorable. Both the delete and the restore write a tamper-evident `audit_log` row.
+> Guardrails are server-enforced: a **vendor** delete also deactivates it (`is_active=false`) and is
+> refused (**400**) while it has an active PO; a **PO** delete is refused (**400**) when any line has
+> received material (void the receipts first); and opening a PO against a soft-deleted/inactive vendor
+> is refused (**404**). See `docs/API.md` → Purchasing.
+
 ### Receiving
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
@@ -250,6 +271,8 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 | View | ✓ | ✓ | ✓ | | ✓ | | ✓ |
 | Create | ✓ | ✓ | ✓ | | | | |
 | Inspect | ✓ | ✓ | ✓ | | ✓ | | |
+| Correct receipt (in place) | ✓ | ✓ | ✓ | | | | |
+| Void receipt (soft-delete) | ✓ | ✓ | | | | | |
 | Print / reprint receiving label | ✓ | ✓ | ✓ | | | | |
 | Configure print profile | ✓ | | | | | | |
 
@@ -264,6 +287,23 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > path existed under `/api/v1/purchasing`; that duplicate has been removed, so `/api/v1/receiving`
 > is the single source of truth. Receiving reads follow the same read-broad / write-restricted
 > pattern noted for Purchasing above.
+
+> **Correct / void receipt — endpoint mapping.** Fixing a mis-keyed receipt is enforced **in code** on
+> `app/api/endpoints/receiving.py`:
+> - **`PATCH /receiving/receipt/{receipt_id}`** (correct in place — new total quantity + optional
+>   traceability fields, required reason) → `require_role([ADMIN, MANAGER, SUPERVISOR])`, the **Correct
+>   receipt** row — the same receive-tier set that may `POST /receiving/receive` and post inventory
+>   adjustments.
+> - **`POST /receiving/receipt/{receipt_id}/void`** (soft-delete + full reversal, required reason) →
+>   `require_role([ADMIN, MANAGER])`, the **Void receipt** row — deliberately tighter (void is delete
+>   authority; Supervisor can correct but not void).
+>
+> `POReceipt` gained `SoftDeleteMixin` (migration `071_soft_delete_purchasing_ncr`); void is a soft
+> delete (invariant #3) and is **terminal — there is no restore** (re-receive to redo). Both actions
+> require a non-blank `reason`, are fully tamper-evidently audited, and reconcile the PO line, PO
+> status, and (dock-to-stock) inventory — the historical `RECEIVE` transaction is never mutated;
+> reversal is a signed compensating `ADJUST`. Corrections/voids are refused after the receipt is
+> inspected, or once its stock has been allocated/consumed. See `docs/API.md` → Receiving & Inspection.
 
 > **Thermal receiving-label printing (ProxyBox / WHTP203e).** Manually (re)printing the
 > 4×6 receiving label — `POST /receiving/receipt/{receipt_id}/print-label` — is enforced
@@ -335,6 +375,7 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 | Approve | ✓ | ✓ | | | ✓ | | |
 | Calibration | ✓ | ✓ | | | ✓ | | |
 | Manage scrap reason codes | ✓ | ✓ | | | ✓ | | |
+| Void / restore NCR | ✓ | ✓ | | | ✓ | | |
 
 > **Inspect — endpoint mapping.** The shop-floor inspection sign-off
 > `POST /api/v1/shop-floor/operations/{operation_id}/inspection` (which records
@@ -353,6 +394,17 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > authenticated user in the tenant, including Operators via the kiosk/desktop scrap pickers — so
 > the matrix row above reflects the server-enforced **write** control. There is no delete endpoint:
 > retirement is `is_active: false` (historical scrap rows reference these ids — traceability).
+>
+> **Void / restore NCR — endpoint mapping.** `DELETE /quality/ncr/{ncr_id}` (void) and
+> `POST /quality/ncr/{ncr_id}/restore` (`app/api/endpoints/quality.py`) are enforced **in code** to the
+> **Void / restore NCR** row above — `require_role([ADMIN, MANAGER, QUALITY])`. `NonConformanceReport`
+> gained `SoftDeleteMixin` (migration `071_soft_delete_purchasing_ncr`); a void is a soft delete
+> (invariant #3) that also moves the NCR to the existing `VOID` status, requires a **non-blank
+> `reason`**, and is **refused (400)** while the NCR still actively gates a work order (an
+> `OPEN`/`ACKNOWLEDGED` `WorkOrderBlocker` references it). Restore reopens it to `OPEN`. Both are
+> tamper-evidently audited — the void writes a status-change **and** a delete row, closing a prior gap
+> where the `PUT /quality/ncr/{id}` update path wrote no `audit_log` row at all. See `docs/API.md` →
+> Quality.
 
 ### Operator Certifications & Training
 

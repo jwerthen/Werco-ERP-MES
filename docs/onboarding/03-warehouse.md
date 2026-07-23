@@ -134,6 +134,21 @@ There are three tabs inside Receiving:
 
 > Tip: Click **Receipt History** at the bottom of a selected PO to see every receipt logged against it, with lot numbers and dates.
 
+### Fixing a receiving mistake — Correct or Void
+
+Keyed the wrong quantity or lot? You don't edit the original entry — you either **Correct** it (fix the numbers in place) or **Void** it (undo the whole receipt). Both controls appear as **Correct** and **Void** buttons on receipt rows — in the **Inspection Queue**, in **History**, and in a PO's **Receipt History** sub-table.
+
+- **Correct** — opens the **Correct Receipt** box. Enter the **new total quantity received** (not the difference), fix the lot/heat/cert/serial or notes if needed, and give a **reason** (required). Saving reconciles the PO line and, for dock-to-stock material, your inventory automatically. *Supervisors, managers, and admins* can correct.
+- **Void** — opens the **Void Receipt** box. Give a **reason** (required) and confirm. The receipt is undone completely: the PO line, its status, and any inventory it added are reversed. **Voiding is final — there's no undo; if you need the receipt back, just receive it again.** *Managers and admins* can void.
+
+A couple of rules the system enforces, with a clear message if they apply:
+
+- Once a receipt has been **inspected** (Passed / Failed / Partial), you can't correct or void it here — that goes through the quality team (NCR or an inventory adjustment).
+- If the received stock has already been **used or allocated** to a job, you can't reverse it — make an inventory adjustment instead.
+- You can't change the **lot number** once dock-to-stock material is on the shelf — void and re-receive with the right lot.
+
+Every correction and void is recorded with your name, the reason, and a timestamp for the audit trail, and — importantly for an AS9100D audit — the original receipt record is **never rewritten**; a reversal posts a separate, signed inventory adjustment on top.
+
 ### Step 2 — Inspect what you received
 
 Receiving with **Requires Inspection** checked puts the material into the **Inspection Queue** — it is *not* available to use until you finish inspection. (Receipts received *without* the inspection flag skip this step and go straight to inventory.)

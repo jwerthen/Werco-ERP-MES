@@ -135,7 +135,7 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 | POST | `/work-orders/` | Create work order | Yes |
 | GET | `/work-orders/{id}` | Get work order by ID | Yes |
 | PUT | `/work-orders/{id}` | Update work order (body requires the WO's current `version` — stale → 409; also 409 if it moves a terminal WO back to a non-terminal status) | Yes |
-| DELETE | `/work-orders/{id}` | Delete work order | Admin |
+| DELETE | `/work-orders/{id}` | Delete work order (soft by default; `hard_delete=true` only for draft/cancelled) | Admin / Manager |
 | POST | `/work-orders/{id}/release` | Release to production | Yes |
 | POST | `/work-orders/{id}/start` | Start production | Yes |
 | POST | `/work-orders/{id}/complete` | Complete work order (409 if the WO is CANCELLED) | Yes |
@@ -1826,6 +1826,8 @@ the caller's most recent closed unapproved session.)
 | GET | `/quality/scrap-reason-codes` | List scrap reason codes (active only by default; `category` / `include_inactive` filters) | Yes |
 | POST | `/quality/scrap-reason-codes` | Create a scrap reason code | Admin / Manager / Quality |
 | PUT | `/quality/scrap-reason-codes/{reason_code_id}` | Update a scrap reason code (deactivate via `is_active: false`) | Admin / Manager / Quality |
+| DELETE | `/quality/ncr/{ncr_id}` | **Void** an NCR (soft-delete + status → `void`); body `{ "reason": "<non-blank>" }`. Guarded, see note | Admin / Manager / Quality |
+| POST | `/quality/ncr/{ncr_id}/restore` | Restore a voided NCR — reopens it to `open` | Admin / Manager / Quality |
 
 > **Scrap reason codes (Lean Phase 1).** The tenant's structured scrap vocabulary, referenced by the
 > optional `scrap_reason_code_id` accepted on the three scrap write paths —
@@ -1838,6 +1840,21 @@ the caller's most recent closed unapproved session.)
 > role-gated to **Admin / Manager / Quality** and write tamper-evident `audit_log` rows (resource type
 > `scrap_reason_code`). There is deliberately **no DELETE endpoint** — historical scrap rows reference
 > these ids (traceability), so retirement is `is_active: false`, never a row removal.
+
+> **NCR void + restore (`NonConformanceReport` now `SoftDeleteMixin`).** Voiding is the quality-record
+> form of a soft delete: `DELETE /quality/ncr/{ncr_id}` marks the NCR `is_deleted` **and** moves it to
+> `VOID` status (the status already existed), retaining it for AS9100D traceability and the
+> tamper-evident audit trail while dropping it from all live reads (which now filter
+> `is_deleted == false`). The request **requires a non-blank JSON body `{ "reason": "..." }`**
+> (whitespace-only → **422**); gate **Admin / Manager / Quality**. **Guardrail:** the void is **refused
+> with 400** while the NCR still **actively gates a work order** — an `OPEN`/`ACKNOWLEDGED`
+> `WorkOrderBlocker` references it — resolve the blocker first; a re-void returns **400** ("already
+> voided"). `POST /quality/ncr/{ncr_id}/restore` clears the soft-delete and reopens the NCR to
+> **`OPEN`** (the pre-void status is not preserved — a safe reset). Both actions are **fully audited**:
+> the void writes a `log_status_change` (→ `void`, reason in the description) **and** a `log_delete`
+> (`soft_delete=true`, reason in `extra_data`); restore writes a `log_update` (`action="restore"`).
+> This closes a prior gap where the ordinary `PUT /quality/ncr/{ncr_id}` update path emitted only an
+> operational event and **no** `audit_log` row.
 
 ### QMS Standards & Audit Readiness
 
@@ -1992,12 +2009,16 @@ the public paths are `/eco/eco/…`.
 | POST | `/purchasing/vendors` | Create vendor | Admin / Manager |
 | GET | `/purchasing/vendors/{vendor_id}` | Get vendor by ID | Yes |
 | PUT | `/purchasing/vendors/{vendor_id}` | Update vendor — `code` is editable (see note) | Admin / Manager |
+| DELETE | `/purchasing/vendors/{vendor_id}` | Soft-delete a vendor (also sets `is_active=false`) — guarded, see note below | Admin / Manager |
+| POST | `/purchasing/vendors/{vendor_id}/restore` | Restore a soft-deleted vendor (re-activates it) | Admin / Manager |
 | GET | `/purchasing/purchase-orders` | List purchase orders (filters: `status`, `vendor_id`) | Yes |
 | POST | `/purchasing/purchase-orders` | Create purchase order with its lines | Admin / Manager / Supervisor |
 | GET | `/purchasing/purchase-orders/{po_id}` | Get PO by ID | Yes |
 | PUT | `/purchasing/purchase-orders/{po_id}` | Update purchase order | Admin / Manager / Supervisor |
 | POST | `/purchasing/purchase-orders/{po_id}/send` | Issue a PO to the vendor — status → `sent`, stamps `order_date`; only `draft`/`approved` POs (else **400**) | Admin / Manager |
 | POST | `/purchasing/purchase-orders/{po_id}/lines` | Add a line to a `draft` PO (else **400**) and roll the PO subtotal/total | Admin / Manager / Supervisor |
+| DELETE | `/purchasing/purchase-orders/{po_id}` | Soft-delete a purchase order — guarded, see note below | Admin / Manager |
+| POST | `/purchasing/purchase-orders/{po_id}/restore` | Restore a soft-deleted purchase order | Admin / Manager |
 
 > Material receiving and incoming inspection are **not** under `/purchasing`. They live under
 > `/receiving` (see below). The duplicate `/purchasing/receiving*` endpoints were removed.
@@ -2030,6 +2051,25 @@ the public paths are `/eco/eco/…`.
 > the PO recording the subtotal/total roll (`extra_data.cause = "po_line_added"`). Audit rows are
 > flushed before the terminal commit so they commit atomically with the change. (These endpoints
 > were RBAC-gated but unaudited prior to 2026-07-12; the import loader was already per-row audited.)
+>
+> **Vendor / PO soft-delete + restore (`Vendor`, `PurchaseOrder` now `SoftDeleteMixin`).** Both
+> `DELETE` endpoints are **soft** deletes (compliance invariant #3 — never a physical `DELETE`):
+> the row is marked `is_deleted` / `deleted_at` / `deleted_by`, disappears from all list/detail reads
+> (which now filter `is_deleted == false`), and is restorable via the paired `POST .../restore`. Both
+> the delete and the restore write a tamper-evident `audit_log` row (`log_delete` with
+> `soft_delete=true` on delete; `log_update` with `action="restore"` on restore), flushed before the
+> terminal commit so it commits atomically with the change. Guardrails:
+> - **Vendor delete** additionally sets `is_active=false`, and is **refused with 400** while the vendor
+>   still has any **active** (not `closed`/`cancelled`, not soft-deleted) purchase order — close or
+>   cancel those first (the 400 names the count). A double delete returns **400** ("already deleted");
+>   restore re-sets `is_active=true`.
+> - **PO delete** is **refused with 400** when any line has received material
+>   (`quantity_received > 0`) — *"Void the receipt(s) first, then delete."* (see Receiving → void
+>   below) — so voided receipts / inventory can't be stranded behind a deleted PO. A double delete
+>   returns **400** ("already deleted").
+> - **Creating a PO against a soft-deleted or inactive vendor is refused** (**404** "Vendor not found"):
+>   `POST /purchasing/purchase-orders` now resolves the vendor with `is_deleted == false` **and**
+>   `is_active == true`.
 
 ### PO Upload (AI document extraction)
 
@@ -2065,6 +2105,8 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 | POST | `/receiving/receive` | Receive material against a PO line (`lot_number` optional — auto-assigned when blank, see below) | Admin / Manager / Supervisor |
 | GET | `/receiving/inspection-queue` | List receipts pending inspection (`days_back` optional, bounded 1–3650; **no date cutoff by default** — pending receipts never age out, so the list matches the `/stats` `pending_inspection` count) | Yes |
 | GET | `/receiving/receipt/{receipt_id}` | Get receipt detail | Yes |
+| PATCH | `/receiving/receipt/{receipt_id}` | Correct a mis-keyed receipt in place (new total `quantity_received` + optional traceability fields; required `reason`) — reconciles PO line / PO status / inventory. Guarded, see note | Admin / Manager / Supervisor |
+| POST | `/receiving/receipt/{receipt_id}/void` | Void (soft-delete) a receipt with full reversal of PO line / status / inventory; required `reason`. Terminal — no restore. Guarded, see note | Admin / Manager |
 | POST | `/receiving/inspect/{receipt_id}` | Complete inspection (accept/reject, auto-NCR on rejection) | Admin / Manager / Quality / Supervisor |
 | GET | `/receiving/history` | Receiving history with inspection results | Yes |
 | GET | `/receiving/stats` | Receiving statistics for dashboard | Yes |
@@ -2103,6 +2145,44 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 > so acceptance rates are unaffected. Receipts auto-accepted before this change keep their
 > prior values (they may still read `passed` / `visual`) — historical quality records are
 > corrected forward, not rewritten.
+
+> **Correcting or voiding a receipt (`POReceipt` now `SoftDeleteMixin`).** A mis-keyed receipt is
+> fixed with **`PATCH /receiving/receipt/{receipt_id}`** (correct in place) or reversed entirely with
+> **`POST /receiving/receipt/{receipt_id}/void`** (soft-delete). Both **require a non-blank `reason`**
+> (recorded on the tamper-evident `audit_log`) and are **fully audited**; live reads now filter
+> `is_deleted == false`.
+>
+> - **Correct** — body: `quantity_received` (the **new TOTAL** received, **> 0** — not a delta) plus
+>   optional `lot_number` / `heat_number` / `cert_number` / `serial_numbers` / `notes`, and the
+>   required `reason`. Gate **Admin / Manager / Supervisor** (the receive-tier — the same roles that
+>   `POST /receiving/receive` and post inventory adjustments). Response: the updated `ReceiptResponse`.
+> - **Void** — body: `reason` only. Gate **Admin / Manager** (tighter — void is delete authority).
+>   **Terminal: there is no restore** — to redo, re-receive.
+>
+> **What gets reconciled (both paths).** All refusal guards run **before any mutation**, so a refusal
+> never leaves the receipt half-reconciled:
+> - **PO line** — `quantity_received` is rolled to match (a void drops it to 0); the line's `is_closed`
+>   is recomputed, so a void can **reopen** a previously-closed line.
+> - **PO status** — recomputed from all lines: `received` (all closed) → `partial` (any received) →
+>   back to **`sent`** when nothing is left received (the pre-receipt open state). A status move is
+>   itself audited (`log_status_change`).
+> - **Inventory (dock-to-stock receipts only)** — a **signed compensating `InventoryTransaction`
+>   `ADJUST`** is appended (`reason_code` `RECEIPT_CORRECTION` / `RECEIPT_VOID`) to move on-hand by the
+>   delta. **AS9100D records integrity: the historical `RECEIVE` transaction is never mutated or
+>   deleted** — reversal is always a new, signed compensating row (like a manual inventory adjustment).
+>   `PENDING_INSPECTION` receipts placed no stock, so nothing is adjusted there.
+>
+> **State model — allowed only before inspection / while unconsumed.** A receipt is correctable/voidable
+> only while it is **`pending`** (awaiting inspection) or **`not_required`** (dock-to-stock accepted).
+> Refusals (all with actionable `detail`):
+> - already **inspected** (`passed` / `failed` / `partial`) → **409** — handle via NCR / inventory
+>   adjustment, not here.
+> - **lot change after stock was placed** (dock-to-stock) → **400** — void and re-receive instead.
+> - received stock for the lot **already allocated or consumed** (would drive `quantity_available`
+>   negative) → **409** — make an inventory adjustment instead.
+> - the reversal would drive the PO line's received total **negative** → **409**.
+> - the receipt's PO line no longer exists (orphaned) → **400** (never a 500).
+> - a cross-tenant / missing / already-voided receipt → **404**.
 
 > **Thermal receiving-label printing (ProxyBox / WHTP203e).** A 4×6 PDF (part / rev /
 > qty / lot / Code128, CRITICAL banner for critical parts) is rendered, stored as a
