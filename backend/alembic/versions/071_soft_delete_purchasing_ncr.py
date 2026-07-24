@@ -1,8 +1,20 @@
 """Add SoftDeleteMixin columns to vendors, purchase_orders, po_receipts, ncrs
 
 Revision ID: 071_soft_delete_purchasing_ncr
-Revises: 070_operation_last_report
+Revises: 071_display_token_show_customer
 Create Date: 2026-07-23
+
+Re-parent note (2026-07-23)
+---------------------------
+Originally authored with ``down_revision = "070_operation_last_report"``. While
+this branch was in review, PR #150 merged ``071_display_token_show_customer``
+(also off ``070``) to ``main``; two revisions off one parent is two Alembic
+heads. This revision was re-parented onto ``071_display_token_show_customer`` so
+the graph has a single head once this branch merges. The revision id / filename
+are intentionally left as ``071_soft_delete_purchasing_ncr`` (Alembic keys on
+the revision string, not the numeric prefix) so every existing reference to
+"migration 071" across the docs stays accurate; the numeric prefix simply
+repeats — harmless and the migration-graph tests still pass.
 
 Context
 -------
@@ -97,7 +109,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision = "071_soft_delete_purchasing_ncr"
-down_revision = "070_operation_last_report"
+down_revision = "071_display_token_show_customer"
 branch_labels = None
 depends_on = None
 
