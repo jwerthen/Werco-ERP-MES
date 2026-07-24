@@ -57,10 +57,12 @@ import {
   ArrowUpTrayIcon,
   RocketLaunchIcon,
   BellAlertIcon,
+  BellIcon,
   UserPlusIcon,
   UserGroupIcon,
   QueueListIcon,
 } from '@heroicons/react/24/outline';
+import NotificationBell from './NotificationBell';
 
 interface LayoutProps {
   children: React.ReactNode;
@@ -93,6 +95,7 @@ const navSections: NavSection[] = [
     items: [
       { name: 'Dashboard', href: '/', icon: HomeIcon },
       { name: 'Action Inbox', href: '/action-inbox', icon: BellAlertIcon },
+      { name: 'Notifications', href: '/notifications', icon: BellIcon },
     ],
   },
   {
@@ -824,6 +827,9 @@ export default function Layout({ children }: LayoutProps) {
                     <span className="hidden md:inline font-mono text-xs">copilot</span>
                   </button>
                 )}
+
+                {/* Notification bell + unread badge (poll-only in PR 1; WS push is PR 2) */}
+                {!isKiosk && <NotificationBell />}
 
                 {/* HUD status cluster */}
                 <div className="hidden xl:flex items-center gap-3.5 pl-1 font-mono text-[11px]">

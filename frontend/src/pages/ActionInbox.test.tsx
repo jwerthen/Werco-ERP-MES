@@ -18,7 +18,6 @@ jest.mock('../services/api', () => ({
   __esModule: true,
   default: {
     getSetupHealth: jest.fn(),
-    getNotificationLogs: jest.fn(),
     getAIRecommendations: jest.fn(),
     acceptAIRecommendation: jest.fn(),
     dismissAIRecommendation: jest.fn(),
@@ -57,7 +56,6 @@ describe('ActionInbox Top 3 hero', () => {
     jest.clearAllMocks();
     localStorage.clear();
     mockApi.getSetupHealth.mockResolvedValue(emptyHealth);
-    mockApi.getNotificationLogs.mockResolvedValue([]);
   });
 
   it('renders the top 3 recommendations by score in the hero and the rest in the queue', async () => {

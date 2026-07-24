@@ -20,8 +20,8 @@ import { AIRecommendation, recommendationIsApplyable } from '../types/aiLearning
 import { formatCentralDateTime, toDate } from '../utils/centralTime';
 
 type Severity = 'high' | 'medium' | 'low' | 'info';
-type ItemSource = 'setup' | 'master-data' | 'notification' | 'ai';
-type FilterKey = 'open' | 'high' | 'ai' | 'master-data' | 'setup' | 'notifications' | 'dismissed';
+type ItemSource = 'setup' | 'master-data' | 'ai';
+type FilterKey = 'open' | 'high' | 'ai' | 'master-data' | 'setup' | 'dismissed';
 
 interface SetupStep {
   key: string;
@@ -49,19 +49,6 @@ interface SetupHealth {
   issues: MasterDataIssue[];
 }
 
-interface NotificationLog {
-  id?: number | string;
-  event_type?: string;
-  title?: string;
-  subject?: string;
-  message?: string;
-  body?: string;
-  status?: string;
-  sent_at?: string;
-  created_at?: string;
-  error_message?: string;
-}
-
 interface InboxItem {
   id: string;
   source: ItemSource;
@@ -84,7 +71,6 @@ const severityStyles: Record<Severity, string> = {
 const sourceLabels: Record<ItemSource, string> = {
   setup: 'Setup',
   'master-data': 'Master Data',
-  notification: 'Notification',
   ai: 'AI',
 };
 
@@ -94,7 +80,6 @@ const filterLabels: Record<FilterKey, string> = {
   ai: 'AI',
   'master-data': 'Master Data',
   setup: 'Setup',
-  notifications: 'Notifications',
   dismissed: 'Dismissed',
 };
 
@@ -115,9 +100,7 @@ const getStoredDismissed = () => {
 
 export default function ActionInbox() {
   const [health, setHealth] = useState<SetupHealth | null>(null);
-  const [notifications, setNotifications] = useState<NotificationLog[]>([]);
   const [aiRecommendations, setAiRecommendations] = useState<AIRecommendation[]>([]);
-  const [notificationsAvailable, setNotificationsAvailable] = useState(true);
   const [aiAvailable, setAiAvailable] = useState(true);
   const [loading, setLoading] = useState(true);
   const [actioningId, setActioningId] = useState<number | null>(null);
@@ -135,26 +118,15 @@ export default function ActionInbox() {
     setLoading(true);
     setError(null);
 
-    const [healthResult, notificationResult, aiResult] = await Promise.allSettled([
+    const [healthResult, aiResult] = await Promise.allSettled([
       api.getSetupHealth(),
-      api.getNotificationLogs({ limit: 25 }),
       api.getAIRecommendations({ status: 'pending', limit: 25 }),
     ]);
 
     if (healthResult.status === 'fulfilled') {
       setHealth(healthResult.value);
     } else {
-      setError('Setup health is unavailable. Action Inbox is showing notification activity only.');
-    }
-
-    if (notificationResult.status === 'fulfilled') {
-      const payload = notificationResult.value;
-      const rows = Array.isArray(payload) ? payload : payload?.items || payload?.results || payload?.logs || [];
-      setNotifications(rows);
-      setNotificationsAvailable(true);
-    } else {
-      setNotifications([]);
-      setNotificationsAvailable(false);
+      setError('Setup health is unavailable. Action Inbox is showing AI recommendations only.');
     }
 
     if (aiResult.status === 'fulfilled') {
@@ -214,19 +186,6 @@ export default function ActionInbox() {
       href: issue.href,
     }));
 
-    const notificationItems: InboxItem[] = notifications.map((notification, index) => {
-      const status = (notification.status || '').toLowerCase();
-      const failed = status.includes('fail') || Boolean(notification.error_message);
-      return {
-        id: `notification:${notification.id || index}`,
-        source: 'notification',
-        severity: failed ? 'high' : 'info',
-        title: notification.title || notification.subject || notification.event_type || 'Notification',
-        detail: notification.error_message || notification.message || notification.body || status || 'Notification activity was recorded.',
-        timestamp: notification.sent_at || notification.created_at,
-      };
-    });
-
     // While the hero is visible the top 3 render above; otherwise every recommendation joins the queue.
     const aiItems: InboxItem[] = queueRecommendations.map((recommendation) => ({
       id: `ai:${recommendation.id}`,
@@ -238,8 +197,8 @@ export default function ActionInbox() {
       recommendation,
     }));
 
-    return [...aiItems, ...masterDataItems, ...setupItems, ...notificationItems];
-  }, [queueRecommendations, health, notifications]);
+    return [...aiItems, ...masterDataItems, ...setupItems];
+  }, [queueRecommendations, health]);
 
   const filteredItems = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
@@ -252,7 +211,6 @@ export default function ActionInbox() {
       if (filter === 'ai' && item.source !== 'ai') return false;
       if (filter === 'master-data' && item.source !== 'master-data') return false;
       if (filter === 'setup' && item.source !== 'setup') return false;
-      if (filter === 'notifications' && item.source !== 'notification') return false;
 
       if (!normalizedQuery) return true;
       return `${item.title} ${item.detail} ${sourceLabels[item.source]}`.toLowerCase().includes(normalizedQuery);
@@ -355,7 +313,7 @@ export default function ActionInbox() {
             <BellAlertIcon className="h-8 w-8 text-cyan-300" />
             <h1 className="text-2xl font-bold text-white">Action Inbox</h1>
           </div>
-          <p className="text-slate-400 mt-1">A focused queue for AI recommendations, setup gaps, master-data blockers, and notification activity.</p>
+          <p className="text-slate-400 mt-1">A focused queue for AI recommendations, setup gaps, and master-data blockers.</p>
         </div>
         <button onClick={loadInbox} className="btn-secondary flex items-center justify-center" disabled={loading}>
           <ArrowPathIcon className={`h-5 w-5 mr-2 ${loading ? 'animate-spin' : ''}`} />
@@ -460,21 +418,13 @@ export default function ActionInbox() {
             ))}
           </div>
         </div>
-        {(!notificationsAvailable || !aiAvailable) && (
+        {!aiAvailable && (
           <div className="mt-2.5 flex flex-wrap items-center gap-2 border-t border-fd-line pt-2.5 text-[11px] text-slate-500">
             <span className="uppercase tracking-wide text-[10px] text-slate-600">Unavailable</span>
-            {!notificationsAvailable && (
-              <span className="inline-flex items-center gap-1 rounded-sm border border-fd-line bg-slate-950/60 px-2 py-0.5">
-                <ExclamationTriangleIcon className="h-3 w-3 text-fd-amber" />
-                Notifications
-              </span>
-            )}
-            {!aiAvailable && (
-              <span className="inline-flex items-center gap-1 rounded-sm border border-fd-line bg-slate-950/60 px-2 py-0.5">
-                <ExclamationTriangleIcon className="h-3 w-3 text-fd-amber" />
-                AI recommendations
-              </span>
-            )}
+            <span className="inline-flex items-center gap-1 rounded-sm border border-fd-line bg-slate-950/60 px-2 py-0.5">
+              <ExclamationTriangleIcon className="h-3 w-3 text-fd-amber" />
+              AI recommendations
+            </span>
             <span className="text-slate-600">— this source is hidden from the queue.</span>
           </div>
         )}

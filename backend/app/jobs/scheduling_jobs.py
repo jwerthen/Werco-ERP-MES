@@ -3,7 +3,8 @@ from typing import List, Optional
 
 from app.db.session import SessionLocal
 from app.models.company import Company
-from app.services.notification_service import NotificationEvent, NotificationService, get_notification_recipients
+from app.services.notification_dispatch import dispatch_direct
+from app.services.notification_service import get_notification_recipients
 from app.services.scheduling_service import SchedulingService
 
 logger = logging.getLogger(__name__)
@@ -89,17 +90,26 @@ async def _run_scheduling_for_company(
     if conflicts:
         logger.warning(f"Detected {len(conflicts)} capacity conflicts for company {company_id}")
 
-        # Send notification to production managers
-        notification_service = NotificationService(db)
+        # Notify production managers via the notification dispatcher.
         managers = get_notification_recipients(db, role="manager", company_id=company_id)
 
         if managers:
-            await notification_service.send_notification(
-                event_type=NotificationEvent.CAPACITY_OVERLOAD,
-                users=managers,
-                subject=f"Production Scheduling: {len(conflicts)} Capacity Conflicts Detected",
-                context={"conflicts": conflicts, "scheduled_count": results["scheduled_count"]},
+            await dispatch_direct(
+                db,
+                event_key="capacity.overload",
+                company_id=company_id,
+                recipients=managers,
+                related_type="WorkCenter",
+                related_id=None,
+                title=f"Production Scheduling: {len(conflicts)} Capacity Conflicts Detected",
+                body=f"{len(conflicts)} capacity conflict(s) were detected in the latest scheduling run.",
+                link="/scheduling",
                 template="scheduling_conflicts",
+                context={
+                    "conflict_count": len(conflicts),
+                    "scheduled_count": results["scheduled_count"],
+                    "link_path": "/scheduling",
+                },
             )
 
     return {

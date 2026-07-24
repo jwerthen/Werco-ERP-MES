@@ -6,9 +6,8 @@ from typing import List, Optional
 from sqlalchemy.orm import Session, joinedload
 
 from app.models.ai_learning import AIRecommendation
-from app.models.notification import NotificationLog
 from app.models.quality import NonConformanceReport
-from app.models.user import User, UserRole
+from app.models.user import User
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation
 from app.models.work_order_blocker import (
     WorkOrderBlocker,
@@ -158,7 +157,10 @@ class WorkOrderBlockerService:
                 "source": source,
             },
         )
-        self._create_notification_logs(company_id=company_id, blocker=blocker, work_order=work_order)
+        # NOTE: the wo.blocker_created in-app/email notification is now owned by the
+        # transactional-outbox notification pipeline (driven by the emitted
+        # ``work_order_blocker_created`` / ``operation_hold`` OperationalEvents above);
+        # the legacy direct NotificationLog write was removed to avoid a double-fire.
         self._create_blocker_recommendation(company_id=company_id, user=user, blocker=blocker, work_order=work_order)
 
         # Tamper-evident audit trail (hash chain): the blocker creation and any
@@ -344,37 +346,6 @@ class WorkOrderBlockerService:
             operation.updated_at = datetime.utcnow()
             return operation, previous_status
         return None, None
-
-    def _create_notification_logs(self, *, company_id: int, blocker: WorkOrderBlocker, work_order: WorkOrder) -> None:
-        roles = [UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]
-        departments = []
-        if blocker.category == WorkOrderBlockerCategory.MATERIAL_MISSING.value:
-            departments = ["Purchasing", "Inventory"]
-
-        query = self.db.query(User).filter(User.company_id == company_id, User.is_active == True)
-        recipients = query.filter(User.role.in_(roles)).all()
-        if departments:
-            recipients.extend(
-                self.db.query(User)
-                .filter(User.company_id == company_id, User.is_active == True, User.department.in_(departments))
-                .all()
-            )
-        unique_recipients = {user.id: user for user in recipients}
-
-        for recipient in unique_recipients.values():
-            self.db.add(
-                NotificationLog(
-                    company_id=company_id,
-                    user_id=recipient.id,
-                    event_type="WO_BLOCKED",
-                    channel="in_app",
-                    subject=f"Blocked: {work_order.work_order_number}",
-                    body=f"{blocker.title}{': ' + blocker.note if blocker.note else ''}",
-                    sent=True,
-                    related_type="WorkOrderBlocker",
-                    related_id=blocker.id,
-                )
-            )
 
     def _create_blocker_recommendation(
         self,

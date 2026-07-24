@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+
+{# CUI-safe: MRP run identifier + action count only. #}
+{% block content %}
+<h2>MRP Actions Need Review</h2>
+
+<div class="alert alert-warning">
+    <strong>MRP Run {{ run_number }}</strong> produced
+    {% if total_actions is not none %}{{ total_actions }}{% endif %} action(s) needing review.
+</div>
+
+<p>Log in to Werco to review and process the MRP actions.</p>
+{% endblock %}

@@ -1,5 +1,4 @@
 import logging
-import os
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -8,19 +7,18 @@ from typing import Dict, List
 import aiosmtplib
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-logger = logging.getLogger(__name__)
+from app.core.config import settings
 
-# Email configuration from environment
-SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER = os.getenv("SMTP_USER", "")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
-SMTP_FROM = os.getenv("SMTP_FROM", "noreply@werco.com")
-SMTP_FROM_NAME = os.getenv("SMTP_FROM_NAME", "Werco ERP System")
+logger = logging.getLogger(__name__)
 
 
 class EmailService:
-    """Email sending service with template support"""
+    """Email sending service with template support.
+
+    SMTP configuration is read from ``Settings`` (``settings.SMTP_*``) rather than
+    module-level ``os.getenv`` so a single validated config source drives the app, the
+    worker, and Alembic.
+    """
 
     def __init__(self):
         # Setup Jinja2 template environment
@@ -41,7 +39,13 @@ class EmailService:
         html: bool = True,
     ) -> bool:
         """
-        Send email
+        Send email.
+
+        Returns True if sent. Returns False (WITHOUT raising) only when SMTP is not
+        configured -- so an unconfigured dev/test environment logs a skip instead of
+        spamming ARQ retries. On a real transport failure the exception PROPAGATES so the
+        enqueuing job (``send_email_job``) can retry and record the terminal outcome
+        (fixes the swallow-all defect §9.2).
 
         Args:
             to: Recipient email(s)
@@ -50,50 +54,42 @@ class EmailService:
             template: Template name (without .html)
             context: Template context variables
             html: Send as HTML
-
-        Returns:
-            True if sent successfully
         """
-        try:
-            # Validate configuration
-            if not SMTP_USER or not SMTP_PASSWORD:
-                logger.warning("SMTP credentials not configured, skipping email send")
-                return False
-
-            # Prepare recipients
-            recipients = [to] if isinstance(to, str) else to
-
-            # Create message
-            msg = MIMEMultipart("alternative")
-            msg["Subject"] = subject
-            msg["From"] = f"{SMTP_FROM_NAME} <{SMTP_FROM}>"
-            msg["To"] = ", ".join(recipients)
-
-            # Render body
-            if template:
-                html_body = self._render_template(template, context or {})
-                plain_body = self._html_to_plain(html_body)
-            else:
-                html_body = body
-                plain_body = body
-
-            # Attach parts
-            msg.attach(MIMEText(plain_body, "plain"))
-            if html and html_body:
-                msg.attach(MIMEText(html_body, "html"))
-
-            # Send email
-            async with aiosmtplib.SMTP(hostname=SMTP_HOST, port=SMTP_PORT) as smtp:
-                await smtp.starttls()
-                await smtp.login(SMTP_USER, SMTP_PASSWORD)
-                await smtp.send_message(msg)
-
-            logger.info(f"Email sent to {recipients}: {subject}")
-            return True
-
-        except Exception as e:
-            logger.error(f"Failed to send email: {e}")
+        # Validate configuration -- soft skip when unconfigured (no raise).
+        if not settings.SMTP_USER or not settings.SMTP_PASSWORD:
+            logger.warning("SMTP credentials not configured, skipping email send")
             return False
+
+        # Prepare recipients
+        recipients = [to] if isinstance(to, str) else to
+
+        # Create message
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = f"{settings.SMTP_FROM_NAME} <{settings.SMTP_FROM}>"
+        msg["To"] = ", ".join(recipients)
+
+        # Render body
+        if template:
+            html_body = self._render_template(template, context or {})
+            plain_body = self._html_to_plain(html_body)
+        else:
+            html_body = body
+            plain_body = body
+
+        # Attach parts
+        msg.attach(MIMEText(plain_body or "", "plain"))
+        if html and html_body:
+            msg.attach(MIMEText(html_body, "html"))
+
+        # Send email -- a transport failure raises out of this call so the job retries.
+        async with aiosmtplib.SMTP(hostname=settings.SMTP_HOST, port=settings.SMTP_PORT) as smtp:
+            await smtp.starttls()
+            await smtp.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
+            await smtp.send_message(msg)
+
+        logger.info(f"Email sent to {recipients}: {subject}")
+        return True
 
     def _render_template(self, template_name: str, context: Dict) -> str:
         """Render email template"""

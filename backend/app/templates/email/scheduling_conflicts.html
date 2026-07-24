@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+
+{# CUI-safe: conflict/scheduled counts only. #}
+{% block content %}
+<h2>Capacity Conflicts Detected</h2>
+
+<div class="alert alert-warning">
+    The latest scheduling run detected <strong>{{ conflict_count }}</strong> capacity conflict(s).
+</div>
+
+{% if scheduled_count is not none %}
+<p>{{ scheduled_count }} operation(s) were scheduled.</p>
+{% endif %}
+
+<p>Log in to Werco to review the schedule and resolve conflicts.</p>
+{% endblock %}

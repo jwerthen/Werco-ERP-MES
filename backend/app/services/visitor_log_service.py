@@ -18,12 +18,10 @@ from sqlalchemy.orm import Session
 
 from app.core.queue import enqueue_job_best_effort
 from app.core.time_utils import to_utc_iso
-from app.models.notification import NotificationPreference
 from app.models.user import User
 from app.models.visitor_log import VisitorLog, VisitorStatus
 from app.schemas.visitor_log import VisitorManualEntryRequest, VisitorSignInRequest
 from app.services.audit_service import AuditService
-from app.services.notification_service import NotificationEvent
 
 logger = logging.getLogger(__name__)
 
@@ -43,34 +41,31 @@ def _match_host_user(db: Session, *, company_id: int, host_name: Optional[str]) 
 
 
 def _notify_host_best_effort(db: Session, *, host: User, row: VisitorLog) -> None:
-    """Enqueue an internal best-effort check-in email to the matched host.
+    """Notify the matched host of a visitor check-in through the notification dispatcher.
 
-    Respects the host's notification preference for ``VISITOR_CHECK_IN`` and
-    requires a host email. Names are CUI: this is internal SMTP to the company's
-    own employee only. NEVER blocks or raises — a notification failure must not
-    fail the sign-in (compliance: outbound signal is best-effort)."""
+    Reroutes the old raw host-email through the pipeline (§9.6 defect #6) so the host
+    ALSO gets an in-app Notification + a NotificationLog row, not just an email — the
+    dispatcher resolves the host's channel prefs against the ``visitor.check_in`` catalog
+    entry (default in-app + email). The old direct ``send_email_job`` enqueue is dropped:
+    the dispatcher's email channel now covers the host (no double-email).
+
+    Sign-in is a SYNC request path and cannot ``await`` the async dispatcher, so this hands
+    off to the worker via ``enqueue_job_best_effort`` (the same sync-safe enqueue used
+    before). NEVER blocks or raises — a notification failure must not fail the sign-in.
+
+    CUI-safe: visitor names are treated as CUI (they never cross the SMTP boundary), so the
+    title/body are generic; the host clicks through to the Visitor Log to see who arrived."""
     try:
-        if not host.email:
-            return
-        pref = db.query(NotificationPreference).filter(NotificationPreference.user_id == host.id).first()
-        prefs = pref.preferences if (pref and pref.preferences) else {}
-        event_pref = prefs.get(NotificationEvent.VISITOR_CHECK_IN, {"email": True})
-        if not event_pref.get("email", True):
-            return
-
         enqueue_job_best_effort(
-            "send_email_job",
-            to=host.email,
-            subject=f"Visitor arrived: {row.visitor_name}",
-            body=None,
-            template="visitor_check_in",
-            context={
-                "visitor_name": row.visitor_name,
-                "visitor_company": row.visitor_company,
-                "purpose": row.purpose.value if row.purpose else None,
-                "signed_in_at": to_utc_iso(row.signed_in_at),
-                "station_label": row.station_label,
-            },
+            "dispatch_notification_direct_job",
+            event_key="visitor.check_in",
+            company_id=row.company_id,
+            recipient_ids=[host.id],
+            related_type="visitor_log",
+            related_id=row.id,
+            title="Visitor checked in",
+            body="A visitor has checked in and named you as their host. Log in to view the visitor log.",
+            link="/visitor-log",
         )
     except Exception:  # pragma: no cover - defensive: never fail the sign-in
         logger.exception("Best-effort host check-in notification failed for visitor_log %s", getattr(row, "id", None))

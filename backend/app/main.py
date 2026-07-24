@@ -24,6 +24,10 @@ from app.middleware.logging_middleware import (
     RequestLoggingMiddleware,
 )
 
+# Import for side effects: attaches the transactional-outbox SQLAlchemy Session listeners
+# so operational events committed on the request path tee into the notification pipeline.
+from app.services import notification_outbox  # noqa: F401
+
 # Configure structured logging with correlation IDs
 configure_logging()
 logger = get_logger(__name__)

@@ -3,9 +3,10 @@ MRP Auto-Processing Service
 Handles automatic creation of POs and WOs from MRP actions
 """
 
+import asyncio
 import logging
 from datetime import date, datetime
-from typing import Dict, List
+from typing import Dict, List, Set
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -17,9 +18,12 @@ from app.models.supplier_part import SupplierPartMapping
 from app.models.user import User
 from app.models.work_order import WorkOrder, WorkOrderStatus
 from app.services.audit_service import AuditService
-from app.services.notification_service import NotificationEvent, NotificationService
 
 logger = logging.getLogger(__name__)
+
+# Hold references to fire-and-forget expedite-notification tasks so the event loop does
+# not GC them mid-flight; each removes itself on completion.
+_expedite_tasks: Set[asyncio.Task] = set()
 
 
 class MRPAutoMode:
@@ -200,31 +204,74 @@ class MRPAutoService:
         return wo
 
     def _flag_for_expedite(self, action: MRPAction, user_id: int = None):
-        """Flag action for manual expedite"""
+        """Flag action for manual expedite and notify Purchasing.
+
+        Runs inside the async MRP job (a running loop exists). The notification is
+        dispatched fire-and-forget on a FRESH session so it never interleaves with this
+        method's shared ``self.db`` unit of work. Recipient identities are resolved here
+        (tenant-scoped) and re-loaded in the task; all CUI-safe primitives are captured so
+        no ORM object crosses the coroutine boundary.
+        """
+        from app.services.notification_service import get_notification_recipients
 
         part = self.db.query(Part).filter(Part.id == action.part_id, Part.company_id == self.company_id).first()
         if not part:
             return
 
-        # Send notification to purchasing/production
-        notification_service = NotificationService(self.db)
+        recipient_ids = [
+            u.id for u in get_notification_recipients(self.db, department="Purchasing", company_id=self.company_id)
+        ]
+        company_id = self.company_id
+        part_id = part.id
+        part_number = part.part_number
+        quantity = float(action.quantity) if action.quantity is not None else None
+        required_date = action.required_date.isoformat() if getattr(action, "required_date", None) else None
 
-        from app.services.notification_service import get_notification_recipients
+        async def _dispatch_expedite() -> None:
+            from app.db.session import SessionLocal
+            from app.services.notification_dispatch import dispatch_direct
 
-        recipients = get_notification_recipients(self.db, department="Purchasing", company_id=self.company_id)
+            if not recipient_ids:
+                return
+            db = SessionLocal()
+            try:
+                users = (
+                    db.query(User)
+                    .filter(User.id.in_(recipient_ids), User.company_id == company_id, User.is_active.is_(True))
+                    .all()
+                )
+                if not users:
+                    return
+                await dispatch_direct(
+                    db,
+                    event_key="mrp.expedite_required",
+                    company_id=company_id,
+                    recipients=users,
+                    related_type="Part",
+                    related_id=part_id,
+                    title=f"EXPEDITE REQUIRED: {part_number}",
+                    body="MRP flagged this part for manual expedite.",
+                    link=f"/parts/{part_id}",
+                    template="expedite_required",
+                    context={
+                        "part_number": part_number,
+                        "quantity": quantity,
+                        "required_date": required_date,
+                        "link_path": f"/parts/{part_id}",
+                    },
+                )
+            except Exception:  # pragma: no cover - an expedite notification must not fail MRP
+                logger.exception("expedite notification failed for part %s (company %s)", part_id, company_id)
+            finally:
+                db.close()
 
-        # Use enqueue_job to avoid blocking
-        import asyncio
-
-        asyncio.create_task(
-            notification_service.send_notification(
-                event_type=NotificationEvent.CAPACITY_OVERLOAD,
-                users=recipients,
-                subject=f"EXPEDITE REQUIRED: {part.part_number}",
-                context={"part": part, "quantity": action.quantity, "required_date": action.required_date},
-                template="expedite_required",
-            )
-        )
+        try:
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(_dispatch_expedite())
+            _expedite_tasks.add(task)
+            task.add_done_callback(_expedite_tasks.discard)
+        except RuntimeError:  # pragma: no cover - MRP runs inside the async worker job
+            asyncio.run(_dispatch_expedite())
 
         action.processed = True
         action.processed_at = datetime.utcnow()

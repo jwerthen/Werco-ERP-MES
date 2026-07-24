@@ -2846,6 +2846,72 @@ quote statuses (accepted / rejected / converted / expired) auto-record `quote_re
 > default (operators keep the kiosk station screen; deep links are unaffected). The page shows a
 > "Top 3 today" hero — the three highest-scoring pending recommendations.
 
+### Notifications (in-app inbox)
+
+Per-user notification inbox for the bell / popover / `/notifications` page — PR 1 (Foundation +
+in-app inbox) of the notification system. See [docs/NOTIFICATIONS.md](NOTIFICATIONS.md) for the
+architecture (transactional outbox, event catalog, channels, compliance invariants). Every inbox
+route is **self + tenant scoped**: rows are filtered to `user_id == current_user.id` **and**
+`company_id == get_current_company_id` — there is no role gate (any authenticated user manages
+their own inbox).
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/notifications` | Paged inbox for the current user (newest first) | Yes (own rows) |
+| GET | `/notifications/unread-count` | Cheap unread badge count `{ "count": int }` | Yes (own rows) |
+| GET | `/notifications/catalog` | The event catalog for the settings matrix | Yes (all roles) |
+| POST | `/notifications/{id}/read` | Mark one notification read (404 if not owned) — **not audited** | Yes (own rows) |
+| POST | `/notifications/read-all` | Mark all of the caller's unread read `{ "updated": int }` — **not audited** | Yes (own rows) |
+| GET | `/notifications/logs` | Recent email/SMS delivery-attempt log (retained) | Yes (see below) |
+
+> **List query params (`GET /notifications`):** `unread` (`true` = only unread, `false` = only
+> read, omit = all), `category` (a catalog category, e.g. `Production` / `Quality` / `Purchasing &
+> Inventory` — an unknown value returns an empty page, never all rows), `severity`
+> (`info` | `warning` | `critical`), `page` (default 1), `page_size` (default 25, **max 100**).
+> Ordered `desc(created_at, id)`.
+>
+> **List response** (`NotificationListResponse`) — note the `pagination` object differs from the
+> generic offset paging under [Pagination](#pagination):
+> ```json
+> {
+>   "items": [
+>     {
+>       "id": 812,
+>       "event_key": "wo.blocker_created",
+>       "severity": "critical",
+>       "title": "Work order blocked / on hold: WO-1042",
+>       "body": "A work order or operation was placed on hold or blocked.",
+>       "link": "/work-orders/1042",
+>       "related_type": "work_order",
+>       "related_id": 1042,
+>       "is_read": false,
+>       "read_at": null,
+>       "created_at": "2026-07-24T15:04:11Z"
+>     }
+>   ],
+>   "pagination": {
+>     "page": 1, "page_size": 25, "total_count": 3,
+>     "total_pages": 1, "has_next": false, "has_previous": false
+>   }
+> }
+> ```
+> `event_key` is the catalog key (see `GET /notifications/catalog`); `link` is a **relative** SPA
+> route the UI deep-links to; timestamps are UTC `Z` (display Central). Content is CUI-safe:
+> record identifier + event only — no part descriptions, customer names, or quantities.
+>
+> **`GET /notifications/catalog`** returns one object per catalog entry
+> (`event_key`, `label`, `description`, `category`, `severity`, `default_channels[]`,
+> `mandatory_channel`, `sms_eligible`) — the source of truth the settings UI renders (the frontend
+> never hardcodes the event list). All roles may read it.
+>
+> **Mark-read is deliberately NOT audited** — read state is UI state, not domain state, so it does
+> not write the `audit_log` hash chain (see [docs/NOTIFICATIONS.md](NOTIFICATIONS.md) §Compliance).
+>
+> **`GET /notifications/logs`** (retained delivery-attempt view): query `limit` (1–100, default 25),
+> `status` (`sent` | `failed`), `mine_only` (default `true`). A non-Admin/Manager/Supervisor caller
+> is always restricted to their own log rows regardless of `mine_only`; the full admin-scoped
+> delivery-failure view is PR 3.
+
 ### Bulk Imports & Templates (Excel Migration Kit)
 
 One shared CSV/XLSX upload kit for go-live data migration — see

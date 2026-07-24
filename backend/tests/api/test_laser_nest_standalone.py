@@ -801,12 +801,38 @@ class TestNullPartSerialization:
         assert wo.part_id is None
 
     def test_wo_email_templates_render_partless_wo_with_nest_labeling(self):
-        """Design item 5 for the email surface: work_order_late / wo_released
-        must render a part-less laser WO with the app's 'Nest package' labeling
-        instead of blank part cells (and never raise)."""
+        """Email surface for part-less laser WOs.
+
+        CUI-safe redesign (§11.1), NOT a regression: ``work_order_late`` was rewritten to
+        carry ONLY the WO identifier + days-late + critical flag -- no part/nest cells, it
+        never touches ``work_order.part`` (the detail lives behind login). ``wo_released``
+        still renders real part fields, or the app's 'Nest package' label for a part-less
+        laser WO -- and must render either without raising.
+        """
         from app.services.email_service import EmailService
 
         service = EmailService()
+
+        # --- work_order_late: CUI-safe (identifier + days-late only) ---
+        late_html = service._render_template(
+            "work_order_late",
+            {"work_order_number": "WO-000123", "days_late": 3, "critical": False, "base_url": "http://erp.test"},
+        )
+        assert "WO-000123" in late_html
+        assert "3 day" in late_html
+        # No part / nest detail leaks into the CUI-safe late email.
+        assert "Nest package" not in late_html
+        assert "PN-77" not in late_html
+
+        # critical=True renders the CRITICAL banner (still no part detail).
+        critical_html = service._render_template(
+            "work_order_late",
+            {"work_order_number": "WO-000999", "days_late": 10, "critical": True, "base_url": "http://erp.test"},
+        )
+        assert "CRITICAL" in critical_html
+        assert "WO-000999" in critical_html
+
+        # --- wo_released: part-less laser WO renders the 'Nest package' label (no raise) ---
         partless_wo = SimpleNamespace(
             id=1,
             wo_number="WO-000123",
@@ -817,13 +843,12 @@ class TestNullPartSerialization:
             status="released",
             priority=5,
         )
-        context = {"work_order": partless_wo, "days_late": 3, "critical": False, "base_url": "http://erp.test"}
-        late_html = service._render_template("work_order_late", context)
-        assert "Nest package" in late_html
-        released_html = service._render_template("wo_released", context)
-        assert "Nest package" in released_html
+        released_partless = service._render_template(
+            "wo_released", {"work_order": partless_wo, "base_url": "http://erp.test"}
+        )
+        assert "Nest package" in released_partless
 
-        # A parted WO still renders its real part fields.
+        # A parted WO still renders its real part fields through wo_released.
         parted_wo = SimpleNamespace(
             id=2,
             wo_number="WO-000124",
@@ -834,12 +859,11 @@ class TestNullPartSerialization:
             status="released",
             priority=5,
         )
-        parted_html = service._render_template(
-            "work_order_late",
-            {"work_order": parted_wo, "days_late": 1, "critical": True, "base_url": "http://erp.test"},
+        released_parted = service._render_template(
+            "wo_released", {"work_order": parted_wo, "base_url": "http://erp.test"}
         )
-        assert "PN-77" in parted_html
-        assert "Nest package" not in parted_html
+        assert "PN-77" in released_parted
+        assert "Nest package" not in released_parted
 
     def test_scheduling_prioritize_tolerates_null_part_id(self, db_session):
         """Regression for the optimize_setup sort: two ops tied on priority +

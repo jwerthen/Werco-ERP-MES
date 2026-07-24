@@ -16,6 +16,9 @@ class OperationalEvent(Base, TenantMixin):
         Index("ix_operational_events_company_type_time", "company_id", "event_type", "occurred_at"),
         Index("ix_operational_events_company_entity", "company_id", "entity_type", "entity_id"),
         Index("ix_operational_events_company_work_order", "company_id", "work_order_id", "occurred_at"),
+        # Supports the notification relay sweeper's cross-company scan
+        # (event_type IN (...) AND notified_at IS NULL AND created_at < ...), §3.1.
+        Index("ix_operational_events_notified_at", "notified_at"),
     )
 
     id = Column(Integer, primary_key=True, index=True)
@@ -30,6 +33,12 @@ class OperationalEvent(Base, TenantMixin):
     event_payload = Column(JSON, nullable=True, default=dict)
     occurred_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False, index=True)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+
+    # Transactional-outbox idempotency marker (notifications, §3.1). NULL until the
+    # dispatch job has fanned out notifications for this event; the 5-min relay sweeper
+    # re-enqueues catalog-mapped events whose notified_at IS NULL. Not set for events
+    # whose event_type is not in the notification catalog.
+    notified_at = Column(DateTime(timezone=True), nullable=True)
 
     work_order = relationship("WorkOrder")
     operation = relationship("WorkOrderOperation")

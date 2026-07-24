@@ -70,6 +70,12 @@ import {
 } from '../types/importKit';
 import { RoutingImportResponse } from '../types/engineering';
 import {
+  NotificationCatalogEntry,
+  NotificationItem,
+  NotificationListParams,
+  NotificationListResponse,
+} from '../types/notification';
+import {
   AddressValidationRequest,
   AddressValidationResult,
   BuyBolRequest,
@@ -1190,6 +1196,48 @@ class ApiService {
 
   async getNotificationLogs(params?: { limit?: number; status?: string }) {
     const response = await this.api.get('/notifications/logs', { params });
+    return response.data;
+  }
+
+  // --- In-app notification inbox (self + tenant scoped) ---------------------
+  // Backed by the rebuilt notifications endpoints; response shapes mirror
+  // backend/app/schemas/notification.py exactly. `getNotificationLogs` above is
+  // the separate email/SMS delivery-attempt log, retained for the admin view.
+
+  /** Paged in-app inbox for the current user (server pagination + filters). */
+  async getNotifications(params?: NotificationListParams): Promise<NotificationListResponse> {
+    const { page, pageSize, unread, category, severity } = params || {};
+    const query: Record<string, string | number | boolean> = {};
+    if (page != null) query.page = page;
+    if (pageSize != null) query.page_size = pageSize;
+    if (unread != null) query.unread = unread;
+    if (category) query.category = category;
+    if (severity) query.severity = severity;
+    const response = await this.api.get<NotificationListResponse>('/notifications', { params: query });
+    return response.data;
+  }
+
+  /** Cheap unread badge count for the bell (returns the raw count). */
+  async getUnreadCount(): Promise<number> {
+    const response = await this.api.get<{ count: number }>('/notifications/unread-count');
+    return response.data.count ?? 0;
+  }
+
+  /** Mark one notification read (NOT audited — UI state). Returns the updated row. */
+  async markNotificationRead(id: number): Promise<NotificationItem> {
+    const response = await this.api.post<NotificationItem>(`/notifications/${id}/read`);
+    return response.data;
+  }
+
+  /** Mark all of the current user's unread notifications read. Returns the count updated. */
+  async markAllNotificationsRead(): Promise<{ updated: number }> {
+    const response = await this.api.post<{ updated: number }>('/notifications/read-all');
+    return response.data;
+  }
+
+  /** The notification event catalog (drives the settings matrix + filter options). */
+  async getNotificationCatalog(): Promise<NotificationCatalogEntry[]> {
+    const response = await this.api.get<NotificationCatalogEntry[]>('/notifications/catalog');
     return response.data;
   }
 

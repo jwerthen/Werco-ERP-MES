@@ -24,6 +24,12 @@ class Company(Base):
     # Anthropic API -- defaults OFF (mirrors allow_carrier_egress / allow_print_egress).
     allow_ai_egress = Column(Boolean, nullable=False, default=False, server_default="false")
 
+    # Per-company kill switch for outbound SMS egress to Twilio (CUI boundary crossing).
+    # Defaults OFF, fail-closed at the sms_service layer -- exactly the allow_ai_egress
+    # pattern. The column is added now (PR 1) so the schema is stable; Twilio calls arrive
+    # in PR 4.
+    allow_sms_egress = Column(Boolean, nullable=False, default=False, server_default="false")
+
     # Hierarchy: parent company (e.g., Werco) -> subsidiaries
     parent_company_id = Column(Integer, ForeignKey("companies.id"), nullable=True)
 
