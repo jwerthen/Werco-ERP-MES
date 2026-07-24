@@ -17,9 +17,11 @@ it authenticates with a **scoped display token** instead of a user session.
 ## Setting up a TV
 
 1. **Issue a display** — Admin Settings → **Wallboard Displays** tab → New display. Give it a
-   label naming the physical screen ("North wall TV"), a lifetime (default 90 days, max 365), and
+   label naming the physical screen ("North wall TV"), a lifetime (default 90 days, max 365),
    — for a one-department TV — an optional **department preset** (a work-center type, e.g.
-   `machining`). The UI is on the Admin Settings page (admin-gated); the API also allows Manager
+   `machining`), and the **Show customer names** opt-in (default **OFF** = public-safe; turn it on
+   only for a trusted executive-office screen — see "Customer names — gated" below). The UI is on
+   the Admin Settings page (admin-gated); the API also allows Manager
    (`require_role([ADMIN, MANAGER])`).
 2. **Copy the 8-char setup code.** Issuance shows a one-time **setup code** (grouped `XXXX-XXXX`;
    valid **15 minutes**, **single use**) alongside the fallback `#token=` URL (below). Both are
@@ -106,13 +108,52 @@ the HUD identity line renders it upper-cased (`LIVE WALLBOARD // MACHINING`).
   the numbers remain plant-wide, and the HUD identity line (`LIVE WALLBOARD // <DEPT>`) is the
   only dept marker on screen.
 
+### Customer names — gated (executive vs. public boards)
+
+The board's long-standing posture is **no customer names on a public screen** — a CUI/AS9100D
+privacy requirement. There is now **one gated exception**: an executive-office board can show the
+work order's **customer name** on each card. It is off by default and enforced **server-side** in
+`build_wallboard_payload` — a display can never widen its own scope past the gate.
+
+A tile's `customer_name` is populated **only** when the requesting principal is authorized:
+
+- a **display token** whose `show_customer_names` flag is `True` — the per-display **Show customer
+  names** opt-in set at issuance (`display_tokens.show_customer_names`, `Boolean NOT NULL`, default
+  `false`; migration `072_display_token_show_customer`), **or**
+- a **signed-in user** whose role is **Platform Admin, Admin, or Manager**.
+
+Every other principal — a public / un-flagged display token, or a signed-in Supervisor / Operator /
+Quality / Shipping / Viewer previewing the board in-app — gets `customer_name = None` (redacted),
+identical to a public TV.
+
+On a redacted (public) board, card **Row 3** keeps its existing `OP n/total · <op name>` line, so
+nothing is lost there. On an authorized (executive) board the customer name **replaces** that line
+(and falls back to the op line for any WO with no customer set). Set the opt-in only on a screen
+whose viewers are cleared to see customer identities.
+
+Two operational notes:
+
+- **The in-app board is not automatically public-safe.** A signed-in Platform Admin / Admin /
+  Manager who opens `/wallboard` in their own session renders customer names regardless of any
+  display token — so an office user who walks up to a shop-floor screen and signs in exposes them.
+  This is that user's authenticated session (they already have customer-data access everywhere),
+  not a new leak, but don't treat "open the board in the app" as equivalent to an un-flagged public
+  display. For an always-public shop TV, pair it with a display token that has **Show customer
+  names** OFF and leave it on the display credential, not a signed-in session.
+- **The flag is fixed at issuance.** There is no edit endpoint for `show_customer_names`; to flip a
+  display between public and executive, **revoke it and issue a new one** (or issue a fresh setup
+  code from a new display). This is deliberate — every public↔executive transition is a fresh,
+  audited issuance rather than a silent toggle.
+
 ## Layout — the four zones
 
 Fixed geography, authored at 1920×1080: HUD bar (86px) / body (work-order grid + the fixed 430px
 right rail) / TODAY KPI bar (102px), 22×24px page margin, 13–14px gaps. Every size on the board
 is `rem` against the `calc(100vh / 67.5)` root — 1rem = 16px at 1080p, 32px at 4K — so the whole
 board scales as one unit. Layout never reflows on data — zero-value chips and panels dim in
-place.
+place. (**2026-07-23:** the board's text, label, and hairline colors were brightened for legibility
+on a wall TV under office lighting; the near-black instrument-panel surfaces are unchanged — see
+`wallboardTokens.ts`.)
 
 ### Z1 — HUD command bar
 
@@ -155,9 +196,11 @@ statuses are off the board as everywhere else.
 - **Card anatomy — five fixed rows:**
   1. WO number ←→ status chip (glowing dot + state word; only DOWN dots pulse);
   2. part number ←→ WO-level `done/ordered` qty;
-  3. `OP n/total · <op name>` ←→ the state's **time value** — red downtime duration on DOWN,
-     orange blocked age on BLOCKED, green elapsed cycle on RUNNING, muted elapsed on a LATE card
-     that is also running (minutes tick client-side between polls);
+  3. `OP n/total · <op name>` — **or the WO's customer name on an authorized (executive) board**
+     (see "Customer names — gated"; public boards keep the op line, and an authorized board falls
+     back to it for a WO with no customer) ←→ the state's **time value** — red downtime duration on
+     DOWN, orange blocked age on BLOCKED, green elapsed cycle on RUNNING, muted elapsed on a LATE
+     card that is also running (minutes tick client-side between polls);
   4. work center ←→ the **stop reason** — the downtime category on DOWN, the blocker category on
      BLOCKED, `IN QUEUE` on WAITING;
   5. a thin WO-level progress bar (`qty_complete / qty_ordered`) + percent.
@@ -219,7 +262,9 @@ feedback 2026-07-15 — see the KPI-strip deprecation note below.)
 field added after A0.5 v1 is optional/defaulted — an old TV build ignores the new fields; the new
 TV against an old backend renders `—` values and falls back to list lengths for the totals. All
 blocks below share the payload's privacy posture: counts, ages, WO/part numbers and dates only —
-no customer names, no ship-to addresses, no dollar figures, no NCR text, operators as "First L.".
+no ship-to addresses, no dollar figures, no NCR text, operators as "First L.". Customer names are
+the one **gated** exception (`jobs[].customer_name`, below) — populated only for an authorized
+principal and redacted on every public board.
 
 - **`jobs[]` / `jobs_total`** — the Z2 work-order grid. Population: open (**RELEASED /
   IN_PROGRESS**) WOs only — **ON_HOLD is deliberately excluded** (the NCR/HOLD split row counts
@@ -227,7 +272,8 @@ no customer names, no ship-to addresses, no dollar figures, no NCR text, operato
   priority sort (blocked/down → most-late → running → promise date asc, WO number tiebreak),
   capped at **24**; `jobs_total` is the true uncapped count for `+N more`. Both are
   **dept-scoped** when `dept` is passed — a job belongs to a dept via its **current op's**
-  work-center type. Each job carries `wo_number`, `part_number`, `status`, WO-level
+  work-center type. Each job carries `wo_number`, `part_number`, the **gated** `customer_name`
+  (see the privacy note below), `status`, WO-level
   `qty_complete` / `qty_ordered`, `promise_date` (`must_ship_by || due_date`), `is_late` /
   `days_late` (the same shared lateness predicate as the rail — the card and the LATE panel
   cannot disagree), `blocked` (any unresolved blocker on the WO), `down` (current op's work
@@ -237,7 +283,10 @@ no customer names, no ship-to addresses, no dollar figures, no NCR text, operato
   `work_center_code` / `work_center_name`, `status`, `qty_done` / `qty_target`, `crew` (up to 3
   "First L." names), `crew_count` (true headcount), `elapsed_minutes` (earliest open clock-in).
   **Privacy:** a card carries WO/part/op identifiers, dates, quantities, and "First L." crew
-  names only — never customer names, dollar figures, or notes. `jobs` is absent (`null`) only
+  names only — never dollar figures or notes. `customer_name` is the ONE **gated** field:
+  populated only for an authorized principal (a display token opted in via `show_customer_names`,
+  or a signed-in Platform Admin / Admin / Manager), `None` on every public board — see "Customer
+  names — gated". `jobs` is absent (`null`) only
   from a pre-job-wall backend, which makes the TV render the Z2 `BOARD DATA UNAVAILABLE` state
   (the machine-wall fallback is gone from the Foundry board).
 - **`work_centers[].active_jobs[]`** (still shipped in full: old TV bundles render it as the
@@ -298,8 +347,11 @@ no customer names, no ship-to addresses, no dollar figures, no NCR text, operato
 - **Revoked/expired token:** full-screen notice directing to a fresh setup code + `/tv`
   re-pairing; every stored display credential (the `sessionStorage` URL capture and the
   `localStorage` `/tv` claim) is dropped and polling stops.
-- **Privacy:** operator names are truncated server-side to "First L." — the payload is built for
-  a public screen. A signed-in user can also open `/wallboard` (scoped to their active company).
+- **Privacy:** operator names are truncated server-side to "First L." — the payload is built to be
+  public-safe by default. The one gated exception is `customer_name` on each job tile (see "Customer
+  names — gated"): redacted on every public / un-flagged display and for non-privileged signed-in
+  roles; shown only to an opted-in executive display or a signed-in Platform Admin / Admin / Manager.
+  A signed-in user can also open `/wallboard` (scoped to their active company).
 
 ## KPI strip — deprecated
 

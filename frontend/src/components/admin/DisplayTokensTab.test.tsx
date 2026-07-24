@@ -104,6 +104,8 @@ describe('DisplayTokensTab', () => {
       expect(mockApi.createDisplayToken).toHaveBeenCalledWith({
         label: 'Weld bay monitor',
         expires_days: 30,
+        // The checkbox defaults OFF (public-safe) and always rides on create.
+        show_customer_names: false,
       }),
     );
 
@@ -138,11 +140,64 @@ describe('DisplayTokensTab', () => {
       expect(mockApi.createDisplayToken).toHaveBeenCalledWith({
         label: 'Weld bay monitor',
         expires_days: 90,
+        show_customer_names: false,
         dept: 'weld',
       }),
     );
     const panel = await screen.findByTestId('issued-panel');
     expect(panel).toHaveTextContent(/pinned to department/i);
+  });
+
+  it('sends show_customer_names: true when the "Show customer names" box is checked', async () => {
+    mockApi.createDisplayToken.mockResolvedValue({ ...issued, show_customer_names: true });
+    renderTab();
+    await screen.findByText('North wall TV');
+
+    fireEvent.change(screen.getByTestId('display-token-label'), {
+      target: { value: 'Front office TV' },
+    });
+    fireEvent.click(screen.getByTestId('display-token-show-customers'));
+    fireEvent.click(screen.getByRole('button', { name: /create token/i }));
+
+    await waitFor(() =>
+      expect(mockApi.createDisplayToken).toHaveBeenCalledWith({
+        label: 'Front office TV',
+        expires_days: 90,
+        show_customer_names: true,
+      }),
+    );
+  });
+
+  it('resets the "Show customer names" box to off after a successful create', async () => {
+    mockApi.createDisplayToken.mockResolvedValue({ ...issued, show_customer_names: true });
+    renderTab();
+    await screen.findByText('North wall TV');
+
+    const checkbox = screen.getByTestId('display-token-show-customers') as HTMLInputElement;
+    fireEvent.change(screen.getByTestId('display-token-label'), { target: { value: 'Front office TV' } });
+    fireEvent.click(checkbox);
+    expect(checkbox.checked).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: /create token/i }));
+
+    await waitFor(() => expect(mockApi.createDisplayToken).toHaveBeenCalled());
+    // Post-create the opt-in returns to its public-safe default so the next
+    // token isn't accidentally provisioned to reveal customers.
+    await waitFor(() => expect(checkbox.checked).toBe(false));
+  });
+
+  it('renders the Customers column as Shown / Hidden from show_customer_names', async () => {
+    mockApi.listDisplayTokens.mockResolvedValue([
+      { ...activeToken, id: 20, label: 'Exec TV', show_customer_names: true },
+      { ...activeToken, id: 21, label: 'Floor TV', show_customer_names: false },
+      // Older backend that never sends the field → treated as Hidden.
+      { ...activeToken, id: 22, label: 'Legacy TV', show_customer_names: undefined },
+    ]);
+    renderTab();
+
+    expect(await screen.findByText('Exec TV')).toBeInTheDocument();
+    expect(screen.getByText('Shown')).toBeInTheDocument();
+    // Two rows read Hidden: the explicit false and the undefined (old backend).
+    expect(screen.getAllByText('Hidden')).toHaveLength(2);
   });
 
   it('re-issues a setup code for a row and shows it in the one-time panel (no JWT/URL)', async () => {

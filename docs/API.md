@@ -46,8 +46,8 @@ long-lived JWT with `type="display"` that authenticates **only** `GET /shop-floo
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| POST | `/auth/display-token` | Issue a display token. Body: `{"label", "expires_days", "dept"?}` (label 1–100 chars; lifetime default **90** days, capped at **365**; optional `dept` ≤ 50 chars — the work-center-type preset the TV opens with). Response carries the one-time `token` **plus** the one-time `setup_code` + `setup_code_expires_at` (15-min TTL — see callouts) | Admin / Manager |
-| GET | `/auth/display-token` | List this company's display tokens (metadata only, incl. `dept` — the JWTs and setup codes are never returned) | Admin / Manager |
+| POST | `/auth/display-token` | Issue a display token. Body: `{"label", "expires_days", "dept"?, "show_customer_names"?}` (label 1–100 chars; lifetime default **90** days, capped at **365**; optional `dept` ≤ 50 chars — the work-center-type preset the TV opens with; `show_customer_names` bool, default **false** = public-safe — opt this display in to rendering work-order customer names on the board, gated server-side, see the wallboard callout). Response carries the one-time `token` **plus** the one-time `setup_code` + `setup_code_expires_at` (15-min TTL — see callouts) | Admin / Manager |
+| GET | `/auth/display-token` | List this company's display tokens (metadata only, incl. `dept` and `show_customer_names` — the JWTs and setup codes are never returned) | Admin / Manager |
 | POST | `/auth/display-token/{id}/setup-code` | Reissue the one-time TV setup code for an existing display → `{"id", "label", "dept", "setup_code", "setup_code_expires_at"}`. The previous code — used or not — is invalidated immediately; the new code is shown once and expires in **15 minutes**. Revoked/expired token → **400**; cross-tenant id → **404** | Admin / Manager |
 | POST | `/auth/display-token/claim` | Exchange a one-time setup code for the display JWT. Body `{"code"}` (case-, space- and dash-insensitive) → `{"token", "label", "dept", "expires_at"}`. **Every** failure mode (unknown / used / expired code, revoked / expired display) → the same generic **404** | **Public** (rate-limited **10/minute** per IP) |
 | DELETE | `/auth/display-token/{id}` | Revoke a display token (status flip, idempotent; cross-tenant id → 404) | Admin / Manager |
@@ -1071,10 +1071,15 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > and a forged claim cannot widen scope. The endpoint is a **zero-write read**: deliberately no
 > reconcile-on-read, no audit rows, no events — an unattended TV polling every 30s must never
 > mutate state, and a display token has no user identity to attribute writes to. The payload is
-> built for a public screen: operator identity is truncated to "First L." (`crew` / `operator_name`),
-> and the ship/today/quality blocks carry counts, ages, WO/part numbers and dates only — **no
-> customer names, no ship-to addresses, no dollar figures, no NCR titles/descriptions**. Signed-in
-> users can call it too (their active company scopes the data). Payload:
+> built to be **public-safe by default**: operator identity is truncated to "First L." (`crew` /
+> `operator_name`), and the ship/today/quality blocks carry counts, ages, WO/part numbers and dates
+> only — **no ship-to addresses, no dollar figures, no NCR titles/descriptions**. The **one gated
+> exception** is `jobs[].customer_name`: it is populated **only** when the request principal is
+> authorized — a display token with `show_customer_names=true`, OR a signed-in user whose role is
+> `PLATFORM_ADMIN` / `ADMIN` / `MANAGER` — and is `null` for every public / un-flagged display token
+> and every other signed-in role (`build_wallboard_payload(..., include_customer=...)`, derived from
+> the principal, never from client input). Signed-in users can call it too (their active company
+> scopes the data). Payload:
 > - `work_centers[]` (`{code, name, status, active_jobs[], queued_count, blocked_count, down}`).
 >   Each active job is **one row per operation** (crew-station grouping): `{wo_number, part_number,
 >   op_name, crew[]` (up to 3 "First L." names)`, crew_count` (true headcount)`, operator_name`
@@ -1090,15 +1095,17 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 >   holds) — priority-sorted server-side (blocked/down → most-late → running → promise date asc),
 >   capped at **24**, with `jobs_total` the true uncapped count for `+N more`; **dept-scoped**
 >   via each WO's **current** operation's work-center type when `?dept=` is passed. Each job:
->   `{wo_number, part_number, status, qty_complete, qty_ordered` (WO-level)`, promise_date,
+>   `{wo_number, part_number, customer_name` (**gated** — see below)`, status, qty_complete, qty_ordered` (WO-level)`, promise_date,
 >   is_late, days_late` (the same shared lateness predicate)`, blocked` (any unresolved blocker
 >   on the WO)`, down` (current op's work center has an open downtime event)`, running` (current
 >   op has ≥1 open labor entry)`, ops_completed, ops_total, current_op}`; `current_op` — the
 >   lowest-sequence IN_PROGRESS op, else lowest READY, else lowest PENDING; `null` when all ops
 >   are complete — is `{sequence, name, work_center_code, work_center_name, status, qty_done,
 >   qty_target, crew[]` (≤3 "First L.")`, crew_count, elapsed_minutes}`. Job tiles carry WO/part/op
->   identifiers, dates, quantities, and "First L." crew names only — never customer names,
->   dollars, or notes. Absent only from a pre-job-wall backend (the current TV then renders a
+>   identifiers, dates, quantities, and "First L." crew names only — never dollars or notes.
+>   `customer_name` is the one **gated** field: populated only for an authorized principal (display
+>   token opted in via `show_customer_names`, or a signed-in `PLATFORM_ADMIN` / `ADMIN` / `MANAGER`),
+>   `null` on every public board. Absent only from a pre-job-wall backend (the current TV then renders a
 >   `BOARD DATA UNAVAILABLE` state; only pre-redesign TV bundles still render the `work_centers`
 >   machine wall).
 > - `late_wos[]` (worst-first), `blocked_wos[]` (oldest-first) — capped at **12**; `late_wos[].due_date`

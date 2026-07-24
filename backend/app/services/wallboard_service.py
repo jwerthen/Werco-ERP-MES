@@ -205,11 +205,15 @@ def _build_job_wall(
     dept_norm: Optional[str],
     central_today: date,
     now: datetime,
+    include_customer: bool = False,
 ) -> tuple[list[WallboardJob], int]:
     """Assemble the job wall from pre-fetched rows — pure Python, ZERO queries.
 
-    PRIVACY: a WallboardJob carries NO customer_name (the WorkOrder model has
-    that column — it must never reach the public TV), no dollars, no notes.
+    PRIVACY: a WallboardJob carries no dollars, no notes. The WorkOrder's
+    ``customer_name`` is included ONLY when ``include_customer`` is True (an
+    authorized executive principal); otherwise it stays None so it never reaches
+    a public TV — the gate is the caller's ``build_wallboard_payload`` argument,
+    derived from the request principal, never from client input.
 
     When ``dept_norm`` is set, a job belongs to the dept TV via its CURRENT
     op's work-center type (a WO with no current op drops off dept boards).
@@ -258,6 +262,10 @@ def _build_job_wall(
             WallboardJob(
                 wo_number=wo.work_order_number,
                 part_number=wo.part.part_number if wo.part else None,
+                # Gated: customer name only for an authorized principal; the
+                # public board keeps it None. ``or None`` collapses a blank
+                # free-text customer to None so tiles render an empty cell.
+                customer_name=((wo.customer_name or None) if include_customer else None),
                 status=wo.status.value if hasattr(wo.status, "value") else str(wo.status),
                 qty_complete=float(wo.quantity_complete or 0),
                 qty_ordered=float(wo.quantity_ordered or 0),
@@ -650,7 +658,9 @@ def _compute_quality(db: Session, company_id: int) -> WallboardQuality:
     )
 
 
-def build_wallboard_payload(db: Session, company_id: int, dept: Optional[str] = None) -> WallboardResponse:
+def build_wallboard_payload(
+    db: Session, company_id: int, dept: Optional[str] = None, include_customer: bool = False
+) -> WallboardResponse:
     """Build the full wallboard snapshot for one company.
 
     ``dept`` optionally narrows the board to work centers whose
@@ -663,6 +673,11 @@ def build_wallboard_payload(db: Session, company_id: int, dept: Optional[str] = 
 
     The job wall is core like work_centers — computed inline, not best-effort.
     ``kpi_strip`` is deprecated and no longer computed (always None).
+
+    ``include_customer`` (default False = public-safe) is the ONE gate that lets
+    the job-wall tiles carry ``customer_name``; the endpoint derives it from the
+    request principal (an executive display token opted in, or a privileged
+    signed-in role), never from client input.
 
     Late = promise (coalesce(must_ship_by, due_date)) strictly before today's
     CENTRAL date on a live, non-terminal WO — see ``_late_wo_filters``.
@@ -856,6 +871,7 @@ def build_wallboard_payload(db: Session, company_id: int, dept: Optional[str] = 
         dept_norm,
         central_today,
         now,
+        include_customer=include_customer,
     )
 
     # --- Late work orders rail: worst-first (most days late), capped --------

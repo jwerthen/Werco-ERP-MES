@@ -2,11 +2,13 @@
  * Admin > Wallboard Displays tab (A0.5).
  *
  * Manage scoped display tokens for unattended shop-floor TVs:
- *  - create (label + expiry + optional department) — the 8-char TV SETUP CODE
- *    is the primary hand-off (enter it at /tv on the TV; 15 minutes, single
- *    use), with the raw JWT + ready-made /wallboard URL as the fallback. All
- *    of it is shown exactly ONCE (the server never returns them again);
- *  - list (label / dept / created / expiry / status);
+ *  - create (label + expiry + optional department + optional "show customer
+ *    names" opt-in) — the 8-char TV SETUP CODE is the primary hand-off (enter
+ *    it at /tv on the TV; 15 minutes, single use), with the raw JWT + ready-made
+ *    /wallboard URL as the fallback. All of it is shown exactly ONCE (the server
+ *    never returns them again). "Show customer names" defaults OFF (public-safe)
+ *    and should be ON only for a trusted executive-office screen;
+ *  - list (label / dept / customers / created / expiry / status);
  *  - "New setup code" per row — re-issues a fresh one-time pairing code for
  *    an existing display (disabled for revoked/expired rows);
  *  - revoke (the TV loses access on its next 30s poll).
@@ -61,6 +63,7 @@ export default function DisplayTokensTab() {
   const [label, setLabel] = useState('');
   const [dept, setDept] = useState('');
   const [expiresDays, setExpiresDays] = useState(90);
+  const [showCustomerNames, setShowCustomerNames] = useState(false);
   const [reveal, setReveal] = useState<OneTimeReveal | null>(null);
   const [reissuingId, setReissuingId] = useState<number | null>(null);
   const [copied, setCopied] = useState<'token' | 'url' | 'code' | null>(null);
@@ -90,6 +93,7 @@ export default function DisplayTokensTab() {
       const result = await api.createDisplayToken({
         label: label.trim(),
         expires_days: expiresDays,
+        show_customer_names: showCustomerNames,
         ...(dept.trim() ? { dept: dept.trim() } : {}),
       });
       setReveal({
@@ -100,6 +104,7 @@ export default function DisplayTokensTab() {
       });
       setLabel('');
       setDept('');
+      setShowCustomerNames(false);
       await load();
     } catch (err: any) {
       setError(err?.response?.data?.detail || err?.message || 'Failed to create display token');
@@ -221,6 +226,20 @@ export default function DisplayTokensTab() {
             {creating ? 'Creating…' : 'Create token'}
           </button>
         </div>
+        <label className="flex items-start gap-2 text-xs text-surface-600 max-w-xl">
+          <input
+            type="checkbox"
+            className="checkbox checkbox-sm mt-0.5"
+            checked={showCustomerNames}
+            onChange={(e) => setShowCustomerNames(e.target.checked)}
+            data-testid="display-token-show-customers"
+          />
+          <span>
+            <span className="font-semibold text-surface-700">Show customer names on this display</span> — reveals the
+            work-order customer on each tile. Leave OFF for public shop-floor TVs; turn ON only for a trusted
+            executive-office screen.
+          </span>
+        </label>
       </form>
 
       {/* One-time reveal: setup code (primary) + raw token/URL fallback on create */}
@@ -328,6 +347,7 @@ export default function DisplayTokensTab() {
               <tr>
                 <th>Label</th>
                 <th>Dept</th>
+                <th>Customers</th>
                 <th>Created</th>
                 <th>Expires</th>
                 <th>Status</th>
@@ -350,6 +370,13 @@ export default function DisplayTokensTab() {
                   <tr key={token.id}>
                     <td className="font-medium">{token.label}</td>
                     <td className="font-mono text-sm">{token.dept || '—'}</td>
+                    <td className="text-sm">
+                      {token.show_customer_names ? (
+                        <span className="text-amber-600 font-semibold uppercase text-xs">Shown</span>
+                      ) : (
+                        <span className="text-surface-500 uppercase text-xs">Hidden</span>
+                      )}
+                    </td>
                     <td className="font-mono text-sm">{formatCentralDateTime(token.created_at)}</td>
                     <td className="font-mono text-sm">{formatCentralDateTime(token.expires_at)}</td>
                     <td>
