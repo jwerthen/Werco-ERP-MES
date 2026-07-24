@@ -224,9 +224,24 @@ jobs:
           format: 'sarif'
           output: 'frontend-trivy-results.sarif'
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+        # No `cache: 'npm'`: this job has no defaults.working-directory, so the
+        # cache-dependency glob would resolve from the repo root (no lockfile
+        # there). Same trap documented on setup-python below. Nothing is
+        # installed here anyway — see the next step.
+
       - name: Run npm audit (Frontend)
         working-directory: ./frontend
-        run: npm audit --audit-level=high
+        # Allowlist-aware wrapper around `npm audit --json`. Still a HARD gate:
+        # any high/critical advisory fails the build unless it has a documented
+        # not-applicable entry in frontend/scripts/audit-allowlist.json.
+        # Verified to need no `npm ci` — `npm audit` resolves the tree from
+        # package-lock.json alone, so the checkout is sufficient.
+        # See docs/SECURITY_ADVISORY_SUPPRESSIONS.md.
+        run: npm run audit:ci
 
       - name: Set up Python
         uses: actions/setup-python@v6
