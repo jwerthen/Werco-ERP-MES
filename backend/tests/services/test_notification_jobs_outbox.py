@@ -159,3 +159,31 @@ def test_sweeper_only_reenqueues_stale_uncommitted_cataloged_events(db_session: 
 
     assert enqueued == [("dispatch_notification_job", ev_stale.id)]
     assert result == {"scanned": 1, "enqueued": 1}
+
+
+def test_sweeper_skips_events_older_than_max_age(db_session: Session, monkeypatch):
+    """Defense-in-depth lower bound: an undispatched event older than _RELAY_MAX_AGE_HOURS
+    is NEVER retroactively dispatched, so the pre-072 history (migration-backfilled) or a
+    long worker/Redis outage backlog can never produce a go-live notification/email storm."""
+    _point_jobs_at_session(monkeypatch, db_session)
+
+    now = datetime.utcnow()
+    within_window = now - timedelta(minutes=10)  # stale but recent -> swept
+    below_floor = now - timedelta(hours=njobs._RELAY_MAX_AGE_HOURS + 1)  # too old -> skipped
+
+    ev_recent = _make_event(
+        db_session, event_type="ncr_created", notified_at=None, created_at=within_window, entity_id=11
+    )
+    _make_event(db_session, event_type="ncr_created", notified_at=None, created_at=below_floor, entity_id=12)
+
+    enqueued = []
+
+    async def _fake_enqueue(job_name, *args, **kwargs):
+        enqueued.append((job_name, kwargs.get("event_id")))
+
+    monkeypatch.setattr(njobs, "enqueue_job", _fake_enqueue)
+
+    result = asyncio.run(njobs.relay_pending_notifications_task())
+
+    assert enqueued == [("dispatch_notification_job", ev_recent.id)]
+    assert result == {"scanned": 1, "enqueued": 1}

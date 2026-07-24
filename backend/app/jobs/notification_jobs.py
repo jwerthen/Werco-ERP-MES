@@ -17,6 +17,12 @@ logger = logging.getLogger(__name__)
 # swept so a normally-enqueued event is not double-dispatched by both paths.
 _RELAY_GRACE_MINUTES = 2
 _RELAY_BATCH_LIMIT = 500
+# Lower bound (defense-in-depth): never retroactively dispatch events older than this.
+# Migration 072 backfills notified_at on all pre-existing rows so history is already
+# excluded; this additionally caps a flood if the worker/Redis is down for a long stretch
+# and a post-deploy backlog of undispatched events accumulates -- a notification pending
+# for over a day is stale enough to skip rather than surface as a burst of old alerts.
+_RELAY_MAX_AGE_HOURS = 24
 
 
 def _active_company_ids(db):
@@ -68,21 +74,25 @@ async def relay_pending_notifications_task(limit: int = _RELAY_BATCH_LIMIT) -> d
 
     Covers a Redis outage at after_commit-enqueue time. Bounded scan: only cataloged
     event types (uncataloged events never get ``notified_at`` set, so filtering by type
-    keeps this from scanning the whole append-only table) with ``notified_at IS NULL`` and
-    older than the grace window.
+    keeps this from scanning the whole append-only table) with ``notified_at IS NULL``,
+    older than the grace window, and NEWER than the max-age floor (so a long outage /
+    the pre-072 history backfilled by the migration can never trigger a retroactive burst).
     """
     if not SOURCE_EVENT_TYPE_TO_KEY:
         return {"scanned": 0, "enqueued": 0}
 
     db = SessionLocal()
     try:
-        cutoff = datetime.utcnow() - timedelta(minutes=_RELAY_GRACE_MINUTES)
+        now = datetime.utcnow()
+        cutoff = now - timedelta(minutes=_RELAY_GRACE_MINUTES)
+        floor = now - timedelta(hours=_RELAY_MAX_AGE_HOURS)
         rows = (
             db.query(OperationalEvent.id)
             .filter(
                 OperationalEvent.event_type.in_(list(SOURCE_EVENT_TYPE_TO_KEY.keys())),
                 OperationalEvent.notified_at.is_(None),
                 OperationalEvent.created_at < cutoff,
+                OperationalEvent.created_at >= floor,
             )
             .order_by(OperationalEvent.id.asc())
             .limit(limit)

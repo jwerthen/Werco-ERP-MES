@@ -238,6 +238,13 @@ async def _fan_out(
         # same (event_key, entity, user) exists, suppress the push channels so a
         # standing condition (e.g. a WO late for two weeks) is ONE inbox row + the
         # digest, not 14 emails. The digest channel still accrues.
+        # PR-3 FOLLOW-UP: this keys off an unread IN-APP row, so a recipient who (via the
+        # PR-3 preferences UI) turns in_app OFF but keeps email ON for a recurring event
+        # would never create a suppressing row and would get an email every cron cycle.
+        # Unreachable in PR 1 (no preference-write endpoint yet; defaults for the only
+        # recurring+email entry, wo.late, include in_app). When PR 3 lands editable prefs,
+        # suppression must also consider email/SMS-only recipients (e.g. a per-(user,key,
+        # entity) "last notified" marker independent of the in-app row).
         suppress_push = entry.recurring and _has_unread(
             db,
             company_id=company_id,
@@ -270,6 +277,11 @@ async def _fan_out(
         if CHANNEL_EMAIL in channels and not suppress_push and user.email:
             if await _dedup_reserve(entry.event_key, related_type, related_id, user.id, CHANNEL_EMAIL):
                 await _enqueue_email(user=user, title=title, body=body, link=link, template=template, context=context)
+                # sent=True records the ENQUEUE, not confirmed SMTP delivery. PR-3 FOLLOW-UP:
+                # the admin delivery-failure view (PR 3) needs the terminal outcome, so
+                # send_email_job should write back sent=False + error on final ARQ-retry
+                # exhaustion (thread notification_log_id through the job). Deferred with that
+                # consuming view; matches the pre-existing enqueue-time logging behavior.
                 db.add(
                     NotificationLog(
                         company_id=company_id,

@@ -224,7 +224,9 @@ class MRPAutoService:
         company_id = self.company_id
         part_id = part.id
         part_number = part.part_number
-        quantity = float(action.quantity) if action.quantity is not None else None
+        # CUI-safe (§11.1): the expedite email carries the part identifier + required date
+        # only. Do NOT pass the order quantity into the email context (quantities are CUI
+        # field detail and must not cross the external SMTP boundary).
         required_date = action.required_date.isoformat() if getattr(action, "required_date", None) else None
 
         async def _dispatch_expedite() -> None:
@@ -255,7 +257,6 @@ class MRPAutoService:
                     template="expedite_required",
                     context={
                         "part_number": part_number,
-                        "quantity": quantity,
                         "required_date": required_date,
                         "link_path": f"/parts/{part_id}",
                     },

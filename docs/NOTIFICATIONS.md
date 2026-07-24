@@ -281,8 +281,31 @@ JSON normalization of `notification_preferences` to the 4-channel shape.
   **`ix_operational_events_notified_at`** builds on `operational_events` (the append-only event
   stream) — if that table is materially large, build the index **`CONCURRENTLY` out-of-band** and let
   the guarded `create_index` no-op, to avoid the non-concurrent build's `SHARE` lock.
+- **Historical backfill (prevents a go-live notification storm):** after adding `notified_at`, the
+  migration backfills `notified_at = created_at` for every existing row. Production already emits the
+  cataloged event types (`work_order_completed`, `ncr_created`, `purchase_order_received`, …), so
+  without this the relay sweeper would re-dispatch the entire event history — in-app rows **and emails**
+  for months-old events — on first deploy. The one-time `UPDATE` takes a brief write lock on
+  `operational_events`; on a very large table run/batch it during the maintenance window. The sweeper
+  additionally has a **24-hour lower bound** (`_RELAY_MAX_AGE_HOURS`) so no sustained backlog can ever
+  produce a retroactive burst.
 
 ---
+
+## Known limitations (carried to later PRs)
+
+Surfaced by the PR-1 adversarial review; each is safe in PR 1 and has a designated home:
+
+- **Delivery-record accuracy** — the email `NotificationLog` is written `sent=True` at *enqueue* time,
+  not after confirmed SMTP delivery (the pre-existing pattern). Terminal-outcome write-back
+  (`sent=False` + `error` on final ARQ-retry exhaustion) lands with the **admin delivery-failure view
+  in PR 3**, which is the only consumer of a "failed" filter.
+- **Recurring re-notify suppression is keyed on an unread in-app row** — a recipient who (via the PR-3
+  preferences UI) turns *in-app off but email on* for a recurring event would escape suppression. Not
+  reachable in PR 1 (no preference-write endpoint; `wo.late` defaults include in-app). **PR 3** must
+  extend suppression to email/SMS-only recipients when it ships editable preferences.
+- **Recurring-detector crons re-read preferences per (recipient × entity)** — a benign N×M of indexed
+  point lookups in nightly jobs; batch per-company if these crons ever grow hot.
 
 ## Deferred / roadmap
 

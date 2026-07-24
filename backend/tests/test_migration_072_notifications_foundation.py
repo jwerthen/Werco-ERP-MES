@@ -341,11 +341,34 @@ def test_migration_072_upgrade_downgrade_upgrade_round_trip(tmp_path):
         # The JSON widening is a documented no-op on downgrade -> keys survive.
         assert _read_pref(engine, 1)["wo.late"].get("in_app") is True
 
+        # Seed a "historical" operational_events row while notified_at is ABSENT (the
+        # column was just dropped) -- exactly the pre-072 production state. The re-upgrade
+        # is where the migration genuinely ADDs the column and must backfill it, so this
+        # proves the go-live-storm guard (BLOCKER fix): every pre-existing event is stamped
+        # notified_at = created_at and is therefore NOT swept/dispatched retroactively.
+        with engine.begin() as conn:
+            conn.execute(
+                sa.text(
+                    "INSERT INTO operational_events "
+                    "(company_id, event_type, source_module, severity, occurred_at, created_at) "
+                    "VALUES (1, 'ncr_created', 'quality', 'critical', '2026-01-01 00:00:00', '2026-01-01 00:00:00')"
+                )
+            )
+            historical_id = conn.execute(sa.text("SELECT max(id) FROM operational_events")).scalar()
+
         # 3. Re-upgrade: everything comes back and the JSON normalization is idempotent.
         _alembic(db_url, "upgrade", REVISION)
         assert _has_table(engine, NEW_TABLE)
         for table, column in ADDED_COLUMNS:
             assert _has_column(engine, table, column)
+        # Backfill ran on the genuine ADD COLUMN: the historical row is now stamped.
+        with engine.connect() as conn:
+            row = conn.execute(
+                sa.text("SELECT notified_at, created_at FROM operational_events WHERE id = :i"),
+                {"i": historical_id},
+            ).first()
+        assert row is not None and row[0] is not None, "migration did not backfill notified_at on historical rows"
+        assert str(row[0]) == str(row[1]), "backfill must stamp notified_at = created_at (go-live storm guard)"
         assert _read_pref(engine, 1)["wo.late"] == {
             "email": True,
             "digest": True,

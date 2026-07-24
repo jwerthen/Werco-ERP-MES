@@ -150,19 +150,35 @@ def resolve_po_creator(db, event, company_id: int) -> List:
 # ---------------------------------------------------------------------------
 
 
+# These emits (work_order_blocker_updated / ncr_updated / fai_updated) fire on ANY
+# edit, and the emitter always carries both status + previous_status. Gate on the
+# TRANSITION into the terminal state, not merely on being in it -- otherwise a later
+# edit of an already-terminal record (past the 5-min dedup window, a distinct event id
+# so notified_at idempotency doesn't help) would re-send a spurious notification.
+
+
 def gate_blocker_resolved(event) -> bool:
     payload = event.event_payload or {}
-    return str(payload.get("status", "")).lower() == "resolved"
+    status = str(payload.get("status", "")).lower()
+    previous = str(payload.get("previous_status", "")).lower()
+    return status == "resolved" and previous != "resolved"
 
 
 def gate_ncr_closed(event) -> bool:
     payload = event.event_payload or {}
-    return str(payload.get("status", "")).lower() == "closed"
+    status = str(payload.get("status", "")).lower()
+    previous = str(payload.get("previous_status", "")).lower()
+    return status == "closed" and previous != "closed"
+
+
+_FAI_TERMINAL = {"passed", "failed", "conditional"}
 
 
 def gate_fai_completed(event) -> bool:
     payload = event.event_payload or {}
-    return str(payload.get("status", "")).lower() in {"passed", "failed", "conditional"}
+    status = str(payload.get("status", "")).lower()
+    previous = str(payload.get("previous_status", "")).lower()
+    return status in _FAI_TERMINAL and previous not in _FAI_TERMINAL
 
 
 def gate_inspection_failed(event) -> bool:

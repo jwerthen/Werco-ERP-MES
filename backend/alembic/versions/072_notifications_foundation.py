@@ -35,7 +35,10 @@ What this migration does
    transactional-outbox idempotency marker (§3.1), plus a plain index on it so
    the 5-min relay sweeper's ``notified_at IS NULL`` scan is index-backed. The
    index is also declared on the model (``__table_args__``) so create_all and
-   this migration converge.
+   this migration converge. **The column is immediately backfilled**
+   (``notified_at = created_at WHERE notified_at IS NULL``) so every event that
+   predates the notification system is marked already-dispatched -- see the
+   go-live-storm note below.
 4. ``users`` += nullable ``phone`` String(32) -- realizes the previously-phantom
    phone field (E.164 for SMS, PR 4).
 5. ``companies`` += ``allow_sms_egress`` Boolean NOT NULL server_default false --
@@ -62,14 +65,19 @@ Bootstrap is ``create_all() -> stamp -> upgrade`` (docs/DEVELOPMENT.md), not a
 bare ``upgrade head`` on an empty DB. Every DDL op is guarded (``_has_table`` /
 ``_has_column`` / ``_has_index``) so a create_all-bootstrapped DB and re-runs are
 clean no-ops. The JSON normalization is idempotent by construction
-(``dict.setdefault`` only adds absent keys). The FK column on
-``notification_logs`` takes the batch (table-recreate) path on SQLite -- alembic
-cannot ALTER-add an FK constraint there (precedent 058) -- and a plain inline-FK
-ALTER on Postgres. Downgrade reverses every DDL op in FK-safe order
+(``dict.setdefault`` only adds absent keys). The ``notified_at`` go-live backfill
+is scoped inside the add-column guard AND predicated on ``WHERE notified_at IS
+NULL``, so it runs once (first column creation) and is a no-op on any re-run --
+crucially, it can never re-stamp events emitted live after go-live. The FK column
+on ``notification_logs`` takes the batch (table-recreate) path on SQLite --
+alembic cannot ALTER-add an FK constraint there (precedent 058) -- and a plain
+inline-FK ALTER on Postgres. Downgrade reverses every DDL op in FK-safe order
 (``notification_logs.notification_id`` before the ``notifications`` drop) and is
-guarded; the JSON widening is deliberately a documented NO-OP on downgrade
-(reversing a widening is lossy, and the extra keys are harmless -- old code that
-reads ``{email, digest}`` ignores them).
+guarded; the ``notified_at`` backfill needs no explicit reversal (the column is
+dropped on downgrade, taking the stamped values with it), and the JSON widening
+is deliberately a documented NO-OP on downgrade (reversing a widening is lossy,
+and the extra keys are harmless -- old code that reads ``{email, digest}``
+ignores them).
 
 Dialect notes for the column drops (SQLite): ``users`` and ``companies`` are
 referenced by many FKs, so their column drops use a PLAIN ``DROP COLUMN``
@@ -85,16 +93,33 @@ Locking / operations note
 -------------------------
 The single CREATE TABLE is a brand-new empty table (instantaneous). Each ADD
 COLUMN is nullable-or-constant-default -> metadata-only on PostgreSQL 11+ (brief
-ACCESS EXCLUSIVE lock, no rewrite, no backfill scan). ``allow_sms_egress`` NOT
-NULL with a CONSTANT server_default is likewise metadata-only. Each CREATE INDEX
-(non-CONCURRENT) takes a SHARE lock on its table for the build; ``notifications``
-is empty, ``notification_logs`` is small, ``operational_events`` is the largest
-(the event stream) -- if it is ever materially large, build
-``ix_operational_events_notified_at`` CONCURRENTLY out-of-band and let the
-guarded ``create_index`` no-op. The one DATA statement group touches only
+ACCESS EXCLUSIVE lock, no table rewrite). ``allow_sms_egress`` NOT NULL with a
+CONSTANT server_default is likewise metadata-only.
+
+The one heavyweight statement is the ``operational_events`` go-live backfill: a
+single set-based ``UPDATE ... SET notified_at = created_at WHERE notified_at IS
+NULL`` over the event stream, run once right after the ADD COLUMN, inside the
+migration transaction. It takes row-level write locks on the events it touches
+(every existing row, on first run) and generates dead tuples that autovacuum
+reclaims afterward. Batching by id range was CONSIDERED and deliberately NOT
+done: at Werco's single-plant scale the event table is tens-of-thousands to low
+hundreds-of-thousands of rows, where one UPDATE is a sub-second-to-seconds
+operation and the added complexity of a chunked loop is unwarranted (same
+single-UPDATE reasoning as 054's grandfather backfill). If ``operational_events``
+is ever materially larger (millions of rows) or this must run hot, do the backfill
+out-of-band in id-range batches BEFORE deploying (``UPDATE ... WHERE notified_at
+IS NULL AND id BETWEEN ...``) and let the guarded migration find nothing to do --
+the same escape hatch as the CONCURRENTLY index note below.
+
+Each CREATE INDEX (non-CONCURRENT) takes a SHARE lock on its table for the build;
+``notifications`` is empty, ``notification_logs`` is small, ``operational_events``
+is the largest (the event stream) -- if it is ever materially large, build
+``ix_operational_events_notified_at`` CONCURRENTLY out-of-band and let the guarded
+``create_index`` no-op. The JSON normalization touches only
 ``notification_preferences`` (at most one row per user), so it is trivial. Deploy
-ordering: run BEFORE the app deploy that reads/writes these columns; old code
-neither writes nor selects them.
+ordering: run BEFORE the app deploy that reads/writes these columns AND before the
+notification worker/sweeper starts, so the sweeper's first pass sees a fully
+backfilled table; old code neither writes nor selects these columns.
 
 Revision id ``072_notifications_foundation`` is 28 chars (<= 32) per the
 create_all -> stamp -> upgrade bootstrap constraint (alembic_version.version_num
@@ -277,10 +302,27 @@ def upgrade() -> None:
             op.create_index(LOGS_INDEX, LOGS_TABLE, [LOGS_COLUMN], unique=False)
 
     # 4) operational_events.notified_at (outbox marker) + sweeper index. Nullable,
-    #    no default, no backfill: NULL = "not yet dispatched" on every historical row.
+    #    added WITHOUT a server default, then IMMEDIATELY backfilled so every
+    #    pre-existing event is marked already-dispatched.
     if _has_table(EVENTS_TABLE):
         if not _has_column(EVENTS_TABLE, EVENTS_COLUMN):
             op.add_column(EVENTS_TABLE, sa.Column(EVENTS_COLUMN, sa.DateTime(timezone=True), nullable=True))
+            # CRITICAL go-live backfill. Production ALREADY emits the event_types
+            # the new notification catalog maps (work_order_completed, ncr_created,
+            # work_order_released, purchase_order_received, operation_completed,
+            # downtime_started, ...). Without this, on first deploy every historical
+            # row has notified_at IS NULL and the 5-min relay sweeper would
+            # re-dispatch the ENTIRE event history -> a go-live in-app + EMAIL storm
+            # to real users for months-old events. Stamp pre-existing events as
+            # already handled ("these predate the notification system") by setting
+            # notified_at = created_at. Scoped INSIDE the add-column guard (precedent
+            # 054's grandfather UPDATE) so it runs ONLY when the column is first
+            # created: a later re-run must NEVER re-stamp events emitted live after
+            # go-live -- those legitimately keep notified_at IS NULL for the sweeper.
+            # The WHERE notified_at IS NULL predicate additionally makes the
+            # statement a no-op over any already-stamped row. Single set-based
+            # UPDATE, no batching (see the locking note in the module docstring).
+            op.execute(sa.text("UPDATE operational_events SET notified_at = created_at WHERE notified_at IS NULL"))
         if not _has_index(EVENTS_TABLE, EVENTS_INDEX):
             op.create_index(EVENTS_INDEX, EVENTS_TABLE, [EVENTS_COLUMN], unique=False)
 
