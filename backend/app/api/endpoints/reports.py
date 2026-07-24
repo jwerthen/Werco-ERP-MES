@@ -123,7 +123,11 @@ def get_quality_metrics(
     # NCR counts
     ncrs = (
         db.query(NonConformanceReport)
-        .filter(NonConformanceReport.company_id == company_id, NonConformanceReport.created_at >= cutoff)
+        .filter(
+            NonConformanceReport.company_id == company_id,
+            NonConformanceReport.is_deleted == False,  # noqa: E712
+            NonConformanceReport.created_at >= cutoff,
+        )
         .all()
     )
 
@@ -136,7 +140,15 @@ def get_quality_metrics(
         ncr_by_source[source] = ncr_by_source.get(source, 0) + 1
 
     # Receiving inspection
-    receipts = db.query(POReceipt).filter(POReceipt.received_at >= cutoff).all()
+    receipts = (
+        db.query(POReceipt)
+        .filter(
+            POReceipt.company_id == company_id,
+            POReceipt.is_deleted == False,  # noqa: E712
+            POReceipt.received_at >= cutoff,
+        )
+        .all()
+    )
 
     total_received_qty = sum(r.quantity_received for r in receipts)
     rejected_qty = sum(r.quantity_rejected for r in receipts)
@@ -223,7 +235,11 @@ def get_vendor_performance(
             db.query(POReceipt)
             .join(PurchaseOrderLine)
             .join(PurchaseOrder)
-            .filter(PurchaseOrder.vendor_id == vendor.id, POReceipt.received_at >= cutoff)
+            .filter(
+                PurchaseOrder.vendor_id == vendor.id,
+                POReceipt.is_deleted == False,  # noqa: E712
+                POReceipt.received_at >= cutoff,
+            )
             .all()
         )
 

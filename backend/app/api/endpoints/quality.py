@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
@@ -20,6 +20,7 @@ from app.models.quality import (
 )
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder
+from app.models.work_order_blocker import WorkOrderBlocker, WorkOrderBlockerStatus
 from app.schemas.quality import (
     CARCreate,
     CARResponse,
@@ -34,6 +35,7 @@ from app.schemas.quality import (
     NCRCreate,
     NCRResponse,
     NCRUpdate,
+    NCRVoidRequest,
 )
 from app.services import process_sheet_service
 from app.services.audit_service import AuditService
@@ -86,7 +88,10 @@ def list_ncrs(
     """List all NCRs"""
     query = (
         db.query(NonConformanceReport)
-        .filter(NonConformanceReport.company_id == company_id)
+        .filter(
+            NonConformanceReport.company_id == company_id,
+            NonConformanceReport.is_deleted == False,  # noqa: E712
+        )
         .options(joinedload(NonConformanceReport.part))
     )
 
@@ -155,7 +160,11 @@ def get_ncr(
     ncr = (
         db.query(NonConformanceReport)
         .options(joinedload(NonConformanceReport.part))
-        .filter(NonConformanceReport.id == ncr_id, NonConformanceReport.company_id == company_id)
+        .filter(
+            NonConformanceReport.id == ncr_id,
+            NonConformanceReport.company_id == company_id,
+            NonConformanceReport.is_deleted == False,  # noqa: E712
+        )
         .first()
     )
 
@@ -175,7 +184,11 @@ def update_ncr(
     """Update an NCR"""
     ncr = (
         db.query(NonConformanceReport)
-        .filter(NonConformanceReport.id == ncr_id, NonConformanceReport.company_id == company_id)
+        .filter(
+            NonConformanceReport.id == ncr_id,
+            NonConformanceReport.company_id == company_id,
+            NonConformanceReport.is_deleted == False,  # noqa: E712
+        )
         .first()
     )
     if not ncr:
@@ -216,6 +229,113 @@ def update_ncr(
     return ncr
 
 
+@router.delete("/ncr/{ncr_id}")
+def void_ncr(
+    ncr_id: int,
+    void_in: NCRVoidRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Void (soft-delete) an NCR.
+
+    Voiding is the quality-record form of a soft delete: the NCR is retained for the
+    tamper-evident audit trail and AS9100D traceability, but marked ``is_deleted`` and
+    moved to ``VOID`` status. Refused while the NCR still actively gates a work order.
+    """
+    ncr = (
+        db.query(NonConformanceReport)
+        .filter(NonConformanceReport.id == ncr_id, NonConformanceReport.company_id == company_id)
+        .first()
+    )
+    if not ncr:
+        raise HTTPException(status_code=404, detail="NCR not found")
+    if ncr.is_deleted:
+        raise HTTPException(status_code=400, detail="NCR is already voided")
+
+    # GUARDRAIL: refuse to void an NCR that is still actively gating a work order. An
+    # "active" blocker is OPEN or ACKNOWLEDGED (RESOLVED/DISMISSED are terminal) — the
+    # same condition used everywhere else (quality_gate_service, scheduling_service, ...).
+    active_blocker = (
+        db.query(WorkOrderBlocker.id)
+        .filter(
+            WorkOrderBlocker.ncr_id == ncr.id,
+            WorkOrderBlocker.company_id == company_id,
+            WorkOrderBlocker.status.in_([WorkOrderBlockerStatus.OPEN.value, WorkOrderBlockerStatus.ACKNOWLEDGED.value]),
+        )
+        .first()
+    )
+    if active_blocker:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot void NCR {ncr.ncr_number}: it is blocking work order(s). Resolve the blocker first.",
+        )
+
+    reason = void_in.reason
+    old_status = ncr.status
+    ncr.soft_delete(current_user.id)
+    ncr.status = NCRStatus.VOID
+
+    # This void path MUST audit (unlike update_ncr, which only emits an OperationalEvent).
+    # Both rows are written BEFORE the single terminal commit so they persist atomically
+    # with the void — AuditService.log() only flushes; get_db never commits on teardown.
+    audit = AuditService(db, current_user, request)
+    audit.log_status_change(
+        "ncr",
+        ncr.id,
+        ncr.ncr_number,
+        old_status=_enum_value(old_status),
+        new_status=NCRStatus.VOID.value,
+        description=f"Voided NCR: {reason}",
+    )
+    audit.log_delete("ncr", ncr.id, ncr.ncr_number, soft_delete=True, extra_data={"reason": reason})
+    db.commit()
+
+    return {"message": f"NCR {ncr.ncr_number} voided", "can_restore": True}
+
+
+@router.post("/ncr/{ncr_id}/restore", summary="Restore a voided NCR")
+def restore_ncr(
+    ncr_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Restore a voided NCR.
+
+    The pre-void status is not preserved, so the NCR reopens to ``OPEN`` (the safe reset).
+    """
+    ncr = (
+        db.query(NonConformanceReport)
+        .filter(NonConformanceReport.id == ncr_id, NonConformanceReport.company_id == company_id)
+        .first()
+    )
+    if not ncr:
+        raise HTTPException(status_code=404, detail="NCR not found")
+    if not ncr.is_deleted:
+        raise HTTPException(status_code=400, detail="NCR is not voided")
+
+    ncr.restore()
+    ncr.status = NCRStatus.OPEN
+
+    # Audit BEFORE the terminal commit so the row persists atomically with the restore —
+    # AuditService.log() only flushes; get_db never commits on teardown.
+    audit = AuditService(db, current_user, request)
+    audit.log_update(
+        "ncr",
+        ncr.id,
+        ncr.ncr_number,
+        old_values={"is_deleted": True, "status": "void"},
+        new_values={"is_deleted": False, "status": "open"},
+        action="restore",
+    )
+    db.commit()
+
+    return {"message": f"NCR {ncr.ncr_number} restored"}
+
+
 @router.post("/ncr/{ncr_id}/create-car", response_model=CARResponse)
 def create_car_from_ncr(
     ncr_id: int,
@@ -226,7 +346,11 @@ def create_car_from_ncr(
     """Create a CAR from an NCR"""
     ncr = (
         db.query(NonConformanceReport)
-        .filter(NonConformanceReport.id == ncr_id, NonConformanceReport.company_id == company_id)
+        .filter(
+            NonConformanceReport.id == ncr_id,
+            NonConformanceReport.company_id == company_id,
+            NonConformanceReport.is_deleted == False,  # noqa: E712
+        )
         .first()
     )
     if not ncr:
@@ -759,7 +883,11 @@ def get_quality_summary(
     month_start = date.today().replace(day=1)
     ncr_dispositions = (
         db.query(NonConformanceReport.disposition, func.count(NonConformanceReport.id))
-        .filter(NonConformanceReport.company_id == company_id, NonConformanceReport.created_at >= month_start)
+        .filter(
+            NonConformanceReport.company_id == company_id,
+            NonConformanceReport.is_deleted == False,  # noqa: E712
+            NonConformanceReport.created_at >= month_start,
+        )
         .group_by(NonConformanceReport.disposition)
         .all()
     )

@@ -2775,11 +2775,13 @@ def delete_work_order(
     request: Request,
     hard_delete: bool = Query(False, description="Permanently delete (only for draft/cancelled WOs)"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN])),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
 ):
     """
     Soft delete or permanently delete a work order.
+
+    Allowed for admins and managers.
 
     **Soft delete (default)**: Marks the work order as deleted but preserves data.
 

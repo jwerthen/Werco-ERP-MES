@@ -301,6 +301,7 @@ def run_global_search(
             db.query(PurchaseOrder)
             .filter(
                 PurchaseOrder.company_id == company_id,
+                PurchaseOrder.is_deleted == False,  # noqa: E712
                 or_(
                     func.lower(PurchaseOrder.po_number).like(search_term),
                 ),

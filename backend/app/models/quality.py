@@ -7,7 +7,7 @@ from sqlalchemy import Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import relationship
 
 from app.db.database import Base
-from app.db.mixins import TenantMixin
+from app.db.mixins import SoftDeleteMixin, TenantMixin
 
 
 class NCRStatus(str, enum.Enum):
@@ -58,7 +58,7 @@ class FAIStatus(str, enum.Enum):
     CONDITIONAL = "conditional"
 
 
-class NonConformanceReport(Base, TenantMixin):
+class NonConformanceReport(Base, SoftDeleteMixin, TenantMixin):
     """NCR - Non-Conformance Report for AS9100D compliance"""
 
     __tablename__ = "ncrs"

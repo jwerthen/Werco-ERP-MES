@@ -725,9 +725,18 @@ class TestWorkOrdersAPI:
         assert test_work_order.is_deleted is True
         assert test_work_order.deleted_at is not None
 
-    def test_delete_work_order_forbidden(self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder):
-        """Test that non-admin cannot delete work orders."""
-        response = client.delete(f"/api/v1/work-orders/{test_work_order.id}", headers=auth_headers)
+    def test_delete_work_order_manager_allowed(
+        self, client: TestClient, manager_headers: dict, test_work_order: WorkOrder, db_session
+    ):
+        """Managers may delete work orders (role widened from admin-only)."""
+        response = client.delete(f"/api/v1/work-orders/{test_work_order.id}", headers=manager_headers)
+        assert response.status_code == status.HTTP_204_NO_CONTENT
+        db_session.refresh(test_work_order)
+        assert test_work_order.is_deleted is True
+
+    def test_delete_work_order_forbidden(self, client: TestClient, operator_headers: dict, test_work_order: WorkOrder):
+        """Operators (below manager) cannot delete work orders."""
+        response = client.delete(f"/api/v1/work-orders/{test_work_order.id}", headers=operator_headers)
         assert response.status_code == status.HTTP_403_FORBIDDEN
 
     def test_release_work_order(self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder):

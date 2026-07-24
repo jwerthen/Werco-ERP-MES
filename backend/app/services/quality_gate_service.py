@@ -154,6 +154,7 @@ def evaluate_completion_quality_exceptions(
         .filter(
             NonConformanceReport.company_id == company_id,
             NonConformanceReport.work_order_id == work_order.id,
+            NonConformanceReport.is_deleted == False,  # noqa: E712
         )
         .all()
     )

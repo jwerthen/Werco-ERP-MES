@@ -283,13 +283,15 @@ ROLE_CARDS = [
             ]),
             ("Vendors", "bullets", [
                 "Vendor create/edit is Manager and up. Approving a vendor stamps its approval date.",
-                "There is no delete button for vendors — a mis-entry goes to the admin. "
-                "Never create a duplicate as a workaround.",
+                "Wrong vendor? Managers and admins can <b>Delete Vendor</b> — a soft-delete that deactivates the "
+                "record but keeps it for audit and can be restored. It is refused while the vendor still has an "
+                "active PO, so close or cancel those first. Never create a duplicate as a workaround.",
             ]),
         ],
         traps=[
             "Bulk-imported POs land directly in SENT status — immediately receivable. A typo'd import instantly "
-            "“issues” POs, which is why imports are admin-driven.",
+            "“issues” POs, which is why imports are admin-driven. A bad PO can be soft-deleted "
+            "(<b>Delete PO</b>, Manager/Admin) as long as nothing has been received against it.",
         ],
     ),
     dict(
@@ -306,6 +308,12 @@ ROLE_CARDS = [
                 "A 409 “egress is disabled” means the admin has not enabled label printing — not a printer fault.",
                 "Items flagged <b>requires inspection</b> land in the inspection queue. Quality signs those off — "
                 "receiving does not.",
+            ]),
+            ("Fix a mistake", "bullets", [
+                "Keyed the wrong quantity or lot? Don't re-receive a correction. On the receipt use <b>CORRECT</b> "
+                "(Supervisor+) to fix the numbers or lot in place, or <b>VOID</b> (Manager/Admin) to undo the whole "
+                "receipt — both require a reason and reconcile the PO and inventory automatically. Once a receipt "
+                "is inspected or its stock has been issued, corrections go through Quality instead.",
             ]),
         ],
         traps=[
@@ -524,8 +532,8 @@ def build_sharp_edges():
          "Open the routing itself for the real list"),
         ("BOM / Routing Release fires instantly", "QUIRK — no confirmation dialog",
          "Treat Release as final; a mistake means a new revision"),
-        ("Can't delete a customer / vendor / lot", "GAP — no UI deactivate path",
-         "Route mis-entries to the admin; never work around with duplicates"),
+        ("Can't delete a customer or lot", "GAP — no UI deactivate path (vendors now soft-delete + restore)",
+         "Route customer/lot mis-entries to the admin; never work around with duplicates"),
         ("“Rate limit exceeded” at login", "DESIGN — 5/min email, 3/min badge, per building IP",
          "Wait about 60 seconds; don't hammer the button"),
         ("“Account is locked”", "DESIGN — 5 failed passwords locks 30 minutes",

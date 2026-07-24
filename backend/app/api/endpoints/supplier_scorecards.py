@@ -552,6 +552,7 @@ def auto_calculate_scorecard(
         db.query(PurchaseOrder)
         .filter(
             PurchaseOrder.vendor_id == vendor_id,
+            PurchaseOrder.is_deleted == False,  # noqa: E712
             PurchaseOrder.order_date >= data.period_start,
             PurchaseOrder.order_date <= data.period_end,
             PurchaseOrder.status != POStatus.CANCELLED,
@@ -573,7 +574,14 @@ def auto_calculate_scorecard(
     # Get receipts
     receipts = []
     if line_ids:
-        receipts = db.query(POReceipt).filter(POReceipt.po_line_id.in_(line_ids)).all()
+        receipts = (
+            db.query(POReceipt)
+            .filter(
+                POReceipt.po_line_id.in_(line_ids),
+                POReceipt.is_deleted == False,  # noqa: E712
+            )
+            .all()
+        )
 
     total_received_qty = sum(r.quantity_received for r in receipts)
     rejected_qty = sum(r.quantity_rejected for r in receipts)
@@ -627,6 +635,7 @@ def auto_calculate_scorecard(
                 db.query(NonConformanceReport)
                 .filter(
                     NonConformanceReport.receipt_id.in_(receipt_ids),
+                    NonConformanceReport.is_deleted == False,  # noqa: E712
                     NonConformanceReport.detected_date >= data.period_start,
                     NonConformanceReport.detected_date <= data.period_end,
                 )
@@ -641,6 +650,7 @@ def auto_calculate_scorecard(
             db.query(NonConformanceReport)
             .filter(
                 NonConformanceReport.receipt_id.in_(receipt_ids),
+                NonConformanceReport.is_deleted == False,  # noqa: E712
                 NonConformanceReport.car_id != None,
                 NonConformanceReport.detected_date >= data.period_start,
                 NonConformanceReport.detected_date <= data.period_end,

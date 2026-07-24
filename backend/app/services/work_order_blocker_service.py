@@ -107,6 +107,7 @@ class WorkOrderBlockerService:
                 .filter(
                     NonConformanceReport.id == data.ncr_id,
                     NonConformanceReport.company_id == company_id,
+                    NonConformanceReport.is_deleted == False,  # noqa: E712
                 )
                 .first()
             )
