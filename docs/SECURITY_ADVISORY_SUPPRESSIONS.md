@@ -8,8 +8,9 @@ justification for any gate that is not hard-blocking.
 
 - Prefer fixing over tolerating: apply any patch/minor upgrade that clears an
   advisory before accepting it.
-- **Frontend `npm audit --audit-level=high` is a HARD gate** (must pass). All
-  known advisories are currently resolved via non-breaking lockfile upgrades.
+- **Frontend `npm audit` is a HARD gate** (must pass) — run through the
+  allowlist-aware wrapper `frontend/scripts/audit-check.mjs`. Any high/critical
+  advisory fails CI unless it carries a documented not-applicable entry.
 - **Backend `pip-audit` is ADVISORY** (non-blocking, `continue-on-error: true`)
   — see below.
 
@@ -80,9 +81,80 @@ signs/verifies JWTs with **HS256 (HMAC) exclusively** (`app/core/config.py`
 is never used. Revisit only if we adopt an EC JWT algorithm or remove
 `python-jose`.
 
-## Frontend (`npm audit --audit-level=high`) — hard gate
+## Frontend (`npm run audit:ci`) — hard gate, allowlist-aware
 
-No suppressions. All advisories were resolved with non-breaking patch/minor
-upgrades via `npm audit fix` (lockfile only; no `package.json` range changes).
-If a future advisory has no non-breaking fix, document it here and narrow the
-gate explicitly rather than dropping `--audit-level`.
+The CI step `Run npm audit (Frontend)` runs `npm run audit:ci` →
+`node scripts/audit-check.mjs` (was: a bare `npm audit --audit-level=high`).
+
+**It is still a hard gate.** Any **high** or **critical** advisory fails the job
+(exit 1) unless its GHSA id is listed in `frontend/scripts/audit-allowlist.json`.
+The wrapper exists so that one documented, non-applicable advisory cannot
+red-line every unrelated PR, while a genuinely new high/critical still blocks.
+
+Properties worth knowing:
+
+- **No npm dependency.** Plain Node ESM — a security gate should not add
+  supply-chain surface. Needs only Node + `package-lock.json`; **no `npm ci`**
+  (npm audit resolves the tree from the lockfile), hence the job installs nothing.
+- **Fails closed.** A failed/unparseable audit, a registry error, or a finding
+  whose advisory id cannot be resolved is a FAILURE, never a silent pass.
+- **Resolves transitive advisories.** `vulnerabilities[].via[]` holds either
+  advisory objects or *strings* naming another vulnerable package. Both are
+  walked (deduped, cycle-guarded). This is load-bearing: `react-router-dom` has
+  `via: ["react-router"]` and no advisory object of its own.
+- **Stale entries warn, never fail.** An allowlist entry matching no current
+  advisory prints a non-fatal `WARNING` telling you to delete it. There is
+  **deliberately no time-based expiry** — this gate already goes red with no code
+  change when advisories publish; a second surprise-failure mechanism would be
+  worse than the problem. `reviewed` is a human review date, not an enforced one.
+
+### Running it locally
+
+```bash
+cd frontend && npm run audit:ci     # identical to CI
+```
+
+### Adding an allowlist entry
+
+Only after confirming no non-breaking upgrade clears the advisory. Add to the
+`advisories` array in `frontend/scripts/audit-allowlist.json`:
+
+| field | purpose |
+| --- | --- |
+| `id` | GHSA id, exactly as in the advisory URL (required) |
+| `package` / `severity` / `title` / `url` | identification for the reviewer |
+| `reason` | **the justification** — string or array of lines (required) |
+| `remove_when` | the condition that retires the entry |
+| `reviewed` | date last reviewed (informational) |
+
+**The `reason` rule:** it must be a concrete, checkable argument that the
+vulnerable code path *does not exist in this app* — which feature the CVE
+requires and the evidence we never use it. "It is noisy", "no fix available", or
+"the upgrade is a big migration" are **not** acceptable reasons on their own; if
+a real advisory applies to us, the answer is to fix it or accept a red build.
+A reviewer must be able to judge the suppression on sight.
+
+### Removing one
+
+Delete the entry when the advisory is fixed (or when the run warns it is stale)
+and re-run `npm run audit:ci`.
+
+### Current suppressions
+
+- **GHSA-qwww-vcr4-c8h2** (`react-router`, high) — "RSC Mode CSRF Bypass Allows
+  Action Execution Before 400 Response", vulnerable `>=7.12.0 <8.3.0`.
+  Reachable **only in React Router's RSC (React Server Components) mode**. This
+  app has no RSC and no server in front of the router — verified: no
+  `react-router/rsc` / `unstable_RSC` / `RSCErrorHandler` imports; no
+  `createStaticHandler` / `StaticRouter` / `renderToString` /
+  `renderToPipeableStream`; no `express` / `@react-router/node` /
+  `@react-router/serve`; a plain client-side `<BrowserRouter>` in
+  `frontend/src/App.tsx`; and a client-only `vite build` with no ssr config.
+  No server action exists to execute, so there is no CSRF boundary to bypass.
+  Also flagged transitively on `react-router-dom`.
+  *Remove when* react-router reaches `>=8.3.0` — which requires the v8 migration
+  that **drops `react-router-dom`** (no v8 of that package exists; it folds into
+  `react-router`), i.e. rewriting imports across ~59 pages.
+
+> **Never run `npm audit fix --force` here.** It resolves `react-router-dom`
+> **down** to 7.11.0 and reintroduces four advisories patched in 7.18.0.
