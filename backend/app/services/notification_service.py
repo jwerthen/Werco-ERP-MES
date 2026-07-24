@@ -1,18 +1,23 @@
 import logging
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 from sqlalchemy.orm import Session
 
-from app.core.queue import enqueue_job
-from app.models.notification import DigestQueue, NotificationLog, NotificationPreference
+from app.models.notification import DigestQueue
 from app.models.user import User
 
 logger = logging.getLogger(__name__)
 
 
 class NotificationEvent:
-    """Notification event types"""
+    """Legacy notification event-type constants.
+
+    Retained for backward compatibility: the daily-digest infrastructure and the
+    visitor check-in host-email path still reference these string keys. New code drives
+    notifications through the event catalog (``notification_catalog``) + the dispatcher
+    (``notification_dispatch``), keyed by dot-notation ``event_key`` instead.
+    """
 
     WO_RELEASED = "WO_RELEASED"
     WO_LATE = "WO_LATE"
@@ -29,156 +34,22 @@ class NotificationEvent:
 
 
 class NotificationService:
-    """Notification dispatcher service"""
+    """Digest read/write helpers.
 
-    # Default preferences for new users
-    DEFAULT_PREFERENCES = {
-        NotificationEvent.WO_RELEASED: {"email": True, "digest": False},
-        NotificationEvent.WO_LATE: {"email": True, "digest": True},
-        NotificationEvent.WO_BLOCKED: {"email": True, "digest": False},
-        NotificationEvent.WO_COMPLETED: {"email": True, "digest": False},
-        NotificationEvent.PO_RECEIVED: {"email": True, "digest": False},
-        NotificationEvent.INSPECTION_FAILED: {"email": True, "digest": False},
-        NotificationEvent.NCR_CREATED: {"email": True, "digest": False},
-        NotificationEvent.LOW_STOCK: {"email": False, "digest": True},
-        NotificationEvent.CALIBRATION_DUE: {"email": True, "digest": False},
-        NotificationEvent.QUOTE_EXPIRING: {"email": True, "digest": False},
-        NotificationEvent.CAPACITY_OVERLOAD: {"email": True, "digest": False},
-        NotificationEvent.VISITOR_CHECK_IN: {"email": True, "digest": False},
-    }
+    The immediate-send + per-event dispatch responsibilities moved to
+    ``notification_dispatch`` (the transactional-outbox pipeline). This service now only
+    owns the digest queue read/write helpers used by the daily-digest job. NOTE: the old
+    ``_get_user_preference`` auto-created a ``NotificationPreference`` WITHOUT
+    ``company_id`` (a non-null TenantMixin column) -- an IntegrityError on Postgres (§9.8).
+    That auto-create is intentionally gone: preferences are resolved in memory at dispatch
+    time and a row is persisted only when a user explicitly saves.
+    """
 
     def __init__(self, db: Session):
         self.db = db
 
-    async def send_notification(
-        self,
-        event_type: str,
-        users: List[int] | List[User],
-        subject: str,
-        context: Dict,
-        template: str = None,
-        related_type: str = None,
-        related_id: int = None,
-    ):
-        """
-        Send notification to users
-
-        Args:
-            event_type: Event type (e.g., WO_RELEASED)
-            users: List of user IDs or User objects
-            subject: Email subject
-            context: Template context
-            template: Email template name
-            related_type: Related entity type (WorkOrder, etc)
-            related_id: Related entity ID
-        """
-        # Normalize user list
-        user_ids = []
-        for user in users:
-            if isinstance(user, int):
-                user_ids.append(user)
-            else:
-                user_ids.append(user.id)
-
-        # Get user preferences
-        for user_id in user_ids:
-            user = self.db.query(User).filter(User.id == user_id).first()
-            if not user:
-                continue
-
-            pref = self._get_user_preference(user_id)
-            event_pref = pref.preferences.get(event_type, {"email": True, "digest": False})
-
-            # Check if user wants this notification
-            if event_pref.get("digest", False):
-                # Add to digest queue
-                self._queue_for_digest(user_id, event_type, context)
-            elif event_pref.get("email", True):
-                # Send immediate email
-                await self._send_immediate_email(
-                    user=user,
-                    event_type=event_type,
-                    subject=subject,
-                    context=context,
-                    template=template,
-                    related_type=related_type,
-                    related_id=related_id,
-                )
-
-    async def _send_immediate_email(
-        self,
-        user: User,
-        event_type: str,
-        subject: str,
-        context: Dict,
-        template: str,
-        related_type: str,
-        related_id: int,
-    ):
-        """Send immediate email notification"""
-        try:
-            # Enqueue email job
-            await enqueue_job(
-                "send_email_job",
-                to=user.email,
-                subject=subject,
-                body=None,
-                template=template or event_type.lower(),
-                context=context,
-            )
-
-            # Log notification
-            log = NotificationLog(
-                user_id=user.id,
-                event_type=event_type,
-                channel="email",
-                subject=subject,
-                sent=True,
-                related_type=related_type,
-                related_id=related_id,
-            )
-            self.db.add(log)
-            self.db.commit()
-
-        except Exception as e:
-            logger.error(f"Failed to send notification to user {user.id}: {e}")
-
-            # Log failed notification
-            log = NotificationLog(
-                user_id=user.id,
-                event_type=event_type,
-                channel="email",
-                subject=subject,
-                sent=False,
-                error=str(e),
-                related_type=related_type,
-                related_id=related_id,
-            )
-            self.db.add(log)
-            self.db.commit()
-
-    def _queue_for_digest(self, user_id: int, event_type: str, event_data: Dict):
-        """Queue notification for digest"""
-        digest_item = DigestQueue(
-            user_id=user_id, event_type=event_type, event_data=event_data, digest_date=datetime.utcnow().date()
-        )
-        self.db.add(digest_item)
-        self.db.commit()
-
-    def _get_user_preference(self, user_id: int) -> NotificationPreference:
-        """Get or create user notification preference"""
-        pref = self.db.query(NotificationPreference).filter(NotificationPreference.user_id == user_id).first()
-
-        if not pref:
-            pref = NotificationPreference(user_id=user_id, preferences=self.DEFAULT_PREFERENCES)
-            self.db.add(pref)
-            self.db.commit()
-            self.db.refresh(pref)
-
-        return pref
-
     def get_digest_items(self, user_id: int, since: datetime = None) -> List[DigestQueue]:
-        """Get digest items for user"""
+        """Get unprocessed digest items for user."""
         query = self.db.query(DigestQueue).filter(DigestQueue.user_id == user_id, DigestQueue.processed == False)
 
         if since:
@@ -187,33 +58,30 @@ class NotificationService:
         return query.order_by(DigestQueue.created_at).all()
 
     def mark_digest_processed(self, items: List[DigestQueue]):
-        """Mark digest items as processed"""
+        """Mark digest items as processed."""
         for item in items:
             item.processed = True
         self.db.commit()
 
 
 def get_notification_recipients(
-    db: Session, role: str = None, department: str = None, company_id: Optional[int] = None
+    db: Session, *, role: Optional[str] = None, department: Optional[str] = None, company_id: int
 ) -> List[User]:
     """
-    Get users for notification
+    Get active users for a notification, tenant-scoped.
 
     Args:
         db: Database session
         role: Filter by role (e.g., 'supervisor', 'manager')
         department: Filter by department
-        company_id: Restrict to a single tenant's users. When ``None`` (default,
-            backward-compatible) every active user across all tenants is returned;
-            pass the active company to enforce tenant isolation (invariant #1).
+        company_id: REQUIRED. Restrict to a single tenant's users. Tenant isolation is
+            not optional for recipient resolution (invariant §8.3) -- there is no
+            all-tenants mode.
 
     Returns:
-        List of User objects
+        List of active User objects in the company matching the role/department filters.
     """
-    query = db.query(User).filter(User.is_active == True)
-
-    if company_id is not None:
-        query = query.filter(User.company_id == company_id)
+    query = db.query(User).filter(User.is_active == True, User.company_id == company_id)
 
     if role:
         query = query.filter(User.role == role)

@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+
+{# CUI-safe: equipment identifier + due window only. #}
+{% block content %}
+<h2>Calibration Due</h2>
+
+<div class="alert {% if urgent %}alert-danger{% else %}alert-warning{% endif %}">
+    <strong>{{ equipment_name }}</strong> is due for calibration
+    {% if days_until_due is not none %}in {{ days_until_due }} day(s){% else %}soon{% endif %}.
+</div>
+
+<p>Log in to Werco to review and schedule the calibration.</p>
+{% endblock %}

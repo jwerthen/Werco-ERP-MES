@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+
+{# CUI-safe: work order identifier + status only -- no customer names or quantities. #}
+{% block content %}
+<h2>Work Order Completed</h2>
+
+<div class="alert alert-info">
+    <strong>Work Order {{ work_order_number }}</strong>
+    {% if status %}reached status {{ status }}{% else %}has been completed{% endif %}.
+</div>
+
+<p>Log in to Werco to view the work order details.</p>
+{% endblock %}

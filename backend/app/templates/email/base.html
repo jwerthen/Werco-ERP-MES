@@ -69,9 +69,17 @@
     </div>
     <div class="content">
         {% block content %}{% endblock %}
+        {% if notification_link %}
+        <p style="text-align: center;">
+            <a href="{{ notification_link }}" class="button">Open in Werco</a>
+        </p>
+        {% endif %}
     </div>
     <div class="footer">
         <p>This is an automated message from Werco ERP System</p>
+        {% if base_url %}
+        <p><a href="{{ base_url }}/settings" style="color: #ffffff;">Manage notifications</a></p>
+        {% endif %}
         <p>&copy; {{ year }} Werco Manufacturing. All rights reserved.</p>
     </div>
 </body>

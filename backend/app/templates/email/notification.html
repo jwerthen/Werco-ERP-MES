@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+
+{# Generic outbox notification email (CUI-safe): record identifier + event + deep link
+   only -- no part descriptions, customer names, or quantities. #}
+{% block content %}
+<h2>{{ title }}</h2>
+
+{% if body %}
+<p>{{ body }}</p>
+{% endif %}
+
+<p>Log in to Werco to view the details.</p>
+{% endblock %}

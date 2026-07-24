@@ -71,7 +71,7 @@ from .maintenance import (
     MaintenanceWorkOrder,
 )
 from .mrp import MRPAction, MRPRequirement, MRPRun, MRPRunStatus, PlanningAction
-from .notification import DigestQueue, NotificationLog, NotificationPreference
+from .notification import DigestQueue, Notification, NotificationLog, NotificationPreference
 from .oee import OEERecord, OEETarget
 from .operational_event import OperationalEvent
 from .operator_certification import (
@@ -224,6 +224,7 @@ __all__ = [
     "JobStatus",
     "JobPriority",
     "NotificationPreference",
+    "Notification",
     "NotificationLog",
     "DigestQueue",
     "Webhook",

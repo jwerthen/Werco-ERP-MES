@@ -26,6 +26,7 @@ export interface RouteParent {
 export const routeTitles: Record<string, string> = {
   '/': 'Dashboard',
   '/action-inbox': 'Action Inbox',
+  '/notifications': 'Notifications',
 
   // Production
   '/shop-floor': 'Time Clock',

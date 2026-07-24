@@ -291,11 +291,28 @@ REDIS_URL=redis://default:xxx@xxx.railway.internal:6379
 | `SMTP_PASSWORD` | No | - | SMTP password or app-specific password |
 | `SMTP_FROM` | No | `noreply@werco.com` | From email address |
 | `SMTP_FROM_NAME` | No | `Werco ERP System` | From display name |
+| `FRONTEND_BASE_URL` | No | `""` (empty) | Base URL used to build **absolute** deep links + the "Manage notifications" footer in outbound emails (e.g. `https://app.werco.com`). Empty by default → the link button/footer are omitted (relative `link` only). No trailing slash. |
 
 **Gmail Setup:**
 1. Enable 2FA on your Google account
 2. Generate an App Password at https://myaccount.google.com/apppasswords
 3. Use the app password as `SMTP_PASSWORD`
+
+> **`SMTP_*` are now live `Settings`, not dead config.** As of the notification foundation (PR 1),
+> `EmailService` reads `settings.SMTP_HOST/PORT/USER/PASSWORD/FROM/FROM_NAME` — previously these
+> six fields existed on `Settings` but the email path read `os.getenv` directly, so setting them
+> had no effect (fixed defect §9.3). With SMTP unset, email sends log a skip and return without
+> raising (so unconfigured dev doesn't spam ARQ retries); a real transport failure now propagates
+> so the job retries and records the outcome. Eight previously-missing templates plus deep links
+> now actually send — **verify SPF/DKIM/DMARC on the `SMTP_FROM` domain** before enabling in prod
+> (deliverability checklist in [docs/NOTIFICATIONS.md](NOTIFICATIONS.md)).
+>
+> **SMS egress kill switch — no env var (PR 1).** The Twilio egress gate is the per-company
+> **database** column `Company.allow_sms_egress` (Boolean, non-null, **default OFF** for every
+> tenant), the same fail-closed pattern as `allow_ai_egress` / `allow_carrier_egress` /
+> `allow_print_egress` — it is a DB flag, not configuration. PR 1 adds the column only; **no SMS is
+> sent** (Twilio credentials `TWILIO_*` and the admin toggle land in PR 4). `User.phone` (E.164) is
+> likewise a new nullable column, inert until PR 4.
 
 > **Visitor sign-in tablet — no new variables.** The visitor sign-in feature
 > ([docs/VISITOR_SIGNIN.md](VISITOR_SIGNIN.md)) introduces **no new environment variables**. The

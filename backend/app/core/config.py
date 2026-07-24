@@ -393,6 +393,11 @@ class Settings(BaseSettings):
     SMTP_FROM: str = "noreply@werco.com"
     SMTP_FROM_NAME: str = "Werco ERP System"
 
+    # Base URL of the SPA, used to build absolute deep links in notification emails
+    # (e.g. "https://app.werco.com"). Empty in dev/test -> emails render relative-less
+    # links gracefully. No trailing slash.
+    FRONTEND_BASE_URL: str = ""
+
     # Webhook Configuration
     WEBHOOK_ENCRYPTION_KEY: str = ""
 

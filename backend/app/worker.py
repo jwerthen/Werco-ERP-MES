@@ -10,6 +10,11 @@ from arq import cron
 
 from app.core.queue import get_redis_settings
 
+# Import for side effects: attaches the transactional-outbox SQLAlchemy Session listeners
+# in the worker process so operational events committed here (e.g. cron writes) also tee
+# into the notification pipeline.
+from app.services import notification_outbox  # noqa: F401
+
 logger = logging.getLogger(__name__)
 
 
@@ -203,6 +208,57 @@ async def poll_tracking_job(ctx):
     return await poll_tracking_task()
 
 
+async def dispatch_notification_job(ctx, event_id: int):
+    """Fan out notifications for one committed OperationalEvent (transactional outbox).
+
+    Enqueued by the after_commit tee (and the relay sweeper). Idempotent + crash-safe via
+    the event's ``notified_at`` marker.
+    """
+    from app.jobs.notification_jobs import dispatch_notification_task
+
+    return await dispatch_notification_task(event_id)
+
+
+async def relay_pending_notifications_job(ctx):
+    """5-min sweeper: re-enqueue catalog-mapped events whose notifications never dispatched
+    (covers a Redis outage at after_commit-enqueue time)."""
+    from app.jobs.notification_jobs import relay_pending_notifications_task
+
+    return await relay_pending_notifications_task()
+
+
+async def dispatch_notification_direct_job(
+    ctx,
+    *,
+    event_key: str,
+    company_id: int,
+    recipient_ids: list,
+    related_type: str = None,
+    related_id: int = None,
+    title: str,
+    body: str = None,
+    link: str = None,
+    template: str = None,
+    context: dict = None,
+):
+    """Run ``dispatch_direct`` in the worker for a sync request-path caller (e.g. visitor
+    check-in), which cannot await the async dispatcher itself."""
+    from app.jobs.notification_jobs import dispatch_notification_direct_task
+
+    return await dispatch_notification_direct_task(
+        event_key=event_key,
+        company_id=company_id,
+        recipient_ids=recipient_ids,
+        related_type=related_type,
+        related_id=related_id,
+        title=title,
+        body=body,
+        link=link,
+        template=template,
+        context=context,
+    )
+
+
 # ============================================================================
 # STARTUP/SHUTDOWN
 # ============================================================================
@@ -251,6 +307,9 @@ class WorkerSettings:
         process_tracking_webhook_job,
         print_receiving_label_job,
         run_oee_auto_calc_job,
+        dispatch_notification_job,
+        relay_pending_notifications_job,
+        dispatch_notification_direct_job,
     ]
 
     # Cron jobs (scheduled tasks)
@@ -266,6 +325,9 @@ class WorkerSettings:
         cron(cleanup_old_logs_job, weekday=0, hour=2, minute=0),  # Sunday 2 AM
         cron(archive_aged_audit_logs_job, day=1, hour=3, minute=0),  # 1st of month, 3 AM
         cron(poll_tracking_job, minute={0, 30}),  # every 30 min (tracking poll fallback)
+        # Notification relay sweeper: every 5 min re-enqueue catalog-mapped events whose
+        # after_commit enqueue was lost (e.g. Redis outage). See notification_jobs.
+        cron(relay_pending_notifications_job, minute=set(range(0, 60, 5))),
     ]
 
     # Lifecycle

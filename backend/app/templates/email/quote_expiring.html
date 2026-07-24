@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+
+{# CUI-safe: quote identifier + expiry window only -- no customer names or amounts. #}
+{% block content %}
+<h2>Quote Expiring</h2>
+
+<div class="alert alert-warning">
+    <strong>Quote {{ quote_number }}</strong> expires
+    {% if days_until_expiry is not none %}in {{ days_until_expiry }} day(s){% else %}soon{% endif %}.
+</div>
+
+<p>Log in to Werco to review and follow up on this quote.</p>
+{% endblock %}

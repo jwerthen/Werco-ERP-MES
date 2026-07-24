@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+
+{# CUI-safe: part identifier + required date only -- no descriptions. #}
+{% block content %}
+<h2>Expedite Required</h2>
+
+<div class="alert alert-warning">
+    MRP flagged part <strong>{{ part_number }}</strong> for manual expedite.
+</div>
+
+<table style="width: 100%; margin: 20px 0;">
+    {% if required_date %}
+    <tr>
+        <td><strong>Required date:</strong></td>
+        <td>{{ required_date }}</td>
+    </tr>
+    {% endif %}
+</table>
+
+<p>Log in to Werco to review and expedite this part.</p>
+{% endblock %}

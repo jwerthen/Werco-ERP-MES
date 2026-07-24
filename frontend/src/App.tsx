@@ -41,6 +41,7 @@ const ProcessSheets = lazyWithRetry(() => import('./pages/ProcessSheets'));
 const SetupWizard = lazyWithRetry(() => import('./pages/SetupWizard'));
 const ImportCenter = lazyWithRetry(() => import('./pages/ImportCenter'));
 const ActionInbox = lazyWithRetry(() => import('./pages/ActionInbox'));
+const Notifications = lazyWithRetry(() => import('./pages/Notifications'));
 const Warehouse = lazyWithRetry(() => import('./pages/Warehouse'));
 const Materials = lazyWithRetry(() => import('./pages/Materials'));
 const MRP = lazyWithRetry(() => import('./pages/MRP'));
@@ -464,6 +465,14 @@ function AppRoutes() {
         <PrivateRoute>
           <Layout>
             <LazyRoute><ActionInbox /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
+      {/* In-app notification inbox — all authenticated roles (auth-only gate). */}
+      <Route path="/notifications" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><Notifications /></LazyRoute>
           </Layout>
         </PrivateRoute>
       } />

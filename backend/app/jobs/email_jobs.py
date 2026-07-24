@@ -73,15 +73,22 @@ async def send_daily_digest_task():
                     grouped_events[event_type] = []
                 grouped_events[event_type].append(item.event_data)
 
-            # Send digest email
+            # Send digest email. ``send_email`` now RAISES on a real transport failure
+            # (so the outbox email JOB can retry); the digest job sends inline in a loop,
+            # so guard each user so one failure never aborts the whole run or loses the
+            # other users' processed-marks.
             context = {"user": user, "events": grouped_events, "date": datetime.utcnow().strftime("%Y-%m-%d")}
 
-            await email_service.send_email(
-                to=user.email,
-                subject=f"Werco ERP Daily Digest - {datetime.utcnow().strftime('%B %d, %Y')}",
-                template="daily_digest",
-                context=context,
-            )
+            try:
+                await email_service.send_email(
+                    to=user.email,
+                    subject=f"Werco ERP Daily Digest - {datetime.utcnow().strftime('%B %d, %Y')}",
+                    template="daily_digest",
+                    context=context,
+                )
+            except Exception:
+                logger.exception("Daily digest email failed for user %s; continuing", user.id)
+                continue
 
             # Mark items as processed
             notification_service.mark_digest_processed(items)

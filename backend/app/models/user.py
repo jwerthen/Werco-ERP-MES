@@ -37,6 +37,9 @@ class User(Base):
     last_name = Column(String(100), nullable=False)
     role = Column(SQLEnum(UserRole), default=UserRole.OPERATOR, nullable=False)
     department = Column(String(100))
+    # E.164 phone for SMS notifications (PR 4). Nullable; PII-minimized — serialized only
+    # in the self-profile and admin user-management responses, never in general lists.
+    phone = Column(String(32), nullable=True)
     is_active = Column(Boolean, default=True)
     is_superuser = Column(Boolean, default=False)
 
