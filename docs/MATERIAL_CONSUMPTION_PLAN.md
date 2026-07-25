@@ -95,7 +95,7 @@ The two tie shapes are handled by different machinery, and the split is load-bea
 
 - **Reservations.** Bringing `quantity_allocated` to life changes `quantity_available` platform-wide — the receipt-void guard would start refusing voids for merely-tied stock — and makes MRP double-count, since it nets `on_hand − allocated` while separately exploding the same work-order demand. When it lands, MRP tied-demand deduplication and a re-audit of every `quantity_available` guard are in-scope requirements of that same PR.
 - **Unit conversion.** Material is consumed in the part's own unit of measure, snapshotted onto the tie at creation. Nothing in the platform converts units. Because the tie's UoM is always the part's own, the only way to state a cross-UOM intent is a **lot pin naming a different part** — refused with **422** (the detail names the UoM clash when the two parts' units also differ) rather than guessed at.
-- **Reversal.** There is no RETURN verb yet, which is why every "reverse consumption first" refusal above currently has no self-service path (PR 3).
+- **Reversal.** There is no RETURN verb yet, which is why every "reverse consumption first" refusal above currently has no self-service path (PR 3). One consequence is worth stating plainly so the floor is not surprised: a laser work order carrying **consumed** ties cannot have its nest package re-imported at all until PR 3 ships. Refusing is the right posture — the wipe would delete the operations that consumption transactions reference, orphaning their lot genealogy — but until the reversal verb exists the only remedy is to open a new work order.
 - **Buy-to-job**, remnant/offcut intake, kitting, and operator lot-picking at the kiosk. Shapes are recorded; none are built.
 
 ## Delivery

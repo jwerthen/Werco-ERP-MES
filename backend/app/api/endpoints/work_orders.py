@@ -877,8 +877,9 @@ def _ensure_laser_child_work_order(
             status_code=409,
             detail=(
                 f"The laser work order for {parent_work_order.work_order_number} "
-                f"({deleted_child.work_order_number}) was deleted. Restore it before importing or "
-                "adding nests, so its nests and material ties stay on one work order."
+                f"({deleted_child.work_order_number}) was deleted. It must be restored before "
+                "importing or adding nests, so its nests and material ties stay on one work order. "
+                "Restoring requires an admin or manager (POST /work-orders/{id}/restore)."
             ),
         )
 

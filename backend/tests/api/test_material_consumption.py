@@ -2182,8 +2182,13 @@ def test_reimport_against_a_soft_deleted_laser_child_is_refused(client: TestClie
         json={"cnc_number": "REIMPORT-1", "planned_runs": 2},
     )
     assert resp.status_code == status.HTTP_409_CONFLICT, resp.text
-    assert child.work_order_number in resp.json()["detail"]
-    assert "Restore" in resp.json()["detail"]
+    detail = resp.json()["detail"]
+    assert child.work_order_number in detail
+    # The refusal has to name the remedy AND who can perform it: restore is
+    # ADMIN/MANAGER while a SUPERVISOR may run this import, so a bare "restore it"
+    # would send that caller straight into a 403.
+    assert "/work-orders/{id}/restore" in detail
+    assert "admin or manager" in detail
 
     db_session.expire_all()
     child = db_session.get(WorkOrder, child.id)
