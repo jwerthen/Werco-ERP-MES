@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_audit_service, get_current_active_user, get_current_company_id, require_role
 from app.db.database import get_db
 from app.db.tenant_filter import tenant_query
+from app.models.audit_log import AuditLog
 from app.models.inventory import InventoryItem
 from app.models.part import Part
 from app.models.user import User, UserRole
@@ -146,15 +147,56 @@ def _resolve_pinned_item(
     return item
 
 
+def _detached_operation_ids(
+    db: Session, allocations: List[WorkOrderMaterialAllocation], company_id: int
+) -> dict[int, int]:
+    """Allocation id -> the operation a nest re-import DETACHED that tie from.
+
+    A re-import clears ``work_order_operation_id`` on every tie scoped to an operation it
+    wipes, because that FK has no ``ON DELETE`` and the operation row is about to go
+    (``material_consumption_service.cancel_allocations_for_operations``). The original
+    scope therefore survives ONLY on the tamper-evident hash chain — which meant a
+    detached tie read back over the API as ``work_order_operation_id: null``, byte-
+    identical to a tie that was always work-order-scoped, with nothing on the row to
+    tell the two apart. This reads that one fact back so the API can echo it.
+
+    The chain stays the record of record: this is a display read, and a cancel row that
+    ``AuditService.log`` failed to write simply yields no echo rather than a wrong one.
+    Candidates are narrowed to detached-SHAPED rows (no operation, no longer OPEN) so the
+    lookup is skipped entirely for the common all-live-ties case.
+    """
+    candidates = [a.id for a in allocations if a.work_order_operation_id is None and a.status != AllocationStatus.OPEN]
+    if not candidates:
+        return {}
+    detached: dict[int, int] = {}
+    # Ascending id => the LAST detach row seen per allocation wins.
+    for resource_id, extra_data in (
+        db.query(AuditLog.resource_id, AuditLog.extra_data)
+        .filter(
+            AuditLog.company_id == company_id,
+            AuditLog.resource_type == "work_order_material_allocation",
+            AuditLog.resource_id.in_(candidates),
+        )
+        .order_by(AuditLog.id)
+        .all()
+    ):
+        extra = extra_data or {}
+        old_operation_id = extra.get("work_order_operation_id")
+        if extra.get("work_order_operation_id_cleared") and old_operation_id is not None:
+            detached[resource_id] = old_operation_id
+    return detached
+
+
 def _display_maps(
     db: Session, allocations: List[WorkOrderMaterialAllocation], company_id: int
-) -> tuple[dict[int, Part], dict[int, Optional[str]]]:
-    """Batch the two display lookups ``_serialize`` needs, tenant-scoped.
+) -> tuple[dict[int, Part], dict[int, Optional[str]], dict[int, int]]:
+    """Batch the display lookups ``_serialize`` needs, tenant-scoped.
 
-    One SELECT for the parts and one for the operations, whatever the row count. Doing
-    them per row is an N+1 that scales with the number of ties on a work order — cheap
-    today (ties ship dark) and exactly the sort of thing that is never revisited once the
-    UI lands in PR 2.
+    One SELECT for the parts, one for the operations and (only when some tie actually
+    looks detached) one for the detach markers on the audit chain, whatever the row
+    count. Doing them per row is an N+1 that scales with the number of ties on a work
+    order — cheap today (ties ship dark) and exactly the sort of thing that is never
+    revisited once the UI lands in PR 2.
     """
     part_ids = {a.part_id for a in allocations if a.part_id is not None}
     parts = (
@@ -172,7 +214,7 @@ def _display_maps(
         if operation_ids
         else {}
     )
-    return parts, operation_numbers
+    return parts, operation_numbers, _detached_operation_ids(db, allocations, company_id)
 
 
 def _serialize(
@@ -181,15 +223,17 @@ def _serialize(
     company_id: int,
     parts: Optional[dict[int, Part]] = None,
     operation_numbers: Optional[dict[int, Optional[str]]] = None,
+    detached_operations: Optional[dict[int, int]] = None,
 ) -> MaterialAllocationResponse:
     """One tie as its response schema.
 
-    ``parts`` / ``operation_numbers`` are the batched maps from ``_display_maps``; pass
-    them from any multi-row caller. Omitted (the single-row verbs) they are built for
-    this one row, which is the same two queries the per-row version always issued.
+    ``parts`` / ``operation_numbers`` / ``detached_operations`` are the batched maps from
+    ``_display_maps``; pass them from any multi-row caller. Omitted (the single-row
+    verbs) they are built for this one row, which is the same queries the per-row version
+    always issued.
     """
-    if parts is None or operation_numbers is None:
-        parts, operation_numbers = _display_maps(db, [allocation], company_id)
+    if parts is None or operation_numbers is None or detached_operations is None:
+        parts, operation_numbers, detached_operations = _display_maps(db, [allocation], company_id)
     part = parts.get(allocation.part_id)
     operation_number: Optional[str] = None
     if allocation.work_order_operation_id is not None:
@@ -199,6 +243,7 @@ def _serialize(
         work_order_id=allocation.work_order_id,
         work_order_operation_id=allocation.work_order_operation_id,
         operation_number=operation_number,
+        detached_from_operation_id=detached_operations.get(allocation.id),
         part_id=allocation.part_id,
         part_number=part.part_number if part else None,
         part_name=part.name if part else None,
@@ -234,6 +279,11 @@ def list_material_allocations(
     CANCELLED/CLOSED rows are included by default: they are the tombstones the ledger's
     ``allocation_id`` back-reference resolves to, so hiding them would make consumed
     material look untied. Pass ``include_inactive=false`` for the live (OPEN) ties only.
+
+    A tie a nest re-import DETACHED reads back with ``work_order_operation_id: null`` —
+    the column is cleared so the superseded operation can be deleted — and carries
+    ``detached_from_operation_id`` naming the operation it used to be scoped to, so it is
+    not confused with a tie that was always work-order-scoped.
     """
     _load_work_order(db, work_order_id, company_id)
     query = tenant_query(db, WorkOrderMaterialAllocation, company_id).filter(
@@ -242,8 +292,11 @@ def list_material_allocations(
     if not include_inactive:
         query = query.filter(WorkOrderMaterialAllocation.status == AllocationStatus.OPEN)
     allocations = query.order_by(WorkOrderMaterialAllocation.id).all()
-    parts, operation_numbers = _display_maps(db, allocations, company_id)
-    return [_serialize(db, allocation, company_id, parts, operation_numbers) for allocation in allocations]
+    parts, operation_numbers, detached_operations = _display_maps(db, allocations, company_id)
+    return [
+        _serialize(db, allocation, company_id, parts, operation_numbers, detached_operations)
+        for allocation in allocations
+    ]
 
 
 @router.post(

@@ -64,6 +64,17 @@ class MaterialAllocationResponse(UTCModel):
     work_order_id: int
     work_order_operation_id: Optional[int] = None
     operation_number: Optional[str] = None
+    # Set only on a tie a nest re-import DETACHED: the operation it used to name, read
+    # back off the audit chain. Without it a detached tie is indistinguishable from one
+    # that was always work-order-scoped -- both read ``work_order_operation_id: null``.
+    # Reporting only; the chain row remains the record of record.
+    detached_from_operation_id: Optional[int] = Field(
+        None,
+        description=(
+            "The operation this tie was tied to before a nest re-import superseded it and "
+            "cleared the link. NULL for every tie that was never detached."
+        ),
+    )
     part_id: int
     part_number: Optional[str] = None
     part_name: Optional[str] = None

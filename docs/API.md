@@ -482,7 +482,12 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > - **`GET …/material-allocations`** — every tie on the work order, ordered by id. `include_inactive`
 >   defaults to **`true`**: `cancelled` (and `closed`) rows are the tombstones the ledger's
 >   `allocation_id` resolves to, so hiding them would make consumed material look untied. Pass
->   `include_inactive=false` for open ties only.
+>   `include_inactive=false` for open ties only. A tie a **nest re-import detached** reads back with
+>   `work_order_operation_id: null` — the column is cleared so the superseded operation row can be
+>   deleted — plus **`detached_from_operation_id`** naming the operation it used to be scoped to,
+>   read back off the audit chain. Without that echo a detached tie is byte-identical to one that
+>   was always work-order-scoped. It is `null` on every tie that was never detached, and it is a
+>   reporting field: the `audit_log` row remains the record of record.
 > - **`POST …/material-allocations`** → **201**. Body (`MaterialAllocationCreate`): `part_id`
 >   (**required** — the material part, never the part being produced), `work_order_operation_id`
 >   (optional; **set ⇒ operation-scoped / per-run**, omit ⇒ work-order-scoped / one-shot), `source`
@@ -490,15 +495,24 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 >   only** — the server stores **`1.0`** when omitted on an operation-scoped tie, and sending it on a
 >   work-order-scoped tie is a **422**, the same answer `PATCH` gives, since there are no runs to
 >   scale by), `qty_planned` (**required**, `> 0`), `pinned_inventory_item_id` (optional
->   — consume from *this* lot; omit for FIFO at consume time; a **held or inactive** lot is refused
->   with 422). The pin is honored on **both** tie shapes: an operation-scoped tie consumes from it
->   per run, and a work-order-scoped tie carries it into the one-shot backflush `ISSUE`. `notes`. `unit_of_measure` is **snapshotted** server-side from the part at tie time and
->   is not client-settable. The work order must **not** be terminal (409).
+>   — consume from *this* lot; omit for automatic lot selection at consume time; a **held or
+>   inactive** lot is refused with 422). The pin is honored on **both** tie shapes: an
+>   operation-scoped tie consumes from it per run, and a work-order-scoped tie carries it into the
+>   one-shot backflush `ISSUE`. **Unpinned selection differs by tie shape** — an operation-scoped
+>   tie walks `received_date ASC NULLS LAST, id ASC` FIFO across *available* lots, while a
+>   work-order-scoped tie takes the **lowest-id active on-hand lot** with **no status filter** (the
+>   pre-existing backflush selection, deliberately unchanged so legacy NULL-status rows stay
+>   eligible). A work-order-scoped tie can therefore land on an `on_hold` / `quarantine` / `rejected`
+>   lot: it still consumes and writes a `HELD_MATERIAL_CONSUMED` audit row (with
+>   `pin_directed: false`) rather than skipping the lot. `notes`. `unit_of_measure` is
+>   **snapshotted** server-side from the part at tie time and is not client-settable. The work order
+>   must **not** be terminal (409).
 > - **`PATCH …/material-allocations/{allocation_id}`** — all fields optional; omitted fields are left
 >   alone. Accepts `qty_per_run`, `qty_planned`, `pinned_inventory_item_id`,
->   `clear_pinned_inventory_item` (`true` drops the pin, back to FIFO — sending it **together with**
->   a `pinned_inventory_item_id` is a **422**, since the two ask for opposite things about a field
->   that is a genealogy fact), and `notes`. Lowering `qty_planned` **below** `qty_consumed` is a
+>   `clear_pinned_inventory_item` (`true` drops the pin, back to automatic lot selection — FIFO on
+>   an operation-scoped tie, the lowest-id active on-hand lot on a work-order-scoped one, per the
+>   `POST` note above; sending it **together with** a `pinned_inventory_item_id` is a **422**, since
+>   the two ask for opposite things about a field that is a genealogy fact), and `notes`. Lowering `qty_planned` **below** `qty_consumed` is a
 >   **422** — the engine never auto-reverses, so the row would immediately read as over-consumed. `part_id`,
 >   `work_order_operation_id` and `source` are **deliberately not editable** — repointing a tie after
 >   consumption posted would rewrite genealogy; untie and re-tie instead. Consumption already posted
@@ -700,6 +714,15 @@ mixed**:
 > operates **on that WO directly** — no child is nested under it. This is how re-import and manual
 > nest-add work on standalone nest WOs from the WO-detail wizard; for every other WO type the classic
 > find-or-create-child flow is unchanged.
+>
+> **A soft-deleted laser child is never rebuilt — `409`.** Find-or-create resolves only **live**
+> children (`is_deleted = false`). When the addressed parent's only laser child is **soft-deleted**,
+> `…/laser-nest-packages/import` and `…/laser-nests/manual` return **409** naming that work order and
+> the remedy (`POST /work-orders/{id}/restore`) — they neither resurrect it (the rebuild force-sets
+> `released`, which would put a deleted WO back on the floor with none of the restore path's
+> controls, including the material-tie re-open) nor fork a **second** laser child alongside it. The
+> directly-addressed route already answered **404** for a soft-deleted WO; this closes the
+> parent-addressed one.
 >
 > **Laser WOs are dispatch pools — every nest READY, no sequence gating.** A laser-cutting WO's
 > nest operations carry sequence numbers for stable labels/ordering only ("Nest N") — they have

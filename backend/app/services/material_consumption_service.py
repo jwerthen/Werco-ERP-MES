@@ -400,8 +400,9 @@ def record_held_material_consumed(
     quantity: float,
     company_id: int,
     audit: AuditService,
+    pinned: bool = True,
 ) -> None:
-    """Record that a PINNED lot which is held/inactive was consumed anyway (AS9100D 8.7).
+    """Record that a held/inactive lot was consumed anyway (AS9100D 8.7).
 
     Consumption is NOT refused: this path also runs from a reconcile-on-read GET, the
     material is already physically in the part, and refusing would leave the ledger
@@ -409,13 +410,22 @@ def record_held_material_consumed(
     fact goes on the tamper-evident hash chain, naming the lot, its status and the tie,
     for the MRB/segregation review that has to follow.
 
-    Only ever reachable when a lot was held AFTER it was pinned: the tie endpoint refuses
-    to pin a non-``available`` or inactive lot in the first place.
+    PUBLIC (no leading underscore) and ``operation``-optional because THREE call sites
+    owe this row: the per-run engine below, and BOTH lot-selection branches of the
+    one-shot work-order-scoped leg in ``completion_inventory_service._issue_one_component``.
+    A work-order-scoped tie has no operation, so the row simply omits it.
 
-    PUBLIC (no leading underscore) and ``operation``-optional because BOTH tie shapes can
-    carry a pin: the per-run engine below, and the one-shot work-order-scoped leg in
-    ``completion_inventory_service._issue_one_component``. A work-order-scoped tie has no
-    operation, so the row simply omits it.
+    ``pinned`` says which branch selected the lot, because the two mean different things
+    to whoever reviews the row:
+
+    * ``True`` (both PINNED branches) -- only reachable when the lot was held AFTER it
+      was pinned, since the tie endpoint refuses to pin a non-``available`` or inactive
+      lot in the first place.
+    * ``False`` (the UNPINNED work-order-scoped branch) -- that branch selects the
+      lowest-id active on-hand lot with no ``status`` predicate at all, so it can pick a
+      lot that was ALREADY held. Its selection is deliberately left alone (tightening it
+      would change the pre-existing BOM backflush by excluding legacy NULL-status rows);
+      this row is what stops the consumption being silent.
     """
     scope = f" operation {operation.operation_number or operation.id}" if operation is not None else ""
     audit.log(
@@ -424,7 +434,8 @@ def record_held_material_consumed(
         resource_id=item.id,
         resource_identifier=item.lot_number or str(item.id),
         description=(
-            f"Consumed {quantity} of part {part_number or part_id} from PINNED lot "
+            f"Consumed {quantity} of part {part_number or part_id} from "
+            f"{'PINNED lot' if pinned else 'lot'} "
             f"{item.lot_number or item.id} on WO {work_order.work_order_number}{scope} "
             f"while that lot was {'inactive' if not item.is_active else item.status}"
         ),
@@ -441,14 +452,16 @@ def record_held_material_consumed(
             "item_status": item.status,
             "item_is_active": bool(item.is_active),
             "quantity": quantity,
+            "pin_directed": pinned,
         },
         company_id=company_id,
     )
     logger.warning(
-        "Held material consumed: WO %s op %s allocation %s pinned lot %s (status=%s active=%s, company %s)",
+        "Held material consumed: WO %s op %s allocation %s %s lot %s (status=%s active=%s, company %s)",
         work_order.id,
         operation.id if operation is not None else None,
         allocation_id,
+        "pinned" if pinned else "unpinned",
         item.lot_number or item.id,
         item.status,
         item.is_active,
@@ -857,14 +870,15 @@ def cancel_allocations_for_operations(
     company_id: int,
     audit: AuditService,
 ) -> list[int]:
-    """Guard + CANCEL every allocation scoped to operations that are about to be WIPED.
+    """Guard + DETACH every allocation scoped to operations that are about to be WIPED.
 
     ``build_laser_nest_child_work_order`` rebuilds a laser WO's operations wholesale
-    (import replaces everything). Any allocation with ``qty_consumed > 0`` on a wiped
-    operation raises ``MaterialAllocationConsumedError`` -> HTTP 409; the rest are
-    CANCELLED (status is the tombstone -- these rows are never deleted) with an audit
-    row so the untie is traceable. Returns the cancelled allocation ids. Tenant-scoped;
-    does not commit.
+    (import replaces everything). Any allocation on a wiped operation with
+    ``qty_consumed > 0`` raises ``MaterialAllocationConsumedError`` -> HTTP 409; the
+    OPEN ones are CANCELLED (status is the tombstone -- these rows are never deleted)
+    with an audit row so the untie is traceable. Returns the ids of the ties this call
+    actually CANCELLED (already-cancelled rows are detached, not re-cancelled, so they
+    are not in the list). Tenant-scoped; does not commit.
 
     **The tie's ``work_order_operation_id`` is CLEARED here, and that is load-bearing.**
     The caller's very next act is ``db.delete(operation)`` on exactly these operations,
@@ -877,14 +891,39 @@ def cancel_allocations_for_operations(
     The suite could not see it: SQLite does not enforce foreign keys unless
     ``PRAGMA foreign_keys=ON``, which this project never sets.
 
-    Nulling is safe and correct for these rows specifically: they are CANCELLED, so
-    NEITHER partial unique index applies (``uq_wo_material_alloc_open_op`` requires
-    ``work_order_operation_id IS NOT NULL AND status='OPEN'``;
-    ``uq_wo_material_alloc_open_wo`` requires ``IS NULL AND status='OPEN'``), and they
-    carry no consumption (guarded above), so no ledger row references the operation id
-    being dropped. The ORIGINAL scope is preserved on the hash chain -- in the audit
-    row's ``old_values`` *and* ``extra_data.work_order_operation_id`` -- so the tie's
-    history still says which operation it was tied to.
+    **The selection is deliberately status-BLIND, and that is the round-3 fix.** This
+    used to filter ``status != CANCELLED``, which made the fix above incomplete in two
+    ways, because an ALREADY-cancelled tie keeps pointing at its operation:
+
+    * ``work_order_materials.delete_material_allocation`` (a manual untie) and
+      ``cancel_open_allocations_for_work_order`` (the work-order soft delete) both set
+      ``CANCELLED`` and deliberately RETAIN ``work_order_operation_id``. Such a row was
+      neither guarded nor detached, so the FK violation -- and the misleading 400 --
+      survived on any WO where a tie had been untied before the re-import. That made the
+      rebuild permanently impossible for that work order through supported verbs alone.
+    * Worse, the consumed-material guard was BYPASSED: the soft delete cancels every
+      OPEN tie regardless of ``qty_consumed``, so a tie carrying real consumption could
+      reach the wipe as a ``CANCELLED`` row the ``qty_consumed`` check never saw. The
+      409 that exists precisely to stop ``work_order_operation``-referenced ISSUE rows
+      being orphaned did not fire. Reading EVERY status widens the guard correctly.
+
+    Nulling is safe and correct for these rows specifically: after this call every one
+    of them is ``CANCELLED``, so NEITHER partial unique index applies
+    (``uq_wo_material_alloc_open_op`` requires ``work_order_operation_id IS NOT NULL AND
+    status='OPEN'``; ``uq_wo_material_alloc_open_wo`` requires ``IS NULL AND
+    status='OPEN'``), and none carries consumption (guarded above), so no ledger row
+    references the operation id being dropped. The ORIGINAL scope is preserved on the
+    hash chain -- in the audit row's ``old_values`` *and*
+    ``extra_data.work_order_operation_id`` -- so the tie's history still says which
+    operation it was tied to.
+
+    A detach of an already-cancelled tie is itself a state change on a tenant row, so it
+    gets its OWN chain row (invariant #2): a ``log_update`` recording
+    ``work_order_operation_id: <old> -> None`` with ``reason=superseded_by_reimport``.
+    It is deliberately an UPDATE, not a second DELETE -- the row was already untied, and
+    ``reopen_allocations_cancelled_by_delete`` reads the tie's most recent DELETE row to
+    decide what a restore may resurrect, so a second DELETE here would rewrite that
+    history. That reader has its own detach check; keep the two in lock-step.
 
     ``audit`` is REQUIRED, not optional. Cancelling a tie is a state change on a tenant
     table (invariant #2), and an optional-with-``None``-default audit made an unaudited
@@ -897,7 +936,6 @@ def cancel_allocations_for_operations(
         .filter(
             WorkOrderMaterialAllocation.company_id == company_id,
             WorkOrderMaterialAllocation.work_order_operation_id.in_(operation_ids),
-            WorkOrderMaterialAllocation.status != AllocationStatus.CANCELLED,
         )
         .all()
     )
@@ -913,40 +951,65 @@ def cancel_allocations_for_operations(
 
     cancelled: list[int] = []
     for allocation in allocations:
-        if allocation.status != AllocationStatus.OPEN:
-            continue
         old_operation_id = allocation.work_order_operation_id
-        allocation.status = AllocationStatus.CANCELLED
+        old_status = allocation.status
         # Detach from the operation that is about to be physically deleted (see above).
+        # Done for EVERY status: a row that is already cancelled still holds the FK.
         allocation.work_order_operation_id = None
-        cancelled.append(allocation.id)
-        audit.log_delete(
-            "work_order_material_allocation",
-            allocation.id,
-            f"WO {work_order.work_order_number} / part {allocation.part_id}",
-            old_values={
-                "status": AllocationStatus.OPEN.value,
-                "qty_consumed": allocation.qty_consumed,
-                "work_order_operation_id": old_operation_id,
-            },
-            description=(
-                f"Cancelled material allocation on WO {work_order.work_order_number}: "
-                f"the tied operation ({old_operation_id}) was superseded by a nest re-import"
-            ),
-            soft_delete=True,
-            extra_data={
-                "reason": REIMPORT_CANCEL_REASON,
-                "work_order_id": work_order.id,
-                # The scope the tie HAD. The column is cleared so the operation delete
-                # below cannot FK-violate; this is where that fact survives.
-                "work_order_operation_id": old_operation_id,
-                "work_order_operation_id_cleared": True,
-                "part_id": allocation.part_id,
-                "new_status": AllocationStatus.CANCELLED.value,
-            },
-        )
-    if cancelled:
-        db.flush()
+        if old_status == AllocationStatus.OPEN:
+            allocation.status = AllocationStatus.CANCELLED
+            cancelled.append(allocation.id)
+            audit.log_delete(
+                "work_order_material_allocation",
+                allocation.id,
+                f"WO {work_order.work_order_number} / part {allocation.part_id}",
+                old_values={
+                    "status": AllocationStatus.OPEN.value,
+                    "qty_consumed": allocation.qty_consumed,
+                    "work_order_operation_id": old_operation_id,
+                },
+                description=(
+                    f"Cancelled material allocation on WO {work_order.work_order_number}: "
+                    f"the tied operation ({old_operation_id}) was superseded by a nest re-import"
+                ),
+                soft_delete=True,
+                extra_data={
+                    "reason": REIMPORT_CANCEL_REASON,
+                    "work_order_id": work_order.id,
+                    # The scope the tie HAD. The column is cleared so the operation delete
+                    # below cannot FK-violate; this is where that fact survives.
+                    "work_order_operation_id": old_operation_id,
+                    "work_order_operation_id_cleared": True,
+                    "part_id": allocation.part_id,
+                    "new_status": AllocationStatus.CANCELLED.value,
+                },
+            )
+        else:
+            # Already CANCELLED (a manual untie, or a work-order soft delete) -- there is
+            # no status change to record, but the DETACH is one, and without this row the
+            # tie's original scope would exist nowhere: the column is about to read NULL,
+            # which is indistinguishable from a tie that was always work-order-scoped.
+            audit.log_update(
+                "work_order_material_allocation",
+                allocation.id,
+                f"WO {work_order.work_order_number} / part {allocation.part_id}",
+                old_values={"work_order_operation_id": old_operation_id},
+                new_values={"work_order_operation_id": None},
+                description=(
+                    f"Detached {old_status.value} material allocation from operation "
+                    f"({old_operation_id}) on WO {work_order.work_order_number}: the operation was "
+                    "superseded by a nest re-import"
+                ),
+                extra_data={
+                    "reason": REIMPORT_CANCEL_REASON,
+                    "work_order_id": work_order.id,
+                    "work_order_operation_id": old_operation_id,
+                    "work_order_operation_id_cleared": True,
+                    "part_id": allocation.part_id,
+                    "status": old_status.value,
+                },
+            )
+    db.flush()
     return cancelled
 
 
@@ -1028,6 +1091,17 @@ def reopen_allocations_cancelled_by_delete(
     is what its current CANCELLED state means. Reading the chain is a read -- the row is
     never written or altered here.
 
+    **A tie DETACHED after that delete is not resurrected either.** A nest re-import
+    clears ``work_order_operation_id`` on every tie scoped to an operation it wipes,
+    including ones that were already cancelled -- and it records the detach as an UPDATE
+    so it does not rewrite the DELETE history this function reads. Reopening such a tie
+    would bring it back as a WORK-ORDER-scoped tie (its operation is NULL and the
+    operation itself no longer exists), re-arming one-shot demand the planner never
+    asked for and risking a collision with ``uq_wo_material_alloc_open_wo``. So a
+    candidate whose cancel row named an operation while the row now holds NULL is left
+    alone; the cancel's ``extra_data.work_order_operation_id`` is what makes that
+    detectable without a second query.
+
     Degrades safely: if a cancel's audit row is missing (``AuditService.log`` swallows its
     own failures), that tie simply is not reopened -- the conservative direction, since
     the alternative is resurrecting a tie whose provenance we cannot establish.
@@ -1049,7 +1123,7 @@ def reopen_allocations_cancelled_by_delete(
 
     by_id = {allocation.id: allocation for allocation in candidates}
     # Ascending id => the LAST row seen per allocation is its most recent cancel.
-    latest_reason: dict[int, Optional[str]] = {}
+    latest_cancel: dict[int, dict] = {}
     for resource_id, extra_data in (
         db.query(AuditLog.resource_id, AuditLog.extra_data)
         .filter(
@@ -1061,11 +1135,17 @@ def reopen_allocations_cancelled_by_delete(
         .order_by(AuditLog.id)
         .all()
     ):
-        latest_reason[resource_id] = (extra_data or {}).get("reason")
+        latest_cancel[resource_id] = extra_data or {}
 
     reopened: list[int] = []
     for allocation in candidates:
-        if latest_reason.get(allocation.id) != WORK_ORDER_DELETED_CANCEL_REASON:
+        cancel_extra = latest_cancel.get(allocation.id, {})
+        if cancel_extra.get("reason") != WORK_ORDER_DELETED_CANCEL_REASON:
+            continue
+        if cancel_extra.get("work_order_operation_id") is not None and allocation.work_order_operation_id is None:
+            # DETACHED after this delete cancelled it -- a nest re-import wiped the
+            # operation it named. Reopening it would re-arm it as a work-order-scoped
+            # tie the planner never created. See the docstring.
             continue
         allocation.status = AllocationStatus.OPEN
         reopened.append(allocation.id)

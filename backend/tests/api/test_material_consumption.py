@@ -40,7 +40,7 @@ from app.models.operational_event import OperationalEvent
 from app.models.part import Part
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
-from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
+from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus, WorkOrderType
 from app.models.work_order_material import AllocationSource, AllocationStatus, WorkOrderMaterialAllocation
 from app.services.analytics_service import AnalyticsService
 from app.services.audit_service import AuditService
@@ -1983,6 +1983,12 @@ def test_operation_delete_after_tie_cancel_survives_foreign_key_enforcement(db_s
     ``IntegrityError`` on Postgres, which the import endpoint turns into a misleading
     400. ``cancel_allocations_for_operations`` therefore CLEARS the column.
 
+    Covers BOTH shapes the wipe can meet, because the round-2 fix only handled the
+    first: a tie that is still OPEN (cancelled + detached here), and one that was
+    ALREADY cancelled by a manual untie (nothing to cancel, but it still holds the FK
+    and so must still be detached). Skipping the second left the crash reachable
+    through supported verbs — tie, untie, re-import — and permanently un-rebuildable.
+
     The positive control below is what makes this test non-vacuous: with the tie still
     attached the delete DOES raise, proving FK enforcement is actually live for this
     test rather than silently off (which is the suite-wide default).
@@ -1998,6 +2004,19 @@ def test_operation_delete_after_tie_cancel_survives_foreign_key_enforcement(db_s
     subject_op = make_op(db_session, wo, wc, sequence=20, operation_group="LASER")
     subject_sheet = make_part(db_session, uom="sheets", part_type="raw_material")
     allocation = make_allocation(db_session, wo, subject_sheet, operation=subject_op, qty_per_run=1.0, qty_planned=3)
+    # The shape a manual untie leaves behind: CANCELLED, qty_consumed 0, and still
+    # pointing at its operation (delete_material_allocation deliberately keeps the id).
+    untied_op = make_op(db_session, wo, wc, sequence=30, operation_group="LASER")
+    untied_sheet = make_part(db_session, uom="sheets", part_type="raw_material")
+    untied = make_allocation(
+        db_session,
+        wo,
+        untied_sheet,
+        operation=untied_op,
+        qty_per_run=1.0,
+        qty_planned=3,
+        status_=AllocationStatus.CANCELLED,
+    )
 
     with sqlite_foreign_keys_enforced(db_session):
         # POSITIVE CONTROL: an attached tie makes the operation delete FK-violate.
@@ -2007,17 +2026,28 @@ def test_operation_delete_after_tie_cancel_survives_foreign_key_enforcement(db_s
             db_session.flush()
         nested.rollback()
 
+        # SECOND POSITIVE CONTROL: an ALREADY-CANCELLED tie violates it just the same —
+        # the FK does not care about the tombstone.
+        nested = db_session.begin_nested()
+        with pytest.raises(IntegrityError):
+            db_session.delete(untied_op)
+            db_session.flush()
+        nested.rollback()
+
         # THE PATH THE IMPORT TAKES: cancel the ties, then wipe the operations.
         cancelled = cancel_allocations_for_operations(
             db_session,
             work_order=wo,
-            operation_ids=[subject_op.id],
+            operation_ids=[subject_op.id, untied_op.id],
             company_id=COMPANY_A,
             audit=AuditService(db_session, user),
         )
+        # Only the OPEN tie is CANCELLED; the already-cancelled one is detached, not
+        # re-cancelled (no second tombstone, no duplicate DELETE row).
         assert cancelled == [allocation.id]
 
         db_session.delete(subject_op)
+        db_session.delete(untied_op)
         db_session.flush()
         db_session.commit()
 
@@ -2026,6 +2056,181 @@ def test_operation_delete_after_tie_cancel_survives_foreign_key_enforcement(db_s
         assert allocation is not None, "the tie row must survive the operation delete"
         assert allocation.status == AllocationStatus.CANCELLED
         assert allocation.work_order_operation_id is None
+
+        untied = db_session.get(WorkOrderMaterialAllocation, untied.id)
+        assert untied is not None, "the already-cancelled tie must survive too"
+        assert untied.status == AllocationStatus.CANCELLED
+        assert untied.work_order_operation_id is None
+
+
+def test_detaching_an_already_cancelled_tie_is_audited(db_session: Session):
+    """The detach is a state change on a tenant row, so it owes a chain row (invariant 2).
+
+    An already-cancelled tie has no status change to record — but clearing
+    ``work_order_operation_id`` erases the tie's only remaining evidence of what it was
+    scoped to, so the UPDATE row carries the old id, the cleared marker and the reason.
+    It is an UPDATE and not a second DELETE on purpose: the restore discriminator reads
+    the tie's most recent DELETE row, and a second one would rewrite that history.
+    """
+    user = make_user(db_session)
+    fg = make_part(db_session)
+    sheet = make_part(db_session, uom="sheets", part_type="raw_material")
+    wo = make_wo(db_session, fg, quantity_ordered=3)
+    op = make_op(db_session, wo, make_work_center(db_session), operation_group="LASER")
+    untied = make_allocation(
+        db_session, wo, sheet, operation=op, qty_per_run=1.0, qty_planned=3, status_=AllocationStatus.CANCELLED
+    )
+
+    cancelled = cancel_allocations_for_operations(
+        db_session,
+        work_order=wo,
+        operation_ids=[op.id],
+        company_id=COMPANY_A,
+        audit=AuditService(db_session, user),
+    )
+    db_session.commit()
+    db_session.refresh(untied)
+
+    assert cancelled == []
+    assert untied.work_order_operation_id is None
+
+    rows = (
+        db_session.query(AuditLog)
+        .filter(
+            AuditLog.company_id == COMPANY_A,
+            AuditLog.resource_type == "work_order_material_allocation",
+            AuditLog.resource_id == untied.id,
+        )
+        .order_by(AuditLog.id)
+        .all()
+    )
+    assert [r.action for r in rows] == ["UPDATE"], "the detach is an UPDATE, never a second DELETE"
+    detach = rows[0]
+    assert detach.old_values["work_order_operation_id"] == op.id
+    assert detach.new_values["work_order_operation_id"] is None
+    assert detach.extra_data["reason"] == "superseded_by_reimport"
+    assert detach.extra_data["work_order_operation_id"] == op.id
+    assert detach.extra_data["work_order_operation_id_cleared"] is True
+
+
+def test_reimport_guard_sees_consumption_on_an_already_cancelled_tie(db_session: Session):
+    """The 409 must fire for a CANCELLED tie that carries consumption, not just an OPEN one.
+
+    ``cancel_open_allocations_for_work_order`` (the work-order soft delete) cancels every
+    OPEN tie REGARDLESS of ``qty_consumed`` — consumption already posted stands. While the
+    wipe query skipped CANCELLED rows, such a tie sailed past the guard, its operation was
+    deleted, and the ISSUE rows carrying that operation's lot genealogy were orphaned:
+    exactly what the 409 exists to prevent, bypassed by a supported verb.
+    """
+    user = make_user(db_session)
+    fg = make_part(db_session)
+    sheet = make_part(db_session, uom="sheets", part_type="raw_material")
+    wo = make_wo(db_session, fg, quantity_ordered=3, quantity_complete=3)
+    op = make_op(db_session, wo, make_work_center(db_session), quantity_complete=3, operation_group="LASER")
+    allocation = make_allocation(db_session, wo, sheet, operation=op, qty_per_run=1.0, qty_planned=3, qty_consumed=3.0)
+
+    # The state a work-order soft delete leaves: CANCELLED, consumption intact, still
+    # pointing at the operation.
+    cancel_open_allocations_for_work_order(
+        db_session, work_order=wo, company_id=COMPANY_A, audit=AuditService(db_session, user)
+    )
+    db_session.commit()
+    db_session.refresh(allocation)
+    assert allocation.status == AllocationStatus.CANCELLED
+    assert allocation.qty_consumed == 3.0
+    assert allocation.work_order_operation_id == op.id
+
+    with pytest.raises(MaterialAllocationConsumedError):
+        cancel_allocations_for_operations(
+            db_session,
+            work_order=wo,
+            operation_ids=[op.id],
+            company_id=COMPANY_A,
+            audit=AuditService(db_session, user),
+        )
+
+
+def test_reimport_against_a_soft_deleted_laser_child_is_refused(client: TestClient, db_session: Session):
+    """A parent-addressed re-import must not resurrect a soft-deleted laser child.
+
+    ``_ensure_laser_child_work_order`` had no ``is_deleted`` filter, so a parent-addressed
+    import resolved the DELETED child and the import's very next act force-set it back to
+    ``RELEASED`` — a deleted work order back on the floor with none of the restore path's
+    controls, and (because the soft delete cancelled its ties and no re-open ran) running
+    with its material demand silently closed out. It is also the door through which a
+    CANCELLED-with-consumption tie reached the operation wipe.
+
+    409, not 404: the child exists, and the remedy is to restore it so its nests and ties
+    stay on one work order rather than forking into a second child.
+    """
+    admin = make_user(db_session)
+    fg = make_part(db_session)
+    parent = make_wo(db_session, fg, quantity_ordered=3, status_=WorkOrderStatus.RELEASED)
+    make_work_center(db_session)  # an active laser work center must exist for the import
+    child = make_wo(db_session, fg, quantity_ordered=1, status_=WorkOrderStatus.RELEASED)
+    child.parent_work_order_id = parent.id
+    child.work_order_type = WorkOrderType.LASER_CUTTING.value
+    db_session.commit()
+
+    assert client.delete(f"/api/v1/work-orders/{child.id}", headers=headers_for(admin)).status_code == 204
+
+    # Both parent-addressed nest write paths funnel through the same helper
+    # (`_resolve_laser_target` -> `_ensure_laser_child_work_order`).
+    resp = client.post(
+        f"/api/v1/work-orders/{parent.id}/laser-nests/manual",
+        headers=headers_for(admin),
+        json={"cnc_number": "REIMPORT-1", "planned_runs": 2},
+    )
+    assert resp.status_code == status.HTTP_409_CONFLICT, resp.text
+    assert child.work_order_number in resp.json()["detail"]
+    assert "Restore" in resp.json()["detail"]
+
+    db_session.expire_all()
+    child = db_session.get(WorkOrder, child.id)
+    assert child.is_deleted, "the deleted child must not have been rebuilt"
+    # No second laser child was created alongside it either.
+    live_children = (
+        db_session.query(WorkOrder)
+        .filter(
+            WorkOrder.company_id == COMPANY_A,
+            WorkOrder.parent_work_order_id == parent.id,
+            WorkOrder.is_deleted == False,  # noqa: E712
+        )
+        .all()
+    )
+    assert live_children == []
+
+
+def test_laser_child_is_still_found_when_it_is_live(client: TestClient, db_session: Session):
+    """The converse control: the ``is_deleted`` filter must not break find-or-create.
+
+    Without this the 409 above could pass while every healthy import quietly forked a
+    second laser child.
+    """
+    admin = make_user(db_session)
+    fg = make_part(db_session)
+    parent = make_wo(db_session, fg, quantity_ordered=3, status_=WorkOrderStatus.RELEASED)
+    make_work_center(db_session)
+
+    first = client.post(
+        f"/api/v1/work-orders/{parent.id}/laser-nests/manual",
+        headers=headers_for(admin),
+        json={"cnc_number": "LIVE-1", "planned_runs": 2},
+    )
+    assert first.status_code == status.HTTP_201_CREATED, first.text
+    second = client.post(
+        f"/api/v1/work-orders/{parent.id}/laser-nests/manual",
+        headers=headers_for(admin),
+        json={"cnc_number": "LIVE-2", "planned_runs": 3},
+    )
+    assert second.status_code == status.HTTP_201_CREATED, second.text
+
+    children = (
+        db_session.query(WorkOrder)
+        .filter(WorkOrder.company_id == COMPANY_A, WorkOrder.parent_work_order_id == parent.id)
+        .all()
+    )
+    assert len(children) == 1, "find-or-create must reuse the live laser child"
 
 
 def test_cancelled_tie_records_the_operation_it_was_detached_from(db_session: Session):
@@ -2059,6 +2264,40 @@ def test_cancelled_tie_records_the_operation_it_was_detached_from(db_session: Se
     assert row.extra_data["work_order_operation_id"] == op.id
     assert row.extra_data["work_order_operation_id_cleared"] is True
     assert row.old_values["work_order_operation_id"] == op.id
+
+
+def test_tie_list_echoes_the_operation_a_reimport_detached_it_from(client: TestClient, db_session: Session):
+    """A detached tie must not read back as one that was always work-order-scoped.
+
+    Both shapes serialize ``work_order_operation_id: null``, so without an echo the API
+    lost the distinction entirely and the original scope existed only on the hash chain.
+    """
+    admin = make_user(db_session)
+    fg = make_part(db_session)
+    detached_part = make_part(db_session, uom="sheets", part_type="raw_material")
+    wo_scoped_part = make_part(db_session, uom="sheets", part_type="raw_material")
+    wo = make_wo(db_session, fg, quantity_ordered=3)
+    op = make_op(db_session, wo, make_work_center(db_session), operation_group="LASER")
+    detached = make_allocation(db_session, wo, detached_part, operation=op, qty_per_run=1.0, qty_planned=3)
+    always_wo_scoped = make_allocation(db_session, wo, wo_scoped_part, operation=None, qty_planned=3)
+
+    cancel_allocations_for_operations(
+        db_session,
+        work_order=wo,
+        operation_ids=[op.id],
+        company_id=COMPANY_A,
+        audit=AuditService(db_session, admin),
+    )
+    db_session.commit()
+
+    resp = client.get(_tie_url(wo.id), headers=headers_for(admin))
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    by_id = {row["id"]: row for row in resp.json()}
+
+    assert by_id[detached.id]["work_order_operation_id"] is None
+    assert by_id[detached.id]["detached_from_operation_id"] == op.id
+    assert by_id[always_wo_scoped.id]["work_order_operation_id"] is None
+    assert by_id[always_wo_scoped.id]["detached_from_operation_id"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -2155,6 +2394,72 @@ def test_available_pinned_lot_on_a_work_order_scoped_tie_records_no_held_row(db_
 
     run_effects(db_session, wo, user)
 
+    assert (
+        db_session.query(AuditLog)
+        .filter(AuditLog.company_id == COMPANY_A, AuditLog.action == HELD_MATERIAL_CONSUMED_AUDIT_ACTION)
+        .count()
+        == 0
+    )
+
+
+def test_unpinned_work_order_scoped_tie_records_a_held_lot_it_consumes(db_session: Session):
+    """The UNPINNED leg selects with no ``status`` filter — so it must RECORD, not skip.
+
+    Its per-run twin ``_fifo_source_items`` filters ``status == 'available'``; this branch
+    orders active on-hand rows by id and takes the first, whatever its status. Adding the
+    status predicate here would newly exclude legacy NULL-status rows and change the
+    pre-existing BOM backflush, so the lot CHOICE is deliberately unchanged — what changes
+    is that an ``on_hold`` / ``quarantine`` / ``rejected`` lot no longer goes into an
+    as-built record silently (AS9100D 8.7).
+    """
+    user = make_user(db_session)
+    fg = make_part(db_session)
+    sheet = make_part(db_session, uom="sheets", part_type="raw_material")
+    held_lot = make_inventory(db_session, sheet, qty=10, lot="LOT-ON-HOLD")
+    held_lot.status = "on_hold"
+    db_session.commit()
+    wo = make_wo(db_session, fg, quantity_ordered=2, quantity_complete=2)
+    allocation = make_allocation(db_session, wo, sheet, operation=None, qty_planned=2.0)
+
+    run_effects(db_session, wo, user)
+    db_session.expire_all()
+
+    rows = _wo_scoped_issue_rows(db_session, wo, sheet)
+    assert len(rows) == 1 and rows[0].lot_number == "LOT-ON-HOLD", "lot selection is unchanged"
+    assert db_session.get(InventoryItem, held_lot.id).quantity_on_hand == 8
+
+    held = (
+        db_session.query(AuditLog)
+        .filter(AuditLog.company_id == COMPANY_A, AuditLog.action == HELD_MATERIAL_CONSUMED_AUDIT_ACTION)
+        .all()
+    )
+    assert len(held) == 1, "an unpinned held consumption owes the same chain row as a pinned one"
+    assert held[0].extra_data["allocation_id"] == allocation.id
+    assert held[0].extra_data["item_status"] == "on_hold"
+    assert held[0].extra_data["pin_directed"] is False, "the row must say the lot was NOT pin-directed"
+    assert "PINNED lot" not in held[0].description
+
+
+def test_unpinned_leg_treats_a_null_status_lot_as_available(db_session: Session):
+    """A legacy NULL-status row is not held — it must not start writing 8.7 rows.
+
+    This is why the fix records rather than tightening the SELECT: ``status IS NULL``
+    predates the column's default and means "unknown, treat as available"
+    (``is_consumable_item``), not "quarantined".
+    """
+    user = make_user(db_session)
+    fg = make_part(db_session)
+    sheet = make_part(db_session, uom="sheets", part_type="raw_material")
+    legacy_lot = make_inventory(db_session, sheet, qty=10, lot="LOT-LEGACY-NULL")
+    legacy_lot.status = None
+    db_session.commit()
+    wo = make_wo(db_session, fg, quantity_ordered=2, quantity_complete=2)
+    make_allocation(db_session, wo, sheet, operation=None, qty_planned=2.0)
+
+    run_effects(db_session, wo, user)
+    db_session.expire_all()
+
+    assert len(_wo_scoped_issue_rows(db_session, wo, sheet)) == 1
     assert (
         db_session.query(AuditLog)
         .filter(AuditLog.company_id == COMPANY_A, AuditLog.action == HELD_MATERIAL_CONSUMED_AUDIT_ACTION)
@@ -2300,6 +2605,46 @@ def test_restore_does_not_resurrect_a_reimport_cancelled_tie(client: TestClient,
 
     db_session.expire_all()
     assert db_session.get(WorkOrderMaterialAllocation, superseded.id).status == AllocationStatus.CANCELLED
+    assert db_session.get(WorkOrderMaterialAllocation, kept.id).status == AllocationStatus.OPEN
+
+
+def test_restore_does_not_resurrect_a_tie_a_reimport_detached(client: TestClient, db_session: Session):
+    """A tie the DELETE cancelled but a later re-import DETACHED stays cancelled.
+
+    The delete's own cancel keeps ``work_order_operation_id`` (so a restore puts the tie
+    back on the same operation) — but a re-import then clears it, and the operation it
+    named is gone. Reopening it would silently convert an operation-scoped tie into a
+    WORK-ORDER-scoped one, re-arming one-shot demand nobody asked for. The cancel row
+    named an operation while the row now holds NULL, which is how the restore sees it.
+    """
+    admin = make_user(db_session)
+    fg = make_part(db_session)
+    detached_part = make_part(db_session, uom="sheets", part_type="raw_material")
+    kept_part = make_part(db_session, uom="sheets", part_type="raw_material")
+    wo = make_wo(db_session, fg, quantity_ordered=3, status_=WorkOrderStatus.RELEASED)
+    op = make_op(db_session, wo, make_work_center(db_session), operation_group="LASER")
+    detached = make_allocation(db_session, wo, detached_part, operation=op, qty_per_run=1.0, qty_planned=3)
+    kept = make_allocation(db_session, wo, kept_part, operation=None, qty_planned=3)
+
+    # The delete cancels BOTH ties, keeping the operation link on the first.
+    assert client.delete(f"/api/v1/work-orders/{wo.id}", headers=headers_for(admin)).status_code == 204
+    db_session.expire_all()
+    assert db_session.get(WorkOrderMaterialAllocation, detached.id).work_order_operation_id == op.id
+
+    # A nest re-import then supersedes that operation and detaches the cancelled tie.
+    cancel_allocations_for_operations(
+        db_session,
+        work_order=db_session.get(WorkOrder, wo.id),
+        operation_ids=[op.id],
+        company_id=COMPANY_A,
+        audit=AuditService(db_session, admin),
+    )
+    db_session.commit()
+
+    assert client.post(f"/api/v1/work-orders/{wo.id}/restore", headers=headers_for(admin)).status_code == 200
+
+    db_session.expire_all()
+    assert db_session.get(WorkOrderMaterialAllocation, detached.id).status == AllocationStatus.CANCELLED
     assert db_session.get(WorkOrderMaterialAllocation, kept.id).status == AllocationStatus.OPEN
 
 

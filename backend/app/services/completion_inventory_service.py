@@ -620,14 +620,20 @@ def _issue_one_component(
     lot-directed instruction, so an insufficient pinned lot is driven negative rather
     than silently spilling onto a different, uncertified, wrong-heat lot. This mirrors
     the operation-scoped engine exactly. Unpinned demand keeps the historical behavior:
-    the lowest-id active row with on-hand, else a placeholder at standard cost.
+    the lowest-id active row with on-hand -- NOT ``received_date`` FIFO, which is what
+    the per-run engine does -- else a placeholder at standard cost.
 
-    **The pin bypasses ordering, NOT the hold check.** A pinned lot that is inactive or
-    not ``available`` is still consumed -- the material is already in the part and this
-    path also runs from a reconcile-on-read GET, where refusing would be unattributable
-    -- but the fact goes on the tamper-evident chain as ``HELD_MATERIAL_CONSUMED``
-    (AS9100D 8.7). The tie endpoint refuses to PIN a held lot (422), so the row can only
-    ever mean "held after it was pinned".
+    **Neither branch consumes a held lot silently.** A lot that is inactive or not
+    ``available`` is still consumed -- the material is already in the part and this path
+    also runs from a reconcile-on-read GET, where refusing would be unattributable --
+    but the fact goes on the tamper-evident chain as ``HELD_MATERIAL_CONSUMED``
+    (AS9100D 8.7). On the PINNED branch the row can only ever mean "held after it was
+    pinned", because the tie endpoint refuses to pin a held lot (422). On the UNPINNED
+    branch it can mean the lot was already held when it was picked: that SELECT filters
+    ``is_active`` and on-hand but deliberately not ``status`` (its per-run twin
+    ``_fifo_source_items`` does), and tightening it here would newly exclude legacy
+    NULL-status rows and change the pre-existing BOM backflush -- so the lot choice is
+    left exactly as it was and the consumption is RECORDED instead of skipped.
     """
     part = db.query(Part).filter(Part.id == component_part_id, Part.company_id == company_id).first()
     part_number = part.part_number if part else None
@@ -668,6 +674,16 @@ def _issue_one_component(
     target = source_items[0] if source_items else None
     if target is None:
         target = _placeholder_stock_row(db, part_id=component_part_id, company_id=company_id, unit_cost=unit_cost)
+    elif held_item is None and not is_consumable_item(target):
+        # UNPINNED leg, and the lot it picked is held. The SELECT above filters
+        # ``is_active`` and on-hand but deliberately NOT ``status`` -- adding
+        # ``status = 'available'`` would newly exclude legacy NULL-status rows and change
+        # the pre-existing BOM backflush, so lot SELECTION stays exactly as it was. What
+        # changes is that consuming an ``on_hold`` / ``quarantine`` / ``rejected`` lot is
+        # no longer SILENT: it takes the same AS9100D 8.7 chain row the pinned leg writes.
+        # (``is_consumable_item`` reads a NULL status as available, so a legacy row is
+        # still not treated as held.)
+        held_item = target
 
     # ONE ISSUE for the full required quantity, inserted FIRST under a savepoint; the
     # decrement applies ONLY when the insert actually committed. A duplicate (a
@@ -694,8 +710,10 @@ def _issue_one_component(
     outcome = IssueOutcome(posted=True)
 
     if held_item is not None:
-        # A pin has exactly ONE source lot, so the whole demand came off the held lot
-        # (whether through the normal take or by driving it negative).
+        # This leg writes exactly ONE ISSUE against ONE lot (uq_wo_inventory_issue
+        # permits no second row per (WO, part)), so the whole demand came off the held
+        # lot -- whether through the normal take or by driving it negative -- on the
+        # pinned and unpinned branches alike.
         record_held_material_consumed(
             work_order=work_order,
             operation=None,
@@ -706,6 +724,7 @@ def _issue_one_component(
             quantity=required_qty,
             company_id=company_id,
             audit=audit,
+            pinned=pinned_inventory_item_id is not None,
         )
 
     shortfall = required_qty - available_total

@@ -834,17 +834,53 @@ def _ensure_laser_child_work_order(
     # before it can be safely added to live multi-tenant data.)
     acquire_generator_lock(db, f"laser_child_work_order:{parent_work_order.id}", company_id)
 
+    # is_deleted == False is load-bearing, not hygiene. Without it a parent-addressed
+    # import or manual add resolved a SOFT-DELETED laser child and rebuilt it -- the
+    # caller's very next act force-sets RELEASED and re-derives the quantities, so a
+    # deleted work order silently came back to life on the shop floor with none of the
+    # restore path's controls (no audited `restore` action, and the tie re-open in
+    # `reopen_allocations_cancelled_by_delete` never ran, so its material demand stayed
+    # cancelled while the work order ran). The direct-address route already refuses
+    # this -- `_load_parent_work_order` filters soft-deleted rows and 404s -- so this
+    # was the one door left open.
     child = (
         db.query(WorkOrder)
         .filter(
             WorkOrder.company_id == company_id,
             WorkOrder.parent_work_order_id == parent_work_order.id,
             WorkOrder.work_order_type == WorkOrderType.LASER_CUTTING.value,
+            WorkOrder.is_deleted == False,  # noqa: E712
         )
         .first()
     )
     if child:
         return child
+
+    # A soft-deleted child exists but no live one: REFUSE rather than silently create a
+    # second laser child alongside the deleted one. Creating one would fork the parent's
+    # nest history in two and leave the deleted work order's operations, nests and
+    # material ties stranded; 409 (the state conflicts with the request) names the work
+    # order and the one remedy that keeps that history in one place.
+    deleted_child = (
+        db.query(WorkOrder)
+        .filter(
+            WorkOrder.company_id == company_id,
+            WorkOrder.parent_work_order_id == parent_work_order.id,
+            WorkOrder.work_order_type == WorkOrderType.LASER_CUTTING.value,
+            WorkOrder.is_deleted == True,  # noqa: E712
+        )
+        .order_by(WorkOrder.id.desc())
+        .first()
+    )
+    if deleted_child is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"The laser work order for {parent_work_order.work_order_number} "
+                f"({deleted_child.work_order_number}) was deleted. Restore it before importing or "
+                "adding nests, so its nests and material ties stay on one work order."
+            ),
+        )
 
     child = WorkOrder(
         company_id=company_id,
