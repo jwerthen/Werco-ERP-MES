@@ -263,13 +263,18 @@ def make_txn(
     """Seed a ledger row directly.
 
     NOTE on the two partial UNIQUE indexes declared on ``InventoryTransaction``
-    (``uq_wo_inventory_receipt`` / ``uq_wo_inventory_issue``): their WHERE clause
-    is ``postgresql_where``, so under the SQLite test engine they materialize as
-    *unconditional* unique indexes over
-    ``(company_id, reference_type, reference_id, transaction_type[, part_id])``.
-    SQLite treats NULLs as distinct, so rows seeded with a NULL
-    ``reference_type``/``reference_id`` never collide; where a test needs several
-    reference-bearing rows they differ in reference_id or transaction_type.
+    (``uq_wo_inventory_receipt`` / ``uq_wo_inventory_issue``): since migration
+    ``076_uq_wo_inv_sqlite_parity`` they declare BOTH ``postgresql_where`` and
+    ``sqlite_where``, so they are genuinely PARTIAL under the SQLite test engine --
+    scoped to ``reference_type = 'work_order'`` with RECEIVE/ISSUE, exactly as in
+    production. Rows seeded with any OTHER ``reference_type`` are outside both
+    predicates and can repeat freely.
+
+    (Before 076 the SQLite engine ignored the ``postgresql_where`` and materialized
+    these as *unconditional* unique indexes over
+    ``(company_id, reference_type, reference_id, transaction_type[, part_id])``,
+    which forced fixtures here to keep reference-bearing rows artificially distinct.
+    That constraint is gone; the existing fixtures are simply still valid.)
     """
     txn = InventoryTransaction(
         company_id=company_id,

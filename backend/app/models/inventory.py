@@ -192,6 +192,27 @@ class InventoryItem(Base, TenantMixin):
     part = relationship("Part", back_populates="inventory_items")
 
 
+# Predicates for the two work-order completion idempotency indexes
+# (uq_wo_inventory_receipt / uq_wo_inventory_issue -- migration 041, dialect parity
+# restored by migration 076_uq_wo_inventory_sqlite_parity).
+#
+# The values are the UPPERCASE enum MEMBER NAMES ('RECEIVE'/'ISSUE'), not the
+# lowercase ``str`` values, because SQLAlchemy's Enum binds ``enum.name``. That is
+# true on BOTH dialects -- verified at the bind-processor level:
+#
+#     Enum(TransactionType).dialect_impl(<dialect>).bind_processor(<dialect>)
+#         postgresql: TransactionType.RECEIVE -> 'RECEIVE'   (native enum label)
+#         sqlite    : TransactionType.RECEIVE -> 'RECEIVE'   (VARCHAR(8), stored TEXT)
+#
+# and end-to-end (an ORM-inserted row stores TEXT 'RECEIVE' under SQLite). So ONE
+# literal is correct for both dialects and the predicate does NOT need to be written
+# per-dialect. These MUST stay aligned with the columns/filters in
+# ``_existing_work_order_receipt`` / ``_component_already_issued``
+# (completion_inventory_service.py) and with migration 041/076.
+WO_RECEIPT_INDEX_PREDICATE = "reference_type = 'work_order' AND transaction_type = 'RECEIVE'"
+WO_ISSUE_INDEX_PREDICATE = "reference_type = 'work_order' AND transaction_type = 'ISSUE'"
+
+
 class InventoryTransaction(Base, TenantMixin):
     """Transaction history for inventory movements"""
 
@@ -204,15 +225,24 @@ class InventoryTransaction(Base, TenantMixin):
     # backflushed component (the second insert raises IntegrityError, which the
     # service catches and treats as an idempotent no-op).
     #
-    # Predicate values are the UPPERCASE enum MEMBER NAMES ('RECEIVE'/'ISSUE'),
-    # which is what SQLAlchemy's native Postgres enum stores and binds for
-    # ``TransactionType.RECEIVE`` / ``TransactionType.ISSUE`` (it uses ``enum.name``,
-    # not ``enum.value``). They MUST stay aligned with the columns/filters in
-    # ``_existing_work_order_receipt`` and ``_component_already_issued``.
+    # Each declares BOTH ``postgresql_where`` AND ``sqlite_where`` from the SAME
+    # predicate constant. Declaring only ``postgresql_where`` (the shape 041 shipped)
+    # silently degraded these to FULL unique indexes under SQLite -- dev and the whole
+    # pytest suite -- so the test environment enforced a constraint production does
+    # not: any two ledger rows sharing (company, reference_type, reference_id,
+    # transaction_type[, part_id]) collided regardless of reference_type. That made
+    # legitimate movements fail locally (e.g. a second compensating ADJUST against one
+    # po_receipt) and blanketed reference types the guard was never meant to cover.
+    # Migration 076_uq_wo_inventory_sqlite_parity restores parity on existing SQLite
+    # DBs; this declaration is what the ``create_all`` bootstrap path builds.
+    #
+    # Coverage is UNCHANGED for the rows these guards exist for: with the predicate
+    # applied, reference_type='work_order' RECEIVE/ISSUE rows are still uniquely
+    # constrained exactly as before, on both dialects.
     #
     # Defined here so the ``create_all`` bootstrap path produces the same indexes a
-    # stamped+migrated DB gets (migration 041_uq_wo_inventory_idempotency). Both are
-    # mirrored there; keep the two in lock-step.
+    # stamped+migrated DB gets (migrations 041 + 076). All three are mirrored; keep
+    # them in lock-step.
     __table_args__ = (
         # At most one finished-goods RECEIPT per (company, work_order).
         Index(
@@ -222,7 +252,8 @@ class InventoryTransaction(Base, TenantMixin):
             "reference_id",
             "transaction_type",
             unique=True,
-            postgresql_where=text("reference_type = 'work_order' AND transaction_type = 'RECEIVE'"),
+            postgresql_where=text(WO_RECEIPT_INDEX_PREDICATE),
+            sqlite_where=text(WO_RECEIPT_INDEX_PREDICATE),
         ),
         # At most one backflush ISSUE per (company, work_order, component part).
         Index(
@@ -233,7 +264,22 @@ class InventoryTransaction(Base, TenantMixin):
             "transaction_type",
             "part_id",
             unique=True,
-            postgresql_where=text("reference_type = 'work_order' AND transaction_type = 'ISSUE'"),
+            postgresql_where=text(WO_ISSUE_INDEX_PREDICATE),
+            sqlite_where=text(WO_ISSUE_INDEX_PREDICATE),
+        ),
+        # NON-unique composite for the reference-scoped reads. The two partial
+        # unique indexes above only cover reference_type = 'work_order'; the
+        # material-consumption path (work_order_material.py) posts with
+        # reference_type = 'work_order_operation', which is deliberately OUTSIDE
+        # those predicates so it can never collide with the backflush idempotency
+        # guards. This index backs the genealogy/history reads for that path
+        # ("every ledger row for this operation") and any other reference_type.
+        # Added by migration 075_inventory_txn_allocation_ref.
+        Index(
+            "ix_inventory_txn_company_reference",
+            "company_id",
+            "reference_type",
+            "reference_id",
         ),
     )
 
@@ -246,9 +292,18 @@ class InventoryTransaction(Base, TenantMixin):
     quantity = Column(Float, nullable=False)  # Positive for in, negative for out
 
     # Reference
-    reference_type = Column(String(50))  # work_order, purchase_order, sales_order
+    reference_type = Column(String(50))  # work_order, work_order_operation, purchase_order, sales_order
     reference_id = Column(Integer)
     reference_number = Column(String(100))
+
+    # Durable genealogy key for the material-consumption path: which
+    # work_order_material_allocations row caused this movement. Nullable and
+    # additive — every pre-existing ledger row (and every movement that is not
+    # allocation-driven: receipts, manual adjusts, backflush issues) truthfully has
+    # NULL here, and is NEVER backfilled. It survives a re-tie (the allocation row
+    # is CANCELLED, not deleted), so an audit can always walk a transaction back to
+    # the tie that produced it. Added by migration 075_inventory_txn_allocation_ref.
+    allocation_id = Column(Integer, ForeignKey("work_order_material_allocations.id"), nullable=True, index=True)
 
     # Location
     from_location = Column(String(100))

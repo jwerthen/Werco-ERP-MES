@@ -29,6 +29,7 @@ from datetime import date, datetime, timedelta
 import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.core.security import create_access_token
@@ -44,6 +45,8 @@ from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation
 from app.services.audit_service import AuditService
 from app.services.completion_inventory_service import (
     FINISHED_GOODS_LOCATION,
+    _component_already_issued,
+    _existing_work_order_receipt,
     _insert_txn_with_savepoint,
     apply_completion_inventory_effects,
 )
@@ -1102,13 +1105,21 @@ def test_fg_receipt_is_tenant_isolated(client: TestClient, db_session: Session):
 # Item 1: savepoint no-op on a duplicate inventory insert
 # ===========================================================================
 #
-# Under the new partial unique index a concurrent second RECEIVE/ISSUE insert (the
+# Under the partial unique indexes a concurrent second RECEIVE/ISSUE insert (the
 # double-receive/issue race) raises IntegrityError. Each insert is wrapped in a
 # SAVEPOINT so the duplicate is a clean no-op that does NOT double on-hand and does
-# NOT abort the outer transaction. On SQLite (test DB) the postgresql_where partial
-# index is not enforced, so the IntegrityError won't fire from the DB -- so we (a)
-# prove the application-level idempotency guard makes a SECOND service call a no-op,
-# and (b) force an IntegrityError directly to prove the savepoint catch is graceful.
+# NOT abort the outer transaction.
+#
+# Dialect note (corrected by migration 076_uq_wo_inventory_sqlite_parity): the two 041
+# indexes now declare ``sqlite_where`` alongside ``postgresql_where``, so they are
+# PARTIAL on BOTH dialects and the SQLite test DB enforces exactly what production
+# Postgres enforces. For the rows these guards cover -- reference_type='work_order'
+# with RECEIVE/ISSUE -- that is the same coverage SQLite had before 076 (it previously
+# over-enforced by ignoring the predicate and blanketing EVERY reference_type). So the
+# IntegrityError below does fire from the DB here, exactly as in production. We prove
+# (a) the application-level idempotency guard makes a SECOND service call a no-op even
+# with NO index at all, (b) the index independently rejects a duplicate, and (c) the
+# savepoint catch is graceful.
 
 
 def test_second_apply_completion_effects_does_not_double_on_hand_and_does_not_raise(
@@ -1172,11 +1183,13 @@ def test_insert_txn_savepoint_catches_integrity_error_and_keeps_session_usable(d
     return False (duplicate no-op), and leave the OUTER transaction usable -- so a
     SUBSEQUENT legitimate insert (a DIFFERENT WO) still commits.
 
-    The model's ``uq_wo_inventory_receipt`` unique index already enforces RECEIVE-key
-    uniqueness in the test DB (SQLite materializes it as a full unique index), so a
-    genuine DUPLICATE of the WO RECEIVE key raises a real unique-violation
-    IntegrityError -- exactly the production race the savepoint guards. We assert the
-    catch yields a no-op (False) and keeps the OUTER transaction usable."""
+    The model's ``uq_wo_inventory_receipt`` unique index enforces RECEIVE-key
+    uniqueness in the test DB. Since 076 it is PARTIAL on SQLite too -- scoped to
+    ``reference_type = 'work_order' AND transaction_type = 'RECEIVE'``, the same
+    predicate Postgres uses -- and the rows below sit squarely inside it, so a genuine
+    DUPLICATE of the WO RECEIVE key raises a real unique-violation IntegrityError here
+    exactly as it does in production. We assert the catch yields a no-op (False) and
+    keeps the OUTER transaction usable."""
     admin = make_user(db_session)
     part = make_part(db_session)
 
@@ -1215,3 +1228,148 @@ def test_insert_txn_savepoint_catches_integrity_error_and_keeps_session_usable(d
         .all()
     )
     assert len(wo555) == 1
+
+
+# ===========================================================================
+# 076 parity: the APPLICATION layer is what enforces WO-level idempotency
+# ===========================================================================
+#
+# Migration 076_uq_wo_inventory_sqlite_parity added ``sqlite_where`` to the two 041
+# indexes so SQLite stops over-enforcing them across every reference_type. For the
+# work-order RECEIVE/ISSUE rows the guards actually cover, coverage is unchanged --
+# but that is a claim worth PROVING rather than reasoning about, in both directions:
+#
+#   * with the indexes DROPPED entirely, the application-level probes
+#     (``_existing_work_order_receipt`` / ``_component_already_issued``) must still
+#     refuse a duplicate WO RECEIVE and a duplicate (WO, component) ISSUE. If they
+#     did not, the index would have been the real guard all along -- and since it is
+#     a Postgres PARTIAL index, production would be relying on a constraint that only
+#     ever existed there. This test is what rules that out.
+#   * with the indexes PRESENT, the (now partial on both dialects) index must still
+#     independently reject the same duplicates -- i.e. 076 did not loosen the guard.
+
+
+def _drop_wo_idempotency_indexes(db: Session) -> list[str]:
+    """Drop the two 041 indexes so ONLY the application guard is left standing.
+
+    Safe within a test: the ``db_session`` fixture drop_all/create_all's the whole
+    schema per test, so nothing leaks to the next one. Returns the names still present
+    afterwards, so a silently-failed DROP cannot make the test pass for free.
+    """
+    for name in ("uq_wo_inventory_receipt", "uq_wo_inventory_issue"):
+        db.execute(text(f"DROP INDEX IF EXISTS {name}"))
+    db.commit()
+    remaining = db.execute(
+        text(
+            "SELECT name FROM sqlite_master WHERE type = 'index' "
+            "AND name IN ('uq_wo_inventory_receipt', 'uq_wo_inventory_issue')"
+        )
+    ).fetchall()
+    return [row[0] for row in remaining]
+
+
+def _backflush_fixture(db: Session):
+    """Admin + a backflush FG part (BOM: 2x component) + a stocked component lot + WO."""
+    admin = make_user(db)
+    component = make_part(db, standard_cost=2.0)
+    src = make_inventory(db, component, qty=100, lot="RAW-APPGUARD-1")
+    fg_part = make_part(db, backflush=True, standard_cost=5.0)
+    bom = BOM(part_id=fg_part.id, revision="A", is_active=True, company_id=COMPANY_A)
+    db.add(bom)
+    db.flush()
+    db.add(
+        BOMItem(
+            bom_id=bom.id,
+            component_part_id=component.id,
+            item_number=10,
+            quantity=2,
+            item_type="buy",
+            line_type="component",
+            scrap_factor=0.0,
+            company_id=COMPANY_A,
+        )
+    )
+    wo = make_wo(db, fg_part, quantity_ordered=4, quantity_complete=4)
+    db.commit()
+    return admin, component, src, fg_part, wo
+
+
+def test_app_layer_alone_refuses_duplicate_wo_receipt_and_issue_without_the_index(db_session: Session):
+    """With BOTH 041 indexes dropped, the application probes still enforce idempotency.
+
+    This is the load-bearing check behind 076: it proves the WO-level double-receive /
+    double-issue guard is the application's check-then-insert, NOT an index. Were it
+    the index, production Postgres would be leaning on a partial index alone with no
+    application backstop, and the whole 041 "application guard + DB backstop" story
+    would be inverted.
+    """
+    admin, component, src, fg_part, wo = _backflush_fixture(db_session)
+
+    assert _drop_wo_idempotency_indexes(db_session) == [], "the 041 indexes must really be gone"
+
+    audit = AuditService(db_session, admin)
+    apply_completion_inventory_effects(db_session, wo, user_id=admin.id, company_id=COMPANY_A, audit=audit)
+    db_session.flush()
+    assert fg_on_hand(db_session, fg_part.id) == 4
+    assert db_session.get(InventoryItem, src.id).quantity_on_hand == 92
+
+    # The probes themselves report "already done" -- name them explicitly so a
+    # refactor that removes them fails HERE rather than silently in production.
+    assert _existing_work_order_receipt(db_session, wo.id, COMPANY_A) is True
+    assert _component_already_issued(db_session, wo.id, component.id, COMPANY_A) is True
+
+    # Second application with NO index behind it: still a clean no-op.
+    apply_completion_inventory_effects(db_session, wo, user_id=admin.id, company_id=COMPANY_A, audit=audit)
+    db_session.commit()
+
+    db_session.expire_all()
+    assert fg_on_hand(db_session, fg_part.id) == 4, "app guard alone must prevent the double FG receipt"
+    assert (
+        db_session.get(InventoryItem, src.id).quantity_on_hand == 92
+    ), "app guard alone must prevent the double component issue"
+    assert len(fg_receipts(db_session, wo.id)) == 1, "exactly one WO-level RECEIVE, enforced by the app layer"
+    issues = (
+        db_session.query(InventoryTransaction)
+        .filter(
+            InventoryTransaction.company_id == COMPANY_A,
+            InventoryTransaction.reference_type == "work_order",
+            InventoryTransaction.reference_id == wo.id,
+            InventoryTransaction.transaction_type == TransactionType.ISSUE,
+            InventoryTransaction.part_id == component.id,
+        )
+        .all()
+    )
+    assert len(issues) == 1, "exactly one (WO, component) ISSUE, enforced by the app layer"
+
+
+def test_partial_index_still_independently_rejects_duplicate_wo_receipt_and_issue(db_session: Session):
+    """076 did not loosen the guard: with the app probes bypassed, the index still bites.
+
+    Inserts the duplicates directly (no service call, so no application check runs),
+    against the post-076 PARTIAL SQLite indexes. Both must raise -- proving the DB
+    backstop for reference_type='work_order' RECEIVE/ISSUE survived the parity fix
+    intact, which is the invariant 041 exists for.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    admin = make_user(db_session)
+    part = make_part(db_session)
+
+    def _txn(transaction_type: TransactionType, reference_id: int) -> InventoryTransaction:
+        return InventoryTransaction(
+            company_id=COMPANY_A,
+            part_id=part.id,
+            transaction_type=transaction_type,
+            quantity=1,
+            reference_type="work_order",
+            reference_id=reference_id,
+            created_by=admin.id,
+        )
+
+    for transaction_type, reference_id in ((TransactionType.RECEIVE, 901), (TransactionType.ISSUE, 902)):
+        db_session.add(_txn(transaction_type, reference_id))
+        db_session.commit()
+        db_session.add(_txn(transaction_type, reference_id))
+        with pytest.raises(IntegrityError):
+            db_session.commit()
+        db_session.rollback()

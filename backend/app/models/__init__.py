@@ -164,6 +164,7 @@ from .work_order_blocker import (
     WorkOrderBlockerSeverity,
     WorkOrderBlockerStatus,
 )
+from .work_order_material import AllocationSource, AllocationStatus, WorkOrderMaterialAllocation
 
 __all__ = [
     "Company",
@@ -203,6 +204,9 @@ __all__ = [
     "WorkOrderBlockerCategory",
     "WorkOrderBlockerSeverity",
     "WorkOrderBlockerStatus",
+    "WorkOrderMaterialAllocation",
+    "AllocationSource",
+    "AllocationStatus",
     "TimeEntry",
     "InventoryItem",
     "InventoryTransaction",
