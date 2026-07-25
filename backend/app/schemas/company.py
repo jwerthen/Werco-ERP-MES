@@ -70,6 +70,7 @@ class CompanyResponse(CompanyBase):
     id: int
     is_active: bool
     allow_ai_egress: bool
+    allow_sms_egress: bool = False
     parent_company_id: Optional[int] = None
     created_at: datetime
     updated_at: datetime
@@ -83,6 +84,12 @@ class CompanyAIEgressUpdate(BaseModel):
     """Request body for the dedicated AI-egress kill-switch toggle."""
 
     allow_ai_egress: bool = Field(..., description="Allow outbound AI document-extraction egress to the Anthropic API")
+
+
+class CompanySMSEgressUpdate(BaseModel):
+    """Request body for the dedicated SMS-egress kill-switch toggle."""
+
+    allow_sms_egress: bool = Field(..., description="Allow outbound notification SMS egress to Twilio")
 
 
 class CompanyListResponse(BaseModel):

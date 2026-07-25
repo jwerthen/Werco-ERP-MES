@@ -17,7 +17,13 @@ from app.core.security import create_access_token, create_refresh_token
 from app.db.database import get_db
 from app.models.company import Company
 from app.models.user import User, UserRole
-from app.schemas.company import CompanyAIEgressUpdate, CompanyRegister, CompanyResponse, CompanyUpdate
+from app.schemas.company import (
+    CompanyAIEgressUpdate,
+    CompanyRegister,
+    CompanyResponse,
+    CompanySMSEgressUpdate,
+    CompanyUpdate,
+)
 from app.schemas.user import Token, UserResponse
 from app.services.audit_service import AuditService
 from app.services.company_onboarding import onboard_company
@@ -153,6 +159,70 @@ def update_my_company_ai_egress(
             description=(
                 "AI document-extraction egress "
                 f"{'ENABLED' if company.allow_ai_egress else 'DISABLED'} for company {company_id}"
+            ),
+        )
+
+    db.commit()
+    db.refresh(company)
+    return CompanyResponse.model_validate(company)
+
+
+@router.put(
+    "/me/sms-egress",
+    response_model=CompanyResponse,
+    summary="Toggle the company's notification-SMS egress kill switch",
+)
+def update_my_company_sms_egress(
+    payload: CompanySMSEgressUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Flip the active company's ``allow_sms_egress`` kill switch.
+
+    SAFETY: ``allow_sms_egress`` gates ALL outbound notification SMS to Twilio, which
+    sits outside the CUI boundary. ADMIN-only, matching the sibling CUI egress kill
+    switches ``allow_ai_egress`` / ``allow_carrier_egress`` / ``allow_print_egress``
+    (a CUI-boundary decision is reserved to Admins). It is created OFF and only flips
+    when an admin sets it here; ``sms_service`` re-checks it fail-closed before every
+    send, so turning it off stops in-flight queued messages too.
+
+    The flip is audited both as a field-level update AND as a security-relevant status
+    change so enabling/disabling egress lands on the tamper-evident trail.
+
+    Tenant-safe: only ever mutates the caller's OWN active company -- the company is
+    loaded by ``get_current_company_id`` and never taken from the request body.
+    """
+    company = db.query(Company).filter(Company.id == company_id).first()
+    if not company:
+        raise HTTPException(status_code=404, detail="Company not found")
+
+    previous_egress = company.allow_sms_egress
+    company.allow_sms_egress = payload.allow_sms_egress
+    db.flush()
+
+    identifier = company.name or f"company:{company_id}"
+
+    audit.log_update(
+        resource_type="company",
+        resource_id=company.id,
+        resource_identifier=identifier,
+        old_values={"allow_sms_egress": previous_egress},
+        new_values={"allow_sms_egress": company.allow_sms_egress},
+        description="Company SMS egress setting updated",
+    )
+
+    if previous_egress != company.allow_sms_egress:
+        audit.log_status_change(
+            "company",
+            company.id,
+            identifier,
+            "sms_egress_enabled" if previous_egress else "sms_egress_disabled",
+            "sms_egress_enabled" if company.allow_sms_egress else "sms_egress_disabled",
+            description=(
+                "Notification SMS egress "
+                f"{'ENABLED' if company.allow_sms_egress else 'DISABLED'} for company {company_id}"
             ),
         )
 

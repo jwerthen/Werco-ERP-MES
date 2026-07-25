@@ -74,6 +74,9 @@ import {
   NotificationItem,
   NotificationListParams,
   NotificationListResponse,
+  NotificationPreferences,
+  NotificationPreferencesUpdate,
+  TestSmsResponse,
 } from '../types/notification';
 import {
   AddressValidationRequest,
@@ -1238,6 +1241,51 @@ class ApiService {
   /** The notification event catalog (drives the settings matrix + filter options). */
   async getNotificationCatalog(): Promise<NotificationCatalogEntry[]> {
     const response = await this.api.get<NotificationCatalogEntry[]>('/notifications/catalog');
+    return response.data;
+  }
+
+  // --- Self-service notification settings (My Settings) ---------------------
+  // Per-user, self-scoped. The SMS slice lands in PR 4; PR 3 extends the same
+  // preferences endpoints with the full channel matrix + digest controls.
+
+  /** The current user's notification preferences (per-event channel flags + digest). */
+  async getMyNotificationPreferences(): Promise<NotificationPreferences> {
+    const response = await this.api.get<NotificationPreferences>('/users/me/notification-preferences');
+    return response.data;
+  }
+
+  /**
+   * Merge-update the current user's notification preferences. Send only the keys
+   * you intend to change — the server merges per event/channel, so a partial save
+   * (e.g. the SMS column alone) never clobbers email/digest choices.
+   */
+  async updateMyNotificationPreferences(
+    payload: NotificationPreferencesUpdate,
+  ): Promise<NotificationPreferences> {
+    const response = await this.api.put<NotificationPreferences>(
+      '/users/me/notification-preferences',
+      payload,
+    );
+    return response.data;
+  }
+
+  /**
+   * Set (or clear, with `null`) the current user's SMS number. The server
+   * validates/normalizes to E.164 via `phonenumbers` and audits the change;
+   * a bad number comes back as a 400 whose `detail` is safe to display.
+   */
+  async updateMyPhone(phone: string | null): Promise<User> {
+    const response = await this.api.put<User>('/users/me/phone', { phone });
+    return response.data;
+  }
+
+  /**
+   * Send a one-off test SMS to the current user's saved number. Fails closed with
+   * a server-side 4xx when company SMS egress is off or no number is on file — no
+   * provider credential is ever returned to the client.
+   */
+  async sendTestSms(): Promise<TestSmsResponse> {
+    const response = await this.api.post<TestSmsResponse>('/users/me/test-sms');
     return response.data;
   }
 
@@ -4300,6 +4348,18 @@ class ApiService {
   // AI-backed features degrade gracefully. Returns the updated CompanyResponse.
   async updateCompanyAiEgress(allow: boolean): Promise<Company> {
     const response = await this.api.put('/companies/me/ai-egress', { allow_ai_egress: allow });
+    return response.data;
+  }
+
+  // Per-company SMS egress kill switch (CUI / data-egress control). ADMIN-only
+  // server-side (mirrors the sibling AI / carrier / print egress switches);
+  // flipping it is recorded on the tamper-evident audit trail. When OFF, no
+  // message body or mobile number leaves the system boundary to the commercial
+  // SMS carrier and every SMS notification is suppressed (fail-closed). No
+  // provider credential is ever exchanged over this route — it carries one
+  // boolean. Returns the updated CompanyResponse.
+  async updateCompanySmsEgress(allow: boolean): Promise<Company> {
+    const response = await this.api.put('/companies/me/sms-egress', { allow_sms_egress: allow });
     return response.data;
   }
 

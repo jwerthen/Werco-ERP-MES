@@ -2615,6 +2615,90 @@ records, targets) require **Admin / Manager / Supervisor**.
 > password fails only that row, `reason` = `"Weak password: …"`); operator **auto-generated**
 > passwords (for badge/employee-ID logins) satisfy the policy by construction and are **exempt**.
 
+### User self-service (My Settings)
+
+Self-scoped profile + notification settings for the signed-in user. **No role gate beyond
+authentication** — every route reads/writes only `current_user` and never accepts a user id, so no
+caller can reach another user's phone or preferences. Backing UI: **My Settings** (`/settings`, all
+roles). See [docs/NOTIFICATIONS.md](NOTIFICATIONS.md#sms-channel-twilio).
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/users/me` | Current user's own profile (the one general route exposing `phone`) | Any authenticated user (self) |
+| PUT | `/users/me/phone` | Set or clear your own phone number (stored E.164, audited) | Any authenticated user (self) |
+| GET | `/users/me/notification-preferences` | Your **effective** per-event channel matrix | Any authenticated user (self) |
+| PUT | `/users/me/notification-preferences` | Save your **SMS** opt-ins (audited) | Any authenticated user (self) |
+| POST | `/users/me/test-sms` | Send a test SMS to your own number — **`3/minute` per IP + `3/hour` per user** | Any authenticated user (self) |
+
+> **`PUT /users/me/phone`** — body `{ "phone": "512-555-0100" }` (or `{ "phone": null }` / `""` to
+> clear); `phone` is `max_length` 32. The number is parsed against `SMS_DEFAULT_REGION` (default
+> `US`) and **normalized to E.164** before storage, so the SMS transport never has to guess a
+> country code. An unparseable/invalid number returns **400** (`"Invalid phone number: …"`) rather
+> than being stored and failing later at send time. Returns the full `UserResponse`. The change is
+> written to the tamper-evident audit log (`extra_data.source = "self_service"`) — the phone is the
+> destination of every SMS alert, so a silent redirect would be an audit gap. A no-op change
+> (same number) short-circuits without an audit row. The **admin** paths `POST /users/` and
+> `PUT /users/{id}` accept and normalize `phone` the same way (it was previously a phantom schema
+> field that was silently dropped).
+>
+> **`GET /users/me/notification-preferences`** returns the channel map the dispatcher **would apply
+> right now** — catalog defaults where the user has saved nothing, plus any mandatory channel forced
+> on — resolved through the dispatcher's own `channels_from_pref`, so the settings UI can never
+> disagree with what actually gets sent. It is **read-only and non-creating**: a user who has never
+> saved preferences gets defaults and **no** `NotificationPreference` row is written.
+> ```json
+> {
+>   "preferences": {
+>     "wo.blocker_created": { "digest": false, "email": true, "in_app": true, "sms": false }
+>   },
+>   "has_saved_preferences": false,
+>   "phone": "+15125550100",
+>   "sms_egress_enabled": false,
+>   "sms_configured": true
+> }
+> ```
+> `sms_egress_enabled` (the company kill switch) / `sms_configured` (server-side Twilio config) /
+> `phone` are what the UI uses to explain why an SMS toggle would currently be inert.
+>
+> **`PUT /users/me/notification-preferences`** — body
+> `{ "preferences": { "<event_key>": { "sms": true }, … } }`, max 200 events. **Scope: the `sms`
+> channel only.** Both models are `extra="forbid"`, so a payload carrying `in_app` / `email` /
+> `digest` fails loudly with **422** instead of silently dropping channels this endpoint does not
+> yet own (the full matrix is PR 3). Errors: an unknown `event_key` → **400**
+> (`"Unknown notification event(s): …"`); enabling `sms` on an event that is not `sms_eligible` →
+> **400** (`"SMS is not available for event(s): …"`). Events the user has never touched are seeded
+> from catalog defaults before the `sms` bit is applied, and the stored row keeps the full
+> `{in_app, email, sms, digest}` shape per event. The mandatory channel is **not** baked into the
+> stored row — the dispatcher re-applies it at send time. Audited as a
+> `notification_preference` update. Returns the same response shape as the `GET`.
+>
+> **`POST /users/me/test-sms`** — no body. Sends `Werco: test message - SMS alerts are configured
+> for your account.` to **`current_user.phone`**; the destination can never be supplied by the
+> caller, so this cannot be used to message an arbitrary number. It runs through the same
+> `sms_service` path as real notifications (so the `allow_sms_egress` kill switch is enforced
+> fail-closed) and writes a `notification_logs` row (`event_type = "sms.test"`) **before** the
+> outbound call, so the attempt is recorded even if the process dies mid-flight.
+>
+> Bounded **twice**, because it is the one authenticated route that spends carrier money per call:
+> **`3/minute` per IP** (`ENDPOINT_RATE_LIMITS` in `main.py`) and **`3/hour` per user**
+> (`SMS_TEST_HOURLY_CAP_PER_USER`, `reserve_test_sms_quota`). The per-IP limiter alone is not
+> sufficient — it keys on address, so one account multiplies it by rotating egress IPs, and it is
+> disabled entirely wherever `RATE_LIMIT_ENABLED=false`. The per-user budget is separate from
+> `SMS_HOURLY_CAP_PER_USER`, so testing never consumes the critical-alert allowance.
+>
+> Any phone number appearing in a provider/validation error is **masked** before it is written to
+> `notification_logs.error` (`***0134`), because that field is served by
+> `GET /notifications/logs` to roles that cannot see `phone`. The HTTP `detail` returned to the
+> caller is unmasked — they own the number.
+>
+> | Status | When |
+> |---|---|
+> | **200** `{ status, sid, provider_status, detail }` | Sent (`status = "sent"`), **or** Twilio unconfigured on the server (`status = "skipped"`, `detail` explains) |
+> | **400** | No phone on file; company SMS egress disabled; the stored number is invalid |
+> | **429** | Per-user hourly test budget exhausted (`3/hour`) |
+> | **503** | The quota backend (Redis) is unavailable — refuses rather than sending unmetered, and deliberately does *not* report this as a limit the user hit |
+> | **502** | Provider rejected the message, or the provider was unreachable |
+
 ### Admin Settings (Admin)
 
 | Method | Endpoint | Description | Auth Required |
@@ -2643,9 +2727,10 @@ The active company's own profile and self-managed settings. Mounted under `/comp
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| GET | `/companies/me` | Get the active company (includes `allow_ai_egress` and `user_count`) | Any authenticated user |
+| GET | `/companies/me` | Get the active company (includes `allow_ai_egress`, `allow_sms_egress`, and `user_count`) | Any authenticated user |
 | PUT | `/companies/me` | Update the active company's settings | Admin |
 | PUT | `/companies/me/ai-egress` | Toggle the company's **AI document-extraction egress kill switch** (`allow_ai_egress`) | Admin |
+| PUT | `/companies/me/sms-egress` | Toggle the company's **notification-SMS egress kill switch** (`allow_sms_egress`) | Admin |
 
 > **`allow_ai_egress` is the AI-egress CUI kill switch (default OFF).** It gates **all** outbound
 > AI document-extraction egress to the Anthropic API (the AI analogue of `allow_carrier_egress` /
@@ -2661,6 +2746,21 @@ The active company's own profile and self-managed settings. Mounted under `/comp
 > **Admin Settings → AI Privacy** (`/admin/settings?tab=aiprivacy`) — interactive for Admin
 > (enabling egress requires explicit confirmation), read-only for other roles. See
 > [docs/AI_QUOTING_AGENT_RUNBOOK.md](AI_QUOTING_AGENT_RUNBOOK.md).
+
+> **`allow_sms_egress` is the notification-SMS CUI kill switch (default OFF).** It gates **all**
+> outbound notification SMS to Twilio, which sits outside the CUI boundary.
+> `PUT /companies/me/sms-egress` takes `{ "allow_sms_egress": boolean }` and returns the updated
+> `CompanyResponse`. **Admin-only** (`require_role([ADMIN])`), matching the sibling
+> `allow_ai_egress` / `allow_carrier_egress` / `allow_print_egress` controls, and it only ever
+> mutates the caller's **own active company** (`get_current_company_id`; never taken from the
+> request body). **Double-audited**: the flip writes both a field-level update **and** an
+> `sms_egress_enabled` / `sms_egress_disabled` status change on the tamper-evident trail. Every
+> company is created **OFF**; while OFF the SMS transport denies **fail-closed** on every send —
+> including messages already queued in ARQ — and nothing (not even the destination number) leaves
+> the boundary. Turning it on is necessary but not sufficient: SMS also requires server-side Twilio
+> configuration and a per-user opt-in with a saved phone number. Exposed in the UI at
+> **Admin Settings → SMS Privacy** (`/admin/settings?tab=smsprivacy`). See
+> [docs/NOTIFICATIONS.md](NOTIFICATIONS.md#sms-channel-twilio).
 
 ### Carrier Integrations (Admin)
 
@@ -2850,7 +2950,9 @@ quote statuses (accepted / rejected / converted / expired) auto-record `quote_re
 
 Per-user notification inbox for the bell / popover / `/notifications` page — PR 1 (Foundation +
 in-app inbox) of the notification system. See [docs/NOTIFICATIONS.md](NOTIFICATIONS.md) for the
-architecture (transactional outbox, event catalog, channels, compliance invariants). Every inbox
+architecture (transactional outbox, event catalog, channels, compliance invariants). Per-user
+channel preferences and the SMS channel live under
+[User self-service (My Settings)](#user-self-service-my-settings). Every inbox
 route is **self + tenant scoped**: rows are filtered to `user_id == current_user.id` **and**
 `company_id == get_current_company_id` — there is no role gate (any authenticated user manages
 their own inbox).
@@ -2910,7 +3012,15 @@ their own inbox).
 > **`GET /notifications/logs`** (retained delivery-attempt view): query `limit` (1–100, default 25),
 > `status` (`sent` | `failed`), `mine_only` (default `true`). A non-Admin/Manager/Supervisor caller
 > is always restricted to their own log rows regardless of `mine_only`; the full admin-scoped
-> delivery-failure view is PR 3.
+> delivery-failure view is PR 3. Rows are returned for **both** the `email` and `sms` channels
+> (`channel`); for SMS, a message suppressed by the per-user storm cap is recorded with the reason
+> in `error` rather than being silently dropped — see
+> [docs/NOTIFICATIONS.md](NOTIFICATIONS.md#storm-control). `NotificationLogResponse` returns
+> `id`, `user_id`, `event_type`, `channel`, `subject`, `body`, `sent`, `error`, `related_type`,
+> `related_id`, `sent_at`, plus — for SMS — `provider_message_id` (the Twilio message SID) and
+> `provider_status` (the provider-reported status). Those two make "did that alert actually go
+> out?" answerable from the API instead of only from the table; they are an opaque provider id and
+> a status string, not PII.
 
 ### Bulk Imports & Templates (Excel Migration Kit)
 
@@ -3386,6 +3496,11 @@ the global default applied):
 | `POST /visitor-logs/station-login` | 5/minute |
 | `POST /shop-floor/kiosk-stations/station-login` | 5/minute |
 | `POST /scanner/resolve-action` | 60/minute |
+| `POST /users/me/test-sms` | 3/minute |
+
+(`POST /users/me/test-sms` is authenticated and self-targeted, but it is the one route that spends
+real carrier money per call, so it is capped well below anything a human would click. The two
+standalone laser-nest routes carry their own **10/minute** caps — see Laser Nests.)
 
 An over-limit request returns **HTTP 429** with a `Retry-After` header (seconds until the window
 resets) and body:

@@ -171,7 +171,7 @@ def test_no_pref_row_uses_defaults_and_creates_no_row(db_session: Session, monke
 
 def test_resolve_channels_defaults_when_no_row(db_session: Session):
     user = _make_user(db_session, company_id=1, role=UserRole.QUALITY)
-    channels = dispatch._resolve_channels(db_session, user, get_entry("ncr.created"))
+    channels = dispatch.resolve_channels(db_session, user, get_entry("ncr.created"))
     assert channels == {CHANNEL_IN_APP, CHANNEL_EMAIL}
     assert db_session.query(NotificationPreference).count() == 0
 
@@ -189,7 +189,7 @@ def test_resolve_channels_honors_partial_row_and_forces_mandatory(db_session: Se
     )
     db_session.commit()
 
-    channels = dispatch._resolve_channels(db_session, user, get_entry("ncr.created"))
+    channels = dispatch.resolve_channels(db_session, user, get_entry("ncr.created"))
     # email kept (saved True); in_app forced on despite the saved False (mandatory).
     assert channels == {CHANNEL_EMAIL, CHANNEL_IN_APP}
 
@@ -207,7 +207,7 @@ def test_resolve_channels_saved_disable_of_non_mandatory_is_respected(db_session
     )
     db_session.commit()
 
-    channels = dispatch._resolve_channels(db_session, user, get_entry("wo.released"))
+    channels = dispatch.resolve_channels(db_session, user, get_entry("wo.released"))
     assert channels == set()
 
 

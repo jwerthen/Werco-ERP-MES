@@ -16,17 +16,21 @@ Compliance (``NOTIFICATIONS_PLAN.md`` §8, ``PR1_DESIGN_SPEC.md`` §C/§D/§K):
   ``company_id`` from the event — never derived-from-nothing;
 * the acting user is never notified of their own action (actor exclusion);
 * preferences are resolved in memory with NO row auto-create (§9.8);
-* mandatory-channel events force their catalog-named channel on regardless of prefs.
+* mandatory-channel events force their catalog-named channel on regardless of prefs;
+* the SMS leg (§3.4) sends only CUI-safe bodies built by ``sms_content.build_sms_body``
+  from the catalog label + a sanitized record identifier — never the caller-composed
+  title/body — and only for opted-in, SMS-eligible events to users with a phone on file;
+  the ``allow_sms_egress`` kill switch is enforced fail-closed in ``sms_service``.
 
-Runs only in the ARQ worker (a running event loop always exists), so emails are enqueued
-with ``await enqueue_job(...)``; never ``enqueue_job_best_effort`` (which ``asyncio.run``s
-and would RuntimeError inside the loop).
+Runs only in the ARQ worker (a running event loop always exists), so emails/SMS are
+enqueued with ``await enqueue_job(...)``; never ``enqueue_job_best_effort`` (which
+``asyncio.run``s and would RuntimeError inside the loop).
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Sequence
 
 from sqlalchemy.orm import Session
@@ -46,6 +50,8 @@ from app.services.notification_catalog import (
     get_entry,
     should_fire,
 )
+from app.services.sms_content import build_sms_body
+from app.services.sms_service import SMS_COLLAPSE_DELAY_SECONDS, SMS_HOURLY_CAP_PER_USER, reserve_sms_quota
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +59,10 @@ logger = logging.getLogger(__name__)
 # the enqueue-vs-sweeper race, and multiple emits within one flow. Best-effort: if
 # Redis is down we skip dedup (the notified_at marker still bounds duplicates).
 _DEDUP_WINDOW_SECONDS = 300
+
+# Delay applied to the SMS send job so the NotificationLog row the dispatcher creates
+# for it is committed before the job reads it (see _dispatch_sms).
+_SMS_ENQUEUE_DEFER_SECONDS = 2
 
 _IDENTIFIER_KEYS = (
     "work_order_number",
@@ -147,19 +157,41 @@ def _recipients_for_entry(db: Session, entry: CatalogEntry, event, company_id: i
 # ---------------------------------------------------------------------------
 
 
-def _resolve_channels(db: Session, user: User, entry: CatalogEntry) -> set:
-    """Enabled channels for this user+event. Catalog defaults unless the user has an
-    explicit saved preference row; the mandatory channel is always forced on. NEVER
-    constructs a NotificationPreference (today's auto-create omits company_id, §9.8)."""
+def get_preference_row(db: Session, user_id: int) -> Optional[NotificationPreference]:
+    """Fetch a user's saved preference row, or ``None``.
+
+    Read-only by design: it NEVER constructs a row (today's auto-create omits
+    ``company_id``, a non-null TenantMixin column — §9.8). A row exists only after an
+    explicit save through ``PUT /users/me/notification-preferences``.
+    """
+    return db.query(NotificationPreference).filter(NotificationPreference.user_id == user_id).first()
+
+
+def channels_from_pref(pref: Optional[NotificationPreference], entry: CatalogEntry) -> set:
+    """Pure resolution of enabled channels from a (possibly absent) preference row.
+
+    Catalog defaults unless the user saved an explicit entry for this event; the
+    mandatory channel is always forced on afterwards, so a mandatory-critical event
+    can never be fully muted (§8.9).
+    """
     channels: set = set(entry.default_channels)
-    pref = db.query(NotificationPreference).filter(NotificationPreference.user_id == user.id).first()
-    if pref and isinstance(pref.preferences, dict):
+    if pref is not None and isinstance(pref.preferences, dict):
         raw = pref.preferences.get(entry.event_key)
         if isinstance(raw, dict):
             channels = {channel for channel in ALL_CHANNELS if raw.get(channel)}
     if entry.mandatory_channel:
         channels.add(entry.mandatory_channel)
     return channels
+
+
+def resolve_channels(db: Session, user: User, entry: CatalogEntry) -> set:
+    """Enabled channels for this user+event (loads the preference row, then resolves).
+
+    Public because the self-service preferences API renders the SAME resolution the
+    dispatcher applies — one source of truth for "what will actually be sent". Callers
+    resolving many events for one user should load the row once with
+    :func:`get_preference_row` and call :func:`channels_from_pref` per entry."""
+    return channels_from_pref(get_preference_row(db, user.id), entry)
 
 
 def _has_unread(db: Session, *, company_id: int, user_id: int, entry: CatalogEntry, related_type, related_id) -> bool:
@@ -211,6 +243,7 @@ async def _fan_out(
     link: Optional[str],
     template: Optional[str],
     context: Optional[Dict],
+    sms_identifier: Optional[str] = None,
 ) -> int:
     """Fan out to every recipient/channel. Adds rows + enqueues emails; does NOT commit.
 
@@ -230,7 +263,7 @@ async def _fan_out(
         recipients[user.id] = user
 
     for user in recipients.values():
-        channels = _resolve_channels(db, user, entry)
+        channels = resolve_channels(db, user, entry)
         if not channels:
             continue
 
@@ -297,9 +330,24 @@ async def _fan_out(
                     )
                 )
 
-        # SMS is resolved but a no-op stub in PR 1 (Twilio arrives in PR 4).
-        if CHANNEL_SMS in channels and entry.sms_eligible and not suppress_push:
-            logger.debug("SMS channel resolved for %s but not sent (PR 4)", entry.event_key)
+        # SMS leg (§3.4). Fires only when the user opted the SMS channel ON for an
+        # SMS-ELIGIBLE event, the recurring-suppression window is clear, AND a phone is
+        # on file -- an SMS toggle is inert without a phone. The per-company
+        # ``allow_sms_egress`` kill switch is enforced fail-closed inside sms_service,
+        # so nothing leaves the boundary even if this leg enqueues.
+        if CHANNEL_SMS in channels and entry.sms_eligible and not suppress_push and getattr(user, "phone", None):
+            if await _dedup_reserve(entry.event_key, related_type, related_id, user.id, CHANNEL_SMS):
+                await _dispatch_sms(
+                    db,
+                    entry=entry,
+                    company_id=company_id,
+                    user=user,
+                    related_type=related_type,
+                    related_id=related_id,
+                    title=title,
+                    sms_identifier=sms_identifier,
+                    in_app_id=in_app_id,
+                )
 
         if CHANNEL_DIGEST in channels:
             if await _dedup_reserve(entry.event_key, related_type, related_id, user.id, CHANNEL_DIGEST):
@@ -320,6 +368,77 @@ async def _fan_out(
                 )
 
     return created
+
+
+async def _dispatch_sms(
+    db: Session,
+    *,
+    entry: CatalogEntry,
+    company_id: int,
+    user: User,
+    related_type: Optional[str],
+    related_id: Optional[int],
+    title: Optional[str],
+    sms_identifier: Optional[str],
+    in_app_id: Optional[int],
+) -> None:
+    """Storm-check, log, and enqueue one notification SMS.
+
+    The body is built ONLY from the catalog label + a sanitized record identifier
+    (``sms_content.build_sms_body``) — never from the caller-composed ``title``/``body``,
+    which may legitimately carry CUI-ish detail that must not cross the Twilio boundary
+    (§3.4 / §11.1).
+
+    A ``NotificationLog`` row is created here (``company_id`` stamped from the EVENT,
+    never from the recipient) and its id handed to the job, which updates that same row
+    with the Twilio SID + status. One row per delivery, retries included.
+
+    Storm control runs before the enqueue: over-cap messages are recorded as suppressed
+    (visible in the delivery log rather than silently vanishing) and the first overflow
+    schedules the deferred collapse message.
+    """
+    body = build_sms_body(label=entry.label, identifier=sms_identifier)
+    decision = await reserve_sms_quota(user.id)
+
+    log = NotificationLog(
+        company_id=company_id,
+        user_id=user.id,
+        event_type=entry.event_key,
+        channel=CHANNEL_SMS,
+        subject=title,
+        body=body,
+        sent=False,
+        related_type=related_type,
+        related_id=related_id,
+        notification_id=in_app_id,
+    )
+    db.add(log)
+
+    if not decision.send:
+        log.error = f"suppressed: per-user SMS cap ({SMS_HOURLY_CAP_PER_USER}/hour) reached"
+        if decision.arm_collapse:
+            await enqueue_job(
+                "send_sms_overflow_job",
+                company_id=company_id,
+                user_id=user.id,
+                _defer_by=timedelta(seconds=SMS_COLLAPSE_DELAY_SECONDS),
+            )
+        return
+
+    db.flush()  # assign the log id so the job can settle THIS row
+    await enqueue_job(
+        "send_sms_job",
+        company_id=company_id,
+        user_id=user.id,
+        body=body,
+        notification_log_id=log.id,
+        event_type=entry.event_key,
+        # Small defer so the row above is COMMITTED before a (possibly different)
+        # worker looks it up. Without it a fast pickup would miss the uncommitted row
+        # and insert a second one. Delivery-irrelevant at this scale; the job is
+        # correct either way, this just keeps one attempt = one log row.
+        _defer_by=timedelta(seconds=_SMS_ENQUEUE_DEFER_SECONDS),
+    )
 
 
 async def _enqueue_email(
@@ -385,6 +504,9 @@ async def dispatch_for_event(db: Session, event) -> int:
         link=link,
         template=None,  # outbox uses the generic notification template
         context={"title": title, "body": body},
+        # The record number only -- the SMS body is built from this + the catalog
+        # label, never from the payload at large (§3.4).
+        sms_identifier=_payload_identifier(event.event_payload or {}),
     )
 
 
@@ -402,12 +524,19 @@ async def dispatch_direct(
     actor_user_id: Optional[int] = None,
     template: Optional[str] = None,
     context: Optional[Dict] = None,
+    sms_identifier: Optional[str] = None,
     commit: bool = True,
 ) -> int:
     """Direct path: fan out to an already-resolved recipient set (crons / MRP / scheduling).
 
     Callers resolve their entities + recipients in worker context and pass them in. Commits
-    its own writes unless ``commit=False``."""
+    its own writes unless ``commit=False``.
+
+    ``sms_identifier`` is the record number to put in an SMS body (e.g. ``"WO-1042"``).
+    Direct callers compose ``title``/``body`` freely, and that free text must never cross
+    the Twilio boundary — so an SMS-eligible direct dispatch that omits this simply sends
+    the catalog label with no identifier rather than borrowing the title (§3.4). No
+    currently-wired direct caller targets an SMS-eligible event."""
     entry = get_entry(event_key)
     if entry is None:  # pragma: no cover - programming error
         logger.error("dispatch_direct called with uncataloged event_key %r", event_key)
@@ -426,6 +555,7 @@ async def dispatch_direct(
         link=link,
         template=template,
         context=context,
+        sms_identifier=sms_identifier,
     )
     if commit:
         db.commit()

@@ -169,6 +169,12 @@ class NotificationLogResponse(BaseModel):
     related_type: Optional[str] = None
     related_id: Optional[int] = None
     sent_at: Optional[datetime] = None
+    # Provider delivery provenance (SMS). The Twilio message SID + provider-reported
+    # status, so "did that alert actually go out?" is answerable from the API instead
+    # of only from the table. Not PII (an opaque provider id), and the rows are already
+    # tenant-scoped and self-scoped-by-default by the endpoint below.
+    provider_message_id: Optional[str] = None
+    provider_status: Optional[str] = None
 
     class Config:
         from_attributes = True

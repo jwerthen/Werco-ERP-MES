@@ -5,9 +5,9 @@ trailing ``Z`` (store UTC, serve UTC, display Central).
 """
 
 from datetime import datetime
-from typing import List, Optional
+from typing import Dict, List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.pagination import PaginationMeta
 from app.schemas.base import UTCModel
@@ -49,3 +49,59 @@ class CatalogEntryResponse(BaseModel):
     default_channels: List[str]
     mandatory_channel: Optional[str] = None
     sms_eligible: bool
+
+
+# ---------------------------------------------------------------------------
+# Self-service notification preferences
+#
+# PR 4 slice: the SMS channel only. The PERSISTED JSON keeps the full
+# ``{in_app, email, sms, digest}`` shape per event so PR 3's complete matrix extends
+# this without a migration; the REQUEST model accepts only ``sms`` and forbids extra
+# keys, so a PR-3-shaped payload fails loudly (422) instead of silently dropping the
+# channels this endpoint does not yet own.
+# ---------------------------------------------------------------------------
+
+
+class NotificationChannelUpdate(BaseModel):
+    """Per-event channel changes. PR 4 scope: ``sms`` only."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    sms: bool = Field(..., description="Deliver this event over SMS (SMS-eligible events only)")
+
+
+class NotificationPreferencesUpdate(BaseModel):
+    """Body of ``PUT /users/me/notification-preferences`` (self-scoped)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    preferences: Dict[str, NotificationChannelUpdate] = Field(
+        ...,
+        max_length=200,
+        description="Map of catalog event_key -> channel changes",
+    )
+
+
+class NotificationPreferencesResponse(BaseModel):
+    """Effective notification preferences for the current user.
+
+    ``preferences`` is the RESOLVED per-event channel map the dispatcher would apply
+    right now (catalog defaults where the user has saved nothing, plus any mandatory
+    channel forced on) — not the raw stored row, so the UI can never disagree with
+    what actually gets sent.
+    """
+
+    preferences: Dict[str, Dict[str, bool]]
+    has_saved_preferences: bool
+    phone: Optional[str] = None
+    sms_egress_enabled: bool = False
+    sms_configured: bool = False
+
+
+class TestSMSResponse(BaseModel):
+    """Result of ``POST /users/me/test-sms``."""
+
+    status: str
+    sid: Optional[str] = None
+    provider_status: Optional[str] = None
+    detail: str

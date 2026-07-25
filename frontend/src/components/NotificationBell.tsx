@@ -10,7 +10,7 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { BellIcon, CheckIcon } from '@heroicons/react/24/outline';
+import { BellIcon, CheckIcon, Cog6ToothIcon } from '@heroicons/react/24/outline';
 import api from '../services/api';
 import { NotificationItem } from '../types/notification';
 import { EmptyState, StatusBadge, useToast } from './ui';
@@ -257,13 +257,24 @@ export default function NotificationBell() {
           </div>
 
           {/* Footer */}
-          <div className="px-3 py-2" style={{ borderTop: '1px solid var(--fd-line)' }}>
+          <div
+            className="flex items-center justify-between px-3 py-2"
+            style={{ borderTop: '1px solid var(--fd-line)' }}
+          >
             <Link
               to="/notifications"
               onClick={() => setOpen(false)}
-              className="block text-center text-[12px] font-medium text-fd-blue hover:text-fd-ink transition-colors"
+              className="text-[12px] font-medium text-fd-blue hover:text-fd-ink transition-colors"
             >
               View all
+            </Link>
+            <Link
+              to="/settings"
+              onClick={() => setOpen(false)}
+              className="inline-flex items-center gap-1 text-[12px] font-medium text-fd-mute hover:text-fd-ink transition-colors"
+            >
+              <Cog6ToothIcon className="h-3.5 w-3.5" aria-hidden="true" />
+              Settings
             </Link>
           </div>
         </div>

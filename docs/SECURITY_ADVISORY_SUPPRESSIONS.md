@@ -156,5 +156,31 @@ and re-run `npm run audit:ci`.
   that **drops `react-router-dom`** (no v8 of that package exists; it folds into
   `react-router`), i.e. rewriting imports across ~59 pages.
 
+- **GHSA-mh99-v99m-4gvg** (`brace-expansion`, high) — "DoS via unbounded
+  expansion length causing an out-of-memory process crash", vulnerable `<=5.0.7`.
+  **Development-only transitive dependency — it ships in nothing.** Verified:
+  `npm ls brace-expansion --all --omit=dev` resolves to **empty**. Every path in
+  is lint/test tooling — eslint 9.x and `@eslint/config-array` / `@eslint/eslintrc`,
+  `eslint-plugin-react`, `eslint-plugin-jsx-a11y` (all via `minimatch` 3.x),
+  `@typescript-eslint/*` (via `minimatch` 9.x), and
+  `jest` / `ts-jest` / `@jest/transform` / `test-exclude` / `babel-plugin-istanbul`.
+  The `vite build` client bundle contains none of it.
+  Exploitation needs an **attacker-controlled** glob fed to minimatch; the only
+  patterns these tools expand are the repo's own developer-authored globs in
+  `eslint.config` / `jest.config` / npm scripts — no runtime, user, or request
+  input reaches them. CI does run eslint/jest on PR branches, so a PR author can
+  influence those globs, but that is not an escalation: a PR that can edit
+  `jest.config` can already exhaust the runner with an infinite loop. Blast radius
+  is a crashed ephemeral CI job, never the shipped app or production data.
+  *Remove when* any consumer upgrade pulls `brace-expansion >= 5.0.8`.
+
+> **Do not add a blanket `brace-expansion` override.** `5.0.8` is the only patched
+> release, and its API is incompatible with the `minimatch` 3.x that eslint's
+> plugin set pins. Tested: `overrides: { "brace-expansion": "^5.0.8" }` does clear
+> the advisory, but `npm run lint` then dies with
+> `TypeError: expand is not a function` in `@eslint/config-array`. npm's own
+> `fixAvailable` suggestions for this advisory are semver-major and include a
+> nonsensical **downgrade to jest 25**.
+
 > **Never run `npm audit fix --force` here.** It resolves `react-router-dom`
 > **down** to 7.11.0 and reintroduces four advisories patched in 7.18.0.

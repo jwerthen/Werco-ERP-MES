@@ -477,6 +477,26 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 | Edit | ✓ | | | | | | |
 | Delete | ✓ | | | | | | |
 | Roles | ✓ | | | | | | |
+| Own profile + notification settings (`/users/me/*`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+> **Self-scoped `/users/me/*` routes are open to every authenticated role — by construction, not by
+> grant.** `GET /users/me`, `PUT /users/me/phone`, `GET`/`PUT /users/me/notification-preferences`,
+> and `POST /users/me/test-sms` (`app/api/endpoints/users.py`) carry **no `require_role`**: they
+> read and write only `current_user` and **never accept a user id**, so there is no id to authorize
+> and no path to another user's record. The backing UI is **My Settings** (`/settings`), routed for
+> all authenticated roles. Notes:
+> - **Phone changes are audited** on both the self-service path (`extra_data.source =
+>   "self_service"`) and the Admin `POST /users/` / `PUT /users/{id}` paths — the phone is the
+>   destination of every SMS alert. Numbers are normalized to E.164; an invalid number is **400**.
+> - **`phone` is field-minimized**: it serializes only in the self-profile / Admin-Manager
+>   user-management `UserResponse`, never in general user serialization. See
+>   [docs/NOTIFICATIONS.md](NOTIFICATIONS.md#phone-is-field-minimized).
+> - **`POST /users/me/test-sms` targets the caller's own number only** (never a caller-supplied
+>   destination), is gated by the company `allow_sms_egress` kill switch, and is rate-limited
+>   **3/minute** per IP.
+> - Saving preferences cannot bypass a **mandatory** channel: the dispatcher re-applies the
+>   catalog's `mandatory_channel` at send time regardless of the stored row, so a mandatory-critical
+>   event can never be fully muted.
 
 > **User writes are Admin-only, and both `require_role([ADMIN])`** — `POST /users/` (create),
 > `PUT /users/{id}` (edit, incl. role assignment), and `DELETE /users/{id}` (deactivate) all gate to
@@ -719,6 +739,7 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 | Audit Logs | ✓ | ✓ | | | | | |
 | AI usage & cost summary (`/ai-usage/summary`) | ✓ | ✓ | | | | | |
 | AI egress kill switch (`PUT /companies/me/ai-egress`) | ✓ | | | | | | |
+| SMS egress kill switch (`PUT /companies/me/sms-egress`) | ✓ | | | | | | |
 | Wallboard display tokens (`/auth/display-token` issue/list/revoke + setup-code reissue) | ✓ | ✓ | | | | | |
 | Visitor sign-in stations (`/visitor-logs/stations` create/list/revoke/reset-pin) | ✓ | ✓ | | | | | |
 | Crew kiosk stations (`/shop-floor/kiosk-stations` create/list/revoke/reset-pin) | ✓ | ✓ | | | | | |
@@ -798,6 +819,21 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > interactive for ADMIN (enabling egress requires explicit confirmation) and read-only for
 > other roles. See [docs/API.md](API.md) →
 > Company (self-service) and [docs/AI_QUOTING_AGENT_RUNBOOK.md](AI_QUOTING_AGENT_RUNBOOK.md).
+
+> **SMS egress kill switch (`PUT /api/v1/companies/me/sms-egress`).** Enforced **in code** via
+> `require_role([ADMIN])` — **Admin-only**, for the same reason as the AI switch above: it gates all
+> outbound notification SMS to **Twilio, which sits outside the CUI boundary**, so flipping it is a
+> CUI-boundary decision reserved to Admins. It only ever mutates the caller's **own active company**
+> (`get_current_company_id`; never taken from the request body). Flipping `Company.allow_sms_egress`
+> writes tamper-evident `audit_log` rows **twice** — a field update **and** an
+> `sms_egress_enabled` / `sms_egress_disabled` status change. Every company is created **OFF**, and
+> the switch is re-resolved **fail-closed before every send** (unknown tenant, missing company row,
+> or a DB error all deny), so turning it off also stops messages already queued in ARQ. Surfaced in
+> the UI at **Admin Settings → SMS Privacy** (`/admin/settings?tab=smsprivacy`). Note this is only
+> the *company* half of the gate — SMS additionally requires a **per-user** opt-in with a saved
+> phone number (self-service, see Users above), and only `sms_eligible` catalog events are
+> offerable. See [docs/API.md](API.md) → Company (self-service) and
+> [docs/NOTIFICATIONS.md](NOTIFICATIONS.md#sms-channel-twilio).
 
 > **Wallboard display tokens (`/auth/display-token`, A0.5).** Issue / list / revoke / setup-code
 > reissue (`POST /auth/display-token/{id}/setup-code`) are enforced
