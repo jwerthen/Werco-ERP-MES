@@ -8,12 +8,25 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.api.deps import get_current_company_id, get_current_user
 from app.db.database import get_db
+
+# The two ledger reference shapes a work order's movement lands under, and the shared
+# predicate that spans them. IMPORTED, not re-declared with string literals: genealogy
+# that read one shape and cost/analytics that read the other is exactly the drift these
+# constants exist to prevent, and an as-built record missing the material a job actually
+# burned is an AS9100D hole. Historical rows are NOT migrated; they truthfully carry
+# ``work_order`` only. On the ``work_order_operation`` rows ``reference_id`` is the
+# OPERATION id, resolved back to its work order below.
+from app.db.ledger_filter import (
+    OPERATION_REFERENCE_TYPE,
+    WORK_ORDER_REFERENCE_TYPES,
+    work_order_ledger_filter,
+)
 from app.models.inventory import InventoryItem, InventoryTransaction, TransactionType
 from app.models.part import Part
 from app.models.purchasing import POReceipt, PurchaseOrder, PurchaseOrderLine
 from app.models.quality import NonConformanceReport
 from app.models.user import User
-from app.models.work_order import WorkOrder
+from app.models.work_order import WorkOrder, WorkOrderOperation
 
 router = APIRouter()
 
@@ -152,7 +165,10 @@ def trace_lot(
         if txn.from_location:
             desc += f" from {txn.from_location}"
 
-        if txn.reference_type == "work_order" and txn.reference_number:
+        # ``reference_number`` is the WO number on BOTH reference types (the
+        # operation-scoped consumption rows carry it too), so one membership test
+        # covers material consumed per-run as well as WO-level movement.
+        if txn.reference_type in WORK_ORDER_REFERENCE_TYPES and txn.reference_number:
             work_orders_used.add(txn.reference_number)
         # A RECEIVE referencing a work order: this lot was PRODUCED by that WO -> its
         # component ISSUE txns hold the as-built genealogy (the second hop below).
@@ -279,21 +295,43 @@ def _reconstruct_consumed_components(
     """As-built second hop: consumed component lots for each producing work order.
 
     Given the work orders that PRODUCED the traced finished-good lot (collected from
-    its RECEIVE txns), enumerate each WO's component ISSUE transactions -- the backflush
-    consumption -- and return one ``ConsumedComponent`` per (WO, component part, lot)
-    with the total quantity consumed (reported positive). Tenant-scoped: every query
-    filters ``company_id`` so a cross-tenant trace can never surface another company's
-    genealogy (invariant #1 / TRACE-1).
+    its RECEIVE txns), enumerate each WO's component ISSUE transactions and return one
+    ``ConsumedComponent`` per (WO, component part, lot) with the total quantity consumed
+    (reported positive). Tenant-scoped: every query filters ``company_id`` so a
+    cross-tenant trace can never surface another company's genealogy (invariant #1 /
+    TRACE-1).
+
+    TWO sources of consumption are read, and both must be:
+      * ``reference_type='work_order'``           — the one-shot BOM/routing backflush,
+                                                    ``reference_id`` = the work order;
+      * ``reference_type='work_order_operation'`` — per-run consumption of material tied
+                                                    to an operation, ``reference_id`` =
+                                                    the OPERATION, mapped back to its work
+                                                    order here so both collapse into the
+                                                    same per-WO genealogy lines.
     """
     if not producing_work_order_ids:
         return []
+
+    # Operations belonging to the producing WOs, so operation-scoped consumption rows
+    # resolve BACK to a work order for the aggregation key below. Tenant-scoped; empty
+    # when no WO has operations. (The WHERE clause itself is the shared predicate — this
+    # map exists for the id resolution the predicate cannot do.)
+    operation_to_work_order = {
+        op_id: wo_id
+        for op_id, wo_id in db.query(WorkOrderOperation.id, WorkOrderOperation.work_order_id)
+        .filter(
+            WorkOrderOperation.company_id == company_id,
+            WorkOrderOperation.work_order_id.in_(producing_work_order_ids),
+        )
+        .all()
+    }
 
     issue_txns = (
         db.query(InventoryTransaction)
         .filter(
             InventoryTransaction.company_id == company_id,
-            InventoryTransaction.reference_type == "work_order",
-            InventoryTransaction.reference_id.in_(producing_work_order_ids),
+            work_order_ledger_filter(producing_work_order_ids, company_id),
             InventoryTransaction.transaction_type == TransactionType.ISSUE,
         )
         .order_by(InventoryTransaction.created_at)
@@ -318,7 +356,15 @@ def _reconstruct_consumed_components(
     # for the same component lot collapse into a single consumed-quantity line.
     aggregated: dict[tuple, float] = {}
     for txn in issue_txns:
-        key = (txn.reference_id, txn.part_id, txn.lot_number)
+        # Operation-scoped rows key on the operation; resolve to its work order so a
+        # WO's per-run consumption and its backflush collapse into the same lines.
+        if txn.reference_type == OPERATION_REFERENCE_TYPE:
+            wo_id = operation_to_work_order.get(txn.reference_id)
+            if wo_id is None:  # pragma: no cover - filtered out by the query above
+                continue
+        else:
+            wo_id = txn.reference_id
+        key = (wo_id, txn.part_id, txn.lot_number)
         aggregated[key] = aggregated.get(key, 0.0) + abs(float(txn.quantity or 0))
 
     consumed: List[ConsumedComponent] = []
@@ -373,7 +419,7 @@ def trace_serial(
     work_orders_used: set[str] = set()
     history = []
     for txn in transactions:
-        if txn.reference_type == "work_order" and txn.reference_number:
+        if txn.reference_type in WORK_ORDER_REFERENCE_TYPES and txn.reference_number:
             work_orders_used.add(txn.reference_number)
         history.append(
             {

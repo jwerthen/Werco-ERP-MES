@@ -428,7 +428,8 @@ Two migrations back the work-order-completion concurrency fixes (see
 ### Completion-inventory migrations (Batch 6 — FG receipt + backflush)
 
 Two migrations back the work-order-completion inventory side-effects (see
-`docs/WORK_ORDER_COMPLETION_REMEDIATION.md`, Rank 9 / Batch 6):
+`docs/WORK_ORDER_COMPLETION_REMEDIATION.md`, Rank 9 / Batch 6), plus a later dialect-parity fix to the
+second of them:
 
 - **`040_add_part_backflush_flag`** — adds the opt-in flag the backflush logic keys off:
   `parts.backflush_components BOOLEAN NOT NULL DEFAULT false`. The `server_default='false'` backfills
@@ -454,8 +455,29 @@ Two migrations back the work-order-completion inventory side-effects (see
   RECEIVE/ISSUE groups exist, the migration **lists the offending `(company_id, reference_id[,
   part_id])` groups and raises** rather than deleting any rows — an operator resolves them deliberately
   (keep the earliest min-id row), then re-runs. Idempotent (`IF NOT EXISTS` / inspector + `pg_indexes`
-  guard) and reversible; Postgres-only (skipped on SQLite, where `create_all` still emits a full unique
-  index from the model and the app-level guard applies).
+  guard) and reversible; the migration body itself is Postgres-only (skipped on SQLite — partial
+  indexes + `CONCURRENTLY` were treated as Postgres features), with `create_all` emitting the indexes
+  from the model on SQLite and the app-level guard applying either way.
+
+- **`076_uq_wo_inv_sqlite_parity`** (file `076_uq_wo_inventory_sqlite_parity.py`) — **dialect-parity
+  fix for the two `041` indexes.** They declared only `postgresql_where`, which SQLite ignores, so on
+  SQLite — local dev and the entire pytest suite — they degraded into **full** unique indexes covering
+  *every* `reference_type`. The test environment therefore enforced a constraint production does not:
+  legitimate repeated movements under one reference (a second compensating `ADJUST` on one
+  `po_receipt`, several `SHIP` rows for one shipment, the many-rows-per-operation material-consumption
+  path) were rejected locally though Postgres accepts them. The model now declares `sqlite_where`
+  alongside `postgresql_where` **from the same predicate constant** — correct on both dialects because
+  SQLAlchemy binds the uppercase enum *member name* (`'RECEIVE'`/`'ISSUE'`) under Postgres **and**
+  SQLite (verified at the bind-processor level, not assumed) — so `create_all` now builds them
+  partial, and the migration rebuilds them partial on existing SQLite DBs. **On Postgres it is a
+  deliberate no-op** (guarded on dialect, emits zero DDL): those indexes are already correct, and
+  rebuilding a unique index on the hottest ledger table would take a real lock and briefly drop the
+  live double-receive guard for no behavioral gain. Coverage for the rows the guards exist for
+  (`reference_type='work_order'` RECEIVE/ISSUE) is **unchanged** on both dialects. Idempotent
+  (reflects `dialect_options['sqlite_where']` and rebuilds only a genuinely-degraded index) and
+  reversible — the `downgrade` really restores the full-index shape, and because that shape is
+  *stricter* it pre-checks and **raises with the offending groups itemized rather than deleting any
+  ledger row** (the `041` posture).
 
 ### Completion-path performance indexes (Batch 9 — reconcile/predecessor read paths)
 

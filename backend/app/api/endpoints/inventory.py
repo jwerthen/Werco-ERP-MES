@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.db.database import atomic_transaction, get_db
+from app.db.ledger_filter import WORK_ORDER_REFERENCE_TYPE, work_order_ledger_filter
 from app.models.inventory import (
     CycleCount,
     CycleCountItem,
@@ -1379,19 +1380,21 @@ def list_transactions(
     if work_order_id is not None:
         # Convenience filter: "everything this work order consumed/produced".
         #
-        # Two shapes exist in the ledger today:
-        #   1. reference_type='work_order' + reference_id=<wo.id>  (completion_inventory_service)
-        #   2. reference_type='work_order' + reference_number=<wo.work_order_number>,
+        # Three shapes exist in the ledger:
+        #   1. reference_type='work_order' + reference_id=<wo.id>
+        #      (FG receipt, one-shot backflush, work-order-scoped tie consumption)
+        #   2. reference_type='work_order_operation' + reference_id=<operation.id>
+        #      (per-run consumption of operation-tied material)
+        #   3. reference_type='work_order' + reference_number=<wo.work_order_number>,
         #      reference_id NULL                                   (POST /inventory/issue)
-        # so we match on either. The work-order number is resolved tenant-scoped; an
-        # unknown/other-tenant id simply yields no reference_number clause (and the
+        #
+        # Shapes 1 and 2 are the SHARED ``work_order_ledger_filter`` — the same predicate
+        # job costing, analytics and lot genealogy use, so this list can never disagree
+        # with the cost of the job it is listing. Shape 3 has no id at all and stays a
+        # local reference_number clause. The work-order number is resolved tenant-scoped;
+        # an unknown/other-tenant id simply yields no reference_number clause (and the
         # ledger query is already company-scoped, so nothing can leak).
         #
-        # TODO(PR 1 — material consumption): extend this to the operation-level
-        # reference types introduced there, i.e. also match
-        # reference_type IN ('work_order_operation', 'work_order_manual') with
-        # reference_id pointing at the operation/consumption row. Those reference
-        # types do NOT exist yet — do not filter on them until PR 1 writes them.
         # DELIBERATE: no ``is_deleted == False`` filter. This is a traceability/history
         # read, and soft delete is not erasure — the movements a since-voided work order
         # posted are still real ledger facts. Filtering here would silently drop the
@@ -1401,16 +1404,11 @@ def list_transactions(
             .filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id)
             .scalar()
         )
-        wo_clauses = [
-            and_(
-                InventoryTransaction.reference_type == "work_order",
-                InventoryTransaction.reference_id == work_order_id,
-            )
-        ]
+        wo_clauses = [work_order_ledger_filter(work_order_id, company_id)]
         if wo_number:
             wo_clauses.append(
                 and_(
-                    InventoryTransaction.reference_type == "work_order",
+                    InventoryTransaction.reference_type == WORK_ORDER_REFERENCE_TYPE,
                     InventoryTransaction.reference_number == wo_number,
                 )
             )

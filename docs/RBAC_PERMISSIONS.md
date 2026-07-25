@@ -39,6 +39,8 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 | Release | ✓ | ✓ | ✓ | | | | |
 | Complete | ✓ | ✓ | ✓ | ✓ | ✓ | | |
 | Approve labor (TimeEntry) | ✓ | ✓ | ✓ | | ✓ | | |
+| View material ties | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Tie / edit / untie material | ✓ | ✓ | ✓ | | | | |
 
 > **Delete — code now matches the matrix (Admin + Manager).** `DELETE /api/v1/work-orders/{id}`
 > (`app/api/endpoints/work_orders.py`) was previously gated **stricter than this matrix** —
@@ -141,6 +143,42 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > shop-floor write verbs it mirrors (clock-in, production, complete, hold, resume) are themselves
 > operator-facing (any authenticated user), so the resolver bypasses no role check. See
 > `docs/API.md` → Scanner.
+
+> **Material ties — endpoint mapping.** Tying stock material to a work order (the tie that makes
+> inventory deplete as work completes) is a **planning act**, gated to the Work Orders **Edit** row
+> above. On `app/api/endpoints/work_order_materials.py`:
+>
+> | Verb | Endpoint | Gate |
+> |------|----------|------|
+> | List ties | `GET /api/v1/work-orders/{id}/material-allocations` | `get_current_active_user` — any authenticated tenant user |
+> | Tie material | `POST /api/v1/work-orders/{id}/material-allocations` | `require_role([ADMIN, MANAGER, SUPERVISOR])` |
+> | Edit a tie | `PATCH /api/v1/work-orders/{id}/material-allocations/{allocation_id}` | `require_role([ADMIN, MANAGER, SUPERVISOR])` |
+> | Untie | `DELETE /api/v1/work-orders/{id}/material-allocations/{allocation_id}` | `require_role([ADMIN, MANAGER, SUPERVISOR])` |
+>
+> The read is deliberately broad — a tie is shop-visible context ("this job burns *that* sheet"),
+> and the same rows are already reachable through lot traceability. **Operator gets 403 on all three
+> mutating verbs**; deciding what material a job consumes is not operator self-service, unlike the
+> shop-floor production verbs. The router is mounted under `/work-orders`, **not**
+> `/api/v1/shop-floor`, so kiosk-scoped operator tokens are **path-fenced away from it** entirely —
+> a crew-station token cannot tie or untie material even if it reached the route.
+>
+> Every lookup (work order, part, operation, pinned lot, allocation) is **tenant-scoped**: a
+> cross-tenant id is **404**, never 403, so an id cannot be probed. Every create / edit / untie writes
+> a tamper-evident `audit_log` row on resource type `work_order_material_allocation`. Untie is
+> `status = cancelled` — the row is **never physically deleted**, because the ledger's
+> `allocation_id` back-reference must keep resolving — and is refused **409** once any material has
+> been consumed against the tie.
+>
+> **The consumption itself has no endpoint and no separate gate.** It runs inside the existing
+> completion paths (`apply_completion_inventory_effects`), so whoever is authorized to complete the
+> work is what authorizes the resulting stock movement — including the operator-facing kiosk and
+> shop-floor completion verbs and the reconcile-on-read GET. This is deliberate: material depletes
+> because production happened, not because someone was granted an inventory power. The stock
+> decrement, the `ISSUE` ledger row, and any `ALLOCATION_SHORTAGE` are audited on the hash chain
+> regardless of which path drove them. Lifecycle side effects follow the same rule — nest re-import
+> and work-order delete cancel or refuse ties under **their own** existing gates (Admin / Manager /
+> Supervisor for import; Admin / Manager for WO delete). See `docs/API.md` → Work Orders →
+> "Material ties" and [docs/MATERIAL_CONSUMPTION_PLAN.md](MATERIAL_CONSUMPTION_PLAN.md).
 
 ### Parts
 

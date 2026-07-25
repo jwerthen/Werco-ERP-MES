@@ -36,6 +36,7 @@ from typing import Iterable, Optional
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.db.ledger_filter import work_order_ledger_filter
 from app.models.inventory import InventoryTransaction, TransactionType
 from app.models.time_entry import TimeEntry, TimeEntryType
 from app.models.work_order import WorkOrder, WorkOrderOperation
@@ -193,18 +194,24 @@ def _labor_and_overhead_cost(db: Session, work_order: WorkOrder, company_id: int
 
 
 def _issued_material_cost(db: Session, work_order: WorkOrder, company_id: int) -> float:
-    """Total cost of material ISSUEd to the WO (the Batch-6 backflush/issue txns).
+    """Total cost of material ISSUEd to the WO (backflush AND tied consumption).
 
-    Sums ``abs(total_cost)`` over every ISSUE ``InventoryTransaction`` referencing this
+    Sums ``abs(total_cost)`` over every ISSUE ``InventoryTransaction`` belonging to this
     work order (ISSUE quantities are stored negative, so ``total_cost`` may be negative;
     we take the magnitude). Tenant-scoped.
+
+    "Belonging to" is ``work_order_ledger_filter``, which spans BOTH reference shapes.
+    Filtering on ``reference_type='work_order'`` alone silently dropped every
+    operation-scoped consumption row -- for the headline nest case, the entire material
+    leg of the job -- out of ``WorkOrder.actual_cost``, the synced ``JobCost``, and the
+    analytics variance. ``analytics_service._issued_material_cost`` calls the same
+    helper, so the two can no longer drift.
     """
     total = (
         db.query(func.coalesce(func.sum(func.abs(InventoryTransaction.total_cost)), 0.0))
         .filter(
             InventoryTransaction.company_id == company_id,
-            InventoryTransaction.reference_type == "work_order",
-            InventoryTransaction.reference_id == work_order.id,
+            work_order_ledger_filter(work_order.id, company_id),
             InventoryTransaction.transaction_type == TransactionType.ISSUE,
         )
         .scalar()

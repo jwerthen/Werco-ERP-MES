@@ -145,12 +145,43 @@ but **only entries whose source is wired today actually fire**; the rest are **d
 (off by default), `op.ready` (off by default), `production.reduced`, `ncr.created`, `ncr.closed`
 (gated), `inspection.failed` (gated), `car.created`, `fai.created`, `fai.completed` (gated),
 `po.sent`, `receipt.created`, `receipt.voided`, `receipt.corrected`, `shipment.shipped`,
-`coc.generation_failed`, `downtime.started`, `downtime.resolved`.
+`coc.generation_failed`, `downtime.started`, `downtime.resolved`, `material.allocation_shortage`.
 
 **Direct-dispatch** (crons / MRP / scheduling call `dispatch_direct`):
 `calibration.due`, `wo.late`, `stock.low`, `quote.expiring` (the four recurring crons in
 `notification_jobs.py`); `mrp.completed`, `mrp.review_needed` (`mrp_jobs.py`), `mrp.expedite_required`
 (`mrp_auto_service.py`), `capacity.overload` (`scheduling_jobs.py`).
+
+> **`material.allocation_shortage` — added with the material-consumption engine.** Not part of the
+> original notification build; it is registered by the same change that introduced the tied-material
+> consumption path, so no release exists in which the shortage fires with no catalog entry.
+>
+> | Field | Value |
+> |-------|-------|
+> | `event_key` | `material.allocation_shortage` |
+> | `label` | Tied material shortage |
+> | `category` | **Purchasing** |
+> | `severity` | **warning** |
+> | `default_channels` | `in_app` + `email` |
+> | `mandatory_channel` | none |
+> | `sms_eligible` | `false` |
+> | `recurring` | `false` |
+> | Recipients | departments **Purchasing** + **Inventory** (no role spec) |
+> | `source_event_types` | `("material_allocation_shortage",)` — outbox-driven |
+>
+> **What emits it.** `services/material_consumption_service.py::_record_allocation_shortage`, at the
+> moment a work order's completion consumes material tied to it (a
+> `work_order_material_allocations` row) and the source lot cannot cover the demand. The lot is driven
+> negative, a tamper-evident `ALLOCATION_SHORTAGE` `audit_log` row is written (that row, not the
+> notification, is the compliance record), and the event is emitted **best-effort** — a signal failure
+> can never fail an in-flight completion. The shortage itself never blocks production.
+>
+> Deliberately **distinct from `stock.low`**, which is cron-driven off reorder points and `recurring`;
+> this one fires at the moment of consumption and is not re-notify-suppressed, because each shortage
+> is a discrete event on a specific work order. It is also distinct from the older
+> **`backflush_shortage`** event, which has **no catalog entry** and therefore still notifies nobody
+> (the outbox tee ignores uncataloged event types by design — see above). Wiring that one up is an
+> open item, not something this entry covers.
 
 **Direct bridge**: `visitor.check_in` — the visitor sign-in host notification. Sign-in is a sync
 request path, so `visitor_log_service._notify_host_best_effort` hands off to
