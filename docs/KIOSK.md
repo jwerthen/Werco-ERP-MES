@@ -120,9 +120,10 @@ URL is all the station setup there is.
      when any scrap is entered, the same scrap-grid reason), then
      `POST /shop-floor/operations/{id}/complete` at the target quantity. The verb opens a
      summary modal: GOOD / SCRAP tiles (naming any NCR filed this session), sheet runs and
-     run time, a steps banner, and a **ROUTES TO** row from the new `next_operation` payload
-     (the next routing step; omitted on the last operation). Final-entry good defaults to the
-     remaining quantity. When the queue holds a next job the CTA chains it — after a
+     run time, a steps banner, a **ROUTES TO** row from the new `next_operation` payload
+     (the next routing step; omitted on the last operation), and — when the operation has
+     tied material — the [material deduction notice](#material-deduction-notice). Final-entry
+     good defaults to the remaining quantity. When the queue holds a next job the CTA chains it — after a
      successful complete the kiosk attempts clock-in to that job, and a refusal is surfaced
      verbatim (non-optimistic) with the operator landing on the queue. If the clock-out
      lands but the completion is refused, the kiosk says so — labor is closed either way.
@@ -214,6 +215,53 @@ appears (see `docs/API.md` → Shop Floor → "Laser-nest payload on operator re
 shape). The optional reference PDF is fetched **inline** through the fence-safe
 `GET /shop-floor/documents/{id}/inline` on kiosk surfaces (the old `GET /laser-nests/{id}/document`
 route remains for desktop callers); there is no approval workflow, and it never gates clock-in.
+
+## Material deduction notice
+
+When the operation carries tied material, both completion screens — the single-operator COMPLETE
+modal and the crew station's badge-signed confirm — show an informational notice above the confirm
+action. It is **never a gate**: a shortage warns, it does not block the job, and the notice never
+blocks a badge signature.
+
+**What it says, and why it is worded around the WORK ORDER.** The heading is
+*"Material — deducts when WO-#### finishes"*, and the footer repeats *"Estimate — nothing leaves
+stock until the last operation on this work order completes."* That phrasing is load-bearing, not
+cautious hedging: every consumption call site is gated on **work-order** completion, and a laser WO
+carries one operation per nest, so finishing nest 1 of 3 moves **no stock at all** — all three flush
+when the last operation closes the work order. Copy that said "this will deduct 1 sheet" would be
+wrong on exactly the shop's most common tied job. (See `docs/API.md` → Shop Floor → "Completion also
+consumes tied material" and `docs/MATERIAL_CONSUMPTION_PLAN.md` → "Capability vs. wiring".)
+
+Two more facts the copy carries because both otherwise read as bugs:
+
+- **The GOOD keypad does not move the number.** `/complete` asserts
+  `quantity_complete = quantity_ordered` regardless of what was keyed, so the prediction is computed
+  from the **ordered** quantity.
+- **SCRAP raises it.** A scrapped run physically used its sheet (posted as `ISSUE`, not `SCRAP`, so
+  lot genealogy keeps it), so keying 2 scrap predicts 2 **extra** sheets. An explicit line says so —
+  *"Includes +2 for the 2 scrap you entered — a scrapped run still used its material"* — because
+  "why did my scrap raise the material?" is otherwise a support ticket.
+
+A shortage adds an amber line naming the short quantity and ending *"This never blocks the job; tell
+your supervisor."* Everything is labelled an **estimate**: consumption is reconcile-to-target,
+quantities can still move before the work order closes, and `qty_consumed` is a cache (the inventory
+ledger is authoritative).
+
+**The data rides the queue payload; the fence is not widened.** Ties come from the `material_ties`
+array the station's own `GET /shop-floor/work-center-queue/{id}` already returns (and from
+`GET /shop-floor/my-active-job` in single-operator mode) — **not** from
+`/work-orders/{id}/material-allocations`, which sits outside the `/shop-floor` path fence and which a
+badge-minted kiosk token gets a 403 from. This is the identical rationale already recorded for the
+**scrap reason codes** under [Crew station mode](#crew-station-mode-kioskkiosk1stationid): carry the
+data on a read the fence permits rather than widen the fence, so the station token keeps being
+honored by exactly two things. The kiosk gets no
+tie *mutation* verb at all — tying material is an office act (Admin / Manager / Supervisor).
+
+The prediction arithmetic and every string above live in one place, `frontend/src/utils/materialTie.ts`,
+shared by both kiosk modes and the Dispatch Board chip, so the operator's line and the manager's chip
+cannot drift apart or drift from the engine. Note that it reads **`operation_quantity_scrapped`** (the
+operation's scrap total), not `quantity_scrapped` (this time entry's session count) — the two differ on
+any job worked across shifts, and the session figure would under-state the deduction.
 
 ## Drawing / nest viewer
 

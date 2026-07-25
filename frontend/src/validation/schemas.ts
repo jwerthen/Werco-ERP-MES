@@ -329,21 +329,48 @@ const optionalTrimmed = (max: number) =>
       return trimmed ? trimmed : undefined;
     });
 
-export const laserNestManualSchema = z.object({
-  cnc_number: z
-    .string()
-    .trim()
-    .min(1, 'CNC number is required')
-    .max(100, 'CNC number must be at most 100 characters'),
-  planned_runs: z.coerce
-    .number({ error: 'Enter a number' })
-    .int('Whole sheets only')
-    .min(1, 'At least 1 run'),
-  nest_name: optionalTrimmed(255),
-  material: optionalTrimmed(100),
-  thickness: optionalTrimmed(50),
-  sheet_size: optionalTrimmed(100),
-});
+/**
+ * A `<select>`/number control that may legitimately be left blank yields `''`,
+ * which `z.coerce.number()` would happily turn into `0`. Fold the empty string
+ * to `undefined` FIRST so "not set" never reaches the wire as a zero.
+ */
+const optionalPositiveNumber = (check: (schema: z.ZodNumber) => z.ZodNumber) =>
+  z
+    .union([z.literal(''), check(z.coerce.number({ error: 'Enter a number' }))])
+    .optional()
+    .transform((v) => (v === '' || v == null ? undefined : v));
+
+export const laserNestManualSchema = z
+  .object({
+    cnc_number: z
+      .string()
+      .trim()
+      .min(1, 'CNC number is required')
+      .max(100, 'CNC number must be at most 100 characters'),
+    planned_runs: z.coerce
+      .number({ error: 'Enter a number' })
+      .int('Whole sheets only')
+      .min(1, 'At least 1 run'),
+    nest_name: optionalTrimmed(255),
+    material: optionalTrimmed(100),
+    thickness: optionalTrimmed(50),
+    sheet_size: optionalTrimmed(100),
+    /**
+     * OPTIONAL sheet-part tie (the material this nest consumes). Always an
+     * explicit pick — never inferred from the free-text `material` field, since
+     * a wrong tie depletes the wrong heat lot into an as-built record. Omitted
+     * => the nest stays untied and behaves exactly as it did pre-feature.
+     */
+    material_part_id: optionalPositiveNumber((n) => n.int('Pick a sheet part').positive('Pick a sheet part')),
+    /** Sheets consumed per completed run. Meaningless without a sheet part. */
+    qty_per_run: optionalPositiveNumber((n) => n.positive('Sheets per run must be greater than 0')),
+  })
+  // A tie without a per-run quantity would be sent as a bare part id and the
+  // API would silently default it to 1.0 — make the planner state it.
+  .refine((data) => data.material_part_id == null || (data.qty_per_run != null && data.qty_per_run > 0), {
+    message: 'Enter sheets per run for the tied sheet part',
+    path: ['qty_per_run'],
+  });
 
 // ============================================================================
 // PROCESS SHEETS (engineering library)

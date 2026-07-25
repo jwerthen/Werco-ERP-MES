@@ -27,6 +27,9 @@ import {
   DispatchBoardResponse,
   RunOrderUpdateResponse,
   OperationDocumentsResponse,
+  MaterialAllocation,
+  MaterialAllocationCreatePayload,
+  MaterialAllocationUpdatePayload,
 } from '../types';
 import { ScanResolveRequest, ScanResolveResult } from '../types/scan';
 import {
@@ -422,6 +425,22 @@ class ApiService {
    *  so the next dashboard fetch revalidates instead of serving a stale 304 body. */
   private invalidateDashboardCache() {
     this.invalidateCache('/shop-floor/dashboard');
+  }
+
+  /**
+   * Drop every cached body a material-tie mutation invalidates.
+   *
+   * The Dispatch Board renders an operation-scoped tie as a chip, so a stale
+   * 304 there would show pre-tie chips immediately after a planner ties (or
+   * unties) material. The work order's own reads — the Materials tab, the
+   * detail page, the tie list itself — are invalidated by URL prefix; the
+   * substring match deliberately over-invalidates sibling ids (`/work-orders/12`
+   * also clears `/work-orders/123`), which costs one revalidation and never
+   * serves a stale tie.
+   */
+  private invalidateMaterialTieCache(workOrderId: number) {
+    this.invalidateCache('/shop-floor/dispatch-board');
+    this.invalidateCache(`/work-orders/${workOrderId}`);
   }
 
   setToken(token: string) {
@@ -1033,6 +1052,83 @@ class ApiService {
   async fetchLaserNestDocument(laserNestId: number): Promise<string> {
     const response = await this.api.get(`/laser-nests/${laserNestId}/document`, { responseType: 'blob' });
     return window.URL.createObjectURL(new Blob([response.data], { type: 'application/pdf' }));
+  }
+
+  // --- Material ties (work-order material allocations) ----------------------
+  // The OPTIONAL tie between a work order (or one of its operations) and stock
+  // material: /work-orders/{id}/material-allocations[/{allocation_id}].
+  //
+  // Reads are open to any authenticated tenant user; every mutating verb is
+  // ADMIN / MANAGER / SUPERVISOR server-side — gate the UI to match.
+  //
+  // These are SERVER-GATED actions (409 on untie-after-consumption, 409 on a
+  // terminal work order, 422 on a held-lot pin, 422 on an ambiguous pin edit),
+  // so callers must stay NON-OPTIMISTIC: keep a loading state and render only
+  // what the server returns. Do not wrap them in useOptimisticMutation.
+
+  /**
+   * Every material tie on a work order, oldest first.
+   *
+   * `include_inactive` defaults to TRUE, matching the server: cancelled rows are
+   * the tombstones the ledger's `allocation_id` resolves to, so hiding them
+   * makes consumed material look untied. Pass `false` for the LIVE (open) ties
+   * only — and note that a fully consumed tie is still `open` (`closed` is never
+   * written), so derive "fully consumed" from `qty_consumed >= qty_planned`.
+   */
+  async getMaterialAllocations(workOrderId: number, includeInactive = true): Promise<MaterialAllocation[]> {
+    const response = await this.api.get<MaterialAllocation[]>(
+      `/work-orders/${workOrderId}/material-allocations`,
+      { params: { include_inactive: includeInactive } }
+    );
+    return response.data;
+  }
+
+  /**
+   * Tie a material part to a work order (or to one of its operations).
+   *
+   * 409 when the tie could never consume (terminal work order, or a
+   * work-order-scoped tie whose part already backflushed); 422 when
+   * `qty_per_run` rides on a work-order-scoped tie or the pinned lot is held.
+   * Surface the server's `detail` verbatim.
+   */
+  async createMaterialAllocation(
+    workOrderId: number,
+    payload: MaterialAllocationCreatePayload
+  ): Promise<MaterialAllocation> {
+    const response = await this.api.post<MaterialAllocation>(
+      `/work-orders/${workOrderId}/material-allocations`,
+      payload
+    );
+    this.invalidateMaterialTieCache(workOrderId);
+    return response.data;
+  }
+
+  /** Edit an OPEN tie's quantities, lot pin, or notes (409 once cancelled). */
+  async updateMaterialAllocation(
+    workOrderId: number,
+    allocationId: number,
+    payload: MaterialAllocationUpdatePayload
+  ): Promise<MaterialAllocation> {
+    const response = await this.api.patch<MaterialAllocation>(
+      `/work-orders/${workOrderId}/material-allocations/${allocationId}`,
+      payload
+    );
+    this.invalidateMaterialTieCache(workOrderId);
+    return response.data;
+  }
+
+  /**
+   * Untie: sets `status = 'cancelled'`. The row is NEVER physically deleted, so
+   * this resolves with the UPDATED allocation (status `cancelled`) — not a 204.
+   * Refused 409 once any material has been consumed; reversal is a separate,
+   * reasoned verb that does not exist yet.
+   */
+  async deleteMaterialAllocation(workOrderId: number, allocationId: number): Promise<MaterialAllocation> {
+    const response = await this.api.delete<MaterialAllocation>(
+      `/work-orders/${workOrderId}/material-allocations/${allocationId}`
+    );
+    this.invalidateMaterialTieCache(workOrderId);
+    return response.data;
   }
 
   async getWorkOrderBlockers(params?: {

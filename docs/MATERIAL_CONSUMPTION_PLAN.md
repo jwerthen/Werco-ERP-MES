@@ -1,10 +1,12 @@
 # Material Consumption — Tying Inventory to Work Orders
 
-Status: **PR 0 merged** (`#154`, inventory hardening) · **PR 1 in progress** (core engine, ships dark) · PRs 2–5 planned.
+Status: **PR 0 merged** (`#154`, inventory hardening) · **PR 1 merged** (`#155`, core engine, shipped dark) · **PR 2 on `feat/material-tie-ux`** (nest tie UX) · PRs 3–5 planned.
 
 ## Why this exists
 
 Material was tracked in inventory and consumed on the floor, but nothing connected the two: a laser nest could cut fifty sheets and stock would not move. Owners asked for material to deplete as it is used — the headline case being *when a nest is marked complete, one sheet comes out of sheet inventory*.
+
+> **Correction (PR 2): that headline case is the ASK, not what shipped — and this document asserted otherwise for two PRs.** Depletion fires when the **work order** completes, never when a nest does. A laser child work order carries one operation per nest, so marking nest 1 of 3 complete moves no stock at all; all three flush together when the last operation closes the work order. The wording above (and the "three of five sheets across three days" line further down) read as descriptions of shipped behavior and were verified **false** against every call site during PR 2 — after UI copy written from them came out wrong. See [Capability vs. wiring](#capability-vs-wiring--when-consumption-actually-fires).
 
 The requirement that shapes every decision below: **tying material to a work order is never mandatory.** A work order with no tie must behave byte-for-byte as it did before this feature existed. That is asserted by test, not just intended.
 
@@ -39,7 +41,9 @@ delta > 0  → post ISSUE for −delta, advance qty_consumed to target
 delta ≤ 0  → no-op
 ```
 
-This is idempotent under **replay** — the target is recomputed from operation state, so a re-entry that sees the previous call's committed `qty_consumed` converges without a new unique index. "Three of five sheets across three days" needs no extra hooks. It is wired into `apply_completion_inventory_effects`, so it inherits all five existing completion call sites (kiosk clock-out, shop-floor and office operation complete, force-complete, reconcile-on-read) without adding one.
+This is idempotent under **replay** — the target is recomputed from operation state, so a re-entry that sees the previous call's committed `qty_consumed` converges without a new unique index. It is wired into `apply_completion_inventory_effects`, so it inherits all five existing completion call sites (kiosk clock-out, shop-floor and office operation complete, force-complete, reconcile-on-read) without adding one.
+
+**Do not read the formula above as a statement of *when* stock moves.** The arithmetic would support "three of five sheets across three days" with no extra hooks — an earlier revision of this document said exactly that, as though it were shipped behavior — but every one of those five call sites is itself gated on **work-order** completion, so the incremental depletion the arithmetic allows never actually occurs. The next section is that correction in full; it is the single most misread thing in this feature.
 
 **What carries *concurrency* is the work-order lock, not the engine.** The convergence argument is sequential. Two *simultaneous* completions of one operation would both compute the same positive delta and both post: these rows sit outside `uq_wo_inventory_issue` by design, and `WorkOrderMaterialAllocation` has no `version` column. What actually serializes them is invariant 4 — `WorkOrder` and `WorkOrderOperation` map `version_id_col` directly, so every call site that drives a completion takes the optimistic lock and a stale racer gets `StaleDataError` → 409 before reaching the engine. Treat that lock as load-bearing here; the per-allocation savepoint and the "advance `qty_consumed` only when an insert actually landed" rule are damage control, not a substitute.
 
@@ -60,6 +64,26 @@ Consumption rows post with **`reference_type='work_order_operation'`** and `refe
 > **Disclosure — lot-hold state is not live in-system.** Nothing anywhere in `app/` ever writes a held `InventoryItem.status`: no endpoint or schema exposes the column, it is only ever set to `"available"` at row creation, and there is no verb that deactivates a lot. Both halves of the control above — the 422 pin refusal and the `HELD_MATERIAL_CONSUMED` row — can therefore only fire on data set **outside** the application (a direct DB write, an import, or a future hold verb). They are built and tested ahead of the feature that will produce that state. Do not read them as evidence that quarantine/hold is an operating control today; the hold verb itself is unbuilt.
 
 **Read-safety.** Each allocation's work runs inside its own `begin_nested()` savepoint and the entry point never propagates — the *whole* body, operation lookup included, is under that guard — so a failure degrades that one allocation instead of poisoning the session a reconcile-on-read GET is about to commit. A rolled-back allocation is **not** silent: it writes an **`ALLOCATION_CONSUMPTION_FAILED`** audit row (`success=false`, with the exception text), because material that should have depleted and did not is a worse control gap than the shortage case, which already writes a chain row. `AuditService.log` opens its own savepoint and swallows its own failures, so it is safe to call on the outer transaction after the rollback.
+
+### Capability vs. wiring — when consumption actually fires
+
+**The engine is capable of incremental depletion. Nothing calls it that way.** Those are two different claims, and PRs 0–1 of this document conflated them. Stating the distinction plainly is the correction.
+
+Every call site of `apply_completion_inventory_effects` is gated on the **work order** finishing:
+
+| Call site | Gate |
+|---|---|
+| `shop_floor.py` — kiosk clock-out | `if work_order_completed:` |
+| `shop_floor.py` — shop-floor operation complete | `if work_order_completed:` |
+| `work_orders.py` — office operation complete | `if work_order_completed and work_order:` |
+| `work_orders.py` — force-complete | inside the privileged override that itself drives the WO to `COMPLETE` |
+| `shop_floor.py` / `work_orders.py` — reconcile-on-read | keyed on `completed_wo_ids`, built from `resource_type == "work_order"` transitions only |
+
+There is no sixth. A laser child work order carries **one operation per nest**, so finishing nest 1 of 3 deducts **nothing**; all three ties flush at once when the last operation closes the work order. What sum-delta buys is that the flush is *correct* whenever it lands — replay-safe, reconcile-safe, and right across an operation completed in pieces — not that it lands early.
+
+**PR 2 deliberately shipped truthful copy rather than a new consumption call site.** Every string the tie UX renders says "deducts N when WO-#### finishes"; none says "deducting now". `frontend/src/utils/materialTie.ts` is the single home for both the client-side sum-delta arithmetic and that wording, so the dispatch chip, the kiosk notice and the Materials panel cannot drift apart or drift from the engine. Wiring incremental consumption instead would have changed *when stock moves* for every work order in the shop, inside a PR whose scope was making existing behavior visible — and the engine's never-auto-reverse rule makes an early, wrong deduction expensive: there is no RETURN verb until PR 3.
+
+**Incremental (per-operation) consumption is tracked follow-up work, not shipped behavior.** It needs a call site with a real actor and intent — not the reconcile-on-read GET, which has neither — and it should not land before PR 3's reversal verb exists to unwind a premature deduction.
 
 ### No double-issue (as implemented)
 
@@ -87,15 +111,30 @@ The two tie shapes are handled by different machinery, and the split is load-bea
 - **Work-order restore un-cancels exactly what the delete cancelled.** Restore is the delete's inverse, so it re-opens those ties (audited, `action="restore"`). Leaving them cancelled meant the restored work order completed and its tied material silently never depleted — with no UI in PR 1, the only signal was a `cancelled` row. It gets worse once `backflush_components` is exposed (PR 4): an operation-scoped tie that consumed and was then cancelled by a delete/restore round trip stops suppressing the BOM backflush in `_drop_allocation_covered_parts`, so the same part is issued **twice**. Only ties cancelled *by that delete* come back — a manual untie and a nest-re-import supersede were cancelled for reasons a restore does not undo. The discriminator is the cancel's own audit row: every cancel path stamps `extra_data.reason`, and a tie's most recent `DELETE` row is what its current `cancelled` state means. If that audit row is missing the tie is simply not reopened (the conservative direction).
 - **Hard delete** (draft/cancelled only) **409s** when the **ledger** actually references a tie on the work order, since the delete physically removes the operations and ties those rows point at; unconsumed ties go with the work order, audited first. The guard reads `inventory_transactions.allocation_id` rather than the `qty_consumed` cache — the cache is explicitly non-authoritative and the FK has no `ON DELETE`, so keying on it would turn any drift into a 500 instead of the intended 409.
 
-### API surface (ships dark)
+### API surface
 
-`GET` / `POST` / `PATCH` / `DELETE` on `/api/v1/work-orders/{id}/material-allocations[/{allocation_id}]`, a sibling router under the `/work-orders` prefix. Reads are open to any authenticated tenant user; every mutating verb is `require_role([ADMIN, MANAGER, SUPERVISOR])`, deliberately outside the kiosk path fence. Untie is `status = cancelled`, never a physical delete, and is refused **409** once anything was consumed. Full request/response shapes and the error table live in `docs/API.md` → Work Orders → "Material ties"; the role rows are in `docs/RBAC_PERMISSIONS.md`. **No frontend ships in PR 1** — that is PR 2.
+`GET` / `POST` / `PATCH` / `DELETE` on `/api/v1/work-orders/{id}/material-allocations[/{allocation_id}]`, a sibling router under the `/work-orders` prefix. Reads are open to any authenticated tenant user; every mutating verb is `require_role([ADMIN, MANAGER, SUPERVISOR])`, deliberately outside the kiosk path fence. Untie is `status = cancelled`, never a physical delete, and is refused **409** once anything was consumed. Full request/response shapes and the error table live in `docs/API.md` → Work Orders → "Material ties"; the role rows are in `docs/RBAC_PERMISSIONS.md`. **PR 1 shipped this dark**; PR 2 gave it a UI — the work-order **Materials panel** drives `GET` / `PATCH` / `DELETE`, while the two nest paths below create ties server-side. The read-only floor surfaces (dispatch chip, kiosk line) deliberately call **none** of these: they ride the shop-floor reads, which is what keeps the kiosk path fence unwidened.
+
+### Where a nest tie is created (PR 2)
+
+A nest's tie is created **server-side, inside the import transaction** — not by a follow-up `POST` from the wizard. `LaserNestImportRow` and `LaserNestManualCreate` each gained `material_part_id` + `qty_per_run`, and both paths run the one `create_nest_material_allocation` seam in `laser_nest_service.py`, so an imported tie and a hand-created one produce byte-identical rows and identical hash-chain entries.
+
+The alternative — let the client import, then `POST` a tie per nest — was rejected because **the import is atomic and the follow-up would not be.** A failed or abandoned second call leaves nests on the floor that a planner believes are tied and that will never deplete, and there is no compensating verb to clean it up until PR 3. Doing it inside the transaction means a bad part id is a clean **404 with nothing persisted**: every distinct `material_part_id` is pre-resolved tenant-scoped *before* the rebuild wipes the prior nests, so the failure can never land mid-build.
+
+Two constraints on that seam: it must run **after** the operation wipe and `cancel_allocations_for_operations` (a superseded tie is cancelled, never deleted, so `uq_wo_material_alloc_open_op` must only ever see one OPEN row per key), and it ships **unpinned** — FIFO picks the lot at consume time, since planner/operator lot-picking is deferred. There is deliberately **no fuzzy auto-match** from the AI-extracted `material` free text to a part: a wrong auto-tie would deplete the wrong heat lot into an as-built record, so the planner picks explicitly or the nest ships untied.
+
+### Reading ties on the floor (PR 2)
+
+`app/services/material_tie_view.py` is the single batched tie + on-hand read shared by the dispatch board and the kiosk queue, so the manager's chip and the operator's line can never disagree about what a tie means or how short it is. It is a **pure read with no write path** — a queue poll is not an actor, has no intent and records no reason, so it must never move stock — and it imports the engine's `AVAILABLE_ITEM_STATUS` / `CONSUMPTION_EPSILON` **constants only**, precisely so the numbers shown to an operator cannot drift from the ones consumption acts on.
+
+Two rules it exists to enforce: it serves **open, operation-scoped ties only** (a work-order-scoped tie belongs to the whole job, so hanging it on cards would fan one tie across every card and read as N ties), and an untied operation gets **no key at all** in the result — not an empty list — so callers render nothing, no placeholder and no "not tied" nag. `on_hand` answers two different questions on purpose: a **pinned** tie is scored against that lot alone (pinning is lot-directed and an insufficient pinned lot is driven negative rather than spilled), while an **unpinned** tie is scored against the FIFO predicate verbatim. The whole page costs at most three SELECTs regardless of card count.
 
 ### Deliberately deferred
 
 - **Reservations.** Bringing `quantity_allocated` to life changes `quantity_available` platform-wide — the receipt-void guard would start refusing voids for merely-tied stock — and makes MRP double-count, since it nets `on_hand − allocated` while separately exploding the same work-order demand. When it lands, MRP tied-demand deduplication and a re-audit of every `quantity_available` guard are in-scope requirements of that same PR.
 - **Unit conversion.** Material is consumed in the part's own unit of measure, snapshotted onto the tie at creation. Nothing in the platform converts units. Because the tie's UoM is always the part's own, the only way to state a cross-UOM intent is a **lot pin naming a different part** — refused with **422** (the detail names the UoM clash when the two parts' units also differ) rather than guessed at.
 - **Reversal.** There is no RETURN verb yet, which is why every "reverse consumption first" refusal above currently has no self-service path (PR 3). One consequence is worth stating plainly so the floor is not surprised: a laser work order carrying **consumed** ties cannot have its nest package re-imported at all until PR 3 ships. Refusing is the right posture — the wipe would delete the operations that consumption transactions reference, orphaning their lot genealogy — but until the reversal verb exists the only remedy is to open a new work order.
+- **Incremental (per-operation) consumption.** The engine's arithmetic already supports it; no call site invokes it, because all five sit inside a work-order-completion branch ([Capability vs. wiring](#capability-vs-wiring--when-consumption-actually-fires)). Landing it means adding a consumption call site with a real actor and intent — explicitly **not** the reconcile-on-read GET — and it should follow PR 3's RETURN verb, so an early deduction can be unwound. Until then, every surface says "deducts when the work order finishes" and means it.
 - **Buy-to-job**, remnant/offcut intake, kitting, and operator lot-picking at the kiosk. Shapes are recorded; none are built.
 
 ## Delivery
@@ -103,9 +142,9 @@ The two tie shapes are handled by different machinery, and the split is load-bea
 | PR | Scope | State |
 |---|---|---|
 | 0 | Inventory hardening: tenant isolation, RBAC gates, cycle-count integrity and audit | **Merged** (#154) |
-| 1 | Schema (074 allocations table / 075 `allocation_id` + reference index / 076 SQLite index parity), allocation model, consumption service, tie API, traceability extension, shortage event, lifecycle guards (nest re-import, WO delete) | In progress — ships dark, no UI |
-| 2 | Nest tie UX: wizard sheet-part picker, dispatch chips, kiosk deduction line, Materials tab | Planned |
-| 3 | Reversal: reasoned RETURN verb, reduce-over-count interplay, ad-hoc issue/return | Planned |
+| 1 | Schema (074 allocations table / 075 `allocation_id` + reference index / 076 SQLite index parity), allocation model, consumption service, tie API, traceability extension, shortage event, lifecycle guards (nest re-import, WO delete) | **Merged** (#155) — shipped dark, no UI |
+| 2 | Nest tie UX. **Server:** `material_part_id` + `qty_per_run` on the nest import row *and* manual nest create, tied inside the import transaction via one `create_nest_material_allocation` seam; `material_tie` on every dispatch-board row (and on the run-order `PUT` response); `material_ties` on the kiosk work-center queue and my-active-job, plus a new distinct `operation_quantity_scrapped`; new `material_tie_view.py` batched read seam. **Client:** wizard sheet-part picker with package-level apply-to-all and an on-hand hint, dispatch tie/shortage chips, kiosk deduction notice, read-only-plus-edit Materials panel on WorkOrderDetail, `utils/materialTie.ts` as the one home for the client-side sum-delta arithmetic and copy. **Docs:** corrected this document's incremental-depletion claim (see [Capability vs. wiring](#capability-vs-wiring--when-consumption-actually-fires)) | Shipped on `feat/material-tie-ux` — no schema change, no new consumption call site |
+| 3 | Reversal: reasoned RETURN verb, reduce-over-count interplay, ad-hoc issue/return. **Also unblocks incremental (per-operation) consumption**, which should not land without a way to unwind an early deduction | Planned |
 | 4 | Production breadth: expose `backflush_components`, per-op tie editor, BOM alternates fix | Planned |
 | 5 | Costing actuals: `CostEntry(MATERIAL)`, real `actual_material_cost` | Planned |
 

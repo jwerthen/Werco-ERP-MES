@@ -1218,6 +1218,22 @@ export default function OperatorKiosk() {
           nowMs={correctedNowMs}
           stepsTotal={activeQueueItem?.steps_total}
           stepsRecorded={activeQueueItem?.steps_recorded}
+          // Material ties + the OPERATION's scrap total ride the queue row that
+          // this kiosk already polls — no extra fetch, no office tie API (which
+          // would 403 on the scope-fenced crew station twin).
+          //
+          // `activeQueueItem.quantity_scrapped` is the OPERATION total, which is
+          // what the consumption target is computed from. `view.job
+          // .quantity_scrapped` is THIS TIME ENTRY's session count (rendered as
+          // `sessionScrap` in the modal's scrap tile) and must never feed the
+          // prediction — it would under-state a multi-session operation.
+          // The queue row is preferred, but it is matched against the kiosk's
+          // SELECTED machine: an operator clocked onto a job at another work
+          // center resolves `activeQueueItem` undefined and would silently lose
+          // the notice entirely. `my-active-job` carries the same two facts for
+          // exactly that case, so fall back to it rather than render nothing.
+          materialTies={activeQueueItem?.material_ties ?? view.job.material_ties}
+          operationScrapped={activeQueueItem?.quantity_scrapped ?? view.job.operation_quantity_scrapped}
           nextQueueItem={nextQueueItem}
           machineCode={machineCode}
           sessionNcrNumber={

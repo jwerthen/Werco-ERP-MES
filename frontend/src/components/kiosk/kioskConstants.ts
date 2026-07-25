@@ -19,7 +19,14 @@
  *   kiosk hold files a blocker.
  */
 
-import { KioskLastReport, KioskQueueWorkCenter, LaserNestInfo } from '../../types';
+import { KioskLastReport, KioskMaterialTie, KioskQueueWorkCenter, LaserNestInfo } from '../../types';
+
+// Re-exported so the kiosk components keep importing their tie shape from the
+// kiosk barrel. The interface itself lives in ../../types because
+// `ActiveJob` (GET /shop-floor/my-active-job) carries it too, and this module
+// imports FROM types -- defining it here and referencing it there would be a
+// cycle.
+export type { KioskMaterialTie };
 
 export const KIOSK_SOURCE = 'kiosk';
 
@@ -85,6 +92,10 @@ export interface KioskQueueItem {
   status: string;
   quantity_ordered: number;
   quantity_complete: number | null;
+  // OPERATION-level scrap total. The backend has always sent this
+  // (shop_floor.py) — the interface simply never declared it. Optional so
+  // pre-feature payloads still typecheck.
+  quantity_scrapped?: number | null;
   priority: number | null;
   due_date: string | null;
   // Laser cutting: the active nest for this operation (CNC#, runs, optional PDF)
@@ -102,6 +113,10 @@ export interface KioskQueueItem {
   part_revision?: string | null;
   // Last production-evidence telemetry for this operation (backend B4).
   last_report?: KioskLastReport | null;
+  // Material ties on this operation. Absent/null/empty on an UNTIED operation —
+  // render nothing at all (no placeholder, no "not tied" nag): an untied work
+  // order must look byte-identical to its pre-feature self.
+  material_ties?: KioskMaterialTie[] | null;
 }
 
 /**
@@ -140,12 +155,13 @@ export const UNKNOWN_OPERATOR_LABEL = 'Operator';
 
 /**
  * Crew-station queue row: the standard queue item plus the live roster of
- * operators clocked into the operation. `quantity_scrapped` feeds the
- * operation-level tally ("37 of 50 · 2 scrap") that guards double counting.
+ * operators clocked into the operation. `quantity_scrapped` (inherited from
+ * `KioskQueueItem`, which both payloads carry) feeds the operation-level tally
+ * ("37 of 50 · 2 scrap") that guards double counting; `material_ties` is
+ * inherited the same way.
  */
 export interface KioskCrewQueueItem extends KioskQueueItem {
   roster: KioskRosterEntry[];
-  quantity_scrapped?: number | null;
 }
 
 /** "37 of 50 · 2 scrap" — the operation-level crew tally line. */

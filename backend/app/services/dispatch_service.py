@@ -44,8 +44,9 @@ from sqlalchemy.orm.exc import StaleDataError
 
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation
-from app.schemas.dispatch import DispatchBoardColumn, DispatchNestInfo, DispatchQueueRow
+from app.schemas.dispatch import DispatchBoardColumn, DispatchMaterialTie, DispatchNestInfo, DispatchQueueRow
 from app.services.laser_nest_service import active_laser_nest
+from app.services.material_tie_view import MaterialTieView, tie_views_for_operations
 from app.services.work_order_state_service import TERMINAL_WO_STATUSES, operation_target_quantity
 
 # Operation statuses that count as "on the machine's queue" -- work an operator
@@ -175,6 +176,67 @@ def display_positions(operations: Iterable[WorkOrderOperation]) -> Dict[int, Opt
     return positions
 
 
+def material_tie_info(
+    db: Session, company_id: int, operations: Iterable[WorkOrderOperation]
+) -> Dict[int, List[MaterialTieView]]:
+    """Open, operation-scoped material ties for a whole column/board, in ONE batch.
+
+    The board's cost has to stay flat in the number of cards, so this is called
+    ONCE per response with every operation on it -- never per column and never
+    per row (modelled on ``process_sheet_service.step_counts_for_operations``).
+    Untied operations get no key at all, so :func:`board_column` renders nothing
+    for them.
+
+    Read-only, like everything else the board projects: this map feeds both the
+    GET board and the response of the run-order PUT, and that PUT commits.
+
+    Tenancy comes from the caller's ACTIVE company (``get_current_company_id``
+    for a user, the station's DB row for a kiosk), never from client input.
+    """
+    return tie_views_for_operations(db, company_id=company_id, operation_ids=[op.id for op in operations])
+
+
+def dispatch_material_tie(ties: Optional[Sequence[MaterialTieView]]) -> Optional[DispatchMaterialTie]:
+    """Project an operation's ties onto the single board chip, or None when untied.
+
+    ONE chip per card. A second tie on the same operation is possible (nothing
+    forbids tying two different parts to one operation) and the card has room
+    for one, so the FIRST is shown -- ``tie_views_for_operations`` orders by
+    allocation id, making "first" deterministic and identical to what the kiosk
+    lists first for the same operation. Summing them is NOT an option: they are
+    different parts with different units, and a merged number would be fiction.
+
+    Showing only the first would make a SHORTAGE on a second tie invisible, so
+    the shortage signal is carried for the whole operation separately:
+    ``tie_count`` says how many there are and ``any_short`` is true when ANY of
+    them is short. The chip names the first part; the tone and the column's
+    "N short" rollup read ``any_short``, so a second tie can never go unflagged
+    just because the card had room for one line.
+
+    Takes an already-materialized list; it must never issue a query (see
+    :func:`dispatch_queue_row`).
+    """
+    if not ties:
+        return None
+    tie = ties[0]
+    return DispatchMaterialTie(
+        tie_count=len(ties),
+        any_short=any(t.short_by > 0 for t in ties),
+        allocation_id=tie.allocation_id,
+        part_id=tie.part_id,
+        part_number=tie.part_number,
+        unit_of_measure=tie.unit_of_measure,
+        qty_per_run=tie.qty_per_run,
+        qty_planned=tie.qty_planned,
+        qty_consumed=tie.qty_consumed,
+        qty_remaining=tie.qty_remaining,
+        on_hand=tie.on_hand,
+        short_by=tie.short_by,
+        pinned_inventory_item_id=tie.pinned_inventory_item_id,
+        pinned_lot_number=tie.pinned_lot_number,
+    )
+
+
 def dispatch_nest_info(operation: WorkOrderOperation) -> Optional[DispatchNestInfo]:
     """The operation's live laser-nest details, or None when it has none.
 
@@ -213,12 +275,26 @@ def dispatch_nest_info(operation: WorkOrderOperation) -> Optional[DispatchNestIn
     )
 
 
-def dispatch_queue_row(operation: WorkOrderOperation, display_position: Optional[int] = None) -> DispatchQueueRow:
+def dispatch_queue_row(
+    operation: WorkOrderOperation,
+    display_position: Optional[int] = None,
+    *,
+    ties: Optional[Sequence[MaterialTieView]] = None,
+) -> DispatchQueueRow:
     """Project one queued operation onto the board/kiosk row shape.
 
     ``display_position`` is the gap-free rank from :func:`display_positions`;
     callers that have the whole ordered queue should pass it. Falling back to
     the raw stored rank keeps single-row callers correct-ish rather than blank.
+
+    ``ties`` is this operation's already-fetched material ties (from
+    :func:`material_tie_info`), passed IN rather than looked up here.
+
+    THIS FUNCTION MUST STAY DB-FREE. It runs once per card across the whole
+    shop's queue and is asserted to issue ZERO SELECTs
+    (``tests/api/test_dispatch_nest_details.py::test_nest_is_eager_loaded_by_the_shared_load_options``);
+    a lazy relationship access or a per-row query here is an N+1 multiplied by
+    the board. Never give it a ``Session``.
     """
     work_order = operation.work_order
     part = work_order.part if work_order else None
@@ -241,18 +317,32 @@ def dispatch_queue_row(operation: WorkOrderOperation, display_position: Optional
         setup_time_hours=float(operation.setup_time_hours or 0.0),
         run_time_hours=float(operation.run_time_hours or 0.0),
         laser_nest=dispatch_nest_info(operation),
+        material_tie=dispatch_material_tie(ties),
     )
 
 
-def board_column(work_center: WorkCenter, operations: Iterable[WorkOrderOperation]) -> DispatchBoardColumn:
+def board_column(
+    work_center: WorkCenter,
+    operations: Iterable[WorkOrderOperation],
+    *,
+    tie_info: Optional[Dict[int, List[MaterialTieView]]] = None,
+) -> DispatchBoardColumn:
     """One board column: a work center plus its (already-ordered) queue rows.
 
     ``is_active`` is read straight off the work center: a deactivated work
     center that still holds queued work renders as a flagged read-only column
     (see :func:`inactive_work_centers_with_work`).
+
+    ``tie_info`` is the batched material-tie map (:func:`material_tie_info`).
+    EVERY caller that builds a column a client will render must pass it --
+    including the run-order PUT, whose response REPLACES the whole column on the
+    board: omitting it there would strip every tie chip on a drag-reorder and
+    read as "reordering untied my material". Omitting it is a no-tie column, not
+    an error, so nothing fails loudly; that is why this note is here.
     """
     ordered = list(operations)
     positions = display_positions(ordered)
+    ties = tie_info or {}
     return DispatchBoardColumn(
         id=work_center.id,
         code=work_center.code,
@@ -260,7 +350,7 @@ def board_column(work_center: WorkCenter, operations: Iterable[WorkOrderOperatio
         work_center_type=work_center.work_center_type,
         current_status=work_center.current_status,
         is_active=bool(work_center.is_active),
-        queue=[dispatch_queue_row(op, positions.get(op.id)) for op in ordered],
+        queue=[dispatch_queue_row(op, positions.get(op.id), ties=ties.get(op.id)) for op in ordered],
     )
 
 
@@ -339,12 +429,19 @@ def build_dispatch_board(db: Session, company_id: int) -> Tuple[List[DispatchBoa
     relationship the row builder touches is eager-loaded via
     :func:`queue_row_load_options`. The board's cost must stay flat in the number
     of cards -- a per-row SELECT here is multiplied by the whole shop's queue.
+    Material ties are batched the same way (:func:`material_tie_info`): they add
+    a small FIXED number of queries to the response, never one per card.
+
+    Read-only. This projection is shared with ``PUT .../run-order``, which
+    COMMITS -- so anything that writes here would be silently persisted by a
+    manager's drag-reorder.
     """
     work_centers = sorted(
         active_work_centers(db, company_id) + inactive_work_centers_with_work(db, company_id),
         key=lambda wc: wc.code,
     )
     by_work_center: Dict[int, List[WorkOrderOperation]] = {wc.id: [] for wc in work_centers}
+    tie_info: Dict[int, List[MaterialTieView]] = {}
     if work_centers:
         operations = queued_operations(
             db,
@@ -357,7 +454,12 @@ def build_dispatch_board(db: Session, company_id: int) -> Tuple[List[DispatchBoa
             bucket = by_work_center.get(operation.work_center_id)
             if bucket is not None:
                 bucket.append(operation)
-    columns = [board_column(wc, by_work_center[wc.id]) for wc in work_centers]
+        # ONE tie batch for the WHOLE board, not one per column: material ties
+        # are a bounded per-page cost (a handful of SELECTs regardless of card
+        # count), and the flat-in-cards property above is what makes the board
+        # usable on a 24-machine shop.
+        tie_info = material_tie_info(db, company_id, operations)
+    columns = [board_column(wc, by_work_center[wc.id], tie_info=tie_info) for wc in work_centers]
     return columns, datetime.utcnow()
 
 

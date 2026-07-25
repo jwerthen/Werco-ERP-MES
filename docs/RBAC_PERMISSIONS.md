@@ -154,6 +154,13 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > | Tie material | `POST /api/v1/work-orders/{id}/material-allocations` | `require_role([ADMIN, MANAGER, SUPERVISOR])` |
 > | Edit a tie | `PATCH /api/v1/work-orders/{id}/material-allocations/{allocation_id}` | `require_role([ADMIN, MANAGER, SUPERVISOR])` |
 > | Untie | `DELETE /api/v1/work-orders/{id}/material-allocations/{allocation_id}` | `require_role([ADMIN, MANAGER, SUPERVISOR])` |
+> | Tie a nest at creation | `POST /api/v1/work-orders/{id}/laser-nests/manual` and the four `…/laser-nest-packages/{preview,import}` routes, via the optional `material_part_id` | `require_role([ADMIN, MANAGER, SUPERVISOR])` — the endpoints' own pre-existing gate |
+>
+> **The matrix rows above hold now that a UI exists** (the work-order Materials panel, the nest
+> wizard's sheet-part picker, the Dispatch Board chip, the kiosk deduction line). Nothing was
+> re-gated: the nest-creation paths already required Admin / Manager / Supervisor, which is the same
+> set the tie verbs require, so a nest tie created inside the import transaction cannot be a
+> privilege escalation around `POST …/material-allocations`.
 >
 > The read is deliberately broad — a tie is shop-visible context ("this job burns *that* sheet"),
 > and the same rows are already reachable through lot traceability. **Operator gets 403 on all three
@@ -161,6 +168,17 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > shop-floor production verbs. The router is mounted under `/work-orders`, **not**
 > `/api/v1/shop-floor`, so kiosk-scoped operator tokens are **path-fenced away from it** entirely —
 > a crew-station token cannot tie or untie material even if it reached the route.
+>
+> **The floor reads ties without reaching that router, and the fence is unchanged.** The Dispatch
+> Board's `material_tie` and the kiosk's `material_ties` ride
+> `GET /shop-floor/dispatch-board` (Admin / Manager / Supervisor) and
+> `GET /shop-floor/work-center-queue/{id}` + `GET /shop-floor/my-active-job` (any authenticated user,
+> **or** a crew-station token for its own work center) — reads the fence already permits, carrying
+> data rather than granting a new capability. The same precedent as `scrap_reason_codes`. Both are
+> **pure reads**: they post no `ISSUE`, write no audit row and reconcile nothing. Note the small
+> disclosure widening this implies for a **station** principal — an unattended, PIN-unlocked terminal
+> with no operator identity can now see material part numbers and on-hand stock for the parts tied to
+> its own work center's queued operations (not an inventory browser, but not nothing).
 >
 > Every lookup (work order, part, operation, pinned lot, allocation) is **tenant-scoped**: a
 > cross-tenant id is **404**, never 403, so an id cannot be probed. Every create / edit / untie writes
@@ -172,7 +190,9 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > **The consumption itself has no endpoint and no separate gate.** It runs inside the existing
 > completion paths (`apply_completion_inventory_effects`), so whoever is authorized to complete the
 > work is what authorizes the resulting stock movement — including the operator-facing kiosk and
-> shop-floor completion verbs and the reconcile-on-read GET. This is deliberate: material depletes
+> shop-floor completion verbs and the reconcile-on-read GET. Every one of those call sites fires only
+> when the **work order** completes, never on an operation alone, so the attributed actor is whoever
+> closed the job — not whoever finished nest 1 of 3. This is deliberate: material depletes
 > because production happened, not because someone was granted an inventory power. The stock
 > decrement, the `ISSUE` ledger row, and any `ALLOCATION_SHORTAGE` are audited on the hash chain
 > regardless of which path drove them. Lifecycle side effects follow the same rule — nest re-import

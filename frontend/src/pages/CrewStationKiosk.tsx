@@ -1549,6 +1549,13 @@ export default function CrewStationKiosk() {
           nowMs={skewedNowMs}
           pendingGood={view.good}
           pendingScrap={view.scrap}
+          // Straight off the station-authed queue poll — no new fetch and no
+          // operator token. The crew station is path-fenced to shop-floor, so
+          // the office tie API (/work-orders/...) is never reachable from here.
+          materialTies={viewItem.material_ties}
+          operationScrapped={viewItem.quantity_scrapped}
+          quantityOrdered={viewItem.quantity_ordered}
+          workOrderNumber={viewItem.work_order_number}
           busy={mutationsBlocked}
           error={badgeError}
           onCancel={() => {

@@ -1,9 +1,17 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { IdentificationIcon } from '@heroicons/react/24/solid';
 import { Modal } from '../ui/Modal';
 import KioskKeypad from './KioskKeypad';
 import { useBadgeCapture } from './useBadgeCapture';
-import { KioskRosterEntry, UNKNOWN_OPERATOR_LABEL, formatElapsedShort } from './kioskConstants';
+import { KioskMaterialTie, KioskRosterEntry, UNKNOWN_OPERATOR_LABEL, formatElapsedShort } from './kioskConstants';
+import {
+  DEDUCTION_TIMING_NOTE,
+  deductionHeadline,
+  deductionLineText,
+  predictMaterialConsumption,
+  scrapNoteText,
+  shortageNoteText,
+} from '../../utils/materialTie';
 
 interface KioskCompleteConfirmModalProps {
   open: boolean;
@@ -16,6 +24,21 @@ interface KioskCompleteConfirmModalProps {
   /** Final NEW pieces entered on the quantity screen (reported before complete). */
   pendingGood: number;
   pendingScrap: number;
+  /**
+   * Material ties on this operation, straight off the STATION-authed queue poll
+   * (the crew station is scope-fenced — it never calls the office tie API).
+   * Absent/empty on an untied operation, which renders nothing at all.
+   */
+  materialTies?: KioskMaterialTie[] | null;
+  /** The OPERATION's scrap total already recorded (not a session count). */
+  operationScrapped?: number | null;
+  /**
+   * The operation's ordered/target quantity — what `/complete` asserts as
+   * `quantity_complete`, and therefore what the material prediction scales by.
+   */
+  quantityOrdered?: number | null;
+  /** Work order number, so the notice can name whose completion deducts. */
+  workOrderNumber?: string | null;
   busy: boolean;
   /** Server rejection (bad badge, gating detail) — shown verbatim, modal stays open. */
   error: string | null;
@@ -38,12 +61,33 @@ export default function KioskCompleteConfirmModal({
   nowMs,
   pendingGood,
   pendingScrap,
+  materialTies,
+  operationScrapped,
+  quantityOrdered,
+  workOrderNumber,
   busy,
   error,
   onCancel,
   onBadge,
 }: KioskCompleteConfirmModalProps) {
   const [badge, setBadge] = useState('');
+
+  // Predicted material draw. `quantityOrdered` (not `pendingGood`) because
+  // /complete asserts `quantity_complete = quantity_ordered` — the good count
+  // entered on the previous screen does not move this number. The scrap count
+  // DOES: a scrapped run still used its material.
+  const prediction = useMemo(
+    () =>
+      predictMaterialConsumption({
+        ties: materialTies,
+        quantityOrdered,
+        operationScrapped,
+        scrapEntered: pendingScrap,
+      }),
+    [materialTies, quantityOrdered, operationScrapped, pendingScrap]
+  );
+  const scrapNote = prediction ? scrapNoteText(prediction, pendingScrap) : null;
+  const shortageNote = prediction ? shortageNoteText(prediction) : null;
 
   useBadgeCapture({
     enabled: open && !busy,
@@ -77,6 +121,44 @@ export default function KioskCompleteConfirmModal({
         <p className="mt-4 rounded border border-fd-blue/50 bg-fd-blue/10 px-4 py-3 font-mono text-xl font-bold text-fd-blue">
           Final pieces to record: {pendingGood} good{pendingScrap > 0 ? ` · ${pendingScrap} scrap` : ''}
         </p>
+      )}
+
+      {/* Material deduction notice — INFORMATIONAL ONLY. Never gates the badge
+          signature (a shortage never blocks production) and never claims the
+          material has already moved: consumption fires at WORK-ORDER
+          completion, so on a laser child WO (one operation per nest) finishing
+          this nest deducts nothing until the last one closes the work order.
+          Untied operations render nothing at all. */}
+      {prediction && prediction.lines.length > 0 && (
+        <div
+          data-testid="kiosk-crew-complete-material"
+          className="mt-4 rounded border border-fd-line-bright bg-fd-sunken px-4 py-3"
+        >
+          <p className="font-mono text-sm uppercase tracking-[0.14em] text-fd-mute">
+            {deductionHeadline(workOrderNumber)}
+          </p>
+          <ul className="mt-1.5 space-y-0.5">
+            {prediction.lines.map((line) => (
+              <li key={line.key} className="font-mono text-xl font-bold uppercase text-fd-ink">
+                {deductionLineText(line)}
+              </li>
+            ))}
+          </ul>
+          {scrapNote && (
+            <p data-testid="kiosk-crew-complete-material-scrap" className="mt-1.5 text-base text-fd-body">
+              {scrapNote}
+            </p>
+          )}
+          <p className="mt-1.5 text-base text-fd-mute">{DEDUCTION_TIMING_NOTE}</p>
+          {shortageNote && (
+            <p
+              data-testid="kiosk-crew-complete-material-short"
+              className="mt-2 rounded border border-fd-amber/50 bg-fd-amber/10 px-3 py-2 font-mono text-base font-bold uppercase text-fd-amber"
+            >
+              {shortageNote}
+            </p>
+          )}
+        </div>
       )}
 
       <div className="mt-4 rounded border border-fd-amber/50 bg-fd-amber/10 p-4">
