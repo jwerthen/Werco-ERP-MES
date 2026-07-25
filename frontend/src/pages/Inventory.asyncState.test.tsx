@@ -35,6 +35,17 @@ jest.mock('../services/api', () => ({
   },
 }));
 
+// Inventory gates its Receive / Transfer affordances on the caller's role, so the
+// page needs an auth context. Manager holds inventory:adjust, which is what the
+// empty-state "Receive Inventory" CTA asserted below is gated on.
+jest.mock('../context/AuthContext', () => ({
+  useAuth: () => ({
+    user: { id: 1, role: 'manager', is_superuser: false },
+    isAuthenticated: true,
+    isLoading: false,
+  }),
+}));
+
 const mockedApi = api as jest.Mocked<typeof api>;
 
 const summary = [
