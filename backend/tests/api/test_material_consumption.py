@@ -32,6 +32,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.security import create_access_token
+from app.db.ledger_filter import OPERATION_REFERENCE_TYPE
 from app.models.audit_log import AuditLog
 from app.models.bom import BOM, BOMItem
 from app.models.company import Company
@@ -51,7 +52,6 @@ from app.services.material_consumption_service import (
     ALLOCATION_SHORTAGE_AUDIT_ACTION,
     ALLOCATION_SHORTAGE_EVENT_TYPE,
     HELD_MATERIAL_CONSUMED_AUDIT_ACTION,
-    OPERATION_REFERENCE_TYPE,
     MaterialAllocationConsumedError,
     cancel_allocations_for_operations,
     cancel_open_allocations_for_work_order,

@@ -118,11 +118,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from app.db.ledger_filter import (  # noqa: F401  (re-exported: the engine's reference shapes)
-    OPERATION_REFERENCE_TYPE,
-    WORK_ORDER_REFERENCE_TYPE,
-    work_order_ledger_filter,
-)
+from app.db.ledger_filter import OPERATION_REFERENCE_TYPE
 from app.models.audit_log import AuditLog
 from app.models.inventory import InventoryItem, InventoryTransaction
 from app.models.part import Part
@@ -140,12 +136,12 @@ from app.services.operational_event_service import OperationalEventService
 logger = logging.getLogger(__name__)
 
 # ``OPERATION_REFERENCE_TYPE`` / ``WORK_ORDER_REFERENCE_TYPE`` / ``work_order_ledger_filter``
-# now live in ``app.db.ledger_filter`` -- the predicate is a GENERIC ledger question ("which
+# live in ``app.db.ledger_filter`` -- the predicate is a GENERIC ledger question ("which
 # rows belong to this work order?") that job costing, analytics, genealogy and the ledger
 # list endpoint all ask, and homing it here forced every one of them to import this whole
 # engine (transitively ``completion_inventory_service`` + ``operational_event_service``)
-# just to get a WHERE clause. Re-exported above so this module's own name for its reference
-# type keeps working for readers and tests.
+# just to get a WHERE clause. Import them from there, NOT through this module: a re-export
+# here would rebuild exactly the coupling the move removed.
 
 # Tamper-evident audit action + operational-event type for a consumption that drove a
 # source lot negative. Distinct from ``BACKFLUSH_SHORTAGE`` so the two mechanisms stay

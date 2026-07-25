@@ -158,8 +158,10 @@ class WorkOrderMaterialAllocationDemand:
     a heat-certified lot, get a 201, and watch the ledger issue from a different lot --
     the as-built genealogy naming material the operator never touched (AS9100D 8.5.2).
     ``uq_wo_material_alloc_open_wo`` permits at most ONE open work-order-scoped tie per
-    (company, WO, part), so there is never a second, conflicting pin to reconcile; the
-    summing branch below exists only for the CANCELLED-row edge and keeps the FIRST pin.
+    (company, WO, part), and the demand builder reads only OPEN rows -- so there is never
+    a second, conflicting pin to reconcile. The summing branch below is unreachable while
+    that partial unique index holds; it is kept as a defensive sum (and keeps the FIRST
+    pin) rather than as a path anything exercises today.
     """
 
     allocation_ids: list[int] = field(default_factory=list)

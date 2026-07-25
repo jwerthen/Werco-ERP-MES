@@ -544,7 +544,10 @@ def update_material_allocation(
         )
 
     consumed = float(allocation.qty_consumed or 0)
-    if payload.qty_planned is not None and payload.qty_planned < consumed:
+    # Epsilon, not a bare `<`: qty_consumed accumulates float sums (0.1 x 3 stores
+    # 0.30000000000000004), so an exact comparison refuses a planner lowering
+    # qty_planned to the value the tie has genuinely consumed.
+    if payload.qty_planned is not None and payload.qty_planned < consumed - CONSUMPTION_EPSILON:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=(
