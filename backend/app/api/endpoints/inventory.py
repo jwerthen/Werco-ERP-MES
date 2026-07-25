@@ -1,9 +1,9 @@
 from datetime import date, datetime
-from typing import Optional
+from typing import Dict, List, Optional, Sequence
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import func
+from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session, joinedload
 
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
@@ -19,15 +19,113 @@ from app.models.inventory import (
 )
 from app.models.part import Part
 from app.models.user import User, UserRole
+from app.models.work_order import WorkOrder
+from app.schemas.inventory import InventoryTransactionResponse
 from app.services.audit_service import AuditService
 from app.services.operational_event_service import OperationalEventService
 
 router = APIRouter()
 
+# A cycle count in either of these states is closed for good. COMPLETED has already
+# posted its variance to the ledger; CANCELLED was deliberately abandoned. Re-opening
+# or re-completing one would append a SECOND COUNT transaction for the same physical
+# variance, permanently diverging the ledger from on-hand.
+TERMINAL_COUNT_STATUSES = (CycleCountStatus.COMPLETED, CycleCountStatus.CANCELLED)
+
+# Every verb that moves stock or posts a row to the inventory ledger. Matches the
+# PO-receipt path ``POST /receiving/receive``, which writes the same
+# ``inventory_items`` / ``inventory_transactions`` tables. Used by /receive, /issue,
+# /transfer, /adjust, and both privileged cycle-count steps (create + complete).
+STOCK_MUTATOR_ROLES = [UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]
+
+# Who may write a counted quantity (``start`` + ``record_count``). Deliberately
+# defined by EXCLUSION: counting is a shop-floor task, so every working role keeps
+# it -- only VIEWER, which is read-only by definition (``inventory:view`` and
+# nothing else in ``frontend/src/utils/permissions.ts``), is refused. A counted
+# quantity is the quality record the manager's ledger-posting adjustment is derived
+# from, so it is not a read.
+COUNT_WRITE_ROLES = [
+    UserRole.ADMIN,
+    UserRole.MANAGER,
+    UserRole.SUPERVISOR,
+    UserRole.OPERATOR,
+    UserRole.QUALITY,
+    UserRole.SHIPPING,
+]
+
+# Bound on the ``IN (...)`` list used to bulk-load stock rows for a completion, so a
+# warehouse-wide count cannot blow past the driver's bind-parameter ceiling.
+_IN_CHUNK = 500
+
+
+def _status_value(status: Optional[CycleCountStatus]) -> str:
+    """The status column's value as a plain string, for messages and audit payloads.
+
+    ``CycleCount.status`` is a ``SQLEnum`` column, so SQLAlchemy always hands back the
+    enum member itself -- never its name or value as a bare string. That is why the
+    lifecycle guards compare ``count.status`` to members directly, and why this helper
+    does not carry a "maybe it's already a string" branch: the only value it can see
+    that is not a member is ``None`` (the column is nullable, so a row written outside
+    the ORM -- which supplies the SCHEDULED default -- can carry NULL).
+    """
+    return status.value if status is not None else "unknown"
+
+
+def _audit_stock_movement(
+    audit: AuditService,
+    txn: InventoryTransaction,
+    inv: InventoryItem,
+    old_quantity: float,
+    new_quantity: float,
+    *,
+    movement_description: str,
+    stock_label: str,
+) -> None:
+    """Write the dual-row tamper-evident trail for one stock movement.
+
+    Every stock mutator in this module records two audit rows: an ``inventory``
+    CREATE for the ``InventoryTransaction`` (the movement) and an ``inventory``
+    UPDATE for the ``quantity_on_hand`` change it produced. Callers invoke this
+    inside their ``atomic_transaction`` block so the audit rows commit with the
+    inventory write.
+
+    Used by ``/inventory/issue``, ``/inventory/adjust`` and
+    ``/inventory/cycle-counts/{id}/complete``. ``/receive`` and ``/transfer`` write
+    their own blocks: receive's stock update is conditional (a brand-new row has no
+    "old" quantity) and identifies the row by part number, and transfer produces a
+    THIRD row for the destination increment.
+    """
+    audit.log_create("inventory", txn.id, str(txn.id), new_values=txn, description=movement_description)
+    audit.log_update(
+        "inventory",
+        inv.id,
+        f"inventory_item {inv.id} @ {inv.location}",
+        old_values={"quantity_on_hand": old_quantity},
+        new_values={"quantity_on_hand": new_quantity},
+        description=f"{stock_label}: stock for inventory item {inv.id} at {inv.location}",
+    )
+
+
+def _load_inventory_items(db: Session, company_id: int, item_ids: Sequence[int]) -> Dict[int, InventoryItem]:
+    """Tenant-scoped bulk load of stock rows, keyed by id.
+
+    Replaces a per-item ``SELECT`` inside the cycle-count completion loop:
+    ``create_cycle_count`` enrolls every stock row in a warehouse, so that loop is
+    inherently bulk. Rows belonging to another company are simply absent from the
+    map, which is what makes the caller's "skip anything not ours" guard work.
+    """
+    loaded: Dict[int, InventoryItem] = {}
+    ids = [i for i in item_ids if i is not None]
+    for start in range(0, len(ids), _IN_CHUNK):
+        chunk = ids[start : start + _IN_CHUNK]
+        rows = db.query(InventoryItem).filter(InventoryItem.company_id == company_id, InventoryItem.id.in_(chunk)).all()
+        loaded.update({row.id: row for row in rows})
+    return loaded
+
 
 @router.get("/low-stock")
 def get_low_stock_alerts(
-    limit: int = Query(500, le=2000),
+    limit: int = Query(500, ge=1, le=2000),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
@@ -35,16 +133,19 @@ def get_low_stock_alerts(
     """Get parts with inventory below reorder point.
 
     Filter is applied in SQL so we don't load the full parts catalog into
-    memory. A hard limit bounds the response size; the frontend paginates
-    display in any case.
+    memory. A hard limit bounds the response size (``ge=1`` so a negative value
+    cannot reach ``.limit()`` -- PostgreSQL rejects a negative LIMIT and SQLite
+    silently treats it as "unbounded"); the frontend paginates display in any case.
     """
     # Subquery: sum of on-hand quantity per active inventory row, by part.
+    # Tenant-scoped so the aggregate can never sum another company's stock into
+    # this company's on-hand figure.
     qty_subq = (
         db.query(
             InventoryItem.part_id.label("pid"),
             func.coalesce(func.sum(InventoryItem.quantity_on_hand), 0).label("total_qty"),
         )
-        .filter(InventoryItem.is_active == True)
+        .filter(InventoryItem.company_id == company_id, InventoryItem.is_active == True)
         .group_by(InventoryItem.part_id)
         .subquery()
     )
@@ -56,6 +157,13 @@ def get_low_stock_alerts(
         .outerjoin(qty_subq, Part.id == qty_subq.c.pid)
         .filter(
             Part.company_id == company_id,
+            # Part is the one SoftDeleteMixin model this module touches. Deleting a
+            # part also clears is_active, so the predicate below is belt-and-braces
+            # today -- but is_active is an operational flag anyone can toggle back,
+            # while is_deleted is the deletion record. Filter on the real one too, so
+            # a restored-to-active-but-still-deleted part can't reappear as a
+            # purchasing signal.
+            Part.is_deleted == False,
             Part.is_active == True,
             Part.reorder_point > 0,
             total_qty_col <= Part.reorder_point,
@@ -263,25 +371,57 @@ def get_inventory_summary(
 def receive_inventory(
     receive_in: ReceiveItemRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(STOCK_MUTATOR_ROLES)),
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Receive inventory into stock"""
-    # Verify part exists
-    part = db.query(Part).filter(Part.id == receive_in.part_id, Part.company_id == company_id).first()
+    """Receive inventory into stock.
+
+    Role gate matches ``POST /receiving/receive`` — the PO-receipt path that writes
+    the same ``inventory_items`` / ``inventory_transactions`` tables — and the sibling
+    stock mutators ``/inventory/issue`` and ``/inventory/adjust``. Previously this
+    endpoint took only ``get_current_user``, so any authenticated user (VIEWER
+    included) could create stock and a ledger row.
+
+    A soft-deleted part is refused with **400**, matching the repo-wide deleted-part
+    policy (``po_upload.py`` / ``bom.py``): "restore it or use a different part
+    number". Without the ``is_deleted`` predicate a Manager could create brand-new
+    stock and a ledger row against a part the business has deleted.
+    """
+    # Verify part exists and is not deleted (Part is a SoftDeleteMixin model).
+    part = (
+        db.query(Part)
+        .filter(Part.id == receive_in.part_id, Part.company_id == company_id, Part.is_deleted == False)
+        .first()
+    )
     if not part:
+        deleted_part = (
+            db.query(Part)
+            .filter(Part.id == receive_in.part_id, Part.company_id == company_id, Part.is_deleted == True)
+            .first()
+        )
+        if deleted_part:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Part '{deleted_part.part_number}' is deleted - restore it or use a different part number",
+            )
         raise HTTPException(status_code=404, detail="Part not found")
 
-    # Verify location exists
-    location = db.query(InventoryLocation).filter(InventoryLocation.code == receive_in.location_code).first()
+    # Verify location exists (tenant-scoped: another company's location code is "not found")
+    location = (
+        db.query(InventoryLocation)
+        .filter(InventoryLocation.code == receive_in.location_code, InventoryLocation.company_id == company_id)
+        .first()
+    )
     if not location:
         raise HTTPException(status_code=404, detail="Location not found")
 
-    # Check for existing inventory at this location with same lot
+    # Check for existing inventory at this location with same lot (tenant-scoped, so a
+    # matching lot in another company can never be the row we increment)
     existing = (
         db.query(InventoryItem)
         .filter(
+            InventoryItem.company_id == company_id,
             InventoryItem.part_id == receive_in.part_id,
             InventoryItem.location == receive_in.location_code,
             InventoryItem.lot_number == receive_in.lot_number,
@@ -378,15 +518,22 @@ def receive_inventory(
     return {"message": "Inventory received", "inventory_item_id": inv_item.id, "quantity": receive_in.quantity}
 
 
-@router.post("/issue")
+@router.post("/issue", deprecated=True, summary="Issue inventory to work order (deprecated)")
 def issue_inventory(
     issue_in: IssueItemRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(STOCK_MUTATOR_ROLES)),
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Issue inventory to work order"""
+    """Issue inventory to work order.
+
+    DEPRECATION NOTICE: this free-form issue verb is slated for removal in favor of
+    the work-order-scoped ``POST /work-orders/{id}/issue-material``, which ties the
+    consumption to a specific work order (and operation) rather than an untyped
+    ``work_order_number`` string. Role gate matches the sibling ``/inventory/adjust``
+    stock-mutating endpoint.
+    """
     inv_item = (
         db.query(InventoryItem)
         .filter(InventoryItem.id == issue_in.inventory_item_id, InventoryItem.company_id == company_id)
@@ -440,23 +587,17 @@ def issue_inventory(
         )
 
         # Tamper-evident audit trail (hash chain) for the stock movement.
-        audit.log_create(
-            "inventory",
-            txn.id,
-            str(txn.id),
-            new_values=txn,
-            description=(
+        _audit_stock_movement(
+            audit,
+            txn,
+            inv_item,
+            old_quantity_on_hand,
+            inv_item.quantity_on_hand,
+            movement_description=(
                 f"Issued {issue_in.quantity} from {inv_item.location}"
                 + (f" for work order {issue_in.work_order_number}" if issue_in.work_order_number else "")
             ),
-        )
-        audit.log_update(
-            "inventory",
-            inv_item.id,
-            f"inventory_item {inv_item.id} @ {inv_item.location}",
-            old_values={"quantity_on_hand": old_quantity_on_hand},
-            new_values={"quantity_on_hand": inv_item.quantity_on_hand},
-            description=f"Issue: stock for inventory item {inv_item.id} at {inv_item.location}",
+            stock_label="Issue",
         )
 
     return {"message": "Inventory issued", "quantity": issue_in.quantity}
@@ -466,11 +607,17 @@ def issue_inventory(
 def transfer_inventory(
     transfer_in: TransferRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(STOCK_MUTATOR_ROLES)),
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Transfer inventory between locations"""
+    """Transfer inventory between locations.
+
+    Role gate matches the **Transfer** row already documented in
+    ``docs/RBAC_PERMISSIONS.md`` (Admin / Manager / Supervisor) and the sibling stock
+    mutators. Previously this endpoint took only ``get_current_user``, so the server
+    under-enforced its own documented policy.
+    """
     inv_item = (
         db.query(InventoryItem)
         .filter(InventoryItem.id == transfer_in.inventory_item_id, InventoryItem.company_id == company_id)
@@ -479,7 +626,13 @@ def transfer_inventory(
     if not inv_item:
         raise HTTPException(status_code=404, detail="Inventory item not found")
 
-    to_location = db.query(InventoryLocation).filter(InventoryLocation.code == transfer_in.to_location_code).first()
+    # Tenant-scoped: another company's location code must behave as "not found",
+    # never as a valid transfer destination.
+    to_location = (
+        db.query(InventoryLocation)
+        .filter(InventoryLocation.code == transfer_in.to_location_code, InventoryLocation.company_id == company_id)
+        .first()
+    )
     if not to_location:
         raise HTTPException(status_code=404, detail="Destination location not found")
 
@@ -494,10 +647,12 @@ def transfer_inventory(
         inv_item.quantity_on_hand -= transfer_in.quantity
         inv_item.quantity_available = inv_item.quantity_on_hand - inv_item.quantity_allocated
 
-        # Add to destination (or create new)
+        # Add to destination (or create new). Tenant-scoped so the destination row we
+        # increment is always this company's stock.
         dest_inv = (
             db.query(InventoryItem)
             .filter(
+                InventoryItem.company_id == company_id,
                 InventoryItem.part_id == inv_item.part_id,
                 InventoryItem.location == transfer_in.to_location_code,
                 InventoryItem.lot_number == inv_item.lot_number,
@@ -557,7 +712,10 @@ def transfer_inventory(
         )
 
         # Tamper-evident audit trail (hash chain): the movement plus both stock-level
-        # changes (source decrement, destination increment).
+        # changes (source decrement, destination increment). Deliberately NOT routed
+        # through ``_audit_stock_movement``: a transfer produces a third row (the
+        # destination increment below), and the source row is identified by its
+        # ORIGINATING location, not its current one.
         audit.log_create(
             "inventory",
             txn.id,
@@ -590,7 +748,7 @@ def transfer_inventory(
 def adjust_inventory(
     adjust_in: AdjustmentRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    current_user: User = Depends(require_role(STOCK_MUTATOR_ROLES)),
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
@@ -647,23 +805,17 @@ def adjust_inventory(
 
         # Tamper-evident audit trail (hash chain): the adjustment movement plus the
         # stock-level change it produced.
-        audit.log_create(
-            "inventory",
-            txn.id,
-            str(txn.id),
-            new_values=txn,
-            description=(
+        _audit_stock_movement(
+            audit,
+            txn,
+            inv_item,
+            old_qty,
+            adjust_in.new_quantity,
+            movement_description=(
                 f"Adjusted inventory item {inv_item.id} at {inv_item.location} "
                 f"from {old_qty} to {adjust_in.new_quantity} (reason: {adjust_in.reason_code})"
             ),
-        )
-        audit.log_update(
-            "inventory",
-            inv_item.id,
-            f"inventory_item {inv_item.id} @ {inv_item.location}",
-            old_values={"quantity_on_hand": old_qty},
-            new_values={"quantity_on_hand": adjust_in.new_quantity},
-            description=f"Adjust: stock for inventory item {inv_item.id} at {inv_item.location}",
+            stock_label="Adjust",
         )
 
     return {"message": "Adjustment complete", "old_quantity": old_qty, "new_quantity": adjust_in.new_quantity}
@@ -687,10 +839,17 @@ def list_cycle_counts(
 def create_cycle_count(
     count_in: CycleCountCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    current_user: User = Depends(require_role(STOCK_MUTATOR_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Create a new cycle count"""
+    """Create a new cycle count.
+
+    Audited: this is the step that DEFINES the count's scope and enrolls the stock
+    rows ``complete`` later adjusts, so "who scoped this count, and which rows did it
+    pull in" has to be answerable from the hash chain. ``CycleCount`` and
+    ``CycleCountItem`` are both TenantMixin tables, and this is their only writer.
+    """
     # Generate count number
     today = datetime.now().strftime("%Y%m%d")
     prefix = f"CC-{today}-"
@@ -712,18 +871,32 @@ def create_cycle_count(
     )
     count.company_id = company_id
 
-    # Get location if specified
+    # Get location if specified (tenant-scoped). An unknown code — or one that
+    # belongs to another company — is a 404, matching the posture of every other
+    # location lookup in this file. Silently ignoring it produced a count whose
+    # declared scope did not match the rows it actually enrolled.
     if count_in.location_code:
-        loc = db.query(InventoryLocation).filter(InventoryLocation.code == count_in.location_code).first()
-        if loc:
-            count.location_id = loc.id
-            count.warehouse = loc.warehouse
+        loc = (
+            db.query(InventoryLocation)
+            .filter(InventoryLocation.code == count_in.location_code, InventoryLocation.company_id == company_id)
+            .first()
+        )
+        if not loc:
+            raise HTTPException(status_code=404, detail="Location not found")
+        count.location_id = loc.id
+        count.warehouse = loc.warehouse
 
     db.add(count)
     db.flush()
 
-    # Add items to count
-    query = db.query(InventoryItem).filter(InventoryItem.is_active == True, InventoryItem.quantity_on_hand > 0)
+    # Add items to count. Tenant-scoped: warehouse / location codes are not unique
+    # across companies, so an unscoped scan would enroll another tenant's stock rows
+    # into this count (and complete_cycle_count would then adjust them).
+    query = db.query(InventoryItem).filter(
+        InventoryItem.company_id == company_id,
+        InventoryItem.is_active == True,
+        InventoryItem.quantity_on_hand > 0,
+    )
 
     if count.warehouse:
         query = query.filter(InventoryItem.warehouse == count.warehouse)
@@ -740,9 +913,35 @@ def create_cycle_count(
             system_quantity=inv.quantity_on_hand,
             unit_cost=inv.unit_cost,
         )
+        # CycleCountItem is a TenantMixin table (company_id NOT NULL — migration
+        # 026). Without this stamp the insert raises IntegrityError and the whole
+        # create rolls back, which is exactly what used to happen: enrolling any
+        # item always 500'd. No untagged row was ever persisted.
+        count_item.company_id = company_id
         db.add(count_item)
 
     count.total_items = len(items)
+
+    # Tamper-evident audit trail (hash chain) for the enrollment, written before the
+    # commit so the audit row lands with the count and its items.
+    audit.log_create(
+        "cycle_count",
+        count.id,
+        count.count_number,
+        new_values=count,
+        description=(
+            f"Created cycle count {count.count_number} "
+            f"(scope: warehouse={count.warehouse or 'any'}, location={count_in.location_code or 'any'}, "
+            f"part_id={count.part_id or 'any'}) enrolling {len(items)} stock row(s)"
+        ),
+        extra_data={
+            "warehouse": count.warehouse,
+            "location_code": count_in.location_code,
+            "part_id": count.part_id,
+            "total_items": len(items),
+        },
+    )
+
     db.commit()
     db.refresh(count)
 
@@ -753,16 +952,67 @@ def create_cycle_count(
 def start_cycle_count(
     count_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(COUNT_WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
+    """Open a cycle count for counting.
+
+    Gated by EXCLUSION (``COUNT_WRITE_ROLES``): every working role keeps this, and
+    only VIEWER — read-only by definition — is refused. Counting is an operator task
+    by documented policy (``docs/RBAC_PERMISSIONS.md`` → Inventory): the privileged
+    steps are *creating* the count and *completing* it (posting the variance to the
+    ledger), both of which stay ``require_role(STOCK_MUTATOR_ROLES)``. Narrowing this
+    to the stock-mutator set would hard-block an operator from ever working a
+    SCHEDULED count, since ``record_count`` 409s unless the parent is IN_PROGRESS —
+    do not do that without owner sign-off. Previously this endpoint took bare
+    ``get_current_user``, so VIEWER could open a count and (via ``record_count``)
+    write the quantities a manager's ledger-posting adjustment is derived from.
+
+    Refuses a terminal count with 409: re-opening a COMPLETED count would allow a
+    second ``complete`` to double-post the same physical variance to the ledger, and
+    a CANCELLED count was deliberately abandoned.
+    """
     count = db.query(CycleCount).filter(CycleCount.id == count_id, CycleCount.company_id == company_id).first()
     if not count:
         raise HTTPException(status_code=404, detail="Cycle count not found")
 
+    if count.status in TERMINAL_COUNT_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cycle count {count.count_number} is {_status_value(count.status)} and cannot be started",
+        )
+
+    old_status = _status_value(count.status)
+    old_assigned_to = count.assigned_to
+    already_started = count.status == CycleCountStatus.IN_PROGRESS
+
     count.status = CycleCountStatus.IN_PROGRESS
-    count.started_at = datetime.utcnow()
+    if not already_started:
+        # Only stamp on the real transition — ``started_at`` is the traceability
+        # record of when counting began and must survive a re-assignment.
+        count.started_at = datetime.utcnow()
     count.assigned_to = current_user.id
+
+    if already_started:
+        audit.log_update(
+            "cycle_count",
+            count.id,
+            count.count_number,
+            old_values={"assigned_to": old_assigned_to},
+            new_values={"assigned_to": count.assigned_to},
+            description=f"Reassigned cycle count {count.count_number}",
+        )
+    else:
+        audit.log_status_change(
+            "cycle_count",
+            count.id,
+            count.count_number,
+            old_status,
+            _status_value(CycleCountStatus.IN_PROGRESS),
+            description=f"Started cycle count {count.count_number}",
+        )
+
     db.commit()
 
     return {"message": "Cycle count started"}
@@ -774,15 +1024,66 @@ def record_count(
     item_id: int,
     count_in: CountItemRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(COUNT_WRITE_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Record a count for an item"""
+    """Record a count for an item.
+
+    Gated by EXCLUSION (``COUNT_WRITE_ROLES``), same set as ``start``: the whole
+    shop-floor counting path is preserved and only the read-only VIEWER role loses
+    write access. The counted quantity is the quality record the manager's
+    ledger-posting adjustment is derived from, so writing it is not a read.
+
+    Audited as an UPDATE of the ``cycle_count_item`` row on EVERY write, not only on
+    a re-count. The row already exists (``create_cycle_count`` enrolled it), so UPDATE
+    is the accurate verb, and a uniform trail means "who counted this, when, and what
+    did it replace" is answerable for every count. It matters most on a re-POST while
+    the parent is still IN_PROGRESS: that silently overwrites ``counted_quantity`` /
+    ``variance`` / ``counted_by``, destroying an evidence value whose only other
+    record is the row being overwritten.
+    """
+    # Tenant-scoped on both the parent count and the item: without it, any
+    # authenticated user could write counted quantities onto another company's rows.
+    count = db.query(CycleCount).filter(CycleCount.id == count_id, CycleCount.company_id == company_id).first()
+    if not count:
+        raise HTTPException(status_code=404, detail="Cycle count not found")
+
+    # The counted quantity is the quality record the variance adjustment is derived
+    # from. Once the count is closed (COMPLETED / CANCELLED) that record is evidence
+    # and must not be overwritten; before it is opened there is nothing to count
+    # against. Only an IN_PROGRESS count accepts writes.
+    if count.status != CycleCountStatus.IN_PROGRESS:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Cycle count {count.count_number} is {_status_value(count.status)}; "
+                "counts can only be recorded while it is in progress"
+            ),
+        )
+
     item = (
-        db.query(CycleCountItem).filter(CycleCountItem.id == item_id, CycleCountItem.cycle_count_id == count_id).first()
+        db.query(CycleCountItem)
+        .filter(
+            CycleCountItem.id == item_id,
+            CycleCountItem.cycle_count_id == count_id,
+            CycleCountItem.company_id == company_id,
+        )
+        .first()
     )
 
     if not item:
         raise HTTPException(status_code=404, detail="Count item not found")
+
+    was_counted = bool(item.is_counted)
+    old_values = {
+        "counted_quantity": item.counted_quantity,
+        "variance": item.variance,
+        "variance_value": item.variance_value,
+        "counted_by": item.counted_by,
+        "is_counted": was_counted,
+        "notes": item.notes,
+    }
 
     item.counted_quantity = count_in.counted_quantity
     item.variance = count_in.counted_quantity - item.system_quantity
@@ -792,12 +1093,38 @@ def record_count(
     item.counted_by = current_user.id
     item.notes = count_in.notes
 
-    # Update count progress
-    count = db.query(CycleCount).filter(CycleCount.id == count_id).first()
+    # Update count progress (``count`` was already resolved tenant-scoped above)
     count.items_counted = (
         db.query(CycleCountItem)
-        .filter(CycleCountItem.cycle_count_id == count_id, CycleCountItem.is_counted == True)
+        .filter(
+            CycleCountItem.cycle_count_id == count_id,
+            CycleCountItem.company_id == company_id,
+            CycleCountItem.is_counted == True,
+        )
         .count()
+    )
+
+    # Tamper-evident audit trail (hash chain) for the counted quantity, written
+    # before the commit so it lands with the count item.
+    audit.log_update(
+        "cycle_count_item",
+        item.id,
+        f"{count.count_number} item {item.id}",
+        old_values=old_values,
+        new_values={
+            "counted_quantity": item.counted_quantity,
+            "variance": item.variance,
+            "variance_value": item.variance_value,
+            "counted_by": item.counted_by,
+            "is_counted": True,
+            "notes": item.notes,
+        },
+        description=(
+            f"{'Re-counted' if was_counted else 'Counted'} inventory item {item.inventory_item_id} "
+            f"on cycle count {count.count_number}: system {item.system_quantity}, "
+            f"counted {item.counted_quantity} (variance {item.variance})"
+        ),
+        extra_data={"cycle_count_id": count.id, "inventory_item_id": item.inventory_item_id},
     )
 
     db.commit()
@@ -810,10 +1137,44 @@ def complete_cycle_count(
     count_id: int,
     apply_adjustments: bool = True,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    current_user: User = Depends(require_role(STOCK_MUTATOR_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Complete cycle count and optionally apply adjustments"""
+    """Complete cycle count and optionally apply adjustments.
+
+    Refuses a terminal count with 409. This endpoint posts a COUNT
+    ``InventoryTransaction`` per adjusted row; without the guard a double-click
+    appends a SECOND ledger row for the same physical variance while writing the
+    same on-hand figure, permanently diverging the ledger from stock. The guard is
+    check-then-act, so the row is LOCKED first (``_lock_cycle_count``) — otherwise
+    two concurrent requests both read IN_PROGRESS and both post.
+
+    ``total_variance_value`` records the variance that was actually **posted** —
+    see the note where it is assigned below.
+    """
+    # Serialize the terminal-state guard against a concurrent double-complete. The
+    # guard below is check-then-act: under PostgreSQL READ COMMITTED two overlapping
+    # requests would both read IN_PROGRESS, both pass it, and both post a COUNT
+    # transaction for the same physical variance — and FastAPI runs these ``def``
+    # handlers in a threadpool, so the overlap is real. CycleCount carries no
+    # optimistic-lock column, so the row is locked instead.
+    #
+    # Deliberately a SEPARATE id-only pre-lock rather than chaining onto the load
+    # below: that one uses joinedload(CycleCount.items), and PostgreSQL refuses FOR
+    # UPDATE across the LEFT OUTER JOIN it emits. The lock is taken before
+    # ``atomic_transaction`` (whose commit releases it), so the status a second
+    # request reads is this request's committed COMPLETED. As everywhere else in this
+    # codebase, with_for_update is a no-op on the SQLite test backend.
+    locked = (
+        db.query(CycleCount.id)
+        .filter(CycleCount.id == count_id, CycleCount.company_id == company_id)
+        .with_for_update()
+        .first()
+    )
+    if not locked:
+        raise HTTPException(status_code=404, detail="Cycle count not found")
+
     count = (
         db.query(CycleCount)
         .options(joinedload(CycleCount.items))
@@ -823,64 +1184,177 @@ def complete_cycle_count(
     if not count:
         raise HTTPException(status_code=404, detail="Cycle count not found")
 
-    # Calculate totals and apply adjustments atomically
-    total_variance = 0
+    if count.status in TERMINAL_COUNT_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cycle count {count.count_number} is already {_status_value(count.status)}",
+        )
+
+    old_status = _status_value(count.status)
+
+    # Two distinct figures, deliberately tracked separately:
+    #   measured_variance — what the counters found (every counted item with a
+    #                       non-zero variance) priced at the ENROLLMENT-TIME unit cost
+    #                       snapshotted on the count item, regardless of posting.
+    #   posted_variance   — what actually hit the ledger: only the items that produced
+    #                       a COUNT InventoryTransaction, priced on the SAME basis as
+    #                       that transaction (the CURRENT InventoryItem.unit_cost).
+    # They differ whenever apply_adjustments is false, a count item points at a stock
+    # row that is gone or belongs to another tenant, OR the part's unit cost moved
+    # between enrollment and completion. Mixing the bases is what used to make
+    # ``CycleCount.total_variance_value`` fail to reconcile with the very rows this
+    # completion wrote.
+    measured_variance = 0.0
+    posted_variance = 0.0
     items_adjusted = 0
 
     with atomic_transaction(db):
+        # One tenant-scoped bulk load instead of a SELECT per count item: a
+        # warehouse-scoped count enrolls every stock row in the warehouse. Narrowed to
+        # the rows this completion could actually adjust (same predicate as the loop),
+        # and skipped entirely when nothing will post. Rows belonging to another
+        # company are absent from the map, which is what makes the per-item guard
+        # below refuse to write through them.
+        adjustable_ids = (
+            [i.inventory_item_id for i in count.items if i.is_counted and i.variance] if apply_adjustments else []
+        )
+        inventory_by_id = _load_inventory_items(db, company_id, adjustable_ids)
+
         for item in count.items:
-            if item.is_counted and item.variance != 0:
-                total_variance += item.variance_value
+            # A null variance means the row was never really counted; writing
+            # ``counted_quantity`` (also null) through to on-hand would corrupt stock.
+            if not item.is_counted or not item.variance:
+                continue
 
-                if apply_adjustments:
-                    # Update inventory
-                    inv = db.query(InventoryItem).filter(InventoryItem.id == item.inventory_item_id).first()
-                    if inv:
-                        old_qty = inv.quantity_on_hand
-                        inv.quantity_on_hand = item.counted_quantity
-                        inv.quantity_available = inv.quantity_on_hand - inv.quantity_allocated
+            measured_variance += item.variance_value or 0.0
 
-                        # Create adjustment transaction
-                        txn = InventoryTransaction(
-                            inventory_item_id=inv.id,
-                            part_id=inv.part_id,
-                            transaction_type=TransactionType.COUNT,
-                            quantity=item.variance,
-                            from_location=inv.location,
-                            to_location=inv.location,
-                            lot_number=inv.lot_number,
-                            reason_code="cycle_count",
-                            notes=f"Cycle count {count.count_number}. System: {old_qty}, Counted: {item.counted_quantity}",
-                            unit_cost=inv.unit_cost,
-                            total_cost=abs(item.variance) * inv.unit_cost,
-                            created_by=current_user.id,
-                        )
-                        db.add(txn)
-                        items_adjusted += 1
+            if not apply_adjustments:
+                continue
+
+            # Tenant-scoped: a count item must never be able to adjust an inventory
+            # row belonging to another company (or one that has since been removed).
+            inv = inventory_by_id.get(item.inventory_item_id)
+            if not inv:
+                continue
+
+            old_qty = inv.quantity_on_hand
+            inv.quantity_on_hand = item.counted_quantity
+            inv.quantity_available = inv.quantity_on_hand - inv.quantity_allocated
+
+            # Create adjustment transaction. company_id is NOT NULL on
+            # inventory_transactions (TenantMixin — migration 026), so omitting it
+            # raised IntegrityError and rolled the completion back: this path always
+            # 500'd whenever it had an adjustment to post. No untagged ledger row
+            # was ever persisted.
+            txn = InventoryTransaction(
+                company_id=company_id,
+                inventory_item_id=inv.id,
+                part_id=inv.part_id,
+                transaction_type=TransactionType.COUNT,
+                quantity=item.variance,
+                from_location=inv.location,
+                to_location=inv.location,
+                lot_number=inv.lot_number,
+                reason_code="cycle_count",
+                notes=f"Cycle count {count.count_number}. System: {old_qty}, Counted: {item.counted_quantity}",
+                unit_cost=inv.unit_cost,
+                total_cost=abs(item.variance) * inv.unit_cost,
+                created_by=current_user.id,
+            )
+            db.add(txn)
+            db.flush()
+
+            # Priced on the ledger row's OWN basis (current unit cost), not the
+            # enrollment-time snapshot on the count item — see the note above.
+            posted_variance += item.variance * (inv.unit_cost or 0.0)
+            items_adjusted += 1
+
+            # Tamper-evident audit trail (hash chain), same dual-row convention as
+            # /inventory/adjust: the movement, plus the stock-level change it made.
+            _audit_stock_movement(
+                audit,
+                txn,
+                inv,
+                old_qty,
+                inv.quantity_on_hand,
+                movement_description=(
+                    f"Cycle count {count.count_number}: adjusted inventory item {inv.id} at "
+                    f"{inv.location} from {old_qty} to {item.counted_quantity} (reason: cycle_count)"
+                ),
+                stock_label="Cycle count",
+            )
 
         count.status = CycleCountStatus.COMPLETED
         count.completed_at = datetime.utcnow()
         count.completed_by = current_user.id
         count.items_adjusted = items_adjusted
-        count.total_variance_value = total_variance
+        # Persist the POSTED figure: this column has to reconcile with the COUNT
+        # ledger rows this completion wrote. The measured total is not lost — each
+        # item keeps its own ``variance_value`` — and it is returned below.
+        count.total_variance_value = posted_variance
+
+        audit.log_status_change(
+            "cycle_count",
+            count.id,
+            count.count_number,
+            old_status,
+            _status_value(CycleCountStatus.COMPLETED),
+            description=(
+                f"Completed cycle count {count.count_number}: {items_adjusted} item(s) adjusted, "
+                f"posted variance value {posted_variance}"
+            ),
+            extra_data={
+                "apply_adjustments": apply_adjustments,
+                "items_adjusted": items_adjusted,
+                "measured_variance_value": measured_variance,
+                "posted_variance_value": posted_variance,
+            },
+        )
 
     return {
         "message": "Cycle count completed",
         "items_adjusted": items_adjusted,
-        "total_variance_value": total_variance,
+        "total_variance_value": posted_variance,
+        "measured_variance_value": measured_variance,
     }
 
 
 # Transaction history
-@router.get("/transactions")
+@router.get("/transactions", response_model=List[InventoryTransactionResponse])
 def list_transactions(
     part_id: Optional[int] = None,
     transaction_type: Optional[str] = None,
-    limit: int = 100,
+    reference_type: Optional[str] = None,
+    reference_id: Optional[int] = None,
+    work_order_id: Optional[int] = None,
+    lot_number: Optional[str] = None,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
+    """Inventory transaction (ledger) history for the active company.
+
+    Server-paged via ``limit``/``offset`` and ordered newest-first, matching the
+    offset-paged convention used by ``GET /audit/`` (the frontend ``DataTable``
+    ``serverPagination`` contract: request ``pageSize + 1`` rows and infer
+    ``hasNext`` from the overflow row — no total-count query against the ledger).
+
+    Typed by ``InventoryTransactionResponse`` (a ``UTCModel``), so ``created_at``
+    serializes as UTC ISO-8601 with a trailing ``Z``. This used to return raw ORM
+    rows, which dumped the whole joined ``Part`` row and emitted a zone-less
+    timestamp. The nested ``part`` object is preserved, narrowed to its identifying
+    fields (number / name / description / revision / UoM).
+
+    Note for callers summing ``quantity``: ``transfer`` rows carry a **positive**
+    quantity with both ``from_location`` and ``to_location`` and represent zero net
+    change in on-hand, so a naive ``SUM(quantity)`` over a filtered set over-counts.
+    ``receive`` is positive, ``issue`` is negative, and ``adjust``/``count`` carry the
+    signed delta.
+    """
     query = (
         db.query(InventoryTransaction)
         .filter(InventoryTransaction.company_id == company_id)
@@ -891,5 +1365,60 @@ def list_transactions(
         query = query.filter(InventoryTransaction.part_id == part_id)
     if transaction_type:
         query = query.filter(InventoryTransaction.transaction_type == transaction_type)
+    if reference_type:
+        query = query.filter(InventoryTransaction.reference_type == reference_type)
+    if reference_id is not None:
+        query = query.filter(InventoryTransaction.reference_id == reference_id)
+    if lot_number:
+        query = query.filter(InventoryTransaction.lot_number == lot_number)
+    if start_date:
+        query = query.filter(InventoryTransaction.created_at >= start_date)
+    if end_date:
+        query = query.filter(InventoryTransaction.created_at <= end_date)
 
-    return query.order_by(InventoryTransaction.created_at.desc()).limit(limit).all()
+    if work_order_id is not None:
+        # Convenience filter: "everything this work order consumed/produced".
+        #
+        # Two shapes exist in the ledger today:
+        #   1. reference_type='work_order' + reference_id=<wo.id>  (completion_inventory_service)
+        #   2. reference_type='work_order' + reference_number=<wo.work_order_number>,
+        #      reference_id NULL                                   (POST /inventory/issue)
+        # so we match on either. The work-order number is resolved tenant-scoped; an
+        # unknown/other-tenant id simply yields no reference_number clause (and the
+        # ledger query is already company-scoped, so nothing can leak).
+        #
+        # TODO(PR 1 — material consumption): extend this to the operation-level
+        # reference types introduced there, i.e. also match
+        # reference_type IN ('work_order_operation', 'work_order_manual') with
+        # reference_id pointing at the operation/consumption row. Those reference
+        # types do NOT exist yet — do not filter on them until PR 1 writes them.
+        # DELIBERATE: no ``is_deleted == False`` filter. This is a traceability/history
+        # read, and soft delete is not erasure — the movements a since-voided work order
+        # posted are still real ledger facts. Filtering here would silently drop the
+        # reference_number-shaped rows from that work order's history.
+        wo_number = (
+            db.query(WorkOrder.work_order_number)
+            .filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id)
+            .scalar()
+        )
+        wo_clauses = [
+            and_(
+                InventoryTransaction.reference_type == "work_order",
+                InventoryTransaction.reference_id == work_order_id,
+            )
+        ]
+        if wo_number:
+            wo_clauses.append(
+                and_(
+                    InventoryTransaction.reference_type == "work_order",
+                    InventoryTransaction.reference_number == wo_number,
+                )
+            )
+        query = query.filter(or_(*wo_clauses))
+
+    return (
+        query.order_by(InventoryTransaction.created_at.desc(), InventoryTransaction.id.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )

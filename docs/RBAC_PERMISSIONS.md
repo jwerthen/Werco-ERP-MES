@@ -232,7 +232,105 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 |------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
 | View | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Adjust | ✓ | ✓ | ✓ | | | | |
+| Issue | ✓ | ✓ | ✓ | | | | |
+| Receive | ✓ | ✓ | ✓ | | | | |
 | Transfer | ✓ | ✓ | ✓ | | | | |
+| Create location | ✓ | ✓ | | | | | |
+| Create / complete cycle count | ✓ | ✓ | ✓ | | | | |
+| Start (open) cycle count | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
+| Record count on an item | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
+
+> **Issue — now enforced in code (Admin / Manager / Supervisor).** `POST /api/v1/inventory/issue`
+> (`app/api/endpoints/inventory.py`) was previously gated only by `get_current_user` — **any**
+> authenticated user in the tenant could issue stock off a lot, with no role restriction. It is now
+> `require_role([ADMIN, MANAGER, SUPERVISOR])`, the same set as the sibling stock-mutating
+> `/inventory/adjust`, which is what the **Issue** row above records. The endpoint is additionally
+> marked **deprecated** in favor of a planned work-order-scoped `POST /work-orders/{id}/issue-material`
+> (that replacement is not implemented yet — `/inventory/issue` is still the supported path). See
+> `docs/API.md` → Inventory.
+
+> **Receive / Transfer — now enforced in code (Admin / Manager / Supervisor).** `POST
+> /api/v1/inventory/receive` and `POST /api/v1/inventory/transfer` previously depended on
+> `get_current_user` only, so **any** authenticated user in the tenant — Viewer included — could
+> create stock and write a ledger row. Both now carry `require_role([ADMIN, MANAGER, SUPERVISOR])`,
+> matching the sibling stock mutators `/inventory/issue` and `/inventory/adjust` and the PO-receipt
+> path `POST /receiving/receive`, which writes the same `inventory_items` /
+> `inventory_transactions` tables. The **Transfer** row above was previously intended policy the
+> server did not enforce; it is now an enforced control, and the new **Receive** row records the
+> gate that closed the same gap on the receive path. (An earlier revision of this section described
+> both as un-gated drift — that is no longer true.)
+>
+> The UI layer now agrees with the server on this one: `frontend/src/pages/Inventory.tsx` hides the
+> **Receive Inventory** button and drops the per-row **Transfer** action (column and mobile-card
+> affordance) for roles without `inventory:adjust` / `inventory:transfer`, which resolve to exactly
+> Admin / Manager / Supervisor (+ Platform Admin, who bypasses `require_role` server-side). Per the
+> [Access enforcement model](#access-enforcement-model) the UI gate remains cosmetic — the server
+> gate is the control.
+
+> **Cycle counts — endpoint mapping.** On `app/api/endpoints/inventory.py`:
+>
+> | Step | Endpoint | Gate |
+> |------|----------|------|
+> | Create + enroll stock rows | `POST /inventory/cycle-counts` | `require_role(STOCK_MUTATOR_ROLES)` = `[ADMIN, MANAGER, SUPERVISOR]` |
+> | Open for counting | `POST /inventory/cycle-counts/{id}/start` | `require_role(COUNT_WRITE_ROLES)` = everyone except Viewer |
+> | Record a counted quantity | `POST /inventory/cycle-counts/{id}/items/{item_id}/count` | `require_role(COUNT_WRITE_ROLES)` = everyone except Viewer |
+> | Complete + post adjustments | `POST /inventory/cycle-counts/{id}/complete` | `require_role(STOCK_MUTATOR_ROLES)` = `[ADMIN, MANAGER, SUPERVISOR]` |
+>
+> **`start` and `record_count` now exclude Viewer — the only cycle-count policy change.** Both were
+> bare `get_current_user`, so **Viewer** — the read-only role, which
+> `frontend/src/utils/permissions.ts` grants `inventory:view` and nothing else — could open a count
+> and write the counted quantities a manager's ledger-posting `complete` derives its adjustment
+> from. That is a write, and a quality record at that, so it does not belong to a read-only role.
+>
+> The gate is deliberately defined by **exclusion**
+> (`COUNT_WRITE_ROLES = [ADMIN, MANAGER, SUPERVISOR, OPERATOR, QUALITY, SHIPPING]`, in
+> `app/api/endpoints/inventory.py`): every *working* role keeps both verbs, so the entire shop-floor
+> counting path is preserved and only the read-only role loses access. Counting is the operator
+> task; the privileged steps stay *creating* the count (which enrolls the stock rows) and
+> *completing* it (which posts the variance to the ledger), both unchanged at
+> `[ADMIN, MANAGER, SUPERVISOR]`.
+>
+> **Do not narrow `start` further.** An earlier revision of this pass gated it to Admin / Manager /
+> Supervisor; that was reverted before merge, because combined with the `record_count` IN_PROGRESS
+> requirement below it would leave an operator unable to work a `SCHEDULED` count at all (unable to
+> open one, and **409** on any attempt to count into it) — a shop-floor capability regression rather
+> than a hardening. The operator path — `start` a scheduled count, then `record_count` into it — is
+> pinned by
+> `backend/tests/api/test_inventory_hardening.py::test_operator_can_start_a_scheduled_count_and_record_into_it`,
+> and every non-Viewer role is pinned by `test_start_allowed_for_every_working_role` /
+> `test_record_count_allowed_for_every_working_role`.
+>
+> Beyond authorization, the hardening pass added **integrity guards and audit coverage** to these
+> two steps:
+>
+> - `start` returns **409** on a terminal count (`COMPLETED` / `CANCELLED`) — re-opening a completed
+>   count would let a second `complete` double-post the same physical variance to the ledger.
+> - `start` writes a `cycle_count` STATUS_CHANGE audit row on the real `SCHEDULED → IN_PROGRESS`
+>   transition, and preserves the original `started_at` when an already-started count is re-assigned
+>   (audited as an UPDATE of `assigned_to`, not a fabricated second transition).
+> - `record_count` returns **409** unless the parent count is `IN_PROGRESS`. A counted quantity is
+>   the quality record the variance adjustment derives from: once the count is closed that record is
+>   evidence and must not be overwritten, and before it is opened there is nothing to count against.
+> - `record_count` writes a `cycle_count_item` **UPDATE** audit row on every counted quantity. A
+>   re-POST while the count is still `IN_PROGRESS` is legal (a genuine re-count) but silently
+>   replaces `counted_quantity` / `variance` / `counted_by` — the audit row is the only surviving
+>   record of what it overwrote.
+> - `POST /inventory/cycle-counts` writes a `cycle_count` **CREATE** audit row carrying the declared
+>   scope (`warehouse`, `location_code`, `part_id`) and the number of stock rows enrolled, so "who
+>   scoped this count, and which rows did `complete` later adjust" is answerable from the hash chain.
+>
+> Also changed by the same hardening pass:
+> `record_count` is now **tenant-scoped** — it resolves the parent count *and* the count item
+> against the active company (**404** otherwise), where it previously matched on ids alone. That was
+> a real authorization defect in the code, though not an exploitable one in the field: the only
+> writer of `cycle_count_items` is `POST /inventory/cycle-counts`, which omitted the NOT NULL
+> `company_id` stamp and therefore always failed with `IntegrityError` whenever it enrolled a row,
+> so no cross-tenant `cycle_count_items` row could exist to be written onto (rows predating
+> migration `026_add_multi_tenancy` were backfilled to the single seeded company). `POST
+> /inventory/cycle-counts` now enrolls only the active company's inventory rows and stamps
+> `company_id` on each `CycleCountItem`, and `.../complete` adjusts only this company's stock.
+> See `docs/API.md` → Inventory for the lifecycle guards (**409** on terminal counts, **404** on an
+> unresolvable `location_code`) and the audit rows these steps now write.
 
 ### Purchasing
 

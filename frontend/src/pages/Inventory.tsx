@@ -21,6 +21,8 @@ import {
 } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
+import { useAuth } from '../context/AuthContext';
+import { hasPermission } from '../utils/permissions';
 
 interface InventoryItem {
   id: number;
@@ -55,6 +57,17 @@ const PART_TYPES = new Set(['manufactured', 'assembly']);
 
 export default function InventoryPage({ embedded }: { embedded?: boolean }) {
   const { showToast } = useToast();
+  const { user } = useAuth();
+  // Stock-moving verbs are Admin / Manager / Supervisor per docs/RBAC_PERMISSIONS.md
+  // → Inventory. There is no `inventory:receive` permission key, so Receive mirrors
+  // `POST /inventory/receive` — require_role([ADMIN, MANAGER, SUPERVISOR]), which also
+  // admits platform_admin and superusers — by naming the roles directly (the
+  // Receiving.tsx idiom) rather than borrowing a key that doesn't mean "receive".
+  const canReceive =
+    (!!user && ['platform_admin', 'admin', 'manager', 'supervisor'].includes(user.role)) || !!user?.is_superuser;
+  // Transfer keeps the named key: `inventory:transfer` means exactly this verb and
+  // resolves to the same role set the server's transfer endpoint allows.
+  const canTransfer = hasPermission(user?.role, 'inventory:transfer') || !!user?.is_superuser;
   const [searchParams, setSearchParams] = useSearchParams();
   const [activeTab, setActiveTab] = useState<TabType>('summary');
   const [groupFilter, setGroupFilter] = useState<InventoryGroup>(() => {
@@ -381,21 +394,25 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
         }`}>{item.status}</span>
       ),
     },
-    {
-      key: 'actions',
-      header: 'Actions',
-      align: 'center',
-      render: (item) => (
-        <button
-          onClick={(e) => { e.stopPropagation(); openTransfer(item); }}
-          className="text-werco-primary hover:text-blue-400"
-          aria-label="Transfer inventory"
-        >
-          <ArrowsRightLeftIcon className="h-5 w-5" aria-hidden="true" />
-        </button>
-      ),
-    },
-  ], []);
+    // Transfer is the only row action; without the permission the whole column is
+    // dropped so no empty "Actions" header is left behind.
+    ...(canTransfer
+      ? [{
+          key: 'actions',
+          header: 'Actions',
+          align: 'center' as const,
+          render: (item: InventoryItem) => (
+            <button
+              onClick={(e) => { e.stopPropagation(); openTransfer(item); }}
+              className="text-werco-primary hover:text-blue-400"
+              aria-label="Transfer inventory"
+            >
+              <ArrowsRightLeftIcon className="h-5 w-5" aria-hidden="true" />
+            </button>
+          ),
+        }]
+      : []),
+  ], [canTransfer]);
 
   // ---- Mobile cards (below md) ----
   const renderSummaryCard = (item: InventorySummary) => {
@@ -484,14 +501,16 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
         },
       ]}
       actions={
-        <button
-          onClick={(e) => { e.stopPropagation(); openTransfer(item); }}
-          className="inline-flex items-center gap-1.5 border border-slate-600 text-slate-200 hover:border-werco-primary hover:text-werco-primary text-sm px-3 py-1 transition-colors"
-          aria-label="Transfer inventory"
-        >
-          <ArrowsRightLeftIcon className="h-4 w-4" />
-          Transfer
-        </button>
+        canTransfer ? (
+          <button
+            onClick={(e) => { e.stopPropagation(); openTransfer(item); }}
+            className="inline-flex items-center gap-1.5 border border-slate-600 text-slate-200 hover:border-werco-primary hover:text-werco-primary text-sm px-3 py-1 transition-colors"
+            aria-label="Transfer inventory"
+          >
+            <ArrowsRightLeftIcon className="h-4 w-4" />
+            Transfer
+          </button>
+        ) : undefined
       }
     />
   );
@@ -522,12 +541,14 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
             <h1 className="text-2xl font-bold text-white">Inventory</h1>
             <p className="text-sm text-slate-400 mt-1">Engineering parts, materials, and supplies in one place</p>
           </div>
-          <button onClick={() => setShowReceiveModal(true)} className="btn-primary flex items-center">
-            <ArrowDownTrayIcon className="h-5 w-5 mr-2" /> Receive Inventory
-          </button>
+          {canReceive && (
+            <button onClick={() => setShowReceiveModal(true)} className="btn-primary flex items-center">
+              <ArrowDownTrayIcon className="h-5 w-5 mr-2" /> Receive Inventory
+            </button>
+          )}
         </div>
       )}
-      {embedded && (
+      {embedded && canReceive && (
         <div className="flex justify-end">
           <button onClick={() => setShowReceiveModal(true)} className="btn-primary flex items-center">
             <ArrowDownTrayIcon className="h-5 w-5 mr-2" /> Receive Inventory
@@ -704,7 +725,9 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
               icon: CubeIcon,
               title: 'No inventory on hand',
               description: 'Received parts and materials will appear here once you receive stock.',
-              action: { label: 'Receive Inventory', onClick: () => setShowReceiveModal(true) },
+              action: canReceive
+                ? { label: 'Receive Inventory', onClick: () => setShowReceiveModal(true) }
+                : undefined,
             }}
           />
         )}
@@ -722,14 +745,16 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
               icon: CubeIcon,
               title: 'No inventory on hand',
               description: 'Received parts and materials will appear here once you receive stock.',
-              action: { label: 'Receive Inventory', onClick: () => setShowReceiveModal(true) },
+              action: canReceive
+                ? { label: 'Receive Inventory', onClick: () => setShowReceiveModal(true) }
+                : undefined,
             }}
           />
         )}
       </div>
 
       {/* Receive Modal */}
-      <Modal open={showReceiveModal} onClose={() => setShowReceiveModal(false)} size="lg" closeOnBackdrop={false}>
+      <Modal open={showReceiveModal && canReceive} onClose={() => setShowReceiveModal(false)} size="lg" closeOnBackdrop={false}>
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-semibold">Receive Inventory</h3>
               <button onClick={() => setShowReceiveModal(false)} aria-label="Close"><XMarkIcon className="h-6 w-6" aria-hidden="true" /></button>
@@ -786,7 +811,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
 
       {/* Transfer Modal */}
       <Modal
-        open={showTransferModal && !!selectedItem}
+        open={showTransferModal && !!selectedItem && canTransfer}
         onClose={() => setShowTransferModal(false)}
         size="md"
         closeOnBackdrop={false}

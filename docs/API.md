@@ -2220,19 +2220,207 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| GET | `/inventory/` | List inventory items | Yes |
-| POST | `/inventory/receive` | Receive inventory into stock | Yes |
-| POST | `/inventory/issue` | Issue inventory to a work order | Yes |
-| POST | `/inventory/transfer` | Transfer inventory between locations | Yes |
+| GET | `/inventory/` | List inventory items (`part_id`, `warehouse`, `location_code`, `has_quantity`) | Yes |
+| GET | `/inventory/summary` | On-hand summary by part, with per-location breakdown | Yes |
+| GET | `/inventory/low-stock` | Parts at/below reorder point (on-hand summed per part) | Yes |
+| GET | `/inventory/locations` | List warehouse locations / bins | Yes |
+| POST | `/inventory/locations` | Create a location | Admin / Manager |
+| GET | `/inventory/transactions` | Inventory transaction (ledger) history, newest first | Yes |
+| POST | `/inventory/receive` | Receive inventory into stock | Admin / Manager / Supervisor |
+| POST | `/inventory/issue` | Issue inventory to a work order (**deprecated** — see below) | Admin / Manager / Supervisor |
+| POST | `/inventory/transfer` | Transfer inventory between locations | Admin / Manager / Supervisor |
 | POST | `/inventory/adjust` | Adjust inventory | Admin / Manager / Supervisor |
-| GET | `/inventory/{part_id}` | Get inventory for part | Yes |
+| GET | `/inventory/cycle-counts` | List cycle counts (optional `status`) | Yes |
+| POST | `/inventory/cycle-counts` | Create a cycle count (enrolls matching stock rows) | Admin / Manager / Supervisor |
+| POST | `/inventory/cycle-counts/{count_id}/start` | Open a count for counting | All roles except Viewer |
+| POST | `/inventory/cycle-counts/{count_id}/items/{item_id}/count` | Record a counted quantity | All roles except Viewer |
+| POST | `/inventory/cycle-counts/{count_id}/complete` | Complete the count (optionally apply adjustments) | Admin / Manager / Supervisor |
 
-> **Stock movements are audited.** Each of `/receive`, `/issue`, `/transfer`, and `/adjust` writes
-> tamper-evident audit rows (`GET /audit/`) — one for the `InventoryTransaction` and one per
-> stock-level change it produces (a transfer logs both the source decrement and the destination
-> increment) — flushed inside the same atomic transaction as the inventory write so the audit row
-> commits with the movement. The new `InventoryTransaction` rows are tenant-tagged with the active
+> **There is no `GET /inventory/{part_id}`.** An earlier revision of this doc listed one; no such
+> route exists in `app/api/endpoints/inventory.py`. Use `GET /inventory/?part_id=<id>` for that
+> part's stock rows, or `GET /inventory/summary` for the per-part rollup with locations.
+
+> **`/receive` and `/transfer` are role-gated (Admin / Manager / Supervisor).** Both previously
+> depended on `get_current_user` only, so any authenticated tenant user — Viewer included — could
+> create stock and write a ledger row. They now carry `require_role(STOCK_MUTATOR_ROLES)` =
+> `[ADMIN, MANAGER, SUPERVISOR]`, matching the sibling stock mutators `/inventory/issue` and
+> `/inventory/adjust` and the PO-receipt path `POST /receiving/receive`, which writes the same
+> `inventory_items` / `inventory_transactions` tables. See `docs/RBAC_PERMISSIONS.md` → Inventory.
+
+> **`POST /inventory/receive` refuses a soft-deleted part with 400.** The part lookup resolved on
+> `(id, company_id)` with no `is_deleted` predicate, so a Manager could create brand-new stock *and*
+> a ledger row against a part the business had deleted. It now returns **400** —
+> *"Part '&lt;number&gt;' is deleted - restore it or use a different part number"* — the same
+> deleted-part policy as the BOM and PO-upload import paths. An id that matches no part at all is
+> still **404 "Part not found"**. `GET /inventory/low-stock` carries the same predicate (a deleted
+> part must not raise a purchasing signal); it was incidentally covered before only because deleting
+> a part also clears `is_active`.
+
+> **`POST /inventory/issue` is role-gated and deprecated.** It now requires
+> **Admin / Manager / Supervisor** (`require_role`), matching the sibling stock-mutating
+> `/inventory/adjust`; it was previously open to any authenticated user, so any operator could
+> issue stock off a lot. The route also carries FastAPI's `deprecated=True`, so it renders struck
+> through at `/docs` and the generated OpenAPI operation has `"deprecated": true`: it ties
+> consumption to an untyped `work_order_number` string rather than a work-order id (so the ledger
+> row it writes has a NULL `reference_id` — see the `work_order_id` filter below), and is planned
+> to be superseded by a work-order-scoped
+> `POST /work-orders/{id}/issue-material`. **That replacement does not exist yet** — `/inventory/issue`
+> remains the supported path until it ships.
+
+> **Transaction-history query params (`GET /inventory/transactions`).** All filters are optional
+> and combine with AND: `part_id`, `transaction_type`, `reference_type`, `reference_id`,
+> `lot_number`, `start_date` / `end_date` (ISO-8601 datetimes, matched inclusively against
+> `created_at`), and `work_order_id`. Only `part_id` and `transaction_type` existed before this
+> pass; the rest are new.
+>
+> Paging is `limit` (default 100, **`ge=1, le=500`**) and `offset` (**`ge=0`**, default 0); a value
+> outside those bounds — `limit=0`, `limit=1000`, a negative `offset` — is rejected **422** by
+> FastAPI before the query runs. `limit` was previously an unvalidated `int`, so a negative or
+> unbounded value reached the database; `offset` is new and bounded from the start. Results are
+> ordered `created_at DESC, id DESC` (newest first, with the id as a stable tiebreaker), so paging
+> with increasing `offset` walks back into older history.
+>
+> The envelope is **unchanged** — a bare JSON array of transaction rows with no wrapper and no total
+> count, the same offset-paged convention as `GET /audit/`: clients over-fetch one row past the page
+> size and infer "has next page" from the overflow (the frontend `DataTable` `serverPagination`
+> contract).
+>
+> **The rows are now typed** by `InventoryTransactionResponse` (`app/schemas/inventory.py`, a
+> `UTCModel`) instead of being raw ORM objects handed to `jsonable_encoder`. Two consequences:
+> `created_at` serializes as UTC ISO-8601 **with the trailing `Z`** (the "store UTC, serve UTC (`Z`),
+> display Central" invariant — it was previously zone-less), and the nested `part` object is
+> narrowed to `{id, part_number, name, description, revision, unit_of_measure}`. The raw dump
+> included the part's entire row, standard / material / labor / overhead cost included, which a
+> ledger read has no business publishing. Every ledger column itself is unchanged and still
+> top-level, and `transaction_type` still serializes as the lowercase enum **value** (`"receive"`,
+> `"count"`, …).
+>
+> `work_order_id` is a convenience filter for "everything this work order consumed/produced". Two
+> row shapes exist in the ledger today and **both** are matched: `reference_type='work_order'` with
+> `reference_id` = the work-order id (written by the completion/backflush path), and
+> `reference_type='work_order'` with `reference_number` = the work-order **number** and a NULL
+> `reference_id` (written by `POST /inventory/issue`). The work-order number is resolved
+> tenant-scoped, so an unknown or other-tenant id simply matches nothing.
+>
+> **`work_order_id` deliberately does not exclude soft-deleted work orders.** Voiding a work order
+> does not un-move the material it consumed — those ledger rows are still real, posted facts, and
+> this is a traceability/history read. Filtering `is_deleted == false` here would silently drop a
+> voided WO's movements (including the `reference_number`-shaped rows) from its own history.
+>
+> **TRANSFER rows are signed for movement, not for net stock.** A `transfer` row carries a
+> **positive** `quantity` together with `from_location` and `to_location`, and represents a
+> **zero net change** in on-hand — the source decrement and destination increment are two stock
+> writes recorded as one movement row. A naive `SUM(quantity)` over a filtered result set therefore
+> over-counts. Callers reconstructing "what this work order consumed" must exclude or specially
+> handle `transaction_type='transfer'` rather than summing the column blindly. For contrast, the
+> other rows this router writes are net-correct as written: `receive` is positive, `issue` is
+> negative (`-quantity`), and `adjust` / `count` carry the signed delta (`new − old` and
+> `counted − system` respectively).
+
+> **Stock movements are audited.** Each of `/receive`, `/issue`, `/transfer`, `/adjust`, and
+> `/cycle-counts/{id}/complete` writes tamper-evident audit rows (`GET /audit/`) — one for the
+> `InventoryTransaction` and one per stock-level change it produces (a transfer logs both the source
+> decrement and the destination increment) — flushed inside the same atomic transaction as the
+> inventory write so the audit row commits with the movement. The new `InventoryTransaction` rows are
+> tenant-tagged with the active `company_id`.
+>
+> `.../complete` previously wrote **no** audit rows at all despite adjusting stock. It now follows the
+> `/adjust` dual-row convention per adjusted item (`inventory` CREATE for the COUNT movement +
+> `inventory` UPDATE for the stock level) and adds one `cycle_count` STATUS_CHANGE for the count
+> itself, whose `extra_data` carries `apply_adjustments`, `items_adjusted`,
+> `measured_variance_value`, and `posted_variance_value`. `.../start` likewise now audits — a
+> `cycle_count` STATUS_CHANGE on the real SCHEDULED→IN_PROGRESS transition, or an UPDATE recording
+> the `assigned_to` change when an already-IN_PROGRESS count is re-assigned.
+>
+> **The whole cycle-count lifecycle is now on the hash chain**, closing the last two gaps:
+> `POST /cycle-counts` writes a `cycle_count` **CREATE** whose `extra_data` records the declared
+> scope (`warehouse`, `location_code`, `part_id`) and `total_items` — the step that defines the
+> count and enrolls the rows `complete` later adjusts — and
+> `.../items/{item_id}/count` writes a `cycle_count_item` **UPDATE** for every counted quantity,
+> carrying the previous values. That last one matters on a **re-count**: a second POST while the
+> count is still `IN_PROGRESS` is legal, but it silently replaces `counted_quantity` / `variance` /
+> `counted_by` on the row, so the audit entry is the only surviving record of the value it
+> overwrote. The first count of an item is logged the same way, with null old values.
+
+> **Every inventory lookup is tenant-scoped.** Location codes, lot numbers, and warehouse names are
+> **not** unique across companies, so each of these endpoints resolves them against the active
+> company only — a code or id belonging to another tenant behaves as **404 / not found**, never as a
+> valid target. This covers the `location_code` lookups on `/receive`, `/transfer`, and
+> `POST /cycle-counts`; the existing-lot row that `/receive` increments and the destination row that
+> `/transfer` increments; the per-part on-hand aggregate behind `/low-stock`; the parent count and
+> count item on `.../items/{item_id}/count`; and the inventory row that `.../complete` adjusts.
+> `POST /cycle-counts` enrolls only the active company's stock rows, and the `CycleCountItem` and
+> COUNT `InventoryTransaction` rows it and `.../complete` create are tenant-tagged with the active
 > `company_id`.
+>
+> **What the missing `company_id` stamps actually did.** `cycle_count_items.company_id` and
+> `inventory_transactions.company_id` are **NOT NULL** (`TenantMixin`; set NOT NULL by migration
+> `026_add_multi_tenancy`). The two inserts that omitted the tag therefore raised `IntegrityError`
+> at commit: `POST /cycle-counts` **always 500'd and rolled back** whenever the scope matched at
+> least one stock row, and `.../complete` **always 500'd and rolled back** whenever it had an
+> adjustment to post. No untagged and no cross-tenant row was ever persisted by either path — the
+> unscoped enrollment query and the unscoped `InventoryItem` lookup in `.../complete` were latent
+> defects masked by that constraint, not sources of bad data. The `company_id` stamps are what make
+> these two endpoints function at all, which is why the lifecycle guards and audit trail below
+> ship with them.
+
+> **Cycle-count lifecycle guards.** The count is a state machine and the endpoints now enforce it.
+> These are integrity guards, separate from authorization: `start` and `.../count` are open to every
+> role **except Viewer** (counting is the operator task, and the gate is defined by excluding the
+> one read-only role — see `docs/RBAC_PERMISSIONS.md` → Inventory); `POST /cycle-counts` and
+> `.../complete` keep their existing Admin / Manager / Supervisor gates.
+>
+> - `POST /cycle-counts/{id}/start` — **409** if the count is terminal (`COMPLETED` or `CANCELLED`).
+>   Re-opening a completed count would let a second `complete` double-post the same physical variance
+>   to the ledger; a cancelled count was deliberately abandoned. Starting an **already-IN_PROGRESS**
+>   count is still allowed (it re-assigns it to the caller) but **preserves the original
+>   `started_at`** — that timestamp is the traceability record of when counting began.
+> - `POST /cycle-counts/{id}/items/{item_id}/count` — **409** unless the parent count is
+>   `IN_PROGRESS`. A client must `start` the count first; a `SCHEDULED` count has nothing to count
+>   against, and once the count is closed the counted quantity is evidence the variance adjustment
+>   was derived from and must not be overwritten.
+> - `POST /cycle-counts/{id}/complete` — **409** if the count is already `COMPLETED` (or
+>   `CANCELLED`). This closes a **ledger double-post**: a second call appended a second COUNT
+>   `InventoryTransaction` for the same physical variance while writing the same on-hand figure,
+>   permanently diverging the ledger from stock.
+> - `POST /cycle-counts` — **404** when `location_code` does not resolve in the active company.
+>   Previously an unknown code was silently ignored, producing a count whose declared scope did not
+>   match the rows it enrolled.
+
+> **`total_variance_value` is the POSTED variance (semantic change), and `measured_variance_value`
+> is new.** `POST /cycle-counts/{id}/complete` now distinguishes two figures:
+>
+> - **posted** — the variance value of only those items that actually produced a COUNT
+>   `InventoryTransaction`, priced on **that transaction's own cost basis**: `variance ×` the
+>   **current** `InventoryItem.unit_cost`, exactly what the ledger row carries. This is what is
+>   persisted to `CycleCount.total_variance_value` and returned as `total_variance_value`, so the
+>   column reconciles against the ledger rows the completion wrote. Under `apply_adjustments=false`
+>   **nothing posts, so this figure is `0.0`** — previously the field was populated with the
+>   measured total even though no ledger row existed.
+> - **measured** — the variance value of every counted item with a non-zero variance, whether or not
+>   it posted, priced on the **enrollment-time** `CycleCountItem.unit_cost` snapshot. Returned as the
+>   **new, additive** `measured_variance_value` response field. It is *not* a new column; per-item
+>   `CycleCountItem.variance_value` remains the record of record, and the figure is also carried in
+>   the STATUS_CHANGE audit row's `extra_data`.
+>
+> The two differ whenever `apply_adjustments=false`, a count item points at a stock row that has
+> since been removed — **or the part's unit cost moved between enrollment and completion** (a
+> re-cost, or a receipt at a different price). That last case is why the two bases are stated
+> explicitly: accumulating the posted total from the enrollment-time snapshot made
+> `total_variance_value` disagree with the very COUNT rows the same request had just written.
+> Clients reading `total_variance_value` as "what the counters found" must switch to
+> `measured_variance_value`.
+
+> **Concurrency: `complete` locks the count row.** The terminal-state **409** above is
+> check-then-act, so under PostgreSQL READ COMMITTED two overlapping requests could both read
+> `IN_PROGRESS`, both pass the guard, and both post a COUNT transaction for the same physical
+> variance (FastAPI runs these sync handlers in a threadpool, so the overlap is real, and
+> `CycleCount` carries no optimistic-lock `version` column). The handler now takes a
+> `SELECT id ... FOR UPDATE` row lock on the count *before* the guard, held until the completion
+> commits. It is a deliberately separate id-only query: the main load uses
+> `joinedload(CycleCount.items)`, and PostgreSQL refuses `FOR UPDATE` across the `LEFT OUTER JOIN`
+> that produces. A count id from another tenant never resolves, so the lock is tenant-scoped too
+> (**404**).
 
 ### Traceability
 
