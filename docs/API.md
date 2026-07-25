@@ -2628,7 +2628,7 @@ roles). See [docs/NOTIFICATIONS.md](NOTIFICATIONS.md#sms-channel-twilio).
 | PUT | `/users/me/phone` | Set or clear your own phone number (stored E.164, audited) | Any authenticated user (self) |
 | GET | `/users/me/notification-preferences` | Your **effective** per-event channel matrix | Any authenticated user (self) |
 | PUT | `/users/me/notification-preferences` | Save your **SMS** opt-ins (audited) | Any authenticated user (self) |
-| POST | `/users/me/test-sms` | Send a test SMS to your own number — **rate-limited `3/minute`** | Any authenticated user (self) |
+| POST | `/users/me/test-sms` | Send a test SMS to your own number — **`3/minute` per IP + `3/hour` per user** | Any authenticated user (self) |
 
 > **`PUT /users/me/phone`** — body `{ "phone": "512-555-0100" }` (or `{ "phone": null }` / `""` to
 > clear); `phone` is `max_length` 32. The number is parsed against `SMS_DEFAULT_REGION` (default
@@ -2677,14 +2677,26 @@ roles). See [docs/NOTIFICATIONS.md](NOTIFICATIONS.md#sms-channel-twilio).
 > caller, so this cannot be used to message an arbitrary number. It runs through the same
 > `sms_service` path as real notifications (so the `allow_sms_egress` kill switch is enforced
 > fail-closed) and writes a `notification_logs` row (`event_type = "sms.test"`) **before** the
-> outbound call, so the attempt is recorded even if the process dies mid-flight. Rate-limited
-> **`3/minute`** per IP (`ENDPOINT_RATE_LIMITS` in `main.py`) — it is the one authenticated route
-> that spends carrier money per call.
+> outbound call, so the attempt is recorded even if the process dies mid-flight.
+>
+> Bounded **twice**, because it is the one authenticated route that spends carrier money per call:
+> **`3/minute` per IP** (`ENDPOINT_RATE_LIMITS` in `main.py`) and **`3/hour` per user**
+> (`SMS_TEST_HOURLY_CAP_PER_USER`, `reserve_test_sms_quota`). The per-IP limiter alone is not
+> sufficient — it keys on address, so one account multiplies it by rotating egress IPs, and it is
+> disabled entirely wherever `RATE_LIMIT_ENABLED=false`. The per-user budget is separate from
+> `SMS_HOURLY_CAP_PER_USER`, so testing never consumes the critical-alert allowance.
+>
+> Any phone number appearing in a provider/validation error is **masked** before it is written to
+> `notification_logs.error` (`***0134`), because that field is served by
+> `GET /notifications/logs` to roles that cannot see `phone`. The HTTP `detail` returned to the
+> caller is unmasked — they own the number.
 >
 > | Status | When |
 > |---|---|
 > | **200** `{ status, sid, provider_status, detail }` | Sent (`status = "sent"`), **or** Twilio unconfigured on the server (`status = "skipped"`, `detail` explains) |
 > | **400** | No phone on file; company SMS egress disabled; the stored number is invalid |
+> | **429** | Per-user hourly test budget exhausted (`3/hour`) |
+> | **503** | The quota backend (Redis) is unavailable — refuses rather than sending unmetered, and deliberately does *not* report this as a limit the user hit |
 > | **502** | Provider rejected the message, or the provider was unreachable |
 
 ### Admin Settings (Admin)

@@ -31,6 +31,7 @@ from app.services.sms_service import (
     SMSPermanentError,
     SMSResult,
     peek_sms_overflow,
+    scrub_phone_numbers,
     send_sms,
     settle_sms_overflow,
 )
@@ -147,7 +148,7 @@ async def send_sms_task(
                 event_type=event_type,
                 body=body,
                 sent=False,
-                error=f"invalid phone number on file: {exc}",
+                error=f"invalid phone number on file: {scrub_phone_numbers(str(exc))}",
             )
             return {"sent": False, "reason": "invalid_phone"}
         except SMSPermanentError as exc:
@@ -160,7 +161,7 @@ async def send_sms_task(
                 event_type=event_type,
                 body=body,
                 sent=False,
-                error=f"provider rejected the message: {exc}",
+                error=f"provider rejected the message: {scrub_phone_numbers(str(exc))}",
                 provider_status=str(exc.status) if exc.status is not None else None,
             )
             return {"sent": False, "reason": "provider_rejected"}
@@ -176,11 +177,13 @@ async def send_sms_task(
                     event_type=event_type,
                     body=body,
                     sent=False,
-                    error=f"transport failure (will retry): {exc}",
+                    error=f"transport failure (will retry): {scrub_phone_numbers(str(exc))}",
                 )
             except Exception:  # pragma: no cover - logging must not mask the retry
                 logger.exception("Could not record SMS transport failure for user %s", user_id)
-            logger.error("SMS job failed for user %s: %s", user_id, exc)
+            # Scrubbed here too: this line reaches application logs and Sentry, which are
+            # readable by people who cannot see the recipient's phone in the app.
+            logger.error("SMS job failed for user %s: %s", user_id, scrub_phone_numbers(str(exc)))
             raise
 
         _record_delivery(

@@ -35,6 +35,7 @@ there. This module never composes body text from domain data.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple
@@ -232,6 +233,42 @@ def mask_phone(phone: Optional[str]) -> str:
     return f"***{digits[-4:]}" if len(digits) >= 4 else "***"
 
 
+#: A digit run long enough to be a phone number, with the usual separators.
+_PHONE_LIKE_RE = re.compile(r"\+?\d[\d\s().\-]{5,}\d")
+
+
+def scrub_phone_numbers(text: Optional[str]) -> str:
+    """Mask any phone-number-shaped substring inside arbitrary text.
+
+    :func:`mask_phone` masks a value we already know is a number; this masks numbers
+    *embedded in strings we do not control* — chiefly exception messages. Both
+    ``InvalidPhoneNumberError`` ("Invalid phone number: +1512…") and Twilio's
+    ``TwilioRestException`` ("The 'To' number +1512… is not a valid phone number")
+    carry the destination in their text, and those strings are persisted to
+    ``notification_logs.error`` — which ``GET /notifications/logs`` serves to
+    SUPERVISOR, a role that cannot see ``phone`` on any user schema. Without this,
+    the delivery log becomes a back door around that field minimization.
+
+    Deliberately over-masks: a bare 10+ digit run (or any ``+``-prefixed 7+ digit run)
+    is masked even when it is not really a phone number, because an over-masked error
+    message costs a little debuggability while an under-masked one discloses PII.
+    """
+    if not text:
+        return ""
+
+    def _repl(match: "re.Match[str]") -> str:
+        token = match.group(0)
+        digits = "".join(ch for ch in token if ch.isdigit())
+        if token.lstrip().startswith("+"):
+            if len(digits) < 7:
+                return token
+        elif len(digits) < 10:
+            return token
+        return f"***{digits[-4:]}"
+
+    return _PHONE_LIKE_RE.sub(_repl, str(text))
+
+
 # ---------------------------------------------------------------------------
 # Twilio configuration + lazy singleton client
 # ---------------------------------------------------------------------------
@@ -372,11 +409,17 @@ async def reserve_sms_quota(user_id: int, cap: int = SMS_HOURLY_CAP_PER_USER) ->
         overflow = int(await redis.incr(overflow_key))
         if overflow == 1:
             await redis.expire(overflow_key, SMS_QUOTA_WINDOW_SECONDS)
+        # TTL is the QUOTA window, not the collapse delay. If the arm key expired when
+        # the collapse fired (both were SMS_COLLAPSE_DELAY_SECONDS), the next suppressed
+        # message would immediately re-arm — turning the documented "5/hour" cap into
+        # 5 + one collapse every 2 minutes (~35/hour) under a sustained storm, which is
+        # exactly the case storm control exists for. One window, one collapse: the real
+        # per-user ceiling is cap + 1. Deliberately NOT cleared by settle_sms_overflow.
         armed = bool(
             await redis.set(
                 _COLLAPSE_ARM_KEY.format(user_id=user_id),
                 "1",
-                ex=SMS_COLLAPSE_DELAY_SECONDS,
+                ex=SMS_QUOTA_WINDOW_SECONDS,
                 nx=True,
             )
         )
@@ -395,6 +438,50 @@ async def reserve_sms_quota(user_id: int, cap: int = SMS_HOURLY_CAP_PER_USER) ->
             exc_info=True,
         )
         return SMSQuotaDecision(send=True)
+
+
+#: Outcomes of a test-SMS reservation. Tri-state on purpose: "capped" and
+#: "unavailable" both refuse the send, but telling a user they hit a 3/hour limit when
+#: Redis is actually down is a false statement, and they would keep retrying against it.
+TEST_QUOTA_ALLOWED = "allowed"
+TEST_QUOTA_CAPPED = "capped"
+TEST_QUOTA_UNAVAILABLE = "unavailable"
+
+
+async def reserve_test_sms_quota(user_id: int, cap: int = SMS_TEST_HOURLY_CAP_PER_USER) -> str:
+    """Reserve one slot in the per-user hourly *test*-SMS window.
+
+    Returns :data:`TEST_QUOTA_ALLOWED`, :data:`TEST_QUOTA_CAPPED`, or
+    :data:`TEST_QUOTA_UNAVAILABLE`.
+
+    Kept separate from :func:`reserve_sms_quota` so the self-service test button never
+    eats into the critical-alert budget, and because the collapse machinery is
+    meaningless for a user-initiated test.
+
+    **Redis-down trade-off: FAIL CLOSED** — the opposite of the storm valve above, on
+    purpose. ``reserve_sms_quota`` fails open because dropping a critical quality alert
+    is worse than an extra message. A test SMS is a convenience the user can retry in a
+    minute; failing open here would restore exactly the unbounded-spend hole this cap
+    closes, since the only other bound is per-IP (and is disabled outright wherever
+    ``RATE_LIMIT_ENABLED=false``).
+    """
+    try:
+        redis = await get_redis_pool()
+        key = _TEST_QUOTA_KEY.format(user_id=user_id)
+        count = int(await redis.incr(key))
+        if count == 1:
+            await redis.expire(key, SMS_QUOTA_WINDOW_SECONDS)
+        if count <= cap:
+            return TEST_QUOTA_ALLOWED
+        logger.info("Test-SMS cap reached for user %s (%d attempts in window)", user_id, count)
+        return TEST_QUOTA_CAPPED
+    except Exception:
+        logger.warning(
+            "Test-SMS counter unavailable (Redis); failing CLOSED for user %s",
+            user_id,
+            exc_info=True,
+        )
+        return TEST_QUOTA_UNAVAILABLE
 
 
 async def peek_sms_overflow(user_id: int) -> int:

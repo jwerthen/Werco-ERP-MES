@@ -369,6 +369,49 @@ def test_provider_rejection_is_terminal_and_does_not_retry(db_session: Session, 
     assert row.provider_message_id is None
 
 
+# ---------------------------------------------------------------------------
+# PII: the destination must not survive into the delivery log (§8.12)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "exc, reason",
+    [
+        (ValueError("Invalid phone number: +15125550134"), "invalid_phone"),
+        (RuntimeError("The 'To' number +15125550134 is not a valid phone number"), "provider_rejected"),
+    ],
+)
+def test_error_text_never_persists_the_recipient_number(db_session: Session, monkeypatch, exc, reason):
+    """``notification_logs.error`` is served by GET /notifications/logs, which admits
+    SUPERVISOR -- a role that cannot see ``phone`` on any user schema. Both the
+    validation error and Twilio's own message carry the destination in their text, so
+    an unscrubbed error field is a back door around that field minimization.
+    """
+    _use_test_session(db_session, monkeypatch)
+    user = _make_user(db_session, company_id=COMPANY_A, phone="+15125550134")
+    _ensure_company(db_session, COMPANY_A, allow_sms=True)
+    log_id = _pending_log(db_session, company_id=COMPANY_A, user_id=user.id)
+
+    if reason == "invalid_phone":
+        monkeypatch.setattr(sms, "normalize_phone", MagicMock(side_effect=sms.InvalidPhoneNumberError(str(exc))))
+        _twilio(monkeypatch)
+    else:
+        exc.status = 400
+        exc.code = 21211
+        _twilio(monkeypatch, side_effect=exc)
+
+    result = asyncio.run(
+        sms_jobs.send_sms_task(company_id=COMPANY_A, user_id=user.id, body="x", notification_log_id=log_id)
+    )
+    assert result["reason"] == reason
+
+    db_session.expire_all()
+    error = db_session.query(NotificationLog).filter(NotificationLog.id == log_id).one().error or ""
+    assert "+15125550134" not in error
+    assert "5550134" not in error
+    assert "***0134" in error
+
+
 def test_unconfigured_twilio_is_a_recorded_skip_not_a_retry(db_session: Session, monkeypatch):
     """An unconfigured environment must not spam ARQ retries."""
     _use_test_session(db_session, monkeypatch)

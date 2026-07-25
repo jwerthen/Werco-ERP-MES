@@ -4,18 +4,20 @@
 2. ``PUT /users/me/phone`` — self-service E.164 phone, audited, self-scoped.
 3. ``GET/PUT /users/me/notification-preferences`` — the minimal SMS opt-in slice; the
    ONLY place a ``NotificationPreference`` row is created (and it stamps ``company_id``).
-4. ``POST /users/me/test-sms`` — respects the kill switch and cannot target another
-   number.
-5. PII field minimization — ``phone`` must not appear in broad user serializations.
+4. ``POST /users/me/test-sms`` — respects the kill switch, is bounded per identity (not
+   just per IP), and cannot target another number.
+5. PII field minimization — ``phone`` must not appear in broad user serializations, and
+   must not leak sideways through ``notification_logs.error``.
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
+import app.api.endpoints.users as users_endpoint
 import app.services.sms_service as sms
 from app.core.security import create_access_token
 from app.models.audit_log import AuditLog
@@ -85,6 +87,21 @@ def _set_egress(db: Session, enabled: bool, company_id: int = COMPANY_A) -> None
 def _egress_of(db: Session, company_id: int) -> bool:
     db.expire_all()
     return db.query(Company).filter(Company.id == company_id).first().allow_sms_egress
+
+
+@pytest.fixture(autouse=True)
+def _allow_test_sms_quota(monkeypatch):
+    """Grant the per-identity test-SMS quota by default.
+
+    The reservation talks to Redis, which the suite does not run, and it fails CLOSED --
+    so without this stub every test-send case would 503 instead of exercising the path
+    under test. Cases that care about the cap override it explicitly.
+    """
+    monkeypatch.setattr(
+        users_endpoint,
+        "reserve_test_sms_quota",
+        AsyncMock(return_value=sms.TEST_QUOTA_ALLOWED),
+    )
 
 
 # ===========================================================================
@@ -302,6 +319,67 @@ class TestTestSMS:
         resp = client.post(TEST_SMS_URL, headers=_headers_for(user))
         assert resp.status_code == status.HTTP_200_OK, resp.text
         assert resp.json()["status"] == "skipped"
+
+    def test_per_identity_cap_returns_429_without_calling_the_provider(
+        self, client: TestClient, db_session: Session, monkeypatch
+    ):
+        """The per-IP limit is not the only bound: one account cannot run up a carrier
+        bill by rotating egress IPs (nor wherever RATE_LIMIT_ENABLED=false)."""
+        user = _make_user(db_session, role=UserRole.QUALITY, phone="+15125550134")
+        _set_egress(db_session, True)
+        provider = MagicMock()
+        monkeypatch.setattr(sms, "_send_via_twilio", provider)
+        monkeypatch.setattr(sms, "sms_configured", lambda: True)
+        monkeypatch.setattr(users_endpoint, "reserve_test_sms_quota", AsyncMock(return_value=sms.TEST_QUOTA_CAPPED))
+
+        resp = client.post(TEST_SMS_URL, headers=_headers_for(user))
+        assert resp.status_code == status.HTTP_429_TOO_MANY_REQUESTS, resp.text
+        provider.assert_not_called()
+
+    def test_quota_backend_down_refuses_without_claiming_a_limit_was_hit(
+        self, client: TestClient, db_session: Session, monkeypatch
+    ):
+        """Fails closed (no unmetered sends) but must not tell the user they hit a cap
+        they never hit -- they would keep retrying against a false explanation."""
+        user = _make_user(db_session, role=UserRole.QUALITY, phone="+15125550134")
+        _set_egress(db_session, True)
+        provider = MagicMock()
+        monkeypatch.setattr(sms, "_send_via_twilio", provider)
+        monkeypatch.setattr(sms, "sms_configured", lambda: True)
+        monkeypatch.setattr(
+            users_endpoint, "reserve_test_sms_quota", AsyncMock(return_value=sms.TEST_QUOTA_UNAVAILABLE)
+        )
+
+        resp = client.post(TEST_SMS_URL, headers=_headers_for(user))
+        assert resp.status_code == status.HTTP_503_SERVICE_UNAVAILABLE, resp.text
+        provider.assert_not_called()
+        assert "limit" not in resp.json()["detail"].lower()
+
+    def test_provider_error_does_not_persist_the_phone_number(
+        self, client: TestClient, db_session: Session, monkeypatch
+    ):
+        """Twilio echoes the destination in its exception text; that text is persisted to
+        notification_logs.error, which SUPERVISOR can read but `phone` is hidden from."""
+        user = _make_user(db_session, role=UserRole.QUALITY, phone="+15125550134")
+        _set_egress(db_session, True)
+        monkeypatch.setattr(sms, "sms_configured", lambda: True)
+        monkeypatch.setattr(
+            sms,
+            "_send_via_twilio",
+            MagicMock(
+                side_effect=sms.SMSPermanentError(
+                    "The 'To' number +15125550134 is not a valid phone number", status=400
+                )
+            ),
+        )
+
+        resp = client.post(TEST_SMS_URL, headers=_headers_for(user))
+        assert resp.status_code == status.HTTP_502_BAD_GATEWAY, resp.text
+
+        log = db_session.query(NotificationLog).filter(NotificationLog.event_type == "sms.test").one()
+        assert "+15125550134" not in (log.error or "")
+        assert "5550134" not in (log.error or "")
+        assert "***0134" in (log.error or "")
 
 
 # ===========================================================================

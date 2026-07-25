@@ -285,9 +285,33 @@ SMS here is critical-events-only and opt-in, so this is a storm valve, not a quo
   whole burst): `Werco: 7 more alerts - check the app. Log in to view.` It carries **no identifiers
   at all**. The collapse **bypasses the per-user cap** — it *is* the cap's safety valve — but still
   passes through the egress gate like any other send.
+- The collapse arms **at most once per quota window**, so the true per-user ceiling is
+  **cap + 1 = 6 messages/hour**. The arm key's TTL is `SMS_QUOTA_WINDOW_SECONDS`, deliberately
+  *longer* than the collapse delay and deliberately **not** cleared by `settle_sms_overflow`. (If
+  the arm expired when the collapse fired — as it would if both used `SMS_COLLAPSE_DELAY_SECONDS` —
+  the next suppressed alert would re-arm it, and a sustained storm would yield one collapse every
+  two minutes, ~35/hour, defeating the cap in exactly the scenario it exists for.)
 - The collapse job **reads** the overflow counter, sends, and only then **settles** it
   (`decrby`, not delete) — so a retried collapse never loses alerts, and messages suppressed while
   the collapse was in flight roll into the next one.
+
+### Test-send budget
+
+`POST /users/me/test-sms` is bounded **per identity**, not only per IP:
+`SMS_TEST_HOURLY_CAP_PER_USER = 3` per hour over the same `SMS_QUOTA_WINDOW_SECONDS` window, via
+`reserve_test_sms_quota`. The per-IP limiter in `main.py` keys on address alone, so one account can
+multiply it by rotating egress IPs, and it is disabled outright wherever `RATE_LIMIT_ENABLED=false`
+(the documented E2E config) — leaving carrier spend unbounded without this second control.
+
+The budget is **separate** from `SMS_HOURLY_CAP_PER_USER`, so testing the button never eats into the
+critical-alert allowance. The reservation is **tri-state**, and the two refusals are distinguished
+on purpose:
+
+| Outcome | HTTP | Why distinct |
+|---|---|---|
+| `TEST_QUOTA_ALLOWED` | 200 | — |
+| `TEST_QUOTA_CAPPED` | **429** | The user really did hit 3/hour. |
+| `TEST_QUOTA_UNAVAILABLE` | **503** | Redis is down. Refuse (see below), but do **not** claim a limit they never hit — they would keep retrying against a false explanation. |
 
 ### The two opposite failure postures (the subtlest thing here)
 
@@ -298,6 +322,7 @@ directions. This is deliberate; do not "make them consistent".
 |---|---|---|---|
 | **Egress gate** (`allow_sms_egress`) | `sms_service._sms_egress_allowed` | **FAILS CLOSED** — deny | It protects the **CUI boundary**. A control that cannot verify "allowed" must deny. Unknown tenant, missing company row, or a DB exception all return `False`, and `_sms_egress_allowed(db, None)` is `False` — **deliberately stricter than `llm_client._ai_egress_allowed`**, which tolerates the no-tenant edge. Every SMS caller has a tenant (the dispatcher stamps it from the event; the API path takes it from `get_current_company_id`), so a missing one is a bug, and a bug must not egress. |
 | **Storm cap** (`reserve_sms_quota`) | `sms_service` | **FAILS OPEN** — send + `WARNING` | If Redis is down the counter cannot be read. SMS is critical-only, opt-in, and kill-switch-gated, so **an extra message beats dropping a critical alert** (an AS9100D awareness control). The per-recipient/channel dedup window (also fail-open) still applies, and the cap resumes the moment Redis returns. |
+| **Test-send cap** (`reserve_test_sms_quota`) | `sms_service` | **FAILS CLOSED** — 503 | The mirror image of the storm cap directly above, and for the reason that distinguishes them: a test SMS is **not** a critical alert. Nobody is deprived of safety information by a button that says "try again shortly", whereas failing open restores the unbounded-spend hole this cap exists to close. Volume controls follow what they protect — the alert budget protects *awareness*, this one protects *spend*. |
 
 ### Twilio configuration
 

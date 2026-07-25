@@ -267,6 +267,7 @@ class _FakeRedis:
     def __init__(self):
         self.values = {}
         self.set_calls = []
+        self.ttls = {}
 
     async def incr(self, key):
         self.values[key] = int(self.values.get(key, 0)) + 1
@@ -277,6 +278,7 @@ class _FakeRedis:
         return self.values[key]
 
     async def expire(self, key, seconds):
+        self.ttls[key] = seconds
         return True
 
     async def get(self, key):
@@ -289,6 +291,7 @@ class _FakeRedis:
         if nx and key in self.values:
             return None
         self.values[key] = value
+        self.ttls[key] = ex
         self.set_calls.append(key)
         return True
 
@@ -326,6 +329,98 @@ def test_quota_fails_open_when_redis_is_down(monkeypatch):
     decision = asyncio.run(sms.reserve_sms_quota(44))
     assert decision.send is True
     assert decision.arm_collapse is False
+
+
+def test_collapse_arms_once_per_quota_window_not_once_per_collapse_delay(monkeypatch):
+    """The per-user ceiling is cap + 1 per window -- not cap + one every 2 minutes.
+
+    Regression: the arm key used to expire after SMS_COLLAPSE_DELAY_SECONDS, the same
+    delay the collapse job was deferred by, so the arm lapsed exactly as the collapse
+    fired and the next suppressed alert re-armed it. Under a sustained storm (the case
+    storm control exists for) that turned the documented 5/hour into ~35/hour.
+    """
+    fake = _FakeRedis()
+    monkeypatch.setattr(sms, "get_redis_pool", AsyncMock(return_value=fake))
+    arm_key = sms._COLLAPSE_ARM_KEY.format(user_id=77)
+
+    burst = [asyncio.run(sms.reserve_sms_quota(77)) for _ in range(sms.SMS_HOURLY_CAP_PER_USER + 3)]
+    assert sum(1 for d in burst if d.arm_collapse) == 1
+
+    # The arm outlives the collapse it scheduled.
+    assert fake.ttls[arm_key] == sms.SMS_QUOTA_WINDOW_SECONDS
+    assert fake.ttls[arm_key] > sms.SMS_COLLAPSE_DELAY_SECONDS
+
+    # A collapse fires and settles; the storm continues. No SECOND collapse arms.
+    asyncio.run(sms.settle_sms_overflow(77, 3))
+    more = [asyncio.run(sms.reserve_sms_quota(77)) for _ in range(20)]
+    assert not any(d.send for d in more)
+    assert not any(d.arm_collapse for d in more)
+
+
+# ---------------------------------------------------------------------------
+# Test-send quota (self-service button; separate budget, fails CLOSED)
+# ---------------------------------------------------------------------------
+
+
+def test_test_sms_quota_allows_cap_then_denies(monkeypatch):
+    fake = _FakeRedis()
+    monkeypatch.setattr(sms, "get_redis_pool", AsyncMock(return_value=fake))
+
+    outcomes = [asyncio.run(sms.reserve_test_sms_quota(51)) for _ in range(sms.SMS_TEST_HOURLY_CAP_PER_USER + 2)]
+
+    assert all(o == sms.TEST_QUOTA_ALLOWED for o in outcomes[: sms.SMS_TEST_HOURLY_CAP_PER_USER])
+    assert all(o == sms.TEST_QUOTA_CAPPED for o in outcomes[sms.SMS_TEST_HOURLY_CAP_PER_USER :])
+
+
+def test_test_sms_quota_is_separate_from_the_alert_budget(monkeypatch):
+    """Testing the button must not consume the critical-alert allowance, or vice versa."""
+    fake = _FakeRedis()
+    monkeypatch.setattr(sms, "get_redis_pool", AsyncMock(return_value=fake))
+
+    for _ in range(sms.SMS_TEST_HOURLY_CAP_PER_USER):
+        assert asyncio.run(sms.reserve_test_sms_quota(52)) == sms.TEST_QUOTA_ALLOWED
+
+    # The alert budget is untouched.
+    assert all(asyncio.run(sms.reserve_sms_quota(52)).send for _ in range(sms.SMS_HOURLY_CAP_PER_USER))
+
+
+def test_test_sms_quota_fails_closed_when_redis_is_down(monkeypatch):
+    """Opposite of the storm valve, on purpose: a test send is not a critical alert,
+    and failing open restores the unbounded-spend hole this cap exists to close.
+
+    Reported distinctly from CAPPED so the endpoint can avoid telling a user they hit
+    a 3/hour limit they never hit.
+    """
+    monkeypatch.setattr(sms, "get_redis_pool", AsyncMock(side_effect=RuntimeError("redis down")))
+    assert asyncio.run(sms.reserve_test_sms_quota(53)) == sms.TEST_QUOTA_UNAVAILABLE
+
+
+# ---------------------------------------------------------------------------
+# Phone-number scrubbing (PII must not reach notification_logs.error / Sentry)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "Invalid phone number: +15125551234",
+        "Unable to create record: The 'To' number +15125551234 is not a valid phone number",
+        "HTTP 400 error: to=+1 (512) 555-1234 rejected",
+        "delivery failed for 512-555-1234",
+    ],
+)
+def test_scrub_removes_phone_numbers_from_arbitrary_text(raw):
+    scrubbed = sms.scrub_phone_numbers(raw)
+    assert "5551234" not in scrubbed.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+    assert "+15125551234" not in scrubbed
+    assert "***1234" in scrubbed
+
+
+def test_scrub_leaves_non_phone_text_intact():
+    assert sms.scrub_phone_numbers("provider rejected the message") == "provider rejected the message"
+    # Short identifiers and codes must survive -- masking them would gut the log's value.
+    assert sms.scrub_phone_numbers("WO-1042 failed with code 30007") == "WO-1042 failed with code 30007"
+    assert sms.scrub_phone_numbers(None) == ""
 
 
 # ---------------------------------------------------------------------------

@@ -26,10 +26,15 @@ from app.services.notification_catalog import ALL_CHANNELS, CATALOG, CHANNEL_SMS
 from app.services.notification_dispatch import channels_from_pref, get_preference_row
 from app.services.sms_content import build_test_sms_body
 from app.services.sms_service import (
+    SMS_TEST_HOURLY_CAP_PER_USER,
+    TEST_QUOTA_CAPPED,
+    TEST_QUOTA_UNAVAILABLE,
     InvalidPhoneNumberError,
     SMSEgressDisabledError,
     SMSPermanentError,
     normalize_phone,
+    reserve_test_sms_quota,
+    scrub_phone_numbers,
     send_sms,
     sms_configured,
 )
@@ -438,12 +443,28 @@ async def send_test_sms(
     Self-only: the destination is ``current_user.phone`` and can never be supplied by
     the caller, so this endpoint cannot be used to message an arbitrary number. It goes
     through the same ``sms_service`` path as real notifications, so the
-    ``allow_sms_egress`` kill switch is enforced fail-closed here too. Rate-limited
-    per-IP in ``main.py`` (ENDPOINT_RATE_LIMITS) and logged to ``notification_logs``
-    like any other delivery attempt.
+    ``allow_sms_egress`` kill switch is enforced fail-closed here too.
+
+    Bounded twice: per-IP in ``main.py`` (ENDPOINT_RATE_LIMITS) and — because the per-IP
+    limit keys on address alone, so one account can multiply it by rotating egress IPs
+    and it is disabled entirely wherever ``RATE_LIMIT_ENABLED=false`` — per-identity via
+    :func:`reserve_test_sms_quota`. Every attempt is logged to ``notification_logs``.
     """
     if not current_user.phone:
         raise HTTPException(status_code=400, detail="Add a phone number before sending a test message")
+
+    quota = await reserve_test_sms_quota(current_user.id)
+    if quota == TEST_QUOTA_CAPPED:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Test-message limit reached ({SMS_TEST_HOURLY_CAP_PER_USER} per hour). Try again later.",
+        )
+    if quota == TEST_QUOTA_UNAVAILABLE:
+        # Refuse rather than send unmetered, but don't claim a limit the user never hit.
+        raise HTTPException(
+            status_code=503,
+            detail="Test messaging is temporarily unavailable. Try again shortly.",
+        )
 
     body = build_test_sms_body()
     # Persist the attempt BEFORE the outbound call so the delivery log records it even
@@ -474,10 +495,13 @@ async def send_test_sms(
             "SMS is turned off for this company. An admin can enable it in Admin Settings.",
         )
     except InvalidPhoneNumberError as exc:
-        raise _fail(f"invalid phone number on file: {exc}", 400, str(exc))
+        # Scrubbed on the way into notification_logs.error (SUPERVISOR can read that
+        # field but not `phone`); the caller is the number's owner, so the HTTP detail
+        # they get back is unscrubbed.
+        raise _fail(f"invalid phone number on file: {scrub_phone_numbers(str(exc))}", 400, str(exc))
     except SMSPermanentError as exc:
         raise _fail(
-            f"provider rejected the message: {exc}",
+            f"provider rejected the message: {scrub_phone_numbers(str(exc))}",
             502,
             "The SMS provider rejected the message. Check the number and try again.",
         )
