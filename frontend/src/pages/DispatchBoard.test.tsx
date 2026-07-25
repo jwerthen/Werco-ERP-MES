@@ -1049,9 +1049,11 @@ describe('DispatchBoard', () => {
  * Material ties on the board.
  *
  * The rules being pinned here: an UNTIED operation renders nothing at all, the
- * chip is worded as an estimate against WORK-ORDER completion (never "deducting
- * now"), a shortage is advisory rather than a gate, and the per-column rollup is
- * recomputed from the queue.
+ * chip is worded as an estimate against THIS OPERATION completing (a card is an
+ * operation row, and an operation-scoped tie deducts when that operation
+ * closes — never "deducting now" on a queue, and never deferred to the work
+ * order finishing), a shortage is advisory rather than a gate, and the
+ * per-column rollup is recomputed from the queue.
  */
 describe('DispatchBoard — material ties', () => {
   const tie = (overrides: Partial<NonNullable<DispatchBoardRow['material_tie']>> = {}) => ({
@@ -1081,7 +1083,7 @@ describe('DispatchBoard — material ties', () => {
         queue: [
           // Covered.
           makeRow({ operation_id: 11, run_order: 1, material_tie: tie() }),
-          // Short — the lot will be driven negative at WO completion.
+          // Short — the lot will be driven negative when this operation completes.
           makeRow({
             operation_id: 9,
             run_order: 2,
@@ -1115,14 +1117,17 @@ describe('DispatchBoard — material ties', () => {
     expect(screen.getByTestId('dispatch-tie-11')).toHaveTextContent('3 EA · SHT-.125-304');
   });
 
-  it('words the chip as an ESTIMATE tied to WORK-ORDER completion, never "deducting now"', async () => {
+  it('words the chip as an ESTIMATE tied to THIS OPERATION completing, never "deducting now"', async () => {
     renderBoard();
     await findColumn('Ermaksan Fiber Laser');
 
     const title = screen.getByTestId('dispatch-tie-11').getAttribute('title') || '';
-    expect(title).toContain('when WO-20260720-001 finishes');
+    expect(title).toContain('when this operation completes');
     expect(title.toLowerCase()).toContain('estimate');
     expect(title.toLowerCase()).not.toContain('deducting');
+    // Not deferred to the job closing either: a laser child WO carries one
+    // operation per nest and draws nest by nest.
+    expect(title.toLowerCase()).not.toContain('finishes');
   });
 
   it('flags a shortage as advisory and never disables the card', async () => {

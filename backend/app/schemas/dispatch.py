@@ -77,9 +77,14 @@ class DispatchMaterialTie(UTCModel):
     completion-time estimate flags short. The kiosk answers the other question
     on purpose; see ``material_tie_view``'s module docstring.
 
-    Consumption fires at WORK-ORDER completion, never per run -- copy built on
-    these numbers must say "deducts N when WO-#### finishes", never "deducting
-    now".
+    Consumption fires when the OPERATION completes, never per run. A dispatch
+    card IS an operation row, so copy built on these numbers should say "deducts
+    N when this operation completes". Both neighbouring phrasings are wrong:
+    "when WO-#### finishes" UNDERSTATES (a laser WO carries one operation per
+    nest and each nest now deducts as it closes), while "deducting now" or
+    anything per-run OVERSTATES -- reporting runs on a still-open operation
+    posts nothing, because an ``IN_PROGRESS`` operation is still reducible and
+    consumption never auto-reverses.
     """
 
     allocation_id: int

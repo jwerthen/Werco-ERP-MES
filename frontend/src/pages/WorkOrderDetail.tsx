@@ -259,6 +259,14 @@ export default function WorkOrderDetail() {
   // the backend — the same tier work_orders:edit maps to. Reads are open to any
   // authenticated tenant user, so the panel itself is not gated.
   const canEditMaterialTies = canCorrectCount;
+  // Office operation-complete mirrors the backend gate, which is
+  // require_role([ADMIN, MANAGER, SUPERVISOR, QUALITY]) — the same set as
+  // complete_work_order, its larger sibling. QUALITY is included deliberately:
+  // it can complete an entire work order, so refusing it a single operation
+  // would be incoherent. It matters more than it looks — completing an
+  // operation now consumes tied material, so this button moves stock and writes
+  // hash-chain rows. Operators complete work from the shop floor / kiosk.
+  const canCompleteOperation = canCorrectCount || user?.role === 'quality';
   const [workOrder, setWorkOrder] = useState<WorkOrder | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -2067,7 +2075,7 @@ export default function WorkOrderDetail() {
                             >
                               <ClipboardDocumentCheckIcon className="h-5 w-5 inline" /> Steps
                             </button>
-                            {op.status !== 'complete' && workOrder.status !== 'draft' && (
+                            {canCompleteOperation && op.status !== 'complete' && workOrder.status !== 'draft' && (
                               <button
                                 onClick={() => handleCompleteOperation(op)}
                                 disabled={completingOpId === op.id}

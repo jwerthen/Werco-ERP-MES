@@ -86,7 +86,10 @@ from app.services.completion_cost_service import (
     rollup_labor_hours_for_closed_entries,
     rollup_labor_hours_from_evidence,
 )
-from app.services.completion_inventory_service import apply_completion_inventory_effects
+from app.services.completion_inventory_service import (
+    apply_completion_inventory_effects,
+    apply_operation_completion_inventory_effects,
+)
 from app.services.completion_quality_service import (
     evaluate_and_record_labor_data_quality,
     record_reconcile_labor_data_quality,
@@ -697,8 +700,11 @@ def _material_ties_payload(ties: Optional[Sequence[MaterialTieView]]) -> list[di
     fence.
 
     ``qty_consumed`` is a CACHE (the ledger is authoritative) and the numbers
-    here describe what will happen at WORK-ORDER completion -- consumption never
-    fires per run, so kiosk copy must say "deducts N when WO-#### finishes".
+    here describe what happens when THIS OPERATION completes -- which, on a
+    kiosk COMPLETE screen, is the action the operator is about to fire. It is
+    still never per run: reporting production on a still-open operation posts
+    nothing, because an ``IN_PROGRESS`` operation is still reducible and
+    consumption never auto-reverses.
 
     Deliberately omits ``pinned_inventory_item_id``: the lot NUMBER is what an
     operator reads off a tag, and the kiosk has no verb that takes the id.
@@ -1611,6 +1617,23 @@ def clock_out(
 
             affected_work_centers = finalize_operation_completion(db, work_order, operation)
             work_order_completed = work_order.status == WorkOrderStatus.COMPLETE
+
+            # Material consumption (incremental): deplete THIS operation's tied material
+            # now that it is COMPLETE, rather than waiting for the whole work order --
+            # a laser child carries one operation per nest, so nest 1 of 3 must move its
+            # sheet when nest 1 closes. Reached only inside `not wo_is_terminal`, so a
+            # finished/cancelled job never consumes. No-op (not one write) when the
+            # operation carries no tie; the whole-WO reconcile below still self-heals.
+            #
+            # The flush is load-bearing: the consume engine issues SELECTs while the
+            # version-mapped WorkOrder/WorkOrderOperation rows are dirty, and an
+            # AUTOFLUSH StaleDataError raised inside its per-allocation savepoint would
+            # be swallowed into an ALLOCATION_CONSUMPTION_FAILED row instead of
+            # surfacing as this handler's documented 409.
+            db.flush()
+            apply_operation_completion_inventory_effects(
+                db, work_order, operation, user_id=current_user.id, company_id=company_id, audit=audit
+            )
             # PERF-5: commit=False joins this scheduling refresh into the handler's
             # single unit of work, so the WO/op state change is committed atomically
             # with the audit rows / cost rollup / quality exceptions written below
@@ -1639,7 +1662,15 @@ def clock_out(
     quality_exceptions: list[QualityException] = []
     if operation_completed or work_order_completed:
         db.flush()
-        audit = AuditService(db, current_user)
+        # NOTE: this branch used to construct its own ``AuditService(db, current_user)``,
+        # SHADOWING the request-scoped one this handler already injects. Two problems,
+        # both fixed by simply using the injected instance: (a) the tied-material
+        # consumption above runs BEFORE this point, so the consumption rows and the
+        # completion status-change rows would have been written by two different
+        # services; and (b) the back-fill audit row further down explicitly documents
+        # itself as using "the request-scoped AuditService so the row captures
+        # ip_address / user_agent" -- which the shadow silently made false whenever an
+        # operation completed on the same call.
         if operation_completed and operation:
             audit.log_status_change(
                 resource_type="work_order_operation",
@@ -3652,6 +3683,7 @@ def complete_operation(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """
     Mark operation as complete (full or partial).
@@ -3901,8 +3933,18 @@ def complete_operation(
         if is_labor_cost_rollup_enabled(company_id):
             rollup_labor_hours_for_closed_entries(work_order, operation, open_entries)
 
-    # Create audit log
-    audit = AuditService(db, current_user)
+    # Create audit log. The flush mirrors the clock-out twin: the tied-material
+    # consumption below issues SELECTs while the version-mapped WorkOrder /
+    # WorkOrderOperation rows are dirty, and an AUTOFLUSH StaleDataError raised inside
+    # its per-allocation savepoint would be swallowed into an
+    # ALLOCATION_CONSUMPTION_FAILED row instead of surfacing as this handler's 409.
+    db.flush()
+    # The request-scoped AuditService is INJECTED (see the signature), not built
+    # here. A local ``AuditService(db, current_user)`` carries no ``request``, so
+    # every row this handler writes -- including the material-consumption rows
+    # below, which move stock -- would land with NULL ip_address / user_agent and
+    # lose "source of the event" (NIST SP 800-171 3.3.1). That was the defect
+    # removed from ``clock_out``; this is its twin.
     audit.log(
         action="COMPLETE_OPERATION" if is_fully_complete else "UPDATE_OPERATION_PROGRESS",
         resource_type="work_order_operation",
@@ -3913,6 +3955,19 @@ def complete_operation(
             + (f". Notes: {completion_data.notes}" if completion_data.notes else "")
         ),
     )
+
+    # Material consumption (incremental): deplete THIS operation's tied material as soon
+    # as the operation is COMPLETE, not at work-order completion -- one laser operation
+    # is one nest, and its sheet leaves stock when the nest closes. A terminal parent WO
+    # was already refused with a 409 above (TERMINAL_WO_STATUSES), so a finished /
+    # cancelled job can never reach here. Writes NOTHING when the operation is untied;
+    # the whole-WO reconcile in apply_completion_inventory_effects below remains the
+    # self-heal for anything this missed. Placed BEFORE the work-order-completion block
+    # so apply_completion_cost_rollup sees these ledger rows on the same request.
+    if is_fully_complete:
+        apply_operation_completion_inventory_effects(
+            db, work_order, operation, user_id=current_user.id, company_id=company_id, audit=audit
+        )
 
     # EVT-2: emit the uniform completion OperationalEvents in-process (before the
     # terminal commit so they land atomically with the status change). This scan/

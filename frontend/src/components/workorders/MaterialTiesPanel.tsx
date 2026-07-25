@@ -6,11 +6,17 @@
  * and the stock material it depletes. Everything on this panel is shaped by
  * four facts that are easy to get wrong:
  *
- * 1. **Consumption fires at WORK-ORDER completion, never per run.** A laser
- *    child WO carries one operation per nest, so finishing nest 1 of 3 deducts
- *    nothing — all three flush when the last operation closes the work order.
- *    The copy here says "deducts when the work order finishes", never "will
- *    deduct now".
+ * 1. **Consumption fires when an OPERATION completes, and never per run.** An
+ *    operation-scoped tie deducts the moment its own operation closes — a laser
+ *    child WO carries one operation per nest, so finishing nest 1 of 3 takes
+ *    nest 1's sheets out of stock right then, not at the end of the job.
+ *    Work-order completion re-runs the whole reconcile as a SELF-HEAL, and is
+ *    still the moment a tie scoped to the WHOLE WORK ORDER (the "Whole work
+ *    order" scope below) drains, through the completion backflush. What never
+ *    happens is a per-run deduction: reporting runs on an open operation posts
+ *    nothing, because an in-progress operation is still reducible and
+ *    consumption never auto-reverses. This panel spans BOTH scopes, so its copy
+ *    has to name both timings rather than picking one.
  * 2. **`qty_consumed` is a CACHE.** The authoritative consumed total is the sum
  *    of `inventory_transactions` carrying this allocation's `allocation_id`, so
  *    the column is labelled "Consumed (reported)" and must not be read as a
@@ -437,8 +443,9 @@ export default function MaterialTiesPanel({ workOrderId, workOrderUpdatedAt, can
         <div className="min-w-0">
           <h2 className="card-title">Material Ties</h2>
           <p className="card-subtitle">
-            Stock material tied to this work order. Tied material is deducted when the{' '}
-            <strong className="text-slate-300">work order</strong> finishes — not as each operation completes.
+            Stock material tied to this work order. A tie scoped to an operation is deducted when that{' '}
+            <strong className="text-slate-300">operation</strong> completes — not per run. A whole-work-order tie
+            drains when the work order finishes.
           </p>
         </div>
         {openTies.length > 0 && (
@@ -605,10 +612,14 @@ export default function MaterialTiesPanel({ workOrderId, workOrderUpdatedAt, can
               </h3>
             </div>
             <div className="modal-body space-y-3">
+              {/* No timing word on purpose: this dialog is reached from both
+                  scopes, and an operation-scoped tie stops drawing at its
+                  operation's completion while a whole-work-order tie stops at
+                  the job's. "Nothing further" is true of both. */}
               <p className="text-sm text-slate-300">
-                This work order will stop drawing {untieTarget.part_number || 'this material'} from stock when it
-                finishes. The tie is cancelled, never deleted, so any consumption already posted keeps its
-                traceability link.
+                Nothing further will be drawn from stock for{' '}
+                {untieTarget.part_number || 'this material'} on this work order. The tie is cancelled, never
+                deleted, so any consumption already posted keeps its traceability link.
               </p>
               <p className="text-xs text-slate-500">
                 Refused if anything has already been consumed against it — reversing a posted consumption is a

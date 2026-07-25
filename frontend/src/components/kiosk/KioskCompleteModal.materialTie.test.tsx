@@ -5,9 +5,11 @@
  * pinned here is the WIRING and the COPY, because both are the parts that get a
  * shop floor into trouble:
  *  - an untied operation renders NOTHING (no placeholder, no nag);
- *  - the notice says material deducts when the WORK ORDER finishes, never that
- *    it is deducting now — a laser child WO has one operation per nest, so
- *    completing nest 1 of 3 moves no stock at all;
+ *  - the notice says material deducts when THIS OPERATION completes — a laser
+ *    child WO has one operation per nest, so completing nest 1 of 3 takes nest
+ *    1's sheets out of stock on this very tap. It must not slip back to "when
+ *    the work order finishes" (understates), and it must not drift to per-run
+ *    (over-states: reporting runs on an open operation posts nothing);
  *  - the GOOD keypad does not move the number (/complete asserts
  *    `quantity_complete = quantity_ordered`), while the SCRAP keypad does, and
  *    the UI says why;
@@ -72,14 +74,25 @@ describe('KioskCompleteModal — material deduction notice', () => {
     expect(screen.queryByTestId('kiosk-complete-material')).not.toBeInTheDocument();
   });
 
-  it('names the WORK ORDER whose completion deducts, and never claims it is deducting now', () => {
+  it('says THIS operation completing is what deducts, and names the job as context', () => {
     renderModal({ materialTies: [TIE], operationScrapped: 0 });
 
     const notice = screen.getByTestId('kiosk-complete-material');
-    expect(notice).toHaveTextContent('Material — deducts when WO-2026-0142 finishes');
+    expect(notice).toHaveTextContent('Material — deducts when you complete this operation on WO-2026-0142');
     expect(notice).toHaveTextContent('5 EA · SHT-.125-304');
-    expect(notice).toHaveTextContent('nothing leaves stock until the last operation on this work order completes');
-    expect(notice.textContent).not.toMatch(/deducting now|will deduct now/i);
+    expect(notice).toHaveTextContent('this leaves stock when the operation completes, not as each run is reported');
+  });
+
+  it('neither defers the deduction to the work order nor promises it per run', () => {
+    // Both failure directions on one screen. "when WO-#### finishes" understates
+    // (this nest's sheets go now); "per run" over-states (nothing posts until
+    // the operation flips COMPLETE — an in-progress operation is still
+    // reducible and consumption never auto-reverses).
+    renderModal({ materialTies: [TIE], operationScrapped: 0 });
+
+    const text = screen.getByTestId('kiosk-complete-material').textContent || '';
+    expect(text).not.toMatch(/finishes/i);
+    expect(text).not.toMatch(/per run|each run completes|deducting now/i);
   });
 
   it('is computed from the ORDERED quantity — the good keypad does not move it', async () => {

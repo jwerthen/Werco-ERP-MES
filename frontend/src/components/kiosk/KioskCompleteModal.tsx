@@ -258,13 +258,17 @@ export default function KioskCompleteModal({
           </div>
         )}
 
-        {/* Material deduction notice — INFORMATIONAL ONLY.
-            Never gates the CTA (a shortage never blocks production) and never
-            claims material has moved. Consumption fires at WORK-ORDER
-            completion, so on a laser child WO (one operation per nest)
-            finishing this nest deducts nothing until the last one closes the
-            work order — hence "deducts when WO-#### finishes", never "this will
-            deduct now". Untied operations render nothing at all. */}
+        {/* Material deduction notice — INFORMATIONAL ONLY. It never gates the
+            CTA below: a shortage does not block production, it drives the lot
+            negative and writes ALLOCATION_SHORTAGE.
+
+            Consumption fires when THIS OPERATION completes, so on a laser child
+            WO (one operation per nest) the sheets for this nest leave stock on
+            this very tap — which is why the copy here is allowed the present
+            tense the board chip is not. What it must NOT drift into is "per
+            run": reporting runs on a still-open operation posts nothing (an
+            in-progress operation is still reducible and consumption never
+            auto-reverses). Untied operations render nothing at all. */}
         {prediction && prediction.lines.length > 0 && (
           <div
             data-testid="kiosk-complete-material"
