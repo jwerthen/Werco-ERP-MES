@@ -589,8 +589,9 @@
   toggle is recorded as an `egress_enabled` / `egress_disabled` status change. See
   `docs/THERMAL_LABEL_PRINTING.md`.
 - [x] AI document-extraction outbound egress is a **per-company kill switch** (SC-3.13.1 boundary /
-  CUI-egress control) — the AI analogue of the carrier and print switches above, completing the set
-  of three egress kill switches (`allow_carrier_egress` / `allow_print_egress` / `allow_ai_egress`).
+  CUI-egress control) — the AI analogue of the carrier and print switches above, one of the **four**
+  egress kill switches (`allow_carrier_egress` / `allow_print_egress` / `allow_ai_egress` /
+  `allow_sms_egress`; the SMS switch is the newest — see the bullet below it).
   `allow_ai_egress` on `Company` (`companies`) is `nullable=False, default=False,
   server_default="false"`; it gates **all** outbound AI document-extraction egress to the Anthropic
   API. Enforcement is a **single fail-closed point** in the shared LLM client
@@ -607,6 +608,41 @@
   `054_company_allow_ai_egress` (not an audited user action — see the data-flow note below for the
   auditor sign-off item on the grandfathered-ON default). See the **Data-flow note (AI extraction
   egress)** below and `docs/AI_QUOTING_AGENT_RUNBOOK.md`.
+- [x] SMS notification outbound egress is a **per-company kill switch** (SC-3.13.1 boundary /
+  CUI-egress control) — the **fourth** egress boundary, added with the notification SMS channel.
+  `allow_sms_egress` on `Company` (`companies`) is `nullable=False, default=False,
+  server_default="false"`; it gates **all** outbound SMS to Twilio. Enforcement is a **single
+  fail-closed point** in `app/services/sms_service.py` (`_sms_egress_allowed` → the send raises
+  before any Twilio call), and it is **stricter than the AI analogue**: an unresolvable tenant
+  returns `False` (deny), because every SMS caller has a tenant and a missing one is a bug that must
+  not egress. The flag flips only via `PUT /api/v1/companies/me/sms-egress` (**ADMIN-only**, for
+  symmetry with the carrier/print/AI controls) and the flip is recorded on the tamper-evident
+  `audit_log` as both a `log_update` and a status change. **Default posture is OFF for ALL tenants,
+  new and existing — there is no grandfathering backfill** (deliberately unlike `054`'s AI
+  backfill): SMS is a brand-new capability, so default-OFF is the correct final state everywhere.
+  A second, independent control sits on top: SMS is **per-user opt-in** and inert without a stored
+  phone number, and only catalog events flagged `sms_eligible` may ever send. See the **Data-flow
+  note (SMS notification egress)** below and `docs/NOTIFICATIONS.md`.
+
+**Data-flow note (SMS notification egress — SC-3.13.1 boundary):**
+- **What crosses the boundary to Twilio:** (1) the recipient's **mobile phone number** (an employee
+  PII element, stored E.164), and (2) a deliberately **terse, generic message body**. Nothing else.
+- The body is machine-composed from exactly two inputs — the **catalog event label** and a
+  **sanitized record identifier** — never from caller-supplied free text. Format:
+  `Werco: {identifier} - {label}. Log in to view.` (e.g. `Werco: WO-1042 - Work order blocked / on
+  hold. Log in to view.`). The identifier passes an allowlist accepting only record-number shapes;
+  anything free-text-like is dropped and the body degrades to the bare label. **No customer names,
+  no part descriptions, no quantities, no drawing/spec text** can reach the carrier. The builder is
+  a single function (`app/services/sms_content.py`) so the rule has one auditable enforcement point.
+- Enforcement is fail-closed and layered: company egress flag → per-user opt-in → stored phone →
+  `sms_eligible` event. With egress OFF, **no request leaves the boundary**.
+- Delivery provenance is retained for audit: each attempt writes a tenant-scoped `notification_logs`
+  row carrying the Twilio message SID and provider status, tying a Werco record to the carrier's own.
+- **Auditor sign-off item:** enabling `allow_sms_egress` adds a commercial telecom carrier to the
+  assessed boundary. Werco's posture is that the transmitted content is deliberately non-CUI (an
+  identifier plus an event label), but the *decision* that this content class may traverse SMS —
+  and the treatment of employee mobile numbers — should be confirmed in the next CUI review.
+  Werco's own admin UI requires an explicit confirmation naming this trade-off before the flag flips.
 
 **Data-flow note (AI extraction egress — SC-3.13.1 boundary):**
 - During AI document extraction, the **extracted text** of an uploaded document egresses to the

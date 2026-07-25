@@ -7,6 +7,13 @@ export interface User {
   last_name: string;
   role: UserRole;
   department?: string;
+  /**
+   * E.164 mobile number used for SMS notifications. FIELD-MINIMIZED server-side:
+   * it is serialized only on the self-profile response and admin user-management
+   * responses — never on general user lists or mention search — so it is optional
+   * here and absent on most payloads.
+   */
+  phone?: string | null;
   is_active: boolean;
   is_superuser: boolean;
   company_id?: number;
@@ -37,6 +44,14 @@ export interface Company {
    * defaults OFF for new companies (existing companies grandfathered ON).
    */
   allow_ai_egress: boolean;
+  /**
+   * Per-company SMS egress kill switch (Twilio). When false, no SMS body leaves
+   * the system boundary to the commercial carrier and every SMS notification is
+   * suppressed server-side (fail-closed). CUI/compliance control; defaults OFF.
+   * Optional on the type because older cached CompanyResponse payloads predate
+   * the column — treat a missing value as OFF.
+   */
+  allow_sms_egress?: boolean;
   created_at?: string;
   updated_at?: string;
 }

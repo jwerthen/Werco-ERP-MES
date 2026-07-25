@@ -571,6 +571,46 @@ export const visitorManualEntrySchema = z
   });
 
 // ============================================================================
+// SMS / NOTIFICATION SETTINGS
+// ============================================================================
+
+/** E.164: `+`, a non-zero country digit, then 7–14 more digits (max 15 total). */
+const E164_PATTERN = /^\+[1-9]\d{7,14}$/;
+
+/**
+ * Strip human formatting and coerce the common US shorthands to E.164 so the
+ * field accepts `(512) 555-0142`, `512-555-0142`, and `1 512 555 0142` as well
+ * as a fully-qualified `+15125550142`. Anything else must already carry its own
+ * `+<country code>`; the SERVER remains the source of truth (it re-validates and
+ * normalizes with `phonenumbers` and its 422 detail is surfaced verbatim).
+ * Returns `''` for a blank input, which means "clear my number".
+ */
+export const normalizePhoneInput = (raw: string | null | undefined): string => {
+  const cleaned = (raw ?? '').replace(/[\s().\-–—]/g, '').trim();
+  if (!cleaned) return '';
+  if (/^\d{10}$/.test(cleaned)) return `+1${cleaned}`;
+  if (/^1\d{10}$/.test(cleaned)) return `+${cleaned}`;
+  return cleaned;
+};
+
+/** True when the raw field value normalizes to a plausible E.164 number. */
+export const isValidPhoneInput = (raw: string | null | undefined): boolean =>
+  E164_PATTERN.test(normalizePhoneInput(raw));
+
+/**
+ * My Settings → mobile number (SMS). An empty value is valid and means "remove
+ * my number", which also stops every SMS notification for this user.
+ */
+export const smsPhoneSchema = z.object({
+  phone: z
+    .string()
+    .trim()
+    .refine((value) => value === '' || isValidPhoneInput(value), {
+      error: 'Enter a mobile number with its country code, e.g. +1 512 555 0142',
+    }),
+});
+
+// ============================================================================
 // TYPES
 // ============================================================================
 
@@ -592,3 +632,4 @@ export type VendorFormData = z.infer<typeof vendorSchema>;
 // form fields hold before validation).
 export type VisitorManualEntryFormData = z.output<typeof visitorManualEntrySchema>;
 export type VisitorManualEntryFormInput = z.input<typeof visitorManualEntrySchema>;
+export type SmsPhoneFormData = z.infer<typeof smsPhoneSchema>;

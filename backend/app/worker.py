@@ -30,6 +30,43 @@ async def send_email_job(ctx, to: str, subject: str, body: str, template: str = 
     return await send_email_task(to, subject, body, template, context)
 
 
+async def send_sms_job(
+    ctx,
+    *,
+    company_id: int,
+    user_id: int,
+    body: str,
+    notification_log_id: int = None,
+    event_type: str = "sms",
+):
+    """Send one notification SMS via Twilio (gated by ``Company.allow_sms_egress``).
+
+    Enqueued by the notification dispatcher's SMS leg. Takes ``user_id`` rather than a
+    phone number so PII stays out of the Redis payload and the recipient is re-resolved
+    tenant-scoped + active at send time. Re-raises on transport failure so ARQ retries.
+    """
+    from app.jobs.sms_jobs import send_sms_task
+
+    return await send_sms_task(
+        company_id=company_id,
+        user_id=user_id,
+        body=body,
+        notification_log_id=notification_log_id,
+        event_type=event_type,
+    )
+
+
+async def send_sms_overflow_job(ctx, *, company_id: int, user_id: int):
+    """Storm-control collapse: one "…and N more" SMS standing in for suppressed alerts.
+
+    Enqueued deferred (``SMS_COLLAPSE_DELAY_SECONDS``) by the dispatcher when a user's
+    per-hour SMS cap is first exceeded.
+    """
+    from app.jobs.sms_jobs import send_sms_overflow_task
+
+    return await send_sms_overflow_task(company_id=company_id, user_id=user_id)
+
+
 async def send_webhook_job(ctx, webhook_id: int, event: str, payload: dict, company_id: int = None):
     """Send webhook job"""
     from app.jobs.webhook_jobs import send_webhook_task
@@ -290,6 +327,8 @@ class WorkerSettings:
     # Job functions
     functions = [
         send_email_job,
+        send_sms_job,
+        send_sms_overflow_job,
         send_webhook_job,
         run_mrp_job,
         run_mrp_auto_draft_job,

@@ -2,9 +2,11 @@
 
 Operational runbook for the Werco notification pipeline. This documents **PR 1 (Foundation +
 in-app inbox)** — the transactional outbox, the event catalog, the in-app and email channels, and
-the compliance invariants. Later PRs extend this file (see [Deferred / roadmap](#deferred--roadmap)
-at the end). The authoritative design spec is [NOTIFICATIONS_PLAN.md](NOTIFICATIONS_PLAN.md); this
-runbook describes what is actually implemented.
+the compliance invariants — and **PR 4 (SMS / Twilio)**, the terse CUI-safe SMS channel (see
+[SMS channel](#sms-channel-twilio)). Later PRs extend this file (see
+[Deferred / roadmap](#deferred--roadmap) at the end). The authoritative design spec is
+[NOTIFICATIONS_PLAN.md](NOTIFICATIONS_PLAN.md); this runbook describes what is actually
+implemented.
 
 Convention: store UTC, serve UTC (`Z`), display Central — inbox timestamps follow the same rule as
 the rest of the app.
@@ -22,6 +24,22 @@ the rest of the app.
   templates, absolute deep links).
 - The **SMS** kill switch column (`Company.allow_sms_egress`, default OFF) — **no SMS is sent** in
   PR 1 (Twilio arrives in PR 4).
+
+## What PR 4 adds
+
+- The **SMS channel**, live over Twilio (`services/sms_service.py` + `jobs/sms_jobs.py`), gated by
+  **two** default-off switches — see [SMS channel](#sms-channel-twilio).
+- The single **CUI-safe body builder** (`services/sms_content.py`) and its standing content rule
+  (below, alongside the email rule).
+- **`User.phone`** made real (E.164, validated with `phonenumbers`), self-service at
+  `PUT /users/me/phone` and on the admin user create/update paths — where `phone` had been a phantom
+  schema field that was silently dropped.
+- **Self-service preferences** for the SMS channel (`GET`/`PUT /users/me/notification-preferences`)
+  plus `POST /users/me/test-sms`, and the ADMIN-only `PUT /companies/me/sms-egress` kill-switch
+  toggle. UI: **My Settings** (`/settings`, all roles) and **Admin Settings → SMS Privacy**
+  (`/admin/settings?tab=smsprivacy`).
+- **`NotificationLog.provider_message_id` / `provider_status`** — the Twilio message SID + provider
+  status on each delivery row.
 
 ---
 
@@ -184,8 +202,144 @@ is skipped — the `notified_at` marker still bounds duplicates).
     built from `FRONTEND_BASE_URL` (see [ENVIRONMENT_VARIABLES.md](ENVIRONMENT_VARIABLES.md#email-smtp)).
     Empty `FRONTEND_BASE_URL` → the absolute link/footer are omitted.
 - **Digest** — a `DigestQueue` row; the daily digest cron (8:00) is unchanged in PR 1.
-- **SMS** — resolved but a **no-op stub** in PR 1. The `Company.allow_sms_egress` kill switch column
-  exists (default OFF); Twilio, `User.phone` UI, storm caps, and the admin toggle are PR 4.
+- **SMS** — live over Twilio as of PR 4. The leg fires only when **all** of the following hold:
+  the catalog entry is `sms_eligible`, the user has explicitly enabled `sms` for that event
+  (no catalog entry ships `sms` in its defaults, so this is always an opt-in), recurring
+  suppression is clear, and the user has a `phone` on file. It writes a `NotificationLog` row and
+  enqueues `send_sms_job`; the `allow_sms_egress` kill switch is then re-checked fail-closed inside
+  `sms_service` before anything leaves the boundary. Full detail in
+  [SMS channel](#sms-channel-twilio).
+
+---
+
+## SMS channel (Twilio)
+
+### Two default-off gates — SMS does nothing until both are on
+
+Read this first when SMS "isn't working". Nothing is broken by default; **it is off by design, twice
+over**:
+
+1. **Per-company** — `Company.allow_sms_egress` (Boolean, non-null, **default OFF** for every
+   tenant). Flipped only by an **ADMIN** via `PUT /companies/me/sms-egress` (UI: Admin Settings →
+   SMS Privacy). Twilio sits outside the CUI boundary, so this is a kill switch in the same family
+   as `allow_ai_egress` / `allow_carrier_egress` / `allow_print_egress`, and it is re-checked
+   **fail-closed on every send** — turning it off also stops messages already queued in ARQ.
+2. **Per-user** — an explicit opt-in **plus** a saved phone number. **No catalog entry ships `sms`
+   in its `default_channels`**, so the SMS leg is unreachable until the user turns it on at
+   `PUT /users/me/notification-preferences` (UI: My Settings), and a toggle without a phone on file
+   is inert (`_fan_out` skips the leg when `user.phone` is empty).
+
+On top of both: only events flagged **`sms_eligible`** in the catalog can ever send. Today that is
+`wo.blocker_created`, `wo.blocker_escalated`, `ncr.created`, `inspection.failed`,
+`downtime.started` — plus `quality.hold`, which is eligible but [deliberately
+dormant](#what-actually-fires-in-pr-1). Enabling `sms` for a non-eligible event is refused with
+**400**.
+
+### How a message flows
+
+```
+dispatcher SMS leg (_dispatch_sms, notification_dispatch.py)
+  1. build the body    → sms_content.build_sms_body(label, identifier)   (CUI-safe, see below)
+  2. storm check       → reserve_sms_quota(user_id)      (Redis, 5/hour per user)
+  3. write NotificationLog(channel="sms", sent=False, company_id from the EVENT)
+       └─ over cap? record WHY on that row, arm the deferred collapse, STOP (no enqueue)
+  4. flush (assign the log id), then enqueue send_sms_job(..., notification_log_id=<id>)
+       with _defer_by = 2s  ── so the row is COMMITTED before a worker looks it up
+                    │
+  ARQ worker: send_sms_job → jobs/sms_jobs.send_sms_task
+  5. re-resolve the recipient: User.id == user_id AND company_id AND is_active
+  6. send_sms(db, company_id, to=user.phone, body)   → egress gate → Twilio
+  7. UPDATE that same NotificationLog row: sent / error / provider_message_id / provider_status
+```
+
+Load-bearing details:
+
+- **One attempt = one `NotificationLog` row, retries included.** The dispatcher creates the row
+  (`sent=False`) and hands the job its id; `_record_delivery` **updates** that row rather than
+  appending one per ARQ attempt. The lookup is tenant-scoped (`id` **and** `company_id`), so a job
+  can never touch another tenant's log row. If the id is absent (the storm-collapse message), a
+  fresh row is inserted.
+- **The 2-second send deferral** (`_SMS_ENQUEUE_DEFER_SECONDS`) exists so the pre-created row is
+  committed before a (possibly different) worker process reads it. Without it a fast pickup would
+  miss the uncommitted row and insert a second one. Delivery is correct either way; the defer is
+  what keeps the delivery log one-row-per-attempt.
+- **The job takes `user_id`, never a phone number.** PII stays out of the Redis job payload, and the
+  recipient is re-resolved **tenant-scoped + `is_active`** at send time — so a user deactivated
+  between dispatch and delivery is not messaged (recorded as `recipient is inactive or has no phone
+  number on file`).
+- The `company_id` on every log row is stamped **from the triggering event**, never from the
+  recipient.
+
+### Storm control
+
+`SMS_HOURLY_CAP_PER_USER = 5` messages per user per hour — a Redis counter over a fixed
+`SMS_QUOTA_WINDOW_SECONDS = 3600` window that starts at the user's first SMS and expires with it.
+SMS here is critical-events-only and opt-in, so this is a storm valve, not a quota.
+
+- Messages **1–5** in the window send normally.
+- **Over cap**, the individual message is suppressed — but *visibly*: the `NotificationLog` row is
+  still written with `error = "suppressed: per-user SMS cap (5/hour) reached"`, so **"why didn't I
+  get an SMS?" is answerable from the delivery log** rather than being a silent drop.
+- The **first** overflow in a window arms **one deferred collapse message**
+  (`send_sms_overflow_job`, deferred `SMS_COLLAPSE_DELAY_SECONDS = 120`s so the count reflects the
+  whole burst): `Werco: 7 more alerts - check the app. Log in to view.` It carries **no identifiers
+  at all**. The collapse **bypasses the per-user cap** — it *is* the cap's safety valve — but still
+  passes through the egress gate like any other send.
+- The collapse job **reads** the overflow counter, sends, and only then **settles** it
+  (`decrby`, not delete) — so a retried collapse never loses alerts, and messages suppressed while
+  the collapse was in flight roll into the next one.
+
+### The two opposite failure postures (the subtlest thing here)
+
+Two Redis/DB-dependent controls sit next to each other in this path and fail in **opposite**
+directions. This is deliberate; do not "make them consistent".
+
+| Control | Where | On failure | Why |
+|---|---|---|---|
+| **Egress gate** (`allow_sms_egress`) | `sms_service._sms_egress_allowed` | **FAILS CLOSED** — deny | It protects the **CUI boundary**. A control that cannot verify "allowed" must deny. Unknown tenant, missing company row, or a DB exception all return `False`, and `_sms_egress_allowed(db, None)` is `False` — **deliberately stricter than `llm_client._ai_egress_allowed`**, which tolerates the no-tenant edge. Every SMS caller has a tenant (the dispatcher stamps it from the event; the API path takes it from `get_current_company_id`), so a missing one is a bug, and a bug must not egress. |
+| **Storm cap** (`reserve_sms_quota`) | `sms_service` | **FAILS OPEN** — send + `WARNING` | If Redis is down the counter cannot be read. SMS is critical-only, opt-in, and kill-switch-gated, so **an extra message beats dropping a critical alert** (an AS9100D awareness control). The per-recipient/channel dedup window (also fail-open) still applies, and the cap resumes the moment Redis returns. |
+
+### Twilio configuration
+
+Credentials come **exclusively** from `Settings`/environment — nothing is hardcoded. See
+[ENVIRONMENT_VARIABLES.md → SMS (Twilio)](ENVIRONMENT_VARIABLES.md#sms-twilio).
+
+- **Auth mode 1 (preferred)** — `TWILIO_ACCOUNT_SID` + `TWILIO_API_KEY_SID` (an `SK…` key) +
+  `TWILIO_API_KEY_SECRET`. Revocable per key without rotating the account credential; used whenever
+  **both** API-key values are set.
+- **Auth mode 2 (legacy fallback)** — `TWILIO_ACCOUNT_SID` + `TWILIO_AUTH_TOKEN`.
+- **Sender resolution** — `TWILIO_MESSAGING_SERVICE_SID` wins over `TWILIO_FROM_NUMBER`.
+- **Unconfigured is a soft skip, not a failure.** With no credentials (or no sender), `send_sms`
+  logs and returns `SMSResult(status="skipped")` **without raising** — the same posture as the
+  unconfigured-SMTP path, so a dev/test environment never spams ARQ retries. Credentials present but
+  the `twilio` package missing is likewise a soft skip (`reason="library_missing"`), logged as an
+  error because it is a deployment defect.
+- The client is a lazily-built module-level singleton (`get_twilio_client`); `reset_twilio_client()`
+  drops it for credential rotation or tests.
+- New backend dependencies (`backend/requirements.txt`): `twilio` and `phonenumbers` (E.164
+  parsing/validation). Both are pinned; rebuild the **worker** image too, or its SMS jobs soft-skip
+  with `library_missing`.
+
+### Error handling
+
+| Outcome | Raised by `send_sms` | Job behavior |
+|---|---|---|
+| Egress disabled / unresolvable tenant | `SMSEgressDisabledError` | Terminal — record `SMS egress is disabled for this company`, no retry |
+| Unparseable stored number | `InvalidPhoneNumberError` | Terminal — record `invalid phone number on file: …` |
+| **Twilio 4xx other than 429** (bad number, opted-out recipient, unpermitted region) | `SMSPermanentError` (carries `status`/`code`) | **Terminal — recorded with `provider_status`, no retry burned** |
+| **Twilio 5xx / 429 / network** | the original exception propagates | **Re-raised → ARQ retries** (the attempt is recorded first as `transport failure (will retry): …`) |
+| Twilio unconfigured / SDK missing | — (returns `skipped`) | Recorded as `skipped: not_configured` / `skipped: library_missing` |
+
+Phone numbers are never logged in full — `mask_phone()` renders them as `***1234`.
+
+### Phone is field-minimized
+
+`User.phone` serializes in **exactly one schema**: the local `UserResponse` in
+`api/endpoints/users.py`, used only by the self-profile routes (`GET /users/me`, the
+`/users/me/*` self-service routes) and the ADMIN/MANAGER user-management routes. General user
+serialization goes through `app.schemas.user.UserResponse` (auth/token/platform browse) and the
+per-domain `UserSummary`-style schemas — **none of which expose a phone number**, and neither will
+PR 5's mention-search. Keep it that way when adding user-shaped responses.
 
 ---
 
@@ -201,7 +355,43 @@ label; the `OperationalEvent` payload is itself redaction-filtered at emit time.
 inside your assessed boundary (e.g. GCC-High / on-prem), this rule can be relaxed to rich templates —
 record that boundary decision here first.
 
-*(SMS terse-body rule is documented when PR 4 lands.)*
+### Terse CUI-safe SMS body rule (plan §3.4 / §11.1)
+
+A **standing rule**, alongside the email rule above — not a per-call judgement. Twilio is outside
+the CUI boundary and an SMS lands on an unlocked lock screen, so a body may carry **only**:
+
+1. the record **identifier** (e.g. `WO-1042`, `NCR-2026-014`),
+2. the catalog **event label** (e.g. "Work order blocked / on hold"), and
+3. the **"log in to view"** pointer.
+
+```
+Werco: {identifier} - {catalog label}. Log in to view.
+Werco: {catalog label}. Log in to view.            # when no safe identifier is present
+```
+
+**Never**: customer names, part numbers or descriptions, quantities, prices, operator names,
+free-text reasons, or any other field detail. The detail lives behind the login.
+
+`services/sms_content.py` is the **only** place an SMS body is built, and it enforces the rule
+structurally:
+
+- **It deliberately does not accept the caller-composed `title` / `body`.** Those are composed
+  freely by crons and direct dispatchers and legitimately carry equipment names, quote numbers, and
+  day counts. The body is assembled from the catalog `label` + a sanitized payload identifier only,
+  so a future payload key carrying free text can never reach an SMS.
+- **`safe_identifier()`** accepts only record-number shapes — must start alphanumeric, then only
+  `A-Z a-z 0-9 . _ / # -` and spaces, ≤ 40 chars. Anything free-text-like is **dropped** and the
+  body degrades to the label alone. The identifier itself comes from the fixed
+  `_IDENTIFIER_KEYS` allowlist on the event payload (work-order / NCR / receipt / PO / FAI / CAR /
+  shipment / quote number, equipment id, blocker id).
+- **160-char cap** (`SMS_MAX_LENGTH`) = one GSM-7 segment, so a storm cannot silently multiply into
+  per-segment billing. The **label truncates before the "log in" pointer is dropped** — every
+  message keeps its pointer to the app.
+- The storm-collapse body (`build_overflow_sms_body`) and the test-SMS body
+  (`build_test_sms_body`) carry no identifiers at all, so they are CUI-safe by construction.
+
+Everything in that module is pure and side-effect free, so the content rule is unit-testable and
+auditable in isolation.
 
 ### Email deliverability checklist (SPF / DKIM / DMARC)
 
@@ -240,8 +430,22 @@ requirements (enforced in `notification_dispatch.py` / `notification_catalog.py`
 - [ ] **Mark-read is NOT audited** — read state is UI state, not domain state (no `audit_log` write).
 - [ ] **Mandatory channels forced on** — a `mandatory_channel` entry can't be fully muted (e.g.
       `ncr.created` / `inspection.failed` force in-app to Quality; `account.locked` forces email).
-- [ ] **SMS egress default-off** — `Company.allow_sms_egress` added, fail-closed; no Twilio calls in
-      PR 1.
+- [ ] **SMS egress default-off, fail-closed** — `Company.allow_sms_egress` is re-resolved before
+      **every** Twilio call in `sms_service._sms_egress_allowed`; unknown tenant, missing company
+      row, `company_id is None`, or any exception all **deny**. No phone number and no body leave
+      the boundary on a denial.
+- [ ] **SMS bodies built only by `sms_content.build_sms_body`** — catalog label + sanitized
+      identifier, never the caller-composed title/body (see the terse-body rule above). Adding
+      another SMS call site means routing it through that builder.
+- [ ] **SMS is doubly opt-in** — per-company kill switch **and** per-user opt-in + phone; only
+      `sms_eligible` catalog events are offerable, and the API rejects enabling `sms` on a
+      non-eligible event with **400**.
+- [ ] **Phone changes are audited** — self-service `PUT /users/me/phone` and the admin user
+      create/update paths write `audit_log` rows (a silently redirected alert channel would be an
+      audit gap). The **egress toggle is double-audited** (field update **and**
+      `sms_egress_enabled` / `sms_egress_disabled` status change).
+- [ ] **Phone is field-minimized** — it serializes only in the self-profile / admin
+      user-management `UserResponse`, never in general user lists (see above).
 
 ---
 
@@ -251,8 +455,11 @@ requirements (enforced in `notification_dispatch.py` / `notification_catalog.py`
 
 `relay_pending_notifications_job` runs **every 5 minutes** (`worker.py` cron
 `minute=set(range(0, 60, 5))`) as the outbox backstop. The new ARQ jobs are
-`dispatch_notification_job`, `relay_pending_notifications_job`, and
-`dispatch_notification_direct_job`. The four recurring detector crons (calibration 7:00, late-WO
+`dispatch_notification_job`, `relay_pending_notifications_job`,
+`dispatch_notification_direct_job`, and — as of PR 4 — `send_sms_job` and
+`send_sms_overflow_job` (both registered in `worker.py::WorkerSettings.functions`; a worker deployed
+without them will leave SMS `NotificationLog` rows stuck at `sent=False`).
+The four recurring detector crons (calibration 7:00, late-WO
 8:00, low-stock 7:30, quote-expiring 9:00) and the MRP/scheduling jobs were repointed onto the new
 dispatcher — the legacy blocker `_create_notification_logs` write and the completion-signal
 notification leg were removed so events don't double-fire (the webhook leg stays).
@@ -267,6 +474,52 @@ notification leg were removed so events don't double-fire (the webhook leg stays
   excluded from unread counts anyway).
 
 The tamper-evident `audit_log` is never purged by this job (archived separately).
+
+### Turning SMS on (end-to-end)
+
+Four steps, in order. Skipping any one leaves SMS silently inert.
+
+1. **Ops — set the Twilio env vars** on the **Railway backend service** (and the worker, if it runs
+   as a separate service): `TWILIO_ACCOUNT_SID` + `TWILIO_API_KEY_SID` + `TWILIO_API_KEY_SECRET`
+   (or the legacy `TWILIO_AUTH_TOKEN`), plus `TWILIO_MESSAGING_SERVICE_SID` **or**
+   `TWILIO_FROM_NUMBER`. Names and combinations in
+   [ENVIRONMENT_VARIABLES.md → SMS (Twilio)](ENVIRONMENT_VARIABLES.md#sms-twilio). Never commit
+   values. Redeploy so the settings are picked up.
+2. **Admin — enable company egress**: Admin Settings → **SMS Privacy**
+   (`/admin/settings?tab=smsprivacy`) → turn on `allow_sms_egress` (confirm-on-enable). This is a
+   **CUI-boundary decision** and lands on the tamper-evident audit trail twice.
+3. **User — save a phone + opt in**: My Settings (`/settings`) → enter the phone number (stored
+   E.164; a number that can't be parsed is rejected with **400**) → enable **SMS** on the
+   SMS-eligible events they want.
+4. **User — click "Send test SMS"** (`POST /users/me/test-sms`, rate-limited **3/minute**). It
+   targets the caller's own number only, goes through the same `sms_service` path as real alerts,
+   and writes a `notification_logs` row (`event_type = "sms.test"`).
+
+### Diagnosing "no SMS arrived"
+
+Walk these in order — the first four are configuration, not bugs:
+
+1. **Company egress** — is `allow_sms_egress` ON for that tenant (Admin Settings → SMS Privacy)?
+   A denial is recorded as `SMS egress is disabled for this company` on the delivery row.
+2. **Phone on file** — `GET /users/me/notification-preferences` returns `phone`,
+   `sms_egress_enabled`, and `sms_configured`, which is exactly what the UI uses to explain an
+   inert toggle. No phone ⇒ the dispatcher skips the SMS leg entirely (no row is written).
+3. **Event eligibility** — is the event `sms_eligible` in the catalog
+   (`GET /notifications/catalog`)? Non-eligible events cannot be enabled (400).
+4. **User opt-in** — SMS is never in a catalog default; confirm the per-event `sms` toggle is on.
+5. **Storm cap** — look for `suppressed: per-user SMS cap (5/hour) reached` on the
+   `notification_logs` row, and for the collapse message (`event_type = "sms.storm_collapse"`).
+6. **Delivery rows** — query the `notification_logs` **table** for `channel = "sms"` and the user:
+   `sent`, `error`, `provider_message_id` (Twilio SID), `provider_status` (`queued` / `accepted` /
+   …). `GET /notifications/logs` shows `sent` / `error` / `event_type` but **does not serialize the
+   two provider columns** today (PR 3's admin delivery view is their intended surface), so the SID
+   needs DB access. A Twilio-side delivery failure *after* acceptance is not visible here at all —
+   the delivery-receipt webhook is deferred (see
+   [Known limitations](#known-limitations-carried-to-later-prs)); take the SID to the Twilio console.
+7. **Worker** — `send_sms_job` / `send_sms_overflow_job` must be registered in the running worker;
+   rows stuck at `sent=False` with no `error` mean the job never ran.
+8. **Twilio configured** — `sms_configured` false ⇒ rows read `skipped: not_configured`; the env
+   vars are missing on that service.
 
 ### Migration 072 deploy ordering
 
@@ -290,6 +543,22 @@ JSON normalization of `notification_preferences` to the 4-channel shape.
   additionally has a **24-hour lower bound** (`_RELAY_MAX_AGE_HOURS`) so no sustained backlog can ever
   produce a retroactive burst.
 
+### PR 4 migration (SMS delivery provenance)
+
+PR 4 adds two **nullable, additive** columns to `notification_logs` with **no backfill**:
+
+| Column | Type | Meaning |
+|---|---|---|
+| `provider_message_id` | `String(64)` | The Twilio message SID for an SMS row |
+| `provider_status` | `String(40)` | The provider-reported status at send (`queued` / `accepted` / …) |
+
+Both are channel-agnostic: the email channel leaves them `NULL` today, and a future ESP with message
+ids can reuse them. Because they are nullable with no default, the migration is metadata-only and
+old code neither reads nor writes them — so the usual ordering (**run the migration before the app
+deploy**) is safe, and a rollback is a plain drop. The revision lands as the next Alembic version
+after `072_notifications_foundation` (authored alongside this PR; confirm the exact revision id in
+`backend/alembic/versions/` before deploying).
+
 ---
 
 ## Known limitations (carried to later PRs)
@@ -306,6 +575,15 @@ Surfaced by the PR-1 adversarial review; each is safe in PR 1 and has a designat
   extend suppression to email/SMS-only recipients when it ships editable preferences.
 - **Recurring-detector crons re-read preferences per (recipient × entity)** — a benign N×M of indexed
   point lookups in nightly jobs; batch per-company if these crons ever grow hot.
+- **SMS delivery receipts and inbound STOP are not wired** (PR 4, deliberate — plan §3.4 defers
+  both). `provider_status` records only the status Twilio returned *at send* (`queued`/`accepted`);
+  a later carrier-side failure is visible in the Twilio console, not in `notification_logs`.
+  Opt-out relies on **Twilio's own STOP handling**, which covers the US compliance requirement — a
+  recipient who texts STOP stops receiving messages, but Werco's per-user `sms` toggles still read
+  as ON, so the delivery log will show provider rejections rather than an opt-out state.
+- **`dispatch_direct` callers pass no `sms_identifier`** — an SMS-eligible direct dispatch (crons /
+  MRP / scheduling) would send the label-only body. Harmless today: no currently-wired direct caller
+  targets an SMS-eligible event. Pass `sms_identifier` when one does.
 
 ## Deferred / roadmap
 
@@ -315,9 +593,16 @@ PR 1 is the foundation; the remaining PRs (see [NOTIFICATIONS_PLAN.md §10](NOTI
   **kiosk WS fence** (reject `scope="kiosk"` tokens at WS connect), Layout `onMessage` → badge/toast.
 - **PR 3 — Preferences & settings**: prefs/catalog APIs, My Settings page, admin defaults tab +
   admin-scoped delivery-failure view, digest fixes (30-min cron, WEEKLY, Central-time `digest_time`),
-  one-click unsubscribe.
-- **PR 4 — SMS**: `User.phone` UI + Twilio service/job + the `allow_sms_egress` admin toggle + storm
-  caps; the terse CUI-safe SMS body rule is documented here when it lands.
+  one-click unsubscribe. **Partially pre-landed by PR 4**: the `/settings` page and
+  `GET`/`PUT /users/me/notification-preferences` exist, but the write path owns the **`sms` channel
+  only** (the request model `forbid`s extra keys, so a PR-3-shaped payload fails loudly with 422
+  rather than silently dropping channels). PR 3 widens the same rows — the persisted JSON already
+  keeps the full `{in_app, email, sms, digest}` shape per event, so no migration is needed.
+- **PR 4 — SMS**: ✅ **shipped** — `User.phone` + My Settings UI, the Twilio service/job, the
+  `allow_sms_egress` admin toggle, and storm caps. Documented above:
+  [SMS channel](#sms-channel-twilio) and the terse CUI-safe body rule under
+  [Content rules](#content-rules-compliance). Still deferred from §3.4: the Twilio inbound
+  STOP/opt-out webhook and the delivery-receipt webhook.
 - **PR 5 — Comments & mentions**: `comments` / `comment_mentions` / `entity_watchers`, `<CommentsPanel>`,
   the `comment.mention` / `comment.added` events, per-entity-type RBAC (documented in
   [RBAC_PERMISSIONS.md](RBAC_PERMISSIONS.md) when it lands), auto-watch.

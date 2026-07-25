@@ -7,8 +7,8 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { BellIcon, CheckIcon } from '@heroicons/react/24/outline';
+import { Link, useNavigate } from 'react-router-dom';
+import { BellIcon, CheckIcon, Cog6ToothIcon } from '@heroicons/react/24/outline';
 import api from '../services/api';
 import { DataTable, DataTableColumn, StatusBadge, Button, useToast } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
@@ -246,10 +246,18 @@ export default function Notifications() {
             <p className="text-sm text-slate-400">Your in-app notification inbox</p>
           </div>
         </div>
-        <Button variant="secondary" size="sm" onClick={markAllRead} disabled={unreadOnPage === 0}>
-          <CheckIcon className="h-4 w-4 mr-1.5" aria-hidden="true" />
-          Mark all read
-        </Button>
+        <div className="flex items-center gap-2">
+          <Link to="/settings">
+            <Button variant="secondary" size="sm">
+              <Cog6ToothIcon className="h-4 w-4 mr-1.5" aria-hidden="true" />
+              Notification settings
+            </Button>
+          </Link>
+          <Button variant="secondary" size="sm" onClick={markAllRead} disabled={unreadOnPage === 0}>
+            <CheckIcon className="h-4 w-4 mr-1.5" aria-hidden="true" />
+            Mark all read
+          </Button>
+        </div>
       </div>
 
       <MiniStatStrip className="grid grid-cols-2 lg:grid-cols-3 gap-2">

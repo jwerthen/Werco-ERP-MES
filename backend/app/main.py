@@ -765,6 +765,10 @@ if settings.RATE_LIMIT_ENABLED:
             # covered by the process-global extraction semaphore + global limit.
             "/api/v1/work-orders/laser-nest-packages/standalone/preview": "10/minute",
             "/api/v1/work-orders/laser-nest-packages/standalone/import": "10/minute",
+            # "Send test SMS" (My Settings). Self-targeted and kill-switch-gated, but it
+            # is the one authenticated route that spends real carrier money per call, so
+            # cap it well below anything a human would click.
+            "/api/v1/users/me/test-sms": "3/minute",
         }
         # Single merged source of truth for the path-specific resolver below.
         PATH_RATE_LIMITS = {**AUTH_RATE_LIMITS, **ENDPOINT_RATE_LIMITS}

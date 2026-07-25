@@ -42,6 +42,7 @@ const SetupWizard = lazyWithRetry(() => import('./pages/SetupWizard'));
 const ImportCenter = lazyWithRetry(() => import('./pages/ImportCenter'));
 const ActionInbox = lazyWithRetry(() => import('./pages/ActionInbox'));
 const Notifications = lazyWithRetry(() => import('./pages/Notifications'));
+const MySettings = lazyWithRetry(() => import('./pages/MySettings'));
 const Warehouse = lazyWithRetry(() => import('./pages/Warehouse'));
 const Materials = lazyWithRetry(() => import('./pages/Materials'));
 const MRP = lazyWithRetry(() => import('./pages/MRP'));
@@ -473,6 +474,14 @@ function AppRoutes() {
         <PrivateRoute>
           <Layout>
             <LazyRoute><Notifications /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
+      {/* Per-user notification settings (self-scoped) — all authenticated roles. */}
+      <Route path="/settings" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><MySettings /></LazyRoute>
           </Layout>
         </PrivateRoute>
       } />

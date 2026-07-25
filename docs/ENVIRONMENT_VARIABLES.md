@@ -307,12 +307,12 @@ REDIS_URL=redis://default:xxx@xxx.railway.internal:6379
 > now actually send — **verify SPF/DKIM/DMARC on the `SMTP_FROM` domain** before enabling in prod
 > (deliverability checklist in [docs/NOTIFICATIONS.md](NOTIFICATIONS.md)).
 >
-> **SMS egress kill switch — no env var (PR 1).** The Twilio egress gate is the per-company
-> **database** column `Company.allow_sms_egress` (Boolean, non-null, **default OFF** for every
-> tenant), the same fail-closed pattern as `allow_ai_egress` / `allow_carrier_egress` /
-> `allow_print_egress` — it is a DB flag, not configuration. PR 1 adds the column only; **no SMS is
-> sent** (Twilio credentials `TWILIO_*` and the admin toggle land in PR 4). `User.phone` (E.164) is
-> likewise a new nullable column, inert until PR 4.
+> **SMS egress kill switch — no env var.** The Twilio egress gate is the per-company **database**
+> column `Company.allow_sms_egress` (Boolean, non-null, **default OFF** for every tenant), the same
+> fail-closed pattern as `allow_ai_egress` / `allow_carrier_egress` / `allow_print_egress` — it is a
+> DB flag, not configuration. Setting the `TWILIO_*` variables below is necessary but **not
+> sufficient**: the per-company switch (Admin Settings → SMS Privacy) and a per-user opt-in + phone
+> number are both still required. See **SMS (Twilio)** below.
 
 > **Visitor sign-in tablet — no new variables.** The visitor sign-in feature
 > ([docs/VISITOR_SIGNIN.md](VISITOR_SIGNIN.md)) introduces **no new environment variables**. The
@@ -320,6 +320,49 @@ REDIS_URL=redis://default:xxx@xxx.railway.internal:6379
 > employee only), and the scoped station signin token reuses the existing JWT signing keys
 > (`SECRET_KEY` / `ALGORITHM` under **Security** above) — the same keys that sign access, refresh, and
 > wallboard display tokens.
+
+### SMS (Twilio)
+
+Credentials for the notification **SMS channel** (see
+[docs/NOTIFICATIONS.md → SMS channel](NOTIFICATIONS.md#sms-channel-twilio)). All optional and empty
+by default. Set them on the **Railway backend service** (and the worker service, if it runs
+separately — `send_sms_job` executes there); they are **never committed** —
+`backend/.env.example` ships the names with empty values only.
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `TWILIO_ACCOUNT_SID` | Conditional³ | `""` | Twilio account SID (`AC…`). Required for **either** auth mode — in API-key mode it identifies the account the key acts on |
+| `TWILIO_API_KEY_SID` | Conditional³ | `""` | API-key SID (`SK…`) — **preferred** auth mode. Revocable per key without rotating the account credential |
+| `TWILIO_API_KEY_SECRET` | Conditional³ | `""` | Secret paired with `TWILIO_API_KEY_SID` |
+| `TWILIO_AUTH_TOKEN` | Conditional³ | `""` | Legacy account auth token — the **fallback** auth mode, used only when the two API-key values are not both set |
+| `TWILIO_MESSAGING_SERVICE_SID` | Conditional³ | `""` | Messaging service SID (`MG…`) — **preferred** sender; carries the pool / compliance registration |
+| `TWILIO_FROM_NUMBER` | Conditional³ | `""` | Sending number in E.164 (e.g. `+15125550100`). Used only when no messaging service SID is set |
+| `SMS_DEFAULT_REGION` | No | `US` | Region used to parse a phone number typed **without** a country code. Stored numbers are always normalized to E.164 |
+
+> ³ **Valid combinations.** SMS is considered configured only when **credentials AND a sender**
+> resolve (`sms_service.sms_configured()`):
+>
+> - **Credentials** — `TWILIO_ACCOUNT_SID` **+** (`TWILIO_API_KEY_SID` **and**
+>   `TWILIO_API_KEY_SECRET`) — *preferred*; **or** `TWILIO_ACCOUNT_SID` **+** `TWILIO_AUTH_TOKEN`.
+>   API-key mode wins whenever both API-key values are present.
+> - **Sender** — `TWILIO_MESSAGING_SERVICE_SID` **or** `TWILIO_FROM_NUMBER`
+>   (messaging service takes precedence).
+>
+> A partial set (e.g. an account SID with neither an API key pair nor an auth token) counts as
+> **unconfigured**.
+
+> **SMS is inert without these — and inert *with* them until two DB switches are on.** Unconfigured,
+> `send_sms` logs and returns a `skipped` result **without raising** (the same posture as
+> unconfigured SMTP), so dev/test never spams ARQ retries and delivery rows read
+> `skipped: not_configured`. Configured, sending still requires the per-company
+> `Company.allow_sms_egress` kill switch (Admin-only, default OFF) **and** a per-user opt-in plus a
+> saved phone number. The full turn-on sequence and the "no SMS arrived" checklist are in
+> [docs/NOTIFICATIONS.md](NOTIFICATIONS.md) → Operational.
+
+> **Never commit or paste credential values.** Rotate by issuing a new Twilio API key and updating
+> `TWILIO_API_KEY_SID` / `TWILIO_API_KEY_SECRET` — the preferred mode exists precisely so the
+> account-level `TWILIO_AUTH_TOKEN` does not have to be rotated. The client is a process-level
+> singleton built on first use, so a credential change takes effect on redeploy/restart.
 
 ### File Storage
 
@@ -549,6 +592,7 @@ Set these manually in Railway dashboard:
 - `ALLOWED_HOSTS` - Comma-separated hostnames the API serves (enables Host-header validation; see [Trusted Hosts](#trusted-hosts-http-host-header)). On Railway you **must** include `healthcheck.railway.app` and `localhost` (the health-check probes) alongside your public domain / `*.up.railway.app`, or the deploy's health check returns `400` and the release never goes live
 - `STORAGE_BACKEND=s3` + `S3_BUCKET_NAME` / `S3_ENDPOINT_URL` / `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_REGION` - Railway has **no persistent volume**, so the default `local` document storage loses files on every redeploy; see [File Storage](#file-storage)
 - `REACT_APP_API_URL` - Your backend URL (for frontend service)
+- `TWILIO_*` / `SMS_DEFAULT_REGION` - **Only if using the notification SMS channel.** Set on the backend service (and the worker service, if separate); see [SMS (Twilio)](#sms-twilio). Leave unset to keep SMS off
 
 ## Security Best Practices
 

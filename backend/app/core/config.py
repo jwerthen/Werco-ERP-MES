@@ -398,6 +398,33 @@ class Settings(BaseSettings):
     # links gracefully. No trailing slash.
     FRONTEND_BASE_URL: str = ""
 
+    # SMS Configuration (Twilio) -- the notification SMS channel (PR 4).
+    #
+    # ALL values come from the environment; nothing is ever hardcoded. Every field is
+    # optional and empty by default, so an unconfigured environment SOFT-SKIPS SMS
+    # (logged, no raise) exactly like the unconfigured SMTP path.
+    #
+    # Two auth modes are supported; ``sms_service`` prefers the FIRST that resolves:
+    #   1. API-key auth (PREFERRED): TWILIO_ACCOUNT_SID + TWILIO_API_KEY_SID (SK...)
+    #      + TWILIO_API_KEY_SECRET. Revocable per key without rotating the account
+    #      credential -- the CMMC-friendlier posture.
+    #   2. Legacy auth-token auth: TWILIO_ACCOUNT_SID + TWILIO_AUTH_TOKEN.
+    #
+    # Sending additionally requires a sender: TWILIO_MESSAGING_SERVICE_SID (preferred
+    # -- it carries the pool/compliance registration) or TWILIO_FROM_NUMBER (E.164).
+    #
+    # NOTE: these credentials only permit egress for companies whose
+    # ``Company.allow_sms_egress`` CUI kill switch is ON (fail-closed in sms_service).
+    TWILIO_ACCOUNT_SID: str = ""
+    TWILIO_API_KEY_SID: str = ""
+    TWILIO_API_KEY_SECRET: str = ""
+    TWILIO_AUTH_TOKEN: str = ""
+    TWILIO_FROM_NUMBER: str = ""
+    TWILIO_MESSAGING_SERVICE_SID: str = ""
+    # Default region used to parse a phone number typed without a country code
+    # (shop-local: US). Stored values are always normalized to E.164.
+    SMS_DEFAULT_REGION: str = "US"
+
     # Webhook Configuration
     WEBHOOK_ENCRYPTION_KEY: str = ""
 

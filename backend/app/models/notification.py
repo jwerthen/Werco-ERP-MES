@@ -84,6 +84,19 @@ class NotificationLog(Base, TenantMixin):
     sent = Column(Boolean, default=False)
     error = Column(Text, nullable=True)
 
+    # Provider delivery provenance (PR 4 / SMS). For an SMS row these hold the Twilio
+    # message SID and the provider-reported status ("queued"/"accepted"/…), which is
+    # what ties a Werco delivery-log row to the carrier's own record for an audit.
+    # Nullable and channel-agnostic: the email channel leaves them NULL today, and a
+    # future ESP with message ids can reuse them.
+    # Added by migration 073_sms_provider_delivery (additive, nullable, no backfill --
+    # pre-SMS rows truthfully have no provider provenance and must not be fabricated).
+    # Currently write-only: nothing filters on them, hence no index. A future Twilio
+    # status-callback webhook WOULD look rows up by SID and must add an index on
+    # provider_message_id in BOTH this model and a new revision.
+    provider_message_id = Column(String(64), nullable=True)
+    provider_status = Column(String(40), nullable=True)
+
     # Related entity
     related_type = Column(String(100), nullable=True)  # WorkOrder, PurchaseOrder, etc
     related_id = Column(Integer, nullable=True)

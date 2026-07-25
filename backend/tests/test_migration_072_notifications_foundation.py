@@ -96,12 +96,23 @@ def _body() -> str:
 
 @pytest.mark.unit
 def test_single_head_and_revision_chain():
+    """The graph stays single-headed and 072 keeps its place in the chain.
+
+    Deliberately does NOT assert that 072 IS the head — later revisions chain onto it
+    (073 added the SMS provider columns), and pinning the head here would make every
+    future migration fail this test for no reason. What matters is the invariant: one
+    head, and 072 still sits on the path from that head down to its own parent.
+    """
     scripts = _script_directory()
     heads = scripts.get_heads()
     assert len(heads) == 1, f"multiple alembic heads: {heads}"
-    assert heads[0] == REVISION, "072 must be the single head"
+
     revision = scripts.get_revision(REVISION)
     assert revision.down_revision == DOWN_REVISION
+
+    # 072 must be reachable by walking down from the current head.
+    chain = {rev.revision for rev in scripts.iterate_revisions(heads[0], "base")}
+    assert REVISION in chain, f"072 is not an ancestor of head {heads[0]}"
 
 
 @pytest.mark.unit
