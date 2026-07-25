@@ -604,6 +604,21 @@ _ENTRIES: List[CatalogEntry] = [
         departments=("Purchasing", "Inventory"),
     ),
     CatalogEntry(
+        event_key="material.allocation_shortage",
+        label="Tied material shortage",
+        description=(
+            "Consuming material tied to a work order drove the source lot negative — "
+            "production was recorded, but stock did not cover it."
+        ),
+        category=Category.PURCHASING,
+        severity="warning",
+        default_channels=frozenset({CHANNEL_IN_APP, CHANNEL_EMAIL}),
+        # Distinct from ``stock.low`` (cron-driven, reorder-point based): this fires at
+        # the moment of consumption, from ``material_consumption_service``.
+        source_event_types=("material_allocation_shortage",),
+        departments=("Purchasing", "Inventory"),
+    ),
+    CatalogEntry(
         event_key="mrp.expedite_required",
         label="Expedite required",
         description="MRP flagged a part that must be expedited.",

@@ -19,7 +19,9 @@ from app.models.document import Document, DocumentType
 from app.models.laser_nest import LaserNest, LaserNestPackage
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderType
+from app.services.audit_service import AuditService
 from app.services.laser_nest_extraction_service import extract_nest_fields_from_pdf
+from app.services.material_consumption_service import cancel_allocations_for_operations
 from app.services.storage_service import get_storage, resolve_upload_dir, sanitize_ext
 from app.services.work_center_type_service import get_work_center_group
 
@@ -323,6 +325,7 @@ def build_laser_nest_child_work_order(
     created_by: Optional[int],
     saved_storage_keys: Optional[list[str]] = None,
     row_work_centers: Optional[dict[int, WorkCenter]] = None,
+    audit: AuditService,
 ) -> LaserNestPackage:
     """Replace a laser WO's nest tasks with the supplied package plan.
 
@@ -345,6 +348,15 @@ def build_laser_nest_child_work_order(
     override as an active, company-scoped work center and hands the resolved
     rows in here -- an override missing from the mapping is a caller bug and
     raises ``ValueError`` rather than silently falling back.
+
+    ``audit`` is REQUIRED and records the material-tie cancellations the operation wipe
+    forces (invariant #2 -- cancelling a tie is a state change on a tenant table, so
+    there is no caller for whom an unaudited wipe is correct). Raises
+    ``MaterialAllocationConsumedError`` -- which the endpoint maps to HTTP 409 -- if any
+    allocation on a to-be-wiped operation has already consumed material; nothing is
+    deleted in that case. Surviving ties are cancelled AND detached from the operation
+    (their ``work_order_operation_id`` is cleared): that FK carries no ``ON DELETE``, so
+    without the detach the ``db.delete(operation)`` below FK-violates on Postgres.
     """
 
     # IMPORT REPLACES EVERYTHING (by design). Importing a laser package wipes ALL
@@ -371,6 +383,35 @@ def build_laser_nest_child_work_order(
         )
         if row[0] is not None
     ]
+    operation_wipe_filter = WorkOrderOperation.operation_group == "LASER"
+    if nest_backed_operation_ids:
+        operation_wipe_filter = or_(operation_wipe_filter, WorkOrderOperation.id.in_(nest_backed_operation_ids))
+
+    # Resolve the operations this rebuild will destroy BEFORE anything is deleted, so
+    # the material-tie guard can run first. Deleting an operation out from under posted
+    # consumption would orphan the ISSUE rows that carry its lot genealogy, so a wipe
+    # touching a CONSUMED allocation raises MaterialAllocationConsumedError (-> 409) and
+    # nothing is destroyed; untouched ties are CANCELLED with an audit row. Computing
+    # the ids here rather than after the package delete is equivalent -- the package
+    # cascade removes nests, never operations.
+    wipe_operation_ids = [
+        row[0]
+        for row in db.query(WorkOrderOperation.id)
+        .filter(
+            WorkOrderOperation.company_id == company_id,
+            WorkOrderOperation.work_order_id == child_work_order.id,
+            operation_wipe_filter,
+        )
+        .all()
+    ]
+    cancel_allocations_for_operations(
+        db,
+        work_order=child_work_order,
+        operation_ids=wipe_operation_ids,
+        company_id=company_id,
+        audit=audit,
+    )
+
     existing_packages = (
         db.query(LaserNestPackage)
         .filter(
@@ -383,17 +424,15 @@ def build_laser_nest_child_work_order(
         db.delete(package)
     db.flush()
 
-    operation_wipe_filter = WorkOrderOperation.operation_group == "LASER"
-    if nest_backed_operation_ids:
-        operation_wipe_filter = or_(operation_wipe_filter, WorkOrderOperation.id.in_(nest_backed_operation_ids))
     existing_operations = (
         db.query(WorkOrderOperation)
         .filter(
             WorkOrderOperation.company_id == company_id,
-            WorkOrderOperation.work_order_id == child_work_order.id,
-            operation_wipe_filter,
+            WorkOrderOperation.id.in_(wipe_operation_ids),
         )
         .all()
+        if wipe_operation_ids
+        else []
     )
     for operation in existing_operations:
         db.delete(operation)

@@ -97,6 +97,13 @@ from app.services.laser_nest_service import (
     parse_laser_nest_folder,
     sync_laser_nest_from_operation,
 )
+from app.services.material_consumption_service import (
+    MaterialAllocationConsumedError,
+    allocations_on_work_order,
+    cancel_open_allocations_for_work_order,
+    ledger_backed_allocation_ids,
+    reopen_allocations_cancelled_by_delete,
+)
 from app.services.migration_import_service import import_open_work_orders
 from app.services.operational_event_service import OperationalEventService
 from app.services.production_reduction_service import (
@@ -2150,6 +2157,7 @@ async def _run_laser_nest_import(
                     created_by=current_user.id,
                     saved_storage_keys=saved_storage_keys,
                     row_work_centers=row_work_centers,
+                    audit=audit,
                 )
 
                 if pre_import_wo_values is not None:
@@ -2255,6 +2263,15 @@ async def _run_laser_nest_import(
                 detail="Could not import the nest package; a nest conflicts with an existing record "
                 "or a value is invalid. Review the rows and try again.",
             ) from exc
+    except MaterialAllocationConsumedError as exc:
+        # A rebuild would destroy operations that already consumed tied material,
+        # orphaning the ISSUE rows that carry their lot genealogy. Nothing was
+        # deleted (the guard runs before the wipe) -- refuse with 409 and let the
+        # planner reverse the consumption explicitly.
+        _reap_saved_blobs()
+        if os.path.isdir(package_dir):
+            shutil.rmtree(package_dir, ignore_errors=True)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         # A pre-commit validation failure (e.g. duplicate source_file, empty
         # package): no transaction committed. Reap any blobs written before the
@@ -2804,6 +2821,35 @@ def delete_work_order(
                 detail="Only draft or cancelled work orders can be hard deleted. Use soft delete instead.",
             )
 
+        # Material ties FK-reference this WO and its operations, so they must go with it
+        # -- but a tie a ledger row points at CANNOT: inventory_transactions.allocation_id
+        # has to keep resolving. Ask the LEDGER, not the qty_consumed cache: the cache is
+        # documented as non-authoritative (model docstring) and the FK carries no
+        # ON DELETE, so any drift between the two would surface as an IntegrityError 500
+        # instead of this 409.
+        tie_rows = allocations_on_work_order(db, work_order_id=wo_id, company_id=company_id)
+        blocked_ids = ledger_backed_allocation_ids(
+            db, allocation_ids=[row.id for row in tie_rows], company_id=company_id
+        )
+        if blocked_ids:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Material has been consumed against {len(blocked_ids)} tied allocation(s) on this "
+                    "work order. Reverse consumption first, or soft delete instead."
+                ),
+            )
+        for tie in tie_rows:
+            audit.log_delete(
+                "work_order_material_allocation",
+                tie.id,
+                f"WO {wo_number} / part {tie.part_id}",
+                old_values={"status": tie.status.value, "qty_consumed": tie.qty_consumed},
+                description=f"Removed material allocation with hard-deleted work order {wo_number}",
+                extra_data={"reason": "work_order_hard_deleted", "work_order_id": wo_id},
+            )
+            db.delete(tie)
+
         # Delete operations first
         for op in work_order.operations:
             db.delete(op)
@@ -2836,6 +2882,12 @@ def delete_work_order(
 
     # Soft delete - allowed for any status
     work_order.soft_delete(current_user.id)
+
+    # Close out forward-looking material demand: every OPEN tie is auto-CANCELLED
+    # (audited). Consumption already posted STANDS -- the material was physically used
+    # and the ledger is the compliance record -- so a consumed tie never refuses the
+    # delete, it just stops accruing.
+    cancel_open_allocations_for_work_order(db, work_order=work_order, company_id=company_id, audit=audit)
 
     # Audit BEFORE the terminal commit so the audit row commits atomically with the
     # soft delete — AuditService.log() only flushes and the session never commits on teardown.
@@ -2881,6 +2933,15 @@ def restore_work_order(
     audit = AuditService(db, current_user, request)
 
     work_order.restore()
+
+    # Symmetry with the soft delete, which auto-CANCELLED every OPEN tie: put back
+    # exactly those, so restored work keeps depleting its tied material. Leaving them
+    # cancelled means the work order completes and material silently never moves — and
+    # once `backflush_components` is exposed, a consumed-then-cancelled operation tie
+    # stops suppressing the BOM backflush, double-issuing the same part. Ties cancelled
+    # for ANY other reason (a manual untie, a nest re-import) are deliberately left
+    # alone; the discriminator is the cancel's own audit reason.
+    reopen_allocations_cancelled_by_delete(db, work_order=work_order, company_id=company_id, audit=audit)
 
     # Audit BEFORE the terminal commit so the audit row commits atomically with the
     # restore — AuditService.log() only flushes and the session never commits on teardown.

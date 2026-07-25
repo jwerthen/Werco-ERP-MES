@@ -10,6 +10,7 @@ from typing import Dict, List, Optional, Tuple
 from sqlalchemy import Date, and_, case, cast, func, or_
 from sqlalchemy.orm import Session, joinedload
 
+from app.db.ledger_filter import work_order_ledger_filter
 from app.models.downtime import DowntimeEvent, DowntimePlannedType
 from app.models.inventory import InventoryItem, InventoryTransaction, TransactionType
 from app.models.part import Part
@@ -1559,18 +1560,20 @@ class AnalyticsService:
         )
 
     def _issued_material_cost(self, work_order_id: int) -> float:
-        """Cost of material ISSUEd to a WO (Batch-6 ISSUE txns), tenant-scoped.
+        """Cost of material ISSUEd to a WO (backflush AND tied consumption), tenant-scoped.
 
-        Mirrors ``completion_cost_service._issued_material_cost`` so the analytics
-        material leg equals the rollup's material leg. ISSUE quantities/costs are stored
-        negative, so the magnitude is summed.
+        Shares ``work_order_ledger_filter`` with ``completion_cost_service`` -- the same
+        predicate, not a re-implementation -- so the analytics material leg cannot drift
+        from the stored rollup's. It spans both ``reference_type='work_order'`` (FG
+        receipt / one-shot backflush) and ``reference_type='work_order_operation'``
+        (per-run consumption of tied material, keyed on the OPERATION). ISSUE
+        quantities/costs are stored negative, so the magnitude is summed.
         """
         total = (
             self.db.query(func.coalesce(func.sum(func.abs(InventoryTransaction.total_cost)), 0.0))
             .filter(
                 InventoryTransaction.company_id == self.company_id,
-                InventoryTransaction.reference_type == "work_order",
-                InventoryTransaction.reference_id == work_order_id,
+                work_order_ledger_filter(work_order_id, self.company_id),
                 InventoryTransaction.transaction_type == TransactionType.ISSUE,
             )
             .scalar()

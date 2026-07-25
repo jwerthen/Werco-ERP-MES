@@ -29,9 +29,14 @@ and one that would make the partial unique indexes below ambiguous (is an
 ``is_deleted`` OPEN row still occupying the slot?). One tombstone, one meaning:
 
   * ``OPEN``      — live tie; consumption posts against it.
-  * ``CLOSED``    — fully consumed, or the work order finished.
-  * ``CANCELLED`` — untied before consumption, or a nest re-import wiped the
-                    operation this row was scoped to.
+  * ``CANCELLED`` — untied before consumption, the work order was deleted, or a
+                    nest re-import wiped the operation this row was scoped to.
+  * ``CLOSED``    — **defined but NEVER WRITTEN by any code in ``app/``.** Nothing
+                    closes a tie on full consumption or on work-order completion, so
+                    in practice a tie ends its life ``OPEN`` or ``CANCELLED``. The
+                    member exists for a later PR; do not write a reader that assumes
+                    a fully-consumed tie has left ``OPEN`` — test ``qty_consumed``
+                    against the ledger instead.
 
 Rows are never physically deleted. ``CANCELLED``/``CLOSED`` rows are retained so
 the ledger's ``allocation_id`` back-reference always resolves.
@@ -131,11 +136,18 @@ class AllocationSource(str, enum.Enum):
 
 
 class AllocationStatus(str, enum.Enum):
-    """Lifecycle of a tie. This IS the tombstone — see the module docstring."""
+    """Lifecycle of a tie. This IS the tombstone — see the module docstring.
+
+    Only ``OPEN`` and ``CANCELLED`` are reachable today: nothing in ``app/`` ever
+    writes ``CLOSED``, so the state machine that runs is OPEN -> CANCELLED (or the tie
+    simply stays OPEN once fully consumed).
+    """
 
     OPEN = "open"
-    CLOSED = "closed"  # fully consumed / work order finished
-    CANCELLED = "cancelled"  # untied before consumption, or nest re-import wiped the op
+    # RESERVED — never written by any code in app/. Kept for a later PR; a fully
+    # consumed tie currently stays OPEN.
+    CLOSED = "closed"
+    CANCELLED = "cancelled"  # untied, work order deleted, or nest re-import wiped the op
 
 
 # Native Postgres enum type names. Explicit so the migration can create/drop the

@@ -428,7 +428,8 @@ Two migrations back the work-order-completion concurrency fixes (see
 ### Completion-inventory migrations (Batch 6 — FG receipt + backflush)
 
 Two migrations back the work-order-completion inventory side-effects (see
-`docs/WORK_ORDER_COMPLETION_REMEDIATION.md`, Rank 9 / Batch 6):
+`docs/WORK_ORDER_COMPLETION_REMEDIATION.md`, Rank 9 / Batch 6), plus a later dialect-parity fix to the
+second of them:
 
 - **`040_add_part_backflush_flag`** — adds the opt-in flag the backflush logic keys off:
   `parts.backflush_components BOOLEAN NOT NULL DEFAULT false`. The `server_default='false'` backfills

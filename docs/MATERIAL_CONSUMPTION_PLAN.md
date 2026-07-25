@@ -1,0 +1,116 @@
+# Material Consumption — Tying Inventory to Work Orders
+
+Status: **PR 0 merged** (`#154`, inventory hardening) · **PR 1 in progress** (core engine, ships dark) · PRs 2–5 planned.
+
+## Why this exists
+
+Material was tracked in inventory and consumed on the floor, but nothing connected the two: a laser nest could cut fifty sheets and stock would not move. Owners asked for material to deplete as it is used — the headline case being *when a nest is marked complete, one sheet comes out of sheet inventory*.
+
+The requirement that shapes every decision below: **tying material to a work order is never mandatory.** A work order with no tie must behave byte-for-byte as it did before this feature existed. That is asserted by test, not just intended.
+
+## What already existed
+
+A consumption engine was already here and largely unused. `app/services/completion_inventory_service.py` runs on every completion path via `apply_completion_inventory_effects()` and does two things: a finished-goods RECEIVE, and a BOM-component backflush ISSUE. The backflush is gated on `Part.backflush_components`, a column with no schema, endpoint, or UI exposure — so in practice it never ran. Much of this effort is lighting that up and extending it, not building new machinery.
+
+Three facts constrain the design:
+
+- **The idempotency indexes.** `uq_wo_inventory_issue` permits exactly one ISSUE per (work order, part) where `reference_type='work_order'`. Incremental per-run consumption needs many rows per operation, so it uses a **different reference type** (`work_order_operation`) and sits outside those predicates. The existing guards are untouched. Building this surfaced a dev/test parity bug in those indexes: they declared only `postgresql_where`, so under SQLite they degraded into **full** unique indexes covering every `reference_type` — the harness was enforcing a constraint production does not, and would have rejected the consumption path outright. Migration `076` declares `sqlite_where` from the same predicate constant (Postgres emits zero DDL). See `docs/DEVELOPMENT.md` → Database Migrations.
+- **Nest material was free text.** `LaserNest.material` / `thickness` are AI-inferred strings with no foreign key to a part, so nothing could resolve "this nest consumes sheet part X".
+- **`quantity_allocated` is a dead column.** It is read by MRP and by `quantity_available`, but never written. Reservations are deliberately deferred (see below).
+
+## Design
+
+### The tie
+
+One table, `work_order_material_allocations`, is the single tie entity for every case: a nest's sheet part (operation-scoped), a production work order's BOM components, and ad-hoc material. It carries planned vs consumed quantity, a unit-of-measure snapshot, an optional pinned lot, and a source (`nest` / `bom` / `manual`).
+
+It is **not** a foreign key on `LaserNest`. Nest import wipes and rebuilds nests and operations wholesale, so consumed-state stored there would be destroyed on re-import — the rebuilt nest would consume from zero and the deleted operation ids would orphan every transaction that referenced them.
+
+Status is the tombstone rather than `SoftDeleteMixin`: these are planning rows, and the compliance record is the ledger plus the audit trail.
+
+### Consumption is sum-delta, not evented
+
+On every completion-path entry, for each open operation-scoped allocation:
+
+```
+target = COALESCE(qty_per_run, 1.0) × (op.quantity_complete + op.quantity_scrapped)
+delta  = target − allocation.qty_consumed
+delta > 0  → post ISSUE for −delta, advance qty_consumed to target
+delta ≤ 0  → no-op
+```
+
+This is idempotent under **replay** — the target is recomputed from operation state, so a re-entry that sees the previous call's committed `qty_consumed` converges without a new unique index. "Three of five sheets across three days" needs no extra hooks. It is wired into `apply_completion_inventory_effects`, so it inherits all five existing completion call sites (kiosk clock-out, shop-floor and office operation complete, force-complete, reconcile-on-read) without adding one.
+
+**What carries *concurrency* is the work-order lock, not the engine.** The convergence argument is sequential. Two *simultaneous* completions of one operation would both compute the same positive delta and both post: these rows sit outside `uq_wo_inventory_issue` by design, and `WorkOrderMaterialAllocation` has no `version` column. What actually serializes them is invariant 4 — `WorkOrder` and `WorkOrderOperation` map `version_id_col` directly, so every call site that drives a completion takes the optimistic lock and a stale racer gets `StaleDataError` → 409 before reaching the engine. Treat that lock as load-bearing here; the per-allocation savepoint and the "advance `qty_consumed` only when an insert actually landed" rule are damage control, not a substitute.
+
+Consumption rows post with **`reference_type='work_order_operation'`** and `reference_id` = the **operation** id, deliberately outside the `uq_wo_inventory_*` predicates. Each row also carries `inventory_transactions.allocation_id` — the durable genealogy key that survives an untie, since allocation rows are cancelled, never deleted.
+
+**Scrap consumes.** A scrapped run physically used its sheet. It posts as ISSUE rather than SCRAP, because lot genealogy filters on ISSUE — using SCRAP would make exactly the material most likely to be audited disappear from the traceability record. The good/scrap split is recorded in the transaction `notes`.
+
+**Consumption never auto-reverses.** When a supervisor walks back an over-count, delta goes negative and consumption no-ops; the sheet is already cut. Reversal is an explicit, reasoned, audited RETURN verb (PR 3). Automatic reversal would let a floor-side quantity edit silently move inventory — and because the consume path also runs from a GET (reconcile-on-read, inside a bare `except: pass`), it would do so with no reason recorded and attributed to whoever happened to be reading the page.
+
+**Shortage never blocks production.** Insufficient stock drives the source lot negative, writes an `ALLOCATION_SHORTAGE` audit row, and emits a warning event (`material_allocation_shortage` → catalog key `material.allocation_shortage`; Purchasing, warning, in-app + email) — the same posture as the existing backflush. Refusing would train operators to untie material.
+
+**A pinned lot is never spilled off, on either tie shape.** Pinning is a lot-directed instruction, so an insufficient pinned lot is driven negative rather than quietly consuming a different (uncertified, wrong-heat) lot. Unpinned ties walk FIFO stock — `received_date ASC NULLS LAST, id ASC` — and spill across lots when the head lot cannot cover the delta. A **work-order-scoped** tie carries its pin through `WorkOrderMaterialAllocationDemand` into the one-shot backflush ISSUE, so the pin means the same thing there as it does per-run; the unpinned backflush keeps its historical "lowest-id on-hand row" selection.
+
+**A pin bypasses FIFO's *ordering*, not its hold check.** FIFO excludes lots that are inactive or whose `status` is not `available`; the pinned branch reads one named lot and would otherwise consume `on_hold` / `quarantine` / `rejected` material straight into an as-built record (AS9100D 8.7). The control is split in two, because the two moments have different options: **pinning** a held or inactive lot is refused at tie time with **422** (a human is present to answer), while a lot held *after* it was pinned still consumes — refusing from a reconcile-on-read GET would be unattributable and the material is already in the part — and writes a tamper-evident **`HELD_MATERIAL_CONSUMED`** audit row naming the lot, its status, the tie and the quantity, for the segregation review that has to follow. Both legs run the same `is_consumable_item` predicate and write the same row.
+
+> **Disclosure — lot-hold state is not live in-system.** Nothing anywhere in `app/` ever writes a held `InventoryItem.status`: no endpoint or schema exposes the column, it is only ever set to `"available"` at row creation, and there is no verb that deactivates a lot. Both halves of the control above — the 422 pin refusal and the `HELD_MATERIAL_CONSUMED` row — can therefore only fire on data set **outside** the application (a direct DB write, an import, or a future hold verb). They are built and tested ahead of the feature that will produce that state. Do not read them as evidence that quarantine/hold is an operating control today; the hold verb itself is unbuilt.
+
+**Read-safety.** Each allocation's work runs inside its own `begin_nested()` savepoint and the entry point never propagates — the *whole* body, operation lookup included, is under that guard — so a failure degrades that one allocation instead of poisoning the session a reconcile-on-read GET is about to commit. A rolled-back allocation is **not** silent: it writes an **`ALLOCATION_CONSUMPTION_FAILED`** audit row (`success=false`, with the exception text), because material that should have depleted and did not is a worse control gap than the shortage case, which already writes a chain row. `AuditService.log` opens its own savepoint and swallows its own failures, so it is safe to call on the outer transaction after the rollback.
+
+### No double-issue (as implemented)
+
+The two tie shapes are handled by different machinery, and the split is load-bearing:
+
+- **Operation-scoped** ties are owned by the per-run engine. Backflush **drops those parts from its demand** (`_drop_allocation_covered_parts`) — nothing at the DB level would stop a WO-level ISSUE from also issuing the same material, because the consumption rows sit outside `uq_wo_inventory_issue`'s predicate. Only operation-scoped ties are dropped, **and only when the operation they name is still on this work order** — the identical check the consume path makes. Without that symmetry a tie pointing at a vanished operation suppressed the backflush *and* never consumed, so the part was silently neither issued nor depleted.
+- **Work-order-scoped** ties never reach the per-run engine. They merge into the existing one-shot backflush and are **summed per part** with any BOM demand, because `uq_wo_inventory_issue` permits only one ISSUE row per (work order, part). Their demand is `qty_planned − qty_consumed`, drained once, and it carries the tie's **lot pin**. When several ties on one part sum into a single ledger row, that row carries the **first** tie's `allocation_id` and the rest are reconciled through `qty_consumed` (in practice `uq_wo_material_alloc_open_wo` permits only one open work-order-scoped tie per part, so the summing branch is an edge case, not the norm). The tie's `qty_consumed` advances **only when an ISSUE row actually landed** — a duplicate no-op (the concurrent-completion race the unique index catches) inserted nothing, so claiming consumption would corrupt the very field the untie 409 keys on. This mirrors the `posted_any` guard the per-run engine has always had.
+- **A work-order-scoped tie consumes ungated by `Part.backflush_components`.** The BOM/routing leg still requires that opt-in flag, but an explicit tie *is* its own opt-in — so a tied part consumes even on a part that never enabled backflush.
+
+### Known limitations
+
+- **A work-order-scoped tie created *after* that part already backflushed on the same work order can never consume — so it is now refused, not created.** The backflush loop's idempotency check (`_component_already_issued`) short-circuits on any existing `reference_type='work_order'` ISSUE for that (WO, part) *before* the tie's demand is applied, and `uq_wo_inventory_issue` physically forbids the second row that would fix it. Leaving the tie to be created meant an `open` row at `qty_consumed` 0 forever, indistinguishable in the API from one that simply had not consumed yet: a planner would tie a sheet, believe stock would deplete, and it never would. `POST` now returns **409** naming the existing issue and the remedy (tie at the operation level, which posts outside that index). Still tie material **before** the work order completes.
+- **A tie on a TERMINAL work order is refused (409)** on one ground only: *a tie that can never consume is a lie*. It would sit `open` at `qty_consumed` 0 forever, indistinguishable in the API from one that simply has not consumed yet, advertising demand that will never be met. The refusal is deliberately **not** justified by claiming every completion path guards on `TERMINAL_WO_STATUSES` — force-complete, for one, refuses a terminal work order through its own explicit checks (`work_orders.py` no-ops COMPLETE/CLOSED and 409s CANCELLED) rather than that constant, so the mechanism claim was wrong even though the conclusion holds. Existing ties on a work order that later goes terminal stay readable and editable.
+- **`AllocationStatus.CLOSED` is never written.** Nothing here closes a tie on full consumption or on work-order completion; ties end their life `open` or `cancelled`. The status exists in the model for later PRs.
+- **Foreign keys are unenforced in the test suite.** SQLite defaults `PRAGMA foreign_keys` to **OFF** and nothing in `app/db/database.py` or `tests/` turns it on, while production runs on Postgres where they are always enforced. Any "delete a parent row a child still references" bug is therefore structurally invisible to pytest — which is how the nest-re-import FK violation (below) shipped through a first review. One test, `test_operation_delete_after_tie_cancel_survives_foreign_key_enforcement`, enables the pragma for its own body with a positive control; enabling it suite-wide is a separate, larger change.
+
+### Lifecycle interactions (settled during implementation)
+
+- **Nest re-import** resolves the operations it will wipe **before** deleting anything. A tie with `qty_consumed > 0` on one of them → **409**, nothing destroyed; unconsumed ties are cancelled with an audit row (`reason: "superseded_by_reimport"`) **and detached** — `work_order_operation_id` is set NULL. The detach is not cosmetic: that FK carries no `ON DELETE` and the model declares no parent backref, so SQLAlchemy will not null it and the very next `db.delete(operation)` raises `IntegrityError` on Postgres, which the import endpoint turns into a misleading **400** ("a nest conflicts with an existing record"). The documented cancel-and-rebuild path was unreachable in production on any laser WO carrying a tie — the feature's headline flow — and unenforced foreign keys hid it from the suite. Nulling is safe for exactly these rows: they are `cancelled`, so neither partial unique index applies, and they carry no consumption (guarded above), so no ledger row references the operation id being dropped. The tie's original scope is preserved on the hash chain (`old_values.work_order_operation_id` and `extra_data.work_order_operation_id`).
+- **Work-order soft delete** is never refused for a tie: open ties are auto-cancelled (audited) and posted consumption stands. `work_order_operation_id` is deliberately **left intact** here — a soft delete removes no operation rows, so there is nothing to detach from.
+- **Work-order restore un-cancels exactly what the delete cancelled.** Restore is the delete's inverse, so it re-opens those ties (audited, `action="restore"`). Leaving them cancelled meant the restored work order completed and its tied material silently never depleted — with no UI in PR 1, the only signal was a `cancelled` row. It gets worse once `backflush_components` is exposed (PR 4): an operation-scoped tie that consumed and was then cancelled by a delete/restore round trip stops suppressing the BOM backflush in `_drop_allocation_covered_parts`, so the same part is issued **twice**. Only ties cancelled *by that delete* come back — a manual untie and a nest-re-import supersede were cancelled for reasons a restore does not undo. The discriminator is the cancel's own audit row: every cancel path stamps `extra_data.reason`, and a tie's most recent `DELETE` row is what its current `cancelled` state means. If that audit row is missing the tie is simply not reopened (the conservative direction).
+- **Hard delete** (draft/cancelled only) **409s** when the **ledger** actually references a tie on the work order, since the delete physically removes the operations and ties those rows point at; unconsumed ties go with the work order, audited first. The guard reads `inventory_transactions.allocation_id` rather than the `qty_consumed` cache — the cache is explicitly non-authoritative and the FK has no `ON DELETE`, so keying on it would turn any drift into a 500 instead of the intended 409.
+
+### API surface (ships dark)
+
+`GET` / `POST` / `PATCH` / `DELETE` on `/api/v1/work-orders/{id}/material-allocations[/{allocation_id}]`, a sibling router under the `/work-orders` prefix. Reads are open to any authenticated tenant user; every mutating verb is `require_role([ADMIN, MANAGER, SUPERVISOR])`, deliberately outside the kiosk path fence. Untie is `status = cancelled`, never a physical delete, and is refused **409** once anything was consumed. Full request/response shapes and the error table live in `docs/API.md` → Work Orders → "Material ties"; the role rows are in `docs/RBAC_PERMISSIONS.md`. **No frontend ships in PR 1** — that is PR 2.
+
+### Deliberately deferred
+
+- **Reservations.** Bringing `quantity_allocated` to life changes `quantity_available` platform-wide — the receipt-void guard would start refusing voids for merely-tied stock — and makes MRP double-count, since it nets `on_hand − allocated` while separately exploding the same work-order demand. When it lands, MRP tied-demand deduplication and a re-audit of every `quantity_available` guard are in-scope requirements of that same PR.
+- **Unit conversion.** Material is consumed in the part's own unit of measure, snapshotted onto the tie at creation. Nothing in the platform converts units. Because the tie's UoM is always the part's own, the only way to state a cross-UOM intent is a **lot pin naming a different part** — refused with **422** (the detail names the UoM clash when the two parts' units also differ) rather than guessed at.
+- **Reversal.** There is no RETURN verb yet, which is why every "reverse consumption first" refusal above currently has no self-service path (PR 3).
+- **Buy-to-job**, remnant/offcut intake, kitting, and operator lot-picking at the kiosk. Shapes are recorded; none are built.
+
+## Delivery
+
+| PR | Scope | State |
+|---|---|---|
+| 0 | Inventory hardening: tenant isolation, RBAC gates, cycle-count integrity and audit | **Merged** (#154) |
+| 1 | Schema (074 allocations table / 075 `allocation_id` + reference index / 076 SQLite index parity), allocation model, consumption service, tie API, traceability extension, shortage event, lifecycle guards (nest re-import, WO delete) | In progress — ships dark, no UI |
+| 2 | Nest tie UX: wizard sheet-part picker, dispatch chips, kiosk deduction line, Materials tab | Planned |
+| 3 | Reversal: reasoned RETURN verb, reduce-over-count interplay, ad-hoc issue/return | Planned |
+| 4 | Production breadth: expose `backflush_components`, per-op tie editor, BOM alternates fix | Planned |
+| 5 | Costing actuals: `CostEntry(MATERIAL)`, real `actual_material_cost` | Planned |
+
+## Compliance notes
+
+- Every consumption, tie, edit, untie, and lifecycle cancellation writes tamper-evident audit rows through `AuditService` — including the stock decrement each consumption causes, the `qty_consumed` advance on **both** tie shapes (the work-order-scoped drain is audited by the backflush leg, symmetric with the per-run engine), the `ALLOCATION_SHORTAGE` row when a lot is driven negative, the `HELD_MATERIAL_CONSUMED` row when a pinned lot was held after pinning, and the `ALLOCATION_CONSUMPTION_FAILED` row when an allocation's consumption is rolled back. `audit` is a **required** parameter on the lifecycle cancel helpers and on the nest rebuild — never an optional one that defaults to `None`. Historical transactions are never mutated. Reversal, when it lands, will be an appended, signed, compensating row — the pattern established by receiving corrections — not an edit; today the engine simply refuses to auto-reverse.
+- Lot genealogy was extended to read the new reference type **in the same PR that introduced it**. There is deliberately no release in which consumption exists but traceability cannot see it.
+- **Job cost reads the new reference type too**, for the same reason. `completion_cost_service` and `analytics_service` share one predicate (`work_order_ledger_filter`) spanning `work_order` *and* `work_order_operation`, so tied consumption lands in `WorkOrder.actual_cost`, the synced `JobCost`, and the analytics variance. Filtering on `work_order` alone would have dropped an entire nest's material — six $80 sheets is $480 — out of compliance-facing cost reports while the ledger and audit rows said otherwise. (PR 5's `CostEntry(MATERIAL)` work is still the structural fix; this is the correctness one.)
+- Every new query is tenant-scoped; a tie referencing another company's lot, part, operation, or work order is refused with a 404 (never a 403, so an id cannot be probed).
+- Allocation rows are never physically deleted on the tie lifecycle (untie and both cancellation paths set `status`), so the ledger's `allocation_id` back-reference always resolves. The one exception is a work-order **hard delete**, which is refused outright if any tie carries consumption.
+- No backfill. Pre-feature work orders simply have no allocations, pre-existing ledger rows keep a NULL `allocation_id`, and their existing history stands as written.
+- `qty_consumed` on the tie is a **cache**. The authoritative consumed total in a compliance answer is the sum of `inventory_transactions` carrying that `allocation_id`.
+- **Cost of an untied work order: exactly one tenant-scoped SELECT** against `work_order_material_allocations`, issued once by `apply_completion_inventory_effects` and threaded into every leg. It was three separate reads of the same table (two unconditional — the consume engine and the work-order-scoped demand — plus a third when the part opted into backflush). The short-circuit is unchanged: an empty result means zero writes, no ledger row, no audit row, no event.
+- **One ledger predicate, one place.** `work_order_ledger_filter` (and the two `reference_type` constants) live in `app/db/ledger_filter.py`, not in the consumption engine. It answers a generic question — "which ledger rows belong to this work order?" — that job costing, analytics, lot genealogy and `GET /inventory/transactions?work_order_id=` all ask; homed in the engine it forced each of them to import the whole engine (transitively `completion_inventory_service` and `operational_event_service`) just to get a WHERE clause, and traceability had already re-implemented it with string literals rather than pay that. All four now share it, so an as-built record and the cost of the job it describes cannot disagree about what the job consumed.
