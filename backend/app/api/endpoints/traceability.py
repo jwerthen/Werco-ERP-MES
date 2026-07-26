@@ -17,6 +17,7 @@ from app.db.database import get_db
 # ``work_order`` only. On the ``work_order_operation`` rows ``reference_id`` is the
 # OPERATION id, resolved back to its work order below.
 from app.db.ledger_filter import (
+    LEDGER_QUANTITY_EPSILON,
     OPERATION_REFERENCE_TYPE,
     WORK_ORDER_REFERENCE_TYPES,
     work_order_ledger_filter,
@@ -28,10 +29,13 @@ from app.models.quality import NonConformanceReport
 from app.models.user import User
 from app.models.work_order import WorkOrder, WorkOrderOperation
 
-# The engine's own float threshold, imported rather than re-declared, so "this component
-# lot is fully returned" means here exactly what "nothing is consumed" means to the
-# consumption engine and to the tie endpoint's untie guard.
-from app.services.material_consumption_service import CONSUMPTION_EPSILON
+# The shared ledger-quantity threshold, imported from ``app.db.ledger_filter`` alongside
+# the predicate above rather than re-declared, so "this component lot is fully returned"
+# means here exactly what "nothing is consumed" means to the consumption engine and to
+# the tie endpoint's untie guard. It comes from ``db`` and not from the engine on
+# purpose: this is a read-only genealogy endpoint and has no business importing
+# ``material_consumption_service`` (and transitively ``completion_inventory_service`` and
+# ``operational_event_service``) to learn one float.
 
 router = APIRouter()
 
@@ -402,7 +406,7 @@ def _reconstruct_consumed_components(
     for (wo_id, comp_part_id, lot), qty in aggregated.items():
         # A fully-returned lot was never built into the part; it must not appear in the
         # as-built record at all. (A partial return simply reports the net quantity.)
-        if (wo_id, comp_part_id, lot) in returned_keys and qty <= CONSUMPTION_EPSILON:
+        if (wo_id, comp_part_id, lot) in returned_keys and qty <= LEDGER_QUANTITY_EPSILON:
             continue
         comp_part = parts_by_id.get(comp_part_id)
         consumed.append(

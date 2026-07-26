@@ -41,23 +41,37 @@ Lot-only (no serialization flag exists yet): on FG receipt we assign
 ``work_order.lot_number`` if empty (a per-company-unique lot derived from the WO
 number) and leave ``InventoryItem.serial_number`` NULL. Serial assignment is a
 tracked follow-up.
+
+**The BOM/routing backflush leg is DARK.** ``Part.backflush_components`` has no writer
+anywhere in ``app/`` -- no schema field, no endpoint, no UI, ``server_default="false"`` --
+so ``_resolve_backflush_components`` and everything it calls have never executed against
+production data. Read that as a licence to fix them and as a warning not to assume any of
+it was ever right: the demand resolution shipped treating a whole-job component quantity
+as a per-unit rate, summing one component's demand once per operation that touched it,
+letting one routed operation cancel an entire BOM explosion, consuming both a
+sub-assembly and its raw material, and reading neither ``is_alternate`` nor
+``is_optional`` nor reference lines. ``_issue_one_component`` and
+``_component_already_issued`` below are the OPPOSITE case -- work-order-scoped material
+ties drive them today, so their behavior (including a lot selection that genuinely
+contradicts the per-run engine's FIFO) is live and is deliberately left alone.
 """
 
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional
+from typing import Iterable, Optional
 
-from sqlalchemy import func
+from sqlalchemy import case, func, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
-from app.db.ledger_filter import WORK_ORDER_REFERENCE_TYPE
+from app.db.ledger_filter import LEDGER_QUANTITY_EPSILON, OPERATION_REFERENCE_TYPE, WORK_ORDER_REFERENCE_TYPE
+from app.models.bom import BOM, BOMItem, BOMItemType, BOMLineType
 from app.models.inventory import InventoryItem, InventoryTransaction, TransactionType
 from app.models.operational_event import OperationalEvent  # noqa: F401  (imported for type/test discoverability)
 from app.models.part import Part
 from app.models.shipping import Shipment, ShipmentStatus
-from app.models.work_order import WorkOrder, WorkOrderOperation
+from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation
 from app.models.work_order_material import WorkOrderMaterialAllocation
 from app.services.audit_service import AuditService
 from app.services.operational_event_service import OperationalEventService
@@ -71,6 +85,14 @@ logger = logging.getLogger(__name__)
 BACKFLUSH_SHORTAGE_AUDIT_ACTION = "BACKFLUSH_SHORTAGE"
 BACKFLUSH_SHORTAGE_EVENT_TYPE = "backflush_shortage"
 
+# Tamper-evident audit action for a BOM/routing backflush demand line that was SUPPRESSED
+# because the ledger already shows that part leaving stock against this work order under
+# the OPERATION reference shape (tied consumption). Recorded rather than left silent: the
+# suppression is the system declining to issue material a planner's BOM asked for, and
+# "correct but invisible" is exactly the shape of control gap an AS9100D 8.5.2 as-built
+# review cannot reconstruct after the fact. See ``_drop_ledger_covered_parts``.
+BACKFLUSH_DOUBLE_ISSUE_BLOCKED_AUDIT_ACTION = "BACKFLUSH_DOUBLE_ISSUE_BLOCKED"
+
 # Tamper-evident audit actions + operational-event types for ship-side discrepancies
 # (G2). A ship with no matching finished-good lot row (receipt skipped / lot changed /
 # stock already moved) and a ship that drives cumulative shipped beyond what was
@@ -83,13 +105,18 @@ OVER_SHIP_AUDIT_ACTION = "OVER_SHIP"
 OVER_SHIP_EVENT_TYPE = "over_ship"
 
 # ONE float-comparison epsilon for the whole completion-inventory surface (this module
-# and ``material_consumption_service``, which imports it). Quantities are ``Float``
-# columns, so "is this quantity zero?" must never be an exact ``== 0`` / ``> 0`` test:
-# a target computed as ``0.1 * 3`` is not ``0.3``. Previously three different spellings
-# were in use -- a bare ``1e-9`` here, ``_EPSILON`` in the consumption engine, and plain
-# ``<= 0`` / ``> 0`` on the tie legs -- so the same near-zero delta could be "zero" in
-# one guard and "positive" in the next.
-_EPSILON = 1e-9
+# and ``material_consumption_service``, which re-exports it as ``CONSUMPTION_EPSILON``).
+# Quantities are ``Float`` columns, so "is this quantity zero?" must never be an exact
+# ``== 0`` / ``> 0`` test: a target computed as ``0.1 * 3`` is not ``0.3``. Previously
+# three different spellings were in use -- a bare ``1e-9`` here, ``_EPSILON`` in the
+# consumption engine, and plain ``<= 0`` / ``> 0`` on the tie legs -- so the same
+# near-zero delta could be "zero" in one guard and "positive" in the next.
+#
+# The DEFINITION now lives in ``app/db/ledger_filter.py``, alongside the ledger predicate
+# it is used with. This module keeps the private name so its own call sites read
+# unchanged, but it is an alias, not a source: a read-only genealogy endpoint should not
+# have to import the consumption engine to learn what "zero" means.
+_EPSILON = LEDGER_QUANTITY_EPSILON
 
 
 def _insert_txn_with_savepoint(db: Session, txn: InventoryTransaction) -> bool:
@@ -402,27 +429,206 @@ def _open_allocations(
     return open_allocations_for_work_order(db, work_order.id, company_id)
 
 
-def _resolve_backflush_components(
+@dataclass
+class _BackflushBomExplosion:
+    """What the BOM explosion says about a work order's component demand.
+
+    ``demand`` is the quantity to ISSUE per part. ``excluded_part_ids`` is every part the
+    explosion walked past WITHOUT giving it demand -- an alternate/optional/reference
+    line, a phantom that was exploded through, or any part inside a ``make``
+    sub-assembly's own subtree. That set is not bookkeeping: the routing leg's
+    ``component_part_id`` values are generated from ``_collect_bom_components``, which
+    applies NONE of these rules and DOES recurse into ``make``, so without the exclusion
+    set the routing would re-introduce through the back door exactly the lines the
+    explosion just declined to issue.
+    """
+
+    demand: dict[int, float] = field(default_factory=dict)
+    excluded_part_ids: set[int] = field(default_factory=set)
+
+
+def _is_non_consumed_bom_line(item: BOMItem) -> bool:
+    """True when a BOM line states demand that a backflush must NOT issue.
+
+    Three families, all of which the backflush read NOWHERE before this and all of which
+    fail in the expensive direction -- material issued into an as-built record that the
+    job never consumed (AS9100D 8.5.2):
+
+    * **``is_alternate``** -- a member of an alternate group. The group is an OR, not an
+      AND: issuing every member multiplies the group's demand by its size. ``mrp_service``
+      has always skipped alternates (``explode_bom_for_mrp``); the backflush now agrees,
+      so planning and consumption cannot state different demand for one BOM.
+    * **``is_optional``** -- present on some units and not others, with nothing on the
+      work order recording which. Nothing here can know, so it issues nothing.
+    * **``line_type == reference``** -- documentation and tooling. The enum's own comment
+      is "Reference only - not consumed".
+
+    Under-issuing is the safe direction and is not silent: the material is still on the
+    shelf, so the operator who needs it draws it manually, and the job's cost shows the
+    gap. Over-issuing writes material into a genealogy record that never contained it,
+    which no downstream reader can distinguish from the truth.
+    """
+    if bool(item.is_alternate) or bool(item.is_optional):
+        return True
+    return (item.line_type or "").lower() == BOMLineType.REFERENCE.value
+
+
+def _explode_backflush_bom(
+    db: Session,
+    bom: BOM,
+    company_id: int,
+    *,
+    parent_qty: float,
+    visited_part_ids: set[int],
+    out: _BackflushBomExplosion,
+    consumed: bool,
+) -> None:
+    """Explode a BOM with BACKFLUSH semantics: phantoms open up, ``make`` items do not.
+
+    Deliberately NOT ``_collect_bom_components``. That helper appends a ``make`` /
+    ``phantom`` sub-assembly AND recurses into its children, producing a flat list in
+    which the assembly and its raw material both appear -- correct for the four callers
+    that want "every part anywhere in this structure" (routing generation, cost estimate,
+    MRP-ish reads), and a double-consume for a backflush. It also has three callers
+    outside this module whose behavior must not change inside a backflush PR, and its
+    flat output cannot express the make/phantom distinction at all (a line's parent is
+    not recoverable from it). So the traversal is re-stated here, with the same
+    ``item_number, id`` ordering, the same ``quantity x parent_qty x (1 + scrap_factor)``
+    extension and the same visited-set cycle guard, and a different rule at each node:
+
+    * **phantom** -- the assembly is a planning fiction that is never stocked, so it is
+      EXCLUDED and its children are exploded in its place at the phantom's extended
+      quantity. A phantom with no active BOM has nothing to explode into; it is treated
+      as a stocked line instead (and logged), because dropping it would make the line
+      vanish with no ledger row, no shortage and no signal of any kind.
+    * **make** -- a stocked unit. The assembly is issued; its children are NOT, because
+      they were consumed when IT was built and issuing both consumes the same material
+      twice. Its subtree is still walked, in exclude-only mode, so the routing leg cannot
+      issue those children either.
+    * **buy** -- a stocked unit with no structure below it. Issued, never recursed into
+      (matching ``_collect_bom_components``).
+
+    ``consumed=False`` walks a subtree purely to collect ``excluded_part_ids`` and
+    contributes no demand. Does not commit and writes nothing.
+    """
+    items = (
+        db.query(BOMItem)
+        .options(joinedload(BOMItem.component_part))
+        .filter(BOMItem.bom_id == bom.id, BOMItem.company_id == company_id)
+        .order_by(BOMItem.item_number.asc(), BOMItem.id.asc())
+        .all()
+    )
+    for item in items:
+        component = item.component_part
+        if component is None or component.id in visited_part_ids:
+            continue
+
+        line_consumed = consumed and not _is_non_consumed_bom_line(item)
+        extended = float(item.quantity or 1) * parent_qty * (1 + float(item.scrap_factor or 0))
+        item_type = (item.item_type or "").lower()
+        child_visited = visited_part_ids | {component.id}
+        child_bom: Optional[BOM] = None
+        if item_type != BOMItemType.BUY.value:
+            # Imported lazily to avoid an import cycle with the endpoints module. One
+            # definition of "the active BOM for a part" for the whole platform.
+            from app.api.endpoints.work_orders import _get_active_bom
+
+            child_bom = _get_active_bom(db, component.id, company_id)
+
+        if item_type == BOMItemType.PHANTOM.value and child_bom is not None:
+            out.excluded_part_ids.add(component.id)
+            _explode_backflush_bom(
+                db,
+                child_bom,
+                company_id,
+                parent_qty=extended,
+                visited_part_ids=child_visited,
+                out=out,
+                consumed=line_consumed,
+            )
+            continue
+        if item_type == BOMItemType.PHANTOM.value:
+            logger.warning(
+                "BOM item %s on BOM %s (company %s) is a phantom with no active BOM to explode; "
+                "backflushing part %s as a stocked line",
+                item.id,
+                bom.id,
+                company_id,
+                component.id,
+            )
+
+        if line_consumed:
+            out.demand[component.id] = out.demand.get(component.id, 0.0) + extended
+        else:
+            out.excluded_part_ids.add(component.id)
+
+        if child_bom is not None:
+            # A stocked sub-assembly. Walk its subtree EXCLUDE-ONLY: its children were
+            # consumed when it was built, and the walk exists so the routing leg -- which
+            # was generated from a traversal that does recurse here -- cannot issue them.
+            _explode_backflush_bom(
+                db,
+                child_bom,
+                company_id,
+                parent_qty=extended,
+                visited_part_ids=child_visited,
+                out=out,
+                consumed=False,
+            )
+
+
+def _routing_backflush_demand(
     db: Session,
     work_order: WorkOrder,
     company_id: int,
-    allocations: Optional[list[WorkOrderMaterialAllocation]] = None,
+    *,
+    basis: float,
 ) -> dict[int, float]:
-    """Required quantity per component part for backflushing this WO.
+    """Component demand stated by the ROUTING (``component_part_id`` on an operation).
 
-    Prefers the WO operations' ``component_part_id`` / ``component_quantity`` (the
-    routing already carries explicit component demand). Falls back to exploding the
-    finished part's active BOM via the existing tenant-scoped ``_collect_bom_components``
-    helper (which already applies ``BOMItem.scrap_factor``). Quantities are scaled by
-    the produced quantity. Returns ``{}`` when no component demand exists.
+    Three things here are not what the previous shape of this leg assumed:
+
+    * **``component_quantity`` is the WHOLE-JOB total, not a per-unit rate.** Both writers
+      (``_create_assembly_routing_operations`` and
+      ``_reconcile_operation_component_quantities``) store
+      ``qty_per_assembly x work_order.quantity_ordered``. Multiplying it by the produced
+      quantity again -- which is what this leg did -- squares the demand: a 100-piece job
+      with 2 per unit asked for 20,000. The rate is recovered by dividing back out by
+      ``quantity_ordered`` and re-scaling to ``basis``, so the routing and the BOM answer
+      in the same units. A work order with no ordered quantity has no rate to recover, so
+      the stated total is used verbatim.
+    * **One component's demand is REPLICATED across every operation that touches it.** A
+      component with a three-operation routing gets three operations all carrying the same
+      whole-job ``component_quantity``; summing them tripled the demand. Reduced with
+      ``max``: the stated value when the rows agree, and incapable of multiplying by the
+      operation count.
+
+      An earlier version of this comment justified ``max`` over ``min`` by claiming
+      ``min`` would silently under-issue to 0 on an unreconciled row. That is **wrong**,
+      and the refutation is two lines below: rows with no ``component_quantity`` are
+      dropped by the ``stated <= _EPSILON`` skip BEFORE the reduction, so ``min`` could
+      never be dragged to zero by one. With that argument gone, ``max`` is a bare choice
+      of the OVER-issue direction on a genuine disagreement -- which sits awkwardly beside
+      this module's own rule that over-issuing writes material into a genealogy record
+      that never contained it. It is kept because rows only disagree when something
+      upstream failed to reconcile, where the larger stated demand is the likelier truth
+      and a shortage is visible while a silent under-issue is not. The disagreement is
+      logged so it is answerable; if that log is ever seen in practice, REFUSING is the
+      better answer than picking a side, and this leg is flag-gated so a refusal costs
+      nothing today.
+    * **Self-consumption is refused.** An operation naming the work order's OWN part would
+      ISSUE the part the finished-goods leg just RECEIVED, netting the job's own output
+      out of stock and writing the produced part into its own as-built record.
+
+    Operation STATUS is deliberately not filtered. ``OperationStatus`` has no cancelled or
+    skipped member, so no status means "this work did not happen"; the quantity is
+    job-scoped and replicated, so filtering would change the JOB's demand according to
+    which replica happened to survive; and at work-order completion every operation is
+    terminal by construction (force-complete stamps the stragglers). A non-COMPLETE
+    operation contributing demand is logged instead, because the only way it happens is a
+    completion path that closed the work order without closing its operations -- a
+    production-record defect worth surfacing rather than silently absorbing.
     """
-    produced = float(work_order.quantity_complete or 0)
-    if produced <= 0:
-        return {}
-
-    required: dict[int, float] = {}
-
-    # 1) Explicit operation component demand (assembly WOs with component ops).
     operations = (
         db.query(WorkOrderOperation)
         .filter(
@@ -432,33 +638,240 @@ def _resolve_backflush_components(
         )
         .all()
     )
+    ordered = float(work_order.quantity_ordered or 0)
+    demand: dict[int, float] = {}
     for op in operations:
-        if op.component_part_id is None:
+        component_part_id = op.component_part_id
+        if component_part_id is None:
             continue
-        per_unit = float(op.component_quantity or 0)
-        if per_unit <= 0:
+        if work_order.part_id is not None and component_part_id == work_order.part_id:
+            logger.warning(
+                "Operation %s on WO %s (company %s) names the work order's own part %s as a component; "
+                "backflush self-consumption refused",
+                op.id,
+                work_order.id,
+                company_id,
+                component_part_id,
+            )
             continue
-        required[op.component_part_id] = required.get(op.component_part_id, 0.0) + per_unit * produced
+        stated = float(op.component_quantity or 0)
+        if stated <= _EPSILON:
+            continue
+        line = (stated / ordered) * basis if ordered > _EPSILON else stated
+        previous = demand.get(component_part_id)
+        if previous is not None and abs(previous - line) > _EPSILON:
+            logger.warning(
+                "WO %s (company %s) operations disagree on component %s demand (%s vs %s); " "backflushing the larger",
+                work_order.id,
+                company_id,
+                component_part_id,
+                previous,
+                line,
+            )
+        demand[component_part_id] = line if previous is None else max(previous, line)
+        if op.status != OperationStatus.COMPLETE:
+            logger.warning(
+                "Operation %s on WO %s (company %s) is %s but contributes backflush demand for part %s",
+                op.id,
+                work_order.id,
+                company_id,
+                getattr(op.status, "value", op.status),
+                component_part_id,
+            )
+    return demand
 
-    if not required:
-        # 2) Fall back to exploding the finished part's BOM (scrap_factor applied by the
-        #    helper). Imported lazily to avoid an import cycle with the endpoints module.
-        from app.api.endpoints.work_orders import _collect_bom_components, _get_active_bom
+
+def _record_backflush_demand_suppressed(
+    db: Session,
+    work_order: WorkOrder,
+    *,
+    part_id: int,
+    quantity: float,
+    company_id: int,
+    audit: AuditService,
+    reason: str,
+    ledger_net: Optional[float] = None,
+) -> None:
+    """Record that resolved backflush demand was dropped without issuing material.
+
+    The shop's BOM/routing asked for this component on THIS completion and it did not
+    move. Whether that is correct (the material already left under a tie) or merely
+    unavoidable (the one-shot index will not permit a second ISSUE) it must not be
+    silent: an as-built review cannot reconstruct a decision the system never wrote down,
+    and "correct but invisible" is the control gap this action exists to close.
+
+    ``reason`` distinguishes the two, because they have opposite remedies:
+
+    * ``ledger_consumed`` -- a tie already drew this material. Nothing is wrong; the row
+      exists so the absence of a backflush ISSUE is explicable.
+    * ``already_issued`` -- ``uq_wo_inventory_issue`` permits one ISSUE per (work order,
+      part) forever and one already exists. If that ISSUE was later RETURNED the material
+      is physically back on the shelf and this work order can never draw it again through
+      the backflush; the remedy is an OPERATION-scoped tie, which posts outside the index.
+    """
+    part_number = (
+        db.query(Part.part_number).filter(Part.company_id == company_id, Part.id == part_id).scalar()  # noqa: E501
+    )
+    logger.warning(
+        "Backflush demand of %s for part %s on WO %s (company %s) suppressed (%s)",
+        quantity,
+        part_id,
+        work_order.id,
+        company_id,
+        reason,
+    )
+    audit.log(
+        action=BACKFLUSH_DOUBLE_ISSUE_BLOCKED_AUDIT_ACTION,
+        resource_type="inventory",
+        resource_id=part_id,
+        resource_identifier=part_number or str(part_id),
+        description=(
+            f"Backflush of {quantity} of component {part_number or part_id} on work order "
+            f"{work_order.work_order_number} was not issued ({reason})"
+        ),
+        new_values={"suppressed_quantity": quantity, "ledger_net_issued": ledger_net},
+        extra_data={
+            "work_order_id": work_order.id,
+            "work_order_number": work_order.work_order_number,
+            "component_part_id": part_id,
+            "component_part_number": part_number,
+            "suppressed_quantity": quantity,
+            "ledger_net_issued": ledger_net,
+            "suppression_reason": reason,
+        },
+        company_id=company_id,
+    )
+
+
+def _backflush_basis(work_order: WorkOrder) -> float:
+    """Units of the finished part whose material this job actually drew.
+
+    ``quantity_complete + scrapped`` -- the same shape the per-run tie engine reconciles
+    to, so one shop cannot report two different consumptions for one physical event
+    depending on whether the material happened to be tied. A scrapped unit consumed its
+    material exactly like a good one; leaving scrap out is why a fully-scrapped work
+    order used to backflush NOTHING.
+
+    **The scrap term comes from the OPERATIONS, and getting this wrong is invisible.**
+    ``WorkOrder.quantity_complete`` IS rolled up from operations
+    (``sync_work_order_quantity_complete``, ``max()``-guarded and monotonic-up), so it is
+    trustworthy. ``WorkOrder.quantity_scrapped`` is NOT rolled up at all -- its only
+    writers are a child reset, a null-guard, force-complete's explicit override and the
+    manual office edit. Reading the header column would therefore report scrap as ZERO
+    for the ordinary case: an operator who scraps 3 of 10 at the kiosk leaves
+    ``operation.quantity_scrapped = 3`` and the header at ``0``, so the tie engine would
+    consume for 10 and this leg for 7 -- precisely the divergence including scrap is
+    meant to close.
+
+    SUMMED across operations, not maxed: a unit scrapped at operation 10 and a unit
+    scrapped at operation 20 are DIFFERENT units, and both drew this job's material.
+
+    The header column is a FALLBACK only, used when no operation carries scrap -- which
+    is exactly the force-complete-with-explicit-scrap path, the one writer that sets it.
+    """
+    produced = float(work_order.quantity_complete or 0)
+    operation_scrap = sum(float(op.quantity_scrapped or 0) for op in (work_order.operations or []))
+    scrapped = operation_scrap if operation_scrap > _EPSILON else float(work_order.quantity_scrapped or 0)
+    return produced + scrapped
+
+
+def _resolve_backflush_components(
+    db: Session,
+    work_order: WorkOrder,
+    company_id: int,
+    allocations: Optional[list[WorkOrderMaterialAllocation]] = None,
+    *,
+    audit: AuditService,
+) -> dict[int, float]:
+    """Required quantity per component part for backflushing this WO.
+
+    Runs ONLY when the finished part opted into ``Part.backflush_components`` -- a column
+    with no writer anywhere in ``app/`` -- so everything below is dark: it has never
+    executed in production and changing it changes no shipped behavior.
+
+    **The basis is ``quantity_complete + quantity_scrapped``, not ``quantity_complete``.**
+    A scrapped run physically used its material, and lot genealogy filters on ISSUE, so
+    material consumed making scrap must appear as ISSUE or the parts most likely to be
+    audited are the ones whose material vanished from the record. This is also the exact
+    basis the per-run tie engine has always used (``qty_per_run x (complete + scrapped)``),
+    which is what stops one shop from reporting two different consumptions for the same
+    physical event depending on whether the material happened to be tied. Consequence: a
+    fully-scrapped work order now backflushes, where before it backflushed nothing.
+
+    **The routing no longer wins outright over the BOM.** It used to
+    (``if not required:``), so ONE stray ``component_part_id`` on ONE operation silently
+    disabled the entire BOM explosion for the whole work order -- and that is not a
+    hypothetical: ``_create_assembly_routing_operations`` writes ``component_part_id``
+    only for components that HAVE a released routing, so an assembly whose ten BOM lines
+    include two routed components lost the other eight. Precedence is now PER PART, which
+    is the only scope the routing actually speaks to: an operation naming a component
+    states that component's demand and says nothing about the rest of the BOM. Routing
+    demand wins for the parts it names; the BOM supplies every part it does not. A
+    disagreement between the two on a shared part is logged.
+
+    Suppression then runs in two layers, and BOTH are needed:
+
+    1. ``_drop_allocation_covered_parts`` -- an OPEN operation-scoped tie owns that part's
+       demand, including a tie that has not consumed yet (the material is coming).
+    2. ``_drop_ledger_covered_parts`` -- the ledger already shows that material gone,
+       whatever the tie's status now says.
+    """
+    basis = _backflush_basis(work_order)
+    if basis <= _EPSILON:
+        return {}
+
+    explosion = _BackflushBomExplosion()
+    if work_order.part_id is not None:
+        # Imported lazily to avoid an import cycle with the endpoints module.
+        from app.api.endpoints.work_orders import _get_active_bom
 
         bom = _get_active_bom(db, work_order.part_id, company_id)
-        if not bom:
-            return {}
-        for _item, component, extended_qty in _collect_bom_components(db, bom, company_id, parent_qty=produced):
-            required[component.id] = required.get(component.id, 0.0) + float(extended_qty or 0)
+        if bom is not None:
+            _explode_backflush_bom(
+                db,
+                bom,
+                company_id,
+                parent_qty=basis,
+                visited_part_ids={bom.part_id},
+                out=explosion,
+                consumed=True,
+            )
+    # A part reached as a primary line SOMEWHERE outranks its appearance as an alternate,
+    # an optional, or a member of a make subtree elsewhere in the same structure.
+    explosion.excluded_part_ids -= set(explosion.demand)
 
-    # 3) ALLOCATION PRECEDENCE. A part covered by an OPEN operation-scoped material
-    #    allocation on this WO is owned by the material-consumption engine, which posts
-    #    per-run ISSUEs with reference_type='work_order_operation'. Those rows are
-    #    OUTSIDE the uq_wo_inventory_issue predicate, so nothing at the DB level would
-    #    stop this WO-level backflush from ALSO issuing the same material -- a silent
-    #    double-issue. Drop those parts here; the allocation is the sole demand carrier
-    #    (we deliberately do NOT write op.component_part_id from a tie).
-    return _drop_allocation_covered_parts(db, work_order, company_id, required, allocations)
+    required: dict[int, float] = dict(explosion.demand)
+    for part_id, quantity in _routing_backflush_demand(db, work_order, company_id, basis=basis).items():
+        if part_id in explosion.excluded_part_ids:
+            logger.warning(
+                "WO %s (company %s) operation demand for part %s is dropped: the BOM reaches that part only "
+                "as an alternate/optional/reference line or inside a make sub-assembly",
+                work_order.id,
+                company_id,
+                part_id,
+            )
+            continue
+        bom_quantity = required.get(part_id)
+        if bom_quantity is not None and abs(bom_quantity - quantity) > _EPSILON:
+            logger.warning(
+                "WO %s (company %s) routing and BOM disagree on component %s (routing %s, BOM %s); routing wins",
+                work_order.id,
+                company_id,
+                part_id,
+                quantity,
+                bom_quantity,
+            )
+        required[part_id] = quantity
+
+    # ALLOCATION PRECEDENCE. A part covered by an OPEN operation-scoped material
+    # allocation on this WO is owned by the material-consumption engine, which posts
+    # per-run ISSUEs with reference_type='work_order_operation'. Those rows are OUTSIDE
+    # the uq_wo_inventory_issue predicate, so nothing at the DB level would stop this
+    # WO-level backflush from ALSO issuing the same material -- a silent double-issue.
+    # Drop those parts here; the allocation is the sole demand carrier (we deliberately
+    # do NOT write op.component_part_id from a tie).
+    required = _drop_allocation_covered_parts(db, work_order, company_id, required, allocations)
+    return _drop_ledger_covered_parts(db, work_order, company_id, required, audit=audit)
 
 
 def _drop_allocation_covered_parts(
@@ -481,6 +894,19 @@ def _drop_allocation_covered_parts(
     cancel, a hand-edited row) suppressed the backflush AND never consumed: the part was
     silently neither issued nor depleted. The operation lookup only runs when an
     operation-scoped tie exists, so an untied WO still costs nothing here.
+
+    This layer is STATUS-keyed, and that is its whole point: an OPEN tie that has not
+    consumed a thing still suppresses, because the material is coming. It is no longer the
+    only layer -- ``_drop_ledger_covered_parts`` covers the ties this one cannot see.
+
+    **Suppression is all-or-nothing and stays that way.** ``required.pop`` drops the BOM's
+    entire demand for the part however little the tie covers. Subtracting instead is not
+    available: the tie's target is ``qty_per_run x runs`` on ONE operation and the BOM's
+    demand is per finished unit across the whole job, so a difference between them is two
+    incompatible bases, not a shortfall, and netting them would post a quantity nobody
+    authored. What the difference IS is worth seeing, so it is logged -- a tie whose live
+    target is nowhere near the BOM demand it just cancelled is a planning error somebody
+    should look at, and before this it produced no signal at all.
     """
     if not required:
         return required
@@ -490,9 +916,13 @@ def _drop_allocation_covered_parts(
     if not operation_ids:
         return required
 
-    live_operation_ids = {
-        row[0]
-        for row in db.query(WorkOrderOperation.id)
+    live_operations = {
+        row.id: row
+        for row in db.query(
+            WorkOrderOperation.id,
+            WorkOrderOperation.quantity_complete,
+            WorkOrderOperation.quantity_scrapped,
+        )
         .filter(
             WorkOrderOperation.company_id == company_id,
             WorkOrderOperation.work_order_id == work_order.id,
@@ -501,8 +931,24 @@ def _drop_allocation_covered_parts(
         .all()
     }
     for allocation in allocations:
-        if allocation.work_order_operation_id in live_operation_ids:
-            required.pop(allocation.part_id, None)
+        operation = live_operations.get(allocation.work_order_operation_id)
+        if operation is not None:
+            demand = required.pop(allocation.part_id, None)
+            if demand is None:
+                continue
+            per_run = float(allocation.qty_per_run if allocation.qty_per_run is not None else 1.0)
+            tie_target = per_run * (float(operation.quantity_complete or 0) + float(operation.quantity_scrapped or 0))
+            if abs(tie_target - demand) > _EPSILON:
+                logger.warning(
+                    "Allocation %s suppresses %s of part %s on WO %s (company %s) but its own live target is "
+                    "%s; the tie's per-run basis and the BOM's per-unit demand disagree",
+                    allocation.id,
+                    demand,
+                    allocation.part_id,
+                    work_order.id,
+                    company_id,
+                    tie_target,
+                )
         elif allocation.work_order_operation_id is not None:
             logger.warning(
                 "Allocation %s points at operation %s which is not on WO %s (company %s); "
@@ -513,6 +959,207 @@ def _drop_allocation_covered_parts(
                 company_id,
                 allocation.part_id,
             )
+    return required
+
+
+def operation_scoped_net_issued_by_part(
+    db: Session,
+    *,
+    work_order_id: int,
+    company_id: int,
+    part_ids: Iterable[int],
+) -> dict[int, float]:
+    """Signed ISSUE - RETURN per part, over this WO's OPERATION-scoped ledger rows.
+
+    The reference shape is ``('work_order_operation', <an operation on this work order>)``
+    -- the same resolution ``work_order_ledger_filter`` performs, narrowed to the one
+    shape that matters here. The ``work_order`` shape is deliberately NOT included: rows
+    under it are already covered by ``_component_already_issued`` and by
+    ``uq_wo_inventory_issue``, and folding them in would turn an ordinary idempotent
+    replay into a "double issue blocked" audit row on every re-entry.
+
+    The SIGN is keyed on ``transaction_type``, never on the stored sign of ``quantity``
+    (ISSUE stores it negative, RETURN positive) -- the rule every other reader that learned
+    to net returns follows, and the one that stops a credit being counted as more
+    consumption. A dataset with no RETURN rows is numerically identical to a plain
+    ``SUM(ABS(quantity))``.
+
+    Tenant-scoped on the outer predicate and the operation subquery alike (invariant #1).
+    Empty input short-circuits to no query at all.
+    """
+    ids = [int(part_id) for part_id in part_ids]
+    if not ids:
+        return {}
+    operation_ids = select(WorkOrderOperation.id).where(
+        WorkOrderOperation.company_id == company_id,
+        WorkOrderOperation.work_order_id == work_order_id,
+    )
+    rows = (
+        db.query(
+            InventoryTransaction.part_id,
+            func.sum(
+                case(
+                    (
+                        InventoryTransaction.transaction_type == TransactionType.RETURN,
+                        -func.abs(InventoryTransaction.quantity),
+                    ),
+                    else_=func.abs(InventoryTransaction.quantity),
+                )
+            ),
+        )
+        .filter(
+            InventoryTransaction.company_id == company_id,
+            InventoryTransaction.part_id.in_(ids),
+            InventoryTransaction.transaction_type.in_((TransactionType.ISSUE, TransactionType.RETURN)),
+            InventoryTransaction.reference_type == OPERATION_REFERENCE_TYPE,
+            InventoryTransaction.reference_id.in_(operation_ids),
+        )
+        .group_by(InventoryTransaction.part_id)
+        .all()
+    )
+    return {part_id: float(total or 0.0) for part_id, total in rows}
+
+
+def net_consumed_quantity_for_allocation(db: Session, *, allocation_id: int, company_id: int) -> float:
+    """Signed ISSUE - RETURN the ledger holds against ONE material tie. Tenant-scoped.
+
+    The authoritative answer to "is this tie still holding material?", as opposed to
+    ``WorkOrderMaterialAllocation.qty_consumed``, which the plan documents as a CACHE and
+    which the completion backflush writes as ``qty_planned`` rather than as the quantity
+    the ISSUE actually posted. Guards whose refusal protects the ledger must read the
+    ledger: hard delete has since PR 1, nest re-import since PR 3, and the manual untie
+    since this PR.
+
+    Signed, not existence-keyed. ``ledger_backed_allocation_ids`` answers a different
+    question -- "would deleting this row orphan a ledger reference?" -- for which mere
+    existence is correct, because a RETURN row references the tie just as durably as the
+    ISSUE it compensates. Here the question is whether material is still OUT, and a tie
+    that gave everything back is holding none.
+    """
+    total = (
+        db.query(
+            func.coalesce(
+                func.sum(
+                    case(
+                        (
+                            InventoryTransaction.transaction_type == TransactionType.RETURN,
+                            -func.abs(InventoryTransaction.quantity),
+                        ),
+                        else_=func.abs(InventoryTransaction.quantity),
+                    )
+                ),
+                0.0,
+            )
+        )
+        .filter(
+            InventoryTransaction.company_id == company_id,
+            InventoryTransaction.allocation_id == allocation_id,
+            InventoryTransaction.transaction_type.in_((TransactionType.ISSUE, TransactionType.RETURN)),
+        )
+        .scalar()
+    )
+    return float(total or 0.0)
+
+
+def _drop_ledger_covered_parts(
+    db: Session,
+    work_order: WorkOrder,
+    company_id: int,
+    required: dict[int, float],
+    *,
+    audit: AuditService,
+) -> dict[int, float]:
+    """Suppress backflush demand for a part the LEDGER already shows leaving this job.
+
+    The double-issue ``_drop_allocation_covered_parts`` cannot prevent on its own. That
+    layer keys on tie STATUS, and three guards in a row miss the same case:
+
+    * a tie that CONSUMED and is no longer ``OPEN`` is invisible to it;
+    * ``_component_already_issued`` keys on ``reference_type='work_order'`` ISSUE rows and
+      therefore cannot see tied consumption at all (it posts under
+      ``work_order_operation``);
+    * ``uq_wo_inventory_issue``'s partial predicate does not cover those rows either --
+      that is the whole reason the reference type was split.
+
+    So the same part leaves stock twice, and the as-built record carries two lines naming
+    two DIFFERENT lots for one physical consumption (AS9100D 8.5.2). It is reachable
+    through supported verbs: ``cancel_open_allocations_for_work_order`` cancels a tie
+    regardless of ``qty_consumed``, and a restore only re-opens ties whose most recent
+    DELETE audit row carries the delete's own reason -- so a missing or detached audit row,
+    or a cancel that came from anywhere else, leaves a consumed tie CANCELLED forever.
+
+    Keyed on the LEDGER because ``status`` and ``qty_consumed`` are both documented as
+    non-authoritative planning state; every other guard of comparable consequence (hard
+    delete since PR 1, nest re-import since PR 3) already reads it for the same reason.
+
+    **A fully-returned tie nets to zero and IS permitted to re-issue. That is a decision,
+    not an accident of the arithmetic.** PR 3's ``return_and_untie`` credits the material
+    back to its source lots; the job then holds none of it, and the BOM's demand for that
+    part is once again unmet. Suppressing on the mere EXISTENCE of ledger rows would leave
+    the part permanently un-issuable on a job that genuinely gave the material back --
+    refusing to consume material the shop is holding, and hiding the demand from the
+    shortage machinery that would otherwise surface it.
+
+    Suppression is RECORDED (``BACKFLUSH_DOUBLE_ISSUE_BLOCKED``) rather than silent. The
+    row is bounded, not per-request: this fires on the completion paths and on a reconcile
+    pass that actually applies a work-order transition, the same cardinality as
+    ``BACKFLUSH_SHORTAGE``, not on every read.
+
+    One known blind spot, inherited from ``work_order_ledger_filter`` and not introduced
+    here: operation ids resolve through a LIVE subquery, so rows naming an operation a nest
+    re-import deleted drop out of it. The structural fix is superseding operations instead
+    of deleting them (see the plan's fourth residual gap).
+    """
+    if not required:
+        return required
+
+    nets = operation_scoped_net_issued_by_part(
+        db, work_order_id=work_order.id, company_id=company_id, part_ids=required.keys()
+    )
+    blocked = {part_id: net for part_id, net in nets.items() if net > _EPSILON and part_id in required}
+    if not blocked:
+        return required
+
+    part_numbers = {
+        part_id: part_number
+        for part_id, part_number in db.query(Part.id, Part.part_number)
+        .filter(Part.company_id == company_id, Part.id.in_(blocked.keys()))
+        .all()
+    }
+    for part_id, net in blocked.items():
+        demand = required.pop(part_id)
+        part_number = part_numbers.get(part_id)
+        logger.warning(
+            "Backflush demand of %s for part %s on WO %s (company %s) suppressed: the ledger already shows "
+            "%s consumed against this work order's operations",
+            demand,
+            part_id,
+            work_order.id,
+            company_id,
+            net,
+        )
+        audit.log(
+            action=BACKFLUSH_DOUBLE_ISSUE_BLOCKED_AUDIT_ACTION,
+            resource_type="inventory",
+            resource_id=part_id,
+            resource_identifier=part_number or str(part_id),
+            description=(
+                f"Backflush of {demand} of component {part_number or part_id} on work order "
+                f"{work_order.work_order_number} was blocked: {net} has already been consumed against "
+                "this work order's operations by a material tie"
+            ),
+            new_values={"suppressed_quantity": demand, "ledger_net_issued": net},
+            extra_data={
+                "work_order_id": work_order.id,
+                "work_order_number": work_order.work_order_number,
+                "component_part_id": part_id,
+                "component_part_number": part_number,
+                "suppressed_quantity": demand,
+                "ledger_net_issued": net,
+                "reference_type": OPERATION_REFERENCE_TYPE,
+            },
+            company_id=company_id,
+        )
     return required
 
 
@@ -652,6 +1299,19 @@ def _issue_one_component(
     the operation-scoped engine exactly. Unpinned demand keeps the historical behavior:
     the lowest-id active row with on-hand -- NOT ``received_date`` FIFO, which is what
     the per-run engine does -- else a placeholder at standard cost.
+
+    **The two engines' lot selection genuinely contradicts each other, and this one is
+    deliberately NOT changed.** Unpinned, this leg takes the LOWEST-ID active on-hand row,
+    ignores ``status`` entirely, and writes ONE ISSUE against that single lot. The per-run
+    engine (``_fifo_source_items``) walks ``received_date`` FIFO, filters
+    ``status = 'available'``, and spills across as many lots as the delta needs. Both write
+    lot genealogy, so on the same material they can name different heats for the same
+    physical draw. Reconciling them is a real, wanted fix and it is not a dark one: this
+    function is LIVE -- work-order-scoped material ties have driven it since PR 1, so any
+    change to which lot it picks changes shipped genealogy for work orders that have
+    nothing to do with the BOM backflush, and adding ``status = 'available'`` would newly
+    exclude legacy NULL-status rows on top of that. It belongs in a PR that can say so and
+    carry the data review, not in one whose remit is the flag-gated leg above.
 
     **Neither branch consumes a held lot silently.** A lot that is inactive or not
     ``available`` is still consumed -- the material is already in the part and this path
@@ -1136,13 +1796,29 @@ def backflush_components_for_work_order(
 
     GATED: the BOM/routing leg only runs when ``work_order.part.backflush_components``
     is True (opt-in per part, default False) so material a shop issued manually is never
-    double-consumed. Idempotent per component (skips a component that already has a
-    WO ISSUE txn). Each consumed source lot is carried on the ISSUE txn for as-built
-    genealogy. A shortage NEVER fails the completion, but is recorded tamper-evidently
-    (a ``BACKFLUSH_SHORTAGE`` ``audit_log`` row + a ``backflush_shortage``
-    ``OperationalEvent``) inside ``_issue_one_component`` -- so it is captured on BOTH
-    the live paths AND the reconcile path (the caller no longer needs to inspect the
-    returned shortages to record them). Does NOT commit.
+    double-consumed. That column has NO writer anywhere in ``app/`` -- no schema field, no
+    endpoint, no UI -- so this leg has never run in production and
+    ``_resolve_backflush_components`` is dark code. Idempotent per component (skips a
+    component that already has a WO ISSUE txn). Each consumed source lot is carried on the
+    ISSUE txn for as-built genealogy. A shortage NEVER fails the completion, but is
+    recorded tamper-evidently (a ``BACKFLUSH_SHORTAGE`` ``audit_log`` row + a
+    ``backflush_shortage`` ``OperationalEvent``) inside ``_issue_one_component`` -- so it
+    is captured on BOTH the live paths AND the reconcile path (the caller no longer needs
+    to inspect the returned shortages to record them). Does NOT commit.
+
+    **``_component_already_issued`` is EXISTENCE-keyed and stays that way**, unlike the
+    signed ledger net ``_drop_ledger_covered_parts`` uses one layer up. That is the
+    documented answer to a real asymmetry: a fully-returned OPERATION-scoped tie nets to
+    zero and lets the backflush re-issue, while a fully-returned WORK-ORDER-scoped tie
+    leaves its part un-issuable on this work order forever. The difference is not a policy
+    preference -- ``uq_wo_inventory_issue`` permits exactly ONE ISSUE row per
+    (company, WO, part) under ``reference_type='work_order'``, so a second issue on that
+    shape is physically unavailable at any price short of a migration. Netting the guard
+    here would therefore not enable a re-issue; it would attempt one, lose to the index,
+    and be swallowed as a duplicate no-op -- claiming a consumption that never posted. The
+    remedy for a work-order-scoped tie that needs to re-consume is an OPERATION-scoped
+    tie, which posts outside that index; ``create_material_allocation``'s 409 already says
+    so.
 
     Also drains WORK-ORDER-scoped material ties (``work_order_material_allocations``
     with no operation). Those are NOT gated on ``backflush_components`` -- an explicit
@@ -1166,7 +1842,7 @@ def backflush_components_for_work_order(
         return result
 
     required_by_component: dict[int, float] = (
-        _resolve_backflush_components(db, work_order, company_id, allocations) if backflush_enabled else {}
+        _resolve_backflush_components(db, work_order, company_id, allocations, audit=audit) if backflush_enabled else {}
     )
     for part_id, demand in allocation_demand.items():
         required_by_component[part_id] = required_by_component.get(part_id, 0.0) + demand.quantity
@@ -1178,7 +1854,29 @@ def backflush_components_for_work_order(
         if required_qty <= _EPSILON:
             continue
         if _component_already_issued(db, work_order.id, component_part_id, company_id):
-            # Idempotency: this component was already backflushed for this WO.
+            # Idempotency: this component was already backflushed for this WO, and
+            # ``uq_wo_inventory_issue`` permits exactly one ISSUE per (work order, part)
+            # on this reference shape -- forever. So this is not merely "skip a replay":
+            # it is the ONLY path by which a work-order-scoped tie that was fully
+            # RETURNED becomes permanently un-issuable, because the returned ISSUE row
+            # still satisfies this existence test while the material is physically back
+            # on the shelf.
+            #
+            # RECORD IT. The demand being dropped here was resolved by THIS call from a
+            # live BOM/routing, so the shop asked for material and got none -- silently,
+            # with no ledger row, no shortage and no event. That is the same shape of
+            # control gap ``_drop_ledger_covered_parts`` writes a chain row for, and
+            # recording the recoverable suppression while staying silent on the
+            # permanent one would be exactly backwards.
+            _record_backflush_demand_suppressed(
+                db,
+                work_order,
+                part_id=component_part_id,
+                quantity=required_qty,
+                company_id=company_id,
+                audit=audit,
+                reason="already_issued",
+            )
             continue
         demand = allocation_demand.get(component_part_id)
         outcome = _issue_one_component(

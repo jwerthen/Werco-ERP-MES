@@ -173,8 +173,10 @@ ALLOWED_HOSTS=api.werco.com,erp.werco.com,*.up.railway.app,healthcheck.railway.a
 > location is **not** an env var — the warehouse (`MAIN`) and location (`FINISHED-GOODS`) are module
 > constants (`FINISHED_GOODS_WAREHOUSE` / `FINISHED_GOODS_LOCATION` in
 > `app/services/completion_inventory_service.py`). Likewise, **component backflush on completion** is
-> not a global switch: it is a per-part database flag (`parts.backflush_components`, default `false`),
-> set on the part record, not via configuration. Neither has an environment variable.
+> not a global switch: it is a per-part database flag (`parts.backflush_components`, default `false`).
+> Note it is not settable *anywhere* today — no schema field, no endpoint, no UI, only a direct database
+> write — so the backflush leg has never run in production; exposing it is its own PR (see
+> `docs/MATERIAL_CONSUMPTION_PLAN.md` → Delivery). Neither has an environment variable.
 >
 > The **operator-qualification gate** (Batch 11C / G5-B) adds **no** env var either: its minimum
 > `SkillMatrix` skill level is the module constant `MIN_SKILL_LEVEL = 2` in

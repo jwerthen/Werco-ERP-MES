@@ -261,15 +261,41 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > receipt (logged, no error). The receipt's lot is reconstructable end-to-end via
 > [Traceability](#traceability).
 >
-> **Component backflush is opt-in per part (default off).** If the finished part has
-> `backflush_components = true` (see [Part Schema](#part-schema)), completion **auto-consumes** the
-> part's BOM components: one negative `ISSUE` `InventoryTransaction` per component (quantity scaled by
-> the produced quantity and each BOM item's `scrap_factor`), decrementing source stock and carrying the
-> consumed lot for genealogy — each **audited** and **idempotent** per component. When the flag is
-> **false** (the default) completion moves no components, so a shop that issues material manually is
-> never double-consumed. A backflush shortage (insufficient stock) **does not fail the completion** —
-> the source lot is driven negative and the shortfall is recorded as a tamper-evident
-> `BACKFLUSH_SHORTAGE` audit row plus a `backflush_shortage` warning event.
+> **Component backflush is opt-in per part (default off) — and NOTHING SETS THE FLAG.** If the
+> finished part has `backflush_components = true` (see [Part Schema](#part-schema)), completion
+> **auto-consumes** the part's BOM components: one negative `ISSUE` `InventoryTransaction` per
+> component, decrementing source stock and carrying the consumed lot for genealogy — each **audited**
+> and **idempotent** per component. When the flag is **false** (the default) completion moves no
+> components, so a shop that issues material manually is never double-consumed. **`backflush_components`
+> has no writer anywhere in the application**, so this entire leg has never run in production; the
+> paragraphs below describe what it would do on the first part that opts in, not observable behavior
+> today. A backflush shortage (insufficient stock) **does not fail the completion** — the source lot is
+> driven negative and the shortfall is recorded as a tamper-evident `BACKFLUSH_SHORTAGE` audit row plus
+> a `backflush_shortage` warning event.
+>
+> **How component demand is resolved** (hardened while still dark; see
+> `docs/MATERIAL_CONSUMPTION_PLAN.md` → "The BOM/routing backflush leg"):
+> - **Basis is `quantity_complete + quantity_scrapped`**, each BOM line extended by its `scrap_factor`
+>   — the same basis the per-run tie engine uses, so one shop cannot report two different consumptions
+>   for the same physical event depending on whether the material was tied. A **fully-scrapped** work
+>   order therefore backflushes (it previously backflushed nothing).
+> - **Alternate, optional and `reference` BOM lines are skipped.** An alternate group is an OR, not an
+>   AND; optional lines have nothing on the work order recording which units got them; `reference`
+>   lines are documentation and tooling. This matches `mrp_service`, so planning and consumption state
+>   the same demand for one BOM. (There is still **no substitution logic** — alternates are inert
+>   columns, not a feature.)
+> - **Multi-level BOMs:** a `phantom` sub-assembly explodes into its children; a `make` sub-assembly is
+>   issued as a stocked unit and its children are **not** (they were consumed when it was built).
+> - **Routing precedence is per part, not all-or-nothing.** An operation's `component_part_id` states
+>   *that component's* demand; the BOM supplies every part the routing does not name. Previously one
+>   stray `component_part_id` disabled the entire BOM explosion for the work order. An operation naming
+>   the work order's **own** part is refused (it would ISSUE the part the FG receipt just RECEIVEd).
+> - **Suppression runs in two layers**, so tied material is never issued twice: an OPEN operation-scoped
+>   tie owns its part's demand (even before it consumes), **and** the signed ledger net suppresses any
+>   part the ledger already shows consumed against this work order's operations — recorded as a
+>   tamper-evident **`BACKFLUSH_DOUBLE_ISSUE_BLOCKED`** audit row rather than silently. A **fully
+>   returned** tie nets to zero and is deliberately allowed to re-issue: the material physically came
+>   back, so the BOM's demand is genuinely unmet again.
 >
 > **Completion also consumes tied material (material allocations).** A work order can optionally be
 > **tied** to stock material via `…/material-allocations` (see "Material ties" below). Consumption is
@@ -583,10 +609,12 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 >   row; it sets `status = "cancelled"` and **never physically deletes** (the ledger's `allocation_id`
 >   back-reference must keep resolving). Idempotent: untying an already-cancelled tie is a no-op that
 >   writes no second audit row. Audited as a `log_delete(soft_delete=True)` on
->   `work_order_material_allocation`. Still refused **409** once anything was consumed — cancelling a
->   tie that moved stock, without moving it back, would strand the ledger's `allocation_id` rows
->   against a tombstone with no account of where the material went. The 409 now names the verb that
->   does both: `POST …/return` with `intent: "return_and_untie"`.
+>   `work_order_material_allocation`. Still refused **409** while the **ledger** shows material out
+>   against the tie — cancelling a tie that moved stock, without moving it back, would strand the
+>   ledger's `allocation_id` rows against a tombstone with no account of where the material went. The
+>   409 names the verb that does both: `POST …/return` with `intent: "return_and_untie"`. **The basis
+>   is the signed ledger net (ISSUE − RETURN), not the `qty_consumed` cache** (re-keyed in PR 4, the
+>   last of the three guards still reading the cache), so a **fully returned** tie can be untied.
 > - **`GET …/material-allocations/{allocation_id}/consumption`** — where this tie's material came
 >   from, per source lot, and how much of each lot can still take it back. Open to **any
 >   authenticated tenant user** (like the tie list — it discloses ledger facts about material the
@@ -666,6 +694,12 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > **and** RETURN rows both still name the operation a rebuild would delete. Those refusals stand,
 > correctly, and their messages say so. See `docs/MATERIAL_CONSUMPTION_PLAN.md` → Residual gaps.
 >
+> **The plain `DELETE` untie is the one refusal a full return DOES clear**, since PR 4 keyed it to the
+> **signed** net rather than to existence. That is not an inconsistency with the three above: they ask
+> "would this orphan a ledger reference?", where a RETURN row counts as durably as the ISSUE it
+> compensates, while untie asks "is material still out?", where a returned tie is holding none. Do not
+> generalize either answer to the other question.
+>
 > **Error contract** (all lookups are tenant-scoped, so a cross-tenant id is **404**, never 403):
 >
 > | Code | When |
@@ -676,7 +710,7 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > | **404** | `pinned_inventory_item_id` unknown or cross-tenant (`"Pinned inventory lot not found"`) |
 > | **404** | `allocation_id` unknown, cross-tenant, or not on this work order (`"Material allocation not found"`) |
 > | **409** | **Duplicate open tie** — this part is already tied to the same scope. At most **one open tie per (work order, part)** for work-order-scoped ties and **one per (operation, part)** for operation-scoped ones. Enforced by an app-level check *and* by two partial unique indexes, so a concurrent race returns the same 409 rather than a 500. Re-tying after a `cancelled` row exists is allowed |
-> | **409** | **Untie after consumption** — `DELETE` once `qty_consumed > 0` (*"… has already been consumed against this allocation. Return the material with intent 'return_and_untie', which credits it back to its source lots and closes this tie in one step."*). The remedy now exists and is a single call; untie stays refused on its own terms, since cancelling a tie that moved stock without moving it back would strand the ledger's `allocation_id` rows against a tombstone |
+> | **409** | **Untie while material is still issued** — `DELETE` while the **signed ledger net** (ISSUE − RETURN) against this tie is positive (*"N <uom> of material is still issued against this allocation. Return the material with intent 'return_and_untie', which credits it back to its source lots and closes this tie in one step."*). The remedy is a single call; untie stays refused on its own terms, since cancelling a tie that moved stock without moving it back would strand the ledger's `allocation_id` rows against a tombstone. **The basis changed in PR 4: it reads the ledger, not the `qty_consumed` cache** — the cache misjudged this in both directions (a `correct_over_consumption` to a zero live target left it at 0 on a tie the ledger still backed; the backflush advances a work-order-scoped tie's cache to `qty_planned`, which is not what the ISSUE posted). **Signed**, not existence-keyed, so a **fully returned tie can be untied** — existence-keying would 409 forever while `return_and_untie` 422s with nothing left to return |
 > | **409** | **`PATCH` on a non-open tie** (`"This allocation is <status>; only an open tie can be edited."`) |
 > | **409** | **`POST` on a TERMINAL work order** (`complete` / `closed` / `cancelled`). Every completion path refuses to re-enter a terminal work order, so the tie could never consume — it would sit `open` at `qty_consumed` 0 advertising demand that will never be met. `PATCH` / `DELETE` / `GET` on an existing tie stay available, so a historical tie is still readable and fixable |
 > | **409** | **`POST` of a work-order-scoped tie whose part was already ISSUEd to this work order** (*"Part X was already issued to work order Y; this tie could never consume — tie the material at the operation level instead, which posts outside the one-issue-per-work-order guard."*). The 409 names the remedy, and it is deliberately **not** "return the material": a return appends a compensating row and never removes the ISSUE row, while this check (and `uq_wo_inventory_issue` behind it) keys on that row's **existence** — so a return would leave this 409 firing exactly as before, having moved stock for nothing. An operation-scoped tie posts outside the index and is unaffected |
@@ -1183,24 +1217,29 @@ mixed**:
   "unit_of_measure": "EA",
   "material_type": "ST-304",
   "is_active": true,
-  "backflush_components": false,
   "created_at": "2024-01-01T10:00:00Z"
 }
 ```
 
-> `backflush_components` (boolean, default `false`) opts this part into **component backflush on
-> work-order completion**: when a work order for this part completes, its BOM components are
-> auto-consumed via negative `ISSUE` inventory transactions. Leave it `false` (the default) when
-> material is issued manually, to avoid double-consuming stock. See the completion-inventory notes
-> under [Work Orders](#work-orders).
+> **`backflush_components` is NOT in the payload above, and used to be.** The sample previously listed
+> it, which was simply false: the column exists on the `parts` **table** (migration `040`) but is not a
+> field on `app/schemas/part.py`, so it is neither returned by nor settable through any part endpoint.
+> It was removed from the sample rather than re-annotated, because a schema block is the one place a
+> reader is entitled to take literally.
 >
-> **Not currently exposed over the API.** The column exists on `parts` (migration `040`) and the
-> backflush logic reads it, but it is **not** a field on `app/schemas/part.py` — so it is neither
-> returned by nor settable through the part endpoints, and the sample above shows it for reference
-> only. Setting it today requires a direct DB change. (Exposing it is planned — see
-> [docs/MATERIAL_CONSUMPTION_PLAN.md](MATERIAL_CONSUMPTION_PLAN.md) → Delivery, PR 4.) A
-> **work-order material tie** is the supported way to make a specific job consume material without
-> this flag — see [Work Orders](#work-orders) → "Material ties".
+> The flag (boolean, default `false`) opts a part into **component backflush on work-order
+> completion** — its BOM components auto-consumed via negative `ISSUE` transactions when a work order
+> for it completes. **Nothing in `app/` ever writes it.** There is no schema field, no endpoint and no
+> UI, and the column's `server_default` is `false`, so the BOM/routing backflush leg has **never
+> executed against production data**; setting it today requires a direct DB change. Do not read the
+> completion-inventory notes under [Work Orders](#work-orders) as descriptions of live behavior —
+> they describe what the leg *would* do on the first part that opts in.
+>
+> Exposing it is planned as its own PR, deliberately **not** the one that hardened the leg — see
+> [docs/MATERIAL_CONSUMPTION_PLAN.md](MATERIAL_CONSUMPTION_PLAN.md) → Delivery, PR 4.5, and "The
+> BOM/routing backflush leg" for what was fixed underneath it first. A **work-order material tie** is
+> the supported and *live* way to make a specific job consume material without this flag — see
+> [Work Orders](#work-orders) → "Material ties".
 
 ### BOM (Bill of Materials)
 
@@ -2999,7 +3038,9 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 > truthfully carry `work_order` only. Consequently `consumed_components` is non-empty when the
 > producing part had `backflush_components = true` **or** the work order carried material ties (see
 > Work Orders → "Material ties"); it stays empty for purchased/raw lots and for untied work on a part
-> that never opted into backflush. The two `work_order`-family reference types are also what the lot
+> that never opted into backflush. In practice **material ties are the only live source** — nothing in
+> the application writes `backflush_components`, so no work order has ever reached the BOM/routing
+> backflush leg (see [Part Schema](#part-schema)). The two `work_order`-family reference types are also what the lot
 > and serial traces use to collect `work_orders_used`.
 
 ### Shipping

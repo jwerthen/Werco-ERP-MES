@@ -216,9 +216,11 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > return writes
 > a tamper-evident `audit_log` row on resource type `work_order_material_allocation`. Untie is
 > `status = cancelled` — the row is **never physically deleted**, because the ledger's
-> `allocation_id` back-reference must keep resolving — and is refused **409** once any material has
-> been consumed against the tie; the 409 names `POST …/return` with `intent: "return_and_untie"`,
-> which credits the material back to its source lots **and** cancels the tie in one transaction.
+> `allocation_id` back-reference must keep resolving — and is refused **409** while the **ledger**
+> still shows material issued against the tie (the signed ISSUE − RETURN net, not the `qty_consumed`
+> cache, so a fully returned tie can be untied); the 409 names `POST …/return` with
+> `intent: "return_and_untie"`, which credits the material back to its source lots **and** cancels the
+> tie in one transaction.
 > A return additionally requires a **non-blank reason** and writes it on the ledger row, in the audit
 > description and in `extra_data.reason`; it appends compensating `RETURN` transactions and never
 > edits a historical row.

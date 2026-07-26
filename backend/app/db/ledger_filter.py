@@ -54,6 +54,31 @@ OPERATION_REFERENCE_TYPE = "work_order_operation"
 WORK_ORDER_REFERENCE_TYPES = (WORK_ORDER_REFERENCE_TYPE, OPERATION_REFERENCE_TYPE)
 
 
+# The float-comparison epsilon for LEDGER QUANTITIES, homed here for the same two
+# reasons the predicate above is -- and it is used alongside it, by the same readers.
+#
+# * **It is not consumption-specific.** Ledger quantities are ``Float`` columns, so "is
+#   this quantity zero?" is never an exact ``== 0`` / ``> 0`` test: a target computed as
+#   ``0.1 * 3`` is not ``0.3``, and a net that cancels to ``4e-16`` is zero in every
+#   sense a human means. Lot genealogy, the consumption engine, the tie endpoints and
+#   the display layer all have to answer that question the SAME way, or a tie reads as
+#   consumed in one guard and squared-up in the next.
+# * **Import weight.** It previously lived in ``completion_inventory_service`` (aliased
+#   public as ``material_consumption_service.CONSUMPTION_EPSILON``), so a READ-ONLY
+#   genealogy endpoint pulled the whole consumption engine -- transitively
+#   ``completion_inventory_service`` and ``operational_event_service`` -- to get one
+#   float. That is precisely the coupling this module exists to prevent, and the
+#   argument does not weaken just because the thing being shared is a constant rather
+#   than a WHERE clause.
+#
+# The services keep their own names for it (``_EPSILON`` internally,
+# ``CONSUMPTION_EPSILON`` as the public alias) so call sites read in their own idiom --
+# but both now resolve HERE. There must never be a second literal: the frontend's
+# ``TIE_EPSILON`` is deliberately LOOSER than this and asserts ``>=`` against it in a
+# parity test, which only means anything while this is the one backend definition.
+LEDGER_QUANTITY_EPSILON = 1e-9
+
+
 def work_order_ledger_filter(
     work_order_ids: Union[int, Iterable[int]],
     company_id: int,
