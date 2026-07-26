@@ -23,9 +23,10 @@
  * deducts NOTHING: production reporting is deliberately not a trigger. An
  * operation that is still IN_PROGRESS is still REDUCIBLE
  * (`production_reduction_service` refuses a walk-back only once the operation is
- * COMPLETE), and consumption NEVER auto-reverses — a negative delta is a no-op
- * and there is no RETURN verb — so consuming against a still-open operation
- * could strand material nothing can give back. Material moves when the
+ * COMPLETE), and consumption NEVER auto-reverses — a negative delta is a no-op,
+ * and the only way back is a supervisor's explicit, reasoned, audited RETURN
+ * (PR 3) — so consuming against a still-open operation would strand material
+ * behind an office verb the floor cannot reach. Material moves when the
  * operation flips COMPLETE, and at no other moment.
  *
  * So every string this module produces is anchored on THIS OPERATION completing.
@@ -50,9 +51,66 @@
  * reconcile-to-target, the operation's quantities can still move before it
  * closes, and a shortage NEVER blocks production — it drives the lot negative
  * and writes an `ALLOCATION_SHORTAGE` audit row.
+ *
+ * ---------------------------------------------------------------------------
+ * WHAT THE RETURN VERB (PR 3) DID TO THE ARITHMETIC IN HERE
+ * ---------------------------------------------------------------------------
+ * `qty_consumed` used to be MONOTONICALLY NON-DECREASING. A reasoned RETURN
+ * lowers it, and that breaks one of the two predictors below — but only one, and
+ * only in one state. Working it through, because the wrong fix here is easy and
+ * expensive:
+ *
+ * 1. THE KIOSK PREDICTOR IS ALREADY CORRECT AND WAS NOT TOUCHED.
+ *    `predictMaterialConsumption` is TARGET-based — it recomputes the engine's
+ *    own `per_run × (complete + scrapped) − qty_consumed`, which is exactly what
+ *    the engine will post no matter which direction `qty_consumed` last moved.
+ *    A lower `qty_consumed` there yields a LARGER delta, and that larger delta is
+ *    genuinely what the next completion will draw. (`materialTie.parity.test.ts`
+ *    is what keeps this true; it needed no new case.) A `return_and_untie` is
+ *    invisible to it for a different reason: that cancels the tie, and
+ *    `material_tie_view` serves OPEN ties only, so the tie leaves the kiosk and
+ *    board payloads entirely rather than lingering with a stale forecast.
+ *
+ * 2. THE BOARD CHIP IS PLAN-BASED, AND THAT IS WHERE THE LIE LIVES.
+ *    `qty_remaining` is `qty_planned − qty_consumed` (server-derived, floored at
+ *    0) — a PLAN-versus-REPORTED gap, not a forecast. Lower `qty_consumed` and it
+ *    rises. On a still-open operation that is harmless and in fact right: ties are
+ *    created with `qty_planned == per_run × ordered`, `/complete` asserts
+ *    `quantity_complete = quantity_ordered`, so the plan gap and the engine's
+ *    delta are the same number and the material really will be drawn. On a
+ *    COMPLETE operation it is a straight falsehood: `correct_over_consumption` is
+ *    bounded by `qty_consumed − live_target`, so the server leaves the tie at
+ *    `qty_consumed >= target` and the engine's delta is `<= 0` FOREVER, on every
+ *    path including reconcile-on-read GETs. Nothing further can be drawn, and the
+ *    chip would nonetheless announce "deducts N when this operation completes".
+ *
+ * THE FIX: a terminal-operation guard (`operationCanStillDraw`). When the row's
+ * operation is COMPLETE, the chip states what was consumed and explicitly says
+ * nothing further can be drawn, instead of forecasting a deduction. It also
+ * suppresses the sibling-shortage tier there, because a shortage against a
+ * deduction that cannot happen is a purchasing signal made of nothing.
+ *
+ * WHAT WAS DELIBERATELY *NOT* DONE: capping the live-row estimate at
+ * `per_run × quantity_ordered − qty_consumed`. That looks like the tidier fix —
+ * make the chip target-based like the kiosk — and it is wrong here, because
+ * `DispatchBoardRow` carries `quantity_ordered` and `quantity_complete` but NOT
+ * `quantity_scrapped`, and scrap RAISES the target. Capping without it would
+ * under-state a scrapped operation's draw, and under-stating turns a real
+ * shortage chip green. Over-stating a covered tie is a cosmetic error;
+ * under-stating a shortage is the one that teaches a planner to stop trusting the
+ * board. So the live-row estimate keeps its plan basis and its "Estimate" label,
+ * and only the case that is provably impossible is suppressed.
+ *
+ * HONEST NOTE ON REACHABILITY: `queued_operations_query` serves READY/IN_PROGRESS
+ * operations on non-terminal work orders, so a COMPLETE row does not reach the
+ * board through today's payload — the guard is defence in depth against the next
+ * caller (a history view, a completed-column board, a cached payload replayed
+ * after the operation closed), not a repair of a live screen. It is cheap,
+ * cannot under-state, and is the only place in this module that could assert a
+ * deduction the engine has already proven it will refuse.
  */
 
-import type { DispatchBoardRow } from '../types';
+import type { DispatchMaterialTie, MaterialAllocation } from '../types';
 import type { KioskMaterialTie } from '../components/kiosk/kioskConstants';
 
 /**
@@ -105,6 +163,38 @@ export interface MaterialTieChip {
 }
 
 /**
+ * The slice of a board row the chip reads.
+ *
+ * Every field is OPTIONAL on purpose. `status` was added by the RETURN verb's
+ * terminal-operation guard, and a payload (or fixture) without it must behave
+ * exactly as it did before that guard existed — an absent status is treated as
+ * "still live", which is what every row the board actually serves is.
+ */
+export interface MaterialTieChipRow {
+  material_tie?: DispatchMaterialTie | null;
+  work_order_number?: string;
+  /**
+   * The OPERATION's status (`DispatchBoardRow.status`). Only `complete` is
+   * terminal — `OperationStatus` has no cancelled/skipped member.
+   */
+  status?: string | null;
+}
+
+/**
+ * Can a completion still fire on this operation, and therefore can the engine
+ * still draw against its ties?
+ *
+ * `false` ONLY for a status that is definitely terminal. An unknown, absent or
+ * unrecognised status reads as "yes" so a new status value can never silently
+ * blank a live chip — the failure direction that matters is suppressing a real
+ * forecast, not leaving one up a moment too long.
+ */
+function operationCanStillDraw(status: string | null | undefined): boolean {
+  const normalized = (status || '').trim().toLowerCase();
+  return normalized !== 'complete' && normalized !== 'completed';
+}
+
+/**
  * The board chip for one queued operation, or `null` when the row carries no
  * tie.
  *
@@ -123,11 +213,14 @@ export interface MaterialTieChip {
  *               will be driven negative. Advisory; production is never blocked.
  *  - `warn`   — covered, but with less than one run's worth of margin left over
  *               (the "this is the last of the stock" case).
- *  - `ok`     — covered, or already fully consumed.
+ *  - `ok`     — covered, already fully consumed, or settled (see below).
+ *
+ * A COMPLETE operation gets no forecast at all. Its ties can never be drawn
+ * against again — after a bounded RETURN the engine's delta is pinned `<= 0`
+ * forever — while the plan-based `qty_remaining` this chip reads goes back UP.
+ * See the RETURN section of the module docstring.
  */
-export function materialTieChip(
-  row: Pick<DispatchBoardRow, 'material_tie' | 'work_order_number'>
-): MaterialTieChip | null {
+export function materialTieChip(row: MaterialTieChipRow): MaterialTieChip | null {
   const tie = row.material_tie;
   if (!tie) return null;
 
@@ -136,6 +229,7 @@ export function materialTieChip(
   const remaining = finite(tie.qty_remaining);
   const shortBy = finite(tie.short_by);
   const onHand = finite(tie.on_hand);
+  const canStillDraw = operationCanStillDraw(row.status);
   // A card is one OPERATION, and an operation-scoped tie deducts when that
   // operation completes — not when the work order finishes (that understates a
   // per-nest laser WO) and not per reported run (nothing posts until COMPLETE).
@@ -151,6 +245,29 @@ export function materialTieChip(
   // failure direction that teaches a planner to stop trusting the indicator.
   // `|| 1` covers a pre-feature payload with no `tie_count`: one chip, no siblings.
   const otherCount = Math.max(0, (finite(tie.tie_count) || 1) - 1);
+
+  // ---------------------------------------------------------------------------
+  // Terminal operation: state the record, forecast NOTHING.
+  //
+  // Placed above every other tier — including the two shortage tiers — because
+  // all of them are claims about a FUTURE deduction, and on a closed operation
+  // there is no future deduction to be short of. `short_by` is derived from the
+  // same plan-based `qty_remaining` that a RETURN pushes back up, so leaving the
+  // shortage tiers reachable here would let a returned quantity manufacture a
+  // purchasing signal out of material that is already back on the shelf.
+  // ---------------------------------------------------------------------------
+  if (!canStillDraw) {
+    return {
+      tone: 'ok',
+      text: `${part} · settled`,
+      title:
+        `This operation is complete: ${qty(finite(tie.qty_consumed))} of ${part} reported consumed, and ` +
+        `nothing further can be drawn against this tie. A returned quantity does not re-arm it — the ` +
+        `engine's delta stays at or below zero on every path. Reported total; the inventory ledger is the ` +
+        `authoritative record.${lotClause}`,
+    };
+  }
+
   if (tie.any_short && shortBy <= TIE_EPSILON && otherCount > 0) {
     return {
       tone: 'short',
@@ -163,15 +280,22 @@ export function materialTieChip(
     };
   }
 
-  // Nothing left to deplete. `qty_consumed` is a CACHE — the ledger
+  // Nothing left to deplete against PLAN. `qty_consumed` is a CACHE — the ledger
   // (inventory_transactions.allocation_id) is the authoritative total, so the
   // tooltip says "reported" rather than asserting the ledger's answer.
+  //
+  // The figure quoted is `qty_consumed`, NOT `qty_planned`. This branch is
+  // reached whenever `qty_consumed >= qty_planned`, and over-consumption
+  // (`consumed > target`, so `consumed > planned` too) became an ordinary steady
+  // state once material started posting per operation — quoting the plan would
+  // under-report the real draw by exactly the amount a supervisor is looking at
+  // when they open the RETURN dialog. The two agree in the ordinary case.
   if (remaining <= TIE_EPSILON) {
     return {
       tone: 'ok',
       text: `${part} · issued`,
       title:
-        `${qty(finite(tie.qty_planned))} of ${part} reported consumed — nothing further deducts ` +
+        `${qty(finite(tie.qty_consumed))} of ${part} reported consumed — nothing further deducts ` +
         `${whenClause}. Reported total; the inventory ledger is the authoritative record.${lotClause}`,
     };
   }
@@ -210,9 +334,63 @@ export function materialTieChip(
  * How many rows in a column carry a SHORT tie — the per-column rollup next to
  * the changeover summary. Recomputed from the queue on every render so it stays
  * correct through an optimistic reorder.
+ *
+ * Delegates to `materialTieChip` rather than reading `short_by` itself, so the
+ * rollup and the chips can never disagree — including on the terminal-operation
+ * guard, where a settled tie must not be counted toward a purchasing signal.
  */
-export function countShortTies(rows: readonly Pick<DispatchBoardRow, 'material_tie' | 'work_order_number'>[]): number {
+export function countShortTies(rows: readonly MaterialTieChipRow[]): number {
   return rows.reduce((total, row) => (materialTieChip(row)?.tone === 'short' ? total + 1 : total), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Over-consumption (the open loop a reduce can leave behind)
+// ---------------------------------------------------------------------------
+
+/** The two operation quantities the consumption target is computed from. */
+export interface TieTargetOperation {
+  quantity_complete?: number | null;
+  quantity_scrapped?: number | null;
+}
+
+/**
+ * How much material this tie holds that its production record no longer justifies —
+ * `max(0, qty_consumed - target)`. `0` means squared up.
+ *
+ * **Why this exists.** The office reduce verb can lower a COMPLETE operation's
+ * quantities, which drops `target` below `qty_consumed`. The material is still out on
+ * the floor and the ledger still says so — correctly — but nothing forces the
+ * supervisor to return it, no event fires, and an over-consumed tie is otherwise
+ * indistinguishable from an ordinary one. It is the single point where the reduce
+ * relaxation's safety rests on a human remembering, so the human has to be shown it.
+ *
+ * The target is the ENGINE's own formula, not an approximation of it:
+ * operation-scoped ties reconcile to `qty_per_run x (complete + scrapped)`, while a
+ * work-order-scoped tie drains against `qty_planned` in the one-shot backflush. That
+ * parity is asserted against the backend in `materialTie.parity.test.ts` — if the
+ * engine's arithmetic ever moves, fix it HERE, not by adding a second copy elsewhere.
+ *
+ * Returns `null` when it cannot be known rather than guessing `0`: an operation-scoped
+ * tie whose operation was not supplied (or was detached by a nest re-import) has no
+ * target to measure against, and a confident "squared up" would be a worse answer than
+ * an absent one.
+ */
+export function overConsumedQty(
+  tie: Pick<MaterialAllocation, 'qty_per_run' | 'qty_planned' | 'qty_consumed' | 'work_order_operation_id'>,
+  operation: TieTargetOperation | null | undefined
+): number | null {
+  const consumed = finite(tie.qty_consumed);
+  let target: number;
+  if (tie.work_order_operation_id == null) {
+    // Work-order-scoped: drained once against the plan by the backflush leg.
+    target = finite(tie.qty_planned);
+  } else {
+    if (!operation) return null;
+    target =
+      effectivePerRun(tie.qty_per_run) * (finite(operation.quantity_complete) + finite(operation.quantity_scrapped));
+  }
+  const over = consumed - target;
+  return over > TIE_EPSILON ? over : 0;
 }
 
 // ---------------------------------------------------------------------------

@@ -7,7 +7,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List
 
-from sqlalchemy import func
+from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
 from app.models.bom import BOMItem
@@ -419,21 +419,46 @@ class PredictionService:
         return demand
 
     def _calculate_daily_usage(self, part_id: int) -> float:
-        """Calculate average daily usage from last 90 days."""
+        """Calculate average daily NET usage from last 90 days (issues less returns).
+
+        Drives reorder points and the MRP suggestion, so the sign is load-bearing: material
+        that was issued to a job and then returned to stock with a reason (``TransactionType
+        .RETURN``, PR 3) was never used, and counting it as usage makes the shop re-buy
+        material that is sitting on the rack. Note that simply adding RETURN to the type
+        filter would have been WORSE than leaving it out -- the ``abs()`` below turns the
+        credit into MORE usage -- hence the explicit sign switch on ``transaction_type``.
+        """
         cutoff = datetime.utcnow() - timedelta(days=90)
 
+        # ISSUE -> +|quantity|, RETURN -> -|quantity|. Keyed on the type, not the stored
+        # sign, so the ISSUE leg is exactly the previous expression.
+        signed_usage = case(
+            (InventoryTransaction.transaction_type == TransactionType.RETURN, -func.abs(InventoryTransaction.quantity)),
+            else_=func.abs(InventoryTransaction.quantity),
+        )
+        # KNOWN GAP (pre-existing, module-wide): no ``company_id`` predicate. This service
+        # is constructed with a session and nothing else, so there is no active company to
+        # scope by, and scoping THIS query alone would read as though the module were
+        # tenant-safe when none of its other queries are. No practical cross-tenant read
+        # exists today -- ``part_id`` is globally unique and tenant-owned, so the filter
+        # already selects one company's rows -- but it does not satisfy invariant 1 and
+        # should be closed by threading the active company through the service.
         total_issued = (
-            self.db.query(func.sum(func.abs(InventoryTransaction.quantity)))
+            self.db.query(func.sum(signed_usage))
             .filter(
                 InventoryTransaction.part_id == part_id,
-                InventoryTransaction.transaction_type == TransactionType.ISSUE,
+                InventoryTransaction.transaction_type.in_((TransactionType.ISSUE, TransactionType.RETURN)),
                 InventoryTransaction.created_at >= cutoff,
             )
             .scalar()
             or 0
         )
 
-        return total_issued / 90
+        # Clamp: the window is rolling, so material issued before the cutoff and returned
+        # inside it nets negative as a pure boundary artifact. A negative daily usage would
+        # push reorder points below zero. With no RETURN rows this is a sum of magnitudes
+        # and the clamp is a no-op, so existing reorder points are unchanged.
+        return max(0.0, float(total_issued)) / 90
 
     def _get_open_po_info(self, part_id: int) -> Dict[str, Any]:
         """Get open PO quantity and next due date for a part."""

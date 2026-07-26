@@ -908,11 +908,15 @@ def test_production_reporting_is_not_a_consumption_trigger(client: TestClient, d
 def test_reduce_after_operation_consumption_is_a_no_op(client: TestClient, db_session: Session):
     """Walking a count back after material posted moves NO stock, by either verb.
 
-    Two layers, because two things could go wrong:
+    Three layers, because three things could go wrong:
 
-    * The reduce ENDPOINTS refuse a COMPLETE operation with 409 -- that refusal is the
-      reason the consumption trigger is scoped to one completed operation, so it is
-      asserted here rather than assumed.
+    * The OPERATOR's reduce endpoint refuses a COMPLETE operation with 409 -- that
+      refusal is the reason the consumption trigger is scoped to one completed
+      operation, so it is asserted here rather than assumed.
+    * The OFFICE verb now SUCCEEDS on a COMPLETE operation (PR 3 relaxed it, because the
+      reasoned RETURN verb is the walk-back its refusal was justified by) -- and it must
+      still move no stock. Lowering the count is what OPENS a return allowance; it never
+      posts a reversal itself.
     * Even so, the engine itself must no-op on a negative delta. The operation's
       quantity is walked back directly and the NEW per-operation seam re-run, which is
       the code path that did not exist before PR 2.5: ``delta <= 0`` is a no-op, never
@@ -950,16 +954,19 @@ def test_reduce_after_operation_consumption_is_a_no_op(client: TestClient, db_se
     )
     assert operator_response.status_code == status.HTTP_409_CONFLICT, operator_response.text
 
-    # (b) the supervisor/office verb -- refused for the same reason
+    # (b) the supervisor/office verb -- ALLOWED since PR 3, and it still moves no stock.
+    # Correcting the count is what opens the bounded return allowance; the material
+    # itself only comes back through the explicit, reasoned RETURN verb.
     office_response = client.post(
         f"/api/v1/work-orders/operations/{op.id}/reduce-production",
         headers=headers_for(supervisor),
         json={"quantity_delta": 2, "reason": "double-scanned the tray"},
     )
-    assert office_response.status_code == status.HTTP_409_CONFLICT, office_response.text
+    assert office_response.status_code == status.HTTP_200_OK, office_response.text
 
     db_session.expire_all()
-    assert ledger_fingerprint(db_session) == frozen_ledger
+    assert db_session.get(WorkOrderOperation, op.id).quantity_complete == 2.0
+    assert ledger_fingerprint(db_session) == frozen_ledger, "a reduction must never post a reversal"
     assert db_session.get(WorkOrderMaterialAllocation, allocation.id).qty_consumed == frozen_consumed
 
     # (c) even with the quantity forced down, the NEW seam never auto-reverses

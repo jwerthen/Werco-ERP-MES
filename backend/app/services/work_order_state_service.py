@@ -1157,10 +1157,31 @@ def _copy_slot_completion_evidence(
         for operation in slot_operations:
             if operation.id in gated_ids:
                 continue
-            target_qty = operation_target_quantity(operation, work_order)
-            if target_qty > 0 and float(operation.quantity_complete or 0) < target_qty:
-                operation.quantity_complete = target_qty
-                changed = True
+            # Fill the quantity ONLY on a row that has no completion evidence of its
+            # own. This function copies a completed row's evidence ACROSS to the
+            # regenerated siblings sharing its progress key; it must not write back
+            # over the row the evidence came from, nor over any other sibling that
+            # carries its own.
+            #
+            # Without this guard the fill reverts an AUDITED CORRECTION to the plan.
+            # A supervisor lowers a COMPLETE operation 5 -> 3 through the reasoned
+            # office reduce verb; the next GET finds that row is its own
+            # ``completed_source``, sees 3 < target 5, and silently writes 5 back. The
+            # surviving TimeEntry evidence still reads 3, so this is not restoring
+            # from evidence -- it is overwriting a deliberate correction with the plan.
+            #
+            # With a material tie it stops being only a records defect: restoring the
+            # count re-opens a positive ``target - qty_consumed`` delta, so the
+            # consumption engine RE-ISSUES the returned material from inside a
+            # reconcile-on-read GET -- no actor, no reason, and FIFO re-selected, so
+            # the second draw can name a different lot than the material came back to.
+            # That is exactly the hazard the bounded-return design exists to make
+            # unreachable, so the two cannot both stand.
+            if not _operation_has_completion_evidence(operation):
+                target_qty = operation_target_quantity(operation, work_order)
+                if target_qty > 0 and float(operation.quantity_complete or 0) < target_qty:
+                    operation.quantity_complete = target_qty
+                    changed = True
             if operation.quantity_scrapped is None and completed_source.quantity_scrapped is not None:
                 operation.quantity_scrapped = completed_source.quantity_scrapped
                 changed = True

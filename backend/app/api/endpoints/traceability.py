@@ -28,6 +28,11 @@ from app.models.quality import NonConformanceReport
 from app.models.user import User
 from app.models.work_order import WorkOrder, WorkOrderOperation
 
+# The engine's own float threshold, imported rather than re-declared, so "this component
+# lot is fully returned" means here exactly what "nothing is consumed" means to the
+# consumption engine and to the tie endpoint's untie guard.
+from app.services.material_consumption_service import CONSUMPTION_EPSILON
+
 router = APIRouter()
 
 
@@ -309,6 +314,21 @@ def _reconstruct_consumed_components(
                                                     the OPERATION, mapped back to its work
                                                     order here so both collapse into the
                                                     same per-WO genealogy lines.
+
+    TWO transaction types are read, and the aggregation is SIGNED. ``RETURN`` rows are the
+    reasoned compensating credit for consumption (PR 3) and mirror the reference shape of
+    the ISSUE rows they compensate, so they arrive through the same predicate. Reading
+    ISSUE alone would keep claiming a sheet that physically went back to the rack; adding
+    RETURN to the type filter *without* the sign flip would be worse still, since the
+    ``abs()`` this aggregation used to take turns a credit into MORE consumption. **This is
+    the as-built record** — a returned lot must stop being claimed as built into the part
+    (AS9100D 8.5.2), so a (WO, part, lot) line that nets to nothing is dropped entirely
+    rather than reported as a zero-quantity component.
+
+    The sign is keyed on ``transaction_type``, not on the stored sign of ``quantity``:
+    ISSUE contributes ``+abs(quantity)`` exactly as before and RETURN contributes
+    ``-abs(quantity)``, so a work order with no returns produces byte-identical lines to
+    the previous ISSUE-only ``abs()`` sum, whatever sign its historical rows carry.
     """
     if not producing_work_order_ids:
         return []
@@ -327,17 +347,17 @@ def _reconstruct_consumed_components(
         .all()
     }
 
-    issue_txns = (
+    movement_txns = (
         db.query(InventoryTransaction)
         .filter(
             InventoryTransaction.company_id == company_id,
             work_order_ledger_filter(producing_work_order_ids, company_id),
-            InventoryTransaction.transaction_type == TransactionType.ISSUE,
+            InventoryTransaction.transaction_type.in_((TransactionType.ISSUE, TransactionType.RETURN)),
         )
         .order_by(InventoryTransaction.created_at)
         .all()
     )
-    if not issue_txns:
+    if not movement_txns:
         return []
 
     # Resolve WO numbers + component part identity in two batched, tenant-scoped reads.
@@ -347,15 +367,20 @@ def _reconstruct_consumed_components(
         .filter(WorkOrder.id.in_(producing_work_order_ids), WorkOrder.company_id == company_id)
         .all()
     }
-    component_part_ids = {txn.part_id for txn in issue_txns if txn.part_id is not None}
+    component_part_ids = {txn.part_id for txn in movement_txns if txn.part_id is not None}
     parts_by_id = {
         p.id: p for p in db.query(Part).filter(Part.id.in_(component_part_ids), Part.company_id == company_id).all()
     }
 
     # Aggregate per (work_order, component part, consumed lot) so multiple ISSUE rows
-    # for the same component lot collapse into a single consumed-quantity line.
+    # for the same component lot collapse into a single consumed-quantity line, NETTING
+    # any RETURN rows that credited that same lot back off the job.
     aggregated: dict[tuple, float] = {}
-    for txn in issue_txns:
+    # Keys that saw at least one RETURN. The net-to-zero drop below is applied ONLY to
+    # these, so a job with no returns keeps every line it emitted before -- including the
+    # degenerate zero-quantity line a zero-quantity ISSUE would produce.
+    returned_keys: set[tuple] = set()
+    for txn in movement_txns:
         # Operation-scoped rows key on the operation; resolve to its work order so a
         # WO's per-run consumption and its backflush collapse into the same lines.
         if txn.reference_type == OPERATION_REFERENCE_TYPE:
@@ -365,10 +390,20 @@ def _reconstruct_consumed_components(
         else:
             wo_id = txn.reference_id
         key = (wo_id, txn.part_id, txn.lot_number)
-        aggregated[key] = aggregated.get(key, 0.0) + abs(float(txn.quantity or 0))
+        magnitude = abs(float(txn.quantity or 0))
+        if txn.transaction_type == TransactionType.RETURN:
+            # A credit: material came back off the job. Subtract, never add.
+            aggregated[key] = aggregated.get(key, 0.0) - magnitude
+            returned_keys.add(key)
+        else:
+            aggregated[key] = aggregated.get(key, 0.0) + magnitude
 
     consumed: List[ConsumedComponent] = []
     for (wo_id, comp_part_id, lot), qty in aggregated.items():
+        # A fully-returned lot was never built into the part; it must not appear in the
+        # as-built record at all. (A partial return simply reports the net quantity.)
+        if (wo_id, comp_part_id, lot) in returned_keys and qty <= CONSUMPTION_EPSILON:
+            continue
         comp_part = parts_by_id.get(comp_part_id)
         consumed.append(
             ConsumedComponent(

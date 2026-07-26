@@ -2934,11 +2934,19 @@ def delete_work_order(
             db, allocation_ids=[row.id for row in tie_rows], company_id=company_id
         )
         if blocked_ids:
+            # Name a remedy that EXISTS. This used to say "Reverse consumption first",
+            # and PR 3's RETURN verb is deliberately NOT that remedy: a return APPENDS a
+            # compensating row carrying the same ``allocation_id``, so a fully returned
+            # tie is still ledger-backed and this guard still fires -- correctly, because
+            # the hard delete would remove the tie those rows resolve through. Soft
+            # delete is the answer, and it keeps the material history intact.
             raise HTTPException(
                 status_code=409,
                 detail=(
-                    f"Material has been consumed against {len(blocked_ids)} tied allocation(s) on this "
-                    "work order. Reverse consumption first, or soft delete instead."
+                    f"Material movement is on the inventory ledger for {len(blocked_ids)} tied "
+                    "allocation(s) on this work order, so it cannot be permanently deleted — returning "
+                    "the material does not remove that history. Soft delete instead; the work order and "
+                    "its material record stay intact."
                 ),
             )
         for tie in tie_rows:
@@ -3922,16 +3930,29 @@ def reduce_operation_production_office(
     segregation-of-duties front door), then reduce. No open clock-in is required --
     the supervisor is correcting from the office, not working the operation.
 
+    Scope difference from the operator's twin: a **COMPLETE operation is correctable
+    here** (``allow_completed_operation=True``). It used to 409 on both verbs, on the
+    rationale that a completed operation's downstream inventory / cost / FG effects had
+    fired and could not be walked back -- while telling the operator to "ask a
+    supervisor" whose own endpoint hit the identical refusal. PR 3's reasoned RETURN
+    verb is that walk-back: tied material a completed operation consumed comes back
+    through ``POST /work-orders/{id}/material-allocations/{alloc}/return``, and lowering
+    the completed operation's count HERE is exactly what opens the bounded
+    ``correct_over_consumption`` allowance that return is measured against. Order
+    matters: reduce first (the count is the record), then return the material the lower
+    count no longer accounts for. A TERMINAL work order is still 409 on both verbs.
+
     Everything else is identical to the shop-floor twin (one shared core, see
-    ``production_reduction_service``): before-completion scope only (COMPLETE
-    operation / terminal WO -> 409, re-checked under the op->WO row locks in the
-    completion paths' order), tenant-scoped 404, required correction ``reason``,
-    per-entry audit trail on the tamper-evident chain, best-effort OperationalEvent,
-    optimistic-lock 409, and the RECOMPUTED work-order rollup (max over non-component
-    siblings -- or, on a laser dispatch-pool WO, the pooled SUM of per-nest progress --
-    only ever lowered). Scrap fields and statuses are never touched.
+    ``production_reduction_service``): terminal-WO 409 re-checked under the op->WO row
+    locks in the completion paths' order, tenant-scoped 404, required correction
+    ``reason``, per-entry audit trail on the tamper-evident chain, best-effort
+    OperationalEvent, optimistic-lock 409, and the RECOMPUTED work-order rollup (max
+    over non-component siblings -- or, on a laser dispatch-pool WO, the pooled SUM of
+    per-nest progress -- only ever lowered). Scrap fields and statuses are never
+    touched: a corrected COMPLETE operation stays COMPLETE, it just carries a truthful
+    count.
     """
-    load_operation_for_reduction_or_http(db, operation_id, company_id)
+    load_operation_for_reduction_or_http(db, operation_id, company_id, allow_completed_operation=True)
 
     # Same loader-channel guard as the labor writes: 'import' is reserved for the
     # bulk-migration loaders and may never be claimed by an interactive correction.
@@ -3981,6 +4002,9 @@ def reduce_operation_production_office(
         notes_entry=None,
         event_source_module="work_orders",
         path="office",
+        # Must match the pre-lock call above: the same gate runs again under the row
+        # locks, so relaxing only one of the two would refuse under the lock instead.
+        allow_completed_operation=True,
     )
     operation = outcome.operation
     work_order = outcome.work_order

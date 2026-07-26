@@ -2140,6 +2140,11 @@ export default function WorkOrderDetail() {
         workOrderId={workOrder.id}
         workOrderUpdatedAt={workOrder.updated_at}
         canEdit={canEditMaterialTies}
+        // Only so the panel can compute each tie's live consumption target and flag
+        // one that is OVER-consumed — the open loop an office reduce on a COMPLETE
+        // operation leaves behind, which nothing else on this page distinguishes
+        // from an ordinary tie.
+        operations={workOrder.operations}
       />
 
       {/* Material Requirements */}

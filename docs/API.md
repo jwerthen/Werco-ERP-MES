@@ -143,11 +143,13 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 | PUT | `/work-orders/operations/{id}` | Update an operation (body now also accepts `work_center_id` — move the operation to another work center; see note below) | Admin / Manager / Supervisor |
 | POST | `/work-orders/operations/{id}/start` | Start an operation | Yes |
 | POST | `/work-orders/operations/{id}/complete` | Complete an operation (or record partial progress; 409 if the parent WO is terminal) | Yes |
-| POST | `/work-orders/operations/{id}/reduce-production` | Supervisor/office over-count correction — walk back good-count across **any** operator's **unapproved** labor on the operation, **before** completion; no clock-in required (see note below) | Admin / Manager / Supervisor |
+| POST | `/work-orders/operations/{id}/reduce-production` | Supervisor/office over-count correction — walk back good-count across **any** operator's **unapproved** labor on the operation; **a COMPLETE operation is correctable here** (unlike the operator's twin), a terminal WO is not; no clock-in required (see note below) | Admin / Manager / Supervisor |
 | GET | `/work-orders/{id}/material-allocations` | List the work order's material ties (`include_inactive`, default `true`) | Yes |
 | POST | `/work-orders/{id}/material-allocations` | Tie a material part to the work order or one of its operations (**201**) | Admin / Manager / Supervisor |
 | PATCH | `/work-orders/{id}/material-allocations/{allocation_id}` | Edit an **open** tie's quantities, lot pin, or notes | Admin / Manager / Supervisor |
 | DELETE | `/work-orders/{id}/material-allocations/{allocation_id}` | Untie (status → `cancelled`; the row is never physically deleted) | Admin / Manager / Supervisor |
+| GET | `/work-orders/{id}/material-allocations/{allocation_id}/consumption` | Per-source-lot ledger position of a tie (`issued` / `returned` / `net`) — the pre-confirm read behind the return dialog | Yes |
+| POST | `/work-orders/{id}/material-allocations/{allocation_id}/return` | **Return consumed material to its source lots** — reasoned, audited, compensating. The only verb on this router that posts inventory | Admin / Manager / Supervisor |
 
 > **Tenant isolation on operation/completion endpoints.** The operation- and completion-level
 > endpoints above (`/start`, `/complete`, `/operations/{id}`, `/operations/{id}/start`,
@@ -283,9 +285,12 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 >   and the per-operation leg of `POST /work-orders/{id}/complete`) right after the operation is
 >   flipped `COMPLETE`. It reconciles **that operation's ties only**. A laser child work order carries
 >   **one operation per nest**, so completing nest 1 of 3 now deducts **nest 1's sheet**. Scope is one
->   operation on purpose: a still-`IN_PROGRESS` operation can still be walked back
->   (`…/reduce-production` refuses only once the operation is `COMPLETE` or the work order is
->   terminal), so consuming against one would strand material that never auto-reverses. Every call site
+>   operation on purpose: a still-`IN_PROGRESS` operation can still be walked back by **either**
+>   reduce-production verb — including the operator's own self-service one — so consuming against one
+>   would let an operator strand material with no supervisor in the loop. (A **COMPLETE** operation is
+>   now correctable through the **office** verb, which is safe precisely because the reasoned material
+>   return exists to hand the material back; the operator verb still refuses. See "Over-count
+>   correction … (supervisor/office)" above.) Every call site
 >   is inside its handler's non-terminal branch, so a finished/cancelled job never consumes.
 > - **Work-order completion** — `apply_completion_inventory_effects`, unchanged, on all five of its
 >   existing call sites (kiosk clock-out, shop-floor and office operation complete, force-complete,
@@ -404,12 +409,23 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > (supervisor/office).** The role-gated twin of the operator's
 > `POST /shop-floor/operations/{id}/reduce-production` (see "Over-count correction" under Shop
 > Floor for the shared semantics — one shared core, the two paths cannot drift). It walks back
-> good-count quantity that was over-reported on an operation, **before** it is complete — a
+> good-count quantity that was over-reported on an operation — a
 > miscount correction, **not** a scrap move (scrap fields and statuses are never touched).
 > Differences from the shop-floor verb:
 > - **Role-gated**: `require_role([ADMIN, MANAGER, SUPERVISOR])` — an Operator gets **403** (this
 >   verb corrects **other operators'** labor records, a Work Orders **Edit** power, not operator
 >   self-service). Kiosk-scoped tokens can't reach it (path-fenced away from `/work-orders`).
+> - **A COMPLETE operation is correctable here.** The office verb passes
+>   `allow_completed_operation=True`; the operator's twin does not, and **neither** accepts a
+>   terminal work order. Both verbs previously hit the identical 409, so the operator was told to
+>   "ask a supervisor" whose own front door refused the same thing. The refusal was set on the
+>   rationale that a completed operation's downstream inventory / cost / FG effects had fired and
+>   could not be walked back; the reasoned **material return**
+>   (`POST /work-orders/{id}/material-allocations/{alloc}/return`) is now that walk-back, and
+>   lowering a completed operation's count is precisely what opens the bounded
+>   `correct_over_consumption` allowance the return is measured against. **Order matters: reduce
+>   first** (the count is the record), then return the material the lower count no longer accounts
+>   for. A corrected COMPLETE operation stays COMPLETE — it just carries a truthful count.
 > - **No clock-in required** — the supervisor is correcting from the office, not working the
 >   operation.
 > - **Scope: ALL unapproved labor on the operation, any operator's** — the walk goes open entries
@@ -426,8 +442,12 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > Body is the same `ProductionReductionRequest` (`quantity_delta` required `> 0` finite; `reason`
 > required non-blank ≤ 255 — a **correction** reason, not a scrap reason; optional `source` /
 > `notes`). Everything else matches the shop-floor twin: **tenant-scoped 404** before any mutation,
-> **before-completion only** (COMPLETE operation / terminal WO → **409** `"Completed work can't be
-> corrected here -- ask a supervisor"`, re-checked under the op→WO row locks), **row-locked +
+> the **terminal-work-order** refusal (**409** `"This work order is complete, closed or cancelled --
+> its recorded production can no longer be corrected"` — a message deliberately **split** from the
+> operator's "ask a supervisor" one, since referring a caller to a supervisor for a terminal work
+> order would be a false referral in the other direction; re-checked under the op→WO row locks with
+> the same predicate the pre-lock read used, so the fast-fail and the authoritative check cannot
+> drift), **row-locked +
 > optimistic-locked** (concurrent stale write → **409**), the same **recomputed WO rollup** (max
 > over non-component siblings — or, on a laser dispatch-pool WO, the **sum** of per-nest progress
 > capped at the WO total — only ever lowered), a **tamper-evident `audit_log` row** (action
@@ -499,14 +519,17 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > **Material ties (`/work-orders/{id}/material-allocations`).** The optional tie between a work order
 > (or one of its operations) and a **material** part — what makes stock deplete as work completes.
 > Ties are **opt-in and additive**: a work order with no allocation rows behaves exactly as it did
-> before the feature, and there is no flag on `work_orders` and no default allocation. Nothing on
-> these four endpoints posts inventory — they manage the planning row only; the movement happens on
-> the completion paths (see "Completion also consumes tied material" above).
+> before the feature, and there is no flag on `work_orders` and no default allocation. **Exactly one
+> verb on this router posts inventory: `POST …/{allocation_id}/return`.** Every other endpoint
+> manages the planning row only; consumption happens on the completion paths (see "Completion also
+> consumes tied material" above). The return is the deliberate exception, because un-consuming can
+> never be something a completion path does for you — see "Returning consumed material" below.
 >
 > The endpoints live on a **sibling router** under the same `/work-orders` prefix
 > (`app/api/endpoints/work_order_materials.py`, OpenAPI tag **Work Order Materials**). They are no
-> longer dark: the **Materials panel on the work-order detail page** reads `GET` and drives `PATCH` /
-> `DELETE`, and the two nest-creation paths write ties server-side (see Laser Nests → "Nest material
+> longer dark: the **Materials panel on the work-order detail page** reads `GET`, drives `PATCH` /
+> `DELETE` and hosts the **return dialog** (`GET …/consumption` then `POST …/return`), and the two
+> nest-creation paths write ties server-side (see Laser Nests → "Nest material
 > ties"). The read-only floor surfaces — the dispatch-board `material_tie` chip and the kiosk
 > `material_ties` line — do **not** call this router at all; they ride the shop-floor reads, which is
 > what keeps the kiosk path fence unwidened.
@@ -514,7 +537,8 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > Reads are open to any authenticated tenant user; **every mutating verb** is
 > `require_role([ADMIN, MANAGER, SUPERVISOR])`. The endpoints are deliberately **not** under
 > `/api/v1/shop-floor`, so kiosk-scoped operator tokens are path-fenced away from them — tying
-> material is an office/planning act.
+> material is an office/planning act, and the **return** sits on the same side of that fence for a
+> stronger reason than the rest: moving stock back with a reason is a bigger power than tying it.
 >
 > - **`GET …/material-allocations`** — every tie on the work order, ordered by id. `include_inactive`
 >   defaults to **`true`**: `cancelled` (and `closed`) rows are the tombstones the ledger's
@@ -559,7 +583,88 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 >   row; it sets `status = "cancelled"` and **never physically deletes** (the ledger's `allocation_id`
 >   back-reference must keep resolving). Idempotent: untying an already-cancelled tie is a no-op that
 >   writes no second audit row. Audited as a `log_delete(soft_delete=True)` on
->   `work_order_material_allocation`.
+>   `work_order_material_allocation`. Still refused **409** once anything was consumed — cancelling a
+>   tie that moved stock, without moving it back, would strand the ledger's `allocation_id` rows
+>   against a tombstone with no account of where the material went. The 409 now names the verb that
+>   does both: `POST …/return` with `intent: "return_and_untie"`.
+> - **`GET …/material-allocations/{allocation_id}/consumption`** — where this tie's material came
+>   from, per source lot, and how much of each lot can still take it back. Open to **any
+>   authenticated tenant user** (like the tie list — it discloses ledger facts about material the
+>   company already owns, and a return dialog that could not show them would be asking for a
+>   confirmation nobody could give). Answers from `inventory_transactions`, **never** from the tie's
+>   `qty_consumed` cache, and works on a `cancelled` tie — whose consumption is exactly what an
+>   operator most often needs to see. Array of `MaterialConsumptionLine`:
+>   `{inventory_item_id, lot_number, issued, returned, net}`. `net` (`issued − returned`, float dust
+>   clamped to 0) is the per-lot **cap** on any further return, and the array is ordered **newest
+>   source lot first** — the exact order a return credits in, so preview and outcome cannot disagree.
+>   A lot whose `net` is 0 is still listed: it is part of the tie's movement history, and dropping it
+>   would make a fully-returned tie look as though the material had never touched that lot. There is
+>   deliberately **no lot to choose** — this is a disclosure, not a picker. Pure read; it moves
+>   nothing and writes nothing.
+>
+> **Returning consumed material — `POST …/material-allocations/{allocation_id}/return`.** The
+> reasoned reversal, and the only un-consume there is. Consumption never auto-reverses (the consume
+> path also runs from a reconcile-on-read `GET`, where there is no actor, no intent and no reason to
+> record); this is that same reversal with all three attached — the compensating-transaction +
+> required-reason + audit pattern the receiving corrections established. **Nothing historical is
+> mutated**: every credit is an **appended** positive `RETURN` `InventoryTransaction`.
+>
+> Body (`MaterialReturnRequest`): `quantity` (**required**, `> 0`, in the tie's UoM), `intent`
+> (**required**), `reason` (**required**, non-blank, ≤ 500 — validated at the Pydantic boundary, so a
+> blank one is FastAPI's own **422**).
+>
+> **Two named intents, and nothing in between:**
+>
+> | `intent` | Bound on `quantity` | Tie afterwards |
+> |---|---|---|
+> | `correct_over_consumption` | `qty_consumed − live target` | stays `open` |
+> | `return_and_untie` | must equal the **full** `qty_consumed` | `cancelled`, same transaction |
+>
+> The bound on `correct_over_consumption` is the engine's own arithmetic: it is exactly the negative
+> delta the sum-delta engine computes and refuses to execute, so after the return `qty_consumed >=
+> target` and the engine no-ops forever. Returning **less** than that on a still-open tie is refused,
+> not merely discouraged — `target` is recomputed from live operation state on **every** call
+> including a reconcile-on-read `GET`, so the material would be re-consumed on the next completion
+> *or page load*, re-running FIFO and possibly crediting a **different lot** than it came from
+> (fabricated heat/cert linkage in an as-built record, AS9100D 8.5.2). `return_and_untie`'s
+> quantity is a **confirmation**, not a choice: a mismatch is a 422 that catches a stale client
+> (a completion landed between page load and submit) rather than returning a different amount than
+> the operator was looking at.
+>
+> **Material returns to the lots it came off, or not at all.** Source lots are walked **newest-first**
+> (the reverse of how consumption posted), so a consumption that FIFO-spilled across three lots
+> returns across those same three and one logical return becomes N ledger rows. Each row carries the
+> compensated ISSUE's `reference_type` / `reference_id` (mirrored — `work_order_ledger_filter`
+> matches on reference *shape*, never on transaction type, so job cost, analytics, lot genealogy and
+> `GET /inventory/transactions?work_order_id=` pick it up unchanged), the same `allocation_id`,
+> `reason_code: "MATERIAL_RETURN"`, and the **compensated row's `unit_cost`** — never the lot's
+> current cost, since a revaluation between consume and return would strand residual material cost on
+> the job. Returning **into a negative lot is expected** (a shortage-driven consumption drove it below
+> zero) and is not guarded.
+>
+> **Idempotency is arithmetic, not an index**: capacity per `(allocation_id, inventory_item_id)` is
+> `issued − already-returned`, so a replay cannot over-credit a lot. Allowed on a **`cancelled`** tie
+> (a consumed-then-cancelled tie is a real state — a work-order soft delete cancels open ties
+> regardless of consumption — and is exactly what the hard-delete 409 points at); a **soft-deleted**
+> work order is still **404**, so restore the work order first (an audited verb that also re-opens
+> the ties the delete cancelled) rather than moving stock against a job that is currently deleted.
+>
+> Response **200** (`MaterialReturnResponse`): `allocation_id`, `work_order_id`, `part_id`,
+> `part_number`, `intent`, `unit_of_measure`, `quantity_returned`, `qty_consumed_before`,
+> `qty_consumed` (after — still a **cache**; the ledger stays authoritative, and note this is the one
+> path that makes `qty_consumed` go **down**), `status` (`open` after a correction, `cancelled` after
+> an untie), and `returned_lots[]` —
+> `{inventory_item_id, lot_number, quantity, unit_cost, transaction_id, compensated_transaction_id}`,
+> one per credited lot. Render the per-lot breakdown, never one anonymous total.
+>
+> **Server-gated, therefore non-optimistic**: the whole point is that the server may refuse. Keep a
+> loading state and render only what the server returns (the `detail` is safe to display verbatim).
+>
+> ⚠️ **A return does NOT unlock a nest re-import, a work-order hard delete, or the
+> already-issued 409 on a work-order-scoped tie.** All three key on the **existence** of ledger rows,
+> and a return *appends* a row rather than removing one — after a full `return_and_untie` the ISSUE
+> **and** RETURN rows both still name the operation a rebuild would delete. Those refusals stand,
+> correctly, and their messages say so. See `docs/MATERIAL_CONSUMPTION_PLAN.md` → Residual gaps.
 >
 > **Error contract** (all lookups are tenant-scoped, so a cross-tenant id is **404**, never 403):
 >
@@ -571,19 +676,56 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > | **404** | `pinned_inventory_item_id` unknown or cross-tenant (`"Pinned inventory lot not found"`) |
 > | **404** | `allocation_id` unknown, cross-tenant, or not on this work order (`"Material allocation not found"`) |
 > | **409** | **Duplicate open tie** — this part is already tied to the same scope. At most **one open tie per (work order, part)** for work-order-scoped ties and **one per (operation, part)** for operation-scoped ones. Enforced by an app-level check *and* by two partial unique indexes, so a concurrent race returns the same 409 rather than a 500. Re-tying after a `cancelled` row exists is allowed |
-> | **409** | **Untie after consumption** — `DELETE` once `qty_consumed > 0` (`"… has already been consumed against this allocation. Reverse consumption first."`) |
+> | **409** | **Untie after consumption** — `DELETE` once `qty_consumed > 0` (*"… has already been consumed against this allocation. Return the material with intent 'return_and_untie', which credits it back to its source lots and closes this tie in one step."*). The remedy now exists and is a single call; untie stays refused on its own terms, since cancelling a tie that moved stock without moving it back would strand the ledger's `allocation_id` rows against a tombstone |
 > | **409** | **`PATCH` on a non-open tie** (`"This allocation is <status>; only an open tie can be edited."`) |
 > | **409** | **`POST` on a TERMINAL work order** (`complete` / `closed` / `cancelled`). Every completion path refuses to re-enter a terminal work order, so the tie could never consume — it would sit `open` at `qty_consumed` 0 advertising demand that will never be met. `PATCH` / `DELETE` / `GET` on an existing tie stay available, so a historical tie is still readable and fixable |
-> | **409** | **`POST` of a work-order-scoped tie whose part was already ISSUEd to this work order** (*"Part X was already issued to work order Y; this tie could never consume — reverse the issue, or tie at the operation level instead."*). The 409 names the remedy: an operation-scoped tie posts outside `uq_wo_inventory_issue` and is unaffected |
+> | **409** | **`POST` of a work-order-scoped tie whose part was already ISSUEd to this work order** (*"Part X was already issued to work order Y; this tie could never consume — tie the material at the operation level instead, which posts outside the one-issue-per-work-order guard."*). The 409 names the remedy, and it is deliberately **not** "return the material": a return appends a compensating row and never removes the ISSUE row, while this check (and `uq_wo_inventory_issue` behind it) keys on that row's **existence** — so a return would leave this 409 firing exactly as before, having moved stock for nothing. An operation-scoped tie posts outside the index and is unaffected |
 > | **422** | **Cross-part / cross-UOM lot pin** — `pinned_inventory_item_id` names a lot of a *different* part. The detail names the unit-of-measure clash when the two parts also disagree on units (*"Unit-of-measure mismatch: … No unit conversion exists"*); otherwise it reads *"The pinned lot belongs to a different part"*. There is **no unit conversion anywhere in the platform** — cross-UOM is refused, never guessed |
 > | **422** | **Held or inactive lot pin** — `pinned_inventory_item_id` names a lot whose `status` is not `available` (`on_hold` / `quarantine` / `rejected`) or that is inactive (*"Lot L is 'quarantine' and may not be tied to work…"*). FIFO already skips such lots; the pinned branch does not, so pinning one would consume nonconforming material into product (AS9100D 8.7). Refused at **tie** time because consumption also runs from a `GET`, where refusing is not an option — a lot held *after* it was pinned still consumes, and writes a `HELD_MATERIAL_CONSUMED` audit row instead. **Nothing in the application ever writes a held `InventoryItem.status`** (no endpoint or schema exposes the column; it is only ever set to `available` at creation, and there is no lot-deactivation verb), so both halves of this control can currently only fire on data set outside the app — a direct DB write, an import, or a future hold verb |
 > | **422** | `qty_per_run` sent on a **work-order-scoped** tie, via `POST` **or** `PATCH` (`"qty_per_run applies to operation-scoped ties only."`) |
 > | **422** | `PATCH` sent **both** `clear_pinned_inventory_item: true` and a `pinned_inventory_item_id`. The clear used to win silently, so a caller who wanted the new pin got an unpinned tie and a 200 |
-> | **422** | `PATCH` lowering `qty_planned` **below** `qty_consumed` (*"qty_planned cannot be lowered to N: M sheets has already been consumed…"*). Lowering it *to* the consumed quantity is allowed |
+> | **422** | `PATCH` lowering `qty_planned` **below** `qty_consumed` (*"qty_planned cannot be lowered to N: M sheets has already been consumed… Return the over-consumed material first (Return material on this tie), then lower the plan."*). Lowering it *to* the consumed quantity is allowed |
+> | **422** | `PATCH` lowering `qty_per_run` so far that the **live target** (`qty_per_run × (quantity_complete + quantity_scrapped)`) falls below `qty_consumed` — the operation-scoped twin of the `qty_planned` rule, and until this shipped the cheapest way in the API to manufacture `consumed > target`. Refused rather than merely recorded, because `target` is exactly what bounds `correct_over_consumption`: lowering `qty_per_run` toward zero would open an **unbounded** return against a tie that stays `open`, which is the middle ground the two intents exist to close. The predicate is "never **worsen** the gap", not "never have a gap" — raising `qty_per_run` on an already-over-consumed tie is allowed, since it reduces the problem. Skipped entirely when the operation is no longer on the work order (its live target is already 0) |
 > | **422** | Body validation — `qty_planned` / `qty_per_run` must be `> 0` |
 >
-> Every create, edit, and untie writes a tamper-evident `audit_log` row (`GET /audit/`) on resource
-> type `work_order_material_allocation`.
+> **`POST …/{allocation_id}/return` error contract.** Eleven distinct refusals. The service carries
+> the status with the refusal so the split cannot drift: **422** means "ask differently" (a bound the
+> caller can satisfy by naming the other intent or a smaller quantity), **409** means "the ledger
+> cannot express this" — receiving's *409 rather than guess* posture. **Every refusal fires before
+> the first ledger row is written**, so a refused return leaves the ledger untouched rather than
+> half-credited.
+>
+> | Code | When |
+> |------|------|
+> | **404** | Work order unknown, cross-tenant, or **soft-deleted** (`"Work order not found"`). Restore the work order first — the restore is itself audited and re-opens the ties the delete cancelled |
+> | **404** | `allocation_id` unknown, cross-tenant, or not on this work order (`"Material allocation not found"`; the service re-checks and answers *"Material tie not found on this work order."*) |
+> | **422** | **Blank reason** — FastAPI's own validation from `MaterialReturnRequest` (`min_length=1` plus a strip-and-check validator), the same boundary `ReceiptCorrection.reason` uses. The service re-asserts it, since it is callable without the schema and an unreasoned compensating movement is what the audit chain must never contain |
+> | **422** | **Non-positive `quantity`** (`gt=0` on the schema; `"Return quantity must be greater than zero."` from the service) |
+> | **422** | **Nothing consumed** (*"Nothing has been consumed against this material tie, so there is nothing to return. Untie it instead if the material is no longer needed."*) |
+> | **422** | **`quantity` exceeds `qty_consumed`** (*"Cannot return N: only M has been consumed against this tie."*) |
+> | **422** | **`correct_over_consumption` past the live bound** (*"…the work still accounts for T and only A is over-consumed. Returning more would be re-consumed automatically the next time this work order is completed or read. Use return_and_untie to give all the material back and close the tie."*). The detail names the intent to use instead |
+> | **422** | **`return_and_untie` that is not the full consumed quantity** (*"return_and_untie returns everything consumed against this tie, which is currently C, not N. Re-read the tie and confirm that quantity."*) |
+> | **422** | **Unsupported `intent`** — unreachable while the enum has two members, and deliberately exhaustive rather than a permissive fall-through: a third intent added without a bound of its own would otherwise post an **unbounded** return against a live tie |
+> | **409** | **The ledger has less returnable than asked** (*"…the ledger shows only R still returnable against this tie. The inventory ledger is authoritative and the tie's consumed quantity is only a cache; make a manual inventory adjustment if stock genuinely needs to move."*). This is the cache/ledger disagreement case — trusting `qty_consumed` here would credit stock no ISSUE row ever took |
+> | **409** | **A source lot is gone** — the stock row the consumption came off no longer exists (nothing in `app/` deletes stock rows, so this means an out-of-band write). Crediting any other lot would misstate lot traceability |
+> | **409** | **A source lot is a placeholder row** — the lot-less, finished-goods-located anchor the engine mints when a part has no stock at all. Crediting it would create unlabeled, FIFO-eligible stock out of a row that exists purely as a ledger anchor (AS9100D 8.5.2) |
+>
+> `GET …/{allocation_id}/consumption` refuses only on the two **404**s above (work order, allocation).
+>
+> **Concurrency.** The return takes `SELECT … FOR UPDATE` on the **operation, then the work order**
+> (the completion paths' order) *before* computing the bound — a return writes neither row, so
+> invariant 4's optimistic lock does not cover it, and a completion landing mid-request would
+> otherwise raise `target` underneath the check and silently invalidate the
+> `correct_over_consumption` guarantee.
+>
+> Every create, edit, untie, and **return** writes a tamper-evident `audit_log` row (`GET /audit/`)
+> on resource type `work_order_material_allocation`. A return writes the `qty_consumed` change as an
+> `UPDATE`, plus the dual `inventory` rows per credited lot (the `RETURN` ledger row and the on-hand
+> move it caused); a `return_and_untie` writes a **second** row for the cancel, stamped
+> `extra_data.reason: "material_returned"` — deliberately **not** the work-order-delete cancel
+> reason, so a delete/restore round trip cannot resurrect a tie whose material was given back. The
+> reason text lands in three places on purpose: the ledger row's `notes`, the audit `description`,
+> and `extra_data.reason`.
 
 > **Ties on work-order delete (`DELETE /work-orders/{id}`).** The two delete modes differ, and the
 > split follows the rule that posted consumption is a fact:
@@ -593,14 +735,21 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 >   the compliance record. `POST /work-orders/{id}/restore` is the inverse: it re-**opens** exactly the
 >   ties that delete cancelled (audited, `RESTORE`), so a restored work order keeps depleting its tied
 >   material. Ties cancelled for any *other* reason — a manual untie, a nest re-import supersede — are
->   deliberately left `cancelled`; the discriminator is the cancel's own audit `reason`.
+>   deliberately left `cancelled`; the discriminator is the cancel's own audit `reason`. A
+>   `return_and_untie` cancel is stamped `reason: "material_returned"` for exactly this reason — a
+>   delete/restore round trip must not resurrect a tie whose material was given back.
 > - **Hard delete** (`hard_delete=true`, draft/cancelled WOs only) returns **409** when any
->   `inventory_transactions` row actually references a tie on the work order (*"Material has been
->   consumed against N tied allocation(s) on this work order. Reverse consumption first, or soft
->   delete instead."*), because a hard delete physically removes the operations and ties the ledger's
+>   `inventory_transactions` row actually references a tie on the work order (*"Material movement is
+>   on the inventory ledger for N tied allocation(s) on this work order, so it cannot be permanently
+>   deleted — returning the material does not remove that history. Soft delete instead; the work order
+>   and its material record stay intact."*), because a hard delete physically removes the operations
+>   and ties the ledger's
 >   consumption rows point at. The guard queries the **ledger**, not the `qty_consumed` cache: the
 >   cache is documented as non-authoritative and the `allocation_id` FK carries no `ON DELETE`, so
->   keying on it would turn any drift into a 500 instead of this 409. Unconsumed ties are removed with
+>   keying on it would turn any drift into a 500 instead of this 409. **A material return does not
+>   clear this refusal** — a `RETURN` row carries the compensated ISSUE's `allocation_id`, so a fully
+>   returned tie is still ledger-backed; the message used to say "Reverse consumption first", which
+>   would now name a verb that exists and still would not help. Unconsumed ties are removed with
 >   the work order, each audited first (`reason: "work_order_hard_deleted"`).
 
 ##### Material allocation schema (`MaterialAllocationResponse`)
@@ -711,15 +860,27 @@ mixed**:
 > left pointing at nothing — and the `ISSUE` ledger rows that carry its lot genealogy reference the
 > operation id. So the import resolves the operations it is about to wipe **before deleting
 > anything** and checks their ties:
-> - Any tie with `qty_consumed > 0` → **409 Conflict** (*"Cannot rebuild this work order's
->   operations: material has already been consumed against N tied allocation(s). Reverse consumption
->   first."*). **Nothing is destroyed** — the guard runs ahead of the wipe, and uploaded blobs are
->   reaped. The planner must reverse the consumption explicitly (a verb that does not exist yet).
->   **This is now reachable as soon as ONE nest's operation completes**, not only after the whole work
->   order finishes: consumption moved to operation completion, so the first completed nest on a
->   three-nest package locks that package. The only remedy until the reversal verb ships is a new work
->   order.
-> - Ties with no consumption are **cancelled** (status → `cancelled`, never deleted) with an audit row
+> - Any tie the **ledger** references → **409 Conflict** (*"Cannot rebuild this work order's
+>   operations: this work order's material movement is already on the inventory ledger for N tied
+>   allocation(s), and the rebuild would delete the operations those ledger rows are recorded against
+>   — dropping them out of job cost, analytics and lot traceability. Returning the material does not
+>   change that. Raise a new work order for the corrected nest package; this one keeps its material
+>   history intact."*). **Nothing is destroyed** — the guard runs ahead of the wipe, and uploaded blobs
+>   are reaped. **This is reachable as soon as ONE nest's operation completes**, not only after the
+>   whole work order finishes: consumption moved to operation completion, so the first completed nest
+>   on a three-nest package locks that package.
+>
+>   ⚠️ **The material RETURN verb is deliberately NOT the remedy here, and the guard is keyed to the
+>   ledger rather than to `qty_consumed` precisely so it cannot be mistaken for one.** A full
+>   `return_and_untie` drives the cache to 0, but the original `ISSUE` row **and** the new `RETURN`
+>   row both still carry `reference_type='work_order_operation'` with `reference_id` = an operation
+>   the rebuild is about to delete — and `work_order_ledger_filter` resolves operation ids through a
+>   **live subquery**, so those rows would silently drop out of job cost, analytics and lot genealogy
+>   while remaining in the ledger. (The FK also has no `ON DELETE`, so on Postgres the delete raises
+>   `IntegrityError` that this endpoint reports as the misleading generic **400** below.) Returning
+>   the material retires the tie's forward-looking demand; it cannot un-write the movement history
+>   that names those operations. **The remedy is a new work order.**
+> - Ties with no ledger rows are **cancelled** (status → `cancelled`, never deleted) with an audit row
 >   (`reason: "superseded_by_reimport"`), the same posture as the superseded nests themselves, **and
 >   detached** — their `work_order_operation_id` is set NULL. That FK carries no `ON DELETE`, so a
 >   still-attached tie makes the operation delete raise `IntegrityError`, which this endpoint reports
@@ -1821,10 +1982,16 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > emits an `operation_production_reduced` operational event and the shop-floor / work-order / dashboard
 > real-time broadcasts. Error codes:
 > - **404** — operation missing / cross-tenant, or its work order not found.
-> - **409** — the operation is **COMPLETE** or the work order is **terminal** (COMPLETE / CLOSED /
->   CANCELLED): `"Completed work can't be corrected here -- ask a supervisor"` — **post-completion
->   corrections are an office/supervisor task by design** (they must reverse finished-goods
->   inventory/cost). A concurrent stale edit also returns **409**
+> - **409** — the operation is **COMPLETE**: `"Completed work can't be corrected here -- ask a
+>   supervisor"` — **post-completion corrections are an office/supervisor task by design**, and that
+>   referral is now honest: the office twin
+>   (`POST /work-orders/operations/{id}/reduce-production`) **accepts** a COMPLETE operation, where
+>   it used to hit this identical refusal. This operator verb keeps it: correcting finished work is a
+>   supervised act.
+> - **409** — the work order is **terminal** (COMPLETE / CLOSED / CANCELLED): `"This work order is
+>   complete, closed or cancelled -- its recorded production can no longer be corrected"`. A separate
+>   message from the one above, on **both** verbs, because no supervisor can correct it either. A
+>   concurrent stale edit also returns **409**
 >   (`"This operation was modified concurrently. Refresh and retry."`).
 > - **400** — no open clock-in of the caller on this operation
 >   (`"You must be clocked in to this operation to correct its count"`), or `quantity_delta` greater

@@ -30,6 +30,9 @@ import {
   MaterialAllocation,
   MaterialAllocationCreatePayload,
   MaterialAllocationUpdatePayload,
+  MaterialConsumptionLine,
+  MaterialReturnRequest,
+  MaterialReturnResult,
 } from '../types';
 import { ScanResolveRequest, ScanResolveResult } from '../types/scan';
 import {
@@ -1128,6 +1131,65 @@ class ApiService {
       `/work-orders/${workOrderId}/material-allocations/${allocationId}`
     );
     this.invalidateMaterialTieCache(workOrderId);
+    return response.data;
+  }
+
+  /**
+   * Where this tie's material came from, grouped per lot — the pre-confirm read
+   * for the RETURN panel. Pure read; it moves nothing.
+   *
+   * `net` (`issued - returned`) is the per-lot cap on any further return, and
+   * the array is ordered newest source lot first, the same order the return
+   * credits in. Show it BEFORE confirming so the actor sees which heat/cert lots
+   * the material goes back to — a return can never be directed at a lot of the
+   * caller's choosing.
+   */
+  async getMaterialAllocationConsumption(
+    workOrderId: number,
+    allocationId: number
+  ): Promise<MaterialConsumptionLine[]> {
+    const response = await this.api.get<MaterialConsumptionLine[]>(
+      `/work-orders/${workOrderId}/material-allocations/${allocationId}/consumption`
+    );
+    return response.data;
+  }
+
+  /**
+   * Return consumed material to its SOURCE lots — the reasoned reversal the
+   * engine deliberately refuses to do automatically (invariant 6b). Appends a
+   * signed compensating `RETURN` transaction per lot; never edits history.
+   *
+   * ADMIN / MANAGER / SUPERVISOR only, like every other tie mutator — moving
+   * stock back with a reason is a stronger power than tying it, not a weaker
+   * one, and this stays outside the kiosk path fence. Gate the UI to match.
+   *
+   * SERVER-GATED, therefore NON-OPTIMISTIC by contract: keep a loading state and
+   * render only what the server returns. Do not wrap it in
+   * `useOptimisticMutation`. The refusals it is built to produce are
+   * **422** on a `correct_over_consumption` that would push `qty_consumed` below
+   * the tie's live target (the detail names which intent to use instead), 422 on
+   * a blank reason, and 4xx when a source lot can no longer take the credit.
+   * Show `detail` verbatim.
+   *
+   * A full return does NOT unlock nest re-import — that guard reads the LEDGER,
+   * and both the ISSUE and RETURN rows still reference the operation a rebuild
+   * would delete. Do not promise otherwise in the confirm copy.
+   */
+  async returnMaterialAllocation(
+    workOrderId: number,
+    allocationId: number,
+    payload: MaterialReturnRequest
+  ): Promise<MaterialReturnResult> {
+    const response = await this.api.post<MaterialReturnResult>(
+      `/work-orders/${workOrderId}/material-allocations/${allocationId}/return`,
+      payload
+    );
+    // The tie AND its work-order reads (incl. the consumption read above, which
+    // shares the `/work-orders/{id}` prefix) plus the dispatch-board tie chips.
+    this.invalidateMaterialTieCache(workOrderId);
+    // Unlike every other tie verb, a return MOVES STOCK — on-hand, lot rows and
+    // the transaction ledger are all stale the moment it lands.
+    this.invalidateCache('/inventory');
     return response.data;
   }
 
