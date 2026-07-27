@@ -21,13 +21,12 @@ Also covered:
 - lifecycle: nest re-import guard, WO soft-delete auto-cancel
 """
 
-from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 
 import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
-from sqlalchemy import and_, or_, text
+from sqlalchemy import and_, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -57,6 +56,7 @@ from app.services.material_consumption_service import (
     cancel_open_allocations_for_work_order,
     consume_tied_materials_for_work_order,
 )
+from tests.api.fk_test_helpers import sqlite_foreign_keys_enforced
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
 
@@ -481,6 +481,97 @@ def test_untied_work_order_transaction_set_is_identical(db_session: Session):
         .filter(
             OperationalEvent.company_id == COMPANY_A,
             OperationalEvent.work_order_id.in_([control_wo.id, subject_wo.id]),
+            OperationalEvent.source_module == "material_consumption",
+        )
+        .count()
+        == 0
+    )
+
+
+def test_untied_work_order_is_unchanged_by_the_pr2_read_surfaces(client: TestClient, db_session: Session):
+    """PR 2's half of invariant 6(d): the new READ surfaces change nothing.
+
+    PR 2 hung a material-tie read on three payloads a work order passes through
+    constantly -- the manager dispatch board, the kiosk work-center queue and the
+    operator's active job. Each of those is polled, and one of them (the run-order
+    PUT that reuses the board projection) COMMITS, so a read that quietly
+    reconciled would be persisted by a manager's drag-reorder.
+
+    An untied work order is driven through every one of those surfaces and THEN
+    completed. Its ledger and audit fingerprints must equal a CONTROL work order
+    that was completed without any of them being touched -- no ledger row, no
+    audit row, no operational event, nothing.
+
+    The reads are asserted to have actually happened (200s, and the tie fields
+    present-but-empty), so this cannot pass by never reaching the code.
+    """
+    user = make_user(db_session)
+    headers = headers_for(user)
+    wc = make_work_center(db_session)
+
+    # CONTROL: completed without any PR-2 surface being read.
+    control_part = make_part(db_session, standard_cost=9.0)
+    control_wo = make_wo(db_session, control_part, quantity_ordered=4, quantity_complete=4)
+    make_op(db_session, control_wo, wc, quantity_complete=4)
+    run_effects(db_session, control_wo, user)
+    control_ledger = work_order_fingerprint(db_session, control_wo)
+    control_audit = work_order_audit_fingerprint(db_session, control_wo)
+    assert control_ledger, "the control WO must still receive its finished good"
+
+    # SUBJECT: structurally identical, untied, read through every new surface first.
+    subject_part = make_part(db_session, standard_cost=9.0)
+    subject_wo = make_wo(db_session, subject_part, quantity_ordered=4, quantity_complete=4)
+    subject_op = make_op(db_session, subject_wo, wc, quantity_complete=4)
+
+    board = client.get("/api/v1/shop-floor/dispatch-board", headers=headers)
+    assert board.status_code == status.HTTP_200_OK, board.text
+    board_rows = [
+        row
+        for column in board.json()["work_centers"]
+        for row in column["queue"]
+        if row["operation_id"] == subject_op.id
+    ]
+    assert board_rows, "the subject operation must really be on the board"
+    assert all(row["material_tie"] is None for row in board_rows)
+
+    queue = client.get(f"/api/v1/shop-floor/work-center-queue/{wc.id}", headers=headers)
+    assert queue.status_code == status.HTTP_200_OK, queue.text
+    queue_rows = [row for row in queue.json()["queue"] if row["operation_id"] == subject_op.id]
+    assert queue_rows, "the subject operation must really be on the kiosk queue"
+    assert all(row["material_ties"] == [] for row in queue_rows)
+
+    active = client.get("/api/v1/shop-floor/my-active-job", headers=headers)
+    assert active.status_code == status.HTTP_200_OK, active.text
+
+    ties = client.get(f"/api/v1/work-orders/{subject_wo.id}/material-allocations", headers=headers)
+    assert ties.status_code == status.HTTP_200_OK, ties.text
+    assert ties.json() == []
+
+    run_effects(db_session, subject_wo, user)
+    db_session.expire_all()
+
+    assert work_order_fingerprint(db_session, subject_wo) == control_ledger
+    assert work_order_audit_fingerprint(db_session, subject_wo) == control_audit
+
+    # The three write channels the feature owns, all empty for this tenant.
+    assert db_session.query(WorkOrderMaterialAllocation).count() == 0
+    rows = work_order_ledger_rows(db_session, subject_wo)
+    assert rows
+    assert all(r.allocation_id is None for r in rows)
+    assert all(r.reference_type == "work_order" for r in rows)
+    assert (
+        db_session.query(AuditLog)
+        .filter(
+            AuditLog.company_id == COMPANY_A,
+            AuditLog.resource_type == "work_order_material_allocation",
+        )
+        .count()
+        == 0
+    )
+    assert (
+        db_session.query(OperationalEvent)
+        .filter(
+            OperationalEvent.company_id == COMPANY_A,
             OperationalEvent.source_module == "material_consumption",
         )
         .count()
@@ -1941,37 +2032,13 @@ def test_supervisor_may_tie(client: TestClient, db_session: Session):
 
 # ---------------------------------------------------------------------------
 # FK enforcement — the nest-re-import operation delete (round-2 BLOCKER B1)
+#
+# ``sqlite_foreign_keys_enforced`` now lives in ``tests/api/fk_test_helpers.py``
+# (imported at the top of this file). It moved out when the PR-2 nest-import tests
+# needed the same pragma: a test module imported BY another test module is loaded
+# twice under two names and loses pytest's assertion rewriting, so the helper is
+# homed where both can import it once.
 # ---------------------------------------------------------------------------
-
-
-@contextmanager
-def sqlite_foreign_keys_enforced(db: Session):
-    """Turn SQLite's FK enforcement ON for the body of one test, then back OFF.
-
-    SQLite defaults ``PRAGMA foreign_keys`` to **OFF**, and nothing in ``app/db`` or
-    ``tests/`` ever turns it on — so the entire suite runs with foreign keys
-    UNENFORCED while production runs on Postgres, where they always are. Any bug of
-    the shape "delete a parent row that a child still references" is therefore
-    structurally invisible here; B1 was exactly that bug, on the feature's headline
-    flow.
-
-    Deliberately scoped to a single test rather than enabled suite-wide: flipping it
-    globally is a large, independent change (it would newly enforce every FK in ~50
-    models against fixture data written in arbitrary order) and belongs in its own PR.
-
-    The pragma is a no-op inside an open transaction, so the session is committed
-    first; it is restored in a ``finally`` so the fixture's ``drop_all`` teardown is
-    unaffected.
-    """
-    db.commit()
-    db.execute(text("PRAGMA foreign_keys=ON"))
-    assert db.execute(text("PRAGMA foreign_keys")).scalar() == 1, "FK enforcement did not take effect"
-    try:
-        yield
-    finally:
-        db.rollback()
-        db.execute(text("PRAGMA foreign_keys=OFF"))
-        db.commit()
 
 
 def test_operation_delete_after_tie_cancel_survives_foreign_key_enforcement(db_session: Session):

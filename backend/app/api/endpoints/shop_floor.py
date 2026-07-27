@@ -5,7 +5,7 @@ import math
 import os
 from collections import defaultdict
 from datetime import date, datetime, timezone
-from typing import Optional
+from typing import Optional, Sequence
 
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
@@ -99,6 +99,7 @@ from app.services.completion_signal_service import (
 )
 from app.services.labor_cost_service import is_labor_cost_rollup_enabled
 from app.services.laser_nest_service import active_laser_nest, sync_laser_nest_from_operation
+from app.services.material_tie_view import MaterialTieView, tie_views_for_operations
 from app.services.operation_action_gates import (
     CLOCK_IN_ALLOWED_STATUSES,
     MSG_WRONG_WORK_CENTER,
@@ -680,6 +681,52 @@ def _laser_nest_payload(operation: WorkOrderOperation) -> Optional[dict]:
     }
 
 
+def _material_ties_payload(ties: Optional[Sequence[MaterialTieView]]) -> list[dict]:
+    """Serialize an operation's open material ties for the KIOSK payloads.
+
+    ``[]`` for an untied operation -- the kiosk renders nothing at all for it
+    (no placeholder, no "not tied" nag), the surface half of the invariant that
+    an untied work order looks byte-identical to its pre-feature self.
+
+    Rides the queue/active-job payloads on purpose. The tie API
+    (``/work-orders/{id}/material-allocations``) sits OUTSIDE the kiosk path
+    fence (``deps.py`` allowlists ``/api/v1/shop-floor`` only), so a
+    badge-minted ``scope="kiosk"`` token is 403 there. This is the same
+    precedent the scrap reason codes set below: carry the data on an
+    already-authorized, already-tenant-scoped read rather than widening the
+    fence.
+
+    ``qty_consumed`` is a CACHE (the ledger is authoritative) and the numbers
+    here describe what will happen at WORK-ORDER completion -- consumption never
+    fires per run, so kiosk copy must say "deducts N when WO-#### finishes".
+
+    Deliberately omits ``pinned_inventory_item_id``: the lot NUMBER is what an
+    operator reads off a tag, and the kiosk has no verb that takes the id.
+    """
+    if not ties:
+        return []
+    return [
+        {
+            "allocation_id": tie.allocation_id,
+            "part_id": tie.part_id,
+            "part_number": tie.part_number,
+            "part_name": tie.part_name,
+            "unit_of_measure": tie.unit_of_measure,
+            # Raw: NULL means "not run-scaled" (reads as 1.0), which is not the
+            # same fact as an explicit 1 -- the client decides how to show it.
+            "qty_per_run": tie.qty_per_run,
+            "qty_planned": tie.qty_planned,
+            "qty_consumed": tie.qty_consumed,
+            "qty_remaining": tie.qty_remaining,
+            "on_hand": tie.on_hand,
+            # Advisory only: a shortage warns, it never blocks production.
+            "short_by": tie.short_by,
+            "pinned_lot_number": tie.pinned_lot_number,
+        }
+        for tie in ties
+    ]
+
+
 def _last_report_payload(operation: Optional[WorkOrderOperation]) -> Optional[dict]:
     """Kiosk LAST REPORT tile: the operation's most recent production-evidence
     report (deltas from that single report, stamped by /production and by a
@@ -775,7 +822,15 @@ def get_my_active_job(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Get the current user's active time entries (clocked in jobs)"""
+    """Get the current user's active time entries (clocked in jobs).
+
+    Each job carries ``material_ties`` (the open, operation-scoped material tied
+    to it, with on-hand and shortage) so the single-operator kiosk can read the
+    deduction straight off the running job, and ``operation_quantity_scrapped``
+    (the OPERATION's scrap total) -- distinct from ``quantity_scrapped``, which
+    is this time ENTRY's session scrap and would under-state a prediction that
+    scales on ``complete + scrapped`` across sessions.
+    """
     # Eager-load operation, work_order, and work_order.part in a single
     # query so we don't issue 2*N extra SELECTs iterating active entries.
     active_entries = (
@@ -798,6 +853,16 @@ def get_my_active_job(
         # server_time rides the empty payload too -- the kiosk clock keeps its
         # skew correction between jobs (same pattern as work-center-queue).
         return {"active_jobs": [], "active_job": None, "server_time": to_utc_iso(datetime.utcnow())}
+
+    # Material ties for the jobs this operator is clocked into, in ONE batched
+    # read (an operator can hold several open entries). Company-scoped to the
+    # ACTIVE company, so an entry on another tenant's operation simply yields no
+    # ties rather than leaking one. Pure read -- nothing here consumes.
+    material_ties = tie_views_for_operations(
+        db,
+        company_id=company_id,
+        operation_ids=[entry.operation_id for entry in active_entries if entry.operation_id is not None],
+    )
 
     jobs = []
     for entry in active_entries:
@@ -830,6 +895,16 @@ def get_my_active_job(
                 "quantity_complete": (
                     float(operation.quantity_complete) if operation and operation.quantity_complete else 0
                 ),
+                # OPERATION-level scrap total, alongside quantity_complete above.
+                #
+                # A DISTINCT key from "quantity_scrapped" below on purpose: that
+                # one is THIS TIME ENTRY's session scrap, and the two are only
+                # equal on a single-session operation. The material prediction
+                # scales on (complete + scrapped) at the OPERATION level -- a
+                # scrapped run still ate its sheet -- so reading the session
+                # figure would under-state the deduction on any job worked
+                # across two shifts. Additive: the existing key is untouched.
+                "operation_quantity_scrapped": (float(operation.quantity_scrapped or 0) if operation else 0.0),
                 # Kiosk session tiles (AVG PER PC): THIS entry's own session counts,
                 # distinct from the operation totals above.
                 "quantity_produced": float(entry.quantity_produced or 0),
@@ -839,6 +914,9 @@ def get_my_active_job(
                 "approved": to_utc_iso(entry.approved) if entry.approved else None,
                 "approved_by": entry.approved_by,
                 "laser_nest": _laser_nest_payload(operation) if operation else None,
+                # Open, operation-scoped material ties for THIS job. [] when
+                # untied -- the running panel renders nothing for those.
+                "material_ties": _material_ties_payload(material_ties.get(entry.operation_id)),
                 # Kiosk telemetry tiles: most recent production report, next routing
                 # step ("ROUTES TO"), and the blocker downtime clock for this op.
                 "last_report": _last_report_payload(operation),
@@ -1902,6 +1980,23 @@ def get_work_center_queue(
     as before. Each queued item carries a ``roster`` of the open (labor)
     TimeEntries on that operation so the crew kiosk can render per-person
     timers; ``server_time`` lets the client correct clock skew.
+
+    Each item also carries ``material_ties``: the open, operation-scoped material
+    tied to that work, with on-hand and shortage, so the kiosk can state what
+    leaves inventory when the WORK ORDER completes (never per run). It rides this
+    payload rather than the tie API because the latter sits outside the kiosk path
+    fence -- the same precedent as ``scrap_reason_codes`` below. ``[]`` on an
+    untied operation.
+
+    DISCLOSURE: a station principal is an unattended, PIN-unlocked terminal with
+    no operator identity, and ``material_ties`` adds material part numbers and
+    ON-HAND STOCK to what it can read. The read is scoped to the tied parts of
+    THIS work center's queued operations -- it is not an inventory browser -- but
+    it is a genuine (small) widening of the station's disclosure surface.
+
+    The tie read itself writes nothing (unlike ``_laser_nest_payload``, which
+    still syncs nest counters here): a poll is not an actor, has no intent and
+    records no reason, so it must never move stock.
     """
     company_id = principal.company_id
     if principal.kind == "station" and principal.work_center_id != work_center_id:
@@ -1975,6 +2070,17 @@ def get_work_center_queue(
     # counts as recorded when its live conforming records cover every WO serial.
     step_counts = process_sheet_service.step_counts_for_operations(db, company_id, operations)
 
+    # Material ties (PR 2): the sheet/stock tied to each queued operation, so the
+    # kiosk job card can state what leaves inventory when the WORK ORDER finishes.
+    # ONE batched read for the whole queue -- this endpoint is polled every 10-15s
+    # per station, shop-wide, so a per-card query would be that cadence times the
+    # card count. Tenant scope is `company_id` above: the STATION'S OWN company
+    # from its kiosk_stations row for a station principal, the active company for
+    # a user -- never client input, never current_user.company_id. Pure read: it
+    # writes nothing and reconciles nothing (consumption is a completion-path
+    # verb and must never fire from a poll).
+    material_ties = tie_views_for_operations(db, company_id=company_id, operation_ids=operation_ids)
+
     # Gap-free rank for the RUN chip: stored ranks go sparse as jobs complete or
     # move away, and "RUN 4" on a three-job queue reads as a missing job.
     run_positions = dispatch_service.display_positions(operations)
@@ -2014,6 +2120,9 @@ def get_work_center_queue(
                 "setup_time_hours": op.setup_time_hours,
                 "run_time_hours": op.run_time_hours,
                 "laser_nest": _laser_nest_payload(op),
+                # Open, operation-scoped material ties. [] when untied -- render
+                # nothing at all for those (see _material_ties_payload).
+                "material_ties": _material_ties_payload(material_ties.get(op.id)),
                 "roster": roster_by_operation.get(op.id, []),
                 "steps_total": op_step_counts["steps_total"],
                 "steps_recorded": op_step_counts["steps_recorded"],
@@ -2099,6 +2208,12 @@ def get_dispatch_board(
     Do not confuse it with ``sequence``, which is routing precedence within one
     work order and does gate.
 
+    Each row carries ``material_tie`` when the operation has an open,
+    OPERATION-scoped material tie -- part, planned/consumed quantity, on-hand and
+    shortage, batched once for the whole board. Null on every untied operation:
+    the client draws nothing for those. Work-order-scoped ties are deliberately
+    excluded (one tie would otherwise fan across every card of that job).
+
     Read-only: no reconcile, no writes, no audit rows.
     """
     columns, generated_at = dispatch_service.build_dispatch_board(db, company_id)
@@ -2138,6 +2253,11 @@ def set_work_center_run_order(
     order) rather than N per-operation rows: it is one manager action. The audit
     row is written before the terminal commit so it lands atomically with the
     rank rewrite (invariant 2).
+
+    The response is a FULL board column and the client swaps it in wholesale, so
+    it must carry everything the GET board carried -- ``material_tie`` included
+    (see the tie map built below), or a reorder would look like it untied the
+    shop's material.
     """
     work_center = dispatch_service.resolve_active_work_center_or_http(db, company_id, work_center_id)
 
@@ -2160,7 +2280,15 @@ def set_work_center_run_order(
         )
         # Project the response BEFORE the commit: commit expires every loaded row,
         # which would re-issue the whole queue read (and its part joins) lazily.
-        column = dispatch_service.board_column(work_center, refreshed)
+        #
+        # The tie map is REQUIRED here, not decorative: this response REPLACES the
+        # whole column on the manager's board, so building the column without it
+        # would blank every material chip the GET had just drawn -- a drag-reorder
+        # would look like it untied the shop's material. Built before the commit
+        # for the same expiry reason, and it is a pure read (invariant: the board
+        # projection stays write-free even though this handler commits).
+        tie_info = dispatch_service.material_tie_info(db, company_id, refreshed)
+        column = dispatch_service.board_column(work_center, refreshed, tie_info=tie_info)
         db.commit()
     except StaleDataError:
         db.rollback()

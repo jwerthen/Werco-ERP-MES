@@ -33,6 +33,9 @@ jest.mock('../services/api', () => ({
     getActiveUsers: jest.fn(),
     getUsers: jest.fn(),
     getDocuments: jest.fn(),
+    // MaterialTiesPanel loads on mount; an unmocked method is `undefined` and
+    // surfaces as a silent <ErrorState role="alert"> instead of a red test.
+    getMaterialAllocations: jest.fn(),
     completeWorkOrder: jest.fn(),
     completeWOOperation: jest.fn(),
     startWorkOrder: jest.fn(),

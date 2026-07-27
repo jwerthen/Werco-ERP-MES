@@ -40,6 +40,18 @@ ALLOWED_GET_PATHS = ["/api/v1/shop-floor/my-active-job"]
 # Representative fenced surfaces: user admin, quoting, work-order admin.
 FENCED_GET_PATHS = ["/api/v1/users/", "/api/v1/quotes/", "/api/v1/work-orders/"]
 
+# Fenced surfaces that need a path parameter, so they cannot join
+# ``test_unscoped_tokens_unaffected`` (which asserts a 200 and would meet a 404 on
+# an id that does not exist). The fence fires BEFORE any existence check, which is
+# exactly why a made-up id is the right probe here.
+#
+# The material-tie API is the PR-2 entry: the kiosk reads its ties off the
+# ``/shop-floor`` queue and active-job payloads specifically so this router does NOT
+# have to come inside the fence. That decision lives in a docstring; this
+# parametrization is what makes it an executable claim that fails loudly the day
+# someone widens the fence to "make the kiosk tie panel work".
+FENCED_GET_PATHS_WITH_IDS = ["/api/v1/work-orders/1/material-allocations"]
+
 
 def _kiosk_scoped_token(user, company_id: int = COMPANY_A) -> str:
     return create_access_token(subject=user.id, company_id=company_id, scope="kiosk")
@@ -61,7 +73,7 @@ def test_kiosk_scoped_token_allowed_on_shop_floor(client: TestClient, db_session
     assert queue.json()["station"] is None
 
 
-@pytest.mark.parametrize("path", FENCED_GET_PATHS)
+@pytest.mark.parametrize("path", FENCED_GET_PATHS + FENCED_GET_PATHS_WITH_IDS)
 def test_kiosk_scoped_token_403_outside_shop_floor(client: TestClient, db_session: Session, path):
     """scope='kiosk' is 403 outside the fence — with the fence's own detail
     string, so this is the scope check firing, not RBAC."""
@@ -203,6 +215,28 @@ def test_operators_keep_reading_the_run_chips(client: TestClient, db_session: Se
         queue = client.get(queue_url(wc.id), headers=headers)
         assert queue.status_code == status.HTTP_200_OK, queue.text
         assert [row["run_order"] for row in queue.json()["queue"]] == [1]
+
+
+def test_unscoped_session_still_reads_the_material_ties(client: TestClient, db_session: Session):
+    """The tie route is fenced, not dead.
+
+    Without this control the 403 above would also pass if the router were removed
+    or the path misspelled. A normal office session reads the same work order's
+    ties at 200 -- which is the whole reason the kiosk carries its ties on the
+    ``/shop-floor`` payloads instead of asking for the fence to be widened.
+    """
+    manager = make_user(db_session, company_id=COMPANY_A, role=UserRole.MANAGER)
+    wc = make_work_center(db_session, company_id=COMPANY_A)
+    work_order, _ = make_wo_with_operation(db_session, company_id=COMPANY_A, work_center=wc)
+    path = f"/api/v1/work-orders/{work_order.id}/material-allocations"
+
+    allowed = client.get(path, headers=user_headers(manager))
+    assert allowed.status_code == status.HTTP_200_OK, allowed.text
+    assert allowed.json() == []
+
+    fenced = client.get(path, headers=bearer(_kiosk_scoped_token(manager)))
+    assert fenced.status_code == status.HTTP_403_FORBIDDEN, fenced.text
+    assert fenced.json()["detail"] == FENCE_DETAIL
 
 
 def test_unscoped_admin_still_reaches_station_admin(client: TestClient, db_session: Session):

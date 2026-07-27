@@ -1045,6 +1045,112 @@ describe('DispatchBoard', () => {
   });
 });
 
+/**
+ * Material ties on the board.
+ *
+ * The rules being pinned here: an UNTIED operation renders nothing at all, the
+ * chip is worded as an estimate against WORK-ORDER completion (never "deducting
+ * now"), a shortage is advisory rather than a gate, and the per-column rollup is
+ * recomputed from the queue.
+ */
+describe('DispatchBoard — material ties', () => {
+  const tie = (overrides: Partial<NonNullable<DispatchBoardRow['material_tie']>> = {}) => ({
+    allocation_id: 900,
+    part_id: 55,
+    part_number: 'SHT-.125-304',
+    unit_of_measure: 'EA',
+    qty_per_run: 1,
+    qty_planned: 3,
+    qty_consumed: 0,
+    qty_remaining: 3,
+    on_hand: 20,
+    short_by: 0,
+    pinned_inventory_item_id: null,
+    pinned_lot_number: null,
+    ...overrides,
+  });
+
+  const tieBoard = (): { work_centers: DispatchBoardColumn[] } => ({
+    work_centers: [
+      {
+        id: 2,
+        name: 'Ermaksan Fiber Laser',
+        code: 'ERM-FL',
+        work_center_type: 'laser',
+        is_active: true,
+        queue: [
+          // Covered.
+          makeRow({ operation_id: 11, run_order: 1, material_tie: tie() }),
+          // Short — the lot will be driven negative at WO completion.
+          makeRow({
+            operation_id: 9,
+            run_order: 2,
+            work_order_number: 'WO-20260719-004',
+            material_tie: tie({ allocation_id: 901, on_hand: 1, short_by: 2 }),
+          }),
+          // UNTIED — must render no chip at all.
+          makeRow({ operation_id: 14, run_order: 3, work_order_number: 'WO-20260720-003' }),
+        ],
+      },
+    ],
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockApi.getDispatchBoard.mockResolvedValue(tieBoard());
+  });
+
+  it('renders nothing at all on an untied operation', async () => {
+    renderBoard();
+    await findColumn('Ermaksan Fiber Laser');
+
+    expect(screen.getByTestId('dispatch-tie-11')).toBeInTheDocument();
+    expect(screen.queryByTestId('dispatch-tie-14')).not.toBeInTheDocument();
+  });
+
+  it('shows the remaining quantity and part on a covered tie', async () => {
+    renderBoard();
+    await findColumn('Ermaksan Fiber Laser');
+
+    expect(screen.getByTestId('dispatch-tie-11')).toHaveTextContent('3 EA · SHT-.125-304');
+  });
+
+  it('words the chip as an ESTIMATE tied to WORK-ORDER completion, never "deducting now"', async () => {
+    renderBoard();
+    await findColumn('Ermaksan Fiber Laser');
+
+    const title = screen.getByTestId('dispatch-tie-11').getAttribute('title') || '';
+    expect(title).toContain('when WO-20260720-001 finishes');
+    expect(title.toLowerCase()).toContain('estimate');
+    expect(title.toLowerCase()).not.toContain('deducting');
+  });
+
+  it('flags a shortage as advisory and never disables the card', async () => {
+    renderBoard();
+    await findColumn('Ermaksan Fiber Laser');
+
+    const chip = screen.getByTestId('dispatch-tie-9');
+    expect(chip).toHaveTextContent('Short 2 EA · SHT-.125-304');
+    expect(chip.getAttribute('title')).toContain('never blocks production');
+    // The move controls on a short card stay exactly as live as any other.
+    expect(screen.getByLabelText('Move WO-20260719-004 Operation up')).toBeEnabled();
+  });
+
+  it('rolls the short ties up per column, and says nothing when none are short', async () => {
+    renderBoard();
+    await findColumn('Ermaksan Fiber Laser');
+
+    expect(screen.getByTestId('dispatch-tie-short-2')).toHaveTextContent('1 short on material');
+
+    // A board with no shortage gains no rollup line at all.
+    jest.clearAllMocks();
+    mockApi.getDispatchBoard.mockResolvedValue(board());
+    renderBoard();
+    await findColumn('Haas VF-2');
+    expect(screen.queryByTestId('dispatch-tie-short-5')).not.toBeInTheDocument();
+  });
+});
+
 describe('insertionIndexFromPointer', () => {
   // Card i occupies [i*100, i*100+90]; the gaps are the 10px between them.
   const rects = [0, 1, 2].map((i) => ({ top: i * 100, bottom: i * 100 + 90 }));

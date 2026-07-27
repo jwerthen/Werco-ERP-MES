@@ -17,8 +17,10 @@ from sqlalchemy.orm import Session
 
 from app.models.document import Document, DocumentType
 from app.models.laser_nest import LaserNest, LaserNestPackage
+from app.models.part import Part
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderType
+from app.models.work_order_material import AllocationSource, AllocationStatus, WorkOrderMaterialAllocation
 from app.services.audit_service import AuditService
 from app.services.laser_nest_extraction_service import extract_nest_fields_from_pdf
 from app.services.material_consumption_service import cancel_allocations_for_operations
@@ -77,6 +79,17 @@ class ParsedLaserNest:
     # laser work center. IMPORT-SIDE INSTRUCTION only -- deliberately kept out of
     # as_dict() so it never appears in a preview response.
     work_center_id: Optional[int] = None
+    # Per-row MATERIAL TIE (PDF confirm-and-commit import): the stock part this nest
+    # consumes, and how much of it per completed run. When material_part_id is set the
+    # build creates an operation-scoped WorkOrderMaterialAllocation on the nest's
+    # operation, so the material is deducted when the laser WO finishes. Like
+    # work_center_id these are IMPORT-SIDE INSTRUCTIONS only -- deliberately kept out
+    # of as_dict() so they never appear in a preview response. There is NO fuzzy
+    # auto-match from the AI-extracted ``material`` free text: a wrong auto-tie would
+    # deplete the wrong heat lot into an as-built record, so the planner picks
+    # explicitly or the nest ships untied.
+    material_part_id: Optional[int] = None
+    qty_per_run: Optional[float] = None
 
     def as_dict(self) -> dict:
         return {
@@ -312,6 +325,114 @@ def _create_nest_document(
     return document
 
 
+def _uom_value(part: Part) -> str:
+    """``Part.unit_of_measure`` as the lowercase enum VALUE the snapshot column stores.
+
+    Mirrors ``api/endpoints/work_order_materials._uom_value`` so a nest-created tie and
+    a hand-created one snapshot the unit identically (``Part.unit_of_measure`` passes
+    ``values_callable``, so it persists the lowercase value).
+    """
+    uom = part.unit_of_measure
+    return getattr(uom, "value", uom) or "each"
+
+
+def create_nest_material_allocation(
+    db: Session,
+    *,
+    work_order: WorkOrder,
+    operation: WorkOrderOperation,
+    part: Part,
+    qty_per_run: Optional[float],
+    planned_runs: int,
+    company_id: int,
+    created_by: Optional[int],
+    audit: AuditService,
+) -> WorkOrderMaterialAllocation:
+    """Create the OPERATION-scoped material tie for one laser nest.
+
+    The single tie-creation seam shared by the package import
+    (``build_laser_nest_child_work_order``) and the manual single-nest endpoint, so both
+    produce byte-identical rows AND identical hash-chain entries -- the same field set,
+    the same UoM snapshot, and the same ``log_create`` resource type / description /
+    ``extra_data`` shape as ``POST /work-orders/{id}/material-allocations``
+    (``api/endpoints/work_order_materials``). Keep the three in lock-step.
+
+    ``operation`` must already be flushed (its ``id`` is the tie's scope). ``part`` is
+    resolved and tenant-validated by the CALLER -- a tie naming another company's part is
+    a security defect, and the caller is the layer that can answer it with a 404.
+
+    **This seam does NOT re-check the terminal-work-order refusal that
+    ``POST .../material-allocations`` enforces (409, "a tie that can never consume is a
+    lie").** It does not need to, but the reason is a COUPLING rather than a guard, so it
+    is written down here: both nest callers force ``work_order.status = RELEASED`` inside
+    the same transaction before reaching this function (the import at
+    ``work_orders._run_laser_nest_import``, the manual route at
+    ``create_manual_laser_nest_endpoint``), so a terminal work order is unreachable by
+    construction. That coupling is invisible from this signature -- if a third caller is
+    ever added, or either existing one stops forcing the status, this function will
+    happily create a tie that can never consume. Add the explicit check then.
+
+    Ships UNPINNED by design: no ``pinned_inventory_item_id``, so FIFO picks the lot at
+    consume time. Operator/planner lot-picking is deliberately deferred.
+
+    ``qty_per_run`` defaults to 1.0 when the planner named a part but no quantity (one
+    sheet per run -- the headline nest case). ``qty_planned`` is the run-scaled total:
+    the engine is reconcile-to-target, so this is planning demand, not a commitment.
+
+    ``audit`` is REQUIRED (invariant #2): creating a tie is a state change on a tenant
+    table, so there is no caller for whom an unaudited tie is correct. ``AuditService.log``
+    only flushes, so the row commits atomically with the allocation.
+
+    NOTE ON TIMING: at the import call site this MUST run after
+    ``cancel_allocations_for_operations`` and the operation wipe. A superseded tie is
+    CANCELLED (never deleted), so the partial unique index
+    ``uq_wo_material_alloc_open_op (company_id, work_order_operation_id, part_id)
+    WHERE status = 'OPEN'`` only ever sees one OPEN row per key -- and the new operation
+    id is fresh anyway. Creating before the cancel would be a collision waiting to happen.
+    """
+    effective_qty_per_run = float(qty_per_run) if qty_per_run is not None else 1.0
+    allocation = WorkOrderMaterialAllocation(
+        company_id=company_id,
+        work_order_id=work_order.id,
+        work_order_operation_id=operation.id,
+        part_id=part.id,
+        source=AllocationSource.NEST,
+        status=AllocationStatus.OPEN,
+        qty_per_run=effective_qty_per_run,
+        qty_planned=effective_qty_per_run * float(planned_runs),
+        # Snapshot so the tie stays readable after the part's UoM is changed.
+        unit_of_measure=_uom_value(part),
+        qty_consumed=0.0,
+        # No lot pin: FIFO selects at consume time.
+        pinned_inventory_item_id=None,
+        pinned_lot_number=None,
+        notes=None,
+        created_by=created_by,
+    )
+    db.add(allocation)
+    db.flush()
+
+    audit.log_create(
+        "work_order_material_allocation",
+        allocation.id,
+        f"WO {work_order.work_order_number} / part {part.part_number}",
+        new_values=allocation,
+        description=(
+            f"Tied {allocation.qty_planned} {allocation.unit_of_measure} of part {part.part_number} "
+            f"to work order {work_order.work_order_number}"
+            f" operation {operation.operation_number or operation.id}"
+        ),
+        extra_data={
+            "work_order_id": work_order.id,
+            "work_order_operation_id": allocation.work_order_operation_id,
+            "part_id": part.id,
+            "source": allocation.source.value,
+            "pinned_inventory_item_id": allocation.pinned_inventory_item_id,
+        },
+    )
+    return allocation
+
+
 def build_laser_nest_child_work_order(
     db: Session,
     *,
@@ -325,6 +446,7 @@ def build_laser_nest_child_work_order(
     created_by: Optional[int],
     saved_storage_keys: Optional[list[str]] = None,
     row_work_centers: Optional[dict[int, WorkCenter]] = None,
+    row_material_parts: Optional[dict[int, Part]] = None,
     audit: AuditService,
 ) -> LaserNestPackage:
     """Replace a laser WO's nest tasks with the supplied package plan.
@@ -348,6 +470,15 @@ def build_laser_nest_child_work_order(
     override as an active, company-scoped work center and hands the resolved
     rows in here -- an override missing from the mapping is a caller bug and
     raises ``ValueError`` rather than silently falling back.
+
+    ``row_material_parts`` resolves per-nest MATERIAL TIES the same way: a nest whose
+    ``material_part_id`` is set gets an operation-scoped ``WorkOrderMaterialAllocation``
+    on its freshly-created operation, so that material is deducted when the laser WO
+    finishes. The CALLER validates each distinct part as a non-deleted, company-scoped
+    part (404 on a miss -- never 403) and hands the resolved rows in here; a
+    ``material_part_id`` missing from the mapping is a caller bug and raises
+    ``ValueError`` rather than tying nothing. Nests without one are untied and stay
+    byte-identical to their pre-feature behavior -- no allocation row, no audit row.
 
     ``audit`` is REQUIRED and records the material-tie cancellations the operation wipe
     forces (invariant #2 -- cancelling a tie is a state change on a tenant table, so
@@ -451,6 +582,7 @@ def build_laser_nest_child_work_order(
     db.flush()
 
     overrides = row_work_centers or {}
+    material_parts = row_material_parts or {}
     for index, nest in enumerate(nests, start=1):
         sequence = index * 10
         if nest.work_center_id:
@@ -481,6 +613,27 @@ def build_laser_nest_child_work_order(
         )
         db.add(operation)
         db.flush()
+
+        # Optional MATERIAL TIE for this nest. Runs after the operation flush (the
+        # tie is scoped to operation.id) and, critically, after the cancel+wipe
+        # above, so the OPEN partial unique index can never see two live rows for
+        # the same (company, operation, part). A nest with no material_part_id
+        # creates NOTHING -- no allocation row, no audit row.
+        if nest.material_part_id:
+            material_part = material_parts.get(nest.material_part_id)
+            if material_part is None:
+                raise ValueError(f"Unresolved nest material part: {nest.material_part_id}")
+            create_nest_material_allocation(
+                db,
+                work_order=child_work_order,
+                operation=operation,
+                part=material_part,
+                qty_per_run=nest.qty_per_run,
+                planned_runs=nest.planned_runs,
+                company_id=company_id,
+                created_by=created_by,
+                audit=audit,
+            )
 
         # PDF nests carry their source bytes: store them as a DRAWING Document
         # and attach it via document_id. Scoped to the parent WO in the classic

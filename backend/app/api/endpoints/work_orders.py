@@ -33,6 +33,7 @@ from app.core.websocket import (
 )
 from app.db.database import atomic_transaction, get_db
 from app.db.locks import acquire_generator_lock
+from app.db.tenant_filter import tenant_query
 from app.models.bom import BOM, BOMItem
 from app.models.laser_nest import LaserNest
 from app.models.part import Part, PartType
@@ -91,6 +92,7 @@ from app.services.laser_nest_service import (
     build_parsed_nest_from_extraction,
     copy_laser_nest_folder,
     create_manual_laser_nest,
+    create_nest_material_allocation,
     extract_laser_nest_zip,
     manual_nest_response_dict,
     package_has_pdfs,
@@ -771,6 +773,21 @@ def _find_laser_work_center(db: Session, company_id: int, work_center_id: Option
     return min(candidates, key=lambda wc: (_laser_work_center_preference(wc), wc.id))
 
 
+def _find_nest_material_part(db: Session, company_id: int, part_id: int) -> Part:
+    """Resolve a nest row's ``material_part_id`` to a live, company-scoped part.
+
+    Tenant isolation is the whole point (invariant #1): an unscoped
+    ``db.query(Part).get()`` would let a planner tie -- and then deplete -- another
+    company's material. A miss is a **404, never a 403**, so a part id cannot be
+    probed for existence across tenants. Soft-deleted parts are excluded: a tie to a
+    deleted part would advertise demand nothing can satisfy.
+    """
+    part = tenant_query(db, Part, company_id).filter(Part.id == part_id, Part.is_deleted == False).first()  # noqa: E712
+    if part is None:
+        raise HTTPException(status_code=404, detail="Material part not found")
+    return part
+
+
 # Byte cap on laser-package uploads (ZIP or bare PDF), enforced while the body
 # streams to the temp file -- BEFORE any pypdf or AI work touches it. Matches
 # the nginx client_max_body_size posture (50M) so the app-layer guard holds on
@@ -1208,6 +1225,11 @@ def _build_confirmed_pdf_nests(package_dir: str, rows: list[LaserNestImportRow])
                 # Per-row work-center override (import-side instruction; resolved
                 # and validated in _run_laser_nest_import before the atomic build).
                 work_center_id=row.work_center_id,
+                # Per-row material tie (import-side instruction; the part is resolved
+                # and tenant-validated in _run_laser_nest_import before the atomic
+                # build). No fuzzy match off row.material -- an explicit pick only.
+                material_part_id=row.material_part_id,
+                qty_per_run=row.qty_per_run,
             )
         )
     return nests
@@ -2099,6 +2121,19 @@ async def _run_laser_nest_import(
             if nest.work_center_id and nest.work_center_id not in row_work_centers:
                 row_work_centers[nest.work_center_id] = _find_laser_work_center(db, company_id, nest.work_center_id)
 
+        # Same pre-resolution for every DISTINCT per-row MATERIAL TIE, and for the
+        # same reason: a bad or cross-tenant part id must fail cleanly (404) with
+        # nothing persisted, rather than mid-build where the rebuild has already
+        # wiped the prior nests. Only the PDF confirm-and-commit path carries ties;
+        # the legacy CNC-file path has no rows, so this loop is a no-op there and
+        # those imports stay byte-identical to their pre-feature behavior.
+        row_material_parts: dict[int, Part] = {}
+        for nest in nests:
+            if nest.material_part_id and nest.material_part_id not in row_material_parts:
+                row_material_parts[nest.material_part_id] = _find_nest_material_part(
+                    db, company_id, nest.material_part_id
+                )
+
         import_source = "pdf_import" if is_pdf_import else "cnc_file_import"
 
         try:
@@ -2194,6 +2229,7 @@ async def _run_laser_nest_import(
                     created_by=current_user.id,
                     saved_storage_keys=saved_storage_keys,
                     row_work_centers=row_work_centers,
+                    row_material_parts=row_material_parts,
                     audit=audit,
                 )
 
@@ -2468,8 +2504,19 @@ def create_manual_laser_nest_endpoint(
     ``laser_cutting`` (e.g. a standalone nest WO) -- the nest is appended to it
     directly. Delegates the state change to ``create_manual_laser_nest``.
     Untouched by, and does not touch, the import flow.
+
+    An optional ``material_part_id`` ties the created nest's operation to a stock
+    material part (``qty_per_run`` defaults to 1.0), so that material is deducted when
+    the laser work order finishes -- the same tie, through the same
+    ``create_nest_material_allocation`` seam, that the package import creates. Omitting
+    it leaves the nest untied and byte-identical to its pre-feature behavior.
     """
     target_work_order = _load_parent_work_order(db, work_order_id, company_id)
+    # Resolve the material part BEFORE the transaction: it is a read-only,
+    # tenant-scoped lookup, and a 404 here must not have to unwind a partial build.
+    material_part = (
+        _find_nest_material_part(db, company_id, payload.material_part_id) if payload.material_part_id else None
+    )
 
     with atomic_transaction(db):
         parent_work_order, child_work_order = _resolve_laser_target(
@@ -2492,6 +2539,21 @@ def create_manual_laser_nest_endpoint(
             company_id=company_id,
             user_id=current_user.id,
         )
+        if material_part is not None:
+            # Same operation-scoped tie the package import creates, through the same
+            # seam, so both paths produce identical rows and identical hash-chain
+            # entries. The nest's operation is already flushed by the call above.
+            create_nest_material_allocation(
+                db,
+                work_order=child_work_order,
+                operation=nest.operation,
+                part=material_part,
+                qty_per_run=payload.qty_per_run,
+                planned_runs=nest.planned_runs,
+                company_id=company_id,
+                created_by=current_user.id,
+                audit=audit,
+            )
         # Audit BEFORE the atomic_transaction commit so the audit row commits
         # atomically with the nest (AuditService.log only flushes).
         audit.log_create(

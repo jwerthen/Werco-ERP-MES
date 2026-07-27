@@ -320,6 +320,19 @@ export interface LaserNestImportRow {
    * pick (or the server's auto-detect when no package pick was made).
    */
   work_center_id?: number | null;
+  /**
+   * Per-nest sheet-part tie. Omit to leave the nest untied.
+   *
+   * Always an EXPLICIT pick — never fuzzy-matched from the AI-extracted
+   * `material` / `thickness` free text. A wrong auto-tie depletes the wrong
+   * heat lot into an as-built record.
+   */
+  material_part_id?: number | null;
+  /**
+   * Sheets consumed per completed run on the tied nest operation (defaults to
+   * 1.0 server-side). Meaningless without `material_part_id`.
+   */
+  qty_per_run?: number | null;
 }
 
 /**
@@ -334,6 +347,17 @@ export interface LaserNestPackageImportResult {
   child_work_order?: {
     id: number;
     work_order_number: string;
+    /**
+     * The created/updated laser operations, one per nest. The payload is a full
+     * `WorkOrderResponse` and has always carried these; the type simply never
+     * exposed them. Optional so callers must null-check — an older server, or a
+     * response shape change, must not crash the wizard.
+     */
+    operations?: Array<{
+      id: number;
+      operation_number?: string | null;
+      laser_nest?: LaserNestInfo | null;
+    }>;
   } | null;
 }
 
@@ -357,6 +381,118 @@ export interface WorkOrderSummary {
   due_date?: string;
   customer_name?: string;
   current_operation?: string;
+}
+
+// --- Material ties (work-order material allocations) ------------------------
+// The OPTIONAL tie between a work order (or one of its operations) and stock
+// material. Mirrors backend/app/schemas/work_order_material.py exactly.
+// Consumption fires at WORK-ORDER completion, never per run — copy must say
+// "deducts N when WO-#### finishes", never "deducting now".
+
+/** How the tie was created. Mirrors backend `AllocationSource`. */
+export type MaterialAllocationSource = 'nest' | 'bom' | 'manual';
+
+/**
+ * Lifecycle of a tie — this IS the tombstone (rows are never physically
+ * deleted, so the ledger's `allocation_id` back-reference always resolves).
+ *
+ * `closed` is RESERVED and never written by any code: a fully consumed tie
+ * stays `open`. Derive "fully consumed" from `qty_consumed >= qty_planned`,
+ * never from status. Readers that want the LIVE ties must filter `'open'`
+ * explicitly.
+ */
+export type MaterialAllocationStatus = 'open' | 'closed' | 'cancelled';
+
+/** One material tie on a work order (GET/POST/PATCH/DELETE responses). */
+export interface MaterialAllocation {
+  id: number;
+  work_order_id: number;
+  /**
+   * Set => the tie is OPERATION-scoped and depletes per completed run (the
+   * laser-nest case). `null` => work-order-scoped, one-shot at completion.
+   */
+  work_order_operation_id: number | null;
+  operation_number: string | null;
+  /**
+   * The operation this tie pointed at before a nest re-import superseded it and
+   * cleared the link. `null` for every tie that was never detached — without it
+   * a detached tie is indistinguishable from one that was always
+   * work-order-scoped (both read `work_order_operation_id: null`). Reporting
+   * only; the audit chain remains the record of record.
+   */
+  detached_from_operation_id: number | null;
+  /** The MATERIAL part consumed — never the part being produced. */
+  part_id: number;
+  part_number: string | null;
+  part_name: string | null;
+
+  source: MaterialAllocationSource;
+  status: MaterialAllocationStatus;
+
+  /** Material per completed run. Operation-scoped ties only; `null` otherwise. */
+  qty_per_run: number | null;
+  qty_planned: number;
+  /** Snapshot of the part's UoM at tie time. Nothing converts units. */
+  unit_of_measure: string;
+  /**
+   * CACHE, not a compliance figure. The authoritative consumed total is the sum
+   * of `inventory_transactions` carrying this allocation's `allocation_id`.
+   * Label it as such wherever it is shown.
+   */
+  qty_consumed: number;
+
+  /** Consume from THIS lot. `null` => FIFO picks the lot at consume time. */
+  pinned_inventory_item_id: number | null;
+  pinned_lot_number: string | null;
+
+  notes: string | null;
+  created_by: number | null;
+  /** UTC ISO (`Z`) — render via centralTime, never `new Date().toLocaleString()`. */
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * POST body. `part_id`, `work_order_operation_id` and `source` are fixed at
+ * creation — changing what a tie points at after consumption posted would
+ * rewrite genealogy, so untie and re-tie instead.
+ */
+export interface MaterialAllocationCreatePayload {
+  /** The MATERIAL part consumed — never the part being produced. */
+  part_id: number;
+  /**
+   * Set => OPERATION-scoped (per-run). Omit for a work-order-scoped, one-shot
+   * tie.
+   */
+  work_order_operation_id?: number | null;
+  /** Defaults to `'manual'` server-side. */
+  source?: MaterialAllocationSource;
+  /**
+   * Operation-scoped ties ONLY (defaults to 1.0 when omitted). Sending it
+   * without `work_order_operation_id` is a 422 — there are no runs to scale by.
+   */
+  qty_per_run?: number | null;
+  /** Total material planned for this tie. Must be > 0. */
+  qty_planned: number;
+  /** Omit to leave the tie UNPINNED (FIFO at consume time). A held lot is 422. */
+  pinned_inventory_item_id?: number | null;
+  notes?: string | null;
+}
+
+/**
+ * PATCH body — an OPEN tie only (409 otherwise). Omitted fields are untouched.
+ *
+ * `clear_pinned_inventory_item` is required-with-default on the backend: send
+ * `true` to drop the pin and fall back to FIFO. Sending it together with a
+ * `pinned_inventory_item_id` is a 422 (they ask for opposite things), as is
+ * lowering `qty_planned` below `qty_consumed`.
+ */
+export interface MaterialAllocationUpdatePayload {
+  qty_per_run?: number | null;
+  qty_planned?: number | null;
+  pinned_inventory_item_id?: number | null;
+  clear_pinned_inventory_item?: boolean;
+  notes?: string | null;
 }
 
 export type TimeEntryType = 'setup' | 'run' | 'rework' | 'inspection' | 'downtime' | 'break';
@@ -502,6 +638,52 @@ export interface DispatchNestInfo {
 }
 
 /**
+ * The material tie carried on a Dispatch Board row.
+ *
+ * OPERATION-SCOPED ties only. A work-order-scoped tie would fan out across every
+ * card of that work order and read as N separate ties, so the board never shows
+ * one. `null`/absent for an untied operation — render nothing at all, no
+ * placeholder and no "not tied" nag.
+ *
+ * `qty_remaining`, `on_hand` and `short_by` are SERVER-DERIVED (the board is a
+ * read path and must not recompute stock client-side). `short_by` is 0 when
+ * stock covers the remainder; > 0 is the shortage chip — advisory only, a
+ * shortage never blocks production.
+ */
+export interface DispatchMaterialTie {
+  allocation_id: number;
+  part_id: number;
+  part_number: string | null;
+  /** Snapshot of the part's UoM at tie time. Nothing converts units. */
+  unit_of_measure: string;
+  /** Material per completed run; `null` on a tie that never set one (=> 1.0). */
+  qty_per_run: number | null;
+  qty_planned: number;
+  /** CACHE — the ledger (`inventory_transactions.allocation_id`) is authoritative. */
+  qty_consumed: number;
+  /** `qty_planned - qty_consumed`, floored at 0 server-side. */
+  qty_remaining: number;
+  /** On-hand stock of the tied part, company-scoped. */
+  on_hand: number;
+  /** `max(0, qty_remaining - on_hand)`. 0 = covered. */
+  short_by: number;
+  /**
+   * How many open ties the operation carries. The card renders ONE chip, so
+   * without this a second tied part is invisible on the board. Optional: a
+   * pre-feature cached payload has no value, which reads as a single tie.
+   */
+  tie_count?: number;
+  /**
+   * True when ANY of the operation's ties is short — not only the one this chip
+   * names. Chip tone and the column's "N short" rollup read this, so a shortage
+   * on a tie the card had no room to draw still surfaces.
+   */
+  any_short?: boolean;
+  pinned_inventory_item_id: number | null;
+  pinned_lot_number: string | null;
+}
+
+/**
  * One queued operation on the Dispatch Board (GET /shop-floor/dispatch-board).
  *
  * Rows arrive server-sorted: ranked work first by `run_order`, then unranked by
@@ -532,6 +714,12 @@ export interface DispatchBoardRow {
    * drive sheet swaps, assist-gas and nozzle/lens changes).
    */
   laser_nest?: DispatchNestInfo | null;
+  /**
+   * Operation-scoped material tie for this operation; `null`/absent when the
+   * operation is untied (the byte-identical pre-feature case — render nothing).
+   * Optional so pre-feature payloads and existing fixtures still typecheck.
+   */
+  material_tie?: DispatchMaterialTie | null;
 }
 
 /** One work center column on the Dispatch Board. */
@@ -564,6 +752,39 @@ export type RunOrderUpdateResponse =
 // All additive + optional so pre-redesign backend payloads (and existing
 // tests) still typecheck.
 // ---------------------------------------------------------------------------
+
+/**
+ * A material tie carried on a kiosk queue row — the shop-floor-facing twin of
+ * `DispatchMaterialTie` (types/index.ts), with the part NAME the operator reads
+ * and without the pinned inventory id the office uses.
+ *
+ * Consumption fires at WORK-ORDER completion, never per run: an operator
+ * finishing nest 1 of 3 deducts NOTHING. Copy must say "deducts N when WO-####
+ * finishes" — never "this will deduct now". `qty_remaining`, `on_hand` and
+ * `short_by` are server-derived (the queue is a READ path; it must not compute
+ * stock, and it must not write).
+ */
+export interface KioskMaterialTie {
+  allocation_id: number;
+  part_id: number;
+  part_number: string | null;
+  part_name: string | null;
+  /** Snapshot of the part's UoM at tie time. Nothing converts units. */
+  unit_of_measure: string;
+  /** Material per completed run; `null` on a tie that never set one (=> 1.0). */
+  qty_per_run: number | null;
+  qty_planned: number;
+  /** CACHE — the ledger (`inventory_transactions.allocation_id`) is authoritative. */
+  qty_consumed: number;
+  /** `qty_planned - qty_consumed`, floored at 0 server-side. */
+  qty_remaining: number;
+  /** On-hand stock of the tied part, company-scoped. */
+  on_hand: number;
+  /** `max(0, qty_remaining - on_hand)`. 0 = covered. Advisory: never blocks work. */
+  short_by: number;
+  /** Named lot the tie is pinned to; `null` = FIFO picks at consume time. */
+  pinned_lot_number: string | null;
+}
 
 /**
  * Last production-evidence telemetry for an operation ("LAST REPORT" tile).
@@ -634,6 +855,22 @@ export interface ActiveJob {
   quantity_produced?: number;
   /** THIS open entry's session scrap count (backend B7). */
   quantity_scrapped?: number;
+  /**
+   * The OPERATION's running scrap total — deliberately a DIFFERENT key from
+   * `quantity_scrapped` above, which is only THIS time entry's session count.
+   * The consumption target is computed from the operation total, so feeding the
+   * session figure into the deduction estimate would under-state any operation
+   * worked across more than one sitting (or by a crew).
+   */
+  operation_quantity_scrapped?: number | null;
+  /**
+   * Open material ties on this operation. Present so the deduction notice still
+   * renders when the running job is NOT in the queue the kiosk is displaying —
+   * `activeQueueItem` is matched against the kiosk's SELECTED machine, so an
+   * operator clocked onto a job at another work center resolves it `undefined`
+   * and would otherwise lose the notice silently.
+   */
+  material_ties?: KioskMaterialTie[] | null;
 }
 
 /**

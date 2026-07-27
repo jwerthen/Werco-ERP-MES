@@ -275,13 +275,22 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > reconcile-on-read — reconciles those ties as part of the same transaction, so consumption is atomic
 > with the status change. There is **no new endpoint and no new call site**: it rides
 > `apply_completion_inventory_effects` alongside the FG receipt and the backflush. **An untied work
-> order is untouched** — no ledger row, no audit row, no event (asserted by test). The two tie shapes
+> order is untouched** — no ledger row, no audit row, no event (asserted by test).
+>
+> **Consumption fires when the WORK ORDER completes, never when an operation does.** All five call
+> sites above sit inside a work-order-completion branch (the two operation-complete verbs run it only
+> under `if work_order_completed:`; reconcile-on-read keys on work-order transitions only). A laser
+> child work order carries **one operation per nest**, so completing nest 1 of 3 deducts **nothing** —
+> all three ties flush together when the last operation closes the work order. Client copy built on
+> these numbers must say "deducts N when WO-#### finishes", never "deducting now". The two tie shapes
 > behave differently:
-> - **Operation-scoped** ties (`work_order_operation_id` set — the laser-nest case) consume
->   **incrementally per run**, as a **sum-delta reconcile**: `target = qty_per_run × (operation
+> - **Operation-scoped** ties (`work_order_operation_id` set — the laser-nest case) are reconciled
+>   **per operation** as a **sum-delta**: `target = qty_per_run × (operation
 >   quantity_complete + quantity_scrapped)`, and a negative `ISSUE` is posted for
 >   `target − qty_consumed` whenever that delta is positive. Because the target is recomputed from
->   live operation state, replays and reconcile-on-read converge instead of double-issuing. These rows
+>   live operation state, replays and reconcile-on-read converge instead of double-issuing — but the
+>   reconcile still only *runs* at work-order completion, so this is per-operation **accuracy**, not
+>   per-operation timing (see `docs/MATERIAL_CONSUMPTION_PLAN.md` → "Capability vs. wiring"). These rows
 >   carry **`reference_type='work_order_operation'`** with `reference_id` = the **operation** id
 >   (and `reference_number` = the work-order number) — deliberately outside the
 >   `uq_wo_inventory_receipt` / `uq_wo_inventory_issue` idempotency predicates, which key on
@@ -471,8 +480,12 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > the completion paths (see "Completion also consumes tied material" above).
 >
 > The endpoints live on a **sibling router** under the same `/work-orders` prefix
-> (`app/api/endpoints/work_order_materials.py`, OpenAPI tag **Work Order Materials**). **No UI ships
-> in this release** — the API is live and dark.
+> (`app/api/endpoints/work_order_materials.py`, OpenAPI tag **Work Order Materials**). They are no
+> longer dark: the **Materials panel on the work-order detail page** reads `GET` and drives `PATCH` /
+> `DELETE`, and the two nest-creation paths write ties server-side (see Laser Nests → "Nest material
+> ties"). The read-only floor surfaces — the dispatch-board `material_tie` chip and the kiosk
+> `material_ties` line — do **not** call this router at all; they ride the shop-floor reads, which is
+> what keeps the kiosk path fence unwidened.
 >
 > Reads are open to any authenticated tenant user; **every mutating verb** is
 > `require_role([ADMIN, MANAGER, SUPERVISOR])`. The endpoints are deliberately **not** under
@@ -814,8 +827,9 @@ mixed**:
 >   then `import` re-sends the same ZIP
 >   **plus an optional `rows` form field** — a JSON array of confirmed rows
 >   `{source_file, cnc_number, nest_name, planned_runs, material, thickness, sheet_size}` (plus
->   `source_pages` on bare-PDF rows — see below — and an optional per-row `work_center_id`
->   override — see "Work-center selection" above). When
+>   `source_pages` on bare-PDF rows — see below — an optional per-row `work_center_id`
+>   override — see "Work-center selection" above — and an optional per-row **material tie**,
+>   `material_part_id` + `qty_per_run`, see below). When
 >   `rows` is present, the backend matches each row to its PDF by `source_file`, stores each PDF as
 >   a `DRAWING` `Document` (attached via `document_id`), sets `cnc_number`, writes one `log_create`
 >   audit row per nest, and builds the target laser WO — **no second AI call** (the re-sent ZIP only
@@ -826,7 +840,9 @@ mixed**:
 >   `source_pages` optional (required on the bare-PDF path — see below): non-empty, entries
 >   **≥ 1**, ascending and consecutive,
 >   `work_center_id` optional and **> 0** (per-nest override; must resolve to an **active**,
->   company-scoped work center, else **404** before anything is persisted), and
+>   company-scoped work center, else **404** before anything is persisted),
+>   `material_part_id` optional and **> 0** with `qty_per_run` optional and **> 0** (the per-nest
+>   material tie — see "Nest material ties" below), and
 >   `cnc_number` / `nest_name` / `material` / `thickness` / `sheet_size` length-bounded as on the
 >   manual path. Import-specific **400** cases: `rows` not valid JSON / not a JSON array; any row
 >   failing validation; a **duplicate `source_file`** across rows; and a DB constraint/length fault
@@ -885,7 +901,8 @@ mixed**:
 >
 > **Manual nest create (`POST /work-orders/{id}/laser-nests/manual`).** Body: `cnc_number`
 > (required, 1–100 chars), `planned_runs` (required, **≥ 1**), and optional `nest_name`,
-> `material`, `thickness`, `sheet_size`. Resolves the target laser WO (find-or-create the child on
+> `material`, `thickness`, `sheet_size`, plus the same optional **material tie** the import rows take
+> (`material_part_id` **> 0**, `qty_per_run` **> 0** — see "Nest material ties" below). Resolves the target laser WO (find-or-create the child on
 > an assembly WO; the addressed WO itself when it is `laser_cutting`) and an active
 > laser work center — **400** if no active laser work center exists (auto-detected with the same
 > Ermaksan-fiber-first, tube-last preference — see "Work-center selection" above). Every manual
@@ -895,6 +912,29 @@ mixed**:
 > nest plus its backing operation (`work_order_operation_id`, `operation_status`). Besides the
 > per-nest `log_create`, the add writes a WO-level `log_update` (reason `manual_laser_nest_added`)
 > recording the forced-**RELEASED** status and the re-derived `quantity_ordered` on the laser WO.
+>
+> **Nest material ties (`material_part_id` + `qty_per_run`).** Both nest-creation paths — the PDF
+> confirm-and-commit import row and the manual create body — take an optional pair naming the stock
+> part (sheet/plate) the nest consumes. When `material_part_id` is set, the server creates an
+> **operation-scoped** `WorkOrderMaterialAllocation` on that nest's freshly-created operation
+> (`source: "nest"`, unpinned, `qty_per_run` defaulting to **1.0**, `qty_planned = qty_per_run ×
+> planned_runs`, `unit_of_measure` snapshotted from the part), so the material is deducted **when the
+> laser work order finishes** — not per nest. Omit it and the nest is untied and byte-identical to its
+> pre-feature behavior: no allocation row, no audit row.
+>
+> The tie is created **inside the import transaction**, not by a follow-up `POST` to
+> `…/material-allocations`: the import is atomic and a second call would not be, so a failed follow-up
+> would leave nests a planner believes are tied that never deplete — with no compensating verb to fix
+> it. Both paths run the same `create_nest_material_allocation` seam, so an imported tie and a
+> hand-created one produce identical rows and identical `work_order_material_allocation` `log_create`
+> hash-chain entries. Every distinct `material_part_id` is resolved **before** the rebuild wipes the
+> prior nests, so a bad or cross-tenant id is a clean **404** ("Material part not found", never 403)
+> with nothing persisted; soft-deleted parts are refused the same way. `qty_per_run` **without**
+> `material_part_id` is a **422** on the manual path / **400** on the import path rather than a
+> silently dropped field. There is deliberately **no fuzzy auto-match** from the AI-extracted
+> `material` free text to a part — a wrong auto-tie would deplete the wrong heat lot into an as-built
+> record — so the planner picks explicitly or the nest ships untied. See "Material ties" under Work
+> Orders for the tie lifecycle and `docs/MATERIAL_CONSUMPTION_PLAN.md` for the design record.
 >
 > **Manual nest edit (`PATCH /laser-nests/{id}`).** All-optional body (`cnc_number`, `nest_name`,
 > `planned_runs`, `material`, `thickness`, `sheet_size`). A `planned_runs` change **reverse-syncs**
@@ -1412,10 +1452,19 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > `true` — older clients ignore it. Each row:
 > `{operation_id, run_order, version, work_order_id, work_order_number, operation_number,
 > operation_name, part_number, part_name, status, priority, due_date, quantity_ordered,
-> quantity_complete, setup_time_hours, run_time_hours, laser_nest}` — `version` is the operation's
-> optimistic-lock counter, which the cross-machine move (`PUT /work-orders/operations/{id}`)
+> quantity_complete, setup_time_hours, run_time_hours, laser_nest, material_tie}` — `version` is the
+> operation's optimistic-lock counter, which the cross-machine move (`PUT /work-orders/operations/{id}`)
 > requires. Rows arrive in the queue order above. **Zero-write read**: no reconcile, no audit rows,
 > no events.
+>
+> **The zero-write guarantee covers material consumption explicitly.** The board reads material ties
+> and stock levels, and it does **not** run `apply_completion_inventory_effects`, post an `ISSUE`, or
+> advance any `qty_consumed` — `material_tie_view.py` has no write path and must never grow one. This
+> read is polled by every manager on the shop and by the kiosk queue every 10–15 seconds per station;
+> a poll is not an actor, has no intent and records no reason, so material that moved from one would
+> be unattributable in the audit chain. (Note the contrast with the *nest* block, which still syncs
+> `nest.completed_runs` on the kiosk queue read but never on the board — see below.) If a future
+> change is tempted to reconcile ties here, that is the reason not to.
 >
 > `laser_nest` is `null` for every non-laser row. For a laser-nest operation whose nest is live
 > (**soft-deleted nests are never surfaced**, same `active_laser_nest` rule as the kiosk) it carries
@@ -1428,6 +1477,29 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > `max(0, planned − completed)` — the same numbers the kiosk shows, but derived read-only: unlike
 > the kiosk payload the board never writes `nest.completed_runs` back (the same row builder serves
 > the run-order `PUT`, which commits). The same block rides the column that `PUT` returns.
+>
+> `material_tie` is `null` for every **untied** row — the client draws nothing for those, no
+> placeholder and no "not tied" nag, so an untied work order looks byte-identical to its pre-feature
+> self. When the operation carries an **open, operation-scoped** tie it is
+> `{allocation_id, part_id, part_number, unit_of_measure, qty_per_run, qty_planned, qty_consumed,
+> qty_remaining, on_hand, short_by, pinned_inventory_item_id, pinned_lot_number}`.
+> **Operation-scoped only**: a work-order-scoped tie belongs to the whole job and drains through the
+> one-shot backflush, so hanging it on cards would fan one tie across every card of that work order
+> and read as N separate ties. **One chip per card** — if an operation somehow carries two ties the
+> **first by `allocation_id`** is sent (the same one the kiosk lists first); summing them is not an
+> option, since they are different parts in different units and a merged number would be fiction.
+> `qty_remaining` is `max(0, planned − consumed)`, `on_hand` is the **pinned lot's own** stock when
+> the tie is pinned and the FIFO-eligible total for the part when it is not, and `short_by` is
+> `max(0, remaining − on_hand)` — all three derived **server-side**, floored at the engine's own
+> epsilon so float residue can't paint a false shortage. `short_by` is **advisory**: a shortage never
+> blocks production, it drives the lot negative and warns. `qty_consumed` is a **cache** — the ledger
+> rows carrying that `allocation_id` are the authoritative total. `qty_per_run` is carried **raw**
+> (`null` means "not run-scaled" and reads as 1.0, which is not the same fact as an explicit 1).
+> Ties are batched **once per response** for the whole board, so the board's cost stays flat in the
+> number of cards. The same block rides the column the run-order `PUT` returns — that response
+> **replaces** the column client-side, so omitting it there would blank every material chip and read
+> as though reordering untied the shop's material. `material_tie` defaults to `null`, so a
+> pre-feature client is unaffected by its arrival — exactly as `laser_nest` was.
 >
 > **`PUT /shop-floor/work-centers/{id}/run-order`** (Admin / Manager / Supervisor, tenant-scoped) —
 > body `{"operation_ids": [11, 9, 14]}`, the **full** desired order for that column, rank 1 first.
@@ -1520,6 +1592,41 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 >   status** — "where the job goes", not "what is startable" — `null` on the last operation. Rides
 >   the my-active-job job dict **and** the `POST /operations/{id}/complete` response (the complete
 >   modal's "ROUTES TO" row).
+
+> **Material ties on operator reads (`/work-center-queue/{id}`, `/my-active-job`).** Both payloads
+> gained a **`material_ties`** array so the kiosk can state what leaves inventory — it rides these
+> already-authorized, already-tenant-scoped reads rather than the tie API, because
+> `/work-orders/{id}/material-allocations` sits **outside the kiosk path fence** (`deps.py` allowlists
+> `/api/v1/shop-floor` only, so a badge-minted `scope="kiosk"` token is 403 there). Same precedent as
+> `scrap_reason_codes`: carry the data on a read the fence already permits rather than widen the
+> fence. Both endpoints build it from the same batched `material_tie_view` read the dispatch board
+> uses, so the manager's chip and the operator's line cannot disagree.
+>
+> `[]` on an untied operation — the kiosk renders nothing at all for those. Each entry:
+> `{allocation_id, part_id, part_number, part_name, unit_of_measure, qty_per_run, qty_planned,
+> qty_consumed, qty_remaining, on_hand, short_by, pinned_lot_number}` — the same projection the board
+> sends, **plus `part_name`** and **minus `pinned_inventory_item_id`** (an operator reads a lot
+> *number* off a tag and the kiosk has no verb that takes the id). Open, **operation-scoped** ties
+> only. `short_by` is advisory — a shortage never blocks the job. **Pure read**: the tie read posts
+> no `ISSUE`, writes no audit row and reconciles nothing, even though `_laser_nest_payload` on the
+> same endpoint still syncs nest counters.
+>
+> **`/my-active-job` also gained `operation_quantity_scrapped`** — a **new, distinct key**, not a
+> change to the existing one. Read the two carefully, they are a live footgun:
+>
+> | Key | Scope |
+> |-----|-------|
+> | `quantity_scrapped` | **THIS TIME ENTRY's** session scrap (this clock-in's delta; feeds the AVG PER PC tile) — unchanged, pre-existing |
+> | `operation_quantity_scrapped` | The **OPERATION's** scrap total, alongside the existing `quantity_complete` |
+>
+> They are only equal on a single-session operation. The material prediction scales on
+> `(complete + scrapped)` at the **operation** level — a scrapped run still ate its sheet — so a client
+> that reaches for `quantity_scrapped` under-states the deduction on any job worked across two shifts.
+>
+> **Station disclosure note:** a station principal is an unattended, PIN-unlocked terminal with no
+> operator identity, and `material_ties` adds material part numbers and **on-hand stock** to what it
+> can read. Scoped to the tied parts of that work center's queued operations — it is not an inventory
+> browser — but it is a genuine, if small, widening of the station's disclosure surface.
 
 > **Kiosk doc viewer — `GET /shop-floor/operations/{operation_id}/documents` +
 > `GET /shop-floor/documents/{document_id}/inline` (Foundry redesign).** The full-screen

@@ -11,6 +11,7 @@ import LaserNestManualModal from '../components/laser/LaserNestManualModal';
 import LaserNestImportWizard from '../components/laser/LaserNestImportWizard';
 import LaserNestPdfPreview from '../components/laser/LaserNestPdfPreview';
 import { CompleteWorkModal, CompleteWorkSubmit } from '../components/workorders/CompleteWorkModal';
+import MaterialTiesPanel from '../components/workorders/MaterialTiesPanel';
 import OperationStepsPanel from '../components/processSheets/OperationStepsPanel';
 import {
   extractStepsBypassed,
@@ -254,6 +255,10 @@ export default function WorkOrderDetail() {
   const canCorrectCount = hasPermission(user?.role, 'work_orders:edit') || !!user?.is_superuser;
   // Inline due-date edit shares the same work_orders:edit tier.
   const canEditDueDate = canCorrectCount;
+  // Material-tie PATCH/untie is require_role([ADMIN, MANAGER, SUPERVISOR]) on
+  // the backend — the same tier work_orders:edit maps to. Reads are open to any
+  // authenticated tenant user, so the panel itself is not gated.
+  const canEditMaterialTies = canCorrectCount;
   const [workOrder, setWorkOrder] = useState<WorkOrder | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -300,6 +305,10 @@ export default function WorkOrderDetail() {
   // Manual nest entry + per-nest PDF management.
   const [nestModalOpen, setNestModalOpen] = useState(false);
   const [nestModalTarget, setNestModalTarget] = useState<LaserNestInfo | null>(null);
+  // The operation the edited nest sits on. The nest itself carries no operation
+  // id, but material ties are OPERATION-scoped, so without this the modal can't
+  // read or write the tie for the nest being edited.
+  const [nestModalOperationId, setNestModalOperationId] = useState<number | undefined>(undefined);
   const [previewNestId, setPreviewNestId] = useState<number | null>(null);
   const [nestActionId, setNestActionId] = useState<number | null>(null);
   const [nestActionError, setNestActionError] = useState('');
@@ -957,12 +966,16 @@ export default function WorkOrderDetail() {
   // --- Manual laser nest handlers -----------------------------------------
   const openAddNestModal = () => {
     setNestModalTarget(null);
+    // A nest being CREATED has no operation yet — the modal ties on the
+    // operation the create returns, not on one passed in here.
+    setNestModalOperationId(undefined);
     setNestActionError('');
     setNestModalOpen(true);
   };
 
-  const openEditNestModal = (nest: LaserNestInfo) => {
+  const openEditNestModal = (nest: LaserNestInfo, operationId?: number) => {
     setNestModalTarget(nest);
+    setNestModalOperationId(operationId);
     setNestActionError('');
     setNestModalOpen(true);
   };
@@ -1658,7 +1671,7 @@ export default function WorkOrderDetail() {
                             )}
                             <button
                               type="button"
-                              onClick={() => openEditNestModal(nest)}
+                              onClick={() => openEditNestModal(nest, operation.id)}
                               className="btn-secondary btn-sm flex items-center gap-1"
                               title="Edit nest"
                             >
@@ -2109,6 +2122,18 @@ export default function WorkOrderDetail() {
         )}
       </div>
 
+      {/* Material Ties — the optional link between this work order (or one of
+          its operations) and the stock material it depletes. Its own stacked
+          section, deliberately not a tab: this page's content is all co-visible.
+          `workOrder.updated_at` is the freshness seam — a completion that posts
+          consumption bumps the work order, which re-runs the panel's fetch;
+          the panel adds no poller of its own. */}
+      <MaterialTiesPanel
+        workOrderId={workOrder.id}
+        workOrderUpdatedAt={workOrder.updated_at}
+        canEdit={canEditMaterialTies}
+      />
+
       {/* Material Requirements */}
       {materialReqs && materialReqs.has_bom && materialReqs.materials.length > 0 && (
         <div className="card card-compact">
@@ -2192,6 +2217,9 @@ export default function WorkOrderDetail() {
             onClose={() => setNestModalOpen(false)}
             workOrderId={workOrder.id}
             nest={nestModalTarget}
+            // Operation-scoped material ties hang off this id — the edit path
+            // had been discarding it even though the caller already has it.
+            workOrderOperationId={nestModalOperationId}
             onSaved={handleNestSaved}
           />
           <LaserNestImportWizard
