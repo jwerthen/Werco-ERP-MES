@@ -49,10 +49,12 @@ const makeTie = (overrides: Partial<DispatchMaterialTie> = {}): DispatchMaterial
 });
 
 const makeRow = (
-  tie?: DispatchMaterialTie | null
-): Pick<DispatchBoardRow, 'material_tie' | 'work_order_number'> => ({
+  tie?: DispatchMaterialTie | null,
+  status?: string
+): Pick<DispatchBoardRow, 'material_tie' | 'work_order_number'> & { status?: string } => ({
   work_order_number: 'WO-2026-0142',
   material_tie: tie ?? null,
+  ...(status === undefined ? {} : { status }),
 });
 
 const makeKioskTie = (overrides: Partial<KioskMaterialTie> = {}): KioskMaterialTie => ({
@@ -171,6 +173,70 @@ describe('materialTieChip', () => {
     const chip = materialTieChip(makeRow(makeTie({ part_number: null })))!;
     expect(chip.text).toContain('Part #55');
   });
+
+  it('reports the CONSUMED total on a fully-issued tie, not the plan figure', () => {
+    // Over-consumption (`consumed > planned`) became an ordinary steady state
+    // once material started posting per operation, and it is exactly the state a
+    // supervisor opens the RETURN dialog on. Quoting `qty_planned` here would
+    // under-report the draw by the amount they are about to give back.
+    const chip = materialTieChip(makeRow(makeTie({ qty_planned: 3, qty_consumed: 5, qty_remaining: 0 })))!;
+    expect(chip.title).toContain('5 EA of SHT-.125-304 reported consumed');
+    expect(chip.title).not.toContain('3 EA of SHT-.125-304 reported consumed');
+  });
+});
+
+describe('materialTieChip — the RETURN re-arm guard', () => {
+  // A bounded `correct_over_consumption` lowers `qty_consumed`, which pushes the
+  // PLAN-based `qty_remaining` this chip reads back UP. On a live operation that
+  // is fine (the material really will be drawn at completion). On a COMPLETE one
+  // it is a straight falsehood: the server leaves the tie at
+  // `qty_consumed >= target`, so the engine's delta is pinned <= 0 forever.
+  const returnedTie = makeTie({ qty_planned: 5, qty_consumed: 3, qty_remaining: 2, on_hand: 4 });
+
+  it('still forecasts a deduction while the operation can complete', () => {
+    ['ready', 'in_progress', 'on_hold', 'pending'].forEach((status) => {
+      const chip = materialTieChip(makeRow(returnedTie, status))!;
+      expect(chip.title).toContain('when this operation completes');
+      expect(chip.text).toBe('2 EA · SHT-.125-304');
+    });
+  });
+
+  it('forecasts NOTHING once the operation is complete, and says why', () => {
+    const chip = materialTieChip(makeRow(returnedTie, 'complete'))!;
+    expect(chip.tone).toBe('ok');
+    expect(chip.text).toBe('SHT-.125-304 · settled');
+    // No future-deduction claim of any kind.
+    expect(chip.title).not.toContain('deducts');
+    expect(chip.title).not.toContain('Estimate');
+    expect(chip.title).toContain('nothing further can be drawn');
+    // The consumed total is stated from qty_consumed, not the plan gap.
+    expect(chip.title).toContain('3 EA');
+  });
+
+  it('does not raise a SHORTAGE against a deduction that cannot happen', () => {
+    // Plan-based short_by re-arms with qty_remaining; a purchasing signal built
+    // on a draw the engine has already refused is a signal made of nothing.
+    const short = makeTie({ qty_planned: 5, qty_consumed: 3, qty_remaining: 2, on_hand: 0, short_by: 2 });
+    expect(materialTieChip(makeRow(short, 'in_progress'))!.tone).toBe('short');
+    expect(materialTieChip(makeRow(short, 'complete'))!.tone).toBe('ok');
+
+    // …including the sibling-shortage tier, which reads the same basis.
+    const sibling = makeTie({ tie_count: 2, any_short: true, short_by: 0 });
+    expect(materialTieChip(makeRow(sibling, 'in_progress'))!.tone).toBe('short');
+    expect(materialTieChip(makeRow(sibling, 'complete'))!.tone).toBe('ok');
+  });
+
+  it('treats an ABSENT or unknown status as still live — a new status never blanks a chip', () => {
+    // Byte-identical to the pre-guard behaviour for any payload/fixture that
+    // carries no status at all.
+    expect(materialTieChip(makeRow(returnedTie))!.text).toBe('2 EA · SHT-.125-304');
+    expect(materialTieChip(makeRow(returnedTie, 'some_future_status'))!.text).toBe('2 EA · SHT-.125-304');
+    expect(materialTieChip(makeRow(returnedTie, ''))!.text).toBe('2 EA · SHT-.125-304');
+  });
+
+  it('still renders nothing at all for an untied complete operation', () => {
+    expect(materialTieChip(makeRow(null, 'complete'))).toBeNull();
+  });
 });
 
 describe('countShortTies', () => {
@@ -183,6 +249,11 @@ describe('countShortTies', () => {
     ];
     expect(countShortTies(rows)).toBe(2);
     expect(countShortTies([])).toBe(0);
+  });
+
+  it('agrees with the chips, so a settled tie never inflates the column rollup', () => {
+    const short = makeTie({ short_by: 2, on_hand: 1 });
+    expect(countShortTies([makeRow(short, 'in_progress'), makeRow(short, 'complete')])).toBe(1);
   });
 });
 

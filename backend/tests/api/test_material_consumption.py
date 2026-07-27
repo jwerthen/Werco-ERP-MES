@@ -1500,12 +1500,26 @@ def test_lot_trace_sees_operation_scoped_consumption(client: TestClient, db_sess
 
 
 def test_nest_reimport_guard_refuses_when_consumed(db_session: Session):
+    """The wipe is refused once the LEDGER references the operations it would delete.
+
+    PR 3 re-keyed this guard from the ``qty_consumed`` cache to
+    ``ledger_backed_allocation_ids``, matching the hard-delete guard. The consumption is
+    therefore driven for real here rather than by presetting the cache: the cache is
+    documented as non-authoritative, and it is the ledger rows whose ``reference_id``
+    would be orphaned by ``db.delete(operation)``.
+    """
     user = make_user(db_session)
     fg = make_part(db_session)
     sheet = make_part(db_session, uom="sheets", part_type="raw_material")
+    make_inventory(db_session, sheet, qty=10, lot="REIMPORT-CONSUMED")
     wo = make_wo(db_session, fg, quantity_ordered=3, quantity_complete=3)
     op = make_op(db_session, wo, make_work_center(db_session), quantity_complete=3, operation_group="LASER")
-    make_allocation(db_session, wo, sheet, operation=op, qty_per_run=1.0, qty_planned=3, qty_consumed=3.0)
+    allocation = make_allocation(db_session, wo, sheet, operation=op, qty_per_run=1.0, qty_planned=3)
+
+    run_effects(db_session, wo, user)
+    db_session.refresh(allocation)
+    assert allocation.qty_consumed == 3.0
+    assert consumption_txns(db_session, op.id), "the ledger must really carry the consumption"
 
     with pytest.raises(MaterialAllocationConsumedError):
         cancel_allocations_for_operations(
@@ -1515,6 +1529,39 @@ def test_nest_reimport_guard_refuses_when_consumed(db_session: Session):
             company_id=COMPANY_A,
             audit=AuditService(db_session, user),
         )
+
+
+def test_nest_reimport_guard_reads_the_ledger_not_the_qty_consumed_cache(db_session: Session):
+    """A cache that claims consumption the LEDGER does not show must not block the wipe.
+
+    ``qty_consumed`` is explicitly a cache (model docstring) and the ledger is
+    authoritative — the same basis the hard-delete guard has always used. Keying on the
+    cache is what PR 3 had to move away from: a full ``return_and_untie`` drives the cache
+    to 0 while the ISSUE **and** RETURN rows both still name the operation, so a
+    cache-keyed guard would wave through exactly the wipe that orphans them. The converse,
+    pinned here, is that drift in the other direction does not manufacture a refusal:
+    with no ledger row there is nothing to orphan, so the tie is simply cancelled.
+    """
+    user = make_user(db_session)
+    fg = make_part(db_session)
+    sheet = make_part(db_session, uom="sheets", part_type="raw_material")
+    wo = make_wo(db_session, fg, quantity_ordered=3, quantity_complete=3)
+    op = make_op(db_session, wo, make_work_center(db_session), quantity_complete=3, operation_group="LASER")
+    allocation = make_allocation(db_session, wo, sheet, operation=op, qty_per_run=1.0, qty_planned=3, qty_consumed=3.0)
+    assert consumption_txns(db_session, op.id) == [], "no ledger row backs this cache value"
+
+    cancelled = cancel_allocations_for_operations(
+        db_session,
+        work_order=wo,
+        operation_ids=[op.id],
+        company_id=COMPANY_A,
+        audit=AuditService(db_session, user),
+    )
+    db_session.commit()
+    db_session.refresh(allocation)
+    assert cancelled == [allocation.id]
+    assert allocation.status == AllocationStatus.CANCELLED
+    assert allocation.work_order_operation_id is None, "and it is DETACHED, so the operation delete is FK-safe"
 
 
 def test_nest_reimport_cancels_unconsumed_allocations(db_session: Session):
@@ -1614,7 +1661,14 @@ def test_hard_delete_guard_asks_the_ledger_not_the_cache(client: TestClient, db_
 
     resp = client.delete(f"/api/v1/work-orders/{wo.id}?hard_delete=true", headers=headers_for(admin))
     assert resp.status_code == status.HTTP_409_CONFLICT, resp.text
-    assert "Reverse consumption first" in resp.json()["detail"]
+    # PR 3: the remedy named must be one that EXISTS, and the RETURN verb is
+    # deliberately NOT it here -- a return APPENDS a compensating row carrying the same
+    # allocation_id, so a fully returned tie is still ledger-backed and this guard still
+    # fires (correctly: the hard delete would remove the tie those rows resolve through).
+    detail = resp.json()["detail"]
+    assert "Material movement is on the inventory ledger" in detail, detail
+    assert "Soft delete instead" in detail, detail
+    assert "Reverse consumption first" not in detail, detail
     assert db_session.get(WorkOrder, wo.id) is not None
 
 
@@ -1756,7 +1810,13 @@ def test_untie_is_refused_once_material_is_consumed(client: TestClient, db_sessi
 
     resp = client.delete(_tie_url(wo.id, allocation.id), headers=headers_for(admin))
     assert resp.status_code == status.HTTP_409_CONFLICT, resp.text
-    assert "Reverse consumption first" in resp.json()["detail"]
+    # PR 3: untie stays refused on its own terms -- cancelling a tie that moved stock,
+    # without moving it back, strands the ledger's allocation_id rows against a tombstone
+    # with no account of where the material went. What changed is that the refusal now
+    # names a verb that exists and does exactly what the caller wants.
+    detail = resp.json()["detail"]
+    assert "return_and_untie" in detail, detail
+    assert "Reverse consumption first" not in detail, detail
     db_session.refresh(allocation)
     assert allocation.status == AllocationStatus.OPEN
 
@@ -2188,13 +2248,22 @@ def test_reimport_guard_sees_consumption_on_an_already_cancelled_tie(db_session:
     wipe query skipped CANCELLED rows, such a tie sailed past the guard, its operation was
     deleted, and the ISSUE rows carrying that operation's lot genealogy were orphaned:
     exactly what the 409 exists to prevent, bypassed by a supported verb.
+
+    The consumption is driven for real because PR 3 re-keyed the guard to the LEDGER (see
+    ``test_nest_reimport_guard_reads_the_ledger_not_the_qty_consumed_cache``); those ledger
+    rows are the thing the orphaning would strand.
     """
     user = make_user(db_session)
     fg = make_part(db_session)
     sheet = make_part(db_session, uom="sheets", part_type="raw_material")
+    make_inventory(db_session, sheet, qty=10, lot="REIMPORT-CANCELLED")
     wo = make_wo(db_session, fg, quantity_ordered=3, quantity_complete=3)
     op = make_op(db_session, wo, make_work_center(db_session), quantity_complete=3, operation_group="LASER")
-    allocation = make_allocation(db_session, wo, sheet, operation=op, qty_per_run=1.0, qty_planned=3, qty_consumed=3.0)
+    allocation = make_allocation(db_session, wo, sheet, operation=op, qty_per_run=1.0, qty_planned=3)
+
+    run_effects(db_session, wo, user)
+    db_session.refresh(allocation)
+    assert allocation.qty_consumed == 3.0
 
     # The state a work-order soft delete leaves: CANCELLED, consumption intact, still
     # pointing at the operation.

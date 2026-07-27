@@ -386,8 +386,13 @@ export interface WorkOrderSummary {
 // --- Material ties (work-order material allocations) ------------------------
 // The OPTIONAL tie between a work order (or one of its operations) and stock
 // material. Mirrors backend/app/schemas/work_order_material.py exactly.
-// Consumption fires at WORK-ORDER completion, never per run — copy must say
-// "deducts N when WO-#### finishes", never "deducting now".
+//
+// Consumption fires when an OPERATION completes (that operation's ties, and only
+// those) — corrected here in PR 2.5; this block previously said "at WORK-ORDER
+// completion", which under-stated it once the per-operation seam landed. It is
+// still NOT per run: reporting 3 of 6 runs on a nest that is still open deducts
+// nothing. `utils/materialTie.ts` is the single home for the client-side
+// arithmetic and the copy — anchor every string on THIS OPERATION completing.
 
 /** How the tie was created. Mirrors backend `AllocationSource`. */
 export type MaterialAllocationSource = 'nest' | 'bom' | 'manual';
@@ -493,6 +498,151 @@ export interface MaterialAllocationUpdatePayload {
   pinned_inventory_item_id?: number | null;
   clear_pinned_inventory_item?: boolean;
   notes?: string | null;
+}
+
+// --- Material RETURN (PR 3) --------------------------------------------------
+// Consumption NEVER auto-reverses (invariant 6b): a negative delta is a no-op,
+// so every "reverse consumption first" refusal needs an ACTOR to perform it,
+// with a reason, on the record. That verb is the RETURN below. It appends a
+// signed compensating `RETURN` inventory transaction per credited lot — it never
+// mutates the historical ISSUE rows — mirroring the receiving correct/void
+// pattern.
+//
+// What it does NOT unlock: nest package re-import stays refused after a full
+// return. The original ISSUE rows and the new RETURN rows both still reference
+// the operation a rebuild would delete, so the ledger — not the `qty_consumed`
+// cache — is what the re-import guard reads. The remedy for a job whose nests
+// must change is still a NEW work order.
+
+/**
+ * Which of the two named intents the actor is performing. There is deliberately
+ * nothing in between: a return that would leave `qty_consumed` below the tie's
+ * LIVE target with the tie still open is refused **422**, because the sum-delta
+ * engine would simply re-consume it on the next completion — or on a
+ * reconcile-on-read GET, which re-runs FIFO and can credit a DIFFERENT lot than
+ * the material came from, fabricating heat/cert linkage in an as-built record.
+ *
+ * - `correct_over_consumption` — BOUNDED by `qty_consumed - target`, where
+ *   `target` is recomputed live from operation state at return time (never from
+ *   `qty_planned`). The tie stays OPEN and live. Afterwards `qty_consumed >=
+ *   target`, so the engine's delta stays `<= 0` and it no-ops forever, on every
+ *   path including GETs. This is exactly the negative delta the engine already
+ *   computes and refuses to execute — now performed by a human, with a reason.
+ * - `return_and_untie` — UNBOUNDED (return everything consumed) and sets the
+ *   tie `status = 'cancelled'` in the SAME transaction, so the engine can never
+ *   re-draw it.
+ *
+ * The 422 detail names which intent the caller wants; render it verbatim.
+ */
+export type MaterialReturnIntent = 'correct_over_consumption' | 'return_and_untie';
+
+/**
+ * POST body for the return.
+ *
+ * `reason` is REQUIRED and non-blank — validated at the Pydantic boundary
+ * exactly like `ReceiptCorrection.reason` (min_length 1, max 500, plus a
+ * strip-and-reject-whitespace validator), so a blank one comes back **422**
+ * from FastAPI's own validation rather than a hand-rolled 400. It lands in the
+ * ledger `notes` AND the audit `description` AND `extra_data.reason`.
+ */
+export interface MaterialReturnRequest {
+  /** Total material to credit back, in the tie's `unit_of_measure`. Must be > 0. */
+  quantity: number;
+  intent: MaterialReturnIntent;
+  /** Required, non-blank, <= 500 chars. Whitespace-only is a 422. */
+  reason: string;
+}
+
+/**
+ * One lot credited by a return.
+ *
+ * Mirrors the server's `MaterialReturnLot` (`schemas/work_order_material.py`)
+ * FIELD FOR FIELD. It is deliberately NOT shared with `MaterialConsumptionLine`
+ * below: the pre-confirm read answers "what has this lot issued and given back"
+ * (`issued`/`returned`/`net`) while this answers "what did THIS return credit"
+ * (`quantity`/`unit_cost`/the two transaction ids). Collapsing them would make
+ * one of the two silently wrong.
+ *
+ * Material is ALWAYS returned to its SOURCE lots: the server walks the tie's own
+ * ISSUE rows NEWEST-FIRST and credits each lot back, capped per lot at
+ * issued-minus-already-returned. A single consumption can spill across several
+ * FIFO lots, so one logical return is N of these rows. Crediting any other lot
+ * would invent heat/cert linkage (AS9100D 8.5.2), which is why there is no
+ * "return to a lot of your choosing" option.
+ */
+export interface MaterialReturnLotLine {
+  inventory_item_id: number;
+  /** The lot the material goes back to. `null` for a lot-less stock row. */
+  lot_number: string | null;
+  /** Quantity credited to THIS lot (positive). */
+  quantity: number;
+  /**
+   * Copied from the ISSUE ROW being compensated, NOT the lot's current
+   * `unit_cost` — a revaluation between consume and return would otherwise leave
+   * residual (or negative) material cost on the job.
+   */
+  unit_cost: number;
+  /** The appended `RETURN` inventory transaction this line created. */
+  transaction_id: number;
+  /** The ISSUE row it compensates. Historical rows are never mutated. */
+  compensated_transaction_id: number;
+}
+
+/**
+ * 200 response from the return — the server's `MaterialReturnResponse`, field
+ * for field.
+ *
+ * This interface previously declared `lines` and an `allocation` object, neither
+ * of which the server has ever sent. Because the only consumer read
+ * `result.lines`, the per-lot count silently degraded to zero and the
+ * confirmation toast dropped the "…to 2 lots" disclosure with no error anywhere.
+ * Keep this shape pinned to the schema; `MaterialTiesPanel.test.tsx` fixtures
+ * are built from the real response for exactly that reason.
+ */
+export interface MaterialReturnResult {
+  allocation_id: number;
+  work_order_id: number;
+  part_id: number;
+  part_number: string | null;
+  intent: MaterialReturnIntent;
+  /** The tie's unit of measure, echoed so a toast need not look it up. */
+  unit_of_measure: string;
+  /** Total credited back across every lot — the sum of `returned_lots[].quantity`. */
+  quantity_returned: number;
+  /** The tie's `qty_consumed` BEFORE this return. */
+  qty_consumed_before: number;
+  /**
+   * The tie's `qty_consumed` AFTER the return. Still a CACHE: the authoritative
+   * total is the sum of `inventory_transactions` carrying this `allocation_id`.
+   */
+  qty_consumed: number;
+  /**
+   * The tie's status AFTER the return: `'open'` for `correct_over_consumption`,
+   * `'cancelled'` for `return_and_untie`.
+   */
+  status: MaterialAllocationStatus;
+  /** Per-lot breakdown of what was actually credited, newest source lot first. */
+  returned_lots: MaterialReturnLotLine[];
+}
+
+/**
+ * One lot's consumption ledger for a tie — the pre-confirm read that answers
+ * "where will this material land?" BEFORE anything moves.
+ *
+ * Rows are the tie's `inventory_transactions` grouped per lot. `net` is what is
+ * still out on the job for that lot, and therefore the per-lot CAP on any
+ * further return; the array is ordered newest source lot first, which is the
+ * order the return itself credits in.
+ */
+export interface MaterialConsumptionLine {
+  inventory_item_id: number;
+  lot_number: string | null;
+  /** Total ISSUEd from this lot against the tie (positive). */
+  issued: number;
+  /** Total already RETURNed to this lot against the tie (positive). */
+  returned: number;
+  /** `issued - returned` — still consumed, and the cap on a further return. */
+  net: number;
 }
 
 export type TimeEntryType = 'setup' | 'run' | 'rework' | 'inspection' | 'downtime' | 'break';

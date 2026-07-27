@@ -15,6 +15,13 @@ from every allowance -- the existing unapprove endpoint is the front door for
 correcting signed-off labor. Clock-out is NOT a boundary: closed-but-unapproved
 evidence is correctable (the real-world "noticed after check-out" case).
 
+Operation COMPLETION is not a boundary for the OFFICE verb either (PR 3). It refused
+both verbs on the rationale that a completed operation's downstream inventory / cost /
+FG effects had fired and could not be walked back; the reasoned RETURN verb
+(``material_consumption_service.return_tied_material``) is now that walk-back, so the
+office path passes ``allow_completed_operation=True`` and the operator path does not.
+The terminal-WORK-ORDER refusal is unchanged on BOTH verbs.
+
 The quantity math itself lives in
 ``work_order_state_service.reduce_operation_produced_quantity`` (the walk across
 eligible entries + the recomputed WO rollup); this module owns eligibility,
@@ -46,18 +53,68 @@ from app.services.work_order_state_service import (
     reduce_operation_produced_quantity,
 )
 
-# One message for both the pre-lock gate and the TOCTOU re-check, and for both routers.
+# The OPERATOR's refusal, for both the pre-lock gate and the TOCTOU re-check. It is
+# accurate only because the office verb now ACCEPTS a completed operation
+# (``allow_completed_operation``): before that, both endpoints hit this identical 409, so
+# the operator was told to ask a supervisor whose own front door refused the same thing.
 MSG_COMPLETED_WORK = "Completed work can't be corrected here -- ask a supervisor"
+
+# The terminal-WORK-ORDER refusal, deliberately SPLIT from the message above. A terminal
+# work order is refused on BOTH verbs -- the office relaxation is scoped to a completed
+# OPERATION on a live work order -- so pointing the caller at a supervisor here would be
+# the same false referral in the other direction.
+MSG_TERMINAL_WORK_ORDER = (
+    "This work order is complete, closed or cancelled -- its recorded production can no longer be corrected"
+)
+
+
+def _assert_reduction_in_scope(
+    work_order: WorkOrder,
+    operation: WorkOrderOperation,
+    *,
+    allow_completed_operation: bool,
+) -> None:
+    """The before-completion scope gate. ONE implementation, two call sites, two verbs.
+
+    Both the pre-lock read and the post-lock TOCTOU re-check run this, so the unlocked
+    fast-fail and the authoritative under-lock check can never drift (the whole reason
+    this module exists).
+
+    Two independent refusals, and only one of them is relaxable:
+
+    * **Terminal work order** -- always 409, on both verbs. The job's record is closed.
+    * **COMPLETE operation** -- 409 on the operator's self-service verb; ALLOWED on the
+      office verb (``allow_completed_operation=True``). The original rationale for
+      refusing was that "downstream inventory / cost / FG effects have fired" and could
+      not be walked back. Since PR 3 that is no longer true: tied material that a
+      completed operation consumed is unwound by the reasoned RETURN verb
+      (``material_consumption_service.return_tied_material``), and a supervisor lowering
+      a completed operation's count is precisely what opens the
+      ``correct_over_consumption`` allowance that verb is bounded by. The operator's
+      verb keeps the refusal -- correcting finished work is a supervised act, and
+      MSG_COMPLETED_WORK's referral is only honest because the office door is now open.
+    """
+    if work_order.status in TERMINAL_WO_STATUSES:
+        raise HTTPException(status_code=409, detail=MSG_TERMINAL_WORK_ORDER)
+    if operation.status == OperationStatus.COMPLETE and not allow_completed_operation:
+        raise HTTPException(status_code=409, detail=MSG_COMPLETED_WORK)
 
 
 def load_operation_for_reduction_or_http(
-    db: Session, operation_id: int, company_id: int
+    db: Session, operation_id: int, company_id: int, *, allow_completed_operation: bool = False
 ) -> tuple[WorkOrderOperation, WorkOrder]:
     """Pre-lock phase shared by both routers: tenant-scoped 404s + the before-completion 409.
 
     The same terminal/complete gate is re-asserted under the row locks in
     ``perform_production_reduction`` (TOCTOU); this unlocked read exists to fail fast
     with a clear 4xx before any query the caller runs for eligibility.
+
+    ``allow_completed_operation`` is the OFFICE verb's opt-in to correcting a COMPLETE
+    operation (see ``_assert_reduction_in_scope``). It defaults to ``False``, so the
+    operator's shop-floor path keeps its refusal without changing a line, and the
+    relaxation can only ever be reached by a caller that asked for it explicitly. Pass
+    the SAME value to ``perform_production_reduction`` -- a caller that relaxes only the
+    pre-lock gate would sail past it and be refused under the lock instead.
     """
     operation = (
         db.query(WorkOrderOperation)
@@ -74,11 +131,9 @@ def load_operation_for_reduction_or_http(
     if not work_order or work_order.is_deleted:
         raise HTTPException(status_code=404, detail="Work order not found for this operation")
 
-    # Before-completion scope gate (non-optimistic): once the operation is COMPLETE or
-    # the work order is terminal, downstream inventory / cost / FG effects have fired
-    # and correction-by-reduction is out of bounds. 409 Conflict.
-    if work_order.status in TERMINAL_WO_STATUSES or operation.status == OperationStatus.COMPLETE:
-        raise HTTPException(status_code=409, detail=MSG_COMPLETED_WORK)
+    # Before-completion scope gate (non-optimistic), shared verbatim with the post-lock
+    # re-check below. 409 Conflict.
+    _assert_reduction_in_scope(work_order, operation, allow_completed_operation=allow_completed_operation)
 
     return operation, work_order
 
@@ -169,6 +224,7 @@ def perform_production_reduction(
     notes_entry: Optional[TimeEntry],
     event_source_module: str,
     path: str,
+    allow_completed_operation: bool = False,
 ) -> ProductionReductionOutcome:
     """The shared transactional body of both reduce-production endpoints.
 
@@ -180,7 +236,9 @@ def perform_production_reduction(
     * Row locks in the completion paths' order -- OPERATION then WORK ORDER
       (``with_for_update``), tenant-scoped, soft-delete-aware (SFI-1).
     * The TOCTOU re-check of the before-completion gate under those locks (a
-      concurrent WO-cancel doesn't bump any row version this write touches).
+      concurrent WO-cancel doesn't bump any row version this write touches), run
+      through the same ``_assert_reduction_in_scope`` the pre-lock read used and with
+      the same ``allow_completed_operation`` the caller passed there.
     * The walk + recomputed WO rollup via ``reduce_operation_produced_quantity``.
     * ``notes``/``source`` applied to ``notes_entry`` when given AND unapproved (the
       self-service path passes the caller's open entry only when ``approved IS
@@ -203,6 +261,11 @@ def perform_production_reduction(
 
     ``notes_entry`` MUST be an unapproved row (callers enforce this); ``path``
     disambiguates the two verbs on the audit chain.
+
+    ``allow_completed_operation`` MUST match what the caller passed to
+    ``load_operation_for_reduction_or_http`` -- it is the office verb's opt-in to
+    correcting a COMPLETE operation, and the two gates are the same predicate evaluated
+    before and under the locks.
     """
     # SFI-1: same locks, same order as report_operation_production / complete_operation.
     operation = (
@@ -234,8 +297,9 @@ def perform_production_reduction(
     # guard): the op-COMPLETE race is also caught by the operation version bump, but a
     # concurrent WO-cancel does NOT bump any version this write touches -- without this
     # a reduction could commit against a just-CANCELLED work order. 409 Conflict.
-    if work_order.status in TERMINAL_WO_STATUSES or operation.status == OperationStatus.COMPLETE:
-        raise HTTPException(status_code=409, detail=MSG_COMPLETED_WORK)
+    # (On the office verb the op-COMPLETE half is relaxed; the terminal-WO half -- the
+    # half this re-check exists for -- is not.)
+    _assert_reduction_in_scope(work_order, operation, allow_completed_operation=allow_completed_operation)
 
     target_qty = operation_target_quantity(operation, work_order)
 

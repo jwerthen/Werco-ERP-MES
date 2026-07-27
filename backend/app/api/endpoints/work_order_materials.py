@@ -11,13 +11,19 @@ Mounted as a SIBLING router under the same ``/work-orders`` prefix rather than a
     it cannot collide with ``work_orders.py``'s ``/{work_order_id}`` or its other
     literal sub-resources.
 
-Nothing here posts inventory. Consumption rides the existing completion call sites via
-``apply_completion_inventory_effects``; these endpoints only manage the planning row.
+**One verb here posts inventory, and exactly one: the RETURN.** Consumption still rides
+the completion call sites only (``apply_operation_completion_inventory_effects`` /
+``apply_completion_inventory_effects``) and every other endpoint below manages the
+planning row alone. The return is the deliberate exception — an actor, a required
+reason, and an appended compensating transaction — because un-consuming can never be
+something a completion path does for you (invariant 6b).
 
 RBAC: reads are open to any authenticated tenant user; every mutating verb requires
 ADMIN / MANAGER / SUPERVISOR. Deliberately NOT under ``/api/v1/shop-floor`` — the kiosk
 path fence (``deps.py``) exists to keep operator-scoped tokens off office endpoints, and
-tying material is an office/planning action.
+tying material is an office/planning action. The return sits on the same side of that
+fence for a stronger reason than the rest: moving stock back with a reason is a bigger
+power than tying it.
 """
 
 import logging
@@ -31,7 +37,7 @@ from app.api.deps import get_audit_service, get_current_active_user, get_current
 from app.db.database import get_db
 from app.db.tenant_filter import tenant_query
 from app.models.audit_log import AuditLog
-from app.models.inventory import InventoryItem
+from app.models.inventory import InventoryItem, InventoryTransaction, TransactionType
 from app.models.part import Part
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder, WorkOrderOperation
@@ -40,11 +46,17 @@ from app.schemas.work_order_material import (
     MaterialAllocationCreate,
     MaterialAllocationResponse,
     MaterialAllocationUpdate,
+    MaterialConsumptionLine,
+    MaterialReturnLot,
+    MaterialReturnRequest,
+    MaterialReturnResponse,
 )
 from app.services.audit_service import AuditService
 from app.services.material_consumption_service import (
     CONSUMPTION_EPSILON,
+    MaterialReturnRefused,
     is_consumable_item,
+    return_tied_material,
     work_order_tie_is_already_issued,
 )
 from app.services.work_order_state_service import TERMINAL_WO_STATUSES
@@ -262,6 +274,155 @@ def _serialize(
     )
 
 
+def _assert_qty_per_run_not_under_consumed(
+    db: Session,
+    *,
+    allocation: WorkOrderMaterialAllocation,
+    new_qty_per_run: float,
+    consumed: float,
+    company_id: int,
+) -> None:
+    """Refuse a ``qty_per_run`` edit that would push the LIVE target under ``qty_consumed``.
+
+    The operation-scoped twin of the ``qty_planned`` guard, and it was missing: the plan
+    quantity was protected while the per-run rate — the number the engine actually
+    consumes against — could be lowered freely, which made this the cheapest way in the
+    whole API to manufacture ``consumed > target``.
+
+    Why refuse rather than merely allow it (over-consumption IS an ordinary steady state
+    since PR 2.5): the two arrive by opposite routes. There it is the residue of a REAL
+    event — a supervisor walking back a count, a scrap absolute-write — recorded on the
+    chain with its own reason. Here nothing happened on the floor; the plan is being
+    rewritten UNDER posted consumption. And it is not harmless bookkeeping, because
+    ``target`` is exactly what bounds ``correct_over_consumption``: lowering
+    ``qty_per_run`` toward zero would open an unbounded return against a tie that stays
+    OPEN, which is precisely the middle ground the two named intents exist to close
+    (``MaterialReturnIntent``). The honest sequence is the other one — correct the
+    production record, or return the material and untie, then state the corrected rate on
+    a new tie.
+
+    The predicate is "never WORSEN the gap", not "never have a gap": an edit is allowed
+    when the new target covers what is consumed OR when it is at least as high as the
+    current one. Refusing on the gap alone would block a planner RAISING ``qty_per_run``
+    on a tie already over-consumed from a walk-back — an edit that reduces the very
+    problem this guard exists to prevent.
+
+    An operation that is no longer on the work order is skipped: its live target is
+    already 0 by ``_live_consumption_target``'s own rule, no consumption leg can reach
+    the tie, and the edit therefore manufactures nothing.
+    """
+    if consumed <= CONSUMPTION_EPSILON:
+        return
+    operation = (
+        tenant_query(db, WorkOrderOperation, company_id)
+        .filter(
+            WorkOrderOperation.id == allocation.work_order_operation_id,
+            WorkOrderOperation.work_order_id == allocation.work_order_id,
+        )
+        .first()
+    )
+    if operation is None:
+        return
+    runs = float(operation.quantity_complete or 0) + float(operation.quantity_scrapped or 0)
+    old_target = float(allocation.qty_per_run if allocation.qty_per_run is not None else 1.0) * runs
+    new_target = float(new_qty_per_run) * runs
+    if new_target >= consumed - CONSUMPTION_EPSILON or new_target >= old_target - CONSUMPTION_EPSILON:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        detail=(
+            f"qty_per_run cannot be lowered to {new_qty_per_run}: this operation has {runs:g} run(s) "
+            f"recorded, so the tie would only account for {round(new_target, 6)} "
+            f"{allocation.unit_of_measure} while {consumed} has already been consumed. Return the "
+            "over-consumed material first, or correct the recorded production."
+        ),
+    )
+
+
+def _consumption_lines(
+    db: Session,
+    allocation: WorkOrderMaterialAllocation,
+    company_id: int,
+) -> List[MaterialConsumptionLine]:
+    """Per-source-lot issued / returned / net for one tie, straight off the LEDGER.
+
+    ``qty_consumed`` on the tie is a documented cache; this is the authoritative answer,
+    and it is the one the return dialog must show — the return credits lots, not a tie,
+    so a single total would hide the only fact the operator can act on.
+
+    Ordering and aggregation deliberately mirror
+    ``material_consumption_service._plan_material_return``: ISSUE rows walked newest-first
+    (``id DESC``), so a lot's position here is the order a return would credit it in, and
+    ``net = issued - returned`` per ``(allocation, inventory_item)`` is exactly that
+    plan's per-lot capacity. Preview and outcome therefore cannot disagree.
+
+    Lots whose ``net`` is zero are still listed: they are part of this tie's movement
+    history, and dropping them would make a fully-returned tie look as though the material
+    had never touched that lot. Pure read — no session mutation, nothing to commit.
+    """
+    rows = (
+        db.query(InventoryTransaction)
+        .filter(
+            InventoryTransaction.company_id == company_id,
+            InventoryTransaction.allocation_id == allocation.id,
+        )
+        .order_by(InventoryTransaction.id.desc())
+        .all()
+    )
+    order: List[int] = []
+    issued: dict[int, float] = {}
+    returned: dict[int, float] = {}
+    ledger_lot: dict[int, Optional[str]] = {}
+    for txn in rows:
+        item_id = txn.inventory_item_id
+        if item_id is None:
+            # No stock row => nothing to credit back to. Cannot occur on this path (both
+            # writers resolve or mint a row) and is skipped rather than guessed at, the
+            # same way the return planner skips it.
+            continue
+        quantity = abs(float(txn.quantity or 0))
+        if txn.transaction_type == TransactionType.ISSUE:
+            if item_id not in issued:
+                issued[item_id] = 0.0
+                order.append(item_id)
+                ledger_lot[item_id] = txn.lot_number
+            issued[item_id] += quantity
+        elif txn.transaction_type == TransactionType.RETURN:
+            returned[item_id] = returned.get(item_id, 0.0) + quantity
+
+    # Current lot numbers, tenant-scoped: this is what a return would actually credit
+    # (it reads the stock row, not the historical ledger label). Falls back to the
+    # ledger row's own lot_number when the stock row is gone — a state the return itself
+    # refuses with 409, so the preview should still name what it can.
+    items = (
+        {
+            item.id: item
+            for item in tenant_query(db, InventoryItem, company_id).filter(InventoryItem.id.in_(order)).all()
+        }
+        if order
+        else {}
+    )
+
+    lines: List[MaterialConsumptionLine] = []
+    for item_id in order:
+        issued_qty = issued.get(item_id, 0.0)
+        returned_qty = returned.get(item_id, 0.0)
+        net = issued_qty - returned_qty
+        item = items.get(item_id)
+        lines.append(
+            MaterialConsumptionLine(
+                inventory_item_id=item_id,
+                lot_number=(item.lot_number if item is not None else ledger_lot.get(item_id)),
+                issued=issued_qty,
+                returned=returned_qty,
+                # Clamp float dust so a squared-up lot reads 0, not 4e-16 (the
+                # receiving-correction precedent, and what the engine's cache does).
+                net=0.0 if abs(net) <= CONSUMPTION_EPSILON else net,
+            )
+        )
+    return lines
+
+
 @router.get(
     "/{work_order_id}/material-allocations",
     response_model=List[MaterialAllocationResponse],
@@ -376,11 +537,18 @@ def create_material_allocation(
     if payload.work_order_operation_id is None and work_order_tie_is_already_issued(
         db, work_order_id=work_order.id, part_id=part.id, company_id=company_id
     ):
+        # The remedy named here is deliberately NOT "return the material". PR 3's RETURN
+        # verb appends a compensating row and never removes the ISSUE row, while
+        # ``_component_already_issued`` (and ``uq_wo_inventory_issue`` behind it) keys on
+        # the ISSUE row's existence -- so a return would leave this 409 firing exactly as
+        # before, having moved stock for nothing. Operation-scoped ties post outside that
+        # index, which is why they are the way through.
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
                 f"Part {part.part_number} was already issued to work order {work_order.work_order_number}; "
-                "this tie could never consume — reverse the issue, or tie at the operation level instead."
+                "this tie could never consume — tie the material at the operation level instead, which "
+                "posts outside the one-issue-per-work-order guard."
             ),
         )
 
@@ -524,7 +692,12 @@ def update_material_allocation(
     * ``qty_planned`` lowered BELOW what has already been consumed. The engine never
       auto-reverses, so the row would immediately read as over-consumed and the
       work-order-scoped drain (``qty_planned - qty_consumed``) would go negative.
-      Reverse the consumption first (a later PR) rather than editing the plan under it.
+      Return the consumed material first rather than editing the plan under it.
+    * ``qty_per_run`` lowered so far that the LIVE target
+      (``qty_per_run x (quantity_complete + quantity_scrapped)``) falls below
+      ``qty_consumed`` — the operation-scoped twin of the ``qty_planned`` rule, and
+      until PR 3 the cheapest way to manufacture an over-consumed tie. See the guard
+      itself for why it is refused rather than merely recorded.
     """
     work_order = _load_work_order(db, work_order_id, company_id)
     allocation = _load_allocation(db, work_order_id, allocation_id, company_id)
@@ -553,8 +726,22 @@ def update_material_allocation(
             detail=(
                 f"qty_planned cannot be lowered to {payload.qty_planned}: {consumed} "
                 f"{allocation.unit_of_measure} has already been consumed against this allocation. "
-                "Reverse consumption first."
+                "Return the over-consumed material first (Return material on this tie), then lower the plan."
             ),
+        )
+
+    if payload.qty_per_run is not None:
+        if allocation.work_order_operation_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="qty_per_run applies to operation-scoped ties only.",
+            )
+        _assert_qty_per_run_not_under_consumed(
+            db,
+            allocation=allocation,
+            new_qty_per_run=payload.qty_per_run,
+            consumed=consumed,
+            company_id=company_id,
         )
 
     part = tenant_query(db, Part, company_id).filter(Part.id == allocation.part_id).first()
@@ -567,11 +754,7 @@ def update_material_allocation(
     }
 
     if payload.qty_per_run is not None:
-        if allocation.work_order_operation_id is None:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="qty_per_run applies to operation-scoped ties only.",
-            )
+        # Scope + over-consumption already validated above, before any mutation.
         allocation.qty_per_run = payload.qty_per_run
     if payload.qty_planned is not None:
         allocation.qty_planned = payload.qty_planned
@@ -647,11 +830,18 @@ def delete_material_allocation(
         return _serialize(db, allocation, company_id)
 
     if float(allocation.qty_consumed or 0) > CONSUMPTION_EPSILON:
+        # The remedy is now a single verb rather than an impossibility: return_and_untie
+        # gives the material back to its source lots AND cancels the tie in one
+        # transaction, which is exactly what a caller reaching this 409 is asking for.
+        # Untie stays refused here on its own terms -- cancelling a tie that moved stock,
+        # without moving it back, would strand the ledger's allocation_id rows against a
+        # tombstone with no account of where the material went.
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
                 f"{allocation.qty_consumed} {allocation.unit_of_measure} has already been consumed "
-                "against this allocation. Reverse consumption first."
+                "against this allocation. Return the material with intent 'return_and_untie', which "
+                "credits it back to its source lots and closes this tie in one step."
             ),
         )
 
@@ -680,3 +870,155 @@ def delete_material_allocation(
     db.commit()
     db.refresh(allocation)
     return _serialize(db, allocation, company_id)
+
+
+@router.get(
+    "/{work_order_id}/material-allocations/{allocation_id}/consumption",
+    response_model=List[MaterialConsumptionLine],
+    summary="Per-lot ledger position of a material tie (issued / returned / net)",
+)
+def get_material_allocation_consumption(
+    work_order_id: int,
+    allocation_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Where this tie's material came from, and how much of each lot is still out.
+
+    Read-only and open to any authenticated tenant user, like the tie list — it discloses
+    ledger facts about material this company already owns, and a return dialog that
+    cannot show them would be asking for a confirmation nobody could give.
+
+    One line per source lot: ``issued`` and ``returned`` totals from the ledger, and
+    ``net`` = the quantity that lot can still take back. Ordered newest source lot first,
+    which is the order a return credits in. There is no lot to choose — material goes
+    back where it came from — so this is a disclosure, not a picker.
+
+    Answers from ``inventory_transactions``, never from the tie's ``qty_consumed``
+    cache, and works on a CANCELLED tie (whose consumption is exactly what an operator
+    most often needs to see). Nothing here writes: a read is not an actor and records no
+    reason.
+    """
+    _load_work_order(db, work_order_id, company_id)
+    allocation = _load_allocation(db, work_order_id, allocation_id, company_id)
+    return _consumption_lines(db, allocation, company_id)
+
+
+@router.post(
+    "/{work_order_id}/material-allocations/{allocation_id}/return",
+    response_model=MaterialReturnResponse,
+    summary="Return consumed material to its source lots (reasoned, audited)",
+)
+def return_material_allocation(
+    work_order_id: int,
+    allocation_id: int,
+    payload: MaterialReturnRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(WRITE_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Put consumed material back on the lots it came off — the only un-consume there is.
+
+    Consumption never auto-reverses (invariant 6b), because the consume path also runs
+    from a reconcile-on-read GET where there is no actor, no intent and no reason to
+    record. This is that same reversal with all three attached: the compensating
+    ``RETURN`` transaction + required reason + audit pattern the receiving corrections
+    established. Historical rows are never touched — every credit is an APPENDED row.
+
+    **Two named intents, and nothing in between** (``MaterialReturnIntent``):
+
+    * ``correct_over_consumption`` — the tie stays OPEN, so the return is bounded by
+      ``qty_consumed - live target``. That bound is the engine's own arithmetic: below
+      it, the next completion **or the next reconcile-on-read GET** re-consumes what was
+      just returned, re-running FIFO and possibly crediting a different lot than the
+      material came from.
+    * ``return_and_untie`` — give everything back and CANCEL the tie in the same
+      transaction, so no OPEN row survives for the engine to draw against. ``quantity``
+      must equal the full ``qty_consumed``; the mismatch 422 catches a stale client
+      rather than returning a different amount than the operator was looking at.
+
+    Allowed on a CANCELLED tie: a consumed-then-cancelled tie is a real state (a
+    work-order soft delete cancels open ties regardless of consumption) and is exactly
+    what the hard-delete 409 points at, so refusing there would leave that refusal with
+    no self-service path. A SOFT-DELETED work order is still 404 here, like every other
+    verb on this router — restore the work order (an audited verb that also re-opens the
+    ties the delete cancelled) and then return, rather than moving stock against a job
+    that is currently deleted.
+
+    RBAC is the router's write gate (ADMIN / MANAGER / SUPERVISOR) and deliberately
+    stays outside the kiosk path fence: moving stock back with a reason is a stronger
+    power than tying it, not a weaker one.
+
+    Status codes — the service decides each one and the ``detail`` is returned verbatim
+    (the client is non-optimistic and renders exactly what the server says):
+
+    * **404** — work order or tie not on this company / work order (never 403).
+    * **422** — blank reason (FastAPI's own validation, from the schema), non-positive
+      quantity, nothing consumed, more than ``qty_consumed``, a
+      ``correct_over_consumption`` past the live bound (the detail names
+      ``return_and_untie``), or a ``return_and_untie`` that is not the full quantity.
+    * **409** — the ledger has less returnable than asked, or a source lot is gone or is
+      a placeholder row. Receiving's "409 rather than guess" posture.
+
+    Concurrency: the service takes ``SELECT ... FOR UPDATE`` on the operation then the
+    work order (its ``_lock_return_scope``, the completion paths' order) BEFORE computing
+    the bound, so a completion landing mid-request cannot raise the target underneath the
+    check. It is deliberately not re-taken here — a second lock in the opposite order is
+    how deadlocks are built.
+
+    A returned tie does NOT unlock a nest re-import. That guard reads the ledger, not the
+    cache, and the ISSUE **and** RETURN rows both still name the operations a rebuild
+    would delete; the remedy stays "raise a new work order".
+    """
+    work_order = _load_work_order(db, work_order_id, company_id)
+    allocation = _load_allocation(db, work_order_id, allocation_id, company_id)
+
+    try:
+        result = return_tied_material(
+            db,
+            work_order,
+            allocation,
+            quantity=payload.quantity,
+            intent=payload.intent,
+            reason=payload.reason,
+            user_id=current_user.id,
+            company_id=company_id,
+            audit=audit,
+        )
+    except MaterialReturnRefused as exc:
+        # The service carries the status with the refusal so the 422 ("ask differently")
+        # / 409 ("the ledger cannot express this") split cannot drift from the reasons
+        # that produced it. Nothing was written — every refusal fires before the first
+        # ledger row (see ``_plan_material_return``) — so the rollback is a formality
+        # that keeps the session clean for the dependency teardown.
+        db.rollback()
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+    # One unit of work: the RETURN rows, the on-hand moves, the tie's qty_consumed, the
+    # cancel on an untie, and every audit row commit together or not at all.
+    db.commit()
+    return MaterialReturnResponse(
+        allocation_id=result.allocation_id,
+        work_order_id=result.work_order_id,
+        part_id=result.part_id,
+        part_number=result.part_number,
+        intent=result.intent,
+        unit_of_measure=result.unit_of_measure,
+        quantity_returned=result.quantity_returned,
+        qty_consumed_before=result.qty_consumed_before,
+        qty_consumed=result.qty_consumed,
+        status=result.status,
+        returned_lots=[
+            MaterialReturnLot(
+                inventory_item_id=lot.inventory_item_id,
+                lot_number=lot.lot_number,
+                quantity=lot.quantity,
+                unit_cost=lot.unit_cost,
+                transaction_id=lot.transaction_id,
+                compensated_transaction_id=lot.compensated_transaction_id,
+            )
+            for lot in result.returned_lots
+        ],
+    )

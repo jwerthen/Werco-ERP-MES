@@ -592,6 +592,34 @@ def _placeholder_stock_row(
     return item
 
 
+def _is_placeholder_stock_row(item: InventoryItem) -> bool:
+    """True when a stock row has the shape ``_placeholder_stock_row`` creates.
+
+    Lives next to its constructor deliberately: the two definitions must move together,
+    and the reader that needs this is in another module (the RETURN engine).
+
+    A placeholder is a LOT-LESS row at the finished-goods location, minted only so a
+    consumption with no stock at all still has a real ``inventory_item_id`` to point at.
+    It names no heat and carries no cert, so it is a fine sink for a negative movement
+    and a bad SOURCE for a positive one: crediting material back into it would create
+    unlabeled, FIFO-eligible stock out of a row that exists purely as a ledger anchor
+    (AS9100D 8.5.2). The RETURN engine refuses rather than guessing.
+
+    Identification is by SHAPE, not by a flag -- there is no column marking these -- so it
+    matches the constructor's FULL shape (location AND warehouse), not a prefix of it.
+    Matching on location alone OVER-matches, and not hypothetically: the finished-goods
+    RECEIPT path mints genuine stock at ``FINISHED-GOODS`` with
+    ``lot_number = work_order.lot_number``, which is NULL for any work order carrying no
+    lot. A sub-assembly that is both produced and consumed can therefore hold real,
+    lot-less finished-goods stock -- and calling that a placeholder would 409 a return
+    that should have been allowed. The failure direction was safe (refuse, never
+    mis-credit), but a refusal a user cannot act on is still a defect.
+    """
+    return (
+        not item.lot_number and item.location == FINISHED_GOODS_LOCATION and item.warehouse == FINISHED_GOODS_WAREHOUSE
+    )
+
+
 def _issue_one_component(
     db: Session,
     work_order: WorkOrder,
@@ -859,11 +887,11 @@ def _write_issue_txn(
 ) -> Optional[InventoryTransaction]:
     """Write one negative ISSUE txn (carrying the consumed lot), decrement, + audit.
 
-    THE single construct -> savepoint -> decrement -> dual-audit implementation for every
-    negative work-order material movement. The per-run consumption engine used to carry a
-    near-verbatim copy of this (``_post_consumption_txn``) differing only in reference
-    shape, notes and description -- while its module docstring claimed it "REUSES its
-    helpers rather than reimplementing them". The variable parts are now parameters:
+    THE single way material leaves stock against a work order. The per-run consumption
+    engine used to carry a near-verbatim copy of this (``_post_consumption_txn``)
+    differing only in reference shape, notes and description -- while its module docstring
+    claimed it "REUSES its helpers rather than reimplementing them". The variable parts
+    are now parameters:
 
     * ``reference_type`` / ``reference_id`` -- ``('work_order', work_order.id)`` for the
       FG backflush and work-order-scoped ties, ``('work_order_operation', operation.id)``
@@ -872,15 +900,12 @@ def _write_issue_txn(
     * ``movement_verb`` / ``movement_label`` / ``movement_suffix`` -- the audit prose;
     * ``extra_data`` -- extra audit context (the tie + operation ids on the per-run leg).
 
-    Order matters (item 1): the ISSUE txn is inserted FIRST under a savepoint. The
-    source on-hand is decremented ONLY when the insert actually committed; a duplicate
-    (the double-issue race the unique index catches) rolls back just the savepoint and
-    is a clean no-op -- no decrement, no audit -- so it never double-consumes the
-    component or aborts the outer completion / reconcile transaction.
-
-    ``quantity_available`` is recomputed HERE, in the same block as the
-    ``quantity_on_hand`` mutation; skipping it silently desyncs the denormalized column
-    that the receipt-void guard and MRP read.
+    The insert -> decrement -> dual-audit body itself lives in
+    ``_post_stock_movement_txn``, shared with the compensating ``_write_return_txn``; the
+    only thing that differs between consuming and returning is the SIGN of the on-hand
+    move. Read that helper for the ordering rule (insert first, under a savepoint; move
+    on-hand only when the insert actually landed) and for why ``quantity_available`` is
+    recomputed in the same block.
 
     Returns the inserted ``InventoryTransaction``, or ``None`` on a duplicate no-op.
     """
@@ -903,12 +928,178 @@ def _write_issue_txn(
         notes=notes if notes is not None else f"Backflush consumption for work order {work_order.work_order_number}",
         created_by=user_id,
     )
-    if not _insert_txn_with_savepoint(db, txn):
-        return None
+    return _post_stock_movement_txn(
+        db,
+        txn=txn,
+        inventory_item=inventory_item,
+        # NEGATIVE: an ISSUE takes material off the shelf.
+        on_hand_delta=-quantity,
+        audit=audit,
+        movement_description=(
+            f"{movement_verb} {quantity} of part {part_number or component_part_id} "
+            f"for work order {work_order.work_order_number}"
+            + movement_suffix
+            + (f" lot {lot_number}" if lot_number else "")
+        ),
+        stock_identifier=f"{part_number or component_part_id} @ {inventory_item.location}",
+        stock_description=f"{movement_label}: stock for part {part_number or component_part_id}",
+        extra_data=extra_data,
+    )
 
-    # Insert committed to the savepoint -> NOW decrement the source stock.
+
+def _write_return_txn(
+    db: Session,
+    work_order: WorkOrder,
+    *,
+    inventory_item: InventoryItem,
+    part_id: int,
+    quantity: float,
+    unit_cost: float,
+    lot_number: Optional[str],
+    company_id: int,
+    user_id: int,
+    audit: AuditService,
+    part_number: Optional[str],
+    allocation_id: Optional[int],
+    reference_type: str,
+    reference_id: int,
+    reason_code: str,
+    notes: str,
+    movement_verb: str = "Returned",
+    movement_label: str = "Material return",
+    movement_suffix: str = "",
+    extra_data: Optional[dict] = None,
+) -> InventoryTransaction:
+    """Write one POSITIVE ``RETURN`` txn against a source lot, increment it, + audit.
+
+    The compensating sibling of ``_write_issue_txn``, sharing its
+    construct -> insert -> move-on-hand -> dual-audit body (``_post_stock_movement_txn``)
+    rather than copying it. The insert/increment ORDER and the dual-audit shape are the
+    compliance-visible parts of a stock movement; a drifted copy is exactly what the
+    shared helper exists to prevent.
+
+    Deliberate choices, each of which has a wrong-looking alternative:
+
+    * **``TransactionType.RETURN``, positive quantity.** Not a positive ``ISSUE`` -- five
+      readers ``abs()`` an ISSUE row into MORE consumption, and under
+      ``reference_type='work_order'`` a second ISSUE row collides with
+      ``uq_wo_inventory_issue``. Not ``ADJUST`` either: that means "a count changed", not
+      "material came back off a job".
+    * **``reference_type`` / ``reference_id`` MIRROR the rows being compensated**
+      (``('work_order_operation', operation.id)`` for an operation-scoped tie). That is
+      the single most load-bearing field here: ``work_order_ledger_filter`` matches on
+      reference SHAPE only, never on ``transaction_type``, so a correctly-referenced
+      RETURN is picked up by job cost, analytics, lot genealogy and
+      ``GET /inventory/transactions?work_order_id=`` with no change to those readers.
+    * **``unit_cost`` is the COMPENSATED ROW'S**, not the lot's current ``unit_cost`` --
+      a lot revaluation between consume and return would otherwise leave residual (or
+      negative) material cost stranded on the job.
+    * **``to_location``** mirrors the ISSUE's ``from_location``: the material goes back
+      where it came from.
+
+    Unlike the ISSUE path this NEVER treats a duplicate as a no-op. A RETURN row sits
+    outside both ``uq_wo_inventory_*`` predicates (they require ``transaction_type`` of
+    ``RECEIVE`` / ``ISSUE``), so there is no idempotency index to lose a race with: an
+    ``IntegrityError`` here is a real fault and must reach the write handler that asked
+    for the return, not be swallowed into a silent "nothing moved". Hence the non-optional
+    return type.
+    """
+    txn = InventoryTransaction(
+        company_id=company_id,
+        inventory_item_id=inventory_item.id,
+        part_id=part_id,
+        transaction_type=TransactionType.RETURN,
+        quantity=quantity,
+        to_location=inventory_item.location,
+        lot_number=lot_number,
+        reference_type=reference_type,
+        reference_id=reference_id,
+        reference_number=work_order.work_order_number,
+        # The tie the material came off, so the compensating row walks back to the same
+        # allocation its ISSUE rows do (and the ledger-backed guards stay armed).
+        allocation_id=allocation_id,
+        unit_cost=unit_cost,
+        total_cost=quantity * unit_cost,
+        reason_code=reason_code,
+        notes=notes,
+        created_by=user_id,
+    )
+    posted = _post_stock_movement_txn(
+        db,
+        txn=txn,
+        inventory_item=inventory_item,
+        # POSITIVE: a RETURN puts material back on the shelf. Returning INTO a negative
+        # lot is expected -- a shortage-driven consumption drove it below zero and this
+        # unwinds it toward zero -- so there is deliberately no guard against it.
+        on_hand_delta=quantity,
+        audit=audit,
+        movement_description=(
+            f"{movement_verb} {quantity} of part {part_number or part_id} "
+            f"to stock from work order {work_order.work_order_number}"
+            + movement_suffix
+            + (f" lot {lot_number}" if lot_number else "")
+        ),
+        stock_identifier=f"{part_number or part_id} @ {inventory_item.location}",
+        stock_description=f"{movement_label}: stock for part {part_number or part_id}",
+        extra_data=extra_data,
+        duplicate_is_noop=False,
+    )
+    if posted is None:  # pragma: no cover - unreachable: duplicate_is_noop=False never returns None
+        raise RuntimeError(f"Material return transaction for work order {work_order.id} was not written")
+    return posted
+
+
+def _post_stock_movement_txn(
+    db: Session,
+    *,
+    txn: InventoryTransaction,
+    inventory_item: InventoryItem,
+    on_hand_delta: float,
+    audit: AuditService,
+    movement_description: str,
+    stock_identifier: str,
+    stock_description: str,
+    extra_data: Optional[dict] = None,
+    duplicate_is_noop: bool = True,
+) -> Optional[InventoryTransaction]:
+    """Insert one ledger row, move the lot's on-hand by ``on_hand_delta``, write the audit.
+
+    THE single implementation of the four steps every work-order material movement owes,
+    in the order it owes them (item 1):
+
+    1. INSERT the ``InventoryTransaction`` first (under a savepoint when the caller has an
+       idempotency index behind it);
+    2. move ``quantity_on_hand`` ONLY when that insert actually landed -- a duplicate
+       inserted nothing, so decrementing/incrementing would double-count against the
+       winning transaction's row;
+    3. recompute ``quantity_available`` in the SAME block as the ``quantity_on_hand``
+       mutation, because skipping it silently desyncs the denormalized column the
+       receipt-void guard and MRP read;
+    4. write the DUAL audit rows -- an ``inventory`` CREATE for the movement plus an
+       ``inventory`` UPDATE for the on-hand change it produced (the canonical shape,
+       shared with ``inventory.py``'s ``_audit_stock_movement``).
+
+    The sign of ``on_hand_delta`` is the whole difference between consuming and
+    returning; everything else about the two is identical, which is exactly why they
+    share this body instead of each carrying a copy of it.
+
+    ``duplicate_is_noop`` picks the insert discipline:
+
+    * ``True`` (ISSUE / backflush) -- a partial UNIQUE index backs the row, so a
+      concurrent duplicate raises ``IntegrityError``; roll back just the savepoint and
+      report ``None``, leaving the outer completion / reconcile transaction usable.
+    * ``False`` (RETURN) -- no index covers the row, so an ``IntegrityError`` is a real
+      fault. Insert plainly and let it propagate to the write handler.
+    """
+    if duplicate_is_noop:
+        if not _insert_txn_with_savepoint(db, txn):
+            return None
+    else:
+        db.add(txn)
+        db.flush()
+
     old_on_hand = inventory_item.quantity_on_hand
-    inventory_item.quantity_on_hand = float(inventory_item.quantity_on_hand or 0) - quantity
+    inventory_item.quantity_on_hand = float(inventory_item.quantity_on_hand or 0) + on_hand_delta
     inventory_item.quantity_available = inventory_item.quantity_on_hand - float(inventory_item.quantity_allocated or 0)
     db.flush()
 
@@ -917,22 +1108,17 @@ def _write_issue_txn(
         txn.id,
         str(txn.id),
         new_values=txn,
-        description=(
-            f"{movement_verb} {quantity} of part {part_number or component_part_id} "
-            f"for work order {work_order.work_order_number}"
-            + movement_suffix
-            + (f" lot {lot_number}" if lot_number else "")
-        ),
+        description=movement_description,
         extra_data=extra_data,
     )
     if old_on_hand is not None:
         audit.log_update(
             "inventory",
             inventory_item.id,
-            f"{part_number or component_part_id} @ {inventory_item.location}",
+            stock_identifier,
             old_values={"quantity_on_hand": old_on_hand},
             new_values={"quantity_on_hand": inventory_item.quantity_on_hand},
-            description=f"{movement_label}: stock for part {part_number or component_part_id}",
+            description=stock_description,
         )
     return txn
 

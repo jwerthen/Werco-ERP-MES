@@ -77,7 +77,9 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > Authorization is by **evidence, not role**: the walk-back is bounded to the caller's **own
 > unapproved** entries on the operation (crew-safe — never another operator's count; **approved**
 > labor is excluded — approval is the immutability boundary, G5-A) and is refused **409** once
-> the operation/WO is complete (post-completion corrections stay an office/supervisor task). It is
+> the operation is COMPLETE or the WO is terminal (post-completion corrections stay an
+> office/supervisor task — and that referral is now honest, since the office twin below **accepts** a
+> COMPLETE operation where it used to hit the identical refusal). It is
 > tenant-scoped (a cross-tenant id → **404** before any mutation) and writes a tamper-evident
 > `audit_log` row (action `reduce_operation_production`, old→new quantity + the operator-supplied
 > reason). See `docs/API.md` → Shop Floor → "Over-count correction".
@@ -88,8 +90,20 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > labor record, which is a supervisory power, not self-service. No clock-in is required. Approved
 > entries stay excluded on this path too — the front door for signed-off labor is
 > `POST /shop-floor/time-entries/{id}/unapprove` (the audited Approve-labor row, which forbids
-> self-unapproval), then reduce. Same tenant-scoped **404**, before-completion **409**, and
-> tamper-evident audit row as the shop-floor verb; the supervisor's optional note is recorded on
+> self-unapproval), then reduce. Same tenant-scoped **404** and tamper-evident audit row as the
+> shop-floor verb.
+>
+> **The office/operator split on a COMPLETE operation is a role decision, not a mechanism detail.**
+> The office verb passes `allow_completed_operation=True` and the operator verb does not, so a
+> completed operation is correctable **only** by Admin / Manager / Supervisor; a **terminal work
+> order** is refused on both, with its own distinct message so neither verb makes a referral the
+> other cannot honor. The refusal being relaxed dated from a production incident and was justified
+> on "downstream inventory / cost / FG effects have fired and cannot be walked back" — the reasoned
+> **material return** above is that walk-back, which is what makes the relaxation a supervised
+> correction rather than a loosened control. Note that the two powers travel together by design:
+> the same tier that can lower a completed operation's count is the tier that can hand the material
+> back, so neither half can be exercised without the authority to do the other. The supervisor's
+> optional note is recorded on
 > the **audit row only**, never written onto another operator's labor record. In the UI this is
 > the **Correct count** action on the work-order detail page, gated on `work_orders:edit`. See
 > `docs/API.md` → Work Orders → "Over-count correction … (supervisor/office)".
@@ -154,7 +168,23 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > | Tie material | `POST /api/v1/work-orders/{id}/material-allocations` | `require_role([ADMIN, MANAGER, SUPERVISOR])` |
 > | Edit a tie | `PATCH /api/v1/work-orders/{id}/material-allocations/{allocation_id}` | `require_role([ADMIN, MANAGER, SUPERVISOR])` |
 > | Untie | `DELETE /api/v1/work-orders/{id}/material-allocations/{allocation_id}` | `require_role([ADMIN, MANAGER, SUPERVISOR])` |
+> | Read a tie's per-lot consumption | `GET /api/v1/work-orders/{id}/material-allocations/{allocation_id}/consumption` | `get_current_active_user` — any authenticated tenant user |
+> | **Return consumed material** | `POST /api/v1/work-orders/{id}/material-allocations/{allocation_id}/return` | `require_role([ADMIN, MANAGER, SUPERVISOR])` |
 > | Tie a nest at creation | `POST /api/v1/work-orders/{id}/laser-nests/manual` and the four `…/laser-nest-packages/{preview,import}` routes, via the optional `material_part_id` | `require_role([ADMIN, MANAGER, SUPERVISOR])` — the endpoints' own pre-existing gate |
+>
+> **The return verb sits in the same tier as the tie verbs, and outside the kiosk path fence, for a
+> stronger reason than the rest of them.** Every other verb on this router manages a **planning row**;
+> the return is the one that **moves stock** and writes tamper-evident ledger rows. Reading it as
+> "just another tie mutation" and later relaxing it to operator self-service would be the mistake this
+> paragraph exists to prevent: **moving material back with a reason is a bigger power than tying it,
+> not a smaller one.** It is a supervised reversal of a physical fact, it credits specific heat/cert
+> lots, and it is the only self-service path that can lower a tie's `qty_consumed`. Keeping it under
+> `/work-orders` rather than `/api/v1/shop-floor` means a crew-station or kiosk-scoped operator token
+> is path-fenced away from it entirely — an operator who over-reported a count asks a supervisor,
+> exactly as they do for the office reduce-production verb. The read half
+> (`…/consumption`) is deliberately **broad**, like the tie list: it discloses ledger facts about
+> material the company already owns, and a return dialog that could not show which lots the material
+> goes back to would be asking for a confirmation nobody could give.
 >
 > **The matrix rows above hold now that a UI exists** (the work-order Materials panel, the nest
 > wizard's sheet-part picker, the Dispatch Board chip, the kiosk deduction line). Nothing was
@@ -163,11 +193,12 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > privilege escalation around `POST …/material-allocations`.
 >
 > The read is deliberately broad — a tie is shop-visible context ("this job burns *that* sheet"),
-> and the same rows are already reachable through lot traceability. **Operator gets 403 on all three
-> mutating verbs**; deciding what material a job consumes is not operator self-service, unlike the
+> and the same rows are already reachable through lot traceability. **Operator gets 403 on all four
+> mutating verbs**; deciding what material a job consumes — or handing it back — is not operator
+> self-service, unlike the
 > shop-floor production verbs. The router is mounted under `/work-orders`, **not**
 > `/api/v1/shop-floor`, so kiosk-scoped operator tokens are **path-fenced away from it** entirely —
-> a crew-station token cannot tie or untie material even if it reached the route.
+> a crew-station token cannot tie, untie or return material even if it reached the route.
 >
 > **The floor reads ties without reaching that router, and the fence is unchanged.** The Dispatch
 > Board's `material_tie` and the kiosk's `material_ties` ride
@@ -181,17 +212,26 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > its own work center's queued operations (not an inventory browser, but not nothing).
 >
 > Every lookup (work order, part, operation, pinned lot, allocation) is **tenant-scoped**: a
-> cross-tenant id is **404**, never 403, so an id cannot be probed. Every create / edit / untie writes
+> cross-tenant id is **404**, never 403, so an id cannot be probed. Every create / edit / untie /
+> return writes
 > a tamper-evident `audit_log` row on resource type `work_order_material_allocation`. Untie is
 > `status = cancelled` — the row is **never physically deleted**, because the ledger's
 > `allocation_id` back-reference must keep resolving — and is refused **409** once any material has
-> been consumed against the tie.
+> been consumed against the tie; the 409 names `POST …/return` with `intent: "return_and_untie"`,
+> which credits the material back to its source lots **and** cancels the tie in one transaction.
+> A return additionally requires a **non-blank reason** and writes it on the ledger row, in the audit
+> description and in `extra_data.reason`; it appends compensating `RETURN` transactions and never
+> edits a historical row.
 >
 > **The consumption itself has no endpoint and no separate gate.** It runs inside the existing
 > completion paths — `apply_operation_completion_inventory_effects` when an **operation** completes and
 > `apply_completion_inventory_effects` when the **work order** does — so whoever is authorized to
 > complete the work is what authorizes the resulting stock movement, including the operator-facing
-> kiosk and shop-floor completion verbs and the reconcile-on-read GET. **The attributed actor is
+> kiosk and shop-floor completion verbs and the reconcile-on-read GET. **The reversal is the
+> asymmetric case, deliberately**: consuming needs no gate beyond the authority to complete the work,
+> while un-consuming has its own endpoint, its own Admin/Manager/Supervisor gate and a mandatory
+> reason. That asymmetry is the point — production authorizes depletion because production happened;
+> nothing on the floor happens that authorizes putting material back, so somebody has to say why. **The attributed actor is
 > whoever completed the operation the material was consumed against** — with the trigger at operation
 > completion that is the operator who finished nest 1 of 3, not whoever later closed the job. (Through
 > PR 2 it was the other way round and this paragraph said so; the reconcile-on-read GET is still the

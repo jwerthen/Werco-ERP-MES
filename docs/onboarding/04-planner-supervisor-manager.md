@@ -136,7 +136,8 @@ What it can and can't do:
 
 - **Any operator's counts** on the operation — you don't need to be clocked in, and it works from the office. It removes from **unapproved** time entries only (newest first).
 - **Approved labor is locked.** If some of the count is on approved entries, the refusal tells you how much is correctable and how much is approved — **unapprove** the entry first (Time Entries approval), then correct.
-- **Only before the operation is complete.** A finished operation (or a completed/closed/cancelled work order) is refused — post-completion corrections affect inventory and cost and aren't done here.
+- **A finished operation *can* be corrected here — that's the difference between your button and the operator's.** The operator is told to "ask a supervisor" once the step is complete; this is where they're asking. If the operation consumed tied material, correct the count **first**, then use **Return material** on the work order's Materials panel to put the material the lower count no longer accounts for back on its lot.
+- **Not on a finished job.** A completed, closed or cancelled **work order** is refused for everyone — its production record is closed.
 - **This is a miscount fix, not scrap.** Nothing moves to scrap, and the job's status doesn't change. Bad parts are reported as scrap with a scrap reason instead.
 - **Everything is recorded** — the amount removed, which time entries it came off, your reason, and your name land on the tamper-evident audit trail.
 
