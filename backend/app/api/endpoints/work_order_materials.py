@@ -52,6 +52,7 @@ from app.schemas.work_order_material import (
     MaterialReturnResponse,
 )
 from app.services.audit_service import AuditService
+from app.services.completion_inventory_service import net_consumed_quantity_for_allocation
 from app.services.material_consumption_service import (
     CONSUMPTION_EPSILON,
     MaterialReturnRefused,
@@ -543,6 +544,12 @@ def create_material_allocation(
         # the ISSUE row's existence -- so a return would leave this 409 firing exactly as
         # before, having moved stock for nothing. Operation-scoped ties post outside that
         # index, which is why they are the way through.
+        #
+        # PR 4 made that asymmetry explicit rather than incidental: an operation-scoped
+        # tie that gives all its material back becomes re-issuable (the backflush
+        # suppression there reads a SIGNED ledger net), while this shape does not, because
+        # the unique index forbids the second ISSUE row at any price. See
+        # ``return_material_allocation`` for the full statement of the choice.
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
@@ -811,10 +818,39 @@ def delete_material_allocation(
 ):
     """Untie: sets ``status = CANCELLED``. The row is never physically deleted.
 
-    Refused with 409 once ANY material has been consumed. Cancelling a tie that already
-    moved stock would strand ``inventory_transactions.allocation_id`` rows against a
-    tombstone with no explanation of where the material went; the reversal (RETURN) is a
-    separate, reasoned verb.
+    Refused with 409 while the LEDGER still holds material out against this tie.
+    Cancelling a tie that moved stock, without moving it back, would strand
+    ``inventory_transactions.allocation_id`` rows against a tombstone with no account of
+    where the material went; the reversal (RETURN) is a separate, reasoned verb.
+
+    **The guard reads the ledger, not ``qty_consumed``.** It used to read the cache, while
+    hard delete (since PR 1) and nest re-import (since PR 3) both read the ledger — an
+    asymmetry nobody chose, and one the cache's own documented semantics make unsafe. Two
+    concrete failures it produced, in opposite directions:
+
+    * ``correct_over_consumption`` down to a zero live target leaves ``qty_consumed`` at 0
+      on a still-OPEN tie. The cache said "nothing consumed" and permitted the untie, on a
+      tie the ledger could still be backing.
+    * the completion backflush advances a work-order-scoped tie's ``qty_consumed`` to
+      ``qty_planned``, which is not the quantity the ISSUE posted (the row carries the
+      summed BOM + tie demand). A cache reading above the ledger refused an untie that
+      would have stranded nothing.
+
+    The ledger figure is SIGNED — ISSUE minus RETURN — so a tie that gave everything back
+    is untieable. That is deliberate and it closes a dead end rather than opening one: an
+    existence-keyed guard (the shape hard delete uses, correctly, since a RETURN row
+    references the tie as durably as the ISSUE it compensates) would refuse forever, while
+    ``return_and_untie`` would 422 with nothing left to return.
+
+    One residual, stated precisely because an earlier draft of this docstring overstated
+    it: if the tie's cache has drifted BELOW the signed ledger net, this DELETE's 409 can
+    stand while ledger rows remain. It is **not** a dead end for the user.
+    ``return_and_untie`` does not route through this guard at all — it cancels the tie
+    inside the return service, and this handler early-returns on an already-CANCELLED tie
+    before the net is ever computed. So the tie always closes; what the residual net then
+    represents is the BOM's material, legitimately still out, not the tie's. The drift
+    itself requires the ISSUE row to carry summed BOM + tie demand, which requires
+    ``Part.backflush_components`` — unset anywhere in ``app/`` — so it is dark today.
 
     Audit verb: ``log_delete(soft_delete=True)``. The HTTP verb is DELETE, the operator
     intent is "remove this tie", and the question an auditor asks is "who removed it and
@@ -829,17 +865,16 @@ def delete_material_allocation(
         # Idempotent untie: already cancelled, nothing to do and nothing to audit.
         return _serialize(db, allocation, company_id)
 
-    if float(allocation.qty_consumed or 0) > CONSUMPTION_EPSILON:
-        # The remedy is now a single verb rather than an impossibility: return_and_untie
-        # gives the material back to its source lots AND cancels the tie in one
-        # transaction, which is exactly what a caller reaching this 409 is asking for.
-        # Untie stays refused here on its own terms -- cancelling a tie that moved stock,
-        # without moving it back, would strand the ledger's allocation_id rows against a
-        # tombstone with no account of where the material went.
+    consumed_net = net_consumed_quantity_for_allocation(db, allocation_id=allocation.id, company_id=company_id)
+    if consumed_net > CONSUMPTION_EPSILON:
+        # The remedy is a single verb rather than an impossibility: return_and_untie gives
+        # the material back to its source lots AND cancels the tie in one transaction,
+        # which is exactly what a caller reaching this 409 is asking for. Untie stays
+        # refused here on its own terms.
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
-                f"{allocation.qty_consumed} {allocation.unit_of_measure} has already been consumed "
+                f"{round(consumed_net, 6)} {allocation.unit_of_measure} of material is still issued "
                 "against this allocation. Return the material with intent 'return_and_untie', which "
                 "credits it back to its source lots and closes this tie in one step."
             ),
@@ -865,6 +900,14 @@ def delete_material_allocation(
             "part_id": allocation.part_id,
             "new_status": AllocationStatus.CANCELLED.value,
             "tombstone": "status",
+            # The figure this untie was actually authorized against, and the test that
+            # was applied to it. The guard moved from the qty_consumed CACHE to the
+            # signed ledger net, so a tie can now be untied while ISSUE and RETURN rows
+            # still carry its allocation_id — an auditor asking "why was this permitted
+            # when ledger rows exist?" needs the answer on the chain, not inferable only
+            # by re-deriving it from the ledger months later.
+            "guard_basis": "signed_ledger_net",
+            "ledger_net_issued": consumed_net,
         },
     )
     db.commit()
@@ -971,6 +1014,32 @@ def return_material_allocation(
     A returned tie does NOT unlock a nest re-import. That guard reads the ledger, not the
     cache, and the ISSUE **and** RETURN rows both still name the operations a rebuild
     would delete; the remedy stays "raise a new work order".
+
+    **What a full return leaves behind differs by TIE SCOPE, and the difference is now a
+    decision.** Until this was written down it was neither — it fell out of two guards
+    having been keyed differently by accident:
+
+    * an **operation-scoped** tie, fully returned, nets to zero in the ledger. Once
+      ``Part.backflush_components`` is exposed, the BOM backflush is then free to issue
+      that part again (``completion_inventory_service._drop_ledger_covered_parts``). That
+      is the right answer: the material physically came back, the job holds none of it,
+      and the BOM's demand is once again unmet. Suppressing forever would refuse to
+      consume material the shop is standing next to, and would hide the gap from the
+      shortage machinery that exists to surface it.
+    * a **work-order-scoped** tie, fully returned, leaves its part **un-issuable on this
+      work order forever**. Its ISSUE row was written under ``reference_type='work_order'``
+      and survives the return, so ``_component_already_issued`` keeps firing. This is not
+      a policy choice made in code and it cannot be reversed there:
+      ``uq_wo_inventory_issue`` permits exactly ONE ISSUE row per (company, WO, part) on
+      that reference shape, so a second issue is physically unavailable. A guard that
+      netted returns here would attempt the re-issue, lose to the index, and be swallowed
+      as a duplicate no-op — claiming a consumption that never posted, which is strictly
+      worse than refusing.
+
+    The remedy for the second case is the first: tie at the OPERATION level, which posts
+    outside that index. ``POST`` already returns 409 with exactly that wording when a
+    work-order-scoped tie is created on an already-issued part, and a return does not
+    change that refusal.
     """
     work_order = _load_work_order(db, work_order_id, company_id)
     allocation = _load_allocation(db, work_order_id, allocation_id, company_id)

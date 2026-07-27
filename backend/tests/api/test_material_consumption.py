@@ -1801,12 +1801,29 @@ def test_retie_after_untie_is_allowed(client: TestClient, db_session: Session):
 
 
 def test_untie_is_refused_once_material_is_consumed(client: TestClient, db_session: Session):
+    """PR 4 re-keyed this guard from ``qty_consumed`` to the SIGNED ledger net, so the
+    tie is driven through a REAL consumption rather than a hand-set cache value.
+
+    That is not a weaker fixture, it is the only honest one: the refusal exists to stop
+    an untie stranding ``inventory_transactions.allocation_id`` rows against a tombstone,
+    so the ledger rows have to be there for the refusal to be about anything. A tie whose
+    cache reads above an EMPTY ledger has nothing to strand and is now untieable -- the
+    same answer the hard-delete guard has given since PR 1; see
+    ``test_untie_permitted_when_the_cache_reads_above_an_empty_ledger`` below.
+    """
     admin = make_user(db_session)
     fg = make_part(db_session)
     sheet = make_part(db_session, uom="sheets", part_type="raw_material")
-    wo = make_wo(db_session, fg, quantity_ordered=5)
-    op = make_op(db_session, wo, make_work_center(db_session))
-    allocation = make_allocation(db_session, wo, sheet, operation=op, qty_planned=5, qty_consumed=2.0)
+    lot = make_inventory(db_session, sheet, qty=10, lot="SHEET-UNTIE-409")
+    wo = make_wo(db_session, fg, quantity_ordered=5, quantity_complete=2)
+    op = make_op(db_session, wo, make_work_center(db_session), quantity_complete=2)
+    allocation = make_allocation(db_session, wo, sheet, operation=op, qty_per_run=1.0, qty_planned=5)
+
+    run_effects(db_session, wo, admin)
+    db_session.expire_all()
+    assert [t.quantity for t in consumption_txns(db_session, op.id)] == [-2], "the ledger must really hold 2 out"
+    db_session.refresh(lot)
+    assert lot.quantity_on_hand == 8
 
     resp = client.delete(_tie_url(wo.id, allocation.id), headers=headers_for(admin))
     assert resp.status_code == status.HTTP_409_CONFLICT, resp.text
@@ -1817,8 +1834,30 @@ def test_untie_is_refused_once_material_is_consumed(client: TestClient, db_sessi
     detail = resp.json()["detail"]
     assert "return_and_untie" in detail, detail
     assert "Reverse consumption first" not in detail, detail
-    db_session.refresh(allocation)
-    assert allocation.status == AllocationStatus.OPEN
+    db_session.expire_all()
+    assert db_session.get(WorkOrderMaterialAllocation, allocation.id).status == AllocationStatus.OPEN
+
+
+def test_untie_permitted_when_the_cache_reads_above_an_empty_ledger(client: TestClient, db_session: Session):
+    """The converse of the guard's re-key, and the asymmetry it removed.
+
+    ``qty_consumed`` is a documented CACHE; the ledger is authoritative. Until PR 4 this
+    endpoint was the only guard of its class still keyed on the cache -- hard delete has
+    read the ledger since PR 1 and nest re-import since PR 3 -- so a drifted cache value
+    manufactured a 409 on a tie whose untie would have stranded nothing.
+    """
+    admin = make_user(db_session)
+    fg = make_part(db_session)
+    sheet = make_part(db_session, uom="sheets", part_type="raw_material")
+    wo = make_wo(db_session, fg, quantity_ordered=5)
+    op = make_op(db_session, wo, make_work_center(db_session))
+    allocation = make_allocation(db_session, wo, sheet, operation=op, qty_planned=5, qty_consumed=2.0)
+    assert consumption_txns(db_session, op.id) == [], "no ledger row backs this cache value"
+
+    resp = client.delete(_tie_url(wo.id, allocation.id), headers=headers_for(admin))
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    db_session.expire_all()
+    assert db_session.get(WorkOrderMaterialAllocation, allocation.id).status == AllocationStatus.CANCELLED
 
 
 def test_pinned_lot_of_a_different_uom_part_is_422(client: TestClient, db_session: Session):
