@@ -350,21 +350,32 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 >   (and `reference_number` = the work-order number) — deliberately outside the
 >   `uq_wo_inventory_receipt` / `uq_wo_inventory_issue` idempotency predicates, which key on
 >   `reference_type='work_order'`.
-> - **Work-order-scoped** ties (no operation) are drained **once** through the existing one-shot
->   backflush machinery (`reference_type='work_order'`), summed with any BOM demand for the same part
->   so exactly one `ISSUE` row per (work order, part) is emitted. Unlike the BOM leg this is **not**
->   gated on `backflush_components` — an explicit tie is itself the opt-in. The drain advances the
->   tie's `qty_consumed` to `qty_planned` and **audits** that advance (`work_order_material_allocation`
->   UPDATE, `extra_data.reference_type = "work_order"`), exactly as the per-run engine audits its own.
->   A work-order-scoped tie created *after* that part already backflushed on the same work order
->   could never consume — the one-ISSUE-per-(work order, part) index forbids a second row, and the
->   backflush's idempotency check short-circuits before the tie's demand is applied — so **`POST` now
->   refuses it with 409** rather than creating a tie that silently never depletes. Tie material
->   **before** the work order completes. Operation-scoped ties are unaffected.
+> - **Work-order-scoped** ties (no operation) are drained by the work-order-completion backflush, **as
+>   their own leg**, and reconciled to `qty_planned` against that tie's signed ledger net (ISSUE −
+>   RETURN, keyed on `allocation_id`). Their rows carry **`reference_type='work_order_backflush'`**
+>   with `reference_id` = the **work order**, also outside the `uq_wo_inventory_*` predicates. Unlike
+>   the BOM leg this is **not** gated on `backflush_components` — an explicit tie is itself the opt-in.
+>   The drain advances the tie's `qty_consumed` to that ledger net (never to `qty_planned` regardless
+>   of what posted) and **audits** the advance (`work_order_material_allocation` UPDATE,
+>   `extra_data.reference_type = "work_order_backflush"`), exactly as the per-run engine audits its own.
+>   Tie material **before** the work order completes.
+>
+>   > **Changed in PR 4.4 — the previous contract is stated so a stale integration is not read as a
+>   > regression.** Through PR 4 a work-order-scoped tie was *summed per part* with any BOM demand and
+>   > drained as **one** `ISSUE` row under `reference_type='work_order'`, because
+>   > `uq_wo_inventory_issue` permitted exactly one row per (work order, part). It is now **two
+>   > separately-attributed rows** — the tie row carries `allocation_id`, the BOM row has it NULL — and
+>   > the tie leg posts **first**, so a shortage lands on the derived side and the tie's lot pin gets
+>   > first claim on stock. **The total issued for a part carrying both demands is unchanged.** The
+>   > unpinned draw also spills across lots now, so one logical draw can be N rows naming N lots.
+>   > A `POST` of a work-order-scoped tie on a part carrying a **legacy** (pre-4.4) `work_order`-shaped
+>   > `ISSUE` on the same work order is still refused **409** — see the error table below — but that
+>   > refusal is now a legacy-only fence and is **unreachable** in practice.
 >
 > **Tied material counts as job-cost material.** `WorkOrder.actual_cost`, the synced `JobCost`, and
-> the analytics cost variance sum `abs(total_cost)` over the work order's `ISSUE` rows under **both**
-> reference shapes (`work_order` *and* `work_order_operation`) — one shared predicate, so the stored
+> the analytics cost variance sum `abs(total_cost)` over the work order's `ISSUE` rows under **all
+> three** reference shapes (`work_order`, `work_order_backflush` and `work_order_operation`) — one
+> shared predicate (`work_order_ledger_filter`), so the stored
 > rollup and the analytics leg cannot drift. A nest that burned six $80 sheets contributes $480.
 >
 > **Scrap consumes**, and posts as `ISSUE` (not `SCRAP`): lot genealogy filters on `ISSUE`, so a
@@ -373,15 +384,21 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 >
 > **Consumption never auto-reverses.** A negative delta (e.g. after an over-count walk-back) is a
 > **no-op**, never an automatic `RETURN` — the material was already cut. Reversal is a separate,
-> explicit, reasoned verb that **does not exist yet**.
+> explicit, reasoned verb: `POST …/material-allocations/{allocation_id}/return`, shipped in PR 3 and
+> documented under **Material ties** below. (This paragraph said the verb *"does not exist yet"* for
+> three PRs after it shipped; corrected 2026-07-27.)
 >
 > **A shortage never fails the completion.** Insufficient stock drives the source lot negative,
 > writes a tamper-evident **`ALLOCATION_SHORTAGE`** audit row, and emits a
 > `material_allocation_shortage` warning event. It is the allocation twin of `BACKFLUSH_SHORTAGE` /
-> `backflush_shortage` and is deliberately kept distinct from it in the audit trail. Unlike the
-> backflush event, this one **is** in the notification catalog (key `material.allocation_shortage`,
-> Purchasing / warning, in-app + email to the Purchasing and Inventory departments) — see
-> [docs/NOTIFICATIONS.md](NOTIFICATIONS.md).
+> `backflush_shortage` and is deliberately kept distinct from it in the audit trail. **Both are now in
+> the notification catalog** — `material.allocation_shortage` and, since PR 4.4,
+> `material.backflush_shortage` (both Purchasing / warning, in-app + email to the Purchasing and
+> Inventory departments); the backflush event had been emitted with no catalog row since Batch 6 and
+> therefore notified nobody. The **rolled-back** case — where the draw raised and the savepoint undid
+> it, so no stock moved at all — is separately keyed as `material.allocation_consumption_failed` /
+> `material.backflush_failed`, so "stock went negative" and "stock never moved" are distinguishable
+> without opening the audit log. See [docs/NOTIFICATIONS.md](NOTIFICATIONS.md).
 >
 > **Labor-hour + cost rollup on completion is opt-in (global flag `LABOR_COST_ROLLUP_ENABLED`,
 > default OFF).** When the flag is **on**, a work order reaching **COMPLETE** (any path, including
@@ -585,20 +602,28 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 >   — consume from *this* lot; omit for automatic lot selection at consume time; a **held or
 >   inactive** lot is refused with 422). The pin is honored on **both** tie shapes: an
 >   operation-scoped tie consumes from it per run, and a work-order-scoped tie carries it into the
->   one-shot backflush `ISSUE`. **Unpinned selection differs by tie shape** — an operation-scoped
->   tie walks `received_date ASC NULLS LAST, id ASC` FIFO across *available* lots, while a
->   work-order-scoped tie takes the **lowest-id active on-hand lot** with **no status filter** (the
->   pre-existing backflush selection, deliberately unchanged so legacy NULL-status rows stay
->   eligible). A work-order-scoped tie can therefore land on an `on_hold` / `quarantine` / `rejected`
->   lot: it still consumes and writes a `HELD_MATERIAL_CONSUMED` audit row (with
->   `pin_directed: false`) rather than skipping the lot. `notes`. `unit_of_measure` is
+>   completion backflush's tie leg. **Unpinned selection is now identical on both tie shapes**
+>   (PR 4.4): `received_date ASC NULLS LAST, id ASC` FIFO across consumable lots, spilling across as
+>   many lots as the demand needs. "Consumable" is `is_active` **and**
+>   `COALESCE(status, 'available') = 'available'` — so a legacy **NULL-status** lot **is** eligible,
+>   while `on_hold` / `quarantine` / `rejected` lots are **skipped**. Through PR 4 a work-order-scoped
+>   tie instead took the **lowest-id active on-hand lot** with **no status filter**, could therefore
+>   land on a held lot and consume it (writing `HELD_MATERIAL_CONSUMED` with `pin_directed: false`),
+>   and used a single lot for the whole demand. Held stock is no longer consumed on the unpinned path;
+>   it is **disclosed on the shortage record** instead (`held_quantity_skipped` / `held_lot_numbers`),
+>   so a shortage is never reported bare against material sitting in segregated status. On a **pinned**
+>   draw the shortage record names the **pin** instead (`pinned_lot`) — there the pin, not any lot's
+>   status, is why the rest was not drawn, and the two clauses are mutually exclusive. Both live on the
+>   audit record and the event payload only; a lot that was skipped appears on **no** genealogy line. A
+>   `HELD_MATERIAL_CONSUMED` row now means one thing only: a **pinned** lot held after it was pinned
+>   (`pin_directed` is always `true`). `notes`. `unit_of_measure` is
 >   **snapshotted** server-side from the part at tie time and is not client-settable. The work order
 >   must **not** be terminal (409).
 > - **`PATCH …/material-allocations/{allocation_id}`** — all fields optional; omitted fields are left
 >   alone. Accepts `qty_per_run`, `qty_planned`, `pinned_inventory_item_id`,
->   `clear_pinned_inventory_item` (`true` drops the pin, back to automatic lot selection — FIFO on
->   an operation-scoped tie, the lowest-id active on-hand lot on a work-order-scoped one, per the
->   `POST` note above; sending it **together with** a `pinned_inventory_item_id` is a **422**, since
+>   `clear_pinned_inventory_item` (`true` drops the pin, back to automatic lot selection — since
+>   PR 4.4 that is the **same** `received_date` FIFO over consumable lots on **both** tie shapes, per
+>   the `POST` note above; sending it **together with** a `pinned_inventory_item_id` is a **422**, since
 >   the two ask for opposite things about a field that is a genealogy fact), and `notes`. Lowering `qty_planned` **below** `qty_consumed` is a
 >   **422** — the engine never auto-reverses, so the row would immediately read as over-consumed. `part_id`,
 >   `work_order_operation_id` and `source` are **deliberately not editable** — repointing a tie after
@@ -713,7 +738,7 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > | **409** | **Untie while material is still issued** — `DELETE` while the **signed ledger net** (ISSUE − RETURN) against this tie is positive (*"N <uom> of material is still issued against this allocation. Return the material with intent 'return_and_untie', which credits it back to its source lots and closes this tie in one step."*). The remedy is a single call; untie stays refused on its own terms, since cancelling a tie that moved stock without moving it back would strand the ledger's `allocation_id` rows against a tombstone. **The basis changed in PR 4: it reads the ledger, not the `qty_consumed` cache** — the cache misjudged this in both directions (a `correct_over_consumption` to a zero live target left it at 0 on a tie the ledger still backed; the backflush advances a work-order-scoped tie's cache to `qty_planned`, which is not what the ISSUE posted). **Signed**, not existence-keyed, so a **fully returned tie can be untied** — existence-keying would 409 forever while `return_and_untie` 422s with nothing left to return |
 > | **409** | **`PATCH` on a non-open tie** (`"This allocation is <status>; only an open tie can be edited."`) |
 > | **409** | **`POST` on a TERMINAL work order** (`complete` / `closed` / `cancelled`). Every completion path refuses to re-enter a terminal work order, so the tie could never consume — it would sit `open` at `qty_consumed` 0 advertising demand that will never be met. `PATCH` / `DELETE` / `GET` on an existing tie stay available, so a historical tie is still readable and fixable |
-> | **409** | **`POST` of a work-order-scoped tie whose part was already ISSUEd to this work order** (*"Part X was already issued to work order Y; this tie could never consume — tie the material at the operation level instead, which posts outside the one-issue-per-work-order guard."*). The 409 names the remedy, and it is deliberately **not** "return the material": a return appends a compensating row and never removes the ISSUE row, while this check (and `uq_wo_inventory_issue` behind it) keys on that row's **existence** — so a return would leave this 409 firing exactly as before, having moved stock for nothing. An operation-scoped tie posts outside the index and is unaffected |
+> | **409** | **`POST` of a work-order-scoped tie whose part carries a LEGACY one-time issue on this work order** (*"Part X already has a one-time issue recorded against work order Y; this tie could never consume — tie the material at the operation level instead, which posts outside the one-issue-per-work-order guard."*). **Wording corrected in PR 4.4; behaviour unchanged.** The guard keys on a `reference_type='work_order'` `ISSUE` row, and since PR 4.4 **nothing writes that shape** — the backflush posts `work_order_backflush` — so it matches only **pre-4.4** rows and is that work order's permanent fence out of the reconciling engine. The 409 names the remedy, and it is deliberately **not** "return the material": a return appends a compensating row and never removes the ISSUE row, while this check (and `uq_wo_inventory_issue` behind it) keys on that row's **existence** — so a return would leave this 409 firing exactly as before, having moved stock for nothing. An operation-scoped tie posts outside the index and is unaffected. **The refusal is also UNREACHABLE and is kept deliberately**: creating a tie requires a non-terminal work order, a `work_order`-shaped component ISSUE requires the backflush, the backflush only runs at COMPLETE, and COMPLETE → non-terminal is blocked — so no client can produce the state. It costs one existence query, fails safe, and stays correct if that reachability argument ever stops holding; a refusal whose *stated reason* was false is what PR 4.4 fixed |
 > | **422** | **Cross-part / cross-UOM lot pin** — `pinned_inventory_item_id` names a lot of a *different* part. The detail names the unit-of-measure clash when the two parts also disagree on units (*"Unit-of-measure mismatch: … No unit conversion exists"*); otherwise it reads *"The pinned lot belongs to a different part"*. There is **no unit conversion anywhere in the platform** — cross-UOM is refused, never guessed |
 > | **422** | **Held or inactive lot pin** — `pinned_inventory_item_id` names a lot whose `status` is not `available` (`on_hold` / `quarantine` / `rejected`) or that is inactive (*"Lot L is 'quarantine' and may not be tied to work…"*). FIFO already skips such lots; the pinned branch does not, so pinning one would consume nonconforming material into product (AS9100D 8.7). Refused at **tie** time because consumption also runs from a `GET`, where refusing is not an option — a lot held *after* it was pinned still consumes, and writes a `HELD_MATERIAL_CONSUMED` audit row instead. **Nothing in the application ever writes a held `InventoryItem.status`** (no endpoint or schema exposes the column; it is only ever set to `available` at creation, and there is no lot-deactivation verb), so both halves of this control can currently only fire on data set outside the app — a direct DB write, an import, or a future hold verb |
 > | **422** | `qty_per_run` sent on a **work-order-scoped** tie, via `POST` **or** `PATCH` (`"qty_per_run applies to operation-scoped ties only."`) |
@@ -1713,7 +1738,7 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > `{allocation_id, part_id, part_number, unit_of_measure, qty_per_run, qty_planned, qty_consumed,
 > qty_remaining, on_hand, short_by, pinned_inventory_item_id, pinned_lot_number}`.
 > **Operation-scoped only**: a work-order-scoped tie belongs to the whole job and drains through the
-> one-shot backflush, so hanging it on cards would fan one tie across every card of that work order
+> completion backflush's own tie leg, so hanging it on cards would fan one tie across every card of that work order
 > and read as N separate ties. **One chip per card** — if an operation somehow carries two ties the
 > **first by `allocation_id`** is sent (the same one the kiosk lists first); summing them is not an
 > option, since they are different parts in different units and a merged number would be fiction.
@@ -2842,16 +2867,24 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 > `created_at`), and `work_order_id`. Only `part_id` and `transaction_type` existed before this
 > pass; the rest are new.
 >
-> **`work_order_id` matches all three ledger shapes a work order's movement takes**: the
-> work-order-referencing rows (`reference_type='work_order'`, `reference_id=<id>` — finished-good
-> receipt, one-shot backflush, work-order-scoped tie consumption), the **operation-scoped**
+> **`work_order_id` matches all four ledger shapes a work order's movement takes**: the
+> work-order-referencing rows (`reference_type='work_order'`, `reference_id=<id>` — the finished-good
+> receipt, plus every **legacy** pre-PR-4.4 component `ISSUE`), the **reconciled component** rows
+> (**`reference_type='work_order_backflush'`**, `reference_id=<id>` — BOM/routing backflush demand and
+> work-order-scoped tie consumption, added in PR 4.4 and able to appear as **several rows per (work
+> order, part)** when a draw spills across lots), the **operation-scoped**
 > consumption rows (`reference_type='work_order_operation'`, `reference_id=<operation id>` — per-run
 > depletion of tied material), and the id-less legacy shape `POST /inventory/issue` writes
-> (`reference_number=<WO number>`, `reference_id` NULL). The first two come from the **shared**
+> (`reference_number=<WO number>`, `reference_id` NULL). The first three come from the **shared**
 > `work_order_ledger_filter` — the same predicate job costing, analytics and lot genealogy use — so
 > this list cannot disagree with the cost of the job it is listing. (Until PR 1 it matched only
 > `reference_type='work_order'` and silently under-reported an entire nest's material.) Soft-deleted
 > work orders are deliberately **not** excluded: their posted movements are still real ledger facts.
+>
+> **`reference_type` is unconstrained free text on the ledger** (`String(50)`, no CHECK / enum /
+> domain), so a client filtering `?reference_type=` must treat the value set as **open** — PR 1 added
+> `work_order_operation` and PR 4.4 added `work_order_backflush`, neither with a migration. Filter on
+> `work_order_id` rather than enumerating shapes.
 >
 > Paging is `limit` (default 100, **`ge=1, le=500`**) and `offset` (**`ge=0`**, default 0); a value
 > outside those bounds — `limit=0`, `limit=1000`, a negative `offset` — is rejected **422** by
@@ -2875,22 +2908,19 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 > top-level, and `transaction_type` still serializes as the lowercase enum **value** (`"receive"`,
 > `"count"`, …).
 >
-> `work_order_id` is a convenience filter for "everything this work order consumed/produced". Two
-> row shapes exist in the ledger today and **both** are matched: `reference_type='work_order'` with
-> `reference_id` = the work-order id (written by the completion/backflush path), and
-> `reference_type='work_order'` with `reference_number` = the work-order **number** and a NULL
-> `reference_id` (written by `POST /inventory/issue`). The work-order number is resolved
+> `work_order_id` is a convenience filter for "everything this work order consumed/produced". The
+> authoritative statement of what it matches is the four-shape list above; this paragraph and the
+> "known gap" that followed it described the **pre-PR-1** behaviour and were left stale through three
+> PRs. They are corrected here rather than left to contradict the list: the id-less
+> `POST /inventory/issue` shape (`reference_type='work_order'`, `reference_number` = the work-order
+> **number**, `reference_id` NULL) is matched by a local clause, and the three id-keyed shapes are
+> matched by the shared `work_order_ledger_filter`. The work-order number is resolved
 > tenant-scoped, so an unknown or other-tenant id simply matches nothing.
 >
-> **Known gap — `work_order_id` does not yet match operation-scoped material consumption.** Both
-> clauses require `reference_type='work_order'`, so the per-run consumption rows written against
-> **operation-scoped material ties** — `reference_type='work_order_operation'`, `reference_id` = the
-> **operation** id — are **not** returned by this filter, even though they carry the work-order number
-> in `reference_number`. Until that is closed, read them with
-> `?reference_type=work_order_operation&reference_id=<operation_id>` (or `?part_id=`), or use
-> `GET /traceability/lot/{lot_number}`, whose as-built genealogy **does** resolve both reference types.
-> Nothing is lost or mis-scoped — the rows are on the ledger and company-scoped; this one convenience
-> filter under-reports.
+> ~~**Known gap — `work_order_id` does not yet match operation-scoped material consumption.**~~
+> **CLOSED in PR 1** (`work_order_operation`) **and extended in PR 4.4** (`work_order_backflush`).
+> Both are returned by this filter today. `GET /traceability/lot/{lot_number}` resolves the same three
+> shapes for its as-built genealogy, so the two reads cannot disagree.
 >
 > **`work_order_id` deliberately does not exclude soft-deleted work orders.** Voiding a work order
 > does not un-move the material it consumed — those ledger rows are still real, posted facts, and
@@ -3029,18 +3059,24 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 > (reported positive). `GET /traceability/serial/{serial_number}` mirrors the lot trace's work-order
 > and NCR collection. Every query is scoped to the active company.
 >
-> **Two consumption sources are read, and both must be.** Genealogy resolves ISSUE rows under
-> **`reference_type='work_order'`** (the one-shot BOM/routing backflush, `reference_id` = the work
-> order) **and** **`reference_type='work_order_operation'`** (per-run consumption of material tied to
-> an operation, `reference_id` = the **operation**, mapped back to its work order here). Both collapse
+> **Three consumption sources are read, and all three must be.** Genealogy resolves ISSUE rows under
+> **`reference_type='work_order'`** (LEGACY pre-PR-4.4 one-shot BOM / work-order-scoped-tie rows,
+> `reference_id` = the work order — nothing writes this shape any more), **`work_order_backflush`**
+> (PR 4.4: the reconciling component leg — BOM/routing demand and work-order-scoped ties,
+> `reference_id` = the work order) **and** **`reference_type='work_order_operation'`** (per-run
+> consumption of material tied to
+> an operation, `reference_id` = the **operation**, mapped back to its work order here). All three collapse
 > into the same per-`(work order, component part, lot)` lines, so a nest that consumed sheets and a
 > BOM that backflushed hardware read identically. Historical rows are **not** migrated — they
-> truthfully carry `work_order` only. Consequently `consumed_components` is non-empty when the
+> truthfully carry `work_order` only. **Expect more lines per component than before PR 4.4**: the
+> reconciling leg spills across lots, so one logical draw of 25 over lots of 10/10/10 is three lines
+> naming three heats. That is the intended as-built record — the single summed row it replaced could
+> not express which heats went into the part. Consequently `consumed_components` is non-empty when the
 > producing part had `backflush_components = true` **or** the work order carried material ties (see
 > Work Orders → "Material ties"); it stays empty for purchased/raw lots and for untied work on a part
 > that never opted into backflush. In practice **material ties are the only live source** — nothing in
 > the application writes `backflush_components`, so no work order has ever reached the BOM/routing
-> backflush leg (see [Part Schema](#part-schema)). The two `work_order`-family reference types are also what the lot
+> backflush leg (see [Part Schema](#part-schema)). All three `work_order`-family reference types are also what the lot
 > and serial traces use to collect `work_orders_used`.
 
 ### Shipping

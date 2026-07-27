@@ -28,8 +28,8 @@ not "reconcile" them into one number: that would break whichever surface lost.
 **This module is a PURE READ. It has no write path and must never grow one.**
 ``consume_tied_materials_for_work_order`` posts ISSUE rows, audit rows and shortage
 events; it is deliberately NOT imported here. Reads must not write (a queue poll is not
-an actor, has no intent and gives no reason), and the two constants this module *does*
-take from the engine -- ``AVAILABLE_ITEM_STATUS`` and ``CONSUMPTION_EPSILON`` -- are
+an actor, has no intent and gives no reason), and the two things this module *does* take
+from the engine -- ``CONSUMABLE_ITEM_CLAUSES`` and ``CONSUMPTION_EPSILON`` -- are
 imported precisely so the numbers shown here cannot drift from the numbers the engine
 acts on. Sharing the literal is the point; re-declaring it is the bug.
 
@@ -44,7 +44,8 @@ Scope: OPEN and OPERATION-scoped only
 * **Operation-scoped only.** A WORK-ORDER-scoped tie belongs to the whole job, so
   attaching it to operations would fan the same one tie across every card of that work
   order and read as N separate ties. Those ties also drain through a different mechanism
-  (the one-shot backflush), so per-operation numbers would be meaningless for them.
+  (leg 2 of the completion backflush, reconciled against ``qty_planned``), so
+  per-operation numbers would be meaningless for them.
 * **An untied operation gets NO KEY in the returned dict** -- not an empty list. Callers
   render nothing at all for it. That is the surface-level half of the feature's central
   invariant: a work order with no ties behaves exactly as it did before this feature
@@ -61,14 +62,14 @@ Scope: OPEN and OPERATION-scoped only
   the lot is held or inactive: consumption proceeds regardless (writing a
   ``HELD_MATERIAL_CONSUMED`` row), so this view reports what is physically there rather
   than zeroing it and inventing a shortage that will not happen.
-* **An UNPINNED tie is scored against the SAME predicate FIFO uses** --
-  ``is_active AND status = 'available' AND quantity_on_hand > 0``, mirroring
-  ``_fifo_source_items``. Anything looser promises stock FIFO will refuse to touch.
-  In particular a **NULL ``status`` deliberately does NOT match** ``= 'available'`` in
-  SQL, and that asymmetry is intentional, not a bug to fix here: ``is_consumable_item``
-  reads a NULL as available (the column default) while the FIFO SQL skips it, which is
-  the safe direction -- such a lot is passed over rather than silently consumed. This
-  view must show what the engine will actually draw from, so it follows the SQL.
+* **An UNPINNED tie is scored against the SAME predicate the engine draws with** --
+  ``CONSUMABLE_ITEM_CLAUSES`` splatted in, plus ``quantity_on_hand > 0``, exactly as
+  ``consumable_source_items`` filters. Anything looser promises stock the engine will
+  refuse to touch; anything tighter hides stock it WILL take. A **NULL ``status`` counts
+  as available** on both sides (``COALESCE(status, 'available')`` in SQL, ``status or
+  'available'`` in ``is_consumable_item``) -- the column has a Python-side default and no
+  ``server_default``, so treating NULL as held would hide legacy stock from the board and
+  from the operator alike.
 * A pinned lot that is missing, or that belongs to ANOTHER TENANT, yields ``0.0``. The
   aggregate is company-scoped (invariant #1): an on-hand rollup that sums another
   company's lots is a security defect wearing a display bug's clothes, and the failure
@@ -104,10 +105,12 @@ from app.models.inventory import InventoryItem
 from app.models.part import Part
 from app.models.work_order_material import AllocationStatus, WorkOrderMaterialAllocation
 
-# CONSTANTS ONLY -- never the engine's verbs. See the module docstring: this import is
-# what keeps the FIFO predicate and the float-comparison threshold shown to an operator
-# identical to the ones consumption acts on.
-from app.services.material_consumption_service import AVAILABLE_ITEM_STATUS, CONSUMPTION_EPSILON
+# CONSTANTS AND THE SHARED PREDICATE ONLY -- never the engine's verbs. See the module
+# docstring: this import is what keeps the consumable-lot predicate and the
+# float-comparison threshold shown to an operator identical to the ones consumption acts
+# on. ``CONSUMABLE_ITEM_CLAUSES`` is a tuple of WHERE clauses, not a verb; it can be
+# splatted into a query but it cannot write anything.
+from app.services.material_consumption_service import CONSUMABLE_ITEM_CLAUSES, CONSUMPTION_EPSILON
 
 # Discriminators for the two legs of the one inventory query. Needed because the legs
 # key on different id spaces -- an ``inventory_items.id`` and a ``parts.id`` of the same
@@ -276,8 +279,8 @@ def _on_hand_by_allocation(
     The two rules are genuinely different questions (module docstring): a PINNED tie is
     scored against its own lot's ``quantity_on_hand`` -- held or inactive included, since
     consumption will draw from it anyway -- while an UNPINNED tie is scored against the
-    sum over lots matching the FIFO predicate exactly, NULL ``status`` included in the
-    exclusion.
+    sum over lots matching ``CONSUMABLE_ITEM_CLAUSES`` exactly, which counts a NULL
+    ``status`` as available and excludes held / inactive lots.
 
     They are asked as two aggregate legs of one ``UNION ALL`` rather than two round
     trips, because this runs on a queue that polls every 10-15 seconds per station across
@@ -321,12 +324,16 @@ def _on_hand_by_allocation(
             .where(
                 InventoryItem.company_id == company_id,
                 InventoryItem.part_id.in_(unpinned_part_ids),
-                # The FIFO predicate, verbatim from ``_fifo_source_items``. A NULL
-                # ``status`` does not match ``= 'available'`` and is therefore excluded --
-                # kept, not "fixed": FIFO will not draw from such a lot either, and
-                # promising stock the engine refuses to touch is the worse error.
-                InventoryItem.is_active == True,  # noqa: E712
-                InventoryItem.status == AVAILABLE_ITEM_STATUS,
+                # THE consumable predicate, SPLATTED IN from the engine rather than
+                # re-declared. It used to be re-stated here verbatim with a comment
+                # arguing that excluding NULL-``status`` lots was "kept, not fixed"
+                # because FIFO would not draw from such a lot either. That rationale
+                # inverted the moment FIFO did: ``CONSUMABLE_ITEM_CLAUSES`` reads
+                # ``COALESCE(status, 'available')``, so a legacy NULL-status lot IS drawn,
+                # and a re-declared copy would now HIDE stock the engine will take --
+                # exactly the display-vs-engine drift this module's docstring exists to
+                # prevent. Sharing the clauses is the point; re-declaring them is the bug.
+                *CONSUMABLE_ITEM_CLAUSES,
                 InventoryItem.quantity_on_hand > 0,
             )
             .group_by(InventoryItem.part_id)

@@ -46,7 +46,12 @@ from sqlalchemy.orm import Session
 
 import app.services.completion_inventory_service as cis
 from app.core.security import create_access_token
-from app.db.ledger_filter import OPERATION_REFERENCE_TYPE, WORK_ORDER_REFERENCE_TYPE
+from app.db.ledger_filter import (
+    BACKFLUSH_REFERENCE_TYPE,
+    OPERATION_REFERENCE_TYPE,
+    WORK_ORDER_ID_KEYED_REFERENCE_TYPES,
+    WORK_ORDER_REFERENCE_TYPE,
+)
 from app.models.audit_log import AuditLog
 from app.models.bom import BOM, BOMItem
 from app.models.company import Company
@@ -336,17 +341,28 @@ def run_effects(db: Session, wo: WorkOrder, user: User, *, company_id: int = COM
 
 
 def wo_issues(db: Session, wo: WorkOrder, *, company_id: int = COMPANY_A) -> dict[int, float]:
-    """``{part_id: signed total}`` over this work order's WO-scoped ISSUE rows.
+    """``{part_id: signed total}`` over every work-order-KEYED component ISSUE row.
 
-    The backflush's own output shape: one ISSUE per (work order, part) under
-    ``reference_type='work_order'``, which is all ``uq_wo_inventory_issue`` permits.
+    Both work-order-id-keyed shapes, deliberately SUMMED rather than split:
+
+    * ``work_order_backflush`` -- what the reconciling leg writes since PR 4.4. It spills
+      across lots, so one logical draw is now N rows and a per-part TOTAL is the only
+      stable thing to assert;
+    * ``work_order`` -- LEGACY pre-4.4 one-shot rows. Nothing writes them any more, but
+      a fixture that hand-builds one (the legacy fence tests) must still be visible here,
+      and so must a would-be regression that started writing them again.
+
+    Summing is what lets every caller's assertion survive the shape change unedited: a
+    quantity that was ``{part: -8.0}`` under one row is still ``{part: -8.0}`` under two.
+    Row COUNT and ``allocation_id`` attribution are asserted directly, by the tests that
+    are about them, not through this helper.
     """
     totals: dict[int, float] = {}
     rows = (
         db.query(InventoryTransaction)
         .filter(
             InventoryTransaction.company_id == company_id,
-            InventoryTransaction.reference_type == WORK_ORDER_REFERENCE_TYPE,
+            InventoryTransaction.reference_type.in_(WORK_ORDER_ID_KEYED_REFERENCE_TYPES),
             InventoryTransaction.reference_id == wo.id,
             InventoryTransaction.transaction_type == TransactionType.ISSUE,
         )
@@ -404,7 +420,13 @@ def wo_audit_fingerprint(db: Session, wo: WorkOrder, *, company_id: int = COMPAN
 def wo_ledger_fingerprint(db: Session, wo: WorkOrder, *, company_id: int = COMPANY_A) -> list[tuple]:
     """The MOVEMENT this work order caused, normalized so two structurally identical
     work orders compare equal (identity — WO number, derived FG lot, own part id — is
-    replaced with placeholders; everything describing the movement is verbatim)."""
+    replaced with placeholders; everything describing the movement is verbatim).
+
+    It spans ALL THREE reference shapes. That matters most for the flag-off identity
+    test: a fingerprint that only knew the two pre-4.4 shapes would go BLIND to any
+    ``work_order_backflush`` row a regression started writing, and would then pass by
+    failing to look — the exact way an identity assertion decays into nothing.
+    """
     operation_ids = [
         row[0]
         for row in db.query(WorkOrderOperation.id)
@@ -420,7 +442,7 @@ def wo_ledger_fingerprint(db: Session, wo: WorkOrder, *, company_id: int = COMPA
         .filter(InventoryTransaction.company_id == company_id)
         .filter(
             (
-                (InventoryTransaction.reference_type == WORK_ORDER_REFERENCE_TYPE)
+                InventoryTransaction.reference_type.in_(WORK_ORDER_ID_KEYED_REFERENCE_TYPES)
                 & (InventoryTransaction.reference_id == wo.id)
             )
             | (
@@ -766,28 +788,32 @@ def test_a_fully_returned_tie_nets_to_zero_and_the_backflush_may_re_issue(client
     ], "and nothing historical was mutated to achieve it"
 
 
-def test_a_fully_returned_work_order_scoped_tie_leaves_its_part_un_issuable_but_RECORDED(
+def test_a_fully_returned_work_order_scoped_tie_posts_two_attributed_rows_and_never_redraws(
     client: TestClient, db_session: Session
 ):
-    """The asymmetric counterpart, and the harm is SILENCE — not a corrupted cache.
+    """REWRITE of ``..._leaves_its_part_un_issuable_but_RECORDED``: that behaviour is gone.
 
-    A work-order-scoped tie's ISSUE is written under ``reference_type='work_order'`` and
-    survives the return, so ``_component_already_issued`` keeps firing.
-    ``uq_wo_inventory_issue`` permits exactly ONE such row per (company, work order,
-    part), so a second issue is physically unavailable — netting the guard here would not
-    enable a re-issue, it would attempt one and lose to the index.
+    The named behaviour it locked — a work-order-scoped tie's ISSUE landing under
+    ``reference_type='work_order'``, surviving the return, and fencing its part out of
+    the backflush FOREVER via ``_component_already_issued`` — no longer exists for a
+    work order created after PR 4.4. The leg posts ``work_order_backflush``, which that
+    guard does not match, so the permanent-suppression case (and its
+    ``BACKFLUSH_DOUBLE_ISSUE_BLOCKED`` row) is now reachable only on a LEGACY work order
+    carrying a pre-4.4 row. That case is covered directly, on a hand-built legacy row, by
+    ``test_backflush_lot_policy.py::test_legacy_work_order_shape_row_fences_both_legs``.
 
-    The part therefore stays un-issuable on this work order — that half is not choosable.
-    What WAS choosable is whether it happens silently, and it no longer does: the skip now
-    writes a ``BACKFLUSH_DOUBLE_ISSUE_BLOCKED`` row carrying the suppressed quantity and
-    ``suppression_reason='already_issued'``. Recording the recoverable suppression (a tie
-    already drew the material) while staying silent on the PERMANENT one was exactly
-    backwards — an as-built review cannot reconstruct a decision nothing wrote down.
+    What replaces it here, on the SAME fixture and the SAME quantities:
 
-    The tie's ``qty_consumed`` is still NOT falsely advanced
-    (``_mark_work_order_ties_consumed`` is gated on ``IssueOutcome.posted``, never
-    reached), so the cache stays honest. The remedy remains an OPERATION-scoped tie, which
-    posts outside that index — the 409 on ``POST`` already says exactly that.
+    * The total is unchanged. **4 from the BOM + 4 from the tie is still −8** — asserted
+      first, so this rewrite cannot hide a quantity regression behind a shape change.
+    * It is now TWO rows, each walkable to its own origin: ``allocation_id IS NULL`` for
+      the BOM's demand, ``allocation_id == tie.id`` for the tie's. That is what makes the
+      two nets disjoint and the reconciliation per-demand-source.
+    * ``return_and_untie`` credits the tie's 4 back and CANCELs the tie in the same
+      transaction, so the next completion does not re-draw it — not because the ledger
+      fences it, but because there is no OPEN tie left to reconcile. The BOM's own
+      demand has converged (``target 4 − net 4 == 0``), so it posts nothing either, and
+      a converged replay is NOT a suppression: no blocked row is written.
     """
     supervisor = make_user(db_session, role=UserRole.SUPERVISOR)
     wc = make_work_center(db_session)
@@ -802,8 +828,40 @@ def test_a_fully_returned_work_order_scoped_tie_leaves_its_part_un_issuable_but_
 
     run_effects(db_session, wo, supervisor)
     db_session.expire_all()
-    assert wo_issues(db_session, wo) == {stock.id: -8.0}, "4 from the BOM + 4 from the tie, summed into one row"
+    assert wo_issues(db_session, wo) == {stock.id: -8.0}, "4 from the BOM + 4 from the tie — the TOTAL is unchanged"
     assert db_session.get(WorkOrderMaterialAllocation, allocation.id).qty_consumed == 4.0
+
+    def stock_issue_rows() -> list[InventoryTransaction]:
+        return (
+            db_session.query(InventoryTransaction)
+            .filter(
+                InventoryTransaction.company_id == COMPANY_A,
+                InventoryTransaction.reference_type == BACKFLUSH_REFERENCE_TYPE,
+                InventoryTransaction.reference_id == wo.id,
+                InventoryTransaction.part_id == stock.id,
+                InventoryTransaction.transaction_type == TransactionType.ISSUE,
+            )
+            .order_by(InventoryTransaction.id)
+            .all()
+        )
+
+    rows = stock_issue_rows()
+    assert len(rows) == 2
+    assert {(row.allocation_id, row.quantity) for row in rows} == {
+        (None, -4.0),
+        (allocation.id, -4.0),
+    }, "two rows, each attributable to its own demand source"
+    assert (
+        db_session.query(InventoryTransaction)
+        .filter(
+            InventoryTransaction.company_id == COMPANY_A,
+            InventoryTransaction.reference_type == WORK_ORDER_REFERENCE_TYPE,
+            InventoryTransaction.reference_id == wo.id,
+            InventoryTransaction.transaction_type == TransactionType.ISSUE,
+        )
+        .count()
+        == 0
+    ), "the legacy one-shot shape is never written again"
 
     returned = client.post(
         f"/api/v1/work-orders/{wo.id}/material-allocations/{allocation.id}/return",
@@ -813,35 +871,15 @@ def test_a_fully_returned_work_order_scoped_tie_leaves_its_part_un_issuable_but_
     assert returned.status_code == status.HTTP_200_OK, returned.text
     db_session.expire_all()
     assert db_session.get(WorkOrderMaterialAllocation, allocation.id).qty_consumed == 0.0
+    assert db_session.get(WorkOrderMaterialAllocation, allocation.id).status == AllocationStatus.CANCELLED
     assert on_hand(db_session, stock) == 46.0, "50 - 8 issued + 4 returned"
 
-    audit_before = db_session.query(AuditLog).count()
     run_effects(db_session, db_session.get(WorkOrder, wo.id), supervisor)
     db_session.expire_all()
 
-    issue_rows = (
-        db_session.query(InventoryTransaction)
-        .filter(
-            InventoryTransaction.company_id == COMPANY_A,
-            InventoryTransaction.reference_type == WORK_ORDER_REFERENCE_TYPE,
-            InventoryTransaction.reference_id == wo.id,
-            InventoryTransaction.part_id == stock.id,
-            InventoryTransaction.transaction_type == TransactionType.ISSUE,
-        )
-        .all()
-    )
-    assert len(issue_rows) == 1, "the index permits exactly one, and the return does not free it"
+    assert len(stock_issue_rows()) == 2, "no third ISSUE row: the tie is cancelled and the BOM has converged"
     assert on_hand(db_session, stock) == 46.0, "no second draw"
-
-    # The unmet demand is now ON THE RECORD rather than silent.
-    blocked = blocked_audit_rows(db_session)
-    assert len(blocked) == 1, "the permanent suppression must be recorded, not silent"
-    assert (blocked[0].extra_data or {}).get("suppression_reason") == "already_issued"
-    assert (blocked[0].extra_data or {}).get("component_part_id") == stock.id
-    assert db_session.query(AuditLog).count() > audit_before, "the unmet demand is written down"
-    assert (
-        db_session.get(WorkOrderMaterialAllocation, allocation.id).qty_consumed == 0.0
-    ), "and the cache is NOT falsely advanced — the issue loop never reached _issue_one_component"
+    assert blocked_audit_rows(db_session) == [], "a converged replay is not a suppression, so nothing is recorded"
 
 
 # ===========================================================================

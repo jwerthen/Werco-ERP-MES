@@ -145,7 +145,8 @@ but **only entries whose source is wired today actually fire**; the rest are **d
 (off by default), `op.ready` (off by default), `production.reduced`, `ncr.created`, `ncr.closed`
 (gated), `inspection.failed` (gated), `car.created`, `fai.created`, `fai.completed` (gated),
 `po.sent`, `receipt.created`, `receipt.voided`, `receipt.corrected`, `shipment.shipped`,
-`coc.generation_failed`, `downtime.started`, `downtime.resolved`, `material.allocation_shortage`.
+`coc.generation_failed`, `downtime.started`, `downtime.resolved`, `material.allocation_shortage`,
+`material.backflush_shortage`, `material.allocation_consumption_failed`, `material.backflush_failed`.
 
 **Direct-dispatch** (crons / MRP / scheduling call `dispatch_direct`):
 `calibration.due`, `wo.late`, `stock.low`, `quote.expiring` (the four recurring crons in
@@ -179,9 +180,89 @@ but **only entries whose source is wired today actually fire**; the rest are **d
 > Deliberately **distinct from `stock.low`**, which is cron-driven off reorder points and `recurring`;
 > this one fires at the moment of consumption and is not re-notify-suppressed, because each shortage
 > is a discrete event on a specific work order. It is also distinct from the older
-> **`backflush_shortage`** event, which has **no catalog entry** and therefore still notifies nobody
-> (the outbox tee ignores uncataloged event types by design — see above). Wiring that one up is an
-> open item, not something this entry covers.
+> **`backflush_shortage`** event — ~~which has **no catalog entry** and therefore still notifies
+> nobody~~ **wired up in PR 4.4; see the next entry.**
+
+> **`material.backflush_shortage` — added in PR 4.4 (material consumption, backflush lot policy).**
+> **What this closed is a silent drop, not a missing feature.** `BACKFLUSH_SHORTAGE_EVENT_TYPE =
+> "backflush_shortage"` has been **emitted since Batch 6** with **no catalog row**, and
+> `SOURCE_EVENT_TYPE_TO_KEY` ignores uncataloged event types by design — so a BOM/routing backflush
+> shortage was written to the tamper-evident audit chain and then notified to **nobody**, for four
+> PRs. This entry is the whole wiring; **the emit site is unchanged**.
+>
+> | Field | Value |
+> |-------|-------|
+> | `event_key` | `material.backflush_shortage` |
+> | `label` | Backflush material shortage |
+> | `category` | **Purchasing** |
+> | `severity` | **warning** |
+> | `default_channels` | `in_app` + `email` |
+> | `mandatory_channel` | none |
+> | `sms_eligible` | `false` |
+> | `recurring` | `false` |
+> | Recipients | departments **Purchasing** + **Inventory** (no role spec) |
+> | `source_event_types` | `("backflush_shortage",)` — outbox-driven |
+>
+> Placed immediately after `material.allocation_shortage` and mirroring it exactly. **Two keys rather
+> than one, deliberately:** same moment (consumption), different engine — that one fires from the
+> operation-scoped tie engine (`material_consumption_service`), this one from the work-order
+> completion backflush (`completion_inventory_service`). Distinct keys let an operator tell a
+> tied-material shortage from a BOM shortage at a glance, and let the settings matrix gate them
+> independently. The audit action strings (`ALLOCATION_SHORTAGE` / `BACKFLUSH_SHORTAGE`) were already
+> split for the same reason.
+>
+> **What emits it.** `services/completion_inventory_service.py::_record_backflush_shortage`, when a
+> completing work order's component demand cannot be covered by stock. The lot is driven negative, a
+> tamper-evident `BACKFLUSH_SHORTAGE` `audit_log` row is written — **that row, not the notification,
+> is the compliance record** — and the event is emitted **best-effort**, so a signal failure can never
+> fail an in-flight completion. The shortage never blocks production.
+>
+> **Two PR 4.4 changes affect what the payload means.** (1) The shortfall is now computed against the
+> lots the draw **actually walked**, closing a defect where a multi-lot component could be driven
+> deeply negative with **no** shortage row and **no** event at all — so this key firing *more* often
+> than the old code would have is the fix working, not a regression. (2) The audit row now discloses
+> **why the rest of the stock was not drawn**: on an unpinned draw, the segregated stock the predicate
+> passed over (`held_quantity_skipped` / `held_lot_numbers`), so a shortage is never reported bare
+> against material physically on the rack; on a **pinned** draw, the pin itself (`pinned_lot`), because
+> there the pin — not any lot's status — is the constraint. The two clauses are mutually exclusive.
+> Neither reaches the notification body (see the CUI rule below): the body is machine-composed from the
+> catalog label plus one allowlisted identifier, so lot numbers never leave the audit row and the event
+> payload.
+>
+> **Dormant in practice, and say so.** The BOM/routing half of that leg is gated on
+> `Part.backflush_components`, which has **no writer anywhere in `app/`** — so today this key can only
+> fire from the **work-order-scoped material tie** half of the same leg. It becomes broadly reachable
+> when PR 4.5 exposes the flag. See `docs/MATERIAL_CONSUMPTION_PLAN.md` → "The reconciling backflush
+> and one lot policy (PR 4.4)".
+
+> **`material.allocation_consumption_failed` and `material.backflush_failed` — added in PR 4.4, and
+> they exist because the SHORTAGE keys above would otherwise have been unreachable on some
+> deployments.** These are the **degraded siblings** of the two shortage keys: same engines, same
+> moment, but the draw **raised and was rolled back to its savepoint**, so *nothing moved at all*.
+>
+> | Field | `material.allocation_consumption_failed` | `material.backflush_failed` |
+> |-------|------------------------------------------|------------------------------|
+> | `label` | Tied material consumption failed | Backflush consumption failed |
+> | `category` | **Purchasing** | **Purchasing** |
+> | `severity` | **warning** | **warning** |
+> | `default_channels` | `in_app` + `email` | `in_app` + `email` |
+> | `sms_eligible` / `recurring` | `false` / `false` | `false` / `false` |
+> | Recipients | departments **Purchasing** + **Inventory** | same |
+> | `source_event_types` | `("material_allocation_consumption_failed",)` | `("backflush_component_failed",)` |
+> | Emitted by | `material_consumption_service::_record_consumption_failed` | `completion_inventory_service::_record_backflush_component_failed` |
+> | Audit twin | `ALLOCATION_CONSUMPTION_FAILED` (`success=false`) | `BACKFLUSH_COMPONENT_FAILED` (`success=false`) |
+>
+> **Why they are not optional tidying.** The audit rows alone made the degraded path strictly
+> **quieter** than the lesser condition it degrades from — a shortage still moves stock and still
+> notifies, while "the draw rolled back, so stock was never depleted" reached nobody. That is the worse
+> material-trail gap, and it is not a corner case: on a database where
+> `chk_inventory_items_quantity_non_negative` is live, **every** shortage arrives here instead, so
+> `material.backflush_shortage` — PR 4.4's headline signal — would be exactly the key that never fires.
+> Kept **separately keyed** from the shortage pair so an operator can tell "stock went negative" from
+> "stock never moved" without opening the audit log, and so the settings matrix can gate them
+> independently. Both emit **best-effort** on the post-rollback outer transaction, so a signal failure
+> can never fail an in-flight completion, and the `audit_log` row — not the notification — remains the
+> compliance record.
 
 **Direct bridge**: `visitor.check_in` — the visitor sign-in host notification. Sign-in is a sync
 request path, so `visitor_log_service._notify_host_best_effort` hands off to

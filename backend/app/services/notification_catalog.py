@@ -619,6 +619,65 @@ _ENTRIES: List[CatalogEntry] = [
         departments=("Purchasing", "Inventory"),
     ),
     CatalogEntry(
+        event_key="material.backflush_shortage",
+        label="Backflush material shortage",
+        description=(
+            "Backflushing a completed work order's components drove a source lot negative — "
+            "the job was completed, but stock did not cover its bill of material."
+        ),
+        category=Category.PURCHASING,
+        severity="warning",
+        default_channels=frozenset({CHANNEL_IN_APP, CHANNEL_EMAIL}),
+        # Sibling of ``material.allocation_shortage``: same moment (consumption), different
+        # engine. That one fires from the operation-scoped tie engine; this one from the
+        # work-order completion backflush (``completion_inventory_service``). Distinct keys
+        # so an operator can tell a tied-material shortage from a BOM shortage, and so the
+        # settings matrix can gate them independently.
+        #
+        # ``backflush_shortage`` has been EMITTED since Batch 6 with no catalog row, so
+        # the outbox has been silently dropping it. This entry is the whole wiring; the
+        # emit site is unchanged.
+        source_event_types=("backflush_shortage",),
+        departments=("Purchasing", "Inventory"),
+    ),
+    CatalogEntry(
+        event_key="material.allocation_consumption_failed",
+        label="Tied material consumption failed",
+        description=(
+            "Consuming material tied to a work order raised and was rolled back — "
+            "production was recorded, but the tied stock was NOT depleted."
+        ),
+        category=Category.PURCHASING,
+        severity="warning",
+        default_channels=frozenset({CHANNEL_IN_APP, CHANNEL_EMAIL}),
+        # The DEGRADED sibling of ``material.allocation_shortage``, and it must not be
+        # quieter than the condition it degrades from. A shortage still moves stock (a lot
+        # goes negative) and notifies; this is "nothing moved at all", which is the worse
+        # material-trail gap. Where ``chk_inventory_items_quantity_non_negative`` is live,
+        # every shortage becomes THIS -- so without an entry here that deployment gets no
+        # consumption notification whatsoever.
+        source_event_types=("material_allocation_consumption_failed",),
+        departments=("Purchasing", "Inventory"),
+    ),
+    CatalogEntry(
+        event_key="material.backflush_failed",
+        label="Backflush consumption failed",
+        description=(
+            "Backflushing a completed work order's components raised and was rolled back — "
+            "the job was completed, but that component's stock was NOT depleted."
+        ),
+        category=Category.PURCHASING,
+        severity="warning",
+        default_channels=frozenset({CHANNEL_IN_APP, CHANNEL_EMAIL}),
+        # Same relationship to ``material.backflush_shortage`` that
+        # ``material.allocation_consumption_failed`` has to
+        # ``material.allocation_shortage``: the rolled-back case, kept separately keyed so
+        # an operator can tell "stock went negative" from "stock never moved" without
+        # opening the audit log, and so the settings matrix can gate them independently.
+        source_event_types=("backflush_component_failed",),
+        departments=("Purchasing", "Inventory"),
+    ),
+    CatalogEntry(
         event_key="mrp.expedite_required",
         label="Expedite required",
         description="MRP flagged a part that must be expedited.",

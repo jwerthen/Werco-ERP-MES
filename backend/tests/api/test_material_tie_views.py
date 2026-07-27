@@ -13,9 +13,11 @@ What is pinned here:
    against the ledger, the audit chain and ``qty_consumed``.
 2. **``on_hand`` answers two different questions.** A PINNED tie scores against THAT LOT
    ALONE (held/inactive included -- consumption will draw from it regardless); an
-   UNPINNED tie sums the lots matching the FIFO predicate verbatim, which deliberately
-   EXCLUDES a NULL ``status`` because ``status = 'available'`` does not match NULL in
-   SQL and FIFO will not draw from such a lot either.
+   UNPINNED tie sums the lots matching ``CONSUMABLE_ITEM_CLAUSES``, IMPORTED from the
+   engine rather than re-declared, so the number shown can never promise stock the
+   engine refuses to touch nor hide stock it will take. Since PR 4.4 that predicate
+   reads a NULL ``status`` as available (``COALESCE(status, 'available')``), matching
+   ``is_consumable_item``; held / inactive lots stay excluded.
 3. **OPEN and OPERATION-scoped only.** ``CLOSED`` is never written by any code in
    ``app/``, so "fully consumed" is derived from the quantities and never from status --
    while "live" is the opposite and the ``OPEN`` filter is spelled out, because a
@@ -286,8 +288,9 @@ def test_closed_tie_is_excluded_too(db_session: Session):
 
 def test_work_order_scoped_tie_is_excluded(db_session: Session):
     """A work-order-scoped tie belongs to the whole job and drains through the
-    one-shot backflush; hanging it on operations would fan one tie across every
-    card of that work order and read as N separate ties."""
+    completion backflush's own tie leg (reconciled against ``qty_planned``);
+    hanging it on operations would fan one tie across every card of that work
+    order and read as N separate ties."""
     operation = make_operation(db_session)
     part = make_part(db_session)
     make_lot(db_session, part, qty=50.0)
@@ -383,8 +386,12 @@ def test_duplicate_operation_ids_do_not_duplicate_rows(db_session: Session):
 
 
 def test_unpinned_tie_sums_only_fifo_eligible_lots(db_session: Session):
-    """The predicate is ``_fifo_source_items`` verbatim: active AND available AND
-    on-hand > 0. Anything looser promises stock FIFO will refuse to touch."""
+    """The predicate is ``CONSUMABLE_ITEM_CLAUSES`` verbatim — the engine's own,
+    IMPORTED rather than restated: active AND ``COALESCE(status, 'available') =
+    'available'``, plus on-hand > 0. Anything looser promises stock
+    ``consumable_source_items`` will refuse to touch; anything tighter hides stock
+    it will take (see the NULL-status test below, which is the case that was
+    wrong while this module re-declared the predicate)."""
     operation = make_operation(db_session)
     part = make_part(db_session)
     make_lot(db_session, part, qty=4.0)  # counted
@@ -402,29 +409,35 @@ def test_unpinned_tie_sums_only_fifo_eligible_lots(db_session: Session):
     assert view.short_by == 10.0
 
 
-def test_null_status_lot_stays_excluded_from_the_unpinned_sum(db_session: Session):
-    """A legacy NULL ``status`` does NOT match ``= 'available'`` in SQL, and that
-    asymmetry is intentional rather than a bug to fix here.
+def test_null_status_lot_is_counted_in_the_unpinned_sum_because_the_engine_draws_it(db_session: Session):
+    """REWRITE of ``test_null_status_lot_stays_excluded_from_the_unpinned_sum``.
 
-    ``is_consumable_item`` reads a NULL as available (the column default) while the
-    FIFO *query* skips it -- so such a lot is passed over rather than silently
-    consumed. This view must show what the engine will actually DRAW FROM, so it
-    follows the SQL. The positive control alongside proves the exclusion is the
-    status predicate and not a broken fixture.
+    That test locked an EXCLUSION whose stated rationale was "FIFO will not draw from
+    such a lot either" — true only while this module re-declared ``status = 'available'``
+    verbatim. PR 4.4 makes the engine's predicate ``COALESCE(status, 'available')``, so
+    FIFO now DOES draw from a legacy NULL-status lot, and the rule the exclusion existed
+    to serve — never promise stock the engine refuses to touch, never hide stock it will
+    take — inverts the answer.
+
+    The rule is what this test locks, not the answer: the clauses are now IMPORTED from
+    the engine (``CONSUMABLE_ITEM_CLAUSES``) rather than restated, so display and engine
+    cannot drift again. A ``quarantine`` lot is the negative control, proving the count
+    comes from the predicate and not from the predicate having been dropped.
     """
     operation = make_operation(db_session)
     part = make_part(db_session)
     make_lot(db_session, part, qty=7.0)  # available -- the positive control
     null_status = make_lot(db_session, part, qty=93.0)
     null_status.status = None
+    make_lot(db_session, part, qty=500.0, status="quarantine")  # the negative control
     db_session.commit()
     make_tie(db_session, operation, part, qty_planned=50.0)
 
     [view] = tie_views_for_operations(db_session, company_id=COMPANY_A, operation_ids=[operation.id])[operation.id]
 
     assert db_session.get(InventoryItem, null_status.id).status is None, "the fixture must really be NULL"
-    assert view.on_hand == 7.0
-    assert view.short_by == 43.0
+    assert view.on_hand == 100.0, "7 available + 93 NULL-status; the quarantined 500 is still excluded"
+    assert view.short_by == 0.0
 
 
 def test_unpinned_sum_never_reaches_across_tenants(db_session: Session):

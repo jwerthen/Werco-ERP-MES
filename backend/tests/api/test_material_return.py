@@ -51,7 +51,11 @@ from sqlalchemy import and_, or_, text
 from sqlalchemy.orm import Session
 
 from app.core.security import create_access_token
-from app.db.ledger_filter import OPERATION_REFERENCE_TYPE
+from app.db.ledger_filter import (
+    BACKFLUSH_REFERENCE_TYPE,
+    OPERATION_REFERENCE_TYPE,
+    WORK_ORDER_ID_KEYED_REFERENCE_TYPES,
+)
 from app.models.audit_log import AuditLog
 from app.models.company import Company
 from app.models.inventory import InventoryItem, InventoryTransaction, TransactionType
@@ -428,7 +432,12 @@ def ledger_fingerprint(db: Session, *, company_id: int = COMPANY_A) -> list[tupl
 
 
 def wo_ledger_rows(db: Session, wo: WorkOrder, *, company_id: int = COMPANY_A) -> list[InventoryTransaction]:
-    """EVERY ledger row belonging to one work order, under BOTH reference shapes."""
+    """EVERY ledger row belonging to one work order, under ALL THREE reference shapes.
+
+    ``work_order`` (FG receipt + legacy one-shot rows), ``work_order_backflush`` (the
+    reconciling component leg, which a work-order-scoped tie's RETURN now mirrors) and
+    ``work_order_operation`` (per-run tie consumption and its returns).
+    """
     operation_ids = [
         row[0]
         for row in db.query(WorkOrderOperation.id)
@@ -441,7 +450,7 @@ def wo_ledger_rows(db: Session, wo: WorkOrder, *, company_id: int = COMPANY_A) -
             InventoryTransaction.company_id == company_id,
             or_(
                 and_(
-                    InventoryTransaction.reference_type == "work_order",
+                    InventoryTransaction.reference_type.in_(WORK_ORDER_ID_KEYED_REFERENCE_TYPES),
                     InventoryTransaction.reference_id == wo.id,
                 ),
                 and_(
@@ -646,10 +655,16 @@ def test_correction_past_the_live_bound_is_422_and_names_return_and_untie(client
 def test_a_work_order_scoped_tie_is_bounded_by_its_plan(client: TestClient, db_session: Session):
     """A work-order-scoped tie's live target is ``qty_planned``, not a run count.
 
-    Its one-shot demand is ``qty_planned - qty_consumed``, so leaving ``qty_consumed``
-    below the plan re-arms the backflush. A tie drained exactly to plan therefore has a
-    ZERO correction allowance and ``return_and_untie`` is its only way back — the
+    Since PR 4.4 the backflush's tie leg reconciles that target directly
+    (``delta = qty_planned - net_consumed_quantity_for_allocation``), so leaving
+    ``qty_consumed`` below the plan re-arms it. A tie drained exactly to plan therefore
+    has a ZERO correction allowance and ``return_and_untie`` is its only way back — the
     documented consequence, pinned so nobody "relaxes" it.
+
+    The hand-built ISSUE standing in for that drain now carries the shape the leg really
+    writes (``work_order_backflush``), and the compensating RETURN must mirror it: a
+    return that landed under the legacy ``work_order`` shape would put a credit inside
+    ``uq_wo_inventory_issue``'s neighbourhood for a tie that never wrote a row there.
     """
     supervisor = make_user(db_session, role=UserRole.SUPERVISOR)
     sheet = make_sheet(db_session)
@@ -657,7 +672,7 @@ def test_a_work_order_scoped_tie_is_bounded_by_its_plan(client: TestClient, db_s
     wo = make_wo(db_session, make_part(db_session), quantity_ordered=4)
     allocation = tie(db_session, wo, sheet, operation=None, qty_planned=4.0, qty_consumed=4.0)
 
-    # A hand-built ISSUE standing in for the one-shot backflush drain.
+    # A hand-built ISSUE standing in for leg 2's drain, in the shape that leg really writes.
     db_session.add(
         InventoryTransaction(
             company_id=COMPANY_A,
@@ -667,7 +682,7 @@ def test_a_work_order_scoped_tie_is_bounded_by_its_plan(client: TestClient, db_s
             quantity=-4.0,
             from_location=lot.location,
             lot_number=lot.lot_number,
-            reference_type="work_order",
+            reference_type=BACKFLUSH_REFERENCE_TYPE,
             reference_id=wo.id,
             reference_number=wo.work_order_number,
             allocation_id=allocation.id,
@@ -690,8 +705,8 @@ def test_a_work_order_scoped_tie_is_bounded_by_its_plan(client: TestClient, db_s
     # The compensating row mirrors the ISSUE's work-order reference shape.
     rows = allocation_ledger(db_session, allocation)
     assert [(r.transaction_type.value, r.reference_type, r.reference_id) for r in rows] == [
-        ("issue", "work_order", wo.id),
-        ("return", "work_order", wo.id),
+        ("issue", BACKFLUSH_REFERENCE_TYPE, wo.id),
+        ("return", BACKFLUSH_REFERENCE_TYPE, wo.id),
     ]
 
 

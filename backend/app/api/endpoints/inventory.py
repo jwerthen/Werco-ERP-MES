@@ -1380,15 +1380,18 @@ def list_transactions(
     if work_order_id is not None:
         # Convenience filter: "everything this work order consumed/produced".
         #
-        # Three shapes exist in the ledger:
+        # Four shapes exist in the ledger:
         #   1. reference_type='work_order' + reference_id=<wo.id>
-        #      (FG receipt, one-shot backflush, work-order-scoped tie consumption)
+        #      (FG receipt; plus LEGACY pre-PR-4.4 one-shot component ISSUE rows)
+        #   1b. reference_type='work_order_backflush' + reference_id=<wo.id>
+        #      (the reconciling component leg: BOM/routing demand and work-order-scoped
+        #       ties, spilling across as many lots as the demand needs)
         #   2. reference_type='work_order_operation' + reference_id=<operation.id>
         #      (per-run consumption of operation-tied material)
         #   3. reference_type='work_order' + reference_number=<wo.work_order_number>,
         #      reference_id NULL                                   (POST /inventory/issue)
         #
-        # Shapes 1 and 2 are the SHARED ``work_order_ledger_filter`` — the same predicate
+        # Shapes 1, 1b and 2 are the SHARED ``work_order_ledger_filter`` — the same predicate
         # job costing, analytics and lot genealogy use, so this list can never disagree
         # with the cost of the job it is listing. Shape 3 has no id at all and stays a
         # local reference_number clause. The work-order number is resolved tenant-scoped;

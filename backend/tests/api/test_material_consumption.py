@@ -12,7 +12,9 @@ Also covered:
 - scrap consumes, posted as ISSUE (never SCRAP) so genealogy still sees it
 - never auto-reverse on a negative delta (the reduce-over-count case)
 - backflush skip-precedence (no double-issue for an allocation-covered part)
-- WO-scoped ties merged into the ONE backflush ISSUE uq_wo_inventory_issue allows
+- WO-scoped ties and BOM demand posting as SEPARATE attributed rows under
+  reference_type='work_order_backflush' (PR 4.4 — they used to be summed into the one
+  ISSUE uq_wo_inventory_issue allowed; the TOTAL is unchanged)
 - quantity_available stays == quantity_on_hand - quantity_allocated
 - FIFO spill across lots + lot pinning
 - shortage: negative on-hand, ALLOCATION_SHORTAGE audit row, warning event
@@ -31,7 +33,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.security import create_access_token
-from app.db.ledger_filter import OPERATION_REFERENCE_TYPE
+from app.db.ledger_filter import (
+    BACKFLUSH_REFERENCE_TYPE,
+    OPERATION_REFERENCE_TYPE,
+    WORK_ORDER_ID_KEYED_REFERENCE_TYPES,
+    WORK_ORDER_REFERENCE_TYPE,
+)
 from app.models.audit_log import AuditLog
 from app.models.bom import BOM, BOMItem
 from app.models.company import Company
@@ -45,7 +52,10 @@ from app.models.work_order_material import AllocationSource, AllocationStatus, W
 from app.services.analytics_service import AnalyticsService
 from app.services.audit_service import AuditService
 from app.services.completion_cost_service import _issued_material_cost
-from app.services.completion_inventory_service import apply_completion_inventory_effects
+from app.services.completion_inventory_service import (
+    BACKFLUSH_SHORTAGE_AUDIT_ACTION,
+    apply_completion_inventory_effects,
+)
 from app.services.material_consumption_service import (
     ALLOCATION_CONSUMPTION_FAILED_AUDIT_ACTION,
     ALLOCATION_SHORTAGE_AUDIT_ACTION,
@@ -313,7 +323,15 @@ def all_txn_fingerprints(db: Session, *, company_id: int = COMPANY_A) -> list[tu
 
 
 def work_order_ledger_rows(db: Session, wo: WorkOrder, *, company_id: int = COMPANY_A) -> list[InventoryTransaction]:
-    """EVERY ledger row belonging to one work order, under BOTH reference types."""
+    """EVERY ledger row belonging to one work order, under ALL THREE reference shapes.
+
+    ``work_order`` (FG receipt + legacy one-shot rows), ``work_order_backflush`` (the
+    reconciling component leg) and ``work_order_operation`` (per-run tie consumption).
+    The backflush shape is here for the sake of the invariant-6(d) fingerprint below: a
+    reader that knew only the two pre-4.4 shapes would go BLIND to a
+    ``work_order_backflush`` row a regression started writing on an untied work order,
+    and would then pass by failing to look.
+    """
     operation_ids = [
         row[0]
         for row in db.query(WorkOrderOperation.id)
@@ -326,7 +344,7 @@ def work_order_ledger_rows(db: Session, wo: WorkOrder, *, company_id: int = COMP
             InventoryTransaction.company_id == company_id,
             or_(
                 and_(
-                    InventoryTransaction.reference_type == "work_order",
+                    InventoryTransaction.reference_type.in_(WORK_ORDER_ID_KEYED_REFERENCE_TYPES),
                     InventoryTransaction.reference_id == wo.id,
                 ),
                 and_(
@@ -1060,8 +1078,22 @@ def test_backflush_still_issues_uncovered_bom_components(db_session: Session):
     assert [t.quantity for t in consumption_txns(db_session, op.id)] == [-3]
 
 
-def test_work_order_scoped_tie_merges_into_one_issue_row(db_session: Session):
-    """A WO-scoped tie sums with BOM demand into the ONE ISSUE the index permits."""
+def test_bom_and_tie_post_separate_attributed_rows(db_session: Session):
+    """REWRITE of ``test_work_order_scoped_tie_merges_into_one_issue_row``.
+
+    The merge existed ONLY because ``uq_wo_inventory_issue`` permitted a single ISSUE
+    row per (company, work order, part), and it was arithmetically wrong under
+    reconciliation: BOM demand is an absolute target while tie demand was a remainder, so
+    summing them and subtracting one net double-counts the tie forever. The reconciling
+    leg posts outside that index, so the two demand sources get their own rows.
+
+    **The TOTAL is asserted first and is unchanged — 10 from the BOM + 7 from the tie is
+    still 17, and the source lot still ends at 83.** That is deliberate: a rewrite of a
+    quantity test must not be able to hide a quantity regression behind a shape change.
+    What changed is attribution — ``allocation_id IS NULL`` on the BOM's row and the tie's
+    own id on the tie's row, which is exactly what keeps the two nets disjoint — and that
+    the tie's LOT PIN would now govern the tie's quantity rather than the whole sum.
+    """
     user = make_user(db_session)
     fg = make_part(db_session, backflush=True)
     stock = make_part(db_session, part_type="purchased")
@@ -1079,16 +1111,27 @@ def test_work_order_scoped_tie_merges_into_one_issue_row(db_session: Session):
         db_session.query(InventoryTransaction)
         .filter(
             InventoryTransaction.company_id == COMPANY_A,
-            InventoryTransaction.reference_type == "work_order",
+            InventoryTransaction.reference_type == BACKFLUSH_REFERENCE_TYPE,
             InventoryTransaction.reference_id == wo.id,
             InventoryTransaction.transaction_type == TransactionType.ISSUE,
             InventoryTransaction.part_id == stock.id,
         )
         .all()
     )
-    assert len(issues) == 1, "uq_wo_inventory_issue permits exactly one ISSUE per (WO, part)"
-    assert issues[0].quantity == -17, "10 from the BOM + 7 from the tie, summed"
-    assert issues[0].allocation_id == allocation.id
+    assert sum(t.quantity for t in issues) == -17, "10 from the BOM + 7 from the tie — the total is unchanged"
+    assert len(issues) == 2, "one row per demand source, not one merged row"
+    assert {(t.allocation_id, t.quantity) for t in issues} == {(None, -10.0), (allocation.id, -7.0)}
+    assert (
+        db_session.query(InventoryTransaction)
+        .filter(
+            InventoryTransaction.company_id == COMPANY_A,
+            InventoryTransaction.reference_type == WORK_ORDER_REFERENCE_TYPE,
+            InventoryTransaction.reference_id == wo.id,
+            InventoryTransaction.transaction_type == TransactionType.ISSUE,
+        )
+        .count()
+        == 0
+    ), "and nothing is written under the legacy one-shot shape"
     db_session.refresh(lot)
     assert lot.quantity_on_hand == 83
     db_session.refresh(allocation)
@@ -1125,7 +1168,7 @@ def test_backflush_is_not_suppressed_by_a_tie_to_a_foreign_operation(db_session:
         db_session.query(InventoryTransaction)
         .filter(
             InventoryTransaction.company_id == COMPANY_A,
-            InventoryTransaction.reference_type == "work_order",
+            InventoryTransaction.reference_type == BACKFLUSH_REFERENCE_TYPE,
             InventoryTransaction.reference_id == wo.id,
             InventoryTransaction.transaction_type == TransactionType.ISSUE,
             InventoryTransaction.part_id == sheet.id,
@@ -1245,11 +1288,16 @@ def test_material_cost_never_reaches_across_tenants(db_session: Session):
 
 
 def test_work_order_scoped_tie_consumption_is_audited(db_session: Session):
-    """``qty_consumed`` 0 -> planned on a WO-scoped tie is a state change: audit it.
+    """``qty_consumed`` 0 -> its ledger net on a WO-scoped tie is a state change: audit it.
 
     It is the field the untie guard keys on (409 once anything is consumed), so an
     unaudited write here changes what a later verb refuses with nothing on the chain
     saying why. The operation-scoped twin already audited it; this is the asymmetry.
+
+    Since PR 4.4 the value written is the tie's OWN signed ledger net rather than
+    ``qty_planned`` — here they coincide (the draw covered the plan), which is the point:
+    cache == net by construction. The chain row's ``reference_type`` follows the shape
+    the movement actually posted under.
     """
     user = make_user(db_session)
     fg = make_part(db_session)
@@ -1277,7 +1325,7 @@ def test_work_order_scoped_tie_consumption_is_audited(db_session: Session):
     assert row.old_values["qty_consumed"] == 0
     assert row.new_values["qty_consumed"] == 6
     assert row.extra_data["work_order_id"] == wo.id
-    assert row.extra_data["reference_type"] == "work_order"
+    assert row.extra_data["reference_type"] == BACKFLUSH_REFERENCE_TYPE
     assert row.extra_data["allocation_id"] == allocation.id
     assert row.integrity_hash and row.sequence_number is not None
 
@@ -1355,18 +1403,23 @@ def test_failed_consumption_is_recorded_on_the_chain(db_session: Session, monkey
 
 
 def test_failure_after_the_inner_savepoint_opened_leaves_the_caller_committable(db_session: Session, monkeypatch):
-    """Fail AFTER the ledger INSERT's savepoint is open — the caller must still commit.
+    """Fail AFTER the ledger INSERT landed, with a deeper savepoint still open.
 
-    ``_insert_txn_with_savepoint`` opens ``db.begin_nested()`` and, on SUCCESS, returns
-    WITHOUT closing it, so a raise anywhere later in ``_consume_one_allocation`` unwinds a
-    savepoint stack two deep. The test above patches ``_post_consumption_txn`` wholesale,
-    which raises BEFORE that inner savepoint ever opens — so the only shape that can
-    actually poison the caller's unit of work (an inner savepoint still open when the
-    per-allocation one rolls back) went unexercised.
+    **The seam this test patched moved in PR 4.4 and the test moved with it rather than
+    being deleted.** It used to wrap ``_insert_txn_with_savepoint``, which opens
+    ``db.begin_nested()`` and on SUCCESS returns WITHOUT closing it — so a later raise
+    unwound a savepoint stack two deep, the only shape that can actually poison the
+    caller's unit of work. This leg no longer takes that path at all: it posts with
+    ``duplicate_is_noop=False`` (no unique index has ever covered
+    ``work_order_operation``, so an ``IntegrityError`` here is a real fault, not a lost
+    race), which inserts plainly. Left alone, the patch would simply never fire and the
+    test would pass by testing nothing.
 
-    The wrapper calls the REAL helper first, so the INSERT genuinely lands and the inner
-    savepoint is genuinely open before the raise. That is asserted, so this test cannot
-    quietly decay back into the same before-the-savepoint case it exists to cover.
+    So the wrapper now sits on ``_post_stock_movement_txn``: it calls the REAL helper
+    first — the INSERT, the decrement and the dual audit rows all genuinely land — then
+    opens a nested savepoint of its own to reconstruct the exact stack the old helper
+    left behind, and raises inside it. Both facts are asserted, so this cannot quietly
+    decay into the shallow before-the-savepoint case the test above already covers.
     """
     import app.services.completion_inventory_service as cis
 
@@ -1378,21 +1431,22 @@ def test_failure_after_the_inner_savepoint_opened_leaves_the_caller_committable(
     op = make_op(db_session, wo, make_work_center(db_session), quantity_complete=3)
     allocation = make_allocation(db_session, wo, sheet, operation=op, qty_per_run=1.0, qty_planned=3)
 
-    real_insert = cis._insert_txn_with_savepoint
-    opened: list[bool] = []
+    real_post = cis._post_stock_movement_txn
+    posted: list[object] = []
 
-    def _insert_then_explode(db, txn):
-        opened.append(real_insert(db, txn))
-        raise RuntimeError("failed with the inner savepoint still open")
+    def _post_then_explode(db, **kwargs):
+        posted.append(real_post(db, **kwargs))
+        db.begin_nested()  # the stack _insert_txn_with_savepoint used to leave open
+        raise RuntimeError("failed with a deeper savepoint still open")
 
-    monkeypatch.setattr(cis, "_insert_txn_with_savepoint", _insert_then_explode)
+    monkeypatch.setattr(cis, "_post_stock_movement_txn", _post_then_explode)
 
     audit = AuditService(db_session, user)
     result = consume_tied_materials_for_work_order(db_session, wo, user_id=user.id, company_id=COMPANY_A, audit=audit)
     # A session poisoned by the deeper rollback raises PendingRollbackError here.
     db_session.commit()
 
-    assert opened == [True], "the INSERT must have landed, or the inner savepoint never opened"
+    assert len(posted) == 1 and posted[0] is not None, "the INSERT must have landed before the raise"
     assert result.failed_allocation_ids == [allocation.id]
     assert result.transactions == []
 
@@ -1912,48 +1966,94 @@ def test_post_qty_per_run_on_a_work_order_scoped_tie_is_422(client: TestClient, 
     assert patch_resp.json()["detail"] == resp.json()["detail"]
 
 
-def test_work_order_scoped_tie_on_an_already_issued_part_is_409(client: TestClient, db_session: Session):
-    """Such a tie could never consume — refuse it instead of creating a silent lie.
+def test_work_order_scoped_tie_is_409_only_on_a_LEGACY_one_shot_row(client: TestClient, db_session: Session):
+    """REWRITE of ``test_work_order_scoped_tie_on_an_already_issued_part_is_409``.
 
-    The one-shot backflush skips a component that already has a WO ISSUE row, and
-    ``uq_wo_inventory_issue`` forbids the second one, so the tie would sit OPEN at
-    ``qty_consumed`` 0 forever — indistinguishable in the API from one that simply has
-    not consumed yet.
+    The guard is unchanged and still keys on ``reference_type='work_order'`` ISSUE rows.
+    What changed is WHAT CAN PRODUCE ONE: nothing does any more, so the refusal is now a
+    permanent LEGACY fence rather than the ordinary consequence of a backflush. Both
+    halves are asserted, because each on its own would be misleading:
+
+    * a hand-built pre-4.4 ``('work_order', ISSUE)`` row — the only shape that can now
+      reach it — still 409s, with the corrected wording and the remedy named;
+    * a REAL backflush no longer produces that state at all, so the same tie is
+      ACCEPTED (201) on a work order whose component left stock under the new shape.
+      Under the old engine this exact call was the 409.
     """
     admin = make_user(db_session)
     fg = make_part(db_session, backflush=True)
     stock = make_part(db_session, part_type="purchased")
-    make_inventory(db_session, stock, qty=100, lot="ALREADY-ISSUED")
+    lot = make_inventory(db_session, stock, qty=100, lot="ALREADY-ISSUED")
     _bom_with_component(db_session, fg, stock, qty=2.0)
 
-    wo = make_wo(db_session, fg, quantity_ordered=5, quantity_complete=5)
-    op = make_op(db_session, wo, make_work_center(db_session), quantity_complete=5)
-    run_effects(db_session, wo, admin)  # backflush issues the component
-    wo.status = WorkOrderStatus.IN_PROGRESS  # keep the terminal guard out of the way
+    legacy_wo = make_wo(db_session, fg, quantity_ordered=5, quantity_complete=5)
+    legacy_op = make_op(db_session, legacy_wo, make_work_center(db_session), quantity_complete=5)
+    db_session.add(
+        InventoryTransaction(
+            company_id=COMPANY_A,
+            inventory_item_id=lot.id,
+            part_id=stock.id,
+            transaction_type=TransactionType.ISSUE,
+            quantity=-10.0,
+            reference_type=WORK_ORDER_REFERENCE_TYPE,
+            reference_id=legacy_wo.id,
+            reference_number=legacy_wo.work_order_number,
+            unit_cost=2.0,
+            total_cost=20.0,
+            created_by=admin.id,
+        )
+    )
     db_session.commit()
 
     resp = client.post(
-        _tie_url(wo.id),
+        _tie_url(legacy_wo.id),
         json={"part_id": stock.id, "source": "manual", "qty_planned": 4},
         headers=headers_for(admin),
     )
     assert resp.status_code == status.HTTP_409_CONFLICT, resp.text
     detail = resp.json()["detail"]
-    assert "already issued" in detail
+    assert "one-time issue recorded" in detail
     assert "operation level" in detail, "the remedy must be named"
 
     # The operation-scoped form is the remedy, and it is still allowed.
     ok = client.post(
-        _tie_url(wo.id),
+        _tie_url(legacy_wo.id),
         json={
             "part_id": stock.id,
-            "work_order_operation_id": op.id,
+            "work_order_operation_id": legacy_op.id,
             "source": "manual",
             "qty_planned": 4,
         },
         headers=headers_for(admin),
     )
     assert ok.status_code == status.HTTP_201_CREATED, ok.text
+
+    # And the negative half: a work order the CURRENT engine backflushed writes
+    # ``work_order_backflush``, which this guard does not match, so the refusal it used
+    # to raise is now unreachable through any supported verb.
+    fresh_wo = make_wo(db_session, fg, quantity_ordered=5, quantity_complete=5)
+    make_op(db_session, fresh_wo, make_work_center(db_session), quantity_complete=5)
+    run_effects(db_session, fresh_wo, admin)
+    fresh_wo.status = WorkOrderStatus.IN_PROGRESS  # keep the terminal guard out of the way
+    db_session.commit()
+    assert (
+        db_session.query(InventoryTransaction)
+        .filter(
+            InventoryTransaction.company_id == COMPANY_A,
+            InventoryTransaction.reference_type == BACKFLUSH_REFERENCE_TYPE,
+            InventoryTransaction.reference_id == fresh_wo.id,
+            InventoryTransaction.transaction_type == TransactionType.ISSUE,
+        )
+        .count()
+        == 1
+    ), "the backflush really ran, or the 201 below proves nothing"
+
+    allowed = client.post(
+        _tie_url(fresh_wo.id),
+        json={"part_id": stock.id, "source": "manual", "qty_planned": 4},
+        headers=headers_for(admin),
+    )
+    assert allowed.status_code == status.HTTP_201_CREATED, allowed.text
 
 
 @pytest.mark.parametrize(
@@ -2486,15 +2586,22 @@ def test_tie_list_echoes_the_operation_a_reimport_detached_it_from(client: TestC
 
 
 def _wo_scoped_issue_rows(db: Session, wo: WorkOrder, part: Part) -> list[InventoryTransaction]:
+    """Component ISSUE rows a work-order-scoped tie produced, under BOTH keyed shapes.
+
+    ``work_order_backflush`` is what the leg writes now; ``work_order`` stays in the
+    predicate so a hand-built legacy row (or a regression that started writing that shape
+    again) is still visible to every caller.
+    """
     return (
         db.query(InventoryTransaction)
         .filter(
             InventoryTransaction.company_id == COMPANY_A,
-            InventoryTransaction.reference_type == "work_order",
+            InventoryTransaction.reference_type.in_(WORK_ORDER_ID_KEYED_REFERENCE_TYPES),
             InventoryTransaction.reference_id == wo.id,
             InventoryTransaction.part_id == part.id,
             InventoryTransaction.transaction_type == TransactionType.ISSUE,
         )
+        .order_by(InventoryTransaction.id)
         .all()
     )
 
@@ -2502,7 +2609,7 @@ def _wo_scoped_issue_rows(db: Session, wo: WorkOrder, part: Part) -> list[Invent
 def test_work_order_scoped_tie_consumes_from_its_pinned_lot(db_session: Session):
     """The pin is a lot-directed instruction on BOTH tie shapes, not just the per-run one.
 
-    The unpinned backflush picks the LOWEST-ID on-hand row, so pinning the higher-id lot
+    Unpinned, this leg would walk FIFO and take the first lot, so pinning the SECOND lot
     is a real discriminator: before this, the tie's pin was dropped on the way into the
     demand object and the ledger issued from the wrong lot while the operator followed
     the pin — the as-built genealogy naming material never touched (AS9100D 8.5.2).
@@ -2582,15 +2689,22 @@ def test_available_pinned_lot_on_a_work_order_scoped_tie_records_no_held_row(db_
     )
 
 
-def test_unpinned_work_order_scoped_tie_records_a_held_lot_it_consumes(db_session: Session):
-    """The UNPINNED leg selects with no ``status`` filter — so it must RECORD, not skip.
+def test_unpinned_work_order_scoped_tie_skips_a_held_lot_and_discloses_it(db_session: Session):
+    """REWRITE of ``..._records_a_held_lot_it_consumes``: the UNPINNED leg no longer can.
 
-    Its per-run twin ``_fifo_source_items`` filters ``status == 'available'``; this branch
-    orders active on-hand rows by id and takes the first, whatever its status. Adding the
-    status predicate here would newly exclude legacy NULL-status rows and change the
-    pre-existing BOM backflush, so the lot CHOICE is deliberately unchanged — what changes
-    is that an ``on_hold`` / ``quarantine`` / ``rejected`` lot no longer goes into an
-    as-built record silently (AS9100D 8.7).
+    The behaviour it locked — this leg selecting with NO ``status`` predicate, consuming
+    an ``on_hold`` / ``quarantine`` / ``rejected`` lot, and merely RECORDING it with a
+    ``HELD_MATERIAL_CONSUMED`` row — was a deliberate hold-your-nose compromise: the leg
+    was live, and tightening its SELECT would have newly excluded legacy NULL-status rows
+    as collateral. PR 4.4 removes that objection (``COALESCE(status, 'available')`` keeps
+    the legacy rows eligible) and adopts the per-run engine's rule, which is the AS9100D
+    8.7-correct one: segregated material is NOT drawn into product.
+
+    The replacement obligation is DISCLOSURE, and it is the whole point of the rewrite. A
+    part whose only stock is held must not report a bare shortage against material
+    physically on the rack, so the shortage row carries ``held_quantity_skipped`` and the
+    held lot numbers. The PINNED leg is unchanged and still writes the 8.7 row — see the
+    test two above.
     """
     user = make_user(db_session)
     fg = make_part(db_session)
@@ -2604,28 +2718,40 @@ def test_unpinned_work_order_scoped_tie_records_a_held_lot_it_consumes(db_sessio
     run_effects(db_session, wo, user)
     db_session.expire_all()
 
+    assert db_session.get(InventoryItem, held_lot.id).quantity_on_hand == 10, "the held lot must NOT be drawn"
     rows = _wo_scoped_issue_rows(db_session, wo, sheet)
-    assert len(rows) == 1 and rows[0].lot_number == "LOT-ON-HOLD", "lot selection is unchanged"
-    assert db_session.get(InventoryItem, held_lot.id).quantity_on_hand == 8
+    assert [r.quantity for r in rows] == [-2.0], "the demand is still recorded, against placeholder stock"
+    assert rows[0].lot_number is None, "a placeholder row names no lot"
+    assert rows[0].allocation_id == allocation.id
 
-    held = (
+    assert (
         db_session.query(AuditLog)
         .filter(AuditLog.company_id == COMPANY_A, AuditLog.action == HELD_MATERIAL_CONSUMED_AUDIT_ACTION)
+        .count()
+        == 0
+    ), "nothing was consumed from a held lot, so there is no 8.7 consumption to record"
+
+    shortage = (
+        db_session.query(AuditLog)
+        .filter(AuditLog.company_id == COMPANY_A, AuditLog.action == BACKFLUSH_SHORTAGE_AUDIT_ACTION)
         .all()
     )
-    assert len(held) == 1, "an unpinned held consumption owes the same chain row as a pinned one"
-    assert held[0].extra_data["allocation_id"] == allocation.id
-    assert held[0].extra_data["item_status"] == "on_hold"
-    assert held[0].extra_data["pin_directed"] is False, "the row must say the lot was NOT pin-directed"
-    assert "PINNED lot" not in held[0].description
+    assert len(shortage) == 1, "the skip becomes a shortage, and a shortage is always recorded"
+    extra = shortage[0].extra_data or {}
+    assert extra["shortfall"] == 2.0
+    assert extra["held_quantity_skipped"] == 10.0, "the disclosure is what stops the row lying by omission"
+    assert extra["held_lot_numbers"] == ["LOT-ON-HOLD"]
+    assert "segregated status" in (shortage[0].description or "")
 
 
 def test_unpinned_leg_treats_a_null_status_lot_as_available(db_session: Session):
-    """A legacy NULL-status row is not held — it must not start writing 8.7 rows.
+    """A legacy NULL-status row is not held — it is DRAWN, and writes no 8.7 row.
 
-    This is why the fix records rather than tightening the SELECT: ``status IS NULL``
-    predates the column's default and means "unknown, treat as available"
-    (``is_consumable_item``), not "quarantined".
+    ``status IS NULL`` predates the column's default and means "unknown, treat as
+    available" (``is_consumable_item``), not "quarantined". The SQL now agrees, via
+    ``COALESCE(status, 'available')``; before PR 4.4 the two disagreed and the FIFO query
+    would have hidden such a lot. The decrement is asserted, not just the row count —
+    without it this test would pass just as well against a placeholder-anchored shortage.
     """
     user = make_user(db_session)
     fg = make_part(db_session)
@@ -2639,13 +2765,21 @@ def test_unpinned_leg_treats_a_null_status_lot_as_available(db_session: Session)
     run_effects(db_session, wo, user)
     db_session.expire_all()
 
-    assert len(_wo_scoped_issue_rows(db_session, wo, sheet)) == 1
+    rows = _wo_scoped_issue_rows(db_session, wo, sheet)
+    assert [(r.quantity, r.lot_number) for r in rows] == [(-2.0, "LOT-LEGACY-NULL")]
+    assert db_session.get(InventoryItem, legacy_lot.id).quantity_on_hand == 8, "the legacy lot IS drawn"
     assert (
         db_session.query(AuditLog)
         .filter(AuditLog.company_id == COMPANY_A, AuditLog.action == HELD_MATERIAL_CONSUMED_AUDIT_ACTION)
         .count()
         == 0
     )
+    assert (
+        db_session.query(AuditLog)
+        .filter(AuditLog.company_id == COMPANY_A, AuditLog.action == BACKFLUSH_SHORTAGE_AUDIT_ACTION)
+        .count()
+        == 0
+    ), "and no false shortage against stock the engine can see"
 
 
 # ---------------------------------------------------------------------------
@@ -2653,17 +2787,26 @@ def test_unpinned_leg_treats_a_null_status_lot_as_available(db_session: Session)
 # ---------------------------------------------------------------------------
 
 
-def test_duplicate_issue_no_op_does_not_advance_qty_consumed(db_session: Session, monkeypatch):
-    """``qty_consumed`` may only move when an ISSUE row actually landed.
+def test_a_concurrent_winners_rows_converge_the_delta_instead_of_double_issuing(
+    db_session: Session,
+):
+    """REWRITE of ``test_duplicate_issue_no_op_does_not_advance_qty_consumed``.
 
-    Simulates the check-then-act race the ``uq_wo_inventory_issue`` index catches: the
-    winning ISSUE row already exists, but ``_component_already_issued`` (the application
-    pre-check) is stubbed to miss it, so the insert reaches the savepoint and is rolled
-    back as a duplicate. Advancing the cache anyway would claim consumption this call
-    never posted — on the exact field the untie endpoint refuses against (409).
+    The old test's whole premise was the INDEX: it stubbed ``_component_already_issued``
+    to miss a concurrent winner's row, let the second insert reach the savepoint, and
+    asserted the ``uq_wo_inventory_issue`` violation was swallowed as a clean no-op. That
+    mechanism is gone in both directions — the leg posts outside that index, and it no
+    longer swallows an ``IntegrityError`` at all (``duplicate_is_noop=False``), because
+    with no index behind the row such an error is a real fault, not a lost race.
+
+    What replaces it is the mechanism that now does the job: ARITHMETIC. The winner's
+    rows are seeded under the shape a concurrent completion would really have written
+    (``work_order_backflush``, carrying this tie's ``allocation_id``), and the loser
+    re-reads a net that already includes them, so ``delta = 2 − 2 = 0`` and it writes
+    nothing. **All three of the original assertions survive verbatim** — one ISSUE row,
+    ``qty_consumed`` not advanced, no second decrement — which is the point: the
+    protection changed, the guarantee did not.
     """
-    import app.services.completion_inventory_service as cis
-
     user = make_user(db_session)
     fg = make_part(db_session)
     sheet = make_part(db_session, uom="sheets", part_type="raw_material")
@@ -2671,7 +2814,7 @@ def test_duplicate_issue_no_op_does_not_advance_qty_consumed(db_session: Session
     wo = make_wo(db_session, fg, quantity_ordered=2, quantity_complete=2)
     allocation = make_allocation(db_session, wo, sheet, operation=None, qty_planned=2.0)
 
-    # The concurrent winner's row.
+    # The concurrent winner's row, in the shape the reconciling leg actually writes.
     db_session.add(
         InventoryTransaction(
             company_id=COMPANY_A,
@@ -2679,9 +2822,10 @@ def test_duplicate_issue_no_op_does_not_advance_qty_consumed(db_session: Session
             part_id=sheet.id,
             transaction_type=TransactionType.ISSUE,
             quantity=-2.0,
-            reference_type="work_order",
+            reference_type=BACKFLUSH_REFERENCE_TYPE,
             reference_id=wo.id,
             reference_number=wo.work_order_number,
+            allocation_id=allocation.id,
             unit_cost=2.0,
             total_cost=4.0,
             created_by=user.id,
@@ -2689,13 +2833,12 @@ def test_duplicate_issue_no_op_does_not_advance_qty_consumed(db_session: Session
     )
     db_session.commit()
 
-    monkeypatch.setattr(cis, "_component_already_issued", lambda *args, **kwargs: False)
     run_effects(db_session, wo, user)
     db_session.expire_all()
 
-    assert len(_wo_scoped_issue_rows(db_session, wo, sheet)) == 1, "the unique index must reject the second row"
+    assert len(_wo_scoped_issue_rows(db_session, wo, sheet)) == 1, "the delta had already been posted"
     assert db_session.get(WorkOrderMaterialAllocation, allocation.id).qty_consumed == 0.0
-    assert db_session.get(InventoryItem, lot.id).quantity_on_hand == 10, "a duplicate must not decrement"
+    assert db_session.get(InventoryItem, lot.id).quantity_on_hand == 10, "a converged replay must not decrement"
 
 
 # ---------------------------------------------------------------------------

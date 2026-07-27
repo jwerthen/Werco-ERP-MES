@@ -489,17 +489,22 @@ def create_material_allocation(
 
     ``pinned_inventory_item_id`` is honored on BOTH tie shapes: the per-run engine
     consumes from the pinned lot exclusively, and a work-order-scoped tie carries its
-    pin into the one-shot backflush ISSUE. A held lot is refused here (422); a lot held
-    AFTER pinning still consumes and writes ``HELD_MATERIAL_CONSUMED``.
+    pin into the completion backflush's tie leg. A held lot is refused here (422); a lot
+    held AFTER pinning still consumes and writes ``HELD_MATERIAL_CONSUMED``.
 
     Refused with **409** when the tie could never consume:
 
     * the work order is TERMINAL (complete / closed / cancelled) — nothing will drive a
       completion through the consumption engine again; and
-    * a work-order-scoped tie whose part was ALREADY issued to this work order — the
-      one-shot backflush skips an already-issued component and ``uq_wo_inventory_issue``
-      forbids the second ISSUE row, so the tie would sit OPEN at ``qty_consumed`` 0
-      forever.
+    * a work-order-scoped tie whose part already carries a LEGACY (pre-PR-4.4) one-shot
+      ``('work_order', ISSUE)`` row on this work order. The backflush's legacy fence
+      (``_component_already_issued``) drops such a part, and ``uq_wo_inventory_issue``
+      forbids a second ISSUE under that shape at any price, so the tie would sit OPEN at
+      ``qty_consumed`` 0 forever. **This refusal is UNREACHABLE** — creating a tie needs a
+      non-terminal work order, a ``work_order``-shaped component ISSUE needs the
+      backflush, the backflush only runs at COMPLETE, and COMPLETE → non-terminal is
+      blocked — and it is kept anyway: it costs one existence query, fails safe, and is
+      the correct fence if that reachability argument ever stops holding.
     """
     work_order = _load_work_order(db, work_order_id, company_id)
 
@@ -538,24 +543,31 @@ def create_material_allocation(
     if payload.work_order_operation_id is None and work_order_tie_is_already_issued(
         db, work_order_id=work_order.id, part_id=part.id, company_id=company_id
     ):
-        # The remedy named here is deliberately NOT "return the material". PR 3's RETURN
-        # verb appends a compensating row and never removes the ISSUE row, while
-        # ``_component_already_issued`` (and ``uq_wo_inventory_issue`` behind it) keys on
-        # the ISSUE row's existence -- so a return would leave this 409 firing exactly as
-        # before, having moved stock for nothing. Operation-scoped ties post outside that
-        # index, which is why they are the way through.
+        # WHAT THIS GUARD NOW MEANS. ``_component_already_issued`` still keys on
+        # ``reference_type='work_order'`` ISSUE rows, and since PR 4.4 nothing writes
+        # that shape -- the backflush posts ``work_order_backflush``. So this fires only
+        # on a work order carrying a LEGACY pre-4.4 one-shot row, and it is that work
+        # order's permanent fence out of the reconciling engine.
         #
-        # PR 4 made that asymmetry explicit rather than incidental: an operation-scoped
-        # tie that gives all its material back becomes re-issuable (the backflush
-        # suppression there reads a SIGNED ledger net), while this shape does not, because
-        # the unique index forbids the second ISSUE row at any price. See
-        # ``return_material_allocation`` for the full statement of the choice.
+        # The remedy named here is deliberately NOT "return the material". PR 3's RETURN
+        # verb appends a compensating row and never removes the ISSUE row, while this
+        # guard (and ``uq_wo_inventory_issue`` behind it) keys on the ISSUE row's
+        # existence -- so a return would leave this 409 firing exactly as before, having
+        # moved stock for nothing. Operation-scoped ties post outside that index, which is
+        # why they are the way through.
+        #
+        # UNREACHABLE, and kept: creating a tie requires a NON-terminal work order, a
+        # ``work_order``-shaped component ISSUE requires the backflush, the backflush only
+        # runs at COMPLETE, and COMPLETE -> non-terminal is blocked. No operator can
+        # produce the state. Shipping a refusal whose stated reason is WRONG would be a
+        # records-integrity defect even when nobody can trigger it, which is why the
+        # wording is corrected rather than left alone.
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
-                f"Part {part.part_number} was already issued to work order {work_order.work_order_number}; "
-                "this tie could never consume — tie the material at the operation level instead, which "
-                "posts outside the one-issue-per-work-order guard."
+                f"Part {part.part_number} already has a one-time issue recorded against work order "
+                f"{work_order.work_order_number}; this tie could never consume — tie the material at "
+                "the operation level instead, which posts outside the one-issue-per-work-order guard."
             ),
         )
 
@@ -1026,19 +1038,32 @@ def return_material_allocation(
       and the BOM's demand is once again unmet. Suppressing forever would refuse to
       consume material the shop is standing next to, and would hide the gap from the
       shortage machinery that exists to surface it.
-    * a **work-order-scoped** tie, fully returned, leaves its part **un-issuable on this
-      work order forever**. Its ISSUE row was written under ``reference_type='work_order'``
-      and survives the return, so ``_component_already_issued`` keeps firing. This is not
-      a policy choice made in code and it cannot be reversed there:
-      ``uq_wo_inventory_issue`` permits exactly ONE ISSUE row per (company, WO, part) on
-      that reference shape, so a second issue is physically unavailable. A guard that
-      netted returns here would attempt the re-issue, lose to the index, and be swallowed
-      as a duplicate no-op — claiming a consumption that never posted, which is strictly
-      worse than refusing.
+    * a **work-order-scoped** tie, fully returned, nets to zero too **as of PR 4.4** —
+      its ISSUE rows now post under ``reference_type='work_order_backflush'``, outside
+      ``uq_wo_inventory_issue``, and the leg reconciles ``qty_planned`` against
+      ``net_consumed_quantity_for_allocation``. So the ARITHMETIC no longer refuses a
+      re-draw the way the index did. It does not follow that one happens: **there is no
+      next completion.** That leg runs exactly once per work-order lifetime -- every
+      operation-completion handler refuses a terminal parent, ``complete_work_order``
+      early-returns for COMPLETE/CLOSED, reconcile-on-read strips terminal work orders,
+      and terminal -> non-terminal is blocked. So, as with the bullet above: once a
+      re-entry trigger exists (PR 4.5 or later), a fully-returned open tie would be
+      re-drawn exactly as an operation-scoped one is; today nothing re-enters to draw it.
+      (``return_and_untie`` CANCELs the tie in the same transaction anyway, precisely so
+      that cannot happen behind the operator's back; ``correct_over_consumption`` is
+      bounded so it cannot leave a live tie below its target.)
 
-    The remedy for the second case is the first: tie at the OPERATION level, which posts
-    outside that index. ``POST`` already returns 409 with exactly that wording when a
-    work-order-scoped tie is created on an already-issued part, and a return does not
+      The asymmetry survives only for **LEGACY work orders** — those carrying a pre-4.4
+      ``('work_order', ISSUE)`` row. There the part is un-issuable on that work order
+      forever: the row survives the return, ``_component_already_issued`` keeps firing,
+      and ``uq_wo_inventory_issue`` makes a second issue on that shape physically
+      unavailable at any price. A guard that netted returns for those rows would attempt
+      the re-issue, lose to the index, and claim a consumption that never posted — worse
+      than refusing.
+
+    The remedy in that legacy case is the first bullet: tie at the OPERATION level, which
+    posts outside that index. ``POST`` returns 409 with exactly that wording when a
+    work-order-scoped tie is created on a part carrying such a row, and a return does not
     change that refusal.
     """
     work_order = _load_work_order(db, work_order_id, company_id)

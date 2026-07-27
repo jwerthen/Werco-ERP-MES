@@ -54,8 +54,9 @@ class DispatchMaterialTie(UTCModel):
     never disagree about what a tie means or how short it is.
 
     OPERATION-SCOPED ONLY. A work-order-scoped tie belongs to the whole job and
-    drains through the one-shot backflush, so hanging it on a card would fan one
-    tie across every card of that work order and read as N separate ties.
+    drains through the completion backflush's own tie leg, so hanging it on a card
+    would fan one tie across every card of that work order and read as N separate
+    ties.
 
     Absent (``null``) on an untied operation -- and that is the WHOLE rendering
     contract: the client draws nothing, no placeholder and no "not tied" nag, so

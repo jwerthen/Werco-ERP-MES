@@ -200,12 +200,14 @@ def _issued_material_cost(db: Session, work_order: WorkOrder, company_id: int) -
     work order (ISSUE quantities are stored negative, so ``total_cost`` may be negative;
     we take the magnitude) and SUBTRACTS the magnitude of every RETURN row. Tenant-scoped.
 
-    "Belonging to" is ``work_order_ledger_filter``, which spans BOTH reference shapes.
-    Filtering on ``reference_type='work_order'`` alone silently dropped every
-    operation-scoped consumption row -- for the headline nest case, the entire material
-    leg of the job -- out of ``WorkOrder.actual_cost``, the synced ``JobCost``, and the
-    analytics variance. ``analytics_service._issued_material_cost`` calls the same
-    helper, so the two can no longer drift.
+    "Belonging to" is ``work_order_ledger_filter``, which spans ALL THREE reference shapes
+    (``work_order``, ``work_order_backflush``, ``work_order_operation``). Filtering on
+    ``reference_type='work_order'`` alone silently dropped every operation-scoped
+    consumption row -- for the headline nest case, the entire material leg of the job --
+    out of ``WorkOrder.actual_cost``, the synced ``JobCost``, and the analytics variance,
+    and it would now drop every reconciled component row too.
+    ``analytics_service._issued_material_cost`` calls the same helper, so the two can no
+    longer drift.
 
     **The sign is why RETURN cannot simply join the type filter.** A RETURN is the reasoned
     compensating credit for consumption (PR 3), carrying the SAME reference shape as the
