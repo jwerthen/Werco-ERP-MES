@@ -35,7 +35,12 @@ Because ``target`` is RECOMPUTED from live operation state on every call, a repl
 converges instead of double-issuing: the second call sees ``delta == 0``. That is
 why this path needs no ``uq_*`` index of its own (and why it deliberately posts with
 ``reference_type='work_order_operation'``, OUTSIDE the ``uq_wo_inventory_issue``
-predicate, so it can never collide with the backflush idempotency guard).
+predicate). Since PR 4.4 the work-order backflush reconciles the same way, under its
+own ``work_order_backflush`` shape -- so the reason for staying outside that index is no
+longer "do not collide with the one-shot guard" but the plainer one both legs share: a
+one-row-per-(company, WO, ISSUE, part) index cannot express spill-across-lots plus a
+later top-up row. The two nets never overlap (this leg's rows key on an OPERATION id,
+that leg's on the WORK ORDER id).
 
 Two entry points, one engine
 ----------------------------
@@ -66,8 +71,7 @@ map ``version_id_col`` directly, so every call site that drives a completion tak
 optimistic lock and a stale concurrent writer raises ``StaleDataError`` (-> HTTP 409)
 before it can reach here. Treat that lock as load-bearing for this engine: a future
 call site that mutates neither row would step outside the protection, and the
-per-allocation savepoint plus the "advance ``qty_consumed`` only when an insert actually
-landed" rule are damage control, not a substitute.
+per-allocation savepoint is damage control, not a substitute.
 
 **Scrap consumes.** A scrapped run physically used the sheet, so scrap is inside
 ``target``. It is posted as ``TransactionType.ISSUE``, NOT ``SCRAP``: lot genealogy
@@ -120,10 +124,20 @@ bookkeeping -- refusing would train operators to untie material. Mirroring
 ``ALLOCATION_SHORTAGE`` audit row, and emit a warning ``OperationalEvent``
 (``material_allocation_shortage`` -> notification catalog ``material.allocation_shortage``).
 
+The shortage row DISCLOSES why the draw could not reach further, and the sentence differs
+by cause (``shortage_draw_disclosure`` picks; both engines share it). On an UNPINNED draw
+it names the stock the predicate passed over (``held_stock_summary`` ->
+``held_quantity_skipped`` / ``held_lot_numbers``): both engines skip held / inactive lots,
+so without it a part whose stock is entirely segregated reports a bare shortage against
+material physically on the rack, and the reader cannot tell a purchasing problem from an
+MRB problem. On a PINNED draw it names the PIN instead (``pinned_lot``) -- there, held
+stock is not the constraint, and saying it was would send MRB to release material whose
+release changes nothing while never mentioning the available stock the pin excluded.
+
 The same warn-and-record posture covers the other two things that can go wrong here,
 because BOTH would otherwise be silent:
 
-* **Held material consumed** (``HELD_MATERIAL_CONSUMED``). ``_fifo_source_items``
+* **Held material consumed** (``HELD_MATERIAL_CONSUMED``). ``consumable_source_items``
   excludes lots that are inactive or not ``available``, but a PINNED lot bypasses FIFO
   entirely, and a lot can be quarantined/held AFTER it was pinned. Consumption still
   proceeds -- the sheet was physically cut, and refusing from a GET would be
@@ -153,10 +167,11 @@ import logging
 from dataclasses import dataclass, field
 from typing import Optional
 
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import StaleDataError
 
-from app.db.ledger_filter import OPERATION_REFERENCE_TYPE, WORK_ORDER_REFERENCE_TYPE
+from app.db.ledger_filter import BACKFLUSH_REFERENCE_TYPE, OPERATION_REFERENCE_TYPE
 from app.models.audit_log import AuditLog
 from app.models.inventory import InventoryItem, InventoryTransaction, TransactionType
 from app.models.part import Part
@@ -171,12 +186,13 @@ from app.services.completion_inventory_service import (
     _placeholder_stock_row,
     _write_issue_txn,
     _write_return_txn,
+    require_posted_issue,
 )
 from app.services.operational_event_service import OperationalEventService
 
 logger = logging.getLogger(__name__)
 
-# ``OPERATION_REFERENCE_TYPE`` / ``WORK_ORDER_REFERENCE_TYPE`` / ``work_order_ledger_filter``
+# ``OPERATION_REFERENCE_TYPE`` / ``BACKFLUSH_REFERENCE_TYPE`` / ``work_order_ledger_filter``
 # live in ``app.db.ledger_filter`` -- the predicate is a GENERIC ledger question ("which
 # rows belong to this work order?") that job costing, analytics, genealogy and the ledger
 # list endpoint all ask, and homing it here forced every one of them to import this whole
@@ -199,6 +215,12 @@ HELD_MATERIAL_CONSUMED_AUDIT_ACTION = "HELD_MATERIAL_CONSUMED"
 # back to its savepoint. Recorded so a FAILED depletion is at least as visible as a
 # shortage (which already writes a chain row).
 ALLOCATION_CONSUMPTION_FAILED_AUDIT_ACTION = "ALLOCATION_CONSUMPTION_FAILED"
+
+# ...and its operational-event type, so the FAILED case is at least as loud as the lesser
+# SHORTAGE case. A shortage emits ``material_allocation_shortage`` and reaches Purchasing;
+# without this, "nothing depleted at all" reached nobody -- and on a database where
+# ``chk_inventory_items_quantity_non_negative`` is live, every shortage becomes this.
+ALLOCATION_CONSUMPTION_FAILED_EVENT_TYPE = "material_allocation_consumption_failed"
 
 # The only ``InventoryItem.status`` a consumption may draw from without comment. Anything
 # else (``on_hold`` / ``quarantine`` / ``rejected`` -- see ``models/inventory.py``) is
@@ -259,8 +281,8 @@ def open_allocations_for_work_order(
     keeps untied work orders byte-identical to their pre-feature behavior.
 
     Called ONCE per completion, by ``apply_completion_inventory_effects``, which threads
-    the result into the consume engine, the backflush-precedence drop and the
-    work-order-scoped demand. Call it directly only outside that seam.
+    the result into the consume engine, the backflush-precedence drop and the backflush's
+    work-order-scoped tie leg. Call it directly only outside that seam.
     """
     return (
         db.query(WorkOrderMaterialAllocation)
@@ -311,21 +333,51 @@ def _open_allocations_for_operation(
 def is_consumable_item(item: InventoryItem) -> bool:
     """True when a lot may be consumed into product without a compliance comment.
 
-    Mirrors what ``_fifo_source_items`` filters on, exposed so the tie endpoint can
-    refuse a PIN of a held lot up front (a 422 at tie time, where a human is present to
-    answer) instead of leaving the divergence to be discovered at consume time -- which
-    runs from a GET, where refusing is not an option.
+    The PYTHON half of one policy; ``CONSUMABLE_ITEM_CLAUSES`` is the SQL half and the
+    two are locked together by a parity test. Exposed so the tie endpoint can refuse a
+    PIN of a held lot up front (a 422 at tie time, where a human is present to answer)
+    instead of leaving the divergence to be discovered at consume time -- which runs from
+    a GET, where refusing is not an option.
 
     A NULL ``status`` reads as ``available`` (the column's own default), so a legacy row
-    written outside the ORM is not treated as held. The FIFO SQL is stricter -- a NULL
-    simply never matches ``status = 'available'`` -- which is the safe direction: such a
-    lot is skipped by FIFO rather than silently consumed.
+    written outside the ORM is not treated as held. The SQL agrees, via
+    ``COALESCE(status, 'available')`` -- it did NOT before PR 4.4, and the disagreement
+    was not benign: ``status`` has a Python-side ``default`` with no ``server_default``
+    and no backfill, so a bare ``status = 'available'`` hid legacy stock from the engine,
+    which then recorded a false shortage against material sitting on the rack.
     """
     return bool(item.is_active) and (item.status or AVAILABLE_ITEM_STATUS) == AVAILABLE_ITEM_STATUS
 
 
-def _fifo_source_items(db: Session, part_id: int, company_id: int) -> list[InventoryItem]:
-    """Active, available, on-hand stock for a part in FIFO order (tenant-scoped).
+# THE consumable-stock predicate, in SQL. One tuple, splatted into every query that asks
+# "which lots may this engine draw from?" -- the FIFO source read below, and the on-hand
+# hint ``material_tie_view`` paints on the dispatch board and the kiosk queue. Sharing
+# the clauses is the point; re-declaring them is the bug (a display that promises stock
+# the engine refuses to touch, or hides stock it will).
+#
+# ``COALESCE(status, 'available')`` rather than ``status = 'available'``: see
+# ``is_consumable_item``. It is a strict WIDENING -- it can never make a held lot
+# consumable -- and it compiles identically on Postgres and SQLite, unlike the
+# ``OR status IS NULL`` spelling it replaces conceptually.
+#
+# ``is_active == True`` is deliberately the SQL ``= TRUE`` comparison: it excludes NULL,
+# and ``bool(None)`` is False in ``is_consumable_item``, so the two already agree.
+CONSUMABLE_ITEM_CLAUSES = (
+    InventoryItem.is_active == True,  # noqa: E712
+    func.coalesce(InventoryItem.status, AVAILABLE_ITEM_STATUS) == AVAILABLE_ITEM_STATUS,
+)
+
+
+def consumable_source_items(db: Session, part_id: int, company_id: int) -> list[InventoryItem]:
+    """FIFO-ordered consumable stock for a part (tenant-scoped).
+
+    THE one lot-selection policy, shared by BOTH engines -- the operation-scoped tie
+    engine here and the work-order backflush in ``completion_inventory_service``. Before
+    PR 4.4 they contradicted each other: this walked ``received_date`` FIFO filtered on
+    ``status = 'available'`` and spilled across lots, while the backflush took the
+    LOWEST-ID active row, ignored ``status`` entirely and wrote one row for the whole
+    demand. Two engines naming different heats for the same physical draw is an AS9100D
+    8.5.2 problem, not a stylistic one.
 
     ``received_date ASC NULLS LAST, id ASC``: oldest receipt first, rows with no
     received date last (they cannot be ordered by age, so they are the fallback), and
@@ -336,8 +388,7 @@ def _fifo_source_items(db: Session, part_id: int, company_id: int) -> list[Inven
         .filter(
             InventoryItem.company_id == company_id,
             InventoryItem.part_id == part_id,
-            InventoryItem.is_active == True,  # noqa: E712
-            InventoryItem.status == AVAILABLE_ITEM_STATUS,
+            *CONSUMABLE_ITEM_CLAUSES,
             InventoryItem.quantity_on_hand > 0,
         )
         .order_by(
@@ -347,6 +398,141 @@ def _fifo_source_items(db: Session, part_id: int, company_id: int) -> list[Inven
         )
         .all()
     )
+
+
+def plan_stock_draw(
+    source_items: list[InventoryItem], quantity: float
+) -> tuple[list[tuple[InventoryItem, float]], float]:
+    """Split a demand across candidate lots, in the order given. PURE -- no DB, no writes.
+
+    Returns ``([(lot, take), ...], unmet_remainder)``. Takes of ``<= _EPSILON`` are
+    skipped entirely (a lot at zero or negative on-hand contributes nothing and must not
+    produce a zero-quantity ledger row), so the returned pairs are exactly the rows the
+    caller should post.
+
+    Extracted so the two engines share the SPILL ARITHMETIC while each keeps its own
+    posting and recording prose. The remainder is the honest shortfall -- computed
+    against the lots actually walked, not against a total that includes stock the
+    predicate excluded.
+    """
+    draws: list[tuple[InventoryItem, float]] = []
+    remaining = float(quantity)
+    for item in source_items:
+        if remaining <= _EPSILON:
+            break
+        take = min(remaining, float(item.quantity_on_hand or 0))
+        if take <= _EPSILON:
+            continue
+        draws.append((item, take))
+        remaining -= take
+    return draws, remaining
+
+
+def held_stock_summary(db: Session, part_id: int, company_id: int) -> tuple[float, list[str]]:
+    """On-hand quantity + lot numbers of this part's stock that is NOT consumable.
+
+    ONE extra query, run ONLY when a shortage is about to be recorded. It is what stops a
+    shortage row lying by omission: both engines now SKIP held / inactive lots rather
+    than drawing from them (AS9100D 8.7), so a part whose stock is entirely
+    ``on_hold`` / ``quarantine`` / ``rejected`` would otherwise report a bare shortage
+    against material physically sitting on the rack. The chain row instead reads "short
+    40; 60 on hand in segregated status, lots ...", which is the difference between a
+    purchasing signal and an MRB signal.
+
+    Tenant-scoped (invariant #1). Only rows with POSITIVE on-hand are counted -- a held
+    lot at zero discloses nothing.
+    """
+    rows = (
+        db.query(InventoryItem.lot_number, InventoryItem.quantity_on_hand)
+        .filter(
+            InventoryItem.company_id == company_id,
+            InventoryItem.part_id == part_id,
+            InventoryItem.quantity_on_hand > 0,
+            # The NEGATION of ``CONSUMABLE_ITEM_CLAUSES``, written NULL-safely rather
+            # than as ``~and_(*CONSUMABLE_ITEM_CLAUSES)``. SQL three-valued logic makes
+            # the bare negation wrong: ``is_active = TRUE`` evaluates to NULL (not FALSE)
+            # on a row whose ``is_active`` is NULL, and ``NOT NULL`` is NULL -- so such a
+            # row would fall out of BOTH sets: not consumable (correct, ``bool(None)`` is
+            # False) and not held either, vanishing from the disclosure this helper
+            # exists to write. ``is_active`` has a Python-side default and no
+            # ``server_default``, exactly like ``status``.
+            or_(
+                func.coalesce(InventoryItem.is_active, False) == False,  # noqa: E712
+                func.coalesce(InventoryItem.status, AVAILABLE_ITEM_STATUS) != AVAILABLE_ITEM_STATUS,
+            ),
+        )
+        .order_by(InventoryItem.id)
+        .all()
+    )
+    total = sum(float(quantity or 0) for _, quantity in rows)
+    lots = [lot for lot, _ in rows if lot]
+    return total, lots
+
+
+def shortage_draw_disclosure(
+    db: Session,
+    *,
+    part_id: int,
+    company_id: int,
+    pinned_inventory_item_id: Optional[int],
+    pinned_item: Optional[InventoryItem],
+) -> tuple[float, list[str], Optional[str]]:
+    """What a shortage row may TRUTHFULLY say about the stock the draw did not take.
+
+    Returns ``(held_quantity_skipped, held_lot_numbers, pinned_lot)``, of which at most
+    one half is ever populated -- because an unpinned draw and a pinned draw come up short
+    for entirely different reasons, and saying the wrong one sends the reader to the wrong
+    remedy:
+
+    * **UNPINNED** -- every consumable lot WAS walked, so anything still on the rack is
+      there because the predicate skipped it (on hold / quarantine / rejected / inactive).
+      ``held_stock_summary`` is queried and disclosed: "short 40; 60 on hand in segregated
+      status" is the difference between a purchasing signal and an MRB signal.
+    * **PINNED** -- the reason no other lot was drawn is THE PIN, not any lot's status.
+      Disclosing held stock here would be false by implication twice over: it tells an MRB
+      reviewer that releasing the quarantined material clears the shortage (it does not --
+      the pin still excludes it), and it says nothing about the freely-available stock in
+      other heats that the pin is what excluded. So the held query is not even RUN, and
+      the clause names the restriction instead.
+
+    Shared by both engines' shortage paths from this one helper so the two can never
+    drift, exactly as ``held_stock_summary`` / ``held_stock_disclosure`` are.
+    """
+    if pinned_inventory_item_id is None:
+        held_quantity_skipped, held_lot_numbers = held_stock_summary(db, part_id, company_id)
+        return held_quantity_skipped, held_lot_numbers, None
+    # A pin that does not resolve (deleted row, other tenant) still RESTRICTED the draw,
+    # so it is still the honest explanation; label it by the item id when there is no lot
+    # number to name -- the inventory row IS the lot, named or not.
+    if pinned_item is not None and pinned_item.lot_number:
+        return 0.0, [], pinned_item.lot_number
+    return 0.0, [], f"#{pinned_inventory_item_id}"
+
+
+def held_stock_disclosure(
+    held_quantity_skipped: float,
+    held_lot_numbers: list[str],
+    pinned_lot: Optional[str] = None,
+) -> str:
+    """The shortage-description clause explaining what the draw did NOT take. ``""`` if none.
+
+    The PROSE half of what ``shortage_draw_disclosure`` computes, shared by both engines'
+    shortage recorders for the same reason the summary itself is: an auditor comparing two
+    chain rows should not have to work out whether two different sentences mean the same
+    thing.
+
+    ``pinned_lot`` and the held pair are mutually exclusive by construction (see
+    ``shortage_draw_disclosure``); the pinned clause wins if both are somehow supplied,
+    because on a pinned draw the held quantity is not the constraint.
+    """
+    if pinned_lot is not None:
+        return f"; draw restricted to pinned lot {pinned_lot}, other stock not eligible"
+    if held_quantity_skipped <= _EPSILON:
+        return ""
+    clause = f"; {held_quantity_skipped} on hand in segregated status (not drawn)"
+    if held_lot_numbers:
+        clause += f", lots {', '.join(held_lot_numbers)}"
+    return clause
 
 
 def _post_consumption_txn(
@@ -362,7 +548,7 @@ def _post_consumption_txn(
     audit: AuditService,
     part_number: Optional[str],
     notes: str,
-) -> Optional[InventoryTransaction]:
+) -> InventoryTransaction:
     """Write ONE negative ISSUE against a source lot, decrement it, and audit.
 
     A THIN adapter over the shared ``_write_issue_txn`` -- it supplies only what differs
@@ -371,28 +557,46 @@ def _post_consumption_txn(
     dual-audit sequence itself, including recomputing ``quantity_available``, belongs to
     the shared helper; this used to be a near-verbatim second copy of it.
 
-    Returns the inserted transaction, or ``None`` on a duplicate no-op.
+    **``duplicate_is_noop=False``, and that is a bug fix, not a preference.** These rows
+    post under ``work_order_operation``, which NO unique index has ever covered -- so an
+    ``IntegrityError`` here is a real fault (an FK, a NOT NULL, or
+    ``chk_inventory_items_quantity_non_negative`` if it is live), never the
+    concurrent-duplicate the savepoint discipline exists for. The default (``True``)
+    swallowed it into "a concurrent completion already wrote this row" and returned
+    ``None``, which this leg then treated as a lot that satisfied nothing -- a real fault
+    silently degraded into a shortage. It has been doing that on a LIVE path since PR 1.
+    ``_write_return_txn``'s docstring already states the rule this now follows.
+
+    Consequently it NEVER returns ``None``: a fault raises into the caller's
+    per-allocation savepoint and becomes an ``ALLOCATION_CONSUMPTION_FAILED`` chain row.
+    The narrowing goes through the SHARED ``require_posted_issue`` so both component legs
+    state that invariant the same way -- this one used to raise a hand-rolled
+    ``RuntimeError`` while the backflush discarded the return entirely.
     """
-    return _write_issue_txn(
-        db,
-        work_order,
-        inventory_item=inventory_item,
-        component_part_id=allocation.part_id,
-        quantity=quantity,
-        unit_cost=float(inventory_item.unit_cost or 0),
-        lot_number=inventory_item.lot_number,
-        company_id=company_id,
-        user_id=user_id,
-        audit=audit,
-        part_number=part_number,
-        allocation_id=allocation.id,
-        reference_type=OPERATION_REFERENCE_TYPE,
-        reference_id=operation.id,
-        notes=notes,
-        movement_verb="Consumed",
-        movement_label="Material consumption",
-        movement_suffix=f" operation {operation.operation_number or operation.id}",
-        extra_data={"allocation_id": allocation.id, "work_order_operation_id": operation.id},
+    return require_posted_issue(
+        _write_issue_txn(
+            db,
+            work_order,
+            inventory_item=inventory_item,
+            component_part_id=allocation.part_id,
+            quantity=quantity,
+            unit_cost=float(inventory_item.unit_cost or 0),
+            lot_number=inventory_item.lot_number,
+            company_id=company_id,
+            user_id=user_id,
+            audit=audit,
+            part_number=part_number,
+            allocation_id=allocation.id,
+            reference_type=OPERATION_REFERENCE_TYPE,
+            reference_id=operation.id,
+            notes=notes,
+            movement_verb="Consumed",
+            movement_label="Material consumption",
+            movement_suffix=f" operation {operation.operation_number or operation.id}",
+            extra_data={"allocation_id": allocation.id, "work_order_operation_id": operation.id},
+            duplicate_is_noop=False,
+        ),
+        what=(f"Material consumption transaction for allocation {allocation.id} on work order {work_order.id}"),
     )
 
 
@@ -406,6 +610,9 @@ def _record_allocation_shortage(
     company_id: int,
     user_id: int,
     audit: AuditService,
+    held_quantity_skipped: float = 0.0,
+    held_lot_numbers: Optional[list[str]] = None,
+    pinned_lot: Optional[str] = None,
 ) -> None:
     """Persist a consumption shortage as a tamper-evident audit row + warning event.
 
@@ -416,7 +623,17 @@ def _record_allocation_shortage(
     flush, so they land atomically with the completion; the emit is best-effort so a
     signal failure can never fail an in-flight completion (the audit row is the
     compliance record).
+
+    ``held_quantity_skipped`` / ``held_lot_numbers`` disclose stock the lot-selection
+    predicate PASSED OVER (``held_stock_summary``). Without them a part whose stock is
+    entirely ``on_hold`` / ``quarantine`` / ``rejected`` reports a bare shortage against
+    material physically on the rack, and the reader cannot tell a purchasing problem from
+    an MRB problem. ``pinned_lot`` is the mutually exclusive alternative, populated on a
+    PINNED draw where the reason no other lot was drawn is the pin rather than any lot's
+    status -- see ``shortage_draw_disclosure``, which decides between them. Written from
+    the same helper as the backflush leg's so the two cannot drift.
     """
+    held_lot_numbers = held_lot_numbers or []
     extra = {
         "work_order_id": work_order.id,
         "work_order_number": work_order.work_order_number,
@@ -429,6 +646,9 @@ def _record_allocation_shortage(
         "available_quantity": shortage.available_quantity,
         "shortfall": shortage.shortfall,
         "consumed_lot": consumed_lot,
+        "held_quantity_skipped": held_quantity_skipped,
+        "held_lot_numbers": held_lot_numbers,
+        "pinned_lot": pinned_lot,
     }
     audit.log(
         action=ALLOCATION_SHORTAGE_AUDIT_ACTION,
@@ -441,6 +661,7 @@ def _record_allocation_shortage(
             f"{shortage.part_number or shortage.part_id} short {shortage.shortfall} "
             f"(required {shortage.required_quantity}, available {shortage.available_quantity})"
             + (f", lot {consumed_lot}" if consumed_lot else "")
+            + held_stock_disclosure(held_quantity_skipped, held_lot_numbers, pinned_lot)
         ),
         new_values={"shortfall": shortage.shortfall},
         extra_data=extra,
@@ -481,22 +702,24 @@ def record_held_material_consumed(
     fact goes on the tamper-evident hash chain, naming the lot, its status and the tie,
     for the MRB/segregation review that has to follow.
 
-    PUBLIC (no leading underscore) and ``operation``-optional because THREE call sites
-    owe this row: the per-run engine below, and BOTH lot-selection branches of the
-    one-shot work-order-scoped leg in ``completion_inventory_service._issue_one_component``.
-    A work-order-scoped tie has no operation, so the row simply omits it.
+    PUBLIC (no leading underscore) and ``operation``-optional because TWO call sites owe
+    this row: the per-run engine below, and the work-order backflush's pinned branch in
+    ``completion_inventory_service._issue_one_component``. A work-order-scoped tie has no
+    operation, so the row simply omits it.
 
-    ``pinned`` says which branch selected the lot, because the two mean different things
-    to whoever reviews the row:
+    ``pinned`` distinguishes the two, and since PR 4.4 only ``True`` is reachable:
 
     * ``True`` (both PINNED branches) -- only reachable when the lot was held AFTER it
       was pinned, since the tie endpoint refuses to pin a non-``available`` or inactive
       lot in the first place.
-    * ``False`` (the UNPINNED work-order-scoped branch) -- that branch selects the
-      lowest-id active on-hand lot with no ``status`` predicate at all, so it can pick a
-      lot that was ALREADY held. Its selection is deliberately left alone (tightening it
-      would change the pre-existing BOM backflush by excluding legacy NULL-status rows);
-      this row is what stops the consumption being silent.
+    * ``False`` -- the historical UNPINNED work-order-scoped branch, which selected the
+      lowest-id active on-hand lot with NO ``status`` predicate and could therefore pick
+      an already-held lot. That branch is gone: both engines now share
+      ``consumable_source_items``, which SKIPS held lots (the AS9100D 8.7-correct
+      behaviour) and discloses the skipped quantity on the shortage row instead
+      (``held_stock_summary``). The parameter is kept because the flag is a
+      records-integrity discriminator on rows already written under the old rule; do not
+      re-point an unpinned selection at it.
     """
     scope = f" operation {operation.operation_number or operation.id}" if operation is not None else ""
     audit.log(
@@ -556,8 +779,9 @@ def _consume_one_allocation(
     Lot selection: a PINNED allocation consumes from that lot only -- pinning is a
     lot-directed instruction, so an insufficient pinned lot is driven negative rather
     than silently spilling onto a different (uncertified, wrong-heat) lot. An UNPINNED
-    allocation walks FIFO stock, spilling across lots when the head lot cannot cover
-    the delta.
+    allocation walks ``consumable_source_items`` -- THE shared FIFO/consumable policy,
+    now used by the work-order backflush too -- spilling across lots via
+    ``plan_stock_draw`` when the head lot cannot cover the delta.
 
     The pin bypasses FIFO's ordering, NOT its hold check. A pinned lot that is inactive
     or not ``available`` (on hold / quarantined / rejected) is still consumed -- see
@@ -601,69 +825,76 @@ def _consume_one_allocation(
             # actually taken from this lot is known.
             held_item = pinned
     else:
-        source_items = _fifo_source_items(db, allocation.part_id, company_id)
+        source_items = consumable_source_items(db, allocation.part_id, company_id)
 
     available_total = sum(float(i.quantity_on_hand or 0) for i in source_items)
 
-    remaining = delta
+    draws, remaining = plan_stock_draw(source_items, delta)
     posted_any = False
     last_item: Optional[InventoryItem] = None
-    for item in source_items:
-        if remaining <= _EPSILON:
-            break
-        take = min(remaining, float(item.quantity_on_hand or 0))
-        if take <= _EPSILON:
-            continue
-        txn = _post_consumption_txn(
-            db,
-            work_order=work_order,
-            operation=operation,
-            allocation=allocation,
-            inventory_item=item,
-            quantity=take,
-            company_id=company_id,
-            user_id=user_id,
-            audit=audit,
-            part_number=part_number,
-            notes=notes,
+    for item, take in draws:
+        # ``_post_consumption_txn`` posts with ``duplicate_is_noop=False``: it either
+        # returns the row or raises into this allocation's savepoint. There is no
+        # "duplicate no-op" branch to handle any more, and there never should have been
+        # -- no unique index has ever covered this reference shape, so the swallowed
+        # IntegrityError it used to absorb was always a real fault.
+        result.transactions.append(
+            _post_consumption_txn(
+                db,
+                work_order=work_order,
+                operation=operation,
+                allocation=allocation,
+                inventory_item=item,
+                quantity=take,
+                company_id=company_id,
+                user_id=user_id,
+                audit=audit,
+                part_number=part_number,
+                notes=notes,
+            )
         )
         last_item = item
-        if txn is None:
-            # A duplicate no-op: nothing was inserted and nothing was decremented, so
-            # this lot did NOT satisfy any of the demand. Leave ``remaining`` alone
-            # (under-decrementing it here would silently under-consume) and move on --
-            # the leftover falls through to the shortage leg, which still records the
-            # full demand on the ledger.
-            continue
-        result.transactions.append(txn)
         posted_any = True
-        remaining -= take
 
     if remaining > _EPSILON:
         # SHORTAGE: never fail the completion. Drive a lot negative so the true demand
         # is still on the ledger, then record it tamper-evidently + emit the warning.
         unit_cost = float(part.standard_cost or 0) if part else 0.0
+        # The anchor guard stays in THIS form. ``source_items`` is empty on exactly the
+        # no-stock-at-all path -- which IS the shortage path -- so a bare
+        # ``source_items[0]`` would raise ``IndexError`` precisely when this branch runs.
         target_item = last_item or (source_items[0] if source_items else None)
         if target_item is None:
             target_item = _placeholder_stock_row(
                 db, part_id=allocation.part_id, company_id=company_id, unit_cost=unit_cost
             )
-        txn = _post_consumption_txn(
-            db,
-            work_order=work_order,
-            operation=operation,
-            allocation=allocation,
-            inventory_item=target_item,
-            quantity=remaining,
-            company_id=company_id,
-            user_id=user_id,
-            audit=audit,
-            part_number=part_number,
-            notes=f"{notes} (SHORT {remaining})",
+        result.transactions.append(
+            _post_consumption_txn(
+                db,
+                work_order=work_order,
+                operation=operation,
+                allocation=allocation,
+                inventory_item=target_item,
+                quantity=remaining,
+                company_id=company_id,
+                user_id=user_id,
+                audit=audit,
+                part_number=part_number,
+                notes=f"{notes} (SHORT {remaining})",
+            )
         )
-        if txn is not None:
-            result.transactions.append(txn)
-            posted_any = True
+        posted_any = True
+        # AT MOST one extra query, only on this branch: on an UNPINNED draw, the stock the
+        # predicate passed over, so the chain row cannot report a bare shortage against
+        # segregated material that is physically on the rack. On a PINNED draw the pin is
+        # the constraint, not any lot's status -- no query, and the clause says so.
+        held_quantity_skipped, held_lot_numbers, pinned_lot = shortage_draw_disclosure(
+            db,
+            part_id=allocation.part_id,
+            company_id=company_id,
+            pinned_inventory_item_id=allocation.pinned_inventory_item_id,
+            pinned_item=source_items[0] if allocation.pinned_inventory_item_id is not None and source_items else None,
+        )
         shortage = AllocationShortage(
             allocation_id=allocation.id,
             part_id=allocation.part_id,
@@ -692,11 +923,17 @@ def _consume_one_allocation(
             company_id=company_id,
             user_id=user_id,
             audit=audit,
+            held_quantity_skipped=held_quantity_skipped,
+            held_lot_numbers=held_lot_numbers,
+            pinned_lot=pinned_lot,
         )
 
     if not posted_any:
-        # Every insert was a duplicate no-op (a concurrent completion already posted
-        # this delta). Do NOT advance qty_consumed -- the winner's rows own it.
+        # DEFENSIVE, and honestly unreachable as written: ``delta > _EPSILON`` is already
+        # guaranteed above, and ``plan_stock_draw`` returns the demand UNCHANGED as its
+        # remainder when it draws nothing, so either a take posted or the shortage branch
+        # did. Kept as a bare guard on the one thing that must never happen -- advancing
+        # ``qty_consumed`` against zero movement -- not as a description of a live case.
         return
 
     if held_item is not None:
@@ -716,6 +953,13 @@ def _consume_one_allocation(
         )
 
     old_consumed = float(allocation.qty_consumed or 0)
+    # The TARGET, not the ledger net -- and deliberately NOT the ledger-backed form
+    # ``completion_inventory_service._advance_tie_consumed`` adopted for work-order-scoped
+    # ties in PR 4.4. This engine's own ``delta`` is ``target - qty_consumed``, so the
+    # cache is an INPUT to the next pass here, where there it is only an output. Closing
+    # residual 4 on this leg therefore changes the arithmetic, not just the stored value,
+    # and is out of PR 4.4's scope. The consequence to know: the two engines now mean
+    # different things by ``qty_consumed`` (see that function's docstring).
     allocation.qty_consumed = target
     db.flush()
     audit.log_update(
@@ -735,6 +979,7 @@ def _consume_one_allocation(
 
 
 def _record_consumption_failed(
+    db: Session,
     *,
     work_order: WorkOrder,
     allocation_id: int,
@@ -742,19 +987,37 @@ def _record_consumption_failed(
     operation_id: Optional[int],
     error: BaseException,
     company_id: int,
+    user_id: Optional[int],
     audit: AuditService,
 ) -> None:
-    """Record a rolled-back consumption on the tamper-evident chain.
+    """Record a rolled-back consumption on the tamper-evident chain AND notify.
 
     Material that SHOULD have depleted and did not is a material-trail control gap --
     strictly worse than the shortage case, which already writes a chain row. Without
     this the only trace was a log line the compliance record never sees.
 
+    **The warning ``OperationalEvent`` is the other half of that argument.** The audit row
+    alone left the degraded path quieter than the lesser condition it degrades from: a
+    shortage emits ``material_allocation_shortage`` and reaches Purchasing's inbox, while
+    "nothing was consumed at all" reached nobody. On a database where
+    ``chk_inventory_items_quantity_non_negative`` is live, every shortage arrives here
+    instead -- so without this the notification would be missing on exactly the deployment
+    that needs it. ``material.allocation_consumption_failed`` carries it.
+
     Safe on the post-``nested.rollback()`` outer transaction: ``AuditService.log`` opens
     its OWN savepoint around the INSERT and swallows every failure (returns ``None``),
-    so it can neither propagate nor re-poison the session. Still wrapped defensively --
-    a reconcile-on-read GET must never 500 because the failure record failed.
+    so it can neither propagate nor re-poison the session, and the emit is
+    ``best_effort``. Still wrapped defensively -- a reconcile-on-read GET must never 500
+    because the failure record failed.
     """
+    extra = {
+        "work_order_id": work_order.id,
+        "work_order_number": work_order.work_order_number,
+        "work_order_operation_id": operation_id,
+        "allocation_id": allocation_id,
+        "part_id": part_id,
+        "error": f"{type(error).__name__}: {error}"[:500],
+    }
     try:
         audit.log(
             action=ALLOCATION_CONSUMPTION_FAILED_AUDIT_ACTION,
@@ -767,13 +1030,7 @@ def _record_consumption_failed(
             ),
             success=False,
             error_message=f"{type(error).__name__}: {error}"[:500],
-            extra_data={
-                "work_order_id": work_order.id,
-                "work_order_number": work_order.work_order_number,
-                "work_order_operation_id": operation_id,
-                "allocation_id": allocation_id,
-                "part_id": part_id,
-            },
+            extra_data=extra,
             company_id=company_id,
         )
     except Exception:  # pragma: no cover - the record must never break the caller
@@ -783,6 +1040,33 @@ def _record_consumption_failed(
             work_order.id,
             company_id,
         )
+    # Emitted under its OWN savepoint, for the reason spelled out at the twin recorder in
+    # ``completion_inventory_service._record_backflush_component_failed``: a ``flush()``
+    # that fails at the DB deactivates the outer transaction even though
+    # ``emit_best_effort`` swallows the exception, and this recorder runs inside a
+    # per-allocation loop that must survive to the next allocation. A ``None`` return is
+    # the documented failure signal.
+    event_savepoint = db.begin_nested()
+    if (
+        OperationalEventService(db).emit_best_effort(
+            company_id=company_id,
+            event_type=ALLOCATION_CONSUMPTION_FAILED_EVENT_TYPE,
+            source_module="material_consumption",
+            entity_type="work_order_material_allocation",
+            entity_id=allocation_id,
+            work_order_id=work_order.id,
+            # Deliberately NOT ``operation_id``: ``emit`` validates it against the tenant with
+            # a query, and this path runs after a savepoint rollback where the cheapest
+            # possible touch is the right posture. The operation id is in the payload.
+            user_id=user_id,
+            severity="warning",
+            event_payload=extra,
+        )
+        is None
+    ):
+        event_savepoint.rollback()
+    else:
+        event_savepoint.commit()
 
 
 def consume_tied_materials_for_work_order(
@@ -849,8 +1133,9 @@ def _consume_tied_materials(
 
     operation_ids = [a.work_order_operation_id for a in allocations if a.work_order_operation_id is not None]
     if not operation_ids:
-        # Work-order-scoped ties only; those merge into the one-shot backflush
-        # (completion_inventory_service), not this per-run engine.
+        # Work-order-scoped ties only; those drain through leg 2 of
+        # ``backflush_components_for_work_order`` (completion_inventory_service), which
+        # reconciles them against ``qty_planned``, not this per-run engine.
         return
 
     operations = {
@@ -970,12 +1255,14 @@ def _consume_allocation_under_savepoint(
             company_id,
         )
         _record_consumption_failed(
+            db,
             work_order=work_order,
             allocation_id=allocation_id,
             part_id=allocation_part_id,
             operation_id=operation_id,
             error=StaleDataError("optimistic lock conflict during consumption"),
             company_id=company_id,
+            user_id=user_id,
             audit=audit,
         )
     except Exception as exc:  # degrade per-allocation, never break a GET
@@ -988,12 +1275,14 @@ def _consume_allocation_under_savepoint(
             company_id,
         )
         _record_consumption_failed(
+            db,
             work_order=work_order,
             allocation_id=allocation_id,
             part_id=allocation_part_id,
             operation_id=operation_id,
             error=exc,
             company_id=company_id,
+            user_id=user_id,
             audit=audit,
         )
 
@@ -1255,19 +1544,20 @@ def _live_consumption_target(
 
     * **Operation-scoped, operation present** -- ``qty_per_run x (complete + scrapped)``,
       byte-identical to ``_consume_one_allocation``'s ``target``.
-    * **Work-order-scoped** -- ``qty_planned``. Its one-shot demand in
-      ``_work_order_scoped_allocation_demand`` is ``qty_planned - qty_consumed``, so
-      leaving ``qty_consumed >= qty_planned`` is what makes that demand non-positive and
-      the backflush leg skip it. (Consequence worth knowing: a work-order-scoped tie
-      drained by the backflush sits at exactly ``qty_consumed == qty_planned``, so its
-      correction allowance is ZERO and the only return available to it is
-      ``return_and_untie`` -- correct, because such a tie consumed precisely what it
-      planned. An allowance opens only if the plan was later edited down.)
+    * **Work-order-scoped** -- ``qty_planned``, which is EXACTLY the target the backflush
+      leg reconciles such a tie to (``backflush_components_for_work_order``'s leg 2:
+      ``delta = qty_planned - net_consumed_quantity_for_allocation(...)``). So leaving
+      ``qty_consumed >= qty_planned`` is what makes that delta non-positive and the leg
+      skip it. (Consequence worth knowing: a work-order-scoped tie drained by the
+      backflush sits at exactly ``qty_consumed == qty_planned``, so its correction
+      allowance is ZERO and the only return available to it is ``return_and_untie`` --
+      correct, because such a tie consumed precisely what it planned. An allowance opens
+      only if the plan was later edited down.)
     * **Operation-scoped, operation GONE** (detached by a nest re-import, or never on this
       work order) -- ``0.0``. Neither leg can reach such a tie: the per-operation read is
       keyed by operation id, the whole-work-order reconcile skips a tie whose operation is
-      not on the work order, and the work-order-scoped demand skips any tie that names an
-      operation. Nothing can re-draw it, so nothing is bounded.
+      not on the work order, and the backflush's tie leg reads only ties with
+      ``work_order_operation_id IS NULL``. Nothing can re-draw it, so nothing is bounded.
     """
     if allocation.work_order_operation_id is None:
         return float(allocation.qty_planned or 0)
@@ -1571,8 +1861,13 @@ def return_tied_material(
     part = db.query(Part).filter(Part.id == allocation.part_id, Part.company_id == company_id).first()
     part_number = part.part_number if part else None
     scope = f" operation {operation.operation_number or operation.id}" if operation is not None else ""
+    # FALLBACK only -- the primary path mirrors ``step.issue_txn.reference_type``. A
+    # work-order-scoped tie's ISSUE rows now post under ``work_order_backflush``, so that
+    # is the shape a fallback must derive; ``work_order`` would put the compensating row
+    # under the one-shot legacy shape (and inside the ``uq_wo_inventory_issue`` predicate's
+    # neighbourhood) for a tie that never wrote one.
     scope_reference_type = (
-        OPERATION_REFERENCE_TYPE if allocation.work_order_operation_id is not None else WORK_ORDER_REFERENCE_TYPE
+        OPERATION_REFERENCE_TYPE if allocation.work_order_operation_id is not None else BACKFLUSH_REFERENCE_TYPE
     )
     notes = f"Material return ({intent.value}) for work order {work_order.work_order_number}{scope}: {reason}"
 
@@ -2154,16 +2449,28 @@ def work_order_tie_is_already_issued(
     part_id: int,
     company_id: int,
 ) -> bool:
-    """True when a WORK-ORDER-scoped tie on this part could NEVER consume.
+    """True when a LEGACY (pre-PR-4.4) one-shot ISSUE row exists for this (WO, part).
 
-    A work-order-scoped tie drains through the one-shot backflush, which skips any
-    component that already has a WO-level ISSUE row (its idempotency key) -- and
-    ``uq_wo_inventory_issue`` physically forbids the second ISSUE that would be needed
-    anyway. So a tie created AFTER the part was issued to this work order is dead on
-    arrival: it stays OPEN with ``qty_consumed`` at 0 forever, indistinguishable in the
-    API from a tie that simply has not consumed yet. A planner would tie a sheet,
-    believe stock will deplete, and it silently never would. The tie endpoint 409s on
-    this instead.
+    ``_component_already_issued`` is kept keyed VERBATIM on
+    ``reference_type='work_order' AND transaction_type='ISSUE'``, and since PR 4.4 that
+    predicate matches ONLY rows written before this change: the backflush leg now posts
+    ``work_order_backflush``. So this is the LEGACY FENCE -- a work order carrying one of
+    those summed one-shot rows is fenced out of the new reconciling engine entirely,
+    which is what makes PR 4.4 correct-forward with no backfill and no re-interpretation
+    of a single historical ledger row.
+
+    A work-order-scoped tie on such a part still could never consume: the fence drops it,
+    and ``uq_wo_inventory_issue`` forbids a second ISSUE under that shape at any price.
+    It would stay OPEN at ``qty_consumed`` 0 forever, indistinguishable in the API from a
+    tie that simply has not consumed yet -- so the tie endpoint 409s instead of creating
+    it.
+
+    **That 409 is UNREACHABLE today, and it is kept anyway.** Creating a tie requires a
+    NON-terminal work order; a ``work_order``-shaped component ISSUE requires the
+    backflush, which only runs at COMPLETE; and COMPLETE -> non-terminal is blocked. No
+    operator can produce the state. The guard costs one existence query, fails in the
+    safe direction, and is the correct legacy fence if that reachability argument ever
+    stops holding.
 
     Operation-scoped ties are unaffected -- they post under ``work_order_operation``,
     outside that unique index -- which is exactly the remedy the 409 names.

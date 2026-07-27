@@ -459,6 +459,22 @@ second of them:
   indexes + `CONCURRENTLY` were treated as Postgres features), with `create_all` emitting the indexes
   from the model on SQLite and the app-level guard applying either way.
 
+  > **What `uq_wo_inventory_issue` guards TODAY (PR 4.4, 2026-07-27) — read this before assuming the
+  > component backflush is index-protected.** Both indexes are **unchanged** and stay exactly as
+  > defined here; PR 4.4 ships **no migration at all** (head stays `076_uq_wo_inv_sqlite_parity`) and
+  > the lockstep tests in `tests/test_migration_075_*.py` / `tests/test_migration_076_*.py` pass
+  > **unmodified**. What changed is which rows arrive under the predicate. Reconciled component
+  > consumption now posts `reference_type='work_order_backflush'`, deliberately **outside** it, because
+  > reconcile-to-target needs N rows per (work order, part) plus a later top-up row. So
+  > `uq_wo_inventory_receipt` still guards the live finished-goods `RECEIVE`, while
+  > `uq_wo_inventory_issue` now covers **only legacy (pre-4.4) component ISSUE rows** — no new row can
+  > ever trip it, and it is retained as a permanent fence over that history rather than as a live
+  > guard. The current leg's non-duplication is **arithmetic** (`delta = target − signed ledger net`,
+  > serialized by the pre-existing `SELECT … FOR UPDATE` on `work_orders`), not schema-enforced. Adding
+  > a `reference_type` value needed no migration: the column is unconstrained `String(50)` free text
+  > with no CHECK, enum or domain — the same way PR 1 introduced `work_order_operation`. See
+  > `docs/MATERIAL_CONSUMPTION_PLAN.md` → "The reconciling backflush and one lot policy (PR 4.4)".
+
 - **`076_uq_wo_inv_sqlite_parity`** (file `076_uq_wo_inventory_sqlite_parity.py`) — **dialect-parity
   fix for the two `041` indexes.** They declared only `postgresql_where`, which SQLite ignores, so on
   SQLite — local dev and the entire pytest suite — they degraded into **full** unique indexes covering

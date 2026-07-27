@@ -1598,10 +1598,13 @@ class AnalyticsService:
 
         Shares ``work_order_ledger_filter`` with ``completion_cost_service`` -- the same
         predicate, not a re-implementation -- so the analytics material leg cannot drift
-        from the stored rollup's. It spans both ``reference_type='work_order'`` (FG
-        receipt / one-shot backflush) and ``reference_type='work_order_operation'``
-        (per-run consumption of tied material, keyed on the OPERATION). ISSUE
-        quantities/costs are stored negative, so the magnitude is summed.
+        from the stored rollup's. It spans all three reference shapes:
+        ``reference_type='work_order'`` (FG receipt, plus LEGACY pre-PR-4.4 one-shot
+        component ISSUE rows), ``reference_type='work_order_backflush'`` (the reconciling
+        component leg -- BOM demand and work-order-scoped ties, N rows per part) and
+        ``reference_type='work_order_operation'`` (per-run consumption of tied material,
+        keyed on the OPERATION). ISSUE quantities/costs are stored negative, so the
+        magnitude is summed.
 
         The two services shared only the ledger predicate, NOT the type predicate -- which
         is exactly how a docstring claiming they "cannot drift" could still be wrong -- so

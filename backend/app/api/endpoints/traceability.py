@@ -9,13 +9,14 @@ from sqlalchemy.orm import Session, joinedload
 from app.api.deps import get_current_company_id, get_current_user
 from app.db.database import get_db
 
-# The two ledger reference shapes a work order's movement lands under, and the shared
+# The THREE ledger reference shapes a work order's movement lands under, and the shared
 # predicate that spans them. IMPORTED, not re-declared with string literals: genealogy
-# that read one shape and cost/analytics that read the other is exactly the drift these
+# that read one shape and cost/analytics that read the others is exactly the drift these
 # constants exist to prevent, and an as-built record missing the material a job actually
-# burned is an AS9100D hole. Historical rows are NOT migrated; they truthfully carry
-# ``work_order`` only. On the ``work_order_operation`` rows ``reference_id`` is the
-# OPERATION id, resolved back to its work order below.
+# burned is an AS9100D hole. Historical rows are NOT migrated; pre-PR-4.4 rows truthfully
+# carry ``work_order`` and keep it. On the ``work_order_operation`` rows ``reference_id``
+# is the OPERATION id, resolved back to its work order below; on ``work_order`` and
+# ``work_order_backflush`` rows it is the work order itself.
 from app.db.ledger_filter import (
     LEDGER_QUANTITY_EPSILON,
     OPERATION_REFERENCE_TYPE,
@@ -174,9 +175,11 @@ def trace_lot(
         if txn.from_location:
             desc += f" from {txn.from_location}"
 
-        # ``reference_number`` is the WO number on BOTH reference types (the
-        # operation-scoped consumption rows carry it too), so one membership test
-        # covers material consumed per-run as well as WO-level movement.
+        # ``reference_number`` is the WO number on ALL THREE reference types -- the
+        # operation-scoped consumption rows and the reconciled ``work_order_backflush``
+        # rows carry it too, since ``_write_issue_txn`` stamps it from the work order
+        # regardless of shape -- so one membership test covers material consumed per-run
+        # and by the completion backflush as well as WO-level movement.
         if txn.reference_type in WORK_ORDER_REFERENCE_TYPES and txn.reference_number:
             work_orders_used.add(txn.reference_number)
         # A RECEIVE referencing a work order: this lot was PRODUCED by that WO -> its
@@ -310,14 +313,28 @@ def _reconstruct_consumed_components(
     cross-tenant trace can never surface another company's genealogy (invariant #1 /
     TRACE-1).
 
-    TWO sources of consumption are read, and both must be:
-      * ``reference_type='work_order'``           — the one-shot BOM/routing backflush,
-                                                    ``reference_id`` = the work order;
+    THREE sources of consumption are read, and all three must be:
+      * ``reference_type='work_order'``           — LEGACY (pre-PR-4.4) one-shot BOM /
+                                                    work-order-scoped-tie ISSUE rows,
+                                                    ``reference_id`` = the work order.
+                                                    Nothing writes this shape any more and
+                                                    no historical row was migrated off it;
+      * ``reference_type='work_order_backflush'`` — the reconciling component leg (BOM /
+                                                    routing demand and work-order-scoped
+                                                    ties), ``reference_id`` = the work
+                                                    order. It spills across lots, so ONE
+                                                    logical draw is N rows naming N heats
+                                                    — which is the point, and which the
+                                                    per-(WO, part, lot) aggregation below
+                                                    collapses into one line per lot;
       * ``reference_type='work_order_operation'`` — per-run consumption of material tied
                                                     to an operation, ``reference_id`` =
                                                     the OPERATION, mapped back to its work
-                                                    order here so both collapse into the
-                                                    same per-WO genealogy lines.
+                                                    order here so all three collapse into
+                                                    the same per-WO genealogy lines.
+
+    All three arrive through ``work_order_ledger_filter``; only the operation shape needs
+    the id resolution below, since the other two already key on the work order.
 
     TWO transaction types are read, and the aggregation is SIGNED. ``RETURN`` rows are the
     reasoned compensating credit for consumption (PR 3) and mirror the reference shape of

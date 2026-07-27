@@ -235,8 +235,9 @@ def test_untied_queue_row_carries_an_empty_list(client: TestClient, db_session: 
 
 def test_queue_shows_only_open_operation_scoped_ties(client: TestClient, db_session: Session):
     """A CANCELLED tie must not paint a line on an operator's screen, and a
-    work-order-scoped tie drains through a different mechanism entirely (the
-    one-shot backflush), so per-operation numbers would be meaningless for it."""
+    work-order-scoped tie drains through a different mechanism entirely (leg 2 of
+    the completion backflush, reconciled against ``qty_planned`` for the whole
+    job), so per-operation numbers would be meaningless for it."""
     wc = make_work_center(db_session)
     station = make_kiosk_station(db_session, work_center=wc)
     _, operation = make_wo_with_operation(db_session, work_center=wc)
