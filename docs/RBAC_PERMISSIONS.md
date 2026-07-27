@@ -188,11 +188,29 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > been consumed against the tie.
 >
 > **The consumption itself has no endpoint and no separate gate.** It runs inside the existing
-> completion paths (`apply_completion_inventory_effects`), so whoever is authorized to complete the
-> work is what authorizes the resulting stock movement — including the operator-facing kiosk and
-> shop-floor completion verbs and the reconcile-on-read GET. Every one of those call sites fires only
-> when the **work order** completes, never on an operation alone, so the attributed actor is whoever
-> closed the job — not whoever finished nest 1 of 3. This is deliberate: material depletes
+> completion paths — `apply_operation_completion_inventory_effects` when an **operation** completes and
+> `apply_completion_inventory_effects` when the **work order** does — so whoever is authorized to
+> complete the work is what authorizes the resulting stock movement, including the operator-facing
+> kiosk and shop-floor completion verbs and the reconcile-on-read GET. **The attributed actor is
+> whoever completed the operation the material was consumed against** — with the trigger at operation
+> completion that is the operator who finished nest 1 of 3, not whoever later closed the job. (Through
+> PR 2 it was the other way round and this paragraph said so; the reconcile-on-read GET is still the
+> one path with no meaningful actor, which is exactly why it is **not** a per-operation trigger — see
+> `docs/MATERIAL_CONSUMPTION_PLAN.md` → Residual gaps.) **No role gained a capability — and one role LOST one.** An Operator
+> could already drive consumption by completing a job's last operation, so what changed is when and how
+> often, not who. In the other direction, `POST /api/v1/work-orders/operations/{id}/complete` — the
+> **office** operation-complete verb — was gated to **Admin / Manager / Supervisor / Quality** in the same
+> change, matching `complete-work-order` (its larger sibling, which completes every operation on the work
+> order). Quality is included deliberately: refusing it a single operation while allowing it the whole work
+> order would be incoherent. `reduce-production` stays stricter for a reason that does not apply here — it
+> rewrites other operators' recorded labor.
+> It had been open to any authenticated tenant user, **Viewer and Shipping included**, while its office
+> siblings were already gated. That gap predates this work,
+> but it became load-bearing the moment completing an operation began decrementing stock: a Viewer could
+> move inventory and write hash-chain rows from a page they were only supposed to read. The UI button is
+> gated to the same tier. **Operators are unaffected** — they complete work through
+> `/api/v1/shop-floor/operations/{id}/complete` and the kiosk, which is the documented design above, not
+> through the office page. This is deliberate: material depletes
 > because production happened, not because someone was granted an inventory power. The stock
 > decrement, the `ISSUE` ledger row, and any `ALLOCATION_SHORTAGE` are audited on the hash chain
 > regardless of which path drove them. Lifecycle side effects follow the same rule — nest re-import

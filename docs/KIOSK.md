@@ -223,13 +223,18 @@ modal and the crew station's badge-signed confirm — show an informational noti
 action. It is **never a gate**: a shortage warns, it does not block the job, and the notice never
 blocks a badge signature.
 
-**What it says, and why it is worded around the WORK ORDER.** The heading is
-*"Material — deducts when WO-#### finishes"*, and the footer repeats *"Estimate — nothing leaves
-stock until the last operation on this work order completes."* That phrasing is load-bearing, not
-cautious hedging: every consumption call site is gated on **work-order** completion, and a laser WO
-carries one operation per nest, so finishing nest 1 of 3 moves **no stock at all** — all three flush
-when the last operation closes the work order. Copy that said "this will deduct 1 sheet" would be
-wrong on exactly the shop's most common tied job. (See `docs/API.md` → Shop Floor → "Completion also
+**What it says, and why it is worded around the OPERATION.** The heading is
+*"Material — deducts when you complete this operation on WO-####"*, and the footer is *"Estimate —
+this leaves stock when the operation completes, not as each run is reported."* That phrasing is
+load-bearing, not cautious hedging, and it **changed with the trigger**: through PR 2 the same notice
+said *"deducts when WO-#### finishes"*, which was correct then — every consumption call site was
+gated on **work-order** completion, and since a laser WO carries one operation per nest, finishing
+nest 1 of 3 moved no stock at all. Consumption now fires when the **operation** completes, so the
+operator's next tap genuinely is what takes nest 1's sheet out of stock. The work-order number
+survives only as **context**, never as the trigger — a crew station confirms a badge scan against a
+job label, so "on WO-####" is what makes the sentence checkable against the paperwork in front of the
+operator. What the copy must still never say is *per run*: reporting 3 of 6 runs on a nest whose
+operation is still open deducts **nothing**. (See `docs/API.md` → Shop Floor → "Completion also
 consumes tied material" and `docs/MATERIAL_CONSUMPTION_PLAN.md` → "Capability vs. wiring".)
 
 Two more facts the copy carries because both otherwise read as bugs:
@@ -243,8 +248,8 @@ Two more facts the copy carries because both otherwise read as bugs:
   "why did my scrap raise the material?" is otherwise a support ticket.
 
 A shortage adds an amber line naming the short quantity and ending *"This never blocks the job; tell
-your supervisor."* Everything is labelled an **estimate**: consumption is reconcile-to-target,
-quantities can still move before the work order closes, and `qty_consumed` is a cache (the inventory
+your supervisor."* Everything is labelled an **estimate**: consumption is reconcile-to-target, the
+operation's quantities can still move before it closes, and `qty_consumed` is a cache (the inventory
 ledger is authoritative).
 
 **The data rides the queue payload; the fence is not widened.** Ties come from the `material_ties`

@@ -1135,6 +1135,51 @@ def apply_completion_inventory_effects(
     )
 
 
+def apply_operation_completion_inventory_effects(
+    db: Session,
+    work_order: WorkOrder,
+    operation: WorkOrderOperation,
+    *,
+    user_id: int,
+    company_id: int,
+    audit: AuditService,
+) -> None:
+    """Run the inventory effects of ONE OPERATION completing. Today: tied consumption.
+
+    The operation-level analogue of ``apply_completion_inventory_effects``, and the one
+    seam the four operation-completion handlers call right after
+    ``finalize_operation_completion``. It exists even though it currently does a single
+    thing so that the NEXT operation-scoped inventory effect has an obvious home and
+    lands on all four handlers at once -- the same reason its work-order-level sibling
+    exists (CLAUDE.md: add completion side-effects at the seam, not at the call sites).
+
+    **The finished-goods RECEIVE and the BOM backflush deliberately DO NOT fire here.**
+    They are correctly WORK-ORDER-scoped -- the FG receipt books the job's produced
+    quantity into stock against ``work_order.lot_number``, and the backflush is a
+    one-shot ISSUE per (work order, part) physically constrained to one row by
+    ``uq_wo_inventory_issue``. Firing either per operation would double-receive a
+    multi-operation job and collide with that index. They stay in
+    ``apply_completion_inventory_effects``; only operation-scoped TIED-MATERIAL
+    consumption moved earlier, because that is the leg whose unit of work genuinely is
+    the operation (a nest).
+
+    Does NOT commit -- joins the caller's unit of work, so consumption lands atomically
+    with the operation status change. Writes NOTHING at all when the operation carries no
+    ties.
+
+    **Propagates ``StaleDataError`` and nothing else.** Every other failure degrades into
+    a recorded ``ALLOCATION_CONSUMPTION_FAILED`` row inside the engine; an optimistic-lock
+    conflict (invariant 4) is re-raised so it becomes the calling handler's documented
+    409 rather than a 200 that silently skipped a material deduction. Do NOT wrap this
+    call in a bare ``except`` -- that would restore exactly the failure it prevents.
+    Callers must gate on the work order not being terminal.
+    Imported lazily: that module imports helpers from THIS one.
+    """
+    from app.services.material_consumption_service import consume_tied_materials_for_operation
+
+    consume_tied_materials_for_operation(db, work_order, operation, user_id=user_id, company_id=company_id, audit=audit)
+
+
 def _existing_shipment_ship_txn(db: Session, shipment_id: int, company_id: int) -> bool:
     """True if a SHIP txn for this shipment already exists (idempotency key, G2).
 

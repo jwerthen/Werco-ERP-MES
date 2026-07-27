@@ -202,8 +202,8 @@ describe('package-level default', () => {
 
     // 2/run x (5 + 2) runs = 14 sheets, deducted at WORK-ORDER completion —
     // never "deducting now" and never per run.
-    const chip = screen.getByText(/sheets deducted when the work order finishes/i);
-    expect(chip).toHaveTextContent('2 tied — 14 sheets deducted when the work order finishes');
+    const chip = screen.getByText(/sheets deducted as each nest completes/i);
+    expect(chip).toHaveTextContent('2 tied — 14 sheets deducted as each nest completes');
     expect(screen.queryByText(/deducting now/i)).not.toBeInTheDocument();
   });
 

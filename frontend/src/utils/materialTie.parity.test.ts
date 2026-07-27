@@ -28,6 +28,17 @@
  * agreement — not to adjust the reference below to match whatever the client
  * happens to do.
  *
+ * WHAT THIS FILE IS NOT ABOUT: *when* the engine runs. Consumption moved from
+ * work-order completion to OPERATION completion and not one case below changed,
+ * because the arithmetic never referenced the trigger — it reads live operation
+ * state at whatever moment it is called. The client's `finalComplete` is still
+ * the ORDERED quantity for the same reason it always was (`/complete` asserts
+ * `quantity_complete = quantity_ordered`, and the clock-out path clamps to the
+ * same target), and per-operation timing only makes that basis tighter: the
+ * number predicted here is now posted inside the very request the operator
+ * fires, rather than reconciled later. If the trigger moves again, this table
+ * still should not need to.
+ *
  * ONE DELIBERATE DIFFERENCE, asserted at the bottom: the client's float-residue
  * threshold is LOOSER than the engine's (1e-6 vs 1e-9). That direction is the safe
  * one — the UI can suppress a sub-microunit deduction the engine still posts, but

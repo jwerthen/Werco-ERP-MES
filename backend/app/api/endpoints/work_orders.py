@@ -64,7 +64,10 @@ from app.services.completion_cost_service import (
     compute_and_store_estimated_cost,
     rollup_labor_hours_from_evidence,
 )
-from app.services.completion_inventory_service import apply_completion_inventory_effects
+from app.services.completion_inventory_service import (
+    apply_completion_inventory_effects,
+    apply_operation_completion_inventory_effects,
+)
 from app.services.completion_quality_service import (
     evaluate_and_record_labor_data_quality,
     record_reconcile_labor_data_quality,
@@ -3337,7 +3340,16 @@ def complete_work_order(
     # from a WO id); operations are locked in a deterministic id order.
     work_order = (
         db.query(WorkOrder)
-        .filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id)
+        .filter(
+            WorkOrder.id == work_order_id,
+            WorkOrder.company_id == company_id,
+            # Parity with every other completion path (invariant 3). Benign today
+            # -- a soft delete cancels every open tie, so the consumption engine
+            # this handler now drives finds nothing -- but that is a second-order
+            # property of a different verb, not a guarantee this query should be
+            # leaning on.
+            WorkOrder.is_deleted == False,  # noqa: E712
+        )
         .with_for_update()
         .first()
     )
@@ -3481,6 +3493,24 @@ def complete_work_order(
         operation.updated_at = now
         sync_laser_nest_from_operation(operation)
         affected_work_centers |= finalize_operation_completion(db, work_order, operation)
+
+        # Material consumption (incremental), for symmetry with the three other
+        # operation-completion paths. In practice a NO-OP here: force-complete never
+        # writes ``operation.quantity_complete``, so ``target = qty_per_run * (complete +
+        # scrapped)`` is 0 and the sum-delta is non-positive. Deliberately NOT "fixed"
+        # here -- whether a privileged force-complete should book produced quantity per
+        # operation is a separate product decision, and inventing one would silently
+        # deplete material for runs nobody reported. The tie still flushes through the
+        # whole-WO reconcile in apply_completion_inventory_effects below if the operation
+        # does carry produced quantity from an earlier partial report.
+        #
+        # The flush keeps an autoflush StaleDataError out of the engine's per-allocation
+        # savepoint (where it would degrade into an ALLOCATION_CONSUMPTION_FAILED audit
+        # row instead of a 409); see the shop-floor twins.
+        db.flush()
+        apply_operation_completion_inventory_effects(
+            db, work_order, operation, user_id=current_user.id, company_id=company_id, audit=audit
+        )
         audit.log_status_change(
             resource_type="work_order_operation",
             resource_id=operation.id,
@@ -4125,7 +4155,23 @@ def complete_operation(
     quantity_scrapped: Optional[float] = None,
     scrap_reason: Optional[str] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    # Office verb. Previously open to ANY authenticated tenant user, VIEWER and
+    # SHIPPING included -- already wrong, and load-bearing once operation
+    # completion started moving stock: a Viewer could decrement inventory and
+    # write ledger + hash-chain rows from a page they were only meant to read.
+    #
+    # The gate MATCHES ``complete_work_order`` (its larger sibling, which
+    # completes every operation on the work order) rather than
+    # ``reduce-production``. QUALITY belongs here: excluding it would let a
+    # Quality user complete a whole work order but not one of its operations,
+    # which is incoherent. reduce-production is stricter for a reason that does
+    # not apply here -- it rewrites other operators' recorded labor.
+    #
+    # Operators are unaffected: they complete work through
+    # /shop-floor/operations/{id}/complete and the kiosk (docs/RBAC_PERMISSIONS.md).
+    current_user: User = Depends(
+        require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR, UserRole.QUALITY])
+    ),
     company_id: int = Depends(get_current_company_id),
 ):
     """Complete an operation.
@@ -4385,6 +4431,23 @@ def complete_operation(
             new_values=new_values,
             description=f"Updated operation {operation.operation_number} progress",
         )
+
+    # Material consumption (incremental): deplete THIS operation's tied material the
+    # moment the operation is COMPLETE rather than at work-order completion (one laser
+    # operation = one nest = one sheet). A terminal parent WO was refused with a 409
+    # above, so a finished / cancelled job never consumes. ``work_order`` is 404'd
+    # earlier in this handler, but the guard is kept because every downstream use in
+    # this function is written the same defensive way. Writes NOTHING for an untied
+    # operation; the whole-WO reconcile below stays the self-heal. Placed BEFORE the
+    # work-order-completion block so apply_completion_cost_rollup picks up these ledger
+    # rows on this request. The db.flush() above keeps an autoflush StaleDataError out
+    # of the engine's per-allocation savepoint, where it would be recorded as an
+    # ALLOCATION_CONSUMPTION_FAILED row instead of surfacing as a 409.
+    if is_fully_complete and work_order:
+        apply_operation_completion_inventory_effects(
+            db, work_order, operation, user_id=current_user.id, company_id=company_id, audit=audit
+        )
+
     if work_order_completed and work_order:
         audit.log_status_change(
             resource_type="work_order",

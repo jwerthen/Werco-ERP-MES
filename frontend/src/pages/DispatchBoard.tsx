@@ -1253,10 +1253,11 @@ function DispatchCard({
                 {dueToday ? '' : formatCentralDate(row.due_date)}
               </span>
             )}
-            {/* Material tie — an ESTIMATE of what leaves stock when the WORK
-                ORDER finishes, never a guarantee and never "deducting now":
-                consumption is reconcile-to-target and fires only at work-order
-                completion. The full sentence lives in the title. */}
+            {/* Material tie — an ESTIMATE of what leaves stock when THIS
+                OPERATION completes (a card is an operation row), never a
+                guarantee and never "deducting now": consumption is
+                reconcile-to-target, and nothing posts until the operation flips
+                COMPLETE. The full sentence lives in the title. */}
             {tieChip && (
               <span
                 data-testid={`dispatch-tie-${row.operation_id}`}

@@ -270,27 +270,51 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > `BACKFLUSH_SHORTAGE` audit row plus a `backflush_shortage` warning event.
 >
 > **Completion also consumes tied material (material allocations).** A work order can optionally be
-> **tied** to stock material via `…/material-allocations` (see "Material ties" below). Every
-> completion path — kiosk clock-out, shop-floor and office operation complete, force-complete, and
-> reconcile-on-read — reconciles those ties as part of the same transaction, so consumption is atomic
-> with the status change. There is **no new endpoint and no new call site**: it rides
-> `apply_completion_inventory_effects` alongside the FG receipt and the backflush. **An untied work
-> order is untouched** — no ledger row, no audit row, no event (asserted by test).
+> **tied** to stock material via `…/material-allocations` (see "Material ties" below). Consumption is
+> **never a separate endpoint** — authority to complete the work is what authorizes the movement — and
+> it always joins the completing handler's transaction, so it is atomic with the status change. **An
+> untied work order is untouched** — no ledger row, no audit row, no event (asserted by test).
 >
-> **Consumption fires when the WORK ORDER completes, never when an operation does.** All five call
-> sites above sit inside a work-order-completion branch (the two operation-complete verbs run it only
-> under `if work_order_completed:`; reconcile-on-read keys on work-order transitions only). A laser
-> child work order carries **one operation per nest**, so completing nest 1 of 3 deducts **nothing** —
-> all three ties flush together when the last operation closes the work order. Client copy built on
-> these numbers must say "deducts N when WO-#### finishes", never "deducting now". The two tie shapes
-> behave differently:
+> **Consumption fires when an OPERATION completes, and again (as a reconcile) when the WORK ORDER
+> completes.** Two seams, deliberately different in scope:
+> - **Operation completion** — `apply_operation_completion_inventory_effects`, called by the four
+>   operation-completion handlers (`POST /shop-floor/clock-out/{time_entry_id}` when it closes the
+>   operation, `POST /shop-floor/operations/{id}/complete`, `POST /work-orders/operations/{id}/complete`,
+>   and the per-operation leg of `POST /work-orders/{id}/complete`) right after the operation is
+>   flipped `COMPLETE`. It reconciles **that operation's ties only**. A laser child work order carries
+>   **one operation per nest**, so completing nest 1 of 3 now deducts **nest 1's sheet**. Scope is one
+>   operation on purpose: a still-`IN_PROGRESS` operation can still be walked back
+>   (`…/reduce-production` refuses only once the operation is `COMPLETE` or the work order is
+>   terminal), so consuming against one would strand material that never auto-reverses. Every call site
+>   is inside its handler's non-terminal branch, so a finished/cancelled job never consumes.
+> - **Work-order completion** — `apply_completion_inventory_effects`, unchanged, on all five of its
+>   existing call sites (kiosk clock-out, shop-floor and office operation complete, force-complete,
+>   reconcile-on-read). It reconciles **every** open tie on the work order and is now the **self-heal**:
+>   whatever an operation-level post missed still flushes here, and whatever already posted computes
+>   `delta = 0` and writes nothing. The FG receipt and the BOM backflush stay here and did **not** move
+>   to operation completion (per-operation they would double-receive a multi-operation job and collide
+>   with `uq_wo_inventory_issue`).
+>
+> **Reporting production is still NOT a consumption trigger.** A partial production report on an open
+> operation — `POST /shop-floor/operations/{id}/complete` short of the full quantity, or a clock-out
+> that does not close the operation — moves **no stock**. Keying 3 of 6 runs on an unfinished nest
+> deducts nothing; the sheets move when that operation closes. Client copy built on these numbers must
+> say "deducts when this operation completes", never "deducting now".
+>
+> **Force-complete is a no-op for consumption in practice.** `POST /work-orders/{id}/complete` calls
+> the seam for symmetry, but it never writes `operation.quantity_complete`, so `target` is 0 and the
+> sum-delta is non-positive: a force-completed operation's tie posts nothing unless the operation
+> already carried produced quantity from an earlier report. See
+> `docs/MATERIAL_CONSUMPTION_PLAN.md` → "Residual gaps of the operation-completion trigger".
+>
+> The two tie shapes behave differently:
 > - **Operation-scoped** ties (`work_order_operation_id` set — the laser-nest case) are reconciled
 >   **per operation** as a **sum-delta**: `target = qty_per_run × (operation
 >   quantity_complete + quantity_scrapped)`, and a negative `ISSUE` is posted for
 >   `target − qty_consumed` whenever that delta is positive. Because the target is recomputed from
->   live operation state, replays and reconcile-on-read converge instead of double-issuing — but the
->   reconcile still only *runs* at work-order completion, so this is per-operation **accuracy**, not
->   per-operation timing (see `docs/MATERIAL_CONSUMPTION_PLAN.md` → "Capability vs. wiring"). These rows
+>   live operation state, the operation-completion post, a replay, and the work-order reconcile all
+>   converge instead of double-issuing — the later caller simply sees `delta = 0`
+>   (see `docs/MATERIAL_CONSUMPTION_PLAN.md` → "Capability vs. wiring"). These rows
 >   carry **`reference_type='work_order_operation'`** with `reference_id` = the **operation** id
 >   (and `reference_number` = the work-order number) — deliberately outside the
 >   `uq_wo_inventory_receipt` / `uq_wo_inventory_issue` idempotency predicates, which key on
@@ -691,6 +715,10 @@ mixed**:
 >   operations: material has already been consumed against N tied allocation(s). Reverse consumption
 >   first."*). **Nothing is destroyed** — the guard runs ahead of the wipe, and uploaded blobs are
 >   reaped. The planner must reverse the consumption explicitly (a verb that does not exist yet).
+>   **This is now reachable as soon as ONE nest's operation completes**, not only after the whole work
+>   order finishes: consumption moved to operation completion, so the first completed nest on a
+>   three-nest package locks that package. The only remedy until the reversal verb ships is a new work
+>   order.
 > - Ties with no consumption are **cancelled** (status → `cancelled`, never deleted) with an audit row
 >   (`reason: "superseded_by_reimport"`), the same posture as the superseded nests themselves, **and
 >   detached** — their `work_order_operation_id` is set NULL. That FK carries no `ON DELETE`, so a
@@ -1458,7 +1486,8 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > no events.
 >
 > **The zero-write guarantee covers material consumption explicitly.** The board reads material ties
-> and stock levels, and it does **not** run `apply_completion_inventory_effects`, post an `ISSUE`, or
+> and stock levels, and it does **not** run either consumption seam
+> (`apply_completion_inventory_effects` / `apply_operation_completion_inventory_effects`), post an `ISSUE`, or
 > advance any `qty_consumed` — `material_tie_view.py` has no write path and must never grow one. This
 > read is polled by every manager on the shop and by the kiosk queue every 10–15 seconds per station;
 > a poll is not an actor, has no intent and records no reason, so material that moved from one would

@@ -555,12 +555,13 @@ export default function LaserNestManualModal({
                 {errors.qty_per_run && <p className={ERR}>{errors.qty_per_run.message}</p>}
               </label>
 
-              {/* Consumption fires at WORK-ORDER completion, never per run — a
-                  laser WO carries one operation per nest, so finishing this nest
-                  alone deducts nothing. Say so plainly. */}
+              {/* Consumption fires when this nest's OPERATION completes, never
+                  per run: reporting runs on a still-open nest deducts nothing,
+                  because an IN_PROGRESS operation is still reducible and
+                  consumption never auto-reverses. Say so plainly. */}
               <p className="text-xs text-fd-faint sm:col-span-2">
-                Optional. Tied sheets leave inventory when the work order finishes, not per run. FIFO picks the lot at
-                that moment.
+                Optional. Tied sheets leave inventory when this nest's operation completes, not per run. FIFO picks
+                the lot at that moment.
               </p>
             </>
           )}

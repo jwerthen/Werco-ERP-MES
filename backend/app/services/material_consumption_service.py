@@ -36,6 +36,24 @@ why this path needs no ``uq_*`` index of its own (and why it deliberately posts 
 ``reference_type='work_order_operation'``, OUTSIDE the ``uq_wo_inventory_issue``
 predicate, so it can never collide with the backflush idempotency guard).
 
+Two entry points, one engine
+----------------------------
+* ``consume_tied_materials_for_operation`` -- ONE just-completed operation's ties.
+  This is where stock actually moves on the floor: a laser child work order carries one
+  operation per nest, so nest 1 of 3 must deplete its sheet when nest 1 closes. Its
+  scope is deliberately narrow for a SAFETY reason (a still-``IN_PROGRESS`` operation
+  is still reducible, and consumption never auto-reverses) -- read that function's
+  docstring before widening it.
+* ``consume_tied_materials_for_work_order`` -- EVERY open operation-scoped tie on the
+  work order, run from ``apply_completion_inventory_effects`` at work-order completion.
+  It is now the SELF-HEAL rather than the only depletion moment: sum-delta means it
+  recomputes ``target`` from live operation state and no-ops on whatever the
+  per-operation call already posted.
+
+Both funnel into ``_consume_allocation_under_savepoint`` -> ``_consume_one_allocation``,
+so the savepoint boundary, the ``ALLOCATION_CONSUMPTION_FAILED`` record and the
+arithmetic itself exist exactly once.
+
 **What carries concurrency is the WORK-ORDER LOCK, not this engine.** The convergence
 argument above is a SEQUENTIAL one: it holds for a re-entry that observes the previous
 call's committed ``qty_consumed``. It does not, on its own, make two *simultaneous*
@@ -117,6 +135,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.exc import StaleDataError
 
 from app.db.ledger_filter import OPERATION_REFERENCE_TYPE
 from app.models.audit_log import AuditLog
@@ -226,6 +245,40 @@ def open_allocations_for_work_order(
         .filter(
             WorkOrderMaterialAllocation.company_id == company_id,
             WorkOrderMaterialAllocation.work_order_id == work_order_id,
+            WorkOrderMaterialAllocation.status == AllocationStatus.OPEN,
+        )
+        .order_by(WorkOrderMaterialAllocation.id)
+        .all()
+    )
+
+
+def _open_allocations_for_operation(
+    db: Session,
+    *,
+    work_order_id: int,
+    operation_id: int,
+    company_id: int,
+) -> list[WorkOrderMaterialAllocation]:
+    """The OPEN ties scoped to ONE operation, tenant-scoped (invariant #1).
+
+    The narrow sibling of ``open_allocations_for_work_order``, read by the
+    operation-completion entry point. Index-backed by ``uq_wo_material_alloc_open_op``
+    (``company_id, work_order_operation_id, part_id`` WHERE the row is operation-scoped
+    and OPEN), which is exactly this predicate.
+
+    ``work_order_id`` is filtered too, redundantly with the operation id: it is the same
+    "the tie must actually belong to THIS work order" check the whole-work-order path
+    makes by looking the operation up on the work order, so a tie whose two scopes have
+    drifted apart can never consume against a work order it does not name.
+
+    An UNTIED operation returns ``[]`` and the caller short-circuits with ZERO writes.
+    """
+    return (
+        db.query(WorkOrderMaterialAllocation)
+        .filter(
+            WorkOrderMaterialAllocation.company_id == company_id,
+            WorkOrderMaterialAllocation.work_order_id == work_order_id,
+            WorkOrderMaterialAllocation.work_order_operation_id == operation_id,
             WorkOrderMaterialAllocation.status == AllocationStatus.OPEN,
         )
         .order_by(WorkOrderMaterialAllocation.id)
@@ -804,14 +857,195 @@ def _consume_tied_materials(
                 company_id,
             )
             continue
-        # Captured BEFORE the savepoint: a rollback expires the instance, and the
-        # failure record must not depend on re-loading a row the rollback disturbed.
-        allocation_id = allocation.id
-        allocation_part_id = allocation.part_id
-        operation_id = operation.id
-        nested = db.begin_nested()
-        try:
-            _consume_one_allocation(
+        _consume_allocation_under_savepoint(
+            db,
+            work_order=work_order,
+            allocation=allocation,
+            operation=operation,
+            company_id=company_id,
+            user_id=user_id,
+            audit=audit,
+            result=result,
+            # This reconcile also runs from a GET (reconcile-on-read), where
+            # there is no 409 to return -- degrade and record instead.
+            propagate_lock_conflict=False,
+        )
+
+
+def _consume_allocation_under_savepoint(
+    db: Session,
+    *,
+    work_order: WorkOrder,
+    allocation: WorkOrderMaterialAllocation,
+    operation: WorkOrderOperation,
+    company_id: int,
+    user_id: int,
+    audit: AuditService,
+    result: MaterialConsumptionResult,
+    propagate_lock_conflict: bool,
+) -> None:
+    """Reconcile ONE allocation inside its OWN savepoint; degrade all but a lock conflict.
+
+    The per-allocation damage-control boundary shared by BOTH entry points -- the
+    whole-work-order reconcile (``_consume_tied_materials``) and the per-operation
+    post (``consume_tied_materials_for_operation``). It is a shared helper rather
+    than a second copy precisely because the savepoint/rollback/failure-record
+    sequence is the compliance-visible part: a copy that drifts would mean one entry
+    point silently swallowing a failed depletion the other records on the hash chain.
+
+    A failure rolls back only this allocation, leaves the outer transaction usable
+    (a reconcile-on-read GET is about to commit on it), and writes the
+    ``ALLOCATION_CONSUMPTION_FAILED`` chain row.
+    """
+    # Captured BEFORE the savepoint: a rollback expires the instance, and the
+    # failure record must not depend on re-loading a row the rollback disturbed.
+    allocation_id = allocation.id
+    allocation_part_id = allocation.part_id
+    operation_id = operation.id
+    nested = db.begin_nested()
+    try:
+        _consume_one_allocation(
+            db,
+            work_order=work_order,
+            allocation=allocation,
+            operation=operation,
+            company_id=company_id,
+            user_id=user_id,
+            audit=audit,
+            result=result,
+        )
+        nested.commit()
+    except StaleDataError:
+        # INVARIANT 4, and the ONE failure the caller gets to decide about. Every
+        # other failure here is a per-allocation problem worth recording and
+        # stepping over; an optimistic-lock conflict is a statement about the
+        # whole request -- another transaction moved this work order underneath
+        # us, so the quantities this consumption was computed from are stale.
+        #
+        # Whether that should propagate depends on WHO is calling, which is why
+        # it is a parameter rather than a fixed policy:
+        #   * ``True`` (the per-operation post, called only from write handlers):
+        #     degrading it would turn the handler's documented 409 into a 200
+        #     that silently skipped a material deduction -- operator sees
+        #     success, stock never moves, and the only trace is an audit row
+        #     nobody is watching. Re-raise so the app-wide StaleDataError -> 409
+        #     handler (``app/main.py``) does its job.
+        #   * ``False`` (the whole-work-order reconcile): that path also runs
+        #     from reconcile-on-read GETs, where there is no 409 to return and no
+        #     actor to attribute one to. Propagating would abort the remaining
+        #     allocations AND lose the ``ALLOCATION_CONSUMPTION_FAILED`` row --
+        #     and material that should have depleted and did not is a worse
+        #     control gap than the shortage case, which at least writes a chain
+        #     row. So it degrades exactly as every other failure does.
+        nested.rollback()
+        if propagate_lock_conflict:
+            raise
+        result.failed_allocation_ids.append(allocation_id)
+        logger.exception(
+            "Material consumption hit a lock conflict for allocation %s on WO %s (company %s)",
+            allocation_id,
+            work_order.id,
+            company_id,
+        )
+        _record_consumption_failed(
+            work_order=work_order,
+            allocation_id=allocation_id,
+            part_id=allocation_part_id,
+            operation_id=operation_id,
+            error=StaleDataError("optimistic lock conflict during consumption"),
+            company_id=company_id,
+            audit=audit,
+        )
+    except Exception as exc:  # degrade per-allocation, never break a GET
+        nested.rollback()
+        result.failed_allocation_ids.append(allocation_id)
+        logger.exception(
+            "Material consumption failed for allocation %s on WO %s (company %s)",
+            allocation_id,
+            work_order.id,
+            company_id,
+        )
+        _record_consumption_failed(
+            work_order=work_order,
+            allocation_id=allocation_id,
+            part_id=allocation_part_id,
+            operation_id=operation_id,
+            error=exc,
+            company_id=company_id,
+            audit=audit,
+        )
+
+
+def consume_tied_materials_for_operation(
+    db: Session,
+    work_order: WorkOrder,
+    operation: WorkOrderOperation,
+    *,
+    user_id: int,
+    company_id: int,
+    audit: AuditService,
+) -> MaterialConsumptionResult:
+    """Reconcile the OPEN ties on ONE just-completed operation to their target.
+
+    The incremental entry point: a laser child work order carries one operation per
+    nest, so finishing nest 1 of 3 has to deplete nest 1's sheet NOW rather than at the
+    end of the job. Wired into ``apply_operation_completion_inventory_effects``, which
+    the four operation-completion handlers call right after
+    ``finalize_operation_completion``.
+
+    **The scope is deliberately THIS OPERATION'S ties only -- never the whole work
+    order -- and that is a safety property, not a performance one.** A whole-work-order
+    reconcile from an operation completion would also post against operations that are
+    still ``IN_PROGRESS`` with partial production, and an in-progress operation is still
+    REDUCIBLE: ``production_reduction_service`` refuses a walk-back only once the
+    operation is ``COMPLETE`` (or the work order is terminal). So a supervisor correcting
+    an over-count on a *different*, still-open operation would strand material this call
+    had already consumed against it -- and consumption NEVER auto-reverses (a negative
+    delta is a no-op), with no RETURN verb yet. Scoping to the one operation makes that
+    unreachable: the operation being consumed for is ``COMPLETE`` at the instant the
+    ISSUE posts, hence reduce-immune, so its target can only ever move UP.
+
+    The whole-work-order reconcile in ``apply_completion_inventory_effects`` is unchanged
+    and remains the SELF-HEAL: anything an operation-level post missed (a failed
+    savepoint, a tie created after the operation completed, an operation completed before
+    this call site existed) still flushes when the work order finishes. Sum-delta makes
+    the two converge -- the later call recomputes ``target`` from live operation state
+    and sees ``delta == 0`` for whatever already posted.
+
+    UNTIED OPERATIONS ARE UNTOUCHED: with no tie rows this returns immediately -- no
+    inventory row, no ledger row, no audit row, no event -- so an untied work order stays
+    byte-identical to its pre-feature behavior (invariant 6(d)).
+
+    Does NOT commit (joins the caller's unit of work). It raises exactly ONE exception --
+    ``StaleDataError`` -- and swallows every other: each allocation runs in its own
+    SAVEPOINT via the shared ``_consume_allocation_under_savepoint``, and the whole body,
+    the tie read included, is under the wrapper below.
+
+    **The one thing that propagates is invariant 4.** An optimistic-lock conflict means
+    another transaction moved this work order underneath us, so the quantities this
+    consumption was computed from are stale. This entry point is called ONLY from write
+    handlers, every one of which documents a 409 on a concurrent write, so degrading it
+    would turn that 409 into a 200 that silently skipped a material deduction. Callers
+    must therefore be prepared for it -- ``app/main.py``'s app-wide handler translates it
+    -- and must NOT wrap this in a bare ``except``. The whole-work-order twin
+    (``consume_tied_materials_for_work_order``) makes the opposite choice on purpose: it
+    also runs from GETs, where there is no 409 to return.
+
+    Callers must still gate on the work order NOT being terminal; this engine consumes
+    whatever ties it is handed.
+    """
+    result = MaterialConsumptionResult()
+    try:
+        allocations = _open_allocations_for_operation(
+            db,
+            work_order_id=work_order.id,
+            operation_id=operation.id,
+            company_id=company_id,
+        )
+        if not allocations:
+            return result
+        for allocation in allocations:
+            _consume_allocation_under_savepoint(
                 db,
                 work_order=work_order,
                 allocation=allocation,
@@ -820,26 +1054,32 @@ def _consume_tied_materials(
                 user_id=user_id,
                 audit=audit,
                 result=result,
+                # Write handlers only: a lock conflict is this request's 409.
+                propagate_lock_conflict=True,
             )
-            nested.commit()
-        except Exception as exc:  # degrade per-allocation, never break a GET
-            nested.rollback()
-            result.failed_allocation_ids.append(allocation_id)
-            logger.exception(
-                "Material consumption failed for allocation %s on WO %s (company %s)",
-                allocation_id,
-                work_order.id,
-                company_id,
-            )
-            _record_consumption_failed(
-                work_order=work_order,
-                allocation_id=allocation_id,
-                part_id=allocation_part_id,
-                operation_id=operation_id,
-                error=exc,
-                company_id=company_id,
-                audit=audit,
-            )
+    except StaleDataError:
+        # INVARIANT 4. This entry point is called ONLY from write handlers, all of
+        # which document a 409 on a concurrent-write conflict, so the lock
+        # conflict must reach them. It is re-raised rather than degraded for a
+        # sharper reason than the savepoint helper's: a conflict raised by the
+        # autoflush of the tie READ above never reaches a savepoint at all, so it
+        # would be caught here and produce NO audit row whatsoever -- just a log
+        # line. A silently skipped material deduction with no record is strictly
+        # worse than the shortage case, which at least writes a chain row.
+        #
+        # This is also what keeps the guarantee STRUCTURAL rather than
+        # conventional: the four call sites each precede this with an explicit
+        # ``db.flush()`` so the conflict surfaces there instead, but a fifth call
+        # site that forgets would otherwise turn a 409 into an invisible no-op.
+        raise
+    except Exception:  # pragma: no cover - degrade, never break a completion
+        logger.exception(
+            "Material consumption aborted for WO %s operation %s (company %s)",
+            work_order.id,
+            operation.id,
+            company_id,
+        )
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -940,9 +1180,18 @@ def cancel_allocations_for_operations(
 
     consumed = [a for a in allocations if float(a.qty_consumed or 0) > _EPSILON]
     if consumed:
+        # Name a remedy that EXISTS. This message used to end "Reverse consumption
+        # first", pointing at a RETURN verb that is not built yet -- so the one
+        # person most likely to read it, a planner re-importing a corrected nest
+        # package, was told to do something impossible and would reasonably read
+        # it as a system fault. The refusal itself is right (the rebuild deletes
+        # the operations those ISSUE rows carry lot genealogy against), so the
+        # honest answer is what to do instead.
         raise MaterialAllocationConsumedError(
             "Cannot rebuild this work order's operations: material has already been consumed "
-            f"against {len(consumed)} tied allocation(s). Reverse consumption first."
+            f"against {len(consumed)} tied allocation(s), and consumption cannot be reversed yet. "
+            "Raise a new work order for the corrected nest package — this one keeps its material "
+            "history intact."
         )
 
     cancelled: list[int] = []

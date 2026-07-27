@@ -8,15 +8,35 @@
  * ---------------------------------------------------------------------------
  * THE ONE RULE THE COPY IN HERE EXISTS TO PROTECT
  * ---------------------------------------------------------------------------
- * Consumption fires at WORK-ORDER completion, NEVER per run. Every
- * `apply_completion_inventory_effects` call site sits inside
- * `if work_order_completed:`. A laser child work order carries ONE OPERATION
- * PER NEST, so finishing nest 1 of 3 deducts NOTHING — all three flush when the
- * last operation closes the work order.
+ * Tied material leaves stock when the OPERATION completes — that operation's
+ * ties, and only those. `apply_operation_completion_inventory_effects` runs
+ * immediately after `finalize_operation_completion` on every operation-completion
+ * handler, so a laser child work order (ONE OPERATION PER NEST) deducts nest 1's
+ * sheets the moment nest 1 closes, rather than at the end of the job.
+ * Work-order completion still runs the whole-work-order reconcile, but that is
+ * now the SELF-HEAL — sum-delta means it recomputes `target` and sees
+ * `delta == 0` for everything the per-operation post already moved — not the
+ * moment stock leaves.
  *
- * So every string this module produces says "deducts N when WO-#### finishes".
- * Never "this will deduct N", never "deducting now". When in doubt, under-claim:
- * wrong copy on a shop floor is a real defect, not a wording nit.
+ * IT IS STILL NOT PER RUN, and that is the half a future reader is most likely
+ * to "correct" back out. Reporting 3 of 6 runs on a nest that is still open
+ * deducts NOTHING: production reporting is deliberately not a trigger. An
+ * operation that is still IN_PROGRESS is still REDUCIBLE
+ * (`production_reduction_service` refuses a walk-back only once the operation is
+ * COMPLETE), and consumption NEVER auto-reverses — a negative delta is a no-op
+ * and there is no RETURN verb — so consuming against a still-open operation
+ * could strand material nothing can give back. Material moves when the
+ * operation flips COMPLETE, and at no other moment.
+ *
+ * So every string this module produces is anchored on THIS OPERATION completing.
+ * Two failure directions, both real:
+ *  - "when WO-#### finishes" UNDERSTATES. It was true before the engine grew its
+ *    per-operation entry point; restoring it tells an operator their nest costs
+ *    nothing until the whole job closes, which is now false.
+ *  - "per run" / "deducting now" on anything that is not a completion screen
+ *    OVER-states, and is the same class of error in the other direction.
+ * The two kiosk COMPLETE screens are the one place the copy may speak in the
+ * present tense: the operator is about to fire the completion that posts it.
  *
  * Two further facts the copy has to carry, because both read as bugs otherwise:
  *  - the GOOD keypad does not move the number. `/complete` asserts
@@ -27,9 +47,9 @@
  *    sheets.
  *
  * Everything here is an ESTIMATE and is labelled as one. Consumption is
- * reconcile-to-target, quantities can still move before the work order closes,
- * and a shortage NEVER blocks production — it drives the lot negative and writes
- * an `ALLOCATION_SHORTAGE` audit row.
+ * reconcile-to-target, the operation's quantities can still move before it
+ * closes, and a shortage NEVER blocks production — it drives the lot negative
+ * and writes an `ALLOCATION_SHORTAGE` audit row.
  */
 
 import type { DispatchBoardRow } from '../types';
@@ -94,7 +114,9 @@ export interface MaterialTieChip {
  *
  * Only OPERATION-scoped ties ever reach the board (the server sends nothing
  * else here); a work-order-scoped tie would fan out across every card of that
- * work order and read as N separate ties.
+ * work order and read as N separate ties. That is also why every sentence below
+ * is anchored on "this operation": a dispatch card IS an operation row, and an
+ * operation-scoped tie deducts when that operation completes.
  *
  * The tiers:
  *  - `short`  — `short_by > 0`: stock will not cover the remainder and the lot
@@ -114,8 +136,10 @@ export function materialTieChip(
   const remaining = finite(tie.qty_remaining);
   const shortBy = finite(tie.short_by);
   const onHand = finite(tie.on_hand);
-  const wo = (row.work_order_number || '').trim();
-  const whenClause = wo ? `when ${wo} finishes` : 'when this work order finishes';
+  // A card is one OPERATION, and an operation-scoped tie deducts when that
+  // operation completes — not when the work order finishes (that understates a
+  // per-nest laser WO) and not per reported run (nothing posts until COMPLETE).
+  const whenClause = 'when this operation completes';
   const qty = (value: number) => `${formatTieQty(value)}${uom ? ` ${uom}` : ''}`;
   const lotClause = tie.pinned_lot_number ? ` Pinned to lot ${tie.pinned_lot_number}.` : '';
 
@@ -247,8 +271,9 @@ function sumDeltas(ties: readonly KioskMaterialTie[], finalComplete: number, fin
 }
 
 /**
- * What completing this operation is expected to take out of stock — **when the
- * WORK ORDER finishes**, not now.
+ * What completing this operation is expected to take out of stock — posted by
+ * **that completion**, not by the runs reported along the way and not deferred
+ * to the work order's own completion.
  *
  * Mirrors `material_consumption_service._consume_one_allocation`:
  *
@@ -259,9 +284,16 @@ function sumDeltas(ties: readonly KioskMaterialTie[], finalComplete: number, fin
  * predictedDelta = max(0, target - qty_consumed)       // per tie; summed per part
  * ```
  *
+ * `finalComplete` is the ORDERED quantity and stays so under per-operation
+ * timing: `/complete` asserts `quantity_complete = quantity_ordered` and the
+ * clock-out path clamps at the same target, so at the instant the operation
+ * flips COMPLETE — which is now the instant consumption posts — the engine reads
+ * exactly that number.
+ *
  * `qty_consumed` is an input for a reason: leaving it out over-states a
- * partially-consumed tie. It is a CACHE (the ledger is authoritative), which is
- * one more reason this is presented as an estimate.
+ * partially-consumed tie (an earlier completion, a replay, or a reconcile-on-read
+ * GET may already have posted against it). It is a CACHE (the ledger is
+ * authoritative), which is one more reason this is presented as an estimate.
  *
  * Returns `null` when there are no ties — an untied operation renders NOTHING.
  */
@@ -321,15 +353,30 @@ export function predictMaterialConsumption(input: ConsumptionPredictionInput): C
 // ---------------------------------------------------------------------------
 
 /**
- * The notice heading. Names the work order, because the whole point is that the
- * deduction is deferred to that work order's completion, not this operation's.
+ * The notice heading, shown on the two kiosk COMPLETE screens.
+ *
+ * Those screens are the one place this module may speak in the present tense:
+ * the operator is one tap from firing the completion that posts the deduction,
+ * so it is THIS operation's completion that moves the stock. The work order is
+ * still named — a crew station confirms a badge scan against a job label, and
+ * "on WO-####" is the context that makes the sentence checkable — but it is
+ * context, never the trigger.
  */
 export function deductionHeadline(workOrderNumber: string | null | undefined): string {
   const wo = (workOrderNumber || '').trim();
-  return wo ? `Material — deducts when ${wo} finishes` : 'Material — deducts when this work order finishes';
+  return wo
+    ? `Material — deducts when you complete this operation on ${wo}`
+    : 'Material — deducts when you complete this operation';
 }
 
-/** "2 sheets" → `2 EA · SHT-.125-304` (+ the lot when the tie is pinned). */
+/**
+ * "2 sheets" → `2 EA · SHT-.125-304` (+ the lot when the tie is pinned).
+ *
+ * Deliberately carries NO timing word. The heading above it and
+ * `DEDUCTION_TIMING_NOTE` below it own that one fact between them, so there is
+ * exactly one place to change when the trigger moves (it just did) rather than
+ * a third string to leave behind saying something older.
+ */
 export function deductionLineText(line: ConsumptionPredictionLine): string {
   const qty = `${formatTieQty(line.qty)}${line.unitOfMeasure ? ` ${line.unitOfMeasure}` : ''}`;
   const lot = line.pinnedLotNumber ? ` · lot ${line.pinnedLotNumber}` : '';
@@ -361,8 +408,11 @@ export function shortageNoteText(prediction: ConsumptionPrediction): string | nu
 
 /**
  * The timing disclaimer. Shown verbatim on both completion screens because it
- * is the single fact an operator is most likely to get wrong: finishing THIS
- * operation does not move stock unless it is the one that closes the work order.
+ * carries the two facts an operator gets wrong in OPPOSITE directions:
+ *  - finishing the whole job is NOT a prerequisite — this operation completing
+ *    is what posts it (nest 1 of 3 deducts nest 1's sheets);
+ *  - reporting runs along the way posts NOTHING, so the number does not tick
+ *    down as pieces are called in.
  */
 export const DEDUCTION_TIMING_NOTE =
-  'Estimate — nothing leaves stock until the last operation on this work order completes.';
+  'Estimate — this leaves stock when the operation completes, not as each run is reported.';

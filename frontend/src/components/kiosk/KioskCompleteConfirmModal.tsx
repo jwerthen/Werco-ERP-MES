@@ -37,7 +37,11 @@ interface KioskCompleteConfirmModalProps {
    * `quantity_complete`, and therefore what the material prediction scales by.
    */
   quantityOrdered?: number | null;
-  /** Work order number, so the notice can name whose completion deducts. */
+  /**
+   * Work order number — CONTEXT for the deduction notice, not its trigger. The
+   * trigger is this operation completing; the job label just makes the sentence
+   * checkable against the badge scan the operator is about to make.
+   */
   workOrderNumber?: string | null;
   busy: boolean;
   /** Server rejection (bad badge, gating detail) — shown verbatim, modal stays open. */
@@ -123,12 +127,17 @@ export default function KioskCompleteConfirmModal({
         </p>
       )}
 
-      {/* Material deduction notice — INFORMATIONAL ONLY. Never gates the badge
-          signature (a shortage never blocks production) and never claims the
-          material has already moved: consumption fires at WORK-ORDER
-          completion, so on a laser child WO (one operation per nest) finishing
-          this nest deducts nothing until the last one closes the work order.
-          Untied operations render nothing at all. */}
+      {/* Material deduction notice — INFORMATIONAL ONLY. It never gates the
+          badge signature: a shortage does not block production, it drives the
+          lot negative and writes ALLOCATION_SHORTAGE.
+
+          Consumption fires when THIS OPERATION completes, and the badge scan
+          below is what fires it — so on a laser child WO (one operation per
+          nest) this nest's sheets leave stock on this signature, not at the end
+          of the job. It must NOT drift into "per run" either: the production
+          already reported on the previous screen posts nothing on its own (an
+          in-progress operation is still reducible and consumption never
+          auto-reverses). Untied operations render nothing at all. */}
       {prediction && prediction.lines.length > 0 && (
         <div
           data-testid="kiosk-crew-complete-material"

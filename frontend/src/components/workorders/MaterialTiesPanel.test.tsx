@@ -104,10 +104,17 @@ describe('MaterialTiesPanel — reading', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
-  it('states that deduction happens at WORK-ORDER completion, not per operation', async () => {
+  it('states that an operation-scoped tie deducts at OPERATION completion, and never per run', async () => {
+    // The panel spans both scopes, so it has to name both timings: an
+    // operation-scoped tie deducts as its own operation closes (a per-nest
+    // laser WO draws nest by nest), a whole-work-order tie at job completion.
+    // Neither is per-run.
     renderPanel();
     await screen.findByText('SHT-.125-304');
-    expect(screen.getByText(/not as each operation completes/i)).toBeInTheDocument();
+
+    const subtitle = screen.getByText(/A tie scoped to an operation is deducted when that/i);
+    expect(subtitle).toHaveTextContent('completes — not per run');
+    expect(subtitle).toHaveTextContent('A whole-work-order tie drains when the work order finishes');
   });
 
   it('keeps a cancelled tie listed and dims it rather than filtering it out', async () => {

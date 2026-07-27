@@ -10,7 +10,11 @@
  *    keypad never moves it (the ordered quantity is what /complete asserts),
  *    SCRAP raises it, `qty_consumed` is subtracted, and a negative delta is a
  *    no-op rather than an auto-reversal;
- *  - every generated sentence is worded for WORK-ORDER completion.
+ *  - every generated sentence is anchored on THIS OPERATION completing, and the
+ *    copy assertions below pin BOTH failure directions: it may not slip back to
+ *    "when the work order finishes" (understates — a per-nest laser WO deducts
+ *    each nest as it closes) and it may not drift to "per run" (over-states —
+ *    reporting runs on an open operation posts nothing).
  */
 
 import {
@@ -96,12 +100,35 @@ describe('materialTieChip', () => {
     expect(chip!.text).toBe('3 EA · SHT-.125-304');
   });
 
-  it('words the tooltip for WORK-ORDER completion and flags it as an estimate', () => {
+  it('words the tooltip for THIS OPERATION completing and flags it as an estimate', () => {
+    // A dispatch card is an operation row, and an operation-scoped tie deducts
+    // when that operation completes.
     const chip = materialTieChip(makeRow(makeTie()))!;
-    expect(chip.title).toContain('when WO-2026-0142 finishes');
+    expect(chip.title).toContain('when this operation completes');
     expect(chip.title.toLowerCase()).toContain('estimate');
-    // Never claims the deduction is happening now.
+    // Never claims the deduction is happening now (this is a queue, not a
+    // completion screen) — and never defers it to the work order finishing,
+    // which would tell a planner a per-nest laser WO costs nothing until the
+    // last nest closes.
     expect(chip.title.toLowerCase()).not.toContain('deducting');
+    expect(chip.title.toLowerCase()).not.toContain('finishes');
+  });
+
+  it('never words any chip tier as per-run or as deferred to work-order completion', () => {
+    // Every tier, not just the happy one: the tooltip is the only place the
+    // timing is stated, so a tier left behind is a tier that lies.
+    const tiers = [
+      makeTie(), // covered
+      makeTie({ on_hand: 3.5 }), // last of stock
+      makeTie({ on_hand: 1, short_by: 2 }), // short
+      makeTie({ qty_consumed: 3, qty_remaining: 0 }), // fully issued
+    ];
+    tiers.forEach((tie) => {
+      const title = materialTieChip(makeRow(tie))!.title.toLowerCase();
+      expect(title).toContain('when this operation completes');
+      expect(title).not.toContain('finishes');
+      expect(title).not.toContain('per run');
+    });
   });
 
   it('goes SHORT on short_by > 0 and says a shortage never blocks production', () => {
@@ -307,10 +334,22 @@ describe('predictMaterialConsumption', () => {
 });
 
 describe('kiosk copy', () => {
-  it('names the work order and defers the deduction to ITS completion', () => {
-    expect(deductionHeadline('WO-2026-0142')).toBe('Material — deducts when WO-2026-0142 finishes');
-    expect(deductionHeadline(null)).toBe('Material — deducts when this work order finishes');
-    expect(deductionHeadline('  ')).toContain('this work order finishes');
+  it('anchors the deduction on THIS operation completing, with the work order as context', () => {
+    expect(deductionHeadline('WO-2026-0142')).toBe(
+      'Material — deducts when you complete this operation on WO-2026-0142'
+    );
+    expect(deductionHeadline(null)).toBe('Material — deducts when you complete this operation');
+    expect(deductionHeadline('  ')).toBe('Material — deducts when you complete this operation');
+  });
+
+  it('never defers the kiosk deduction to the work order finishing', () => {
+    // The regression this pins: the pre-per-operation copy read "deducts when
+    // WO-#### finishes", which now understates — a laser child WO deducts each
+    // nest as that nest's operation closes.
+    ['WO-2026-0142', null].forEach((wo) => {
+      expect(deductionHeadline(wo).toLowerCase()).not.toContain('finishes');
+    });
+    expect(DEDUCTION_TIMING_NOTE.toLowerCase()).not.toContain('work order');
   });
 
   it('never claims the deduction has already happened', () => {
@@ -324,9 +363,19 @@ describe('kiosk copy', () => {
       shortBy: 0,
       pinnedLotNumber: null,
     });
+    // The line itself carries no timing word — the headline and the timing note
+    // own that fact between them, so there is no third string to leave stale.
     expect(line).toBe('2 EA · SHT-.125-304');
-    expect(DEDUCTION_TIMING_NOTE).toContain('last operation on this work order completes');
+    expect(DEDUCTION_TIMING_NOTE).toContain('leaves stock when the operation completes');
     expect(DEDUCTION_TIMING_NOTE.toLowerCase()).toContain('estimate');
+  });
+
+  it('rules out the per-run reading explicitly — reporting runs posts nothing', () => {
+    // The opposite failure direction from the one above. Consumption fires on
+    // COMPLETE only: an in-progress operation is still reducible and
+    // consumption never auto-reverses, so runs called in along the way move no
+    // stock. The timing note has to say so, not merely omit it.
+    expect(DEDUCTION_TIMING_NOTE).toContain('not as each run is reported');
   });
 
   it('shows the pinned lot on the line when the tie is lot-directed', () => {

@@ -755,8 +755,8 @@ export default function LaserNestImportWizard({
                   Apply to all rows
                 </button>
                 <p className="basis-full text-xs text-fd-faint sm:basis-auto sm:pb-1.5">
-                  Optional. Stamps every row below — each row stays editable. Tied sheets leave inventory when the work
-                  order finishes, not per run.
+                  Optional. Stamps every row below — each row stays editable. Tied sheets leave inventory when that nest's
+                  operation completes, not per run.
                 </p>
               </div>
             )}
@@ -789,12 +789,14 @@ export default function LaserNestImportWizard({
                   Pages skipped as non-nest: {packageMeta.skipped_pages.join(', ')}
                 </span>
               )}
-              {/* Consumption fires at WORK-ORDER completion, never per run — a
-                  laser WO holds one operation per nest, so finishing nest 1 of 3
-                  deducts nothing. The copy must not imply otherwise. */}
+              {/* Consumption fires when an OPERATION completes, never per run.
+                  A laser WO holds one operation per nest, so each nest deducts its
+                  own sheets as it closes — but reporting runs on a still-open nest
+                  deducts nothing (an IN_PROGRESS operation is still reducible, and
+                  consumption never auto-reverses). Do not drift this either way. */}
               {tiedRowCount > 0 && (
                 <span className="rounded-none border border-fd-line bg-fd-sunken px-2 py-1 font-semibold text-fd-body">
-                  {tiedRowCount} tied — {formatTieQty(tiedSheetTotal)} sheets deducted when the work order finishes
+                  {tiedRowCount} tied — {formatTieQty(tiedSheetTotal)} sheets deducted as each nest completes
                 </span>
               )}
               {tiePrefillCount > 0 && (
