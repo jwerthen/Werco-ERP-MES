@@ -29,6 +29,15 @@ describe('getRouteTitle', () => {
     expect(getRouteTitle(loc('/'))).toBe('Dashboard');
   });
 
+  it('resolves the BOM unit-mismatch sub-route ahead of the bare /bom title', () => {
+    expect(getRouteTitle(loc('/bom'))).toBe('Bill of Materials');
+    expect(getRouteTitle(loc('/bom/uom-mismatches'))).toBe('BOM Unit Mismatches');
+    // Filters live in the query string; the title must not drift with them.
+    expect(getRouteTitle(loc('/bom/uom-mismatches', '?part_id=900&page=2'))).toBe(
+      'BOM Unit Mismatches'
+    );
+  });
+
   it('resolves a query-tab variant by its tab param', () => {
     // Same /warehouse path, different titles per ?tab= value.
     expect(getRouteTitle(loc('/warehouse', '?tab=receiving'))).toBe('Receiving');
@@ -92,6 +101,15 @@ describe('getBreadcrumbParent', () => {
   it('returns null for a list route (no parent crumb)', () => {
     expect(getBreadcrumbParent('/work-orders')).toBeNull();
     expect(getBreadcrumbParent('/parts')).toBeNull();
+  });
+
+  it('nests the BOM unit-mismatch worklist under Bill of Materials', () => {
+    // A sub-route of /bom, not a list route of its own: the correction happens
+    // on the BOM, and the breadcrumb has to say where "back" goes.
+    expect(getBreadcrumbParent('/bom/uom-mismatches')).toEqual({
+      label: 'Bill of Materials',
+      href: '/bom',
+    });
   });
 
   it('returns null for an unknown route', () => {

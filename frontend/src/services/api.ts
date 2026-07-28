@@ -35,6 +35,8 @@ import {
   MaterialReturnResult,
   BackflushPreviewResponse,
   PartBackflushReadiness,
+  BOMUomMismatchParams,
+  BOMUomMismatchReport,
 } from '../types';
 import { ScanResolveRequest, ScanResolveResult } from '../types/scan';
 import {
@@ -1219,12 +1221,39 @@ class ApiService {
   // The OTHER consumption path: driven off the finished part's BOM and routing
   // rather than an explicit tie, and gated on `Part.backflush_components`.
   //
-  // Two of the three below are PURE READS — they write nothing at all, not even
+  // Three of the four below are PURE READS — they write nothing at all, not even
   // an audit row, so they are safe to call on render and safe to re-call. The
-  // third is the flip itself, and it is SERVER-GATED (409 while any blocking
-  // readiness diagnostic stands), so like the tie verbs above it must stay
-  // NON-OPTIMISTIC: keep a loading state, render only what the server returns,
-  // and surface `detail` verbatim. Do not wrap it in useOptimisticMutation.
+  // odd one out is the flip itself (`setPartBackflush`), and it is SERVER-GATED
+  // (409 while any blocking readiness diagnostic stands), so like the tie verbs
+  // above it must stay NON-OPTIMISTIC: keep a loading state, render only what
+  // the server returns, and surface `detail` verbatim. Do not wrap it in
+  // useOptimisticMutation.
+
+  /**
+   * The BOM lines whose stated unit of measure contradicts their component
+   * part's — the remediation worklist that gates arming a real part.
+   *
+   * Pure read, gated ADMIN / MANAGER / SUPERVISOR (the roles that can actually
+   * edit a BOM line or flip the flag). Offset-paged: pass `skip`/`limit` and
+   * page against `total`.
+   *
+   * Two things the caller MUST NOT smooth over:
+   *
+   * 1. **`truncated` means `total` is a FLOOR, not a count.** The scan hit its
+   *    own candidate ceiling. Render it as a plain total and the screen lies
+   *    about how much work is left; say so and narrow the filters instead.
+   * 2. **`blocks_backflush` answers the LINE, not the tree.** A line inside a
+   *    `make` sub-assembly reports true and still refuses nothing when the
+   *    parent is armed. The authoritative per-part answer is `blockers` on
+   *    `getPartBackflushReadiness`.
+   *
+   * `part_id` narrows to that assembly's OWN BOM and does not follow nested
+   * sub-assemblies, so the UNFILTERED report is the authoritative worklist.
+   */
+  async getBOMUomMismatches(params?: BOMUomMismatchParams): Promise<BOMUomMismatchReport> {
+    const response = await this.api.get<BOMUomMismatchReport>('/bom/uom-mismatches', { params });
+    return response.data;
+  }
 
   /**
    * Whether a part may opt into automatic backflush, and what refuses it if not.

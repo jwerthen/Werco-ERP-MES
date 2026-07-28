@@ -834,6 +834,91 @@ export interface PartBackflushReadiness {
   advisories: BackflushDiagnostic[];
 }
 
+/**
+ * One BOM line whose STATED unit of measure contradicts its component part's.
+ *
+ * This is the shape behind the `unit_of_measure_mismatch` BLOCKING diagnostic:
+ * nothing in the platform converts units, so a line stating `each` against a
+ * part stocked in `sheets` would issue the wrong quantity of the right
+ * material. Until every such line is corrected, `Part.backflush_components`
+ * cannot be armed on the assembly.
+ *
+ * `line_unit_of_measure` / `component_unit_of_measure` are the NORMALISED
+ * labels the server's comparison actually used, not the raw column text — what
+ * the row shows is what the gate compared. In particular `ea` does not satisfy
+ * `each`: that is a stored value a human should normalise, not a synonym the
+ * report should paper over.
+ */
+export interface BOMLineUomMismatch {
+  bom_id: number;
+  bom_revision: string | null;
+  bom_status: string | null;
+  bom_is_active: boolean;
+  /** The ASSEMBLY the BOM belongs to (the part someone is trying to arm). */
+  part_id: number;
+  part_number: string;
+  bom_item_id: number;
+  item_number: number | null;
+  component_part_id: number;
+  component_part_number: string;
+  component_part_name: string | null;
+  /**
+   * Disclosed, not filtered. The readiness explosion resolves soft-deleted
+   * components of this company on purpose (they raise their own blocking
+   * diagnostic), so hiding them here would hide a row that still blocks.
+   */
+  component_is_deleted: boolean;
+  /** What the BOM LINE says. */
+  line_unit_of_measure: string;
+  /** What the component part is actually STOCKED in. */
+  component_unit_of_measure: string;
+  /**
+   * Whether the backflush would ever issue THIS LINE — false on alternate /
+   * optional / reference lines, which raise no diagnostic and refuse nothing.
+   *
+   * **It answers the LINE, not the tree.** A line inside a `make`
+   * sub-assembly reports `true` here and still refuses nothing when the parent
+   * assembly is armed. The authoritative per-part answer is `blockers` on
+   * `PartBackflushReadiness` (`GET /parts/{id}/backflush-readiness`).
+   */
+  blocks_backflush: boolean;
+}
+
+/**
+ * The pre-arming remediation worklist for `Part.backflush_components`.
+ *
+ * `truncated` is load-bearing: the scan has a candidate ceiling, and when it is
+ * hit `total` is a **FLOOR, not a count**. A UI that renders it as a plain
+ * total lies about how much work is left — say so on screen and tell the user
+ * to narrow the filters.
+ */
+export interface BOMUomMismatchReport {
+  /** Every disagreeing line found under the requested filters — a FLOOR when `truncated`. */
+  total: number;
+  /** How many rows this page actually carries. */
+  returned: number;
+  truncated: boolean;
+  items: BOMLineUomMismatch[];
+}
+
+/** Query params accepted by `GET /bom/uom-mismatches`. */
+export interface BOMUomMismatchParams {
+  /**
+   * Lines on this assembly part's OWN BOM only. It does NOT follow nested
+   * sub-assembly BOMs, which a readiness check for that part does reach — so
+   * the UNFILTERED report is the authoritative pre-arming worklist and this is
+   * for working one assembly at a time.
+   */
+  part_id?: number;
+  bom_id?: number;
+  component_part_id?: number;
+  /** Default true server-side — the BOMs a backflush actually reads. */
+  active_only?: boolean;
+  skip?: number;
+  /** Server default 100, max 500. */
+  limit?: number;
+}
+
 export type TimeEntryType = 'setup' | 'run' | 'rework' | 'inspection' | 'downtime' | 'break';
 
 export interface DashboardData {

@@ -1436,7 +1436,7 @@ mixed**:
 |--------|----------|-------------|---------------|
 | GET | `/bom/` | List all BOMs | Yes |
 | POST | `/bom/` | Create BOM | Yes |
-| GET | `/bom/uom-mismatches` | **PR 4.5** — BOM lines whose stated unit of measure disagrees with the component part's. Pure read (writes nothing) | Admin / Manager / Supervisor |
+| GET | `/bom/uom-mismatches` | **PR 4.5** — BOM lines whose stated unit of measure disagrees with the component part's. Pure read (writes nothing). **Has a UI:** `/bom/uom-mismatches`, sidebar **Engineering → BOM Unit Mismatches** — see [below](#where-this-is-worked--the-bom-unit-mismatches-screen) | Admin / Manager / Supervisor |
 | GET | `/bom/{id}` | Get BOM by ID | Yes |
 | PUT | `/bom/{id}` | Update BOM | Yes |
 | DELETE | `/bom/{id}` | Delete BOM | Admin |
@@ -1532,6 +1532,93 @@ Response: `{ total, returned, truncated, items[] }`, each item carrying `bom_id`
   still blocks.
 - `truncated: true` means the scan hit its candidate ceiling and `total` is a **floor**, not a
   count — narrow the filters and run it again.
+
+##### Where this is worked — the **BOM Unit Mismatches** screen
+
+The report shipped API-only in PR 4.5 and **is no longer API-only**. It has a UI at
+**`/bom/uom-mismatches`**, reachable from the sidebar under **Engineering → BOM Unit
+Mismatches** (directly after *Bill of Materials*). Route and nav entry are both gated on
+`boms:edit` — **Admin / Manager / Supervisor**, exactly the endpoint's own
+`require_role([ADMIN, MANAGER, SUPERVISOR])` — so a role that cannot act on a row neither sees
+the link nor gets past the route guard by deep-linking. Client method:
+`api.getBOMUomMismatches(params)` in `frontend/src/services/api.ts`, typed by
+`BOMUomMismatchReport` / `BOMLineUomMismatch` / `BOMUomMismatchParams` in
+`frontend/src/types/index.ts`; the page is `frontend/src/pages/BOMUomMismatches.tsx`.
+
+What the screen is, and what it deliberately is not:
+
+- **Read-only — it finds rows and hands off.** There is no inline BOM-line editor. Every row
+  deep-links to `/bom?id={bom_id}` for the correction and to `/parts/{part_id}` for that
+  assembly's own readiness. That is deliberate: BOM-line create/update/delete currently write
+  **no audit rows at all** (a known, separately-filed gap), and making this screen the primary
+  remediation flow would put a compliance-critical correction on an un-audited endpoint.
+  Corrections stay on the BOM screen, where they already were.
+- **Server-paged** (50 rows/page over `skip`/`limit`), so column sort is deliberately
+  unavailable — sorting one page of a server-paged set reorders a window, not the worklist.
+- **Filters live in URL params** (`part_id`, `bom_id`, `component_part_id`, `active_only`,
+  `page`), so a filtered worklist is linkable and survives a reload. All five are parsed with
+  the same strict guard — a positive integer or nothing — so a hand-edited `?page=1.1` cannot
+  become a fractional `skip` the endpoint 422s, and `?page=2.5` cannot become a silently
+  non-aligned window. The two part pickers search with `active_only: false` on purpose: a
+  mismatch can name an inactive or soft-deleted component, and a picker that could not select
+  one could not filter to the very rows this report exists to disclose.
+- **`truncated` is surfaced loudly** — an amber banner above the table, and the count tile
+  renders `≥ N` with the subtitle *"Floor — scan ceiling hit"*. Read as: the total is a
+  **floor, not a count**, and this page is not evidence that a part is clean. Narrow the
+  filters and run it again.
+- **`blocks_backflush` is labelled "Line effect"**, valued *Would be issued* / *Never issued* —
+  never "blocking your part", because `true` can over-promise. A permanent panel on the screen
+  states that a line inside a `make` sub-assembly reads *Would be issued* and still refuses
+  nothing when the parent assembly is armed, and that an assembly filter does not follow nested
+  sub-assembly BOMs — so **the unfiltered list is the authoritative worklist**. The
+  authoritative *per-part* answer is the **Part readiness** link on every row
+  (`GET /parts/{part_id}/backflush-readiness`) — with the caveat the panel and the link tooltip
+  both state: that card renders only for a part typed `manufactured` / `assembly` or one already
+  armed, so a BOM hanging off a `purchased` part opens a page with **no readiness card at all**,
+  and the part type is what to correct first. The link never promises a verdict silently.
+- **`component_is_deleted` rows are kept and flagged**, not filtered: a red *Deleted part* chip,
+  a tinted row, and a marker in the CSV export.
+- **Empty means good news only when it is the whole answer.** "No rows" has four causes and the
+  screen distinguishes them, because the unfiltered copy — *"No unit-of-measure mismatches —
+  every BOM line states the unit its component part is stocked in. Nothing here is blocking a
+  part from being armed"* — is a **conclusion about the shop**, and it is earned only on page 1
+  of a complete, unfiltered scan. A **filtered** empty result says so separately and offers to
+  clear the filters. A **truncated** scan that empties a page says the scan was incomplete and
+  that the page is *not* an all-clear (the amber banner alone was not enough: printed directly
+  above the clean copy it read as a contradiction, and the clean sentence is the one shaped like
+  a conclusion). A page **past the end of the worklist** — `?page=` is durable URL state that
+  outlives the rows it was written against: a shared link, a reload after remediation, an
+  active-company switch — says exactly that and offers **Back to page 1**, because `DataTable`
+  replaces the whole container, pager included, with the empty state. So no empty page —
+  filtered, truncated, or out of range — is ever mistaken for an empty shop.
+
+##### The remediation sequence — run this BEFORE arming any real part
+
+1. **Run the report unfiltered.** Open `/bom/uom-mismatches` with no filters set (equivalently
+   `GET /bom/uom-mismatches` with no `part_id` / `bom_id` / `component_part_id`). Leave
+   `active_only=true` — those are the BOMs a backflush actually reads. Read the count; if the
+   truncation banner is up, that count is a **floor**, so narrow the filters and re-run rather
+   than reporting it as a total.
+2. **Correct the lines on the BOM screen.** Follow each row's link to `/bom?id={bom_id}` and
+   either fix the **line** (`PUT /bom/items/{id}` — state the real unit, or send
+   `unit_of_measure: null` / `""` to re-inherit the component's) or fix the **component part's
+   own** `unit_of_measure` where the stocking unit is the wrong record. Both are ordinary
+   audited human edits; neither is a backfill. ⚠️ Correcting the **part** re-scores every BOM
+   line that names it, across every assembly — so re-run the report **unfiltered** after any
+   part-side correction. Rows reading *Never issued* (alternate / optional / reference) are
+   cosmetic: work them last or not at all.
+3. **Re-check the part** with `GET /parts/{id}/backflush-readiness` — the backflush card on the
+   part page shows the same verdict and blocker list. This, not an empty report, is the
+   authoritative per-part answer: the report answers *lines*, the readiness check answers the
+   *part*, and it is the same function the arming gate runs.
+4. **Arm it** — `PUT /parts/{id}` with `backflush_components: true`. A part whose lines still
+   disagree is refused **409** with the blocker sentences as `detail`, and that refusal is the
+   control working, not a bug to route around.
+
+Clearing this list is not a lock. Every line stays editable afterwards by the same
+Admin / Manager / Supervisor tier, with nothing on the BOM edit path aware that a part is
+armed, so an empty report is evidence about the minute it was run. What backs the part after
+the flip is the completion-time refusal (`BACKFLUSH_DEMAND_REFUSED`), not this list.
 
 #### BOM Import (document upload)
 
