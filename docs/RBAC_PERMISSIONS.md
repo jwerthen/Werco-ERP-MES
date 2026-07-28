@@ -322,6 +322,7 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 | Create | ✓ | ✓ | ✓ | | | | |
 | Edit | ✓ | ✓ | ✓ | | | | |
 | **View unit-of-measure mismatch report** (`GET /bom/uom-mismatches`) | ✓ | ✓ | ✓ | | | | |
+| **BOM Unit Mismatches page** (`/bom/uom-mismatches`) — nav entry + route, `boms:edit` | ✓ | ✓ | ✓ | | | | |
 | Delete | ✓ | ✓ | | | | | |
 | Release | ✓ | ✓ | | | | | |
 
@@ -334,6 +335,30 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > *narrower* than the two backflush read companions above, which are open to any authenticated tenant
 > user because they answer a question about one part a user is already looking at. See `docs/API.md` →
 > BOM (Bill of Materials).
+>
+> **The screen carries the same gate, in both places it can be enforced.** PR 4.5 shipped the report
+> API-only; the follow-up added the **BOM Unit Mismatches** page at **`/bom/uom-mismatches`** (sidebar:
+> Engineering → *BOM Unit Mismatches*, directly after *Bill of Materials*). Both the nav entry and the
+> route require **`boms:edit`**, whose role set — `{platform_admin, admin, manager, supervisor}` — is
+> exactly the endpoint's `require_role([ADMIN, MANAGER, SUPERVISOR])`. So the link is not rendered for a
+> role that cannot act on a row, **and** the route guard refuses a deep link from one; the API gate then
+> refuses the fetch regardless, which is the enforcement that actually counts. The route entry is
+> `{ prefix: '/bom/uom-mismatches', permission: 'boms:edit' }` and wins over the `/bom` → `boms:view`
+> entry because `getRouteAccessRequirement` matches the **longest** prefix — a page gated *more* tightly
+> than the parent it sits under, which is the reason that longest-prefix rule exists. Nav gating needed a
+> small mechanism that did not exist before: `NavItem` gained an optional `permission`, and
+> `visibleNavigation` filters items **and** collapsible-group children by it, dropping a group left with
+> no visible children so no group opens onto nothing. Every pre-existing nav item carries no
+> `permission`, so nothing else changed.
+>
+> **What the page can and cannot do is part of the gate's rationale.** It is **read-only**: rows
+> deep-link to `/bom?id={bom_id}` and to the assembly part, and there is no inline BOM-line editor,
+> because BOM-line create/update/delete write **no audit rows at all** today — making this screen the
+> primary remediation flow would put a compliance-critical correction on an un-audited endpoint. The
+> corrections themselves therefore run through the ordinary, already-gated BOM edit path. See
+> `docs/API.md` → BOM → *Where this is worked — the BOM Unit Mismatches screen*, and
+> [docs/MATERIAL_CONSUMPTION_PLAN.md](MATERIAL_CONSUMPTION_PLAN.md) → "Exposing the flag (PR 4.5)" for
+> the run-report → correct-lines → re-check-readiness → arm sequence.
 
 ### Routings
 
