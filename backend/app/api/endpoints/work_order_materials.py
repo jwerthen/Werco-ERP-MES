@@ -42,6 +42,11 @@ from app.models.part import Part
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder, WorkOrderOperation
 from app.models.work_order_material import AllocationStatus, WorkOrderMaterialAllocation
+from app.schemas.backflush_preview import (
+    BackflushDiagnostic,
+    BackflushPreviewLine,
+    BackflushPreviewResponse,
+)
 from app.schemas.work_order_material import (
     MaterialAllocationCreate,
     MaterialAllocationResponse,
@@ -52,7 +57,11 @@ from app.schemas.work_order_material import (
     MaterialReturnResponse,
 )
 from app.services.audit_service import AuditService
-from app.services.completion_inventory_service import net_consumed_quantity_for_allocation
+from app.services.completion_inventory_service import (
+    BACKFLUSH_BLOCKING,
+    net_consumed_quantity_for_allocation,
+    preview_backflush_for_work_order,
+)
 from app.services.material_consumption_service import (
     CONSUMPTION_EPSILON,
     MaterialReturnRefused,
@@ -862,7 +871,11 @@ def delete_material_allocation(
     before the net is ever computed. So the tie always closes; what the residual net then
     represents is the BOM's material, legitimately still out, not the tie's. The drift
     itself requires the ISSUE row to carry summed BOM + tie demand, which requires
-    ``Part.backflush_components`` — unset anywhere in ``app/`` — so it is dark today.
+    ``Part.backflush_components``. Through PR 4.4 nothing in ``app/`` could set that
+    column, so the drift was unreachable; **PR 4.5 exposed the flag** (``PartUpdate`` +
+    the part-detail card, behind ``parts.assert_backflush_change_allowed``), so it is
+    reachable on any part a supervisor has armed. It is still bounded by the paragraph
+    above — the tie always closes — but it is no longer hypothetical.
 
     Audit verb: ``log_delete(soft_delete=True)``. The HTTP verb is DELETE, the operator
     intent is "remove this tie", and the question an auditor asks is "who removed it and
@@ -958,6 +971,63 @@ def get_material_allocation_consumption(
     _load_work_order(db, work_order_id, company_id)
     allocation = _load_allocation(db, work_order_id, allocation_id, company_id)
     return _consumption_lines(db, allocation, company_id)
+
+
+@router.get(
+    "/{work_order_id}/backflush-preview",
+    response_model=BackflushPreviewResponse,
+    summary="Dry run: what completing this work order would consume, per component and lot",
+)
+def get_work_order_backflush_preview(
+    work_order_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """What a completion of this work order would draw out of stock, before anything moves.
+
+    **Pure read — writes NOTHING.** No ledger row, no ``audit_log`` row (in particular no
+    ``BACKFLUSH_DOUBLE_ISSUE_BLOCKED``, which the suppression layer used to write from
+    inside the resolver), no operational event, nothing to commit. That is structural
+    rather than careful: the resolution layer takes no ``AuditService`` at all, and the
+    recording layer is a separate function only the completion path calls. Same rule as
+    the per-allocation consumption read on this router and as ``material_tie_view`` — a
+    poll is not an actor and records no reason.
+
+    It models the ISSUE LOOP, not merely the demand resolver: both legs in the real order
+    (work-order-scoped ties first, so a tie's lot pin gets first claim on stock), the
+    legacy ``('work_order', ISSUE)`` fence, the reconcile-to-target delta, and the actual
+    lot pick via the same ``consumable_source_items`` + ``plan_stock_draw`` the writer
+    uses. Preview and outcome therefore cannot disagree about which heat gets consumed —
+    the failure a preview built on its own predicate would produce silently.
+
+    BOM/routing lines appear whether or not the part has opted into
+    ``backflush_components`` (each line carries ``requires_opt_in``, and the response
+    carries the part's current flag), because the operator reading this is deciding
+    whether to opt in.
+
+    ``blockers`` / ``advisories`` are the demand resolver's diagnostics for THIS work
+    order — including the routing conditions the part-level readiness check cannot see.
+
+    Open to any authenticated tenant user, like the other reads on this router.
+    """
+    work_order = _load_work_order(db, work_order_id, company_id)
+    preview = preview_backflush_for_work_order(db, work_order, company_id=company_id)
+    return BackflushPreviewResponse(
+        work_order_id=preview.work_order_id,
+        work_order_number=preview.work_order_number,
+        part_id=preview.part_id,
+        part_number=preview.part_number,
+        backflush_components=preview.backflush_components,
+        basis=preview.basis,
+        lines=[BackflushPreviewLine.model_validate(line) for line in preview.lines],
+        blockers=[
+            BackflushDiagnostic.model_validate(d) for d in preview.diagnostics if d.severity == BACKFLUSH_BLOCKING
+        ],
+        advisories=[
+            BackflushDiagnostic.model_validate(d) for d in preview.diagnostics if d.severity != BACKFLUSH_BLOCKING
+        ],
+    )
 
 
 @router.post(

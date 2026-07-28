@@ -678,6 +678,30 @@ _ENTRIES: List[CatalogEntry] = [
         departments=("Purchasing", "Inventory"),
     ),
     CatalogEntry(
+        event_key="material.backflush_demand_refused",
+        label="Backflush demand refused",
+        description=(
+            "A completed work order's BOM or routing could not be resolved cleanly, so the backflush "
+            "refused that component (or the whole leg) and moved NO material for it."
+        ),
+        category=Category.PURCHASING,
+        severity="warning",
+        default_channels=frozenset({CHANNEL_IN_APP, CHANNEL_EMAIL}),
+        # The third member of the backflush family, after ``material.backflush_shortage``
+        # ("stock went negative") and ``material.backflush_failed`` ("the draw raised and
+        # rolled back"). This one is "the system judged the DEMAND itself untrustworthy and
+        # declined to issue it" -- a BOM line with quantity 0, a unit-of-measure mismatch, a
+        # deleted component, a cycle, a routing/BOM disagreement.
+        #
+        # It must not be quieter than the two above, and it is the LEAST self-correcting of
+        # the three: the refusal fires at completion on a part that is already armed, and
+        # nothing disarms it, so every subsequent job under-issues the same component until
+        # somebody fixes the BOM line the diagnostic names. The audit row alone
+        # (``BACKFLUSH_DEMAND_REFUSED``) is a record, not a signal.
+        source_event_types=("backflush_demand_refused",),
+        departments=("Purchasing", "Inventory"),
+    ),
+    CatalogEntry(
         event_key="mrp.expedite_required",
         label="Expedite required",
         description="MRP flagged a part that must be expedited.",

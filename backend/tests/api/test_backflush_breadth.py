@@ -1,9 +1,15 @@
-"""PR 4 behavior locks: hardening the DARK BOM/routing backflush leg.
+"""PR 4 behavior locks: hardening the BOM/routing backflush leg (dark when written).
 
-``Part.backflush_components`` has no writer anywhere in ``app/`` — no schema field, no
-endpoint, no UI, ``server_default="false"`` — so every existing part has it OFF and this
-leg has never executed against production data. PR 4 fixes it and deliberately does NOT
-expose the flag; a follow-up does that.
+When this file was written ``Part.backflush_components`` had no writer anywhere in
+``app/`` — no schema field, no endpoint, no UI, ``server_default="false"`` — so every
+existing part had it OFF and the leg had never executed against production data. PR 4
+hardened it and deliberately did NOT expose the flag.
+
+**PR 4.5 exposed it** (``PartUpdate`` + both PUT doors + the part-detail card, behind
+``parts.assert_backflush_change_allowed``), so §1's flag-OFF proof is now a proof about
+parts nobody has armed rather than about every part in the system, and the flag-ON
+behaviour these sections pin is live code. Its mirror — the flag-ON breadth proof — lives
+in ``test_backflush_exposure.py`` §6.
 
 That shapes what this file has to prove, in order of consequence:
 
@@ -64,6 +70,7 @@ from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation
 from app.models.work_order_material import AllocationSource, AllocationStatus, WorkOrderMaterialAllocation
 from app.services.audit_service import AuditService
 from app.services.completion_inventory_service import (
+    BACKFLUSH_DEMAND_REFUSED_AUDIT_ACTION,
     BACKFLUSH_DOUBLE_ISSUE_BLOCKED_AUDIT_ACTION,
     _drop_allocation_covered_parts,
     apply_completion_inventory_effects,
@@ -275,11 +282,22 @@ def add_bom_item(
     item_type: str = "buy",
     line_type: str = "component",
     scrap_factor: float = 0.0,
+    unit_of_measure: str = None,
     is_alternate: bool = False,
     is_optional: bool = False,
     alternate_group: str = None,
     company_id: int = COMPANY_A,
 ) -> BOMItem:
+    """One BOM line.
+
+    ``unit_of_measure`` defaults to the COMPONENT's own, never to the column's default.
+    ``BOMItem.unit_of_measure`` is ``default="each"``, so a fixture that simply omits it
+    on a part stocked in ``sheets`` mints a real ``unit_of_measure_mismatch`` — a BLOCKING
+    diagnostic, which since PR 4.5 REFUSES that component at completion. Every test in
+    this file is about something else, and an accidental mismatch would make it silently
+    assert nothing. The mismatch itself is exercised deliberately, in
+    ``test_backflush_exposure.py``.
+    """
     item = BOMItem(
         bom_id=bom.id,
         component_part_id=component.id,
@@ -288,6 +306,11 @@ def add_bom_item(
         item_type=item_type,
         line_type=line_type,
         scrap_factor=scrap_factor,
+        unit_of_measure=(
+            unit_of_measure
+            if unit_of_measure is not None
+            else (getattr(component.unit_of_measure, "value", component.unit_of_measure) or "each")
+        ),
         is_alternate=is_alternate,
         is_optional=is_optional,
         alternate_group=alternate_group,
@@ -401,6 +424,25 @@ def blocked_audit_rows(db: Session, *, company_id: int = COMPANY_A) -> list[Audi
         .filter(
             AuditLog.company_id == company_id,
             AuditLog.action == BACKFLUSH_DOUBLE_ISSUE_BLOCKED_AUDIT_ACTION,
+        )
+        .order_by(AuditLog.id)
+        .all()
+    )
+
+
+def refused_audit_rows(db: Session, *, company_id: int = COMPANY_A) -> list[AuditLog]:
+    """Every ``BACKFLUSH_DEMAND_REFUSED`` chain row — one per blocking diagnostic.
+
+    PR 4.5's answer to "the completion computed that this BOM is wrong and threw the
+    knowledge away". A blocking diagnostic now REFUSES the demand it describes and writes
+    this row; the two facts are asserted together everywhere, because a refusal nobody can
+    reconstruct is the same control gap as an over-issue nobody can reconstruct.
+    """
+    return (
+        db.query(AuditLog)
+        .filter(
+            AuditLog.company_id == company_id,
+            AuditLog.action == BACKFLUSH_DEMAND_REFUSED_AUDIT_ACTION,
         )
         .order_by(AuditLog.id)
         .all()
@@ -644,9 +686,13 @@ def test_drop_allocation_covered_parts_keeps_its_three_documented_answers(db_ses
     ]
     required = {covered.id: 4.0, foreign.id: 4.0, wo_scoped.id: 4.0}
 
-    result = _drop_allocation_covered_parts(db_session, wo, COMPANY_A, dict(required), allocations)
+    # PR 4.5 widened the return to ``(surviving demand, dropped demand)``: the dry-run
+    # preview has to SHOW the suppressed lines, and a helper that only returned what
+    # survived could not say what it had taken away.
+    result, dropped = _drop_allocation_covered_parts(db_session, wo, COMPANY_A, dict(required), allocations)
 
     assert covered.id not in result, "a live operation-scoped tie owns its part's demand"
+    assert dropped == {covered.id: 4.0}, "the suppressed demand must be reported, not merely removed"
     assert result[foreign.id] == 4.0, "a tie off this work order must not suppress the backflush"
     assert result[wo_scoped.id] == 4.0, "a work-order-scoped tie is handled by the issue loop, not here"
     assert AuditService(db_session, user) is not None  # keeps the fixture user meaningful
@@ -1055,11 +1101,20 @@ def test_a_make_sub_assembly_is_issued_as_a_unit_and_its_children_are_not(db_ses
     assert on_hand(db_session, sub_child) == 500.0, "its raw material was consumed when IT was built"
 
 
-def test_a_phantom_with_no_bom_is_backflushed_as_a_stocked_line(db_session: Session):
-    """A phantom with nothing to explode into is treated as a stocked line and logged.
+def test_a_phantom_with_no_bom_is_refused_and_recorded_rather_than_issued(db_session: Session):
+    """A phantom with nothing to explode into would be ISSUED AS IF STOCKED. PR 4.5 refuses.
 
-    Dropping it would make the line vanish with no ledger row, no shortage and no signal
-    of any kind — the failure mode this whole PR is about.
+    PR 4 treated it as a stocked line and logged it, on the argument that dropping it
+    would make the line vanish with no ledger row, no shortage and no signal of any kind.
+    That argument was about SILENCE, not about issuing: a phantom is a planning fiction
+    that is never stocked, so consuming one drives a fictitious part negative and writes
+    it into the as-built record.
+
+    The exposure PR closes the silence properly. ``phantom_without_bom`` is a blocking
+    diagnostic — it already refuses the OPT-IN — so at completion it refuses that
+    component and writes a ``BACKFLUSH_DEMAND_REFUSED`` chain row naming the line to fix.
+    Under-issuing is this module's stated safe direction (``_is_non_consumed_bom_line``),
+    and it is no longer silent.
     """
     user = make_user(db_session)
     wc = make_work_center(db_session)
@@ -1075,7 +1130,16 @@ def test_a_phantom_with_no_bom_is_backflushed_as_a_stocked_line(db_session: Sess
     run_effects(db_session, wo, user)
     db_session.expire_all()
 
-    assert wo_issues(db_session, wo) == {orphan_phantom.id: -6.0}
+    assert wo_issues(db_session, wo) == {}, "a fictitious part must not be driven negative"
+    assert on_hand(db_session, orphan_phantom) == 500.0
+
+    rows = refused_audit_rows(db_session)
+    assert len(rows) == 1, "the refusal must be on the tamper-evident chain, not merely logged"
+    extra = rows[0].extra_data or {}
+    assert extra["diagnostic_code"] == "phantom_without_bom"
+    assert extra["component_part_id"] == orphan_phantom.id
+    assert extra["refused_quantity"] == 6.0, "the quantity that did NOT move is the point of the row"
+    assert extra["refused_whole_leg"] is False
 
 
 # ===========================================================================
@@ -1083,12 +1147,27 @@ def test_a_phantom_with_no_bom_is_backflushed_as_a_stocked_line(db_session: Sess
 # ===========================================================================
 
 
-def test_routing_wins_for_the_parts_it_names_and_the_bom_supplies_the_rest(db_session: Session):
-    """The old leg was ``if not required:`` — ONE stray ``component_part_id`` on ONE
-    operation silently disabled the entire BOM explosion for the whole work order. Not
-    hypothetical: ``_create_assembly_routing_operations`` writes ``component_part_id``
-    only for components that HAVE a released routing, so an assembly whose ten BOM lines
-    include two routed components lost the other eight.
+def test_a_routing_bom_disagreement_refuses_that_component_and_the_bom_still_supplies_the_rest(
+    db_session: Session,
+):
+    """The headline property, plus what PR 4.5 does when the two sources disagree.
+
+    **The property:** the old leg was ``if not required:`` — ONE stray
+    ``component_part_id`` on ONE operation silently disabled the entire BOM explosion for
+    the whole work order. Not hypothetical: ``_create_assembly_routing_operations`` writes
+    ``component_part_id`` only for components that HAVE a released routing, so an assembly
+    whose ten BOM lines include two routed components lost the other eight. Precedence is
+    PER PART, so the BOM still supplies every part the routing does not name — asserted
+    here on ``plain_b`` / ``plain_c``.
+
+    **The change:** where the routing and the BOM state DIFFERENT quantities for the same
+    component, PR 4 logged the disagreement and issued the larger. The module's own
+    comment said refusing was the better answer and that a refusal cost nothing while the
+    leg was dark; PR 4.5 armed the leg, which is the moment that stops being free. So
+    ``routing_bom_quantity_disagreement`` now refuses THAT COMPONENT — not the job —
+    and records the quantity that did not move. Picking the larger side wrote material
+    into an as-built record on the strength of a number the system had just declared
+    untrustworthy.
     """
     user = make_user(db_session)
     wc = make_work_center(db_session)
@@ -1114,10 +1193,22 @@ def test_routing_wins_for_the_parts_it_names_and_the_bom_supplies_the_rest(db_se
     db_session.expire_all()
 
     assert wo_issues(db_session, wo) == {
-        routed.id: -20.0,  # routing wins for the part it names
-        plain_b.id: -10.0,  # ...and the BOM still supplies
-        plain_c.id: -15.0,  # ...every part it does not
-    }
+        plain_b.id: -10.0,  # the BOM still supplies
+        plain_c.id: -15.0,  # ...every part the routing does not name
+    }, "one stray component_part_id must never cost the rest of the BOM its demand"
+    assert on_hand(db_session, routed) == 500.0, "the disagreed component is refused, not guessed at"
+
+    rows = refused_audit_rows(db_session)
+    assert len(rows) == 1
+    extra = rows[0].extra_data or {}
+    assert extra["diagnostic_code"] == "routing_bom_quantity_disagreement"
+    assert extra["component_part_id"] == routed.id
+    assert extra["refused_quantity"] == 20.0, "the routing figure that would have been issued"
+    assert extra["refused_whole_leg"] is False
+    assert "20" in extra["diagnostic_detail"] and "5" in extra["diagnostic_detail"], (
+        "the row must name BOTH figures — an as-built reviewer cannot reconcile a routing "
+        "against a BOM the record does not quote"
+    )
 
 
 def test_an_operation_naming_the_work_orders_own_part_never_self_consumes(db_session: Session):

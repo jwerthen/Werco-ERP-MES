@@ -174,9 +174,12 @@ ALLOWED_HOSTS=api.werco.com,erp.werco.com,*.up.railway.app,healthcheck.railway.a
 > constants (`FINISHED_GOODS_WAREHOUSE` / `FINISHED_GOODS_LOCATION` in
 > `app/services/completion_inventory_service.py`). Likewise, **component backflush on completion** is
 > not a global switch: it is a per-part database flag (`parts.backflush_components`, default `false`).
-> Note it is not settable *anywhere* today — no schema field, no endpoint, no UI, only a direct database
-> write — so the backflush leg has never run in production; exposing it is its own PR (see
-> `docs/MATERIAL_CONSUMPTION_PLAN.md` → Delivery). Neither has an environment variable.
+> **Since PR 4.5 (2026-07-27) it is settable — but only through `PUT /parts/{id}` / `PUT /materials/{id}`,
+> behind a readiness refusal gate (409), and never on create or import.** It is still per-part, still
+> default-off, and no production part has opted in, so the backflush leg still has not run in production.
+> Corrects the previous text here, which said it was "not settable *anywhere* today". See
+> `docs/MATERIAL_CONSUMPTION_PLAN.md` → "Exposing the flag (PR 4.5)" and `docs/API.md` → Parts → Part
+> Schema. Neither the FG-receipt location nor this flag has an environment variable.
 >
 > The **operator-qualification gate** (Batch 11C / G5-B) adds **no** env var either: its minimum
 > `SkillMatrix` skill level is the module constant `MIN_SKILL_LEVEL = 2` in

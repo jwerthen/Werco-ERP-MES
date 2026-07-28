@@ -36,7 +36,7 @@ from app.db.locks import acquire_generator_lock
 from app.db.tenant_filter import tenant_query
 from app.models.bom import BOM, BOMItem
 from app.models.laser_nest import LaserNest
-from app.models.part import Part, PartType
+from app.models.part import Part, PartType, UnitOfMeasure, uom_label
 from app.models.routing import Routing, RoutingOperation
 from app.models.time_entry import TimeEntry, TimeEntrySource
 from app.models.user import User, UserRole
@@ -3288,7 +3288,14 @@ def get_material_requirements(
                     "scrap_factor": float(item.scrap_factor or 0),
                     "scrap_allowance": round(scrap_allowance, 3),
                     "total_required": round(total_required, 3),
-                    "unit_of_measure": item.unit_of_measure or component.unit_of_measure.value,
+                    # The one other place a BOM line's unit falls back to its component
+                    # part's. Routed through ``uom_label`` so it agrees with
+                    # ``uom_disagrees`` / ``GET /bom/uom-mismatches`` on what a part's unit
+                    # IS, and so a part with a NULL ``unit_of_measure`` no longer 500s here
+                    # on ``.value`` — the column is nullable and always has been.
+                    "unit_of_measure": (
+                        item.unit_of_measure or uom_label(component.unit_of_measure) or UnitOfMeasure.EACH.value
+                    ),
                     "item_type": item.item_type.value if hasattr(item.item_type, 'value') else item.item_type,
                     "is_optional": item.is_optional,
                     "notes": item.notes,

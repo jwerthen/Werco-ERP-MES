@@ -146,7 +146,8 @@ but **only entries whose source is wired today actually fire**; the rest are **d
 (gated), `inspection.failed` (gated), `car.created`, `fai.created`, `fai.completed` (gated),
 `po.sent`, `receipt.created`, `receipt.voided`, `receipt.corrected`, `shipment.shipped`,
 `coc.generation_failed`, `downtime.started`, `downtime.resolved`, `material.allocation_shortage`,
-`material.backflush_shortage`, `material.allocation_consumption_failed`, `material.backflush_failed`.
+`material.backflush_shortage`, `material.allocation_consumption_failed`, `material.backflush_failed`,
+`material.backflush_demand_refused`.
 
 **Direct-dispatch** (crons / MRP / scheduling call `dispatch_direct`):
 `calibration.due`, `wo.late`, `stock.low`, `quote.expiring` (the four recurring crons in
@@ -230,10 +231,12 @@ but **only entries whose source is wired today actually fire**; the rest are **d
 > payload.
 >
 > **Dormant in practice, and say so.** The BOM/routing half of that leg is gated on
-> `Part.backflush_components`, which has **no writer anywhere in `app/`** — so today this key can only
-> fire from the **work-order-scoped material tie** half of the same leg. It becomes broadly reachable
-> when PR 4.5 exposes the flag. See `docs/MATERIAL_CONSUMPTION_PLAN.md` → "The reconciling backflush
-> and one lot policy (PR 4.4)".
+> `Part.backflush_components`, which through PR 4.4 had **no writer anywhere in `app/`** — so this key
+> could only fire from the **work-order-scoped material tie** half of the same leg. **PR 4.5 exposed the
+> flag** (settable on `PUT /parts/{id}` / `PUT /materials/{id}` behind a 409 readiness gate, still
+> default-off), so the BOM/routing half is now **reachable but unexercised**: no production part has
+> opted in, and this key still has not fired from that half. See
+> `docs/MATERIAL_CONSUMPTION_PLAN.md` → "Exposing the flag (PR 4.5)".
 
 > **`material.allocation_consumption_failed` and `material.backflush_failed` — added in PR 4.4, and
 > they exist because the SHORTAGE keys above would otherwise have been unreachable on some
@@ -263,6 +266,22 @@ but **only entries whose source is wired today actually fire**; the rest are **d
 > independently. Both emit **best-effort** on the post-rollback outer transaction, so a signal failure
 > can never fail an in-flight completion, and the `audit_log` row — not the notification — remains the
 > compliance record.
+
+> **`material.backflush_demand_refused` — added in PR 4.5, the third member of that family.** Same
+> category / severity / channels / recipients as the two above (Purchasing, warning, `in_app` + `email`,
+> departments Purchasing + Inventory; `sms_eligible` and `recurring` both `false`).
+> `source_event_types = ("backflush_demand_refused",)`, emitted by
+> `completion_inventory_service::_emit_demand_refused_event`, audit twin `BACKFLUSH_DEMAND_REFUSED`.
+>
+> Where the other two mean "the draw was attempted and went wrong", this one means **the system judged
+> the DEMAND itself untrustworthy and declined to issue it** — a BOM line with quantity 0, a
+> unit-of-measure mismatch, a deleted component, a cycle, a routing/BOM disagreement. It is the **least
+> self-correcting** of the three: the refusal fires at completion on a part that is *already* armed and
+> nothing disarms it, so absent a notification the same component silently under-issues on every
+> subsequent job while the BOM line the diagnostic names stays broken. Emitted **once per refused
+> scope** (the first diagnostic naming a component, or the first structural blocker), not once per
+> diagnostic — one component violating two rules is one notification — under its own `begin_nested()`
+> savepoint, because this path is reachable from a reconcile-on-read GET that must never 500.
 
 **Direct bridge**: `visitor.check_in` — the visitor sign-in host notification. Sign-in is a sync
 request path, so `visitor_log_service._notify_host_best_effort` hands off to

@@ -89,6 +89,24 @@ class PartCreate(PartBase):
 
 class PartUpdate(BaseModel):
     version: int = Field(..., ge=0, description="Version for optimistic locking")
+    # **DELIBERATELY HERE AND ON ``PartResponse`` ONLY -- never on ``PartBase``.**
+    # ``PartCreate`` is a bare subclass of ``PartBase`` and BOTH create endpoints splat
+    # ``Part(**data)`` (``parts.py`` / ``materials.py``), as do both CSV importers. A
+    # field on ``PartBase`` would therefore become settable on four write paths at once,
+    # with no gate and no readiness check -- turning a shop-wide "consume this part's BOM
+    # automatically, forever" policy into something a spreadsheet column can switch on.
+    #
+    # Turning it ON through ``PUT /parts/{id}`` or ``PUT /materials/{id}`` runs the shared
+    # refusal gate (``parts.assert_backflush_change_allowed``, 409 on any blocking
+    # readiness diagnostic). Turning it OFF is always allowed.
+    backflush_components: Optional[bool] = Field(
+        None,
+        description=(
+            "Opt this part into automatic BOM/routing component backflush at work-order "
+            "completion. Enabling is refused (409) while the part's backflush readiness "
+            "check reports blockers — see GET /parts/{part_id}/backflush-readiness."
+        ),
+    )
     name: Optional[str] = Field(None, min_length=2, max_length=255)
     revision: Optional[str] = Field(None, min_length=1, max_length=20, pattern=r'^[A-Z0-9]+$')
     description: Optional[str] = Field(None, max_length=2000)
@@ -119,10 +137,35 @@ class PartUpdate(BaseModel):
         """Ensure revision is uppercase"""
         return v.upper().strip() if v else v
 
+    @field_validator('backflush_components')
+    @classmethod
+    def backflush_components_not_null(cls, v: Optional[bool]) -> Optional[bool]:
+        """Reject an EXPLICIT ``null`` — 422 rather than a 500 on a NOT NULL column.
+
+        ``None`` is this schema's "field omitted" sentinel and every other optional field
+        treats it that way, but ``parts.backflush_components`` is ``nullable=False``. The
+        generic ``setattr`` loop in both update handlers writes whatever survives
+        ``exclude_unset=True``, so a client sending an explicit ``null`` would drive an
+        ``IntegrityError`` on Postgres (and, worse, silently store ``NULL`` on SQLite).
+
+        Pydantic v2 does not run field validators over DEFAULTS, so this fires only when
+        the client actually supplied the key — which is exactly the distinction that makes
+        the check possible at all.
+        """
+        if v is None:
+            raise ValueError('backflush_components must be true or false, not null')
+        return v
+
 
 class PartResponse(PartBase):
     id: int
     version: Optional[int] = 0  # Optional for backwards compatibility
+    # Read-only here in the sense that ``PartBase`` (and therefore ``PartCreate``) does
+    # NOT carry it: a part is always created with the flag off and can only be switched
+    # on through the gated update path. Defaulted so ``_part_to_response``'s
+    # ``except Exception: return None`` can never make a part VANISH from a list because
+    # of it -- a required field with no default would do exactly that.
+    backflush_components: bool = False
     is_active: bool
     status: str
     created_at: datetime

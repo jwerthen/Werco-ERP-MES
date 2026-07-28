@@ -1001,6 +1001,13 @@ def _bom_with_component(db: Session, parent: Part, component: Part, qty: float =
 
 
 def _add_bom_item(db: Session, bom: BOM, component: Part, qty: float, item_number: int = 10) -> None:
+    """One BOM line, stated in the COMPONENT's own unit of measure.
+
+    ``BOMItem.unit_of_measure`` is ``default="each"``, so omitting it on a part stocked in
+    ``sheets`` mints a real ``unit_of_measure_mismatch``. Since PR 4.5 that BLOCKING
+    diagnostic refuses the component's demand at completion, which would make a fixture
+    here assert the absence of an ISSUE it thought it was testing for.
+    """
     db.add(
         BOMItem(
             bom_id=bom.id,
@@ -1010,6 +1017,7 @@ def _add_bom_item(db: Session, bom: BOM, component: Part, qty: float, item_numbe
             item_type="buy",
             line_type="component",
             scrap_factor=0.0,
+            unit_of_measure=getattr(component.unit_of_measure, "value", component.unit_of_measure) or "each",
             company_id=COMPANY_A,
         )
     )

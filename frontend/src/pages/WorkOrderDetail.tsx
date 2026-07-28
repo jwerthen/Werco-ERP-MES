@@ -12,6 +12,8 @@ import LaserNestImportWizard from '../components/laser/LaserNestImportWizard';
 import LaserNestPdfPreview from '../components/laser/LaserNestPdfPreview';
 import { CompleteWorkModal, CompleteWorkSubmit } from '../components/workorders/CompleteWorkModal';
 import MaterialTiesPanel from '../components/workorders/MaterialTiesPanel';
+import OperationMaterialTieModal from '../components/workorders/OperationMaterialTieModal';
+import BackflushPreviewPanel from '../components/workorders/BackflushPreviewPanel';
 import OperationStepsPanel from '../components/processSheets/OperationStepsPanel';
 import {
   extractStepsBypassed,
@@ -57,6 +59,19 @@ import {
 } from '@heroicons/react/24/outline';
 
 const CURRENT_WORK_ORDER_STATUSES = ['released', 'in_progress', 'on_hold'];
+
+/**
+ * How many runs this operation is expected to produce — nest planned runs, else
+ * its own component quantity, else the work order's ordered quantity.
+ *
+ * Extracted so the Qty column and the material-tie editor's default planned
+ * total cannot drift apart: the tie's plan figure is `qty_per_run × runs`, and a
+ * different `runs` in the two places would show a planner one number and tie
+ * another.
+ */
+function operationRunTarget(op: WorkOrderOperation, quantityOrdered: number | null | undefined): number {
+  return Number(op.laser_nest?.planned_runs || op.component_quantity || quantityOrdered || 0);
+}
 
 interface MaterialRequirement {
   bom_item_id: number;
@@ -276,6 +291,15 @@ export default function WorkOrderDetail() {
   // Which operation's read-only "Process steps" evidence panel is expanded
   // (one at a time — it fetches the steps view on open).
   const [stepsOpenOpId, setStepsOpenOpId] = useState<number | null>(null);
+  // Per-operation material tie editor. `null` = closed; otherwise the operation
+  // every tie created in that dialog is scoped to (operation scope is hard-coded
+  // there, not a default — see the modal's docstring).
+  const [tieTarget, setTieTarget] = useState<WorkOrderOperation | null>(null);
+  // Freshness seam for MaterialTiesPanel. A tie write does NOT bump
+  // `work_orders.updated_at`, which is the panel's only other load dependency,
+  // so without this a tie created from the Operations table would leave a stale
+  // list sitting directly beneath it.
+  const [tieRefreshToken, setTieRefreshToken] = useState(0);
   // Drives the CompleteWorkModal: either the work-order-level completion or a
   // specific operation. `null` = closed. The modal collects qty complete + qty
   // scrapped + a scrap reason (required when scrap > 0) before we call the API.
@@ -1944,7 +1968,7 @@ export default function WorkOrderDetail() {
                   return workOrder.operations.map((op) => {
                     const isNewGroup = op.operation_group && op.operation_group !== lastGroup;
                     if (op.operation_group) lastGroup = op.operation_group;
-                    const operationTarget = Number(op.laser_nest?.planned_runs || op.component_quantity || workOrder.quantity_ordered || 0);
+                    const operationTarget = operationRunTarget(op, workOrder.quantity_ordered);
                     
                     const groupColors: Record<string, string> = {
                       'LASER': 'bg-fd-red/15 text-fd-red',
@@ -2075,6 +2099,24 @@ export default function WorkOrderDetail() {
                             >
                               <ClipboardDocumentCheckIcon className="h-5 w-5 inline" /> Steps
                             </button>
+                            {/* Per-operation material tie. Gated on
+                                `canEditMaterialTies` (work_orders:edit — the
+                                same trio the tie endpoints enforce), NOT on
+                                `canCompleteOperation`, which is a larger set:
+                                QUALITY may complete an operation but may not
+                                decide what stock it eats. The dialog is always
+                                OPERATION-scoped; it never creates a
+                                whole-work-order tie. */}
+                            {canEditMaterialTies && (
+                              <button
+                                type="button"
+                                onClick={() => setTieTarget(op)}
+                                className="text-fd-blue hover:text-blue-300 text-sm font-medium"
+                                title="Tie stock material to this operation"
+                              >
+                                <CubeIcon className="h-5 w-5 inline" /> Material
+                              </button>
+                            )}
                             {canCompleteOperation && op.status !== 'complete' && workOrder.status !== 'draft' && (
                               <button
                                 onClick={() => handleCompleteOperation(op)}
@@ -2139,6 +2181,10 @@ export default function WorkOrderDetail() {
       <MaterialTiesPanel
         workOrderId={workOrder.id}
         workOrderUpdatedAt={workOrder.updated_at}
+        // A tie written from the Operations table above does not bump
+        // `work_orders.updated_at`, so without this the list right here would go
+        // stale the moment someone used the other door onto the same rows.
+        refreshToken={tieRefreshToken}
         canEdit={canEditMaterialTies}
         // Only so the panel can compute each tie's live consumption target and flag
         // one that is OVER-consumed — the open loop an office reduce on a COMPLETE
@@ -2146,6 +2192,26 @@ export default function WorkOrderDetail() {
         // from an ordinary tie.
         operations={workOrder.operations}
       />
+
+      {/* Per-operation material tie editor, opened from the Operations table.
+          Rendered once here rather than per row so only one dialog exists.
+          `onSaved` bumps the token above — a tie write does not touch the work
+          order, so nothing else would refresh the panel. */}
+      <OperationMaterialTieModal
+        open={tieTarget !== null}
+        workOrderId={workOrder.id}
+        operation={tieTarget}
+        operationTarget={tieTarget ? operationRunTarget(tieTarget, workOrder.quantity_ordered) : 0}
+        onClose={() => setTieTarget(null)}
+        onSaved={() => setTieRefreshToken((token) => token + 1)}
+      />
+
+      {/* Backflush dry run — the OTHER consumption path: BOM/routing components
+          pulled automatically at completion when the finished part has opted in.
+          A pure read that writes nothing, loaded on demand. Sits next to the tie
+          panel because both legs post to the same ledger and a planner needs to
+          see them together. */}
+      <BackflushPreviewPanel workOrderId={workOrder.id} />
 
       {/* Material Requirements */}
       {materialReqs && materialReqs.has_bom && materialReqs.materials.length > 0 && (

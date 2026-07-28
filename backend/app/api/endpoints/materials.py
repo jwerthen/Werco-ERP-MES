@@ -13,6 +13,7 @@ from app.api.endpoints.parts import (
     _parse_float,
     _parse_int,
     _part_to_response,
+    assert_backflush_change_allowed,
 )
 from app.db.database import get_db
 from app.models.bom import BOM, BOMItem
@@ -252,6 +253,19 @@ def update_material(
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
 ):
+    """Update a material or supply.
+
+    This handler writes the SAME ``parts`` rows as ``PUT /parts/{part_id}`` through the
+    SAME ``PartUpdate`` schema, so it runs the SAME shared backflush refusal gate —
+    imported, not re-implemented. A gate in one of the two files would not be a gate.
+
+    For the same reason the audit row is logged as ``resource_type="part"``, not
+    ``"material"``: it is a ``parts`` row, and an auditor asking "who armed automatic BOM
+    backflush" filters ONE resource type. Splitting one table's control-change trail
+    across two type values by which URL was used is a query nobody would think to write.
+    ``create_material`` / ``delete_material`` still log ``"material"`` — only the door that
+    can carry this flag was normalised.
+    """
     material = (
         db.query(Part)
         .filter(Part.id == material_id, Part.company_id == company_id, Part.part_type.in_(MATERIAL_SUPPLY_PART_TYPES))
@@ -264,6 +278,10 @@ def update_material(
     old_values = {c.key: getattr(material, c.key) for c in material.__table__.columns}
 
     update_data = material_in.model_dump(exclude_unset=True)
+    # BEFORE the first setattr: a refusal must leave the row untouched. See the identical
+    # call in ``parts.update_part`` for why that order is sound today and what would break
+    # it (a ``PartUpdate`` field that readiness reads off the SUBJECT part).
+    backflush_extra = assert_backflush_change_allowed(db, material, update_data, company_id=company_id)
     for field, value in update_data.items():
         if field == "part_type":
             if hasattr(value, "value"):
@@ -278,7 +296,15 @@ def update_material(
                 value = value.strip().lower()
         setattr(material, field, value)
 
-    audit.log_update("material", material.id, material.part_number, old_values=old_values, new_values=material)
+    audit.log_update(
+        # "part", not "material": same table, same shared gate — see the docstring.
+        "part",
+        material.id,
+        material.part_number,
+        old_values=old_values,
+        new_values=material,
+        extra_data=backflush_extra,
+    )
     db.commit()
     db.refresh(material)
     return material
