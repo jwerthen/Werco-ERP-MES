@@ -267,7 +267,52 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 | View | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Create | ✓ | ✓ | ✓ | | | | |
 | Edit | ✓ | ✓ | ✓ | | | | |
+| **Arm automatic BOM backflush** (`backflush_components`) | ✓ | ✓ | ✓ | | | | |
+| View backflush readiness / dry-run preview | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Delete | ✓ | | | | | | |
+
+> **The backflush row is the ordinary Edit row, and that is a recorded decision, not an omission**
+> (`feat/backflush-exposure`, PR 4.5). `Part.backflush_components` opts a part into **automatic
+> consumption of its BOM/routing components out of stock** on every future work-order completion — a
+> permanent, shop-wide policy change that writes the lots it drew onto the as-built record. It is set as
+> an ordinary field on `PUT /parts/{id}` (and on `PUT /materials/{id}`, which writes the same `parts`
+> rows through the same schema), so its authorization tier is whatever those endpoints already enforce:
+> **`require_role([ADMIN, MANAGER, SUPERVISOR])` — the same permission as editing a description.** The
+> owner chose this over a dedicated reasoned verb limited to Admin/Manager. Three consequences are
+> **accepted residuals**, recorded in `docs/CMMC_LEVEL_2_COMPLIANCE.md`: a **supervisor** can arm it;
+> **no reason is captured** (the audit row records who, when, false→true, and the readiness verdict in
+> `extra_data` — not why); and **a concurrent flip does not 409**, because `Part` maps no `version`
+> column, so optimistic locking on parts is cosmetic and last write wins.
+>
+> **The role gate is not the only gate.** Enabling is refused **409** while the part's readiness check
+> reports a blocking diagnostic, through one shared function (`assert_backflush_change_allowed`) defined
+> in `parts.py` and **imported** by `materials.py` — a gate in only one of the two files would not be a
+> gate. **Disabling is never refused.** Neither door accepts the field on **create**: it is absent from
+> `PartBase`/`PartCreate`, so `POST /parts/`, `POST /materials/` and both CSV importers cannot set it,
+> and a part is always created **off**.
+>
+> **⚠️ But the gate protects the instant of the flip and nothing after it, which matters for how the
+> permission should be read.** The readiness check runs the part's **BOM** explosion only — the routing
+> half is not evaluated at part scope at all — it is evaluated **once**, and it is never re-run on a BOM
+> edit, a routing change, a release or a completion. Every input it read stays editable afterwards by the
+> **same ADMIN/MANAGER/SUPERVISOR tier** through `boms:edit` / `routings:edit`, and **nothing on those
+> edit paths knows the part is armed**. So the recorded verdict `backflush_readiness: "clean"` asserts
+> less than a reader assumes: not "this part's demand resolves correctly", only "no blocking diagnostic
+> in its BOM at that instant". What backs it afterwards is a completion-time refusal
+> (`BACKFLUSH_DEMAND_REFUSED`), which is a net, not a second gate. **Practically: granting `boms:edit` or
+> `routings:edit` is, for an armed part, granting the ability to change what automatically leaves stock.**
+>
+> **Auditing who armed it is ONE query, through either door.** `PUT /materials/{id}` writes the same
+> `parts` row and logs the change as `resource_type="part"`, not `"material"`, so the trail is not split
+> by which URL was used (`create_material` / `delete_material` still log `"material"`). The canonical
+> query recipe lives in [docs/CMMC_LEVEL_2_COMPLIANCE.md](CMMC_LEVEL_2_COMPLIANCE.md) → the 2026-07-27
+> (PR 4.5) changelog row, item (3) — written down once, on purpose.
+>
+> The two read companions — `GET /parts/{id}/backflush-readiness` and
+> `GET /work-orders/{id}/backflush-preview` — follow the read-broad rule at the top of this document
+> (any authenticated user in the tenant) and are **pure reads: they write nothing**, not even an audit
+> row. See `docs/API.md` → Parts → Part Schema, and
+> [docs/MATERIAL_CONSUMPTION_PLAN.md](MATERIAL_CONSUMPTION_PLAN.md) → "Exposing the flag (PR 4.5)".
 
 ### BOMs
 
@@ -276,8 +321,19 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 | View | ✓ | ✓ | ✓ | ✓ | ✓ | | ✓ |
 | Create | ✓ | ✓ | ✓ | | | | |
 | Edit | ✓ | ✓ | ✓ | | | | |
+| **View unit-of-measure mismatch report** (`GET /bom/uom-mismatches`) | ✓ | ✓ | ✓ | | | | |
 | Delete | ✓ | ✓ | | | | | |
 | Release | ✓ | ✓ | | | | | |
+
+> **The unit-of-measure mismatch report is gated to the Edit tier, not the View tier — deliberately**
+> (`feat/backflush-exposure`, PR 4.5). It is a **remediation worklist**, not a browse view: every row on
+> it is a BOM line someone has to go and correct before the part it belongs to can be armed for automatic
+> backflush. ADMIN / MANAGER / SUPERVISOR is exactly the set that can act on a row — edit the line
+> (`PUT /bom/items/{id}`) or arm the flag (`PUT /parts/{id}`) — so handing the list to a role that can do
+> neither buys nothing. It is a **pure read: it writes nothing**, not even an audit row. Note this is
+> *narrower* than the two backflush read companions above, which are open to any authenticated tenant
+> user because they answer a question about one part a user is already looking at. See `docs/API.md` →
+> BOM (Bill of Materials).
 
 ### Routings
 

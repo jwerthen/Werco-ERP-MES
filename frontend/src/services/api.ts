@@ -33,6 +33,8 @@ import {
   MaterialConsumptionLine,
   MaterialReturnRequest,
   MaterialReturnResult,
+  BackflushPreviewResponse,
+  PartBackflushReadiness,
 } from '../types';
 import { ScanResolveRequest, ScanResolveResult } from '../types/scan';
 import {
@@ -444,6 +446,26 @@ class ApiService {
   private invalidateMaterialTieCache(workOrderId: number) {
     this.invalidateCache('/shop-floor/dispatch-board');
     this.invalidateCache(`/work-orders/${workOrderId}`);
+  }
+
+  /**
+   * Drop every cached body a PART mutation invalidates.
+   *
+   * `invalidateMaterialTieCache` above covers the dispatch board and
+   * `/work-orders/{id}` and nothing else, so a `/parts/{id}` write falls
+   * entirely outside it. That matters for `backflush_components`: the flag rides
+   * on the part row, is echoed by `GET /parts/{id}` AND by the list endpoints
+   * (`_part_to_response` hand-builds it), and it changes what a backflush
+   * preview resolves — so a stale 304 on any of those would show a part still
+   * reading "off" after it was switched on.
+   *
+   * The `/parts` prefix deliberately over-invalidates (`/parts/12` also clears
+   * `/parts/123` and the list), which costs one revalidation and never serves a
+   * stale flag.
+   */
+  private invalidatePartCache(partId: number) {
+    this.invalidateCache('/parts');
+    this.invalidateCache(`/parts/${partId}`);
   }
 
   setToken(token: string) {
@@ -1190,6 +1212,83 @@ class ApiService {
     // Unlike every other tie verb, a return MOVES STOCK — on-hand, lot rows and
     // the transaction ledger are all stale the moment it lands.
     this.invalidateCache('/inventory');
+    return response.data;
+  }
+
+  // --- BOM/routing backflush (PR 4.5) ---------------------------------------
+  // The OTHER consumption path: driven off the finished part's BOM and routing
+  // rather than an explicit tie, and gated on `Part.backflush_components`.
+  //
+  // Two of the three below are PURE READS — they write nothing at all, not even
+  // an audit row, so they are safe to call on render and safe to re-call. The
+  // third is the flip itself, and it is SERVER-GATED (409 while any blocking
+  // readiness diagnostic stands), so like the tie verbs above it must stay
+  // NON-OPTIMISTIC: keep a loading state, render only what the server returns,
+  // and surface `detail` verbatim. Do not wrap it in useOptimisticMutation.
+
+  /**
+   * Whether a part may opt into automatic backflush, and what refuses it if not.
+   *
+   * Pure read; open to any authenticated tenant user. `eligible` is a SNAPSHOT,
+   * never authorisation — every input it reads (BOM lines, alternates, routing
+   * component ids) is mutable by other people, so the identical check re-runs
+   * server-side on the write. Call it to explain, then let the write decide.
+   *
+   * Only the BOM half is answerable at part scope; routing conditions need a
+   * work order and come back from `getWorkOrderBackflushPreview`.
+   */
+  async getPartBackflushReadiness(partId: number): Promise<PartBackflushReadiness> {
+    const response = await this.api.get<PartBackflushReadiness>(`/parts/${partId}/backflush-readiness`);
+    return response.data;
+  }
+
+  /**
+   * Turn `Part.backflush_components` on or off.
+   *
+   * There is deliberately NO dedicated endpoint: the owner chose the ordinary
+   * part-edit field, so this is a narrow `PUT /parts/{id}` carrying only
+   * `version` (required by `PartUpdate`) and the flag. It is kept OUT of the
+   * `PartUpdate` client type on purpose — mirroring the server, where the field
+   * is absent from `PartBase`/`PartCreate` so no create path or CSV importer can
+   * set it — so that this method is the single client door onto the flag.
+   *
+   * SERVER-GATED. Enabling is refused **409** while the part's readiness check
+   * reports blockers, with `detail` a PLAIN STRING: one sentence per blocker,
+   * joined. Show it verbatim — a human is meant to read it and go fix a BOM
+   * line. Disabling is always allowed.
+   *
+   * Two residuals the caller must not paper over: the flip is Supervisor-tier
+   * (the same permission as editing a description), and Part optimistic locking
+   * is COSMETIC — `Part` maps no version column, so a concurrent flip does not
+   * 409 and last write wins. Re-read the part after this resolves rather than
+   * trusting a locally-toggled value.
+   */
+  async setPartBackflush(partId: number, version: number, enabled: boolean): Promise<Part> {
+    const response = await this.api.put<Part>(`/parts/${partId}`, {
+      version,
+      backflush_components: enabled,
+    });
+    this.invalidatePartCache(partId);
+    return response.data;
+  }
+
+  /**
+   * Dry run: what completing this work order would draw out of stock, per
+   * component and per lot, before anything moves.
+   *
+   * Pure read — no ledger row, no audit row, no operational event, nothing to
+   * commit. That is structural on the server (the resolution layer takes no
+   * AuditService at all), not a convention, which is why it is safe to fetch on
+   * demand from a detail page.
+   *
+   * It models the ISSUE LOOP, not just the demand resolver — both legs in the
+   * real order, the legacy one-shot fence, the reconcile-to-target delta, and
+   * the actual lot pick — so preview and outcome cannot disagree about which
+   * heat gets consumed. Lines appear whether or not the part has opted in; each
+   * carries `requires_opt_in`.
+   */
+  async getWorkOrderBackflushPreview(workOrderId: number): Promise<BackflushPreviewResponse> {
+    const response = await this.api.get<BackflushPreviewResponse>(`/work-orders/${workOrderId}/backflush-preview`);
     return response.data;
   }
 

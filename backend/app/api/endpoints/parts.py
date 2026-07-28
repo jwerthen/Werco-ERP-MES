@@ -1,5 +1,6 @@
 import enum
-from typing import List, Optional
+from datetime import datetime
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
@@ -7,17 +8,126 @@ from pydantic import BaseModel, ValidationError
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, selectinload
 
-from app.api.deps import get_current_company_id, get_current_user, require_role
+from app.api.deps import get_current_active_user, get_current_company_id, get_current_user, require_role
+from app.core.time_utils import to_utc_iso
 from app.db.database import get_db
 from app.models.bom import BOM, BOMItem
 from app.models.part import ENGINEERING_PART_TYPES, Part, PartType, UnitOfMeasure, is_engineering_part_type
 from app.models.user import User, UserRole
+from app.schemas.backflush_preview import BackflushDiagnostic, PartBackflushReadinessResponse
 from app.schemas.part import PartCreate, PartResponse, PartUpdate
 from app.services.audit_service import AuditService
+from app.services.completion_inventory_service import (
+    BACKFLUSH_BLOCKING,
+    backflush_readiness_for_part,
+    backflush_refusal_sentence,
+)
 from app.services.import_service import ImportFileError, parse_import_file
 from app.services.part_number_service import generate_werco_part_number, normalize_description
 
 router = APIRouter()
+
+
+def assert_backflush_change_allowed(
+    db: Session,
+    part: Part,
+    update_data: Dict[str, Any],
+    *,
+    company_id: int,
+) -> Optional[Dict[str, Any]]:
+    """THE refusal gate behind ``Part.backflush_components``. Shared by parts AND materials.
+
+    ``PUT /materials/{id}`` is a byte-identical ``setattr`` loop over the SAME
+    ``PartUpdate`` schema, writing the SAME ``parts`` rows, so a gate implemented in only
+    one of the two files is not a gate at all. It lives here and is imported there, the
+    way ``_part_to_response`` already is.
+
+    Turning this flag on is a permanent, shop-wide policy change: from then on, completing
+    a work order for the part moves its BOM components out of stock automatically, forever,
+    and writes the lots it drew onto the as-built record. If the BOM or routing cannot be
+    resolved cleanly, that automation issues the WRONG material -- so the flip is refused
+    (**409**) while any BLOCKING readiness diagnostic stands.
+
+    ``detail`` is a **plain string**: the blocker sentences joined with a space. The Axios
+    interceptor renders a server ``detail`` verbatim, and the whole point of the refusal is
+    that a human reads it and goes and fixes a BOM line. The STRUCTURED list lives on
+    ``GET /parts/{id}/backflush-readiness``, which the UI calls first.
+
+    **The gate runs only when the request actually turns the flag ON.** Turning it OFF is
+    always allowed (stopping automatic consumption can never issue wrong material), and a
+    request that re-states the flag's current value changes nothing and is not gated.
+
+    Returns the ``extra_data`` to hang on the part-update audit row when the flag really
+    moved, else ``None``. The flag itself already lands in that row's ``changes`` map
+    (both sides of the diff enumerate model columns, and ``backflush_components`` is one);
+    what this adds is the READINESS VERDICT that authorised the flip, which is not
+    otherwise reconstructable after the BOM has since been edited.
+
+    **The audit trail of a flip is queried as ``resource_type='part'``, from BOTH doors.**
+    ``update_material`` logs this row under ``resource_type="part"`` rather than
+    ``"material"`` for exactly that reason: the two handlers write the same ``parts`` rows
+    through the same gate, and an auditor asking "who armed automatic stock movement, and
+    when" must not have to know which URL was used. The recipe is: ``resource_type='part'``
+    AND ``action='UPDATE'`` AND ``extra_data->>'backflush_readiness' IS NOT NULL``.
+
+    ACCEPTED RESIDUALS -- recorded here rather than designed around, because the owner
+    chose the ordinary part-edit field over a dedicated reasoned verb:
+
+    * **Supervisor-tier.** The gate on ``PUT /parts/{id}`` and ``PUT /materials/{id}`` is
+      ``[ADMIN, MANAGER, SUPERVISOR]`` -- the same permission as editing a description.
+    * **No reason is captured.** Every other control change in this series (RETURN, untie,
+      receiving void) requires a written reason; this one records the readiness verdict
+      instead.
+    * **Concurrent flips never 409.** ``Part`` maps NO ``version`` column (migration 004
+      versioned the table, the model never mapped it), ``PartUpdate.version`` is required
+      but written onto an unmapped attribute by the setattr loop, and
+      ``_part_to_response`` returns a hard-coded ``0``. Optimistic locking on parts is
+      cosmetic; last write wins.
+    * **``scripts/seed_data.py`` splats ``Part(**data)``** and can therefore set the column
+      with no code change, bypassing this gate. Not a production path.
+    * **The create/delete rows on the materials router still log ``"material"``.** Only
+      the UPDATE door was normalised, because only it can carry this flag; reconstructing
+      a material record's FULL history still means querying both resource types, exactly
+      as it did before.
+
+    NOT a residual, closed rather than accepted: a SOFT-DELETED part cannot be armed. The
+    ``PUT`` lookups filter ``company_id`` only, so a deleted part is still reachable by id,
+    but ``backflush_readiness_for_part`` raises a blocking ``deleted_part`` diagnostic and
+    this gate refuses on it -- through both doors, with no change to a lookup four other
+    handlers share.
+    """
+    if "backflush_components" not in update_data:
+        return None
+    requested = bool(update_data["backflush_components"])
+    if requested == bool(part.backflush_components):
+        # No state change -> nothing to gate and nothing to record. (Re-stating the
+        # current value must not be able to fail: a client PUTting a whole form back
+        # would otherwise be refused for a BOM defect it is not introducing.)
+        return None
+
+    checked_at = to_utc_iso(datetime.utcnow())
+    if not requested:
+        return {
+            "backflush_components": False,
+            "backflush_readiness": "not_evaluated_disable",
+            "backflush_readiness_checked_at": checked_at,
+        }
+
+    diagnostics = backflush_readiness_for_part(db, part, company_id=company_id)
+    blockers = [d for d in diagnostics if d.severity == BACKFLUSH_BLOCKING]
+    if blockers:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=" ".join(backflush_refusal_sentence(part.part_number, d) for d in blockers),
+        )
+    return {
+        "backflush_components": True,
+        "backflush_readiness": "clean",
+        "backflush_readiness_checked_at": checked_at,
+        # Blockers cannot be present (we would have raised), but filter on severity
+        # anyway so the key means what it says regardless of what runs above it.
+        "backflush_readiness_advisories": [d.code for d in diagnostics if d.severity != BACKFLUSH_BLOCKING],
+    }
 
 
 class PartItemGroup(str, enum.Enum):
@@ -104,6 +214,14 @@ def _part_to_response(part: Part) -> Optional[PartResponse]:
             customer_name=part.customer_name,
             customer_part_number=part.customer_part_number,
             drawing_number=part.drawing_number,
+            # LOAD-BEARING, not a field like the others. This helper hand-builds every
+            # kwarg and is wrapped in ``except Exception: return None`` with the callers
+            # filtering the ``None``s out -- so omitting a field here does not raise, it
+            # makes the LIST endpoints report a stale default while ``GET /parts/{id}``
+            # (which serialises the ORM object directly) reports the truth. Two endpoints
+            # disagreeing about whether a part auto-consumes its BOM is exactly the kind
+            # of divergence nobody notices until material has moved.
+            backflush_components=bool(part.backflush_components),
             is_active=part.is_active if part.is_active is not None else True,
             status=part.status or "active",
             created_at=part.created_at,
@@ -431,7 +549,13 @@ def update_part(
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Update a part"""
+    """Update a part.
+
+    Turning ``backflush_components`` ON is refused with **409** (plain-string ``detail``:
+    the blocker sentences joined) while this part's backflush readiness check reports any
+    blocking diagnostic — see ``assert_backflush_change_allowed``, which is shared with
+    ``PUT /materials/{material_id}`` because that endpoint writes the same rows.
+    """
     part = db.query(Part).filter(Part.id == part_id, Part.company_id == company_id).first()
     if not part:
         raise HTTPException(status_code=404, detail="Part not found")
@@ -441,6 +565,19 @@ def update_part(
     old_values = {c.key: getattr(part, c.key) for c in part.__table__.columns}
 
     update_data = part_in.model_dump(exclude_unset=True)
+    # BEFORE the first setattr: a refusal must leave the row untouched, and the readiness
+    # check reads the part it is judging.
+    #
+    # THAT ORDER IS ONLY SAFE WHILE READINESS READS NO MUTABLE FIELD OF THE SUBJECT PART.
+    # It reads ``part.id`` (immutable within a request), ``part.is_deleted``, and
+    # ``part.part_number`` for message text; the unit of measure it compares is the
+    # COMPONENT's, not the subject's. So a same-request "change a field that would break
+    # readiness, and arm in the same PUT" is not currently constructible. If a future
+    # ``PartUpdate`` field ever becomes an input to ``backflush_readiness_for_part``
+    # (a subject-part UoM comparison, a part_type rule, a status rule), this call must move
+    # AFTER the setattr loop and before the flush -- or the gate silently starts judging
+    # the pre-request part while the request rewrites it.
+    backflush_extra = assert_backflush_change_allowed(db, part, update_data, company_id=company_id)
     for field, value in update_data.items():
         if field == "part_type":
             if hasattr(value, "value"):
@@ -459,13 +596,63 @@ def update_part(
                 value = value.strip().lower()
         setattr(part, field, value)
 
-    # Audit log (before the terminal commit so it persists atomically)
-    audit.log_update("part", part.id, part.part_number, old_values=old_values, new_values=part)
+    # Audit log (before the terminal commit so it persists atomically). ``extra_data``
+    # carries the backflush readiness verdict that authorised a flag flip -- the flip
+    # itself is already in the row's ``changes`` map (both sides enumerate model columns),
+    # but the verdict is not reconstructable later once the BOM has been edited.
+    audit.log_update(
+        "part", part.id, part.part_number, old_values=old_values, new_values=part, extra_data=backflush_extra
+    )
 
     db.commit()
     db.refresh(part)
 
     return part
+
+
+@router.get(
+    "/{part_id}/backflush-readiness",
+    response_model=PartBackflushReadinessResponse,
+    summary="Can this part opt into automatic BOM component backflush?",
+)
+def get_part_backflush_readiness(
+    part_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """The structured form of the refusal that ``PUT /parts/{part_id}`` would return.
+
+    Open to any authenticated tenant user, like the other material reads: it discloses
+    facts about this company's own BOM, and a UI that could not show them would be asking
+    for a decision nobody could make.
+
+    **Pure read — writes nothing.** No ledger row, no audit row, no operational event; a
+    poll is not an actor and records no reason.
+
+    ``eligible`` is a snapshot, not authorisation: BOM lines are mutable by other people,
+    so the identical check re-runs server-side on the write that sets the flag.
+
+    Only the BOM half is answerable at part scope. Routing conditions (an operation naming
+    the work order's own part, two operations disagreeing on a component, routing demand
+    the BOM excludes) need a work order and appear on
+    ``GET /work-orders/{id}/backflush-preview``.
+    """
+    part = db.query(Part).filter(Part.id == part_id, Part.company_id == company_id).first()
+    if not part:
+        raise HTTPException(status_code=404, detail="Part not found")
+
+    diagnostics = backflush_readiness_for_part(db, part, company_id=company_id)
+    blockers = [BackflushDiagnostic.model_validate(d) for d in diagnostics if d.severity == BACKFLUSH_BLOCKING]
+    advisories = [BackflushDiagnostic.model_validate(d) for d in diagnostics if d.severity != BACKFLUSH_BLOCKING]
+    return PartBackflushReadinessResponse(
+        part_id=part.id,
+        part_number=part.part_number,
+        backflush_components=bool(part.backflush_components),
+        eligible=not blockers,
+        blockers=blockers,
+        advisories=advisories,
+    )
 
 
 @router.post("/{part_id}/revision")

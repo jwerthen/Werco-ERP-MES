@@ -50,15 +50,23 @@ Lot-only (no serialization flag exists yet): on FG receipt we assign
 number) and leave ``InventoryItem.serial_number`` NULL. Serial assignment is a
 tracked follow-up.
 
-**The BOM/routing backflush leg is DARK.** ``Part.backflush_components`` has no writer
-anywhere in ``app/`` -- no schema field, no endpoint, no UI, ``server_default="false"`` --
-so ``_resolve_backflush_components`` and everything it calls have never executed against
-production data. Read that as a licence to fix them and as a warning not to assume any of
-it was ever right: the demand resolution shipped treating a whole-job component quantity
-as a per-unit rate, summing one component's demand once per operation that touched it,
-letting one routed operation cancel an entire BOM explosion, consuming both a
-sub-assembly and its raw material, and reading neither ``is_alternate`` nor
-``is_optional`` nor reference lines.
+**The BOM/routing backflush leg IS NO LONGER DARK. PR 4.5 gave it a door.**
+``Part.backflush_components`` is writable from ``PUT /parts/{id}`` and
+``PUT /materials/{id}`` (``PartUpdate``, behind ``assert_backflush_change_allowed``'s
+refusal gate) and from the part-detail UI, so ``_resolve_backflush_components`` and
+everything it calls CAN now execute against production data on any part a supervisor has
+armed. Through PR 4.4 the column had no writer anywhere in ``app/``, which is why the leg
+shipped treating a whole-job component quantity as a per-unit rate, summing one
+component's demand once per operation that touched it, letting one routed operation
+cancel an entire BOM explosion, consuming both a sub-assembly and its raw material, and
+reading neither ``is_alternate`` nor ``is_optional`` nor reference lines. Those are fixed;
+the LICENCE that history granted -- "change it freely, nothing runs it" -- **expired with
+PR 4.5**. Treat every change here as a change to live, stock-moving code.
+
+What remains of that history is a POSTURE, not a permission: the leg still refuses rather
+than guesses. Every ``blocking`` diagnostic the resolver raises now REFUSES the demand it
+describes (the component, or the whole leg when the condition is structural) and writes a
+``BACKFLUSH_DEMAND_REFUSED`` chain row saying so -- see ``_resolve_backflush_components``.
 
 ``_issue_one_component`` is the OPPOSITE case -- work-order-scoped material ties drive it
 today, so its behavior is LIVE. PR 4.4 changed it deliberately and with that in mind: it
@@ -72,11 +80,11 @@ widening cannot hide legacy stock the way a bare ``status = 'available'`` would 
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Iterable, Optional
+from typing import Any, Container, Iterable, Optional, TypeVar, cast
 
 from sqlalchemy import and_, case, func, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import StaleDataError
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -89,7 +97,7 @@ from app.db.ledger_filter import (
 from app.models.bom import BOM, BOMItem, BOMItemType, BOMLineType
 from app.models.inventory import InventoryItem, InventoryTransaction, TransactionType
 from app.models.operational_event import OperationalEvent  # noqa: F401  (imported for type/test discoverability)
-from app.models.part import Part
+from app.models.part import Part, uom_disagrees, uom_label
 from app.models.shipping import Shipment, ShipmentStatus
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation
 from app.models.work_order_material import WorkOrderMaterialAllocation
@@ -112,6 +120,37 @@ BACKFLUSH_SHORTAGE_EVENT_TYPE = "backflush_shortage"
 # "correct but invisible" is exactly the shape of control gap an AS9100D 8.5.2 as-built
 # review cannot reconstruct after the fact. See ``_drop_ledger_covered_parts``.
 BACKFLUSH_DOUBLE_ISSUE_BLOCKED_AUDIT_ACTION = "BACKFLUSH_DOUBLE_ISSUE_BLOCKED"
+
+# Tamper-evident audit action for a BLOCKING demand diagnostic raised on the COMPLETION
+# path -- i.e. the resolver worked out that this BOM/routing cannot be resolved cleanly
+# for a part somebody armed, and refused the affected demand rather than issuing a figure
+# it does not trust. Distinct from ``BACKFLUSH_DOUBLE_ISSUE_BLOCKED`` on purpose: that one
+# means "the material already left, correctly, by another route", this one means "the
+# demand is WRONG and no material left at all".
+#
+# Before PR 4.5 these diagnostics were computed at completion and DISCARDED -- eight of
+# them without even a log line -- so a BOM edited after a part was armed (a supervisor's
+# opt-in is checked once, at the flip, and every input it reads is mutable afterwards by
+# anyone with ``boms:edit``) moved material against demand the system itself had judged
+# untrustworthy, leaving no production trace but an ordinary-looking ledger row. That is
+# the "correct but invisible" gap ``_record_ledger_suppression`` and
+# ``_record_backflush_demand_suppressed`` already exist to close for SUPPRESSION.
+BACKFLUSH_DEMAND_REFUSED_AUDIT_ACTION = "BACKFLUSH_DEMAND_REFUSED"
+
+# ...and its operational-event type, for the reason written out at
+# ``BACKFLUSH_COMPONENT_FAILED_EVENT_TYPE`` below, which describes this action verbatim: a
+# degraded path must not be QUIETER than the lesser condition it degrades from. A shortage
+# still moves material and emits ``backflush_shortage`` -> ``material.backflush_shortage``
+# into Purchasing's inbox; a REFUSAL moves nothing at all, which is the worse material-trail
+# gap, and an audit row nobody is watching is not a control.
+#
+# It is not self-limiting either. The refusal happens at COMPLETION, on a part that is
+# ALREADY armed, and nothing here disarms it -- so absent a notification the same component
+# silently under-issues on every subsequent job, with the BOM defect that caused it
+# untouched. (The opt-in gate cannot help: it runs once, at the flip, and every input it
+# reads stays editable by anyone with ``boms:edit``.) Catalog entry:
+# ``material.backflush_demand_refused``, sibling of ``material.backflush_failed``.
+BACKFLUSH_DEMAND_REFUSED_EVENT_TYPE = "backflush_demand_refused"
 
 # Tamper-evident audit action for a component whose consumption RAISED and was rolled
 # back to its own savepoint. The exact twin of the tie engine's
@@ -492,6 +531,90 @@ def _open_allocations(
     return open_allocations_for_work_order(db, work_order.id, company_id)
 
 
+# ---------------------------------------------------------------- diagnostics
+# The resolver has ~14 conditions on which it "cannot answer cleanly". Every one of them
+# was a ``logger.warning`` at best and completely SILENT at worst, with no return channel
+# of any kind -- the resolver's type was a bare ``dict[int, float]``, so a caller could
+# not tell "this BOM resolves cleanly" from "this BOM resolves to a number nobody should
+# trust". That was survivable only while the leg was dark. Now that
+# ``Part.backflush_components`` is settable (PR 4.5), those conditions are the difference
+# between material moving correctly and material moving wrongly and permanently into an
+# as-built record (AS9100D 8.5.2), so they carry the channel a REFUSAL is built on.
+#
+# **``severity`` IS LOAD-BEARING ON THE WRITE PATH.** A ``blocking`` diagnostic REFUSES the
+# demand it describes at COMPLETION -- the component, or the whole leg when the condition
+# is structural -- and writes a ``BACKFLUSH_DEMAND_REFUSED`` chain row saying so. Three
+# readers act on these, and all three must keep agreeing:
+#
+#   * ``backflush_readiness_for_part`` -- refuses the part-level opt-in (409) over any
+#     blocking diagnostic in the part's own BOM explosion;
+#   * ``_refuse_blocked_demand`` (the COMPLETION path, via ``_resolve_backflush_components``)
+#     -- drops the condemned demand and records each blocker;
+#   * ``preview_backflush_for_work_order`` -- mirrors that refusal through the PURE
+#     ``blocked_demand_refusal`` as ``suppression_reason='blocking_diagnostic'``, so the
+#     dry run states the answer the completion will act on without writing anything.
+#
+# What is still ADDITIVE is the RESOLVER itself: every existing log line stays where it
+# was, and ``_resolve_backflush_demand`` never drops demand over a diagnostic -- a pure
+# read that quietly returned a different answer than it reported would be the worst of
+# both. The refusal lives one layer up, in the write-path wrapper. Adding a diagnostic
+# here, or promoting one to ``blocking``, therefore CHANGES WHAT MOVES OUT OF STOCK on
+# every armed part; it is not a reporting-only edit.
+BACKFLUSH_BLOCKING = "blocking"
+BACKFLUSH_ADVISORY = "advisory"
+
+# Mirrors ``api/endpoints/bom.py``'s ``explode_bom_recursive(max_levels=20)``. The
+# visited-set cycle guard alone does NOT bound recursion depth -- it bounds repetition of
+# a PART, and a legitimately deep (or maliciously wide) structure can still exhaust the
+# stack. A ``RecursionError`` raised here would be swallowed whole by the
+# ``except Exception: pass`` at the two reconcile-on-read call sites (``shop_floor.py`` /
+# ``work_orders.py``), silently losing the ENTIRE completion's inventory effects -- FG
+# receipt included -- with nothing but a log line. A cap that emits a diagnostic degrades
+# to "this part cannot opt in" instead.
+_MAX_BOM_LEVELS = 20
+
+
+@dataclass
+class _BackflushDiagnostic:
+    """One thing the demand resolver could not answer cleanly, and what it means.
+
+    ``severity`` is the whole point of the type:
+
+    * ``blocking`` -- the resolved demand for this component is WRONG or absent, and no
+      caller should act on it. These are the sentences the part-level refusal gate joins
+      into its 409, so each ``detail`` is written to follow that template exactly: what is
+      wrong (naming the BOM line or operation) then what to change, in a form that reads
+      correctly after ``"Part {pn} cannot enable automatic backflush: "``.
+    * ``advisory`` -- the demand is usable but something about it is worth a human's
+      attention, or the condition is WORK-ORDER-scoped and therefore cannot be gated at
+      part opt-in at all (a zero ordered quantity, a non-COMPLETE operation contributing
+      demand, a tie whose basis disagrees with the BOM's).
+
+    Every field except ``code``/``severity``/``detail`` is optional context for the UI to
+    link back to the row that produced it; none of them is load-bearing.
+    """
+
+    code: str
+    severity: str
+    detail: str
+    bom_item_id: Optional[int] = None
+    component_part_id: Optional[int] = None
+    component_part_number: Optional[str] = None
+    operation_id: Optional[int] = None
+
+
+def backflush_refusal_sentence(part_number: Optional[str], diagnostic: _BackflushDiagnostic) -> str:
+    """One blocking diagnostic as the sentence the refusal gate shows the operator.
+
+    ONE template for every blocker (``docs`` and the recon brief both state it):
+    ``Part {part_number} cannot enable automatic backflush: {what is wrong}. {what to
+    change}.`` The second half lives in ``_BackflushDiagnostic.detail``; this adds the
+    subject so a joined string of N blockers still names the part on every sentence
+    rather than only the first.
+    """
+    return f"Part {part_number or '?'} cannot enable automatic backflush: {diagnostic.detail}"
+
+
 @dataclass
 class _BackflushBomExplosion:
     """What the BOM explosion says about a work order's component demand.
@@ -504,10 +627,15 @@ class _BackflushBomExplosion:
     applies NONE of these rules and DOES recurse into ``make``, so without the exclusion
     set the routing would re-introduce through the back door exactly the lines the
     explosion just declined to issue.
+
+    ``diagnostics`` is the channel the walk previously did not have: conditions the
+    explosion had to make a judgement call about, recorded so a refusal gate can read
+    them. It never affects ``demand``.
     """
 
     demand: dict[int, float] = field(default_factory=dict)
     excluded_part_ids: set[int] = field(default_factory=set)
+    diagnostics: list[_BackflushDiagnostic] = field(default_factory=list)
 
 
 def _is_non_consumed_bom_line(item: BOMItem) -> bool:
@@ -536,6 +664,261 @@ def _is_non_consumed_bom_line(item: BOMItem) -> bool:
     return (item.line_type or "").lower() == BOMLineType.REFERENCE.value
 
 
+def bom_line_is_backflush_consumed(item: BOMItem) -> bool:
+    """Public inverse of ``_is_non_consumed_bom_line``, for readers outside this module.
+
+    ``GET /bom/uom-mismatches`` reports it per row as ``blocks_backflush``: a line the
+    backflush would never issue also never raises a per-line diagnostic, so listing it
+    without that distinction would send someone to fix a line that refuses nothing.
+
+    It answers the LINE half only. Whether a consuming explosion ever REACHES the line is
+    the other half and depends on which part is being armed (``make`` sub-assembly
+    subtrees are walked exclude-only, phantoms open up), which no flat cross-BOM listing
+    can model. See ``_explode_backflush_bom``.
+    """
+    return not _is_non_consumed_bom_line(item)
+
+
+def _uom_label(value) -> str:
+    """A ``unit_of_measure`` (enum, enum value or raw string) as a comparable lowercase str.
+
+    Module-local alias for ``models.part.uom_label``. The normalisation moved down to the
+    model so the BLOCKING ``unit_of_measure_mismatch`` diagnostic below and the
+    ``GET /bom/uom-mismatches`` remediation report cannot drift apart -- a report that
+    listed a different set of rows than the gate refuses would send people to fix lines
+    that never blocked, or hide lines that still do.
+    """
+    return uom_label(value)
+
+
+def _disclosable_component_id(component_part_id: Optional[int], resolved_part_ids: Container[int]) -> Optional[int]:
+    """The component id a diagnostic may carry: the id, or ``None`` if it is not ours.
+
+    ONE rule for every diagnostic site, because the surface has to read the same way
+    everywhere. ``missing_component_part`` already withholds ``component_part_id`` -- the
+    id did not resolve to a part in this company, and "hard-deleted", "never existed" and
+    "another tenant's" are three states this side of the fence must not distinguish -- but
+    ``alternate_group_without_primary`` and the three routing diagnostics were built from
+    a raw FK (``BOMItem.component_part_id`` / ``WorkOrderOperation.component_part_id``),
+    which ``bom.py``'s unscoped add-line validator lets a client point anywhere. The
+    asymmetry was not a disclosure (it is the tenant's own column value, already readable
+    through ``GET /bom/{id}``) but it was an asymmetry, and these sentences are served to
+    every authenticated tenant user by ``GET /parts/{id}/backflush-readiness`` and the
+    refusal 409. Resolve-or-withhold, uniformly.
+
+    **Withholding has a REFUSAL consequence, and it is the intended one.** Scope in
+    ``blocked_demand_refusal`` keys on ``component_part_id is None``, so a withheld id puts
+    that diagnostic in the STRUCTURAL tier and refuses the whole backflush leg rather than
+    one component -- which is exactly ``missing_component_part``'s own documented rationale
+    ("a line's demand vanished and nothing can say whose"). We cannot name the component,
+    so we cannot scope the refusal to it; refusing wide is the under-issue direction this
+    module already prefers, and it is recorded either way.
+    """
+    if component_part_id is None:
+        return None
+    return int(component_part_id) if int(component_part_id) in resolved_part_ids else None
+
+
+def _record_alternate_group_diagnostics(
+    bom: BOM,
+    items: list[BOMItem],
+    components: dict[int, Part],
+    out: _BackflushBomExplosion,
+) -> None:
+    """Flag alternate groups on this BOM level that contain no non-alternate primary line.
+
+    An alternate group is an OR: ONE member is issued and the rest are substitutes, which
+    is why ``_is_non_consumed_bom_line`` skips every ``is_alternate`` line. A group in
+    which EVERY line carries ``is_alternate`` therefore contributes exactly zero demand --
+    and did so with no log line of any kind, which is the worst shape a wrong answer can
+    take: indistinguishable from a BOM that genuinely has nothing to issue.
+
+    Lines with no ``alternate_group`` are pooled under one ``None`` key rather than
+    flagged individually, and that is deliberately conservative: an ordinary BOM line
+    (``is_alternate`` False, no group) lands in that same pool and satisfies it, so a
+    normal BOM carrying one stray ungrouped alternate is NOT flagged. Only a level whose
+    ungrouped lines are ALL alternates -- i.e. one that really would issue nothing -- is.
+
+    ``components`` is the caller's TENANT-SCOPED resolution of this level's
+    ``component_part_id`` values; the diagnostic names the first member's id only when it
+    resolves there. See ``_disclosable_component_id``.
+    """
+    groups: dict[Optional[str], list[BOMItem]] = {}
+    for item in items:
+        groups.setdefault(item.alternate_group, []).append(item)
+    for group, members in groups.items():
+        if not members or any(not bool(member.is_alternate) for member in members):
+            continue
+        label = f"'{group}'" if group else "of ungrouped lines"
+        numbers = ", ".join(str(member.item_number) for member in members)
+        out.diagnostics.append(
+            _BackflushDiagnostic(
+                code="alternate_group_without_primary",
+                severity=BACKFLUSH_BLOCKING,
+                detail=(
+                    f"alternate group {label} on BOM {bom.id} (line(s) {numbers}) has no non-alternate "
+                    "primary line, so no material would ever be issued for it. Mark one line as the primary"
+                ),
+                bom_item_id=members[0].id,
+                component_part_id=_disclosable_component_id(members[0].component_part_id, components),
+            )
+        )
+
+
+def _record_bom_line_diagnostics(
+    item: BOMItem,
+    component: Part,
+    company_id: int,
+    out: _BackflushBomExplosion,
+) -> None:
+    """Per-line conditions that make one BOM line's demand untrustworthy.
+
+    Four families, none of which was read anywhere on this path before:
+
+    * **zero quantity** -- ``float(item.quantity or 1)`` coerces a stored ``0.0`` to ONE
+      PER PARENT UNIT. ``BOMItem.quantity`` has no CHECK behind ``schemas/bom.py``'s
+      ``gt=0``, so a row written by an importer or by hand can hold it.
+    * **negative quantity / scrap factor <= -1** -- produces a negative ``extended`` that
+      is NETTED against positive demand for the same part elsewhere in the structure,
+      quietly under-issuing rather than failing.
+    * **unit-of-measure mismatch** -- ``BOMItem.unit_of_measure`` is documented as "may
+      differ from part UOM" and is read NOWHERE on this path. Demand is a bare float and
+      nothing in the platform converts units, so a line stating ``each`` against a part
+      stocked in ``sheets`` issues the wrong quantity of the right material. New lines now
+      inherit the component's unit instead of a literal "each", so this fires on stated
+      disagreement rather than on an unchosen default; pre-existing lines are NOT rewritten
+      and are worked off through ``GET /bom/uom-mismatches``.
+    * **soft-deleted component** -- at issue time a soft-deleted component is still
+      resolved and consumed; the shop believes that part is gone. Recorded here rather
+      than moved silently.
+
+    ``component`` is resolved TENANT-SCOPED by ``_tenant_components`` before this is
+    called, so the cross-tenant case cannot normally reach here at all -- it is caught one
+    level up as an unresolvable line. The ``foreign`` branch below is kept as a structural
+    guard, and it is the one place in this module that must never interpolate the
+    component's identity: this diagnostic's ``detail`` is rendered by
+    ``GET /parts/{id}/backflush-readiness`` (open to any authenticated tenant user) and
+    echoed in the refusal 409, so a part number read off another company's row would leave
+    the server through a read this PR opened. Same-tenant soft-deleted components DO name
+    themselves -- that is this company's own part, and the operator cannot act on the
+    sentence otherwise.
+    """
+    quantity = item.quantity
+    scrap_factor = float(item.scrap_factor or 0)
+    if quantity is None or abs(float(quantity)) <= _EPSILON:
+        out.diagnostics.append(
+            _BackflushDiagnostic(
+                code="zero_bom_quantity",
+                severity=BACKFLUSH_BLOCKING,
+                detail=(
+                    f"BOM line {item.item_number} for {component.part_number} has quantity 0, which would be "
+                    "treated as 1 per unit. State the real quantity"
+                ),
+                bom_item_id=item.id,
+                component_part_id=component.id,
+                component_part_number=component.part_number,
+            )
+        )
+    elif float(quantity) < 0 or scrap_factor <= -1:
+        out.diagnostics.append(
+            _BackflushDiagnostic(
+                code="negative_bom_quantity",
+                severity=BACKFLUSH_BLOCKING,
+                detail=(
+                    f"BOM line {item.item_number} for {component.part_number} has a negative quantity or scrap "
+                    "factor, which would cancel out demand from other lines for the same part. Correct the line"
+                ),
+                bom_item_id=item.id,
+                component_part_id=component.id,
+                component_part_number=component.part_number,
+            )
+        )
+
+    line_uom = _uom_label(item.unit_of_measure)
+    part_uom = _uom_label(component.unit_of_measure)
+    # STILL BLOCKING, and still deliberately so -- do NOT quietly soften the severity here.
+    #
+    # The owner decision of 2026-07-27 fixed the DEFAULT rather than this severity: a new
+    # BOM line with no stated unit now inherits the COMPONENT PART's unit (see
+    # ``api/endpoints/bom.py`` -> ``_resolve_line_uom``, applied on all four BOM-line write
+    # paths), so the diagnostic no longer fires on a value nobody chose. What it did NOT do
+    # is rewrite history: this series is correct-forward, so every line written before that
+    # change keeps its stored "each" and still blocks here. The remediation worklist is
+    # ``GET /bom/uom-mismatches``, which shares ``uom_disagrees`` with this branch precisely
+    # so the two cannot list different rows. See ``docs/MATERIAL_CONSUMPTION_PLAN.md`` ->
+    # "Exposing the flag (PR 4.5)" -> the unit-of-measure callout.
+    if uom_disagrees(item.unit_of_measure, component.unit_of_measure):
+        out.diagnostics.append(
+            _BackflushDiagnostic(
+                code="unit_of_measure_mismatch",
+                severity=BACKFLUSH_BLOCKING,
+                detail=(
+                    f"BOM line {item.item_number} states {line_uom} but part {component.part_number} is stocked "
+                    f"in {part_uom}, and nothing converts units. State the line in {part_uom}"
+                ),
+                bom_item_id=item.id,
+                component_part_id=component.id,
+                component_part_number=component.part_number,
+            )
+        )
+
+    foreign = getattr(component, "company_id", company_id) != company_id
+    if foreign:
+        # NO identity of any kind: not the part number, not the id. See the docstring --
+        # this sentence is served to every authenticated user of THIS company.
+        out.diagnostics.append(
+            _BackflushDiagnostic(
+                code="foreign_component_part",
+                severity=BACKFLUSH_BLOCKING,
+                detail=(
+                    f"BOM line {item.item_number} names a component that is not a part in this company, so it "
+                    "would be issued with no part number and no cost. Point the line at a live part in this "
+                    "company"
+                ),
+                bom_item_id=item.id,
+            )
+        )
+    elif bool(getattr(component, "is_deleted", False)):
+        out.diagnostics.append(
+            _BackflushDiagnostic(
+                code="foreign_component_part",
+                severity=BACKFLUSH_BLOCKING,
+                detail=(
+                    f"BOM line {item.item_number} names a component ({component.part_number}) that is deleted, so "
+                    "backflush would issue a part the shop believes is gone. Point the line at a live part"
+                ),
+                bom_item_id=item.id,
+                component_part_id=component.id,
+                component_part_number=component.part_number,
+            )
+        )
+
+
+def _tenant_components(db: Session, company_id: int, part_ids: Iterable[Optional[int]]) -> dict[int, Part]:
+    """``{part_id: Part}`` for one BOM level's components, TENANT-SCOPED, in ONE query.
+
+    Replaces ``joinedload(BOMItem.component_part)``. The relationship joins on
+    ``component_part_id`` alone (``models/bom.py``) and applies no ``company_id``
+    predicate, so it happily materialises ANOTHER COMPANY's ``Part`` -- which was harmless
+    only while nothing rendered it. PR 4.5 renders diagnostics: the readiness GET is open
+    to every authenticated tenant user and the refusal 409 echoes the same sentences, and
+    ``bom.py``'s add-line validator resolves ``component_part_id`` unscoped, so a foreign
+    id is reachable through supported verbs. Scoping the LOOKUP means the foreign object
+    is never materialised at all, rather than materialised and then carefully not printed.
+
+    Soft-deleted rows of THIS company are deliberately included: they resolve, get a
+    ``foreign_component_part`` diagnostic that names them (an operator can act on that),
+    and are refused. An id that does not come back is "not a part in this company" --
+    hard-deleted, never existed, or another tenant's, three states this side of the fence
+    cannot and must not distinguish.
+    """
+    ids = {int(part_id) for part_id in part_ids if part_id is not None}
+    if not ids:
+        return {}
+    rows = db.query(Part).filter(Part.company_id == company_id, Part.id.in_(ids)).all()
+    return {row.id: row for row in rows}
+
+
 def _explode_backflush_bom(
     db: Session,
     bom: BOM,
@@ -545,6 +928,7 @@ def _explode_backflush_bom(
     visited_part_ids: set[int],
     out: _BackflushBomExplosion,
     consumed: bool,
+    depth: int = 0,
 ) -> None:
     """Explode a BOM with BACKFLUSH semantics: phantoms open up, ``make`` items do not.
 
@@ -573,20 +957,104 @@ def _explode_backflush_bom(
 
     ``consumed=False`` walks a subtree purely to collect ``excluded_part_ids`` and
     contributes no demand. Does not commit and writes nothing.
+
+    ``depth`` bounds the recursion at ``_MAX_BOM_LEVELS`` (mirroring ``bom.py``'s
+    ``explode_bom_recursive``) and emits a diagnostic instead of raising -- see that
+    constant for why a ``RecursionError`` here would be far worse than a wrong answer.
+
+    Diagnostics are collected on ``out`` for every condition the walk has to make a
+    judgement call about. They are only collected for a line this walk would actually
+    ISSUE (``line_consumed`` -- a consuming walk AND a line that is not an
+    alternate/optional/reference): an exclude-only pass over a ``make`` sub-assembly's
+    subtree issues nothing, and neither does a reference line, so a wrong quantity, a
+    mismatched UoM, an unresolvable component or a cut cycle down there cannot move
+    material and flagging it would refuse an opt-in over a line the leg never reads. The
+    depth cap is the exception -- it is a runtime hazard, not a data-quality one.
     """
+    if depth >= _MAX_BOM_LEVELS:
+        logger.warning(
+            "BOM explosion for BOM %s (company %s) hit the %s-level cap; deeper levels are not backflushed",
+            bom.id,
+            company_id,
+            _MAX_BOM_LEVELS,
+        )
+        out.diagnostics.append(
+            _BackflushDiagnostic(
+                code="bom_depth_exceeded",
+                severity=BACKFLUSH_BLOCKING,
+                detail=(
+                    f"the BOM structure is deeper than {_MAX_BOM_LEVELS} levels at BOM {bom.id}, so the "
+                    "components below that point would never be issued. Flatten the structure"
+                ),
+            )
+        )
+        return
     items = (
         db.query(BOMItem)
-        .options(joinedload(BOMItem.component_part))
         .filter(BOMItem.bom_id == bom.id, BOMItem.company_id == company_id)
         .order_by(BOMItem.item_number.asc(), BOMItem.id.asc())
         .all()
     )
+    # TENANT-SCOPED, replacing ``joinedload(BOMItem.component_part)``. See
+    # ``_tenant_components``: the relationship carries no ``company_id`` predicate, and
+    # since PR 4.5 these objects' identities are rendered to any authenticated user.
+    components = _tenant_components(db, company_id, (item.component_part_id for item in items))
+    if consumed:
+        _record_alternate_group_diagnostics(bom, items, components, out)
     for item in items:
-        component = item.component_part
-        if component is None or component.id in visited_part_ids:
+        component = components.get(item.component_part_id) if item.component_part_id is not None else None
+        # Computed BEFORE the two skips below, not after: both of them describe demand
+        # this walk would have issued, so on a line the walk never issues (an alternate,
+        # an optional, a reference line, or any line inside an exclude-only pass) they
+        # would refuse an opt-in over a line that contributes nothing either way.
+        line_consumed = consumed and not _is_non_consumed_bom_line(item)
+        if component is None:
+            # PREVIOUSLY MERGED with the cycle skip below into one unlogged ``continue``.
+            # They are opposite conditions with opposite remedies: this one is a BOM line
+            # whose component does not resolve to a part in this company (hard-deleted out
+            # from under it, an FK never enforced -- SQLite does not enforce them at all --
+            # or another tenant's id written by ``bom.py``'s unscoped add-line validator),
+            # and it silently removes that line's demand.
+            #
+            # It carries NO ``component_part_id``. The three states above are deliberately
+            # indistinguishable here, and the only one whose id would be new information to
+            # the reader is the cross-tenant one. Every other diagnostic site now follows the
+            # same resolve-or-withhold rule via ``_disclosable_component_id``; this one is
+            # where the rule came from.
+            if line_consumed:
+                out.diagnostics.append(
+                    _BackflushDiagnostic(
+                        code="missing_component_part",
+                        severity=BACKFLUSH_BLOCKING,
+                        detail=(
+                            f"BOM line {item.item_number} on BOM {bom.id} names a component that does not resolve "
+                            "to a part in this company, so its demand would be dropped without a trace. Repoint "
+                            "or remove the line"
+                        ),
+                        bom_item_id=item.id,
+                    )
+                )
+            continue
+        if component.id in visited_part_ids:
+            if line_consumed:
+                out.diagnostics.append(
+                    _BackflushDiagnostic(
+                        code="circular_bom",
+                        severity=BACKFLUSH_BLOCKING,
+                        detail=(
+                            f"the BOM contains a cycle: line {item.item_number} on BOM {bom.id} reaches part "
+                            f"{component.part_number}, which is already an ancestor of it, so that branch is "
+                            "cut and its demand is dropped. Break the cycle"
+                        ),
+                        bom_item_id=item.id,
+                        component_part_id=component.id,
+                        component_part_number=component.part_number,
+                    )
+                )
             continue
 
-        line_consumed = consumed and not _is_non_consumed_bom_line(item)
+        if line_consumed:
+            _record_bom_line_diagnostics(item, component, company_id, out)
         extended = float(item.quantity or 1) * parent_qty * (1 + float(item.scrap_factor or 0))
         item_type = (item.item_type or "").lower()
         child_visited = visited_part_ids | {component.id}
@@ -608,6 +1076,7 @@ def _explode_backflush_bom(
                 visited_part_ids=child_visited,
                 out=out,
                 consumed=line_consumed,
+                depth=depth + 1,
             )
             continue
         if item_type == BOMItemType.PHANTOM.value:
@@ -619,6 +1088,21 @@ def _explode_backflush_bom(
                 company_id,
                 component.id,
             )
+            if line_consumed:
+                out.diagnostics.append(
+                    _BackflushDiagnostic(
+                        code="phantom_without_bom",
+                        severity=BACKFLUSH_BLOCKING,
+                        detail=(
+                            f"BOM line {item.item_number} ({component.part_number}) is a phantom with no active "
+                            "BOM to explode, so it would be issued as if it were stocked. Give it an active BOM "
+                            "or change the line type"
+                        ),
+                        bom_item_id=item.id,
+                        component_part_id=component.id,
+                        component_part_number=component.part_number,
+                    )
+                )
 
         if line_consumed:
             out.demand[component.id] = out.demand.get(component.id, 0.0) + extended
@@ -637,7 +1121,26 @@ def _explode_backflush_bom(
                 visited_part_ids=child_visited,
                 out=out,
                 consumed=False,
+                depth=depth + 1,
             )
+
+
+def _part_numbers(db: Session, company_id: int, part_ids: Iterable[Optional[int]]) -> dict[int, Optional[str]]:
+    """``{part_id: part_number}`` for the given ids, tenant-scoped, in ONE query.
+
+    Diagnostics and suppression records both name components by part NUMBER -- an id is
+    not something an operator can act on -- and both would otherwise issue a lookup per
+    row. ``None``s in the input are dropped; an empty input costs no query at all.
+    """
+    ids = {int(part_id) for part_id in part_ids if part_id is not None}
+    if not ids:
+        return {}
+    return {
+        part_id: part_number
+        for part_id, part_number in db.query(Part.id, Part.part_number)
+        .filter(Part.company_id == company_id, Part.id.in_(ids))
+        .all()
+    }
 
 
 def _routing_backflush_demand(
@@ -646,6 +1149,7 @@ def _routing_backflush_demand(
     company_id: int,
     *,
     basis: float,
+    diagnostics: list[_BackflushDiagnostic],
 ) -> dict[int, float]:
     """Component demand stated by the ROUTING (``component_part_id`` on an operation).
 
@@ -702,7 +1206,23 @@ def _routing_backflush_demand(
         .all()
     )
     ordered = float(work_order.quantity_ordered or 0)
+    part_numbers = _part_numbers(db, company_id, (op.component_part_id for op in operations))
     demand: dict[int, float] = {}
+    if operations and ordered <= _EPSILON:
+        # WORK-ORDER-scoped and therefore advisory: it cannot be gated at part opt-in.
+        # ``component_quantity`` is a WHOLE-JOB total, so with no ordered quantity there is
+        # no per-unit rate to recover and the stated total is used verbatim -- silently,
+        # until now. ``WorkOrder.quantity_ordered`` carries no positive constraint.
+        diagnostics.append(
+            _BackflushDiagnostic(
+                code="zero_quantity_ordered",
+                severity=BACKFLUSH_ADVISORY,
+                detail=(
+                    f"Work order {work_order.work_order_number} has an ordered quantity of 0, so routing "
+                    "component demand is taken as a whole-job total rather than a per-unit rate."
+                ),
+            )
+        )
     for op in operations:
         component_part_id = op.component_part_id
         if component_part_id is None:
@@ -715,6 +1235,23 @@ def _routing_backflush_demand(
                 work_order.id,
                 company_id,
                 component_part_id,
+            )
+            diagnostics.append(
+                _BackflushDiagnostic(
+                    code="operation_names_own_part",
+                    severity=BACKFLUSH_BLOCKING,
+                    detail=(
+                        f"operation {op.operation_number or op.id} names the work order's own part as a "
+                        "component, which would issue the part the finished-goods receipt just received. "
+                        "Clear that operation's component"
+                    ),
+                    # Resolve-or-withhold, uniformly with every other diagnostic site --
+                    # ``WorkOrderOperation.component_part_id`` is as unscoped an FK as the
+                    # BOM's. See ``_disclosable_component_id``.
+                    component_part_id=_disclosable_component_id(component_part_id, part_numbers),
+                    component_part_number=part_numbers.get(component_part_id),
+                    operation_id=op.id,
+                )
             )
             continue
         stated = float(op.component_quantity or 0)
@@ -731,6 +1268,20 @@ def _routing_backflush_demand(
                 previous,
                 line,
             )
+            diagnostics.append(
+                _BackflushDiagnostic(
+                    code="operations_disagree_on_component",
+                    severity=BACKFLUSH_BLOCKING,
+                    detail=(
+                        f"two operations state different quantities for component "
+                        f"{part_numbers.get(component_part_id) or component_part_id} "
+                        f"({previous:g} vs {line:g}); the larger would be issued. Reconcile the routing"
+                    ),
+                    component_part_id=_disclosable_component_id(component_part_id, part_numbers),
+                    component_part_number=part_numbers.get(component_part_id),
+                    operation_id=op.id,
+                )
+            )
         demand[component_part_id] = line if previous is None else max(previous, line)
         if op.status != OperationStatus.COMPLETE:
             logger.warning(
@@ -740,6 +1291,20 @@ def _routing_backflush_demand(
                 company_id,
                 getattr(op.status, "value", op.status),
                 component_part_id,
+            )
+            diagnostics.append(
+                _BackflushDiagnostic(
+                    code="incomplete_operation_demand",
+                    severity=BACKFLUSH_ADVISORY,
+                    detail=(
+                        f"Operation {op.operation_number or op.id} is "
+                        f"{getattr(op.status, 'value', op.status)} but contributes backflush demand for "
+                        f"{part_numbers.get(component_part_id) or component_part_id}."
+                    ),
+                    component_part_id=_disclosable_component_id(component_part_id, part_numbers),
+                    component_part_number=part_numbers.get(component_part_id),
+                    operation_id=op.id,
+                )
             )
     return demand
 
@@ -849,6 +1414,38 @@ def _backflush_basis(work_order: WorkOrder) -> float:
     return produced + scrapped
 
 
+@dataclass
+class _BackflushResolution:
+    """Everything the demand resolver worked out, INCLUDING what it declined to issue.
+
+    The pure ``_resolve_backflush_demand``'s return type, and the reason that function
+    was split out of ``_resolve_backflush_components`` at all. The old shape was a bare
+    ``dict[int, float]``, which could express only the surviving demand -- so the two
+    suppression layers had nowhere to report what they had dropped except by WRITING an
+    audit row from inside the resolution itself.
+
+    That coupling is what made a dry run structurally impossible: the only way to learn
+    what a completion would do was to run the thing that writes hash-chain rows saying it
+    had happened. Reporting the facts and RECORDING them are now different jobs, done by
+    different functions, and only one of them takes an ``AuditService``.
+
+    * ``demand`` -- the surviving target per component part.
+    * ``allocation_blocked`` -- ``{part_id: dropped demand}`` for parts an OPEN
+      operation-scoped tie owns. Never audited (the tie is the demand carrier; nothing was
+      lost), but the preview must show it or it would over-state what will move.
+    * ``ledger_blocked`` -- ``{part_id: (dropped demand, signed ledger net)}`` for parts
+      the ledger already shows leaving this job. THIS is the set that becomes
+      ``BACKFLUSH_DOUBLE_ISSUE_BLOCKED`` rows -- on the write path only.
+    * ``diagnostics`` -- see ``_BackflushDiagnostic``.
+    """
+
+    basis: float = 0.0
+    demand: dict[int, float] = field(default_factory=dict)
+    allocation_blocked: dict[int, float] = field(default_factory=dict)
+    ledger_blocked: dict[int, tuple[float, float]] = field(default_factory=dict)
+    diagnostics: list[_BackflushDiagnostic] = field(default_factory=list)
+
+
 def _resolve_backflush_components(
     db: Session,
     work_order: WorkOrder,
@@ -856,12 +1453,366 @@ def _resolve_backflush_components(
     allocations: Optional[list[WorkOrderMaterialAllocation]] = None,
     *,
     audit: AuditService,
+    user_id: Optional[int] = None,
 ) -> dict[int, float]:
-    """Required quantity per component part for backflushing this WO.
+    """Required quantity per component part for backflushing this WO. **Writes.**
 
-    Runs ONLY when the finished part opted into ``Part.backflush_components`` -- a column
-    with no writer anywhere in ``app/`` -- so everything below is dark: it has never
-    executed in production and changing it changes no shipped behavior.
+    The WRITE-PATH wrapper over the pure ``_resolve_backflush_demand``. It does two
+    things the read must not: it records each ledger-suppressed part as a
+    ``BACKFLUSH_DOUBLE_ISSUE_BLOCKED`` chain row, and it applies the resolver's BLOCKING
+    diagnostics -- refusing the demand they describe and recording each one as a
+    ``BACKFLUSH_DEMAND_REFUSED`` chain row.
+
+    **Keep the audit writes here and nowhere below it.** The suppression/refusal DECISION
+    is a fact a read is entitled to ask for; the audit ROW is a claim that a completion
+    happened and declined to issue something. Fusing them -- which is what the previous
+    shape did -- meant a preview could not exist without polluting the hash chain with
+    rows describing nothing that occurred, and falsifying ``_drop_ledger_covered_parts``'
+    own documented cardinality ("bounded, not per-request... not on every read"). This
+    feature has already had to defend that boundary once: ``material_tie_view`` exists
+    because a poll is not an actor and records no reason. A structural split keeps it true
+    by construction rather than by discipline -- an ``audit=None`` flag would not.
+
+    ================================================================ WHY IT REFUSES
+    **A blocking diagnostic REFUSES the demand it describes rather than issuing it.**
+    Through PR 4.4 these diagnostics were computed here and dropped on the floor, and the
+    permissive answer was defensible only because the leg was dark. PR 4.5 arms it from a
+    form, and the incoherence became live: the opt-in gate refuses to ARM a part over
+    exactly these conditions ("the automation would issue the WRONG material"), while the
+    completion path met the same condition and issued anyway, silently. A gate that
+    protects only the instant of the flip protects nothing -- every input it reads is
+    mutable afterwards by anyone with ``boms:edit``.
+
+    The direction follows this module's own rule (``_is_non_consumed_bom_line``):
+    under-issuing leaves the material on the shelf where the operator who needs it draws
+    it manually and the job's cost shows the gap; over-issuing writes material into an
+    as-built genealogy record that never contained it, which no downstream reader can
+    distinguish from the truth. Refusing is the under-issuing direction, and -- unlike the
+    old silent-and-wrong answer -- it is RECORDED: one chain row per blocking diagnostic,
+    naming the condition, the component and the quantity that did not move.
+
+    Scope of a refusal, and it is deliberately two-tier:
+
+    * **Per component** when the diagnostic names one (``component_part_id``) -- a zero /
+      negative quantity, a UoM mismatch, a soft-deleted component, a phantom with no BOM,
+      a routing/BOM disagreement, two operations disagreeing. Only that component is
+      dropped; the rest of the BOM still consumes, which is the same per-part precedence
+      rule the routing leg follows. It can OVER-refuse (a part flagged as one line's
+      alternate that is also a primary line elsewhere loses its demand too) -- that is the
+      safe direction and it is recorded.
+    * **The whole leg** when the diagnostic names no component, because the condition is
+      structural and the resolved demand is incomplete in a way no component owns:
+      ``deleted_active_bom`` (the structure the shop deleted is the structure moving
+      stock), ``bom_depth_exceeded`` (everything below the cap is missing) and
+      ``missing_component_part`` (a line's demand vanished and nothing can say whose).
+
+    ``no_demand_source`` is ADVISORY at resolver scope precisely so it cannot reach the
+    structural tier: "this job has no BOM" is the common case for a turned part or a
+    part-less nest package, not a defect. Its BLOCKING form lives at part-opt-in scope in
+    ``backflush_readiness_for_part``, where it means something ("arming this would consume
+    nothing").
+
+    ``user_id`` is carried only so the refusal's ``OperationalEvent`` can be attributed. It
+    is ``Optional`` because the reconcile-on-read entries have no actor to name, exactly as
+    ``_record_backflush_component_failed`` already models.
+    """
+    resolution = _resolve_backflush_demand(db, work_order, company_id, allocations)
+    _refuse_blocked_demand(db, work_order, resolution, company_id=company_id, audit=audit, user_id=user_id)
+    if resolution.ledger_blocked:
+        part_numbers = _part_numbers(db, company_id, resolution.ledger_blocked.keys())
+        for part_id, (demand, net) in resolution.ledger_blocked.items():
+            _record_ledger_suppression(
+                work_order,
+                part_id=part_id,
+                part_number=part_numbers.get(part_id),
+                demand=demand,
+                net=net,
+                company_id=company_id,
+                audit=audit,
+            )
+    return resolution.demand
+
+
+def blocked_demand_refusal(resolution: _BackflushResolution) -> tuple[bool, set[int]]:
+    """What a completion would REFUSE over blocking diagnostics. **PURE — decides only.**
+
+    Returns ``(refuses the whole leg, {component part ids refused})``. The read half of
+    ``_refuse_blocked_demand``, split out for the same reason the resolver was split from
+    the recorder: the dry-run preview has to state the SAME answer the completion will
+    act on, and it may not write anything to learn it. A preview that showed a component
+    posting 20 while the completion refused it would break the one promise the preview
+    exists to keep.
+
+    A blocking diagnostic that names no component is structural -- the resolved demand is
+    incomplete in a way no component owns -- and refuses the whole BOM/routing leg. See
+    ``_resolve_backflush_components`` for the full argument and the code list.
+    """
+    blocking = [d for d in resolution.diagnostics if d.severity == BACKFLUSH_BLOCKING]
+    whole_leg = any(d.component_part_id is None for d in blocking)
+    named_ids = {int(d.component_part_id) for d in blocking if d.component_part_id is not None}
+    return whole_leg, named_ids
+
+
+def _refuse_blocked_demand(
+    db: Session,
+    work_order: WorkOrder,
+    resolution: _BackflushResolution,
+    *,
+    company_id: int,
+    audit: AuditService,
+    user_id: Optional[int] = None,
+) -> None:
+    """Drop the demand every BLOCKING diagnostic condemns, and record each one. **Writes.**
+
+    Mutates ``resolution.demand`` in place and appends one
+    ``BACKFLUSH_DEMAND_REFUSED`` chain row per blocking diagnostic. See
+    ``_resolve_backflush_components`` for WHY it refuses and for the two-tier scope; this
+    function is only the mechanics.
+
+    The row is written for EVERY blocking diagnostic, including ones whose component
+    carried no surviving demand to refuse (an alternate group that would issue nothing, a
+    cut cycle, an operation naming the job's own part). A refusal that changed no quantity
+    is still the fact an as-built review needs: it says the system read this BOM at
+    completion time, judged it wrong, and declined -- which is not reconstructable later
+    from a ledger that simply has no row.
+
+    **``refused_quantity`` is attributed ONCE PER REFUSED SCOPE, never once per row.** Both
+    tiers can emit several rows naming the same thing: ``_record_bom_line_diagnostics``
+    alone can raise ``zero_bom_quantity`` AND ``unit_of_measure_mismatch`` AND the
+    deleted-component branch for ONE line, and two lines can name one component. Charging
+    each of those the component's full demand would put a FALSE FIGURE on the hash chain --
+    an auditor summing ``BACKFLUSH_DEMAND_REFUSED`` would read double what actually failed
+    to move. This module already refuses to do that elsewhere (see
+    ``_record_backflush_demand_suppressed``, which records a tie's UNMET REMAINDER rather
+    than its gross ``qty_planned``, for the same reason). So the FIRST row naming a given
+    component carries the quantity and every later one carries ``0`` -- exactly as the
+    structural tier already attributed its total to ``structural[0]``. The rows that carry
+    the quantity are also the rows that emit the ``OperationalEvent``, so one refused
+    component notifies once rather than once per condition it violates.
+    """
+    blocking = [d for d in resolution.diagnostics if d.severity == BACKFLUSH_BLOCKING]
+    if not blocking:
+        return
+
+    structural = [d for d in blocking if d.component_part_id is None]
+    _, named_ids = blocked_demand_refusal(resolution)
+    part_numbers = _part_numbers(db, company_id, named_ids | set(resolution.demand))
+    surviving_total = sum(resolution.demand.values())
+    attributed: set[int] = set()
+
+    for diagnostic in blocking:
+        named = diagnostic.component_part_id
+        if structural:
+            # A structural blocker refuses the WHOLE leg, so the quantity it stopped is
+            # every surviving line; naming one component's share would under-state it.
+            # Attributed to the FIRST structural row so N rows do not each claim the
+            # same total.
+            attributes = diagnostic is structural[0]
+            refused = surviving_total if attributes else 0.0
+        else:
+            # Same rule, per component: the first diagnostic naming this component owns the
+            # quantity, the rest are recorded at 0.
+            attributes = named is not None and int(named) not in attributed
+            if named is not None:
+                attributed.add(int(named))
+            refused = resolution.demand.get(int(named), 0.0) if attributes and named is not None else 0.0
+        _record_demand_refused(
+            work_order,
+            diagnostic=diagnostic,
+            part_number=part_numbers.get(int(named)) if named is not None else None,
+            refused_quantity=refused,
+            whole_leg=bool(structural),
+            company_id=company_id,
+            audit=audit,
+        )
+        if attributes:
+            _emit_demand_refused_event(
+                db,
+                work_order,
+                diagnostic=diagnostic,
+                part_number=part_numbers.get(int(named)) if named is not None else None,
+                refused_quantity=refused,
+                whole_leg=bool(structural),
+                company_id=company_id,
+                user_id=user_id,
+            )
+
+    if structural:
+        logger.warning(
+            "WO %s (company %s) backflush leg refused entirely (%s of component demand not issued): %s",
+            work_order.id,
+            company_id,
+            surviving_total,
+            ", ".join(d.code for d in structural),
+        )
+        resolution.demand.clear()
+        return
+
+    for part_id in named_ids:
+        dropped = resolution.demand.pop(part_id, None)
+        if dropped is not None:
+            logger.warning(
+                "WO %s (company %s) backflush demand of %s for component %s refused: a blocking diagnostic stands",
+                work_order.id,
+                company_id,
+                dropped,
+                part_id,
+            )
+
+
+def _record_demand_refused(
+    work_order: WorkOrder,
+    *,
+    diagnostic: _BackflushDiagnostic,
+    part_number: Optional[str],
+    refused_quantity: float,
+    whole_leg: bool,
+    company_id: int,
+    audit: AuditService,
+) -> None:
+    """The ``BACKFLUSH_DEMAND_REFUSED`` chain row for ONE blocking diagnostic.
+
+    Keyed on the COMPONENT part when the diagnostic names one (so it lands beside that
+    part's ``BACKFLUSH_SHORTAGE`` / ``BACKFLUSH_DOUBLE_ISSUE_BLOCKED`` history under
+    ``resource_type='inventory'``), and on the work order otherwise -- a structural
+    blocker is a fact about the job's BOM, not about any one component.
+
+    ``extra_data`` carries the diagnostic verbatim (``code``, ``severity``, ``detail``,
+    and whichever of ``bom_item_id`` / ``component_part_id`` / ``operation_id`` it
+    populated) so the row names the row to fix, not merely the fact that something was
+    wrong. ``detail`` is the same operator-facing sentence the refusal gate and the
+    readiness read show, which is what stops the record and the UI drifting apart -- and
+    it is written by the diagnostic sites, which never interpolate another tenant's data.
+    """
+    component_part_id = diagnostic.component_part_id
+    scope = "the whole backflush leg" if whole_leg else f"component {part_number or component_part_id}"
+    if component_part_id is not None:
+        resource_type = "inventory"
+        resource_id = component_part_id
+        resource_identifier = part_number or str(component_part_id)
+    else:
+        resource_type = "work_order"
+        resource_id = work_order.id
+        resource_identifier = work_order.work_order_number or str(work_order.id)
+    audit.log(
+        action=BACKFLUSH_DEMAND_REFUSED_AUDIT_ACTION,
+        resource_type=resource_type,
+        resource_id=resource_id,
+        resource_identifier=resource_identifier,
+        description=(
+            f"Backflush on work order {work_order.work_order_number} refused {scope} "
+            f"({refused_quantity} not issued): {diagnostic.detail}"
+        ),
+        new_values={"refused_quantity": refused_quantity, "diagnostic_code": diagnostic.code},
+        extra_data={
+            "work_order_id": work_order.id,
+            "work_order_number": work_order.work_order_number,
+            "component_part_id": component_part_id,
+            "component_part_number": part_number or diagnostic.component_part_number,
+            "refused_quantity": refused_quantity,
+            "refused_whole_leg": whole_leg,
+            "diagnostic_code": diagnostic.code,
+            "diagnostic_severity": diagnostic.severity,
+            "diagnostic_detail": diagnostic.detail,
+            "bom_item_id": diagnostic.bom_item_id,
+            "operation_id": diagnostic.operation_id,
+        },
+        company_id=company_id,
+    )
+
+
+def _emit_demand_refused_event(
+    db: Session,
+    work_order: WorkOrder,
+    *,
+    diagnostic: _BackflushDiagnostic,
+    part_number: Optional[str],
+    refused_quantity: float,
+    whole_leg: bool,
+    company_id: int,
+    user_id: Optional[int],
+) -> None:
+    """The warning ``OperationalEvent`` for ONE refused scope. Best-effort, never raises.
+
+    The notification half of ``_record_demand_refused``, and split out for the same reason
+    ``_record_backflush_component_failed`` keeps both: the chain row is the compliance
+    record, the event is what reaches a human. Without it the refusal is strictly QUIETER
+    than the shortage it is worse than -- see ``BACKFLUSH_DEMAND_REFUSED_EVENT_TYPE`` --
+    and, because nothing disarms the part, it repeats silently on every subsequent job.
+
+    Called ONCE per refused scope (the first diagnostic naming a component, or the first
+    structural blocker), not once per diagnostic: a BOM line with a zero quantity AND a UoM
+    mismatch is one refused component, not two notifications.
+
+    **Its own savepoint, for the reason PR 4.4's two failure recorders state.**
+    ``emit_best_effort`` swallows the exception, but a ``flush()`` that fails AT THE DB
+    still deactivates the outer transaction, so the caller's next flush would raise
+    ``PendingRollbackError`` with the true cause only in a WARNING log. This runs on a path
+    reached from a reconcile-on-read GET whose whole contract is "never 500", and inside a
+    loop that must survive to the next diagnostic. A ``None`` return is the documented
+    failure signal, so rolling back to the savepoint on it restores a usable session.
+    """
+    component_part_id = diagnostic.component_part_id
+    payload = {
+        "work_order_id": work_order.id,
+        "work_order_number": work_order.work_order_number,
+        "component_part_id": component_part_id,
+        "component_part_number": part_number or diagnostic.component_part_number,
+        "refused_quantity": refused_quantity,
+        "refused_whole_leg": whole_leg,
+        "diagnostic_code": diagnostic.code,
+        "diagnostic_detail": diagnostic.detail,
+        "bom_item_id": diagnostic.bom_item_id,
+        "operation_id": diagnostic.operation_id,
+    }
+    savepoint = db.begin_nested()
+    if (
+        OperationalEventService(db).emit_best_effort(
+            company_id=company_id,
+            event_type=BACKFLUSH_DEMAND_REFUSED_EVENT_TYPE,
+            source_module="completion_inventory",
+            # Keyed like the chain row: the component when one is named, the job otherwise.
+            entity_type="work_order" if component_part_id is None else "inventory",
+            entity_id=work_order.id if component_part_id is None else component_part_id,
+            work_order_id=work_order.id,
+            operation_id=diagnostic.operation_id,
+            user_id=user_id,
+            severity="warning",
+            event_payload=payload,
+        )
+        is None
+    ):
+        savepoint.rollback()
+    else:
+        savepoint.commit()
+
+
+def _resolve_backflush_demand(
+    db: Session,
+    work_order: WorkOrder,
+    company_id: int,
+    allocations: Optional[list[WorkOrderMaterialAllocation]] = None,
+) -> _BackflushResolution:
+    """Required quantity per component part for backflushing this WO. **PURE READ.**
+
+    No session mutation, no audit row, nothing to commit -- the property that lets the
+    dry-run preview shares the resolver with the completion path instead of approximating
+    it. (It DOES read: the BOM walk and the ledger nets are SELECTs.)
+
+    **Two callers, and only one of them is gated on the flag.**
+    ``_resolve_backflush_components`` (the completion path) reaches this only when the
+    finished part opted into ``Part.backflush_components``;
+    ``preview_backflush_for_work_order`` calls it UNCONDITIONALLY and on purpose, because
+    the operator reading a dry run is deciding whether to opt in and a preview that showed
+    nothing until afterwards could not inform that decision. Every line the preview gets
+    back carries ``requires_opt_in``.
+
+    The part-level readiness check is NOT a caller: it has a ``Part`` and no work order,
+    so it re-states the BOM half at a synthetic basis of 1.0 (see
+    ``backflush_readiness_for_part``). A ``basis_override`` parameter existed here for it
+    and had no caller anywhere in ``app/`` or ``tests/`` -- it could not have one, since
+    this function requires a ``WorkOrder``. Removed rather than left as a comment claiming
+    a user it does not have.
 
     **The basis is ``quantity_complete + quantity_scrapped``, not ``quantity_complete``.**
     A scrapped run physically used its material, and lot genealogy filters on ISSUE, so
@@ -889,10 +1840,17 @@ def _resolve_backflush_components(
        demand, including a tie that has not consumed yet (the material is coming).
     2. ``_drop_ledger_covered_parts`` -- the ledger already shows that material gone,
        whatever the tie's status now says.
+
+    Diagnostics are REPORTED here and acted on by the caller: the completion path refuses
+    the demand a blocking diagnostic condemns (``_refuse_blocked_demand``), the preview
+    renders them, and the opt-in gate joins the blocking ones into its 409. This function
+    itself never drops demand over a diagnostic -- a pure read that quietly returned a
+    different answer than it reported would be the worst of both.
     """
     basis = _backflush_basis(work_order)
+    resolution = _BackflushResolution(basis=basis)
     if basis <= _EPSILON:
-        return {}
+        return resolution
 
     explosion = _BackflushBomExplosion()
     if work_order.part_id is not None:
@@ -901,6 +1859,7 @@ def _resolve_backflush_components(
 
         bom = _get_active_bom(db, work_order.part_id, company_id)
         if bom is not None:
+            _record_bom_header_diagnostics(bom, explosion)
             _explode_backflush_bom(
                 db,
                 bom,
@@ -913,9 +1872,12 @@ def _resolve_backflush_components(
     # A part reached as a primary line SOMEWHERE outranks its appearance as an alternate,
     # an optional, or a member of a make subtree elsewhere in the same structure.
     explosion.excluded_part_ids -= set(explosion.demand)
+    resolution.diagnostics.extend(explosion.diagnostics)
 
     required: dict[int, float] = dict(explosion.demand)
-    for part_id, quantity in _routing_backflush_demand(db, work_order, company_id, basis=basis).items():
+    routing = _routing_backflush_demand(db, work_order, company_id, basis=basis, diagnostics=resolution.diagnostics)
+    routing_part_numbers = _part_numbers(db, company_id, routing.keys())
+    for part_id, quantity in routing.items():
         if part_id in explosion.excluded_part_ids:
             logger.warning(
                 "WO %s (company %s) operation demand for part %s is dropped: the BOM reaches that part only "
@@ -923,6 +1885,20 @@ def _resolve_backflush_components(
                 work_order.id,
                 company_id,
                 part_id,
+            )
+            resolution.diagnostics.append(
+                _BackflushDiagnostic(
+                    code="routing_component_excluded_by_bom",
+                    severity=BACKFLUSH_BLOCKING,
+                    detail=(
+                        f"a routing operation names component "
+                        f"{routing_part_numbers.get(part_id) or part_id}, but the BOM reaches it only as an "
+                        "alternate/optional/reference line or inside a make sub-assembly, so that demand "
+                        "would be silently dropped. Reconcile the routing and the BOM"
+                    ),
+                    component_part_id=part_id,
+                    component_part_number=routing_part_numbers.get(part_id),
+                )
             )
             continue
         bom_quantity = required.get(part_id)
@@ -935,7 +1911,45 @@ def _resolve_backflush_components(
                 quantity,
                 bom_quantity,
             )
+            resolution.diagnostics.append(
+                _BackflushDiagnostic(
+                    code="routing_bom_quantity_disagreement",
+                    severity=BACKFLUSH_BLOCKING,
+                    detail=(
+                        f"the routing and the BOM disagree on component "
+                        f"{routing_part_numbers.get(part_id) or part_id} "
+                        f"({quantity:g} routed vs {bom_quantity:g} on the BOM); the routing would win. "
+                        "Reconcile them before enabling"
+                    ),
+                    component_part_id=part_id,
+                    component_part_number=routing_part_numbers.get(part_id),
+                )
+            )
         required[part_id] = quantity
+
+    if not required:
+        # ADVISORY at WORK-ORDER scope, blocking only at part-opt-in scope
+        # (``backflush_readiness_for_part`` raises its own copy). The condition means
+        # "this job has no component demand", which for a single-op turned part, a
+        # purchased item or a part-less standalone nest package is the ORDINARY case and
+        # nothing is wrong -- the preview would otherwise paint a red "1 problem resolving
+        # this demand" banner over a perfectly healthy job, which is the alarm fatigue the
+        # whole severity vocabulary exists to avoid. It also must not reach
+        # ``_refuse_blocked_demand``'s structural tier, where a no-component blocker
+        # refuses the entire leg: there is nothing here to refuse, and "no BOM" is not a
+        # reason to distrust a BOM. At OPT-IN it is a real refusal -- arming a part whose
+        # completions would consume nothing is a shop believing an automation is running
+        # when it is not.
+        resolution.diagnostics.append(
+            _BackflushDiagnostic(
+                code="no_demand_source",
+                severity=BACKFLUSH_ADVISORY,
+                detail=(
+                    "this work order has no active BOM line and no routing operation naming a component that "
+                    "this leg would issue, so completing it would consume nothing."
+                ),
+            )
+        )
 
     # ALLOCATION PRECEDENCE. A part covered by an OPEN operation-scoped material
     # allocation on this WO is owned by the material-consumption engine, which posts
@@ -944,8 +1958,35 @@ def _resolve_backflush_components(
     # WO-level backflush from ALSO issuing the same material -- a silent double-issue.
     # Drop those parts here; the allocation is the sole demand carrier (we deliberately
     # do NOT write op.component_part_id from a tie).
-    required = _drop_allocation_covered_parts(db, work_order, company_id, required, allocations)
-    return _drop_ledger_covered_parts(db, work_order, company_id, required, audit=audit)
+    required, resolution.allocation_blocked = _drop_allocation_covered_parts(
+        db, work_order, company_id, required, allocations, diagnostics=resolution.diagnostics
+    )
+    resolution.demand, resolution.ledger_blocked = _drop_ledger_covered_parts(db, work_order, company_id, required)
+    return resolution
+
+
+def _record_bom_header_diagnostics(bom: BOM, out: _BackflushBomExplosion) -> None:
+    """Conditions about the ACTIVE BOM itself rather than any one of its lines.
+
+    ``_get_active_bom`` filters ``is_active`` only -- not ``is_deleted`` -- while ``BOM``
+    carries ``SoftDeleteMixin``. So a soft-deleted BOM that is still flagged active is
+    resolved and exploded exactly as a live one, which is an invariant-3 violation with a
+    material consequence rather than a bookkeeping one: the structure the shop believes it
+    deleted is the structure that moves stock. Not FIXED here (changing which BOM resolves
+    is a change to a live helper with four other callers) -- recorded, so a part sitting
+    on one cannot opt in.
+    """
+    if bool(getattr(bom, "is_deleted", False)):
+        out.diagnostics.append(
+            _BackflushDiagnostic(
+                code="deleted_active_bom",
+                severity=BACKFLUSH_BLOCKING,
+                detail=(
+                    f"the active BOM for this part (BOM {bom.id}) is soft-deleted, so backflush would explode a "
+                    "structure the shop has deleted. Restore it or activate a live BOM"
+                ),
+            )
+        )
 
 
 def _drop_allocation_covered_parts(
@@ -954,8 +1995,14 @@ def _drop_allocation_covered_parts(
     company_id: int,
     required: dict[int, float],
     allocations: Optional[list[WorkOrderMaterialAllocation]] = None,
-) -> dict[int, float]:
+    *,
+    diagnostics: Optional[list[_BackflushDiagnostic]] = None,
+) -> tuple[dict[int, float], dict[int, float]]:
     """Remove parts covered by an OPEN OPERATION-scoped allocation from backflush demand.
+
+    Returns ``(surviving demand, {part_id: dropped demand})``. The second half is not
+    audited and must not be -- nothing was lost, the tie is simply the demand carrier --
+    but a dry-run preview that omitted it would show the BOM's material moving twice.
 
     No allocations -> ``required`` is returned unchanged, and with the list threaded down
     from ``apply_completion_inventory_effects`` that costs ZERO extra queries -- which is
@@ -982,14 +2029,17 @@ def _drop_allocation_covered_parts(
     target is nowhere near the BOM demand it just cancelled is a planning error somebody
     should look at, and before this it produced no signal at all.
     """
+    dropped: dict[int, float] = {}
     if not required:
-        return required
+        return required, dropped
 
     allocations = [a for a in _open_allocations(db, work_order, company_id, allocations) if a.part_id in required]
     operation_ids = {a.work_order_operation_id for a in allocations if a.work_order_operation_id is not None}
     if not operation_ids:
-        return required
+        return required, dropped
 
+    diagnostics = diagnostics if diagnostics is not None else []
+    part_numbers = _part_numbers(db, company_id, (a.part_id for a in allocations))
     live_operations = {
         row.id: row
         for row in db.query(
@@ -1010,6 +2060,7 @@ def _drop_allocation_covered_parts(
             demand = required.pop(allocation.part_id, None)
             if demand is None:
                 continue
+            dropped[allocation.part_id] = demand
             per_run = float(allocation.qty_per_run if allocation.qty_per_run is not None else 1.0)
             tie_target = per_run * (float(operation.quantity_complete or 0) + float(operation.quantity_scrapped or 0))
             if abs(tie_target - demand) > _EPSILON:
@@ -1023,6 +2074,21 @@ def _drop_allocation_covered_parts(
                     company_id,
                     tie_target,
                 )
+                diagnostics.append(
+                    _BackflushDiagnostic(
+                        code="tie_basis_mismatch",
+                        severity=BACKFLUSH_ADVISORY,
+                        detail=(
+                            f"Material tie {allocation.id} cancels {demand:g} of BOM demand for "
+                            f"{part_numbers.get(allocation.part_id) or allocation.part_id} but its own live "
+                            f"target is {tie_target:g}; the tie's per-run basis and the BOM's per-unit demand "
+                            "disagree."
+                        ),
+                        component_part_id=allocation.part_id,
+                        component_part_number=part_numbers.get(allocation.part_id),
+                        operation_id=allocation.work_order_operation_id,
+                    )
+                )
         elif allocation.work_order_operation_id is not None:
             logger.warning(
                 "Allocation %s points at operation %s which is not on WO %s (company %s); "
@@ -1033,7 +2099,22 @@ def _drop_allocation_covered_parts(
                 company_id,
                 allocation.part_id,
             )
-    return required
+            diagnostics.append(
+                _BackflushDiagnostic(
+                    code="tie_operation_missing",
+                    severity=BACKFLUSH_ADVISORY,
+                    detail=(
+                        f"Material tie {allocation.id} points at operation "
+                        f"{allocation.work_order_operation_id}, which is no longer on this work order, so it "
+                        f"cannot consume and does not suppress backflush demand for "
+                        f"{part_numbers.get(allocation.part_id) or allocation.part_id}."
+                    ),
+                    component_part_id=allocation.part_id,
+                    component_part_number=part_numbers.get(allocation.part_id),
+                    operation_id=allocation.work_order_operation_id,
+                )
+            )
+    return required, dropped
 
 
 def _net_issued_by_part(
@@ -1232,10 +2313,18 @@ def _drop_ledger_covered_parts(
     work_order: WorkOrder,
     company_id: int,
     required: dict[int, float],
-    *,
-    audit: AuditService,
-) -> dict[int, float]:
+) -> tuple[dict[int, float], dict[int, tuple[float, float]]]:
     """Suppress backflush demand for a part the LEDGER already shows leaving this job.
+
+    **PURE READ, and that is a structural property rather than a habit.** It returns
+    ``(surviving demand, {part_id: (suppressed demand, ledger net)})`` and takes no
+    ``AuditService`` at all; ``_resolve_backflush_components`` -- the write-path wrapper --
+    turns the second half into ``BACKFLUSH_DOUBLE_ISSUE_BLOCKED`` rows. It used to write
+    them itself, which meant a caller could not ask "what would this completion do?"
+    without inserting hash-chain rows claiming it HAD, and falsified the cardinality this
+    docstring asserts below. Splitting the decision from the record is what makes "a read
+    never writes" true by construction; an ``audit=None`` parameter would have made it
+    true only as long as every future caller remembered to pass it.
 
     The double-issue ``_drop_allocation_covered_parts`` cannot prevent on its own. That
     layer keys on tie STATUS, and three guards in a row miss the same case:
@@ -1283,25 +2372,20 @@ def _drop_ledger_covered_parts(
     re-import deleted drop out of it. The structural fix is superseding operations instead
     of deleting them (see the plan's fourth residual gap).
     """
+    suppressed: dict[int, tuple[float, float]] = {}
     if not required:
-        return required
+        return required, suppressed
 
     nets = operation_scoped_net_issued_by_part(
         db, work_order_id=work_order.id, company_id=company_id, part_ids=required.keys()
     )
     blocked = {part_id: net for part_id, net in nets.items() if net > _EPSILON and part_id in required}
     if not blocked:
-        return required
+        return required, suppressed
 
-    part_numbers = {
-        part_id: part_number
-        for part_id, part_number in db.query(Part.id, Part.part_number)
-        .filter(Part.company_id == company_id, Part.id.in_(blocked.keys()))
-        .all()
-    }
     for part_id, net in blocked.items():
         demand = required.pop(part_id)
-        part_number = part_numbers.get(part_id)
+        suppressed[part_id] = (demand, net)
         logger.warning(
             "Backflush demand of %s for part %s on WO %s (company %s) suppressed: the ledger already shows "
             "%s consumed against this work order's operations",
@@ -1311,29 +2395,79 @@ def _drop_ledger_covered_parts(
             company_id,
             net,
         )
-        audit.log(
-            action=BACKFLUSH_DOUBLE_ISSUE_BLOCKED_AUDIT_ACTION,
-            resource_type="inventory",
-            resource_id=part_id,
-            resource_identifier=part_number or str(part_id),
-            description=(
-                f"Backflush of {demand} of component {part_number or part_id} on work order "
-                f"{work_order.work_order_number} was blocked: {net} has already been consumed against "
-                "this work order's operations by a material tie"
-            ),
-            new_values={"suppressed_quantity": demand, "ledger_net_issued": net},
-            extra_data={
-                "work_order_id": work_order.id,
-                "work_order_number": work_order.work_order_number,
-                "component_part_id": part_id,
-                "component_part_number": part_number,
-                "suppressed_quantity": demand,
-                "ledger_net_issued": net,
-                "reference_type": OPERATION_REFERENCE_TYPE,
-            },
-            company_id=company_id,
-        )
-    return required
+    return required, suppressed
+
+
+def _record_ledger_suppression(
+    work_order: WorkOrder,
+    *,
+    part_id: int,
+    part_number: Optional[str],
+    demand: float,
+    net: float,
+    company_id: int,
+    audit: AuditService,
+) -> None:
+    """The ``BACKFLUSH_DOUBLE_ISSUE_BLOCKED`` chain row for ONE ledger-suppressed part.
+
+    The WRITE half of what ``_drop_ledger_covered_parts`` decides, lifted out of it so
+    the decision stays callable from a read. The row content is byte-for-byte what that
+    function used to emit -- this is a relocation, not a rewording, because the prose and
+    the ``extra_data`` keys are what an as-built review reads months later.
+
+    Suppression is recorded rather than left silent: it is the system declining to issue
+    material a planner's BOM asked for, and "correct but invisible" is exactly the shape
+    of control gap an AS9100D 8.5.2 review cannot reconstruct after the fact. The row is
+    bounded, not per-request -- it fires on the completion paths and on a reconcile pass
+    that actually applies a work-order transition, the same cardinality as
+    ``BACKFLUSH_SHORTAGE``, and (now structurally) never on a read.
+    """
+    audit.log(
+        action=BACKFLUSH_DOUBLE_ISSUE_BLOCKED_AUDIT_ACTION,
+        resource_type="inventory",
+        resource_id=part_id,
+        resource_identifier=part_number or str(part_id),
+        description=(
+            f"Backflush of {demand} of component {part_number or part_id} on work order "
+            f"{work_order.work_order_number} was blocked: {net} has already been consumed against "
+            "this work order's operations by a material tie"
+        ),
+        new_values={"suppressed_quantity": demand, "ledger_net_issued": net},
+        extra_data={
+            "work_order_id": work_order.id,
+            "work_order_number": work_order.work_order_number,
+            "component_part_id": part_id,
+            "component_part_number": part_number,
+            "suppressed_quantity": demand,
+            "ledger_net_issued": net,
+            "reference_type": OPERATION_REFERENCE_TYPE,
+        },
+        company_id=company_id,
+    )
+
+
+_AnchorT = TypeVar("_AnchorT")
+
+
+def _shortfall_anchor(last_drawn: Optional[_AnchorT], source_items: list[_AnchorT]) -> Optional[_AnchorT]:
+    """The stock row an UNMET REMAINDER is posted against. ONE definition, two callers.
+
+    A draw that ``plan_stock_draw`` could not cover in full still posts the remainder --
+    the true demand belongs on the ledger even when the stock does not exist -- against
+    the last lot it drew, or the first candidate lot if it drew nothing, or (``None`` here)
+    a minted placeholder row when there is no candidate at all.
+
+    Extracted because the DRY RUN has to make the identical choice. It previously did not
+    make it at all: the preview listed only ``plan_stock_draw``'s draws and reported the
+    remainder as a bare scalar, so a 25 demand over lots A(10) and B(5) previewed
+    "A:10, B:5, short 10" while the completion posted A:10, B:5 **and B:10** -- lot B
+    contributing 15 and ending at -10. The lot number on that third row goes onto the
+    as-built genealogy, which is the one thing this preview exists to get right, and three
+    separate docstrings promised the two could not disagree.
+    """
+    if last_drawn is not None:
+        return last_drawn
+    return source_items[0] if source_items else None
 
 
 def _placeholder_stock_row(
@@ -1518,10 +2652,12 @@ def _issue_one_component(
         # SHORTAGE: never fail the completion. Drive a lot negative so the true demand is
         # still on the ledger, then record it tamper-evidently + emit the warning.
         #
-        # The anchor guard stays in THIS form. ``source_items`` is empty on exactly the
-        # no-stock-at-all path -- which IS a shortage path -- so a bare ``source_items[0]``
-        # would raise ``IndexError`` precisely when this branch runs.
-        anchor = last_item or (source_items[0] if source_items else None)
+        # The anchor guard stays in THIS form, now SHARED with the dry run
+        # (``_shortfall_anchor``) so the two cannot pick different heats. ``source_items``
+        # is empty on exactly the no-stock-at-all path -- which IS a shortage path -- so a
+        # bare ``source_items[0]`` would raise ``IndexError`` precisely when this branch
+        # runs.
+        anchor = _shortfall_anchor(last_item, source_items)
         if anchor is None:
             anchor = _placeholder_stock_row(db, part_id=component_part_id, company_id=company_id, unit_cost=unit_cost)
         require_posted_issue(
@@ -2235,11 +3371,14 @@ def backflush_components_for_work_order(
       ``allocation_id``, shape-agnostic, signed ISSUE - RETURN).
     * **LEG 1 -- the BOM / routing backflush.** GATED on
       ``work_order.part.backflush_components`` (opt-in per part, default False) so
-      material a shop issued manually is never double-consumed. That column has NO writer
-      anywhere in ``app/``, so this leg has never run in production and
-      ``_resolve_backflush_components`` is dark code. Target is the resolved demand after
-      BOTH suppression layers; ``posted`` is ``backflush_net_issued_by_part`` (this leg's
-      own history: ``work_order_backflush`` rows with ``allocation_id IS NULL``).
+      material a shop issued manually is never double-consumed. **Since PR 4.5 that column
+      is writable** -- ``PUT /parts/{id}`` / ``PUT /materials/{id}`` behind
+      ``assert_backflush_change_allowed``'s readiness gate, plus the part-detail card --
+      so this leg RUNS for any part a supervisor has armed and is no longer dark code.
+      Target is the resolved demand after BOTH suppression layers and after
+      ``_refuse_blocked_demand`` has dropped anything a blocking diagnostic condemns;
+      ``posted`` is ``backflush_net_issued_by_part`` (this leg's own history:
+      ``work_order_backflush`` rows with ``allocation_id IS NULL``).
 
     In both cases ``delta = target - posted`` and a row is written only when
     ``delta > _EPSILON``. **A non-positive delta is a silent no-op, NEVER an
@@ -2362,7 +3501,9 @@ def backflush_components_for_work_order(
 
     # ------------------------------------------------------- LEG 1: BOM / routing
     required_by_component: dict[int, float] = (
-        _resolve_backflush_components(db, work_order, company_id, allocations, audit=audit) if backflush_enabled else {}
+        _resolve_backflush_components(db, work_order, company_id, allocations, audit=audit, user_id=user_id)
+        if backflush_enabled
+        else {}
     )
     nets = backflush_net_issued_by_part(
         db, work_order_id=work_order.id, company_id=company_id, part_ids=required_by_component.keys()
@@ -2474,6 +3615,578 @@ def _advance_tie_consumed(
             "allocation_id": allocation.id,
         },
     )
+
+
+# ================================================================ DRY RUN (reads only)
+#
+# Everything below models what ``backflush_components_for_work_order`` WOULD do, without
+# doing any of it. Two callers: the part-level refusal gate behind
+# ``Part.backflush_components`` and the work-order dry-run preview endpoint.
+#
+# The rule these functions live by is the one ``material_tie_view`` was created to state:
+# **a poll is not an actor and records no reason.** No session mutation, no audit row, no
+# operational event, nothing to commit. That is enforceable here only because the
+# resolution layer was split from the recording layer first (see
+# ``_resolve_backflush_demand`` / ``_record_ledger_suppression``); a preview built by
+# savepoint-and-rollback around the real writer would have coupled a read to a write path
+# forever, for the sake of one audit row.
+
+# ``BackflushPreviewLine.source`` values.
+BACKFLUSH_SOURCE_BOM = "bom_routing"
+BACKFLUSH_SOURCE_TIE = "work_order_tie"
+
+# ``BackflushPreviewLine.suppression_reason`` values. The first two mirror
+# ``_record_backflush_demand_suppressed``'s ``reason`` vocabulary exactly, so a preview
+# and the chain row a completion later writes use the same word for the same fact.
+SUPPRESSION_ALREADY_ISSUED = "already_issued"
+SUPPRESSION_LEDGER_CONSUMED = "ledger_consumed"
+SUPPRESSION_OPEN_OPERATION_TIE = "open_operation_tie"
+SUPPRESSION_CONVERGED = "converged"
+# The completion would REFUSE this line over a blocking diagnostic and record a
+# ``BACKFLUSH_DEMAND_REFUSED`` chain row (``blocked_demand_refusal``). Reported here for
+# the same reason the other four are: a preview that showed the demand posting would
+# disagree with the outcome, which is the only failure this panel exists to prevent.
+SUPPRESSION_BLOCKING_DIAGNOSTIC = "blocking_diagnostic"
+
+
+@dataclass
+class _PreviewLot:
+    """A DETACHED copy of one stock row's on-hand, used to plan a draw without touching it.
+
+    Load-bearing, not a convenience. The real leg consumes lots in sequence and each draw
+    sees the previous draw's decrement; a preview that planned every line against the
+    committed on-hand would name the same lot twice on a work order whose BOM and whose
+    tie both want the same part -- a state the completion cannot produce. Simulating
+    requires DECREMENTING as we go, and decrementing an ``InventoryItem`` the Session is
+    tracking would be written out by the next autoflush. So the simulation runs on copies
+    the Session has never seen.
+    """
+
+    inventory_item_id: int
+    lot_number: Optional[str]
+    location: Optional[str]
+    unit_cost: float
+    quantity_on_hand: float
+
+
+@dataclass
+class BackflushPreviewLot:
+    """One ISSUE row the completion would post: which lot, and how much.
+
+    ``is_shortfall`` marks the row the writer posts for the part of the demand no
+    permitted lot could cover. It is not a fourth kind of information -- the writer really
+    does post it, against ``_shortfall_anchor``'s lot, driving that lot negative -- and
+    omitting it is how a preview comes to under-state a named heat's contribution.
+    """
+
+    inventory_item_id: int
+    lot_number: Optional[str] = None
+    location: Optional[str] = None
+    quantity: float = 0.0
+    unit_cost: float = 0.0
+    is_shortfall: bool = False
+
+
+@dataclass
+class BackflushPreviewLine:
+    """One component's whole decision: target, what already posted, and the lots it hits."""
+
+    component_part_id: int
+    component_part_number: Optional[str] = None
+    component_part_name: Optional[str] = None
+    unit_of_measure: Optional[str] = None
+    source: str = BACKFLUSH_SOURCE_BOM
+    # True on BOM/routing lines: they move only once ``Part.backflush_components`` is on.
+    # A work-order-scoped tie IS its own opt-in and consumes regardless.
+    requires_opt_in: bool = True
+    allocation_id: Optional[int] = None
+    required_quantity: float = 0.0
+    already_issued: float = 0.0
+    delta_quantity: float = 0.0
+    suppressed: bool = False
+    suppression_reason: Optional[str] = None
+    available_quantity: float = 0.0
+    shortfall: float = 0.0
+    would_go_negative: bool = False
+    held_quantity_skipped: float = 0.0
+    held_lot_numbers: list[str] = field(default_factory=list)
+    pinned_inventory_item_id: Optional[int] = None
+    pinned_lot_number: Optional[str] = None
+    # The pinned lot has gone on_hold / quarantine / rejected / inactive SINCE it was
+    # pinned (the tie endpoint refuses to pin a held lot), and the writer consumes it
+    # anyway -- refusing from a reconcile-on-read GET would be unattributable -- recording
+    # ``HELD_MATERIAL_CONSUMED(pinned=True)``. It is the single most consequential thing a
+    # pre-completion dry run can warn about, and the ``held_*`` fields above cannot carry
+    # it: those describe stock the draw PASSED OVER on an unpinned shortage, which by
+    # construction is never populated on a pinned line.
+    pinned_lot_is_held: bool = False
+    # True when NO stock row for this part exists at all, so the writer would MINT a
+    # placeholder ``InventoryItem`` and post the shortfall against it. The preview cannot
+    # model it as a lot (it has no id yet, and minting one would be a write).
+    shortfall_creates_placeholder: bool = False
+    lots: list[BackflushPreviewLot] = field(default_factory=list)
+
+
+@dataclass
+class BackflushPreview:
+    """What a completion of this work order would move, and what it could not answer."""
+
+    work_order_id: int
+    work_order_number: Optional[str] = None
+    part_id: Optional[int] = None
+    part_number: Optional[str] = None
+    backflush_components: bool = False
+    basis: float = 0.0
+    lines: list[BackflushPreviewLine] = field(default_factory=list)
+    diagnostics: list[_BackflushDiagnostic] = field(default_factory=list)
+
+
+def _preview_source_lots(
+    db: Session,
+    *,
+    part_id: int,
+    company_id: int,
+    proxies: dict[int, _PreviewLot],
+    part_sources: dict[int, list[int]],
+) -> list[_PreviewLot]:
+    """The lots an UNPINNED draw for this part would walk, as simulation proxies.
+
+    Ordering comes from ``consumable_source_items`` -- ``received_date`` FIFO over active,
+    consumable, positive-on-hand lots, ``COALESCE(status,'available')`` so legacy
+    NULL-status stock is not hidden. That is THE policy both engines share since PR 4.4,
+    and reusing the query rather than restating its predicate is the only way the preview
+    can name the heat the completion will actually draw.
+
+    Cached per part so a second draw on the same part (a work-order-scoped tie AND BOM
+    demand for one component is a supported state) sees the first draw's decrements.
+
+    The cached list is re-filtered to POSITIVE on-hand on every call, because the writer
+    re-runs ``consumable_source_items`` per component and that query carries
+    ``quantity_on_hand > 0``. A lot the previous line drove to zero -- or negative, which a
+    shortfall row does -- is therefore invisible to the writer's next draw, and must be
+    invisible here too, or the second line would report an availability the completion
+    does not see.
+    """
+    if part_id not in part_sources:
+        # Imported lazily: ``material_consumption_service`` imports helpers from THIS module.
+        from app.services.material_consumption_service import consumable_source_items
+
+        ordered_ids: list[int] = []
+        for item in consumable_source_items(db, part_id, company_id):
+            proxies.setdefault(
+                item.id,
+                _PreviewLot(
+                    inventory_item_id=item.id,
+                    lot_number=item.lot_number,
+                    location=item.location,
+                    unit_cost=float(item.unit_cost or 0),
+                    quantity_on_hand=float(item.quantity_on_hand or 0),
+                ),
+            )
+            ordered_ids.append(item.id)
+        part_sources[part_id] = ordered_ids
+    return [proxies[item_id] for item_id in part_sources[part_id] if proxies[item_id].quantity_on_hand > _EPSILON]
+
+
+def _plan_preview_line(
+    db: Session,
+    *,
+    part_id: int,
+    quantity: float,
+    company_id: int,
+    pinned_inventory_item_id: Optional[int],
+    proxies: dict[int, _PreviewLot],
+    part_sources: dict[int, list[int]],
+    line: BackflushPreviewLine,
+) -> None:
+    """Fill in ``line``'s lot plan, availability and shortfall. Mutates only ``line``/proxies.
+
+    A faithful replay of ``_issue_one_component``'s decisions, using the SAME
+    ``plan_stock_draw`` the writer uses rather than a second copy of the spill arithmetic
+    -- a preview built on its own predicate is how a dialog comes to promise a heat the
+    engine will never touch. ``plan_stock_draw`` reads only ``quantity_on_hand``, so the
+    detached proxies satisfy it structurally; the ``cast`` says that and nothing more.
+
+    The pinned branch mirrors the writer too: a pin is a lot-directed instruction, so it
+    draws from THAT lot exclusively and is driven negative rather than spilling onto a
+    different heat. Held stock is disclosed exactly where the writer discloses it -- on a
+    shortage, and only on an UNPINNED draw, because on a pinned one the pin (not any
+    lot's status) is why nothing else was drawn -- with ONE addition the writer's
+    disclosure cannot express: ``pinned_lot_is_held``, the case where the writer consumes
+    a lot that went on hold AFTER it was pinned and records
+    ``HELD_MATERIAL_CONSUMED(pinned=True)``. That draw is not short, so no shortage
+    disclosure runs, and without this flag the dry run would show a clean pinned line over
+    quarantined material about to go into product.
+
+    **The unmet remainder is a LOT ROW, not just a scalar.** ``plan_stock_draw``'s
+    ``draws`` are only the covered part; on a shortfall the writer posts a SECOND ISSUE
+    row against ``_shortfall_anchor``'s lot, carrying that lot number onto the as-built
+    record. It is appended here, flagged ``is_shortfall``, against the same anchor the
+    writer picks -- and the anchor proxy is decremented, so a later line for the same part
+    sees the negative exactly as the writer's re-query would (i.e. not at all: the lot
+    drops out under the positive-on-hand filter).
+    """
+    from app.services.material_consumption_service import (
+        is_consumable_item,
+        plan_stock_draw,
+        shortage_draw_disclosure,
+    )
+
+    pinned_item: Optional[InventoryItem] = None
+    if pinned_inventory_item_id is not None:
+        pinned_item = (
+            db.query(InventoryItem)
+            .filter(
+                InventoryItem.id == pinned_inventory_item_id,
+                InventoryItem.company_id == company_id,
+            )
+            .first()
+        )
+        if pinned_item is None:
+            source_lots: list[_PreviewLot] = []
+        else:
+            source_lots = [
+                proxies.setdefault(
+                    pinned_item.id,
+                    _PreviewLot(
+                        inventory_item_id=pinned_item.id,
+                        lot_number=pinned_item.lot_number,
+                        location=pinned_item.location,
+                        unit_cost=float(pinned_item.unit_cost or 0),
+                        quantity_on_hand=float(pinned_item.quantity_on_hand or 0),
+                    ),
+                )
+            ]
+            line.pinned_lot_number = pinned_item.lot_number
+            # The writer's own test (``_issue_one_component``), run here for the one
+            # thing a dry run most needs to say.
+            line.pinned_lot_is_held = not is_consumable_item(pinned_item)
+    else:
+        source_lots = _preview_source_lots(
+            db, part_id=part_id, company_id=company_id, proxies=proxies, part_sources=part_sources
+        )
+
+    line.available_quantity = sum(lot.quantity_on_hand for lot in source_lots)
+    draws, shortfall = plan_stock_draw(cast(Any, source_lots), quantity)
+    last_drawn: Optional[_PreviewLot] = None
+    for lot, take in draws:
+        preview_lot = cast(_PreviewLot, lot)
+        preview_lot.quantity_on_hand -= take
+        last_drawn = preview_lot
+        line.lots.append(
+            BackflushPreviewLot(
+                inventory_item_id=preview_lot.inventory_item_id,
+                lot_number=preview_lot.lot_number,
+                location=preview_lot.location,
+                quantity=take,
+                unit_cost=preview_lot.unit_cost,
+            )
+        )
+    line.shortfall = shortfall if shortfall > _EPSILON else 0.0
+    line.would_go_negative = line.shortfall > 0.0
+    if line.would_go_negative:
+        anchor = _shortfall_anchor(last_drawn, source_lots)
+        if anchor is None:
+            # No candidate lot at all: the writer mints a placeholder stock row and posts
+            # against that. It has no id until it is written, and writing is exactly what
+            # a dry run may not do, so the FACT is reported instead of a fictional lot.
+            line.shortfall_creates_placeholder = True
+        else:
+            anchor.quantity_on_hand -= line.shortfall
+            line.lots.append(
+                BackflushPreviewLot(
+                    inventory_item_id=anchor.inventory_item_id,
+                    lot_number=anchor.lot_number,
+                    location=anchor.location,
+                    quantity=line.shortfall,
+                    unit_cost=anchor.unit_cost,
+                    is_shortfall=True,
+                )
+            )
+        held_quantity, held_lots, pinned_lot = shortage_draw_disclosure(
+            db,
+            part_id=part_id,
+            company_id=company_id,
+            pinned_inventory_item_id=pinned_inventory_item_id,
+            pinned_item=pinned_item,
+        )
+        line.held_quantity_skipped = held_quantity
+        line.held_lot_numbers = held_lots
+        if pinned_lot is not None:
+            line.pinned_lot_number = line.pinned_lot_number or pinned_lot
+
+
+def preview_backflush_for_work_order(db: Session, work_order: WorkOrder, *, company_id: int) -> BackflushPreview:
+    """What a completion of this work order would consume. **PURE READ — writes NOTHING.**
+
+    Models ``backflush_components_for_work_order`` in full, both legs, in the same ORDER
+    (ties first, so the tie's lot pin gets first claim on stock and a shortage lands on the
+    derived side), applying the same fences and the same arithmetic:
+
+    * **LEG 2, work-order-scoped ties** -- target ``qty_planned``, ``posted``
+      ``net_consumed_quantity_for_allocation``, delta tested BEFORE the legacy fence, so a
+      converged tie reports ``converged`` and not a suppression that did not happen.
+    * **LEG 1, BOM / routing demand** -- the two suppression layers run first (they
+      PRODUCE the target), then the blocking-diagnostic refusal
+      (``blocked_demand_refusal``, the pure half of what the completion path acts on),
+      then the legacy fence, then ``delta = target - backflush_net_issued_by_part``.
+
+    Modelling the RESOLVER alone would have been the easy version and a wrong one: the
+    issue loop makes decisions the resolver never sees -- the legacy ``('work_order',
+    ISSUE)`` fence, the ties' own demand, and which lot the draw actually lands on -- so a
+    preview stopping at resolved demand would disagree with the outcome on exactly the
+    work orders where it matters.
+
+    **BOM/routing lines are reported whether or not the part has opted in** (each carries
+    ``requires_opt_in``). That is the point of a dry run: the operator is deciding WHETHER
+    to opt in, and a preview that showed nothing until after the flag was set could not
+    inform that decision. ``backflush_components`` on the response says which world the
+    work order is in today.
+    """
+    from app.services.material_consumption_service import open_allocations_for_work_order
+
+    part = work_order.part
+    if part is None and work_order.part_id is not None:
+        part = db.query(Part).filter(Part.id == work_order.part_id, Part.company_id == company_id).first()
+
+    preview = BackflushPreview(
+        work_order_id=work_order.id,
+        work_order_number=work_order.work_order_number,
+        part_id=work_order.part_id,
+        part_number=part.part_number if part else None,
+        backflush_components=bool(getattr(part, "backflush_components", False)) if part else False,
+    )
+
+    allocations = open_allocations_for_work_order(db, work_order.id, company_id)
+    resolution = _resolve_backflush_demand(db, work_order, company_id, allocations)
+    preview.basis = resolution.basis
+    preview.diagnostics = list(resolution.diagnostics)
+
+    proxies: dict[int, _PreviewLot] = {}
+    part_sources: dict[int, list[int]] = {}
+
+    display_part_ids = (
+        set(resolution.demand)
+        | set(resolution.allocation_blocked)
+        | set(resolution.ledger_blocked)
+        | {a.part_id for a in allocations if a.part_id is not None}
+    )
+    display_parts = (
+        {
+            row.id: row
+            for row in db.query(Part.id, Part.part_number, Part.name, Part.unit_of_measure)
+            .filter(Part.company_id == company_id, Part.id.in_(display_part_ids))
+            .all()
+        }
+        if display_part_ids
+        else {}
+    )
+
+    def _new_line(part_id: int, source: str) -> BackflushPreviewLine:
+        row = display_parts.get(part_id)
+        return BackflushPreviewLine(
+            component_part_id=part_id,
+            component_part_number=row.part_number if row else None,
+            component_part_name=row.name if row else None,
+            unit_of_measure=_uom_label(row.unit_of_measure) if row else None,
+            source=source,
+            requires_opt_in=source == BACKFLUSH_SOURCE_BOM,
+        )
+
+    # ------------------------------------------------------------------ LEG 2: ties
+    for allocation in allocations:
+        if allocation.work_order_operation_id is not None or float(allocation.qty_planned or 0) <= _EPSILON:
+            continue
+        line = _new_line(allocation.part_id, BACKFLUSH_SOURCE_TIE)
+        line.allocation_id = allocation.id
+        line.unit_of_measure = allocation.unit_of_measure or line.unit_of_measure
+        line.pinned_inventory_item_id = allocation.pinned_inventory_item_id
+        line.pinned_lot_number = allocation.pinned_lot_number
+        line.required_quantity = float(allocation.qty_planned or 0)
+        line.already_issued = net_consumed_quantity_for_allocation(
+            db, allocation_id=allocation.id, company_id=company_id
+        )
+        delta = line.required_quantity - line.already_issued
+        if delta <= _EPSILON:
+            line.suppressed = True
+            line.suppression_reason = SUPPRESSION_CONVERGED
+        elif _component_already_issued(db, work_order.id, allocation.part_id, company_id):
+            line.suppressed = True
+            line.suppression_reason = SUPPRESSION_ALREADY_ISSUED
+        else:
+            line.delta_quantity = delta
+            _plan_preview_line(
+                db,
+                part_id=allocation.part_id,
+                quantity=delta,
+                company_id=company_id,
+                pinned_inventory_item_id=allocation.pinned_inventory_item_id,
+                proxies=proxies,
+                part_sources=part_sources,
+                line=line,
+            )
+        preview.lines.append(line)
+
+    # ------------------------------------------------------- LEG 1: BOM / routing
+    nets = backflush_net_issued_by_part(
+        db, work_order_id=work_order.id, company_id=company_id, part_ids=resolution.demand.keys()
+    )
+    refuses_leg, refused_part_ids = blocked_demand_refusal(resolution)
+    for part_id, target in resolution.demand.items():
+        if target <= _EPSILON:
+            continue
+        line = _new_line(part_id, BACKFLUSH_SOURCE_BOM)
+        line.required_quantity = target
+        line.already_issued = nets.get(part_id, 0.0)
+        # FIRST, exactly as on the write path: ``_refuse_blocked_demand`` runs before the
+        # issue loop, so a refused component never reaches the legacy fence or the delta.
+        if refuses_leg or part_id in refused_part_ids:
+            line.suppressed = True
+            line.suppression_reason = SUPPRESSION_BLOCKING_DIAGNOSTIC
+        elif _component_already_issued(db, work_order.id, part_id, company_id):
+            line.suppressed = True
+            line.suppression_reason = SUPPRESSION_ALREADY_ISSUED
+        else:
+            delta = target - line.already_issued
+            if delta <= _EPSILON:
+                line.suppressed = True
+                line.suppression_reason = SUPPRESSION_CONVERGED
+            else:
+                line.delta_quantity = delta
+                _plan_preview_line(
+                    db,
+                    part_id=part_id,
+                    quantity=delta,
+                    company_id=company_id,
+                    pinned_inventory_item_id=None,
+                    proxies=proxies,
+                    part_sources=part_sources,
+                    line=line,
+                )
+        preview.lines.append(line)
+
+    # The two suppression layers' output, reported rather than omitted: material a tie
+    # owns still moves, just not on this leg, and a preview that dropped these lines
+    # would read as "the BOM asks for nothing here".
+    for part_id, demand in resolution.allocation_blocked.items():
+        line = _new_line(part_id, BACKFLUSH_SOURCE_BOM)
+        line.required_quantity = demand
+        line.suppressed = True
+        line.suppression_reason = SUPPRESSION_OPEN_OPERATION_TIE
+        preview.lines.append(line)
+    for part_id, (demand, net) in resolution.ledger_blocked.items():
+        line = _new_line(part_id, BACKFLUSH_SOURCE_BOM)
+        line.required_quantity = demand
+        line.already_issued = net
+        line.suppressed = True
+        line.suppression_reason = SUPPRESSION_LEDGER_CONSUMED
+        preview.lines.append(line)
+
+    return preview
+
+
+def backflush_readiness_for_part(db: Session, part: Part, *, company_id: int) -> list[_BackflushDiagnostic]:
+    """Can this part safely opt into automatic backflush? **PURE READ — writes NOTHING.**
+
+    Runs the same BOM explosion the completion leg runs, at a SYNTHETIC BASIS OF 1.0, and
+    returns its diagnostics. The basis is the trap this function exists to avoid: the real
+    resolver takes ``quantity_complete + operation scrap`` and short-circuits to an empty
+    answer below epsilon (``_backflush_basis``), so a readiness check run at opt-in time --
+    when by definition no work order for the part has produced anything yet -- would walk
+    no BOM at all and pronounce EVERY part clean. One unit of demand exercises every line
+    of the structure without needing a job.
+
+    Only the BOM half can be answered here. Routing conditions (an operation naming the
+    work order's own part, two operations disagreeing, routing demand the BOM excludes) are
+    WORK-ORDER-scoped: there is no work order at opt-in time, and the routing of a job that
+    does not exist yet cannot be checked. Those surface on the dry-run preview instead,
+    which is why the gate can never be sound as a one-time check -- every input it reads is
+    mutable afterwards by other people. Re-run it.
+
+    Blockers are the caller's refusal set; advisories are informational. See
+    ``_BackflushDiagnostic``.
+
+    **The SUBJECT part's own soft-delete is checked here, and that is deliberate
+    placement.** ``Part`` carries ``SoftDeleteMixin``, the list endpoints filter it, and
+    the ``PUT /parts/{id}`` / ``PUT /materials/{id}`` lookups do NOT -- a pre-existing
+    omission this feature inherits rather than introduces. It stops being cosmetic here:
+    ``delete_part`` checks dependencies only on a HARD delete, so a soft-deleted part
+    keeps its in-flight work orders, and arming it would move component stock on behalf of
+    a part the shop believes is gone. One blocking diagnostic closes BOTH doors (the
+    refusal gate calls this function, and so does the readiness GET) without touching a
+    lookup four other handlers share.
+    """
+    # Imported lazily to avoid an import cycle with the endpoints module.
+    from app.api.endpoints.work_orders import _get_active_bom
+
+    explosion = _BackflushBomExplosion()
+    if bool(getattr(part, "is_deleted", False)):
+        explosion.diagnostics.append(
+            _BackflushDiagnostic(
+                code="deleted_part",
+                severity=BACKFLUSH_BLOCKING,
+                detail=(
+                    "this part is deleted, so arming it would consume component stock for a part the shop "
+                    "believes is gone. Restore the part first"
+                ),
+                # NO ``component_part_id`` / ``component_part_number``. Those two fields mean
+                # "the COMPONENT this diagnostic is about", and every reader glosses them that
+                # way -- the readiness card renders "· {component_part_number}" beside the
+                # sentence. This diagnostic is about the SUBJECT part, which the response
+                # already names at the top level, so populating them made the card read as
+                # though the subject part were a component of itself.
+            )
+        )
+    bom = _get_active_bom(db, part.id, company_id)
+    routing_names_a_component = (
+        db.query(WorkOrderOperation.id)
+        .join(WorkOrder, WorkOrder.id == WorkOrderOperation.work_order_id)
+        .filter(
+            WorkOrderOperation.company_id == company_id,
+            WorkOrder.company_id == company_id,
+            WorkOrder.part_id == part.id,
+            WorkOrderOperation.component_part_id.isnot(None),
+        )
+        .first()
+        is not None
+    )
+
+    if bom is not None:
+        _record_bom_header_diagnostics(bom, explosion)
+        _explode_backflush_bom(
+            db,
+            bom,
+            company_id,
+            parent_qty=1.0,
+            visited_part_ids={bom.part_id},
+            out=explosion,
+            consumed=True,
+        )
+        explosion.excluded_part_ids -= set(explosion.demand)
+    elif routing_names_a_component:
+        explosion.diagnostics.append(
+            _BackflushDiagnostic(
+                code="routing_only_no_bom",
+                severity=BACKFLUSH_ADVISORY,
+                detail=(
+                    f"Part {part.part_number} has no active BOM; its component demand would come only from "
+                    "routing operations that name a component."
+                ),
+            )
+        )
+
+    if not explosion.demand and not routing_names_a_component:
+        explosion.diagnostics.append(
+            _BackflushDiagnostic(
+                code="no_demand_source",
+                severity=BACKFLUSH_BLOCKING,
+                detail=(
+                    "it has no active BOM line that would be issued and no routing operation names a "
+                    "component, so enabling backflush would consume nothing. Give it an active BOM first"
+                ),
+            )
+        )
+    return explosion.diagnostics
 
 
 def apply_completion_inventory_effects(

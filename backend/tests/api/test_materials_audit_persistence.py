@@ -60,6 +60,13 @@ pytestmark = [pytest.mark.api, pytest.mark.requires_db]
 
 COMPANY_A = 1
 RESOURCE_TYPE = "material"
+# ...except on UPDATE. PR 4.5 normalised ``update_material``'s audit row to
+# ``resource_type="part"``, because that handler and ``PUT /parts/{id}`` write the SAME
+# ``parts`` rows through the SAME ``PartUpdate`` schema and the SAME shared backflush
+# refusal gate -- and an auditor asking "who armed automatic BOM backflush, and when"
+# must not have to know which URL was used. CREATE and DELETE on this router are
+# unchanged, so the split is asserted here rather than assumed away.
+UPDATE_RESOURCE_TYPE = "part"
 
 # Module-level counter so every fixture row gets a globally unique natural key,
 # even across tests sharing a worker DB under -n auto.
@@ -114,7 +121,7 @@ def _make_material(db: Session, *, company_id: int = COMPANY_A, part_type: str =
     return part
 
 
-def _audit_rows(db: Session, *, resource_id: int, action: str = None):
+def _audit_rows(db: Session, *, resource_id: int, action: str = None, resource_type: str = RESOURCE_TYPE):
     """Fetch AuditLog rows for a material, newest first, optionally filtered by action.
 
     ``expire_all`` first so rows committed through the endpoint's session (the
@@ -123,7 +130,7 @@ def _audit_rows(db: Session, *, resource_id: int, action: str = None):
     """
     db.expire_all()
     q = db.query(AuditLog).filter(
-        AuditLog.resource_type == RESOURCE_TYPE,
+        AuditLog.resource_type == resource_type,
         AuditLog.resource_id == resource_id,
     )
     if action is not None:
@@ -131,7 +138,7 @@ def _audit_rows(db: Session, *, resource_id: int, action: str = None):
     return q.order_by(AuditLog.sequence_number.desc()).all()
 
 
-def _committed_audit_rows(db: Session, *, resource_id: int, action: str = None):
+def _committed_audit_rows(db: Session, *, resource_id: int, action: str = None, resource_type: str = RESOURCE_TYPE):
     """Fetch AuditLog rows that were actually COMMITTED, not merely flushed.
 
     Rolling back BEFORE querying is the real guard against the audit-after-commit
@@ -139,7 +146,7 @@ def _committed_audit_rows(db: Session, *, resource_id: int, action: str = None):
     discarded. See the module docstring for the full rationale.
     """
     db.rollback()
-    return _audit_rows(db, resource_id=resource_id, action=action)
+    return _audit_rows(db, resource_id=resource_id, action=action, resource_type=resource_type)
 
 
 def _material_payload() -> dict:
@@ -202,11 +209,16 @@ def test_create_material_create_audit_committed_for_manager(client: TestClient, 
 
 def test_update_material_emits_committed_update_audit(client: TestClient, db_session: Session):
     """PUT /materials/{id} that changes a real field emits a COMMITTED UPDATE
-    AuditLog row, company-tagged.
+    AuditLog row, company-tagged — under ``resource_type="part"``.
 
     Against the old audit-after-commit code the UPDATE log would be flushed into
     a post-commit transaction; ``_committed_audit_rows`` rolls it away and the
     count assertion fails.
+
+    The resource type is ``part`` and not ``material`` on purpose: see
+    ``UPDATE_RESOURCE_TYPE``. This handler writes ``parts`` rows through the same schema
+    and the same backflush gate as ``PUT /parts/{id}``, and one table's control-change
+    trail must be one query.
     """
     admin = _make_user(db_session, role=UserRole.ADMIN)
     material = _make_material(db_session)
@@ -219,12 +231,16 @@ def test_update_material_emits_committed_update_audit(client: TestClient, db_ses
     assert resp.status_code == status.HTTP_200_OK, resp.text
     assert resp.json()["name"] == "Renamed Material"
 
-    rows = _committed_audit_rows(db_session, resource_id=material.id, action="UPDATE")
+    rows = _committed_audit_rows(
+        db_session, resource_id=material.id, action="UPDATE", resource_type=UPDATE_RESOURCE_TYPE
+    )
     assert len(rows) == 1, "expected exactly one COMMITTED UPDATE audit row for the material"
     assert rows[0].action == "UPDATE"
-    assert rows[0].resource_type == RESOURCE_TYPE
+    assert rows[0].resource_type == UPDATE_RESOURCE_TYPE
     assert rows[0].resource_id == material.id
     assert rows[0].company_id == COMPANY_A
+    # ...and NOT under the old type, or the trail would be in two places at once.
+    assert _audit_rows(db_session, resource_id=material.id, action="UPDATE") == []
 
 
 # ---------------------------------------------------------------------------

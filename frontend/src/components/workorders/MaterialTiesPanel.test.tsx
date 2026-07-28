@@ -79,12 +79,13 @@ const makeTie = (overrides: Partial<MaterialAllocation> = {}): MaterialAllocatio
 const makeOp = (overrides: Partial<WorkOrderOperation> = {}): WorkOrderOperation =>
   ({ id: 71, quantity_complete: 3, quantity_scrapped: 0, ...overrides } as WorkOrderOperation);
 
-const renderPanel = (canEdit = true, operations?: WorkOrderOperation[]) =>
+const renderPanel = (canEdit = true, operations?: WorkOrderOperation[], refreshToken?: number) =>
   render(
     <ToastProvider>
       <MaterialTiesPanel
         workOrderId={42}
         workOrderUpdatedAt="2026-07-24T14:05:00Z"
+        refreshToken={refreshToken}
         canEdit={canEdit}
         operations={operations}
       />
@@ -737,5 +738,54 @@ describe('MaterialTiesPanel — over-consumption flag', () => {
 
     await screen.findByText('SHT-.125-304');
     expect(screen.queryByTestId('tie-over-consumed-1')).not.toBeInTheDocument();
+  });
+});
+
+describe('MaterialTiesPanel — the refreshToken freshness seam (PR 4.5)', () => {
+  // A tie written from ANYWHERE ELSE on the page — the per-operation editor in
+  // the Operations table is the first such door — does not touch
+  // `work_orders.updated_at`, which was this panel's only other load dependency.
+  // Without a second seam the list sitting directly beneath that table would
+  // show neither the new row nor a changed plan until something unrelated
+  // bumped the work order, which reads as "the tie did not save".
+
+  it('re-reads when the token changes, without the work order changing', async () => {
+    mockApi.getMaterialAllocations.mockResolvedValue([makeTie()]);
+    const { rerender } = renderPanel(true, undefined, 0);
+    await screen.findByText('SHT-.125-304');
+    expect(mockApi.getMaterialAllocations).toHaveBeenCalledTimes(1);
+
+    mockApi.getMaterialAllocations.mockResolvedValue([makeTie(), makeTie({ id: 2, part_number: 'BAR-1.0-6061' })]);
+    rerender(
+      <ToastProvider>
+        <MaterialTiesPanel
+          workOrderId={42}
+          workOrderUpdatedAt="2026-07-24T14:05:00Z"
+          refreshToken={1}
+          canEdit
+        />
+      </ToastProvider>
+    );
+
+    expect(await screen.findByText('BAR-1.0-6061')).toBeInTheDocument();
+    await waitFor(() => expect(mockApi.getMaterialAllocations).toHaveBeenCalledTimes(2));
+  });
+
+  it('is optional — an unchanged token does not re-read on every render', async () => {
+    // The prop is optional so existing callers (and the six WorkOrderDetail
+    // suites) keep working untouched, and a re-render for an unrelated reason
+    // must not turn a detail page into a polling client.
+    mockApi.getMaterialAllocations.mockResolvedValue([makeTie()]);
+    const { rerender } = renderPanel(true);
+    await screen.findByText('SHT-.125-304');
+    expect(mockApi.getMaterialAllocations).toHaveBeenCalledTimes(1);
+
+    rerender(
+      <ToastProvider>
+        <MaterialTiesPanel workOrderId={42} workOrderUpdatedAt="2026-07-24T14:05:00Z" canEdit />
+      </ToastProvider>
+    );
+    await screen.findByText('SHT-.125-304');
+    expect(mockApi.getMaterialAllocations).toHaveBeenCalledTimes(1);
   });
 });

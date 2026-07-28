@@ -75,6 +75,17 @@ export interface MaterialTiesPanelProps {
    * fetch and refreshes `qty_consumed`.
    */
   workOrderUpdatedAt?: string | null;
+  /**
+   * Bump to force a re-read, for a tie mutated OUTSIDE this panel.
+   *
+   * `workOrderUpdatedAt` above is the only other load dependency, and a tie
+   * write does NOT touch `work_orders.updated_at` — so a tie created from the
+   * Operations table (or anywhere else on the page) would otherwise leave a
+   * stale list sitting right beside it, showing neither the new row nor the
+   * changed plan until something unrelated bumped the work order. Any
+   * monotonically-changing value works; the caller keeps a counter.
+   */
+  refreshToken?: number;
   /** `work_orders:edit` — ADMIN / MANAGER / SUPERVISOR. Gates PATCH + untie. */
   canEdit: boolean;
   /**
@@ -205,7 +216,13 @@ function scopeLabel(tie: MaterialAllocation): string {
 const scopeSortKey = (tie: MaterialAllocation): string | number =>
   tie.work_order_operation_id ?? tie.detached_from_operation_id ?? Number.MAX_SAFE_INTEGER;
 
-export default function MaterialTiesPanel({ workOrderId, workOrderUpdatedAt, canEdit, operations }: MaterialTiesPanelProps) {
+export default function MaterialTiesPanel({
+  workOrderId,
+  workOrderUpdatedAt,
+  refreshToken,
+  canEdit,
+  operations,
+}: MaterialTiesPanelProps) {
   const { showToast } = useToast();
   const [ties, setTies] = useState<MaterialAllocation[]>([]);
   const [loading, setLoading] = useState(true);
@@ -252,8 +269,11 @@ export default function MaterialTiesPanel({ workOrderId, workOrderUpdatedAt, can
   useEffect(() => {
     setLoading(true);
     void load();
-    // `workOrderUpdatedAt` is the freshness seam — see the prop docstring.
-  }, [load, workOrderUpdatedAt]);
+    // Two freshness seams, both deliberate — see the prop docstrings.
+    // `workOrderUpdatedAt` catches a completion that posted consumption;
+    // `refreshToken` catches a tie written elsewhere on the page, which does not
+    // bump the work order at all.
+  }, [load, workOrderUpdatedAt, refreshToken]);
 
   const openEdit = (tie: MaterialAllocation) => {
     setEditTarget(tie);

@@ -10,8 +10,11 @@ import { StatusBadge } from '../components/ui/StatusBadge';
 import { Button, statusVariant, type StatusVariant } from '../components/ui';
 import { useToast } from '../components/ui/Toast';
 import { PartOverviewTab } from '../components/parts/PartOverviewTab';
+import { PartBackflushCard, showsBackflushCard } from '../components/parts/PartBackflushCard';
 import { PartBOMTab } from '../components/parts/PartBOMTab';
 import { PartRoutingTab } from '../components/parts/PartRoutingTab';
+import { useAuth } from '../context/AuthContext';
+import { hasPermission } from '../utils/permissions';
 import { partTypeColors } from '../types/engineering';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { ContextualAIStrip } from '../components/ai';
@@ -59,6 +62,11 @@ export default function PartDetail() {
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
   const { showToast } = useToast();
+  const { user } = useAuth();
+  // `parts:edit` maps to exactly admin / manager / supervisor (+ platform_admin),
+  // which is the same trio `PUT /parts/{id}` enforces server-side. This only
+  // keeps the UI honest about what the server will allow — the gate is there.
+  const canEditPart = hasPermission(user?.role, 'parts:edit') || !!user?.is_superuser;
 
   const [part, setPart] = useState<Part | null>(null);
   const [bom, setBom] = useState<BOM | null>(null);
@@ -248,7 +256,26 @@ export default function PartDetail() {
       {/* Tab Content */}
       <div className="mt-2">
         {activeTab === 'overview' && (
-          <PartOverviewTab part={part} onPartUpdated={handlePartUpdated} />
+          <div className="space-y-4">
+            <PartOverviewTab part={part} onPartUpdated={handlePartUpdated} />
+            {/* Automatic BOM backflush — a shop-wide policy switch on this part,
+                not a preference. Its own card rather than an inline
+                EditableField: that pattern PUTs `{field, version}` through
+                `updatePart`, whose payload type deliberately does not carry the
+                flag, and a switch that makes stock move by itself deserves a
+                confirmation and the server's readiness verdict beside it.
+                `setPart` directly — the card raises its own, specific toast.
+
+                Gated on the part type (`showsBackflushCard`): a purchased part,
+                raw material, hardware item or consumable can never carry a BOM,
+                so readiness always answers `no_demand_source` and the card would
+                stand permanently red on a page where the feature is meaningless.
+                Gating here rather than inside the card also skips its readiness
+                request entirely on those pages. */}
+            {showsBackflushCard(part) && (
+              <PartBackflushCard part={part} canEdit={canEditPart} onPartUpdated={setPart} />
+            )}
+          </div>
         )}
         {activeTab === 'bom' && (
           <PartBOMTab

@@ -13,7 +13,19 @@ class BOMItemBase(UTCModel):
     quantity: float = Field(default=1.0, gt=0)
     item_type: BOMItemType
     line_type: BOMLineType = BOMLineType.COMPONENT
-    unit_of_measure: str = "each"
+    # DELIBERATELY UNSET, NOT "each" (owner decision, 2026-07-27). A BOM line with no
+    # stated unit inherits the COMPONENT PART's unit of measure, and that resolution can
+    # only happen where the component part is loadable -- which Pydantic is not. Every
+    # BOM-line write path therefore runs the caller's value (or the absence of one) through
+    # ``api/endpoints/bom.py`` -> ``_resolve_line_uom`` before constructing the ``BOMItem``.
+    #
+    # The literal "each" this replaced was a default NOBODY CHOSE, and it is read as a
+    # STATED CLAIM by the BLOCKING ``unit_of_measure_mismatch`` diagnostic
+    # (``completion_inventory_service``): on a sheet-metal shop's data -- components stocked
+    # in sheets / lbs / ft -- it refused to arm almost every part for automatic backflush.
+    # Do not restore a literal default here; the fix belongs at the write path, not in a
+    # schema that cannot see the part it is defaulting for.
+    unit_of_measure: Optional[str] = None
     reference_designator: Optional[str] = None
     find_number: Optional[str] = None
     notes: Optional[str] = None
@@ -72,6 +84,13 @@ class ComponentPartInfo(BaseModel):
 class BOMItemResponse(BOMItemBase):
     id: int
     bom_id: int
+    # Re-tightened to non-optional on the way OUT. The base leaves it unset so the INPUT
+    # side can mean "resolve this from the component part"; a stored row always has a
+    # value, and every response builder in ``api/endpoints/bom.py`` passes one explicitly
+    # (falling back to the column's own "each" default for legacy NULL rows). Clients that
+    # render a UOM column should not have to handle a null that the write paths cannot
+    # produce.
+    unit_of_measure: str = "each"
     component_part: Optional[ComponentPartInfo] = None
     created_at: datetime
     updated_at: datetime
@@ -186,6 +205,56 @@ class BOMFlattened(BaseModel):
     total_items: int
     total_unique_parts: int
     items: List[BOMFlatItem]
+
+
+class BOMLineUomMismatch(UTCModel):
+    """One BOM line whose STATED unit of measure contradicts its component part's.
+
+    Every field is here to make the row actionable without a second lookup: the assembly
+    it belongs to, the line to open, the component to compare against, and both units side
+    by side. ``line_unit_of_measure`` / ``component_unit_of_measure`` are the NORMALISED
+    labels the comparison actually used (``models.part.uom_label``), not the raw column
+    text, so what the row shows is what the gate compared.
+
+    ``component_is_deleted`` is disclosed rather than filtered: the readiness explosion
+    resolves soft-deleted components of this company on purpose (they get their own
+    blocking diagnostic and are refused), so dropping them from this list would hide a row
+    that still blocks. It answers "why does this line name a part I cannot find".
+    """
+
+    bom_id: int
+    bom_revision: Optional[str] = None
+    bom_status: Optional[str] = None
+    bom_is_active: bool = True
+    part_id: int
+    part_number: str
+    bom_item_id: int
+    item_number: Optional[int] = None
+    component_part_id: int
+    component_part_number: str
+    component_part_name: Optional[str] = None
+    component_is_deleted: bool = False
+    line_unit_of_measure: str
+    component_unit_of_measure: str
+    # False on a line the backflush would never issue anyway (alternate / optional /
+    # reference), which therefore raises no diagnostic and refuses no opt-in. Sort these
+    # to the bottom of the worklist: they are cosmetic, not blocking.
+    blocks_backflush: bool = True
+
+
+class BOMUomMismatchReport(UTCModel):
+    """The pre-arming remediation worklist for ``Part.backflush_components``.
+
+    ``total`` is every disagreeing line the scan found for this tenant under the requested
+    filters; ``items`` is the requested page of them. ``truncated`` means the scan hit its
+    own candidate ceiling and ``total`` is therefore a FLOOR, not a count -- narrow the
+    filters and run it again rather than reading the number as complete.
+    """
+
+    total: int
+    returned: int
+    truncated: bool = False
+    items: List[BOMLineUomMismatch] = Field(default_factory=list)
 
 
 # Required for self-referencing model

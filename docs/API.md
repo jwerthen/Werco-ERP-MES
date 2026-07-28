@@ -150,6 +150,7 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 | DELETE | `/work-orders/{id}/material-allocations/{allocation_id}` | Untie (status → `cancelled`; the row is never physically deleted) | Admin / Manager / Supervisor |
 | GET | `/work-orders/{id}/material-allocations/{allocation_id}/consumption` | Per-source-lot ledger position of a tie (`issued` / `returned` / `net`) — the pre-confirm read behind the return dialog | Yes |
 | POST | `/work-orders/{id}/material-allocations/{allocation_id}/return` | **Return consumed material to its source lots** — reasoned, audited, compensating. The only verb on this router that posts inventory | Admin / Manager / Supervisor |
+| GET | `/work-orders/{id}/backflush-preview` | **Dry run (PR 4.5)** — what completing this work order would consume, per component and per lot, before anything moves. Pure read: no ledger row, no audit row, no event | Yes |
 
 > **Tenant isolation on operation/completion endpoints.** The operation- and completion-level
 > endpoints above (`/start`, `/complete`, `/operations/{id}`, `/operations/{id}/start`,
@@ -261,17 +262,30 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > receipt (logged, no error). The receipt's lot is reconstructable end-to-end via
 > [Traceability](#traceability).
 >
-> **Component backflush is opt-in per part (default off) — and NOTHING SETS THE FLAG.** If the
-> finished part has `backflush_components = true` (see [Part Schema](#part-schema)), completion
+> **Component backflush is opt-in per part (default off) — and as of PR 4.5 the flag is SETTABLE.** If
+> the finished part has `backflush_components = true` (see [Part Schema](#part-schema)), completion
 > **auto-consumes** the part's BOM components: one negative `ISSUE` `InventoryTransaction` per
 > component, decrementing source stock and carrying the consumed lot for genealogy — each **audited**
-> and **idempotent** per component. When the flag is **false** (the default) completion moves no
-> components, so a shop that issues material manually is never double-consumed. **`backflush_components`
-> has no writer anywhere in the application**, so this entire leg has never run in production; the
-> paragraphs below describe what it would do on the first part that opts in, not observable behavior
-> today. A backflush shortage (insufficient stock) **does not fail the completion** — the source lot is
-> driven negative and the shortfall is recorded as a tamper-evident `BACKFLUSH_SHORTAGE` audit row plus
-> a `backflush_shortage` warning event.
+> and **reconciled to target** per component (`reference_type='work_order_backflush'`). When the flag is
+> **false** (the default, and every part's state until somebody changes it) completion moves no
+> components, so a shop that issues material manually is never double-consumed.
+>
+> **Read the previous sentence's scope bound literally.** Until PR 4.5 the flag had no writer anywhere
+> in the application, and the sentences below described what the leg *would* do rather than observable
+> behavior. That is no longer true in principle — `PUT /parts/{id}` and `PUT /materials/{id}` can now
+> turn it on, behind the refusal gate described under [Part Schema](#part-schema) — but it remains true
+> in practice **until the first part actually opts in**: the column's `server_default` is `false` and no
+> production work order has yet reached this leg. Treat the behavior described here as **unproven in
+> production**, not as observed.
+>
+> A backflush shortage (insufficient stock, after the shared FIFO policy has walked every consumable lot
+> and skipped the segregated ones) **does not fail the completion** — the remainder is drawn negative and
+> the shortfall is recorded as a tamper-evident `BACKFLUSH_SHORTAGE` audit row plus a
+> `backflush_shortage` warning event (notification catalog `material.backflush_shortage` since PR 4.4).
+>
+> **A dry run is available before any of this happens**, and it writes nothing:
+> `GET /work-orders/{id}/backflush-preview` (below) resolves the same demand through the same issue loop
+> and the same lot policy, so the preview and the outcome cannot name different heats.
 >
 > **How component demand is resolved** (hardened while still dark; see
 > `docs/MATERIAL_CONSUMPTION_PLAN.md` → "The BOM/routing backflush leg"):
@@ -296,6 +310,28 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 >   tamper-evident **`BACKFLUSH_DOUBLE_ISSUE_BLOCKED`** audit row rather than silently. A **fully
 >   returned** tie nets to zero and is deliberately allowed to re-issue: the material physically came
 >   back, so the BOM's demand is genuinely unmet again.
+> - **A blocking diagnostic REFUSES the demand it describes, and the refusal is recorded** (PR 4.5).
+>   The opt-in gate is a one-time check and everything it reads stays editable afterwards by anyone
+>   with `boms:edit`, so a BOM edited after a part was armed would otherwise move material against a
+>   figure the resolver has itself judged wrong — previously with no log line, no audit row and no
+>   event, leaving only an ordinary-looking ledger row. Each blocking diagnostic now drops **that
+>   component's** demand when it names a `component_part_id`, or the **whole leg** when it names none
+>   (the demand is then incomplete in a way no component owns — four codes today: `deleted_active_bom`,
+>   `bom_depth_exceeded`, `missing_component_part`, and the foreign-component branch of
+>   `foreign_component_part`, which carries no identity by design), and writes one
+>   **`BACKFLUSH_DEMAND_REFUSED`** audit row carrying the code, the operator sentence, the BOM line or
+>   operation it names, and the quantity that did **not** move. Under-issuing is the recoverable
+>   direction — the material is still on the shelf; over-issuing writes it into an as-built record
+>   that never contained it. `GET /work-orders/{id}/backflush-preview` reports the same refusal as
+>   `suppression_reason: "blocking_diagnostic"`, so the dry run and the outcome agree.
+>   **`refused_quantity` is attributed once per refused SCOPE, not once per row.** One BOM line can
+>   raise several blocking diagnostics and two lines can name one component, so the first row naming a
+>   given component carries the quantity and every later one carries `0` (the structural tier likewise
+>   charges its whole-leg total to the first structural row). Summing `refused_quantity` over
+>   `BACKFLUSH_DEMAND_REFUSED` therefore gives the real quantity that did not move — the rows still
+>   number one per diagnostic, because each names a different thing to fix. The same rows that carry
+>   the quantity emit the `material.backflush_demand_refused` notification, so one refused component
+>   notifies once rather than once per condition it violates.
 >
 > **Completion also consumes tied material (material allocations).** A work order can optionally be
 > **tied** to stock material via `…/material-allocations` (see "Material ties" below). Consumption is
@@ -398,7 +434,52 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > therefore notified nobody. The **rolled-back** case — where the draw raised and the savepoint undid
 > it, so no stock moved at all — is separately keyed as `material.allocation_consumption_failed` /
 > `material.backflush_failed`, so "stock went negative" and "stock never moved" are distinguishable
-> without opening the audit log. See [docs/NOTIFICATIONS.md](NOTIFICATIONS.md).
+> without opening the audit log. PR 4.5 adds a third backflush key,
+> **`material.backflush_demand_refused`** (same category / severity / channels / recipients), for the
+> case where no draw was attempted at all because a blocking diagnostic condemned the demand — see the
+> completion-time refusal above. It is emitted **once per refused scope**, not once per diagnostic.
+> See [docs/NOTIFICATIONS.md](NOTIFICATIONS.md).
+>
+> **`GET /work-orders/{id}/backflush-preview` — the dry run (PR 4.5).** Returns, for this work order,
+> what a completion would draw out of stock: one `BackflushPreviewLine` per component, each carrying
+> `required_quantity`, `already_issued`, the `delta_quantity` that would actually post, the ordered
+> `lots` the draw would hit, `shortfall` / `would_go_negative`, and — where the shared policy passed over
+> segregated stock — `held_quantity_skipped` / `held_lot_numbers`. Three fields answer questions the
+> first cut of this endpoint could not: each lot carries **`is_shortfall`** (the writer posts the unmet
+> remainder as a SECOND issue against the last lot it drew, driving that lot negative and putting *its*
+> number on the as-built record — so a line may legitimately list one `inventory_item_id` twice);
+> **`shortfall_creates_placeholder`** says the part has no stock row at all, so the completion would
+> mint a lot-less placeholder row instead; and **`pinned_lot_is_held`** says a tie's pinned lot has gone
+> on hold / quarantine / rejected *since* it was pinned and the completion will consume it anyway
+> (recording `HELD_MATERIAL_CONSUMED`) — the one warning the `held_*` fields structurally cannot carry,
+> because a pinned draw is never short. Response-level `blockers` /
+> `advisories` are the demand resolver's diagnostics for **this** work order, including the routing
+> conditions the part-level readiness check cannot see. Any authenticated tenant user; a cross-tenant or
+> unknown id is **404**.
+> - **It models the ISSUE LOOP, not just the demand resolver** — both legs in the real order
+>   (work-order-scoped ties first, so a tie's lot pin gets first claim), the legacy
+>   `('work_order', ISSUE)` fence, the reconcile-to-target delta, and the actual lot pick through the
+>   same `consumable_source_items` + `plan_stock_draw` the writer uses. Preview and outcome therefore
+>   cannot disagree about which heat gets consumed — which is exactly the failure a preview built on its
+>   own predicate would produce silently.
+> - **Pure read. It writes NOTHING** — no ledger row, no `audit_log` row (in particular no
+>   `BACKFLUSH_DOUBLE_ISSUE_BLOCKED`, which the suppression layer used to write from inside the
+>   resolver), no operational event, nothing to commit. That is **structural**, not careful: the
+>   resolution layer takes no `AuditService` at all and the recording layer is a separate function only
+>   the completion path calls. Same rule as the per-allocation consumption read on this router — a poll
+>   is not an actor and records no reason.
+> - **Lines appear whether or not the part has opted in** (each carries `requires_opt_in`, and the
+>   response carries the part's current `backflush_components`), because the operator reading it is
+>   deciding whether to opt in.
+> - **`suppression_reason` values:** `converged` (the ledger already holds the whole target — the
+>   healthy steady state), `already_issued` (a legacy pre-4.4 one-shot row fences this work order out
+>   for that part, permanently), `ledger_consumed` (a tie already drew it), `open_operation_tie` (an
+>   open operation-scoped tie owns the demand; the material still moves, on the per-run engine), and
+>   `blocking_diagnostic` (a blocking diagnostic stands, so the completion refuses that component and
+>   records `BACKFLUSH_DEMAND_REFUSED` instead of issuing it).
+> - **`basis` is `quantity_complete + operation scrap`.** A work order that has produced nothing has a
+>   basis of 0 and therefore **no BOM lines at all**. That is the resolver's real behavior, not a preview
+>   artifact — and it is why part-level readiness runs at a synthetic basis of 1.0 instead.
 >
 > **Labor-hour + cost rollup on completion is opt-in (global flag `LABOR_COST_ROLLUP_ENABLED`,
 > default OFF).** When the flag is **on**, a work order reaching **COMPLETE** (any path, including
@@ -1225,10 +1306,11 @@ mixed**:
 | GET | `/parts/` | List all parts | Yes |
 | POST | `/parts/` | Create part | Yes |
 | GET | `/parts/{id}` | Get part by ID | Yes |
-| PUT | `/parts/{id}` | Update part | Yes |
+| PUT | `/parts/{id}` | Update part (**409** when it turns `backflush_components` on and the part's readiness check reports blockers — see below) | Admin / Manager / Supervisor |
 | DELETE | `/parts/{id}` | Delete part (soft delete — restorable) | Admin |
 | POST | `/parts/{id}/restore` | Restore a soft-deleted part | Admin / Manager |
 | GET | `/parts/{id}/bom` | Get BOM for part | Yes |
+| GET | `/parts/{id}/backflush-readiness` | **PR 4.5** — may this part opt into automatic BOM component backflush, and what refuses it if not. Pure read (writes nothing) | Yes |
 
 #### Part Schema
 
@@ -1241,29 +1323,111 @@ mixed**:
   "type": "manufactured",
   "unit_of_measure": "EA",
   "material_type": "ST-304",
+  "backflush_components": false,
   "is_active": true,
   "created_at": "2024-01-01T10:00:00Z"
 }
 ```
 
-> **`backflush_components` is NOT in the payload above, and used to be.** The sample previously listed
-> it, which was simply false: the column exists on the `parts` **table** (migration `040`) but is not a
-> field on `app/schemas/part.py`, so it is neither returned by nor settable through any part endpoint.
-> It was removed from the sample rather than re-annotated, because a schema block is the one place a
-> reader is entitled to take literally.
+> **`backflush_components` is in the payload again — and the history matters, because it was wrong in
+> both directions before it was right.** The sample originally listed the field while no part endpoint
+> returned it (the column existed on the `parts` **table** since migration `040`, but on no Pydantic
+> schema); PR 4 removed it from the sample rather than re-annotating it, because a schema block is the
+> one place a reader is entitled to take literally. **PR 4.5 put it on `PartResponse`**, so the sample is
+> accurate for the first time. `GET /parts/{id}` and the **list** endpoints agree: the list helper
+> hand-builds its kwargs, so the field is populated there explicitly rather than inherited.
 >
-> The flag (boolean, default `false`) opts a part into **component backflush on work-order
-> completion** — its BOM components auto-consumed via negative `ISSUE` transactions when a work order
-> for it completes. **Nothing in `app/` ever writes it.** There is no schema field, no endpoint and no
-> UI, and the column's `server_default` is `false`, so the BOM/routing backflush leg has **never
-> executed against production data**; setting it today requires a direct DB change. Do not read the
-> completion-inventory notes under [Work Orders](#work-orders) as descriptions of live behavior —
-> they describe what the leg *would* do on the first part that opts in.
+> The flag (boolean, default `false`) opts a part into **component backflush on work-order completion** —
+> its BOM/routing components auto-consumed via negative `ISSUE` transactions when a work order for it
+> completes (see [Work Orders](#work-orders) → completion inventory effects).
 >
-> Exposing it is planned as its own PR, deliberately **not** the one that hardened the leg — see
-> [docs/MATERIAL_CONSUMPTION_PLAN.md](MATERIAL_CONSUMPTION_PLAN.md) → Delivery, PR 4.5, and "The
-> BOM/routing backflush leg" for what was fixed underneath it first. A **work-order material tie** is
-> the supported and *live* way to make a specific job consume material without this flag — see
+> **Where it can be set — deliberately narrow.** The field is on **`PartResponse` and `PartUpdate` only**.
+> It is **not** on `PartBase`, therefore not on `PartCreate`: both create endpoints and both CSV importers
+> splat `Part(**data)`, so a field on `PartBase` would become settable on four write paths at once with
+> no gate. A part is always **created off** and can only be switched on through an update. Sending an
+> explicit `null` is **422** (the column is `NOT NULL`; omission, not `null`, is the "leave it alone"
+> sentinel).
+>
+> **Turning it ON is gated (409).** Both update doors — `PUT /parts/{id}` and `PUT /materials/{id}`,
+> which write the same `parts` rows through the same schema — run one **shared** refusal gate
+> (`assert_backflush_change_allowed`, defined once in `parts.py` and imported by `materials.py`; a gate in
+> only one of the two files would not be a gate). It runs **before the first field is written**, so a
+> refusal leaves the row untouched. If the part's readiness check reports any **blocking** diagnostic the
+> request is refused **409** with `detail` as a **plain string** — one sentence per blocker, joined —
+> reading *"Part {part_number} cannot enable automatic backflush: {what is wrong}. {what to change}."*
+> The **structured** form is on `GET /parts/{id}/backflush-readiness`, which the UI calls first.
+> Turning it **OFF is always allowed** (stopping automatic consumption can never issue wrong material),
+> and a request that re-states the flag's current value is not gated at all.
+>
+> **`GET /parts/{id}/backflush-readiness`** returns `{part_id, part_number, backflush_components,
+> eligible, blockers[], advisories[]}`, each diagnostic carrying a stable `code`, a `severity`
+> (`blocking` / `advisory`), an operator-facing `detail`, and optional `bom_item_id` /
+> `component_part_id` / `component_part_number` / `operation_id` context. Any authenticated tenant user.
+> **Pure read — writes nothing.** Blocking codes today: `deleted_part`, `no_demand_source`,
+> `deleted_active_bom`, `phantom_without_bom`, `alternate_group_without_primary`, `zero_bom_quantity`,
+> `negative_bom_quantity`, `unit_of_measure_mismatch`, `missing_component_part`, `circular_bom`,
+> `bom_depth_exceeded`, `foreign_component_part`; plus, on the work-order preview only,
+> `operation_names_own_part`, `operations_disagree_on_component`,
+> `routing_component_excluded_by_bom`, `routing_bom_quantity_disagreement`. Advisories:
+> `routing_only_no_bom`, `zero_quantity_ordered`, `incomplete_operation_demand`, `tie_basis_mismatch`,
+> `tie_operation_missing`.
+>
+> Two of those carry a caveat worth stating at the contract:
+> * **`no_demand_source` is blocking HERE and advisory on the preview.** At part opt-in it means
+>   "arming this would consume nothing", which is a real refusal; at work-order scope it means
+>   "this job has no BOM", which is the ordinary case for a turned part or a part-less nest package
+>   and must not paint a red banner over a healthy job.
+> * **`missing_component_part` and `foreign_component_part` never disclose a component outside this
+>   company.** A BOM line whose `component_part_id` does not resolve to a part in the active company
+>   yields `missing_component_part` carrying **only `bom_item_id`** — no `component_part_id`, no
+>   `component_part_number`, and no name in `detail`. A same-tenant **soft-deleted** component does
+>   name itself (`foreign_component_part`), because it is this company's own part and the sentence is
+>   otherwise unactionable.
+>
+> **`eligible: true` is a snapshot, never authorization — and it covers the BOM half only.** Every input
+> it reads — BOM lines and their `is_alternate` / `is_optional` / `item_type` / `quantity` /
+> `unit_of_measure` — is mutable afterwards by other people, which is why the identical check re-runs
+> server-side on the write. Readiness runs the explosion at a **synthetic basis of 1.0**, because the real
+> basis is `quantity_complete + operation scrap` and would be zero at opt-in time — which would pronounce
+> every part clean.
+>
+> **Three limits, because `eligible: true` (and the `backflush_readiness: "clean"` it writes onto the
+> audit row) is routinely overread:**
+> * **The routing half is never checked here at all.** `backflush_readiness_for_part` runs the BOM
+>   explosion and nothing else; `operation_names_own_part`, `operations_disagree_on_component`,
+>   `routing_component_excluded_by_bom` and `routing_bom_quantity_disagreement` need a work order and
+>   appear only on `GET /work-orders/{id}/backflush-preview`. An eligible part can still resolve wrong
+>   demand on a specific job.
+> * **It is a one-time check.** It is evaluated at the flip and never again — not on a BOM edit, not on a
+>   routing change, not at release, not at completion.
+> * **Nothing on the BOM or routing edit path knows a part is armed.** Anyone with `boms:edit` /
+>   `routings:edit` — the same ADMIN/MANAGER/SUPERVISOR tier — can change any input afterwards with no
+>   warning, no re-check and no notification on the editing side.
+>
+> What stands behind the flip is the **completion-time refusal** described under
+> [Work Orders](#work-orders) → completion inventory effects: a blocking diagnostic drops the demand it
+> describes and writes a `BACKFLUSH_DEMAND_REFUSED` audit row. That is a net, not a second gate.
+>
+> **Three residuals the owner accepted rather than designed around**, because exposure uses the ordinary
+> part-edit field instead of a dedicated reasoned verb: the flip is **Supervisor-tier** (the same
+> permission as editing a description); **no reason is captured** (the audit row records who, when,
+> false→true, and the readiness verdict that authorized it in `extra_data` — not why); and **a concurrent
+> flip does not 409**, because `Part` maps no `version` column, so `PartUpdate.version` is written onto an
+> unmapped attribute and last write wins. See
+> [docs/CMMC_LEVEL_2_COMPLIANCE.md](CMMC_LEVEL_2_COMPLIANCE.md) and
+> [docs/MATERIAL_CONSUMPTION_PLAN.md](MATERIAL_CONSUMPTION_PLAN.md) → Delivery, PR 4.5.
+>
+> **The flip is auditable from ONE query, through either door.** `PUT /materials/{id}` writes the same
+> `parts` row and logs this change as `resource_type="part"` (not `"material"`) for exactly that reason,
+> so *"who armed automatic stock movement, and when"* does not depend on which URL was used. The
+> canonical query recipe — the predicate, how to narrow it to arming rather than disarming, and what it
+> does and does not return — is written down once, in
+> [docs/CMMC_LEVEL_2_COMPLIANCE.md](CMMC_LEVEL_2_COMPLIANCE.md) → the 2026-07-27 (PR 4.5) changelog row,
+> item (3). `create_material` / `delete_material` still log `"material"`, so a material's *full* history
+> is still a two-resource-type query.
+>
+> A **work-order material tie** remains the way to make one specific job consume material **without**
+> this flag, and is the only one of the two with production mileage — see
 > [Work Orders](#work-orders) → "Material ties".
 
 ### BOM (Bill of Materials)
@@ -1272,9 +1436,16 @@ mixed**:
 |--------|----------|-------------|---------------|
 | GET | `/bom/` | List all BOMs | Yes |
 | POST | `/bom/` | Create BOM | Yes |
+| GET | `/bom/uom-mismatches` | **PR 4.5** — BOM lines whose stated unit of measure disagrees with the component part's. Pure read (writes nothing) | Admin / Manager / Supervisor |
 | GET | `/bom/{id}` | Get BOM by ID | Yes |
 | PUT | `/bom/{id}` | Update BOM | Yes |
 | DELETE | `/bom/{id}` | Delete BOM | Admin |
+| POST | `/bom/{id}/items` | Add a line to a BOM. ⚠️ **`unit_of_measure` changed behaviour on 2026-07-27** — see [below](#bom-line-unit-of-measure) | Admin / Manager / Supervisor |
+| PUT | `/bom/items/{id}` | Update a BOM line. ⚠️ Same — an omitted `unit_of_measure` is left alone; an explicit clear re-inherits | Admin / Manager / Supervisor |
+| DELETE | `/bom/items/{id}` | Remove a BOM line | Admin / Manager |
+
+`POST /bom/` also accepts its lines inline, so it is a BOM-line write path too and carries the
+same `unit_of_measure` change.
 
 #### BOM Item Schema
 
@@ -1288,6 +1459,79 @@ mixed**:
   "is_optional": false
 }
 ```
+
+#### BOM line unit of measure
+
+> ⚠️ **BEHAVIOUR CHANGE on shipped endpoints, 2026-07-27 (owner decision).** What the server
+> stores for a BOM line that arrives **without** a `unit_of_measure` changed. **Before:** the
+> literal `"each"`, from a schema default. **After:** the **component part's own**
+> `unit_of_measure`. Same request, different stored value. No client change is required and
+> no request is newly rejected — but a client that relied on omission meaning `"each"` no
+> longer gets it, and **existing rows were not rewritten** (see the [report](#get-bomuom-mismatches--the-pre-arming-remediation-worklist)
+> immediately below).
+
+A BOM line's `unit_of_measure` is **optional on input**. When it is omitted, the server
+resolves it to the component part's own; the literal `"each"` survives only as the last
+resort — when the component cannot be resolved, or has no unit of its own. **A stated value
+always wins**, so this resolves an *absence* and never second-guesses a caller. The two
+document importers additionally normalise a stated value (`ea` → `each`, `lbs` → `pounds`)
+exactly as they always have; the two JSON paths still store the client's string verbatim.
+The **response** field stays non-null and its type is unchanged.
+
+Applies to every BOM-line write path: `POST /bom/` (lines supplied inline),
+`POST /bom/{id}/items`, `POST /bom/import/commit` and `POST /bom/import`.
+`PUT /bom/items/{id}` is the one exception and deliberately so — **it is not a
+backfill**: a request that does not mention `unit_of_measure` leaves the stored value
+untouched, and only an explicit clear (`null` or `""`) is read as "no stated unit" and
+re-inherits from the component.
+
+Why the default was wrong rather than merely arbitrary: `unit_of_measure_mismatch` is a
+**blocking** backflush diagnostic that reads a stored unit as a *stated claim*. Nothing in
+the platform converts units, so a line stating `each` against a part stocked in `sheets`
+would issue the wrong quantity of the right material — the diagnostic refuses
+`Part.backflush_components` at opt-in (**409**) and refuses that component at completion.
+Against a real sheet-metal BOM set that fired on a value nobody had chosen. **The fix was the
+default; the severity was deliberately left alone.**
+
+#### `GET /bom/uom-mismatches` — the pre-arming remediation worklist
+
+Existing lines are **not rewritten** — this series is correct-forward and does not backfill —
+so lines written before the default changed keep their stored `"each"` and still block. This
+endpoint is how a human finds and corrects them.
+
+| Query param | Default | Meaning |
+|---|---|---|
+| `part_id` | – | Only lines on this assembly part's **own** BOM. Does **not** follow nested sub-assembly BOMs, which a readiness check *does* reach — so the **unfiltered** report is the authoritative pre-arming worklist |
+| `bom_id` | – | Only lines on this BOM |
+| `component_part_id` | – | Only lines naming this component part |
+| `active_only` | `true` | Only active BOMs — the ones a backflush actually reads |
+| `skip` / `limit` | `0` / `100` (max `500`) | Paging over the matched set |
+
+Response: `{ total, returned, truncated, items[] }`, each item carrying `bom_id`,
+`bom_revision`, `bom_status`, `bom_is_active`, `part_id`, `part_number`, `bom_item_id`,
+`item_number`, `component_part_id`, `component_part_number`, `component_part_name`,
+`component_is_deleted`, `line_unit_of_measure`, `component_unit_of_measure` and
+`blocks_backflush`.
+
+- The comparison is `models.part.uom_disagrees`, the **same predicate the blocking diagnostic
+  uses**, so the report and the gate cannot list different rows. Comparison is exact-label:
+  `ea` does **not** satisfy `each` — normalise the stored value rather than expecting the gate
+  to accept it.
+- A blank unit on **either** side is not a disagreement and is not reported.
+- `blocks_backflush` is `false` on alternate / optional / reference lines: the backflush never
+  issues those, so they raise no diagnostic and refuse nothing. Work them last.
+- **`blocks_backflush: true` answers the LINE, not the whole tree — it can over-promise.** It is
+  computed from the line's own type alone. A line sitting inside a `make` sub-assembly's BOM
+  reports `true`, but `make` subtrees are walked exclude-only and collect no per-line
+  diagnostics, so that line refuses nothing when the *parent* assembly is armed (its children
+  were consumed when the sub-assembly was built). Treat `true` as "worth correcting", not as
+  "this is what is refusing my part" — the authoritative list of what actually refuses a given
+  part is `blockers` on `GET /parts/{part_id}/backflush-readiness`.
+- Soft-deleted component parts are **included** (flagged by `component_is_deleted`), because
+  the readiness explosion resolves them on purpose; filtering them out would hide a row that
+  still blocks.
+- `truncated: true` means the scan hit its candidate ceiling and `total` is a **floor**, not a
+  count — narrow the filters and run it again.
 
 #### BOM Import (document upload)
 
@@ -3074,9 +3318,11 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 > not express which heats went into the part. Consequently `consumed_components` is non-empty when the
 > producing part had `backflush_components = true` **or** the work order carried material ties (see
 > Work Orders → "Material ties"); it stays empty for purchased/raw lots and for untied work on a part
-> that never opted into backflush. In practice **material ties are the only live source** — nothing in
-> the application writes `backflush_components`, so no work order has ever reached the BOM/routing
-> backflush leg (see [Part Schema](#part-schema)). All three `work_order`-family reference types are also what the lot
+> that never opted into backflush. In practice **material ties are still the only source with production
+> mileage**: PR 4.5 made `backflush_components` settable (see [Part Schema](#part-schema)), but the
+> column defaults to `false` and no work order has yet reached the BOM/routing leg. The claim here used
+> to be structural ("nothing writes the flag"); it is now merely factual, and it stops being true the
+> first time a part opts in. All three `work_order`-family reference types are also what the lot
 > and serial traces use to collect `work_orders_used`.
 
 ### Shipping
@@ -3993,6 +4239,19 @@ tenants, so the aggregate chain-verification endpoints are **platform-admin only
 > global sequence spanning every tenant, so its stats/issues (record counts, sequence ranges,
 > record ids) can't be scoped to a single company without leaking other tenants' data. A company
 > Admin's "are my records intact?" need is served by the per-record endpoint above.
+>
+> **⚠️ Filtering by `resource_type` does NOT return a material's full history — read this before
+> auditing one.** `parts` and `materials` are the *same table* behind two routers, and their audit
+> rows are split across two `resource_type` values with a **discontinuity dated 2026-07-27 (PR 4.5)**:
+> `POST /materials/` and `DELETE /materials/{id}` log `resource_type="material"`, while
+> `PUT /materials/{id}` logs **`resource_type="part"`** — as `PUT /parts/{id}` always has. Updates
+> before that date are under `"material"`; updates after it are under `"part"`. Nothing is missing and
+> no row was rewritten (the chain is append-only), but a query filtered to one value silently returns a
+> partial trail. **Query both**, e.g. `resource_type IN ('part','material') AND resource_id = <part id>`
+> ordered by `timestamp`. The change was deliberate: it makes *"who armed automatic component
+> backflush on this part, and when"* answerable from one query regardless of which URL was used — see
+> [Parts](#parts) → `backflush_components` and
+> [docs/CMMC_LEVEL_2_COMPLIANCE.md](CMMC_LEVEL_2_COMPLIANCE.md) → the 2026-07-27 (PR 4.5) row, item (3).
 
 ### Visitor Logs
 

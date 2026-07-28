@@ -89,6 +89,20 @@ export interface Part {
   standard_cost: number;
   is_critical: boolean;
   requires_inspection: boolean;
+  /**
+   * Opt-in to AUTOMATIC BOM/routing component backflush at work-order completion.
+   *
+   * Read-mostly and deliberately asymmetric: the server exposes it on every part
+   * read (`PartResponse`) and on `PartUpdate`, but NOT on `PartCreate`/`PartBase`
+   * — so `POST /parts`, `POST /materials` and both CSV importers cannot set it,
+   * and a part is always born with it off. That asymmetry is mirrored here: this
+   * field is absent from `PartCreate`/`PartUpdate` in `types/api.ts` on purpose;
+   * the only client that flips it is `api.setPartBackflush`.
+   *
+   * Turning it ON is server-GATED (409 while the part's backflush readiness check
+   * reports blockers) — so any UI for it must stay NON-optimistic.
+   */
+  backflush_components: boolean;
   is_active: boolean;
   status: string;
   customer_name?: string;
@@ -643,6 +657,181 @@ export interface MaterialConsumptionLine {
   returned: number;
   /** `issued - returned` — still consumed, and the cap on a further return. */
   net: number;
+}
+
+// --- BOM/routing backflush: dry-run preview + opt-in readiness (PR 4.5) ------
+//
+// A SECOND, independent consumption path from the ties above. A tie is the
+// explicit "this job eats that stock" link a planner draws; backflush is the
+// automatic one, driven off the finished part's BOM and routing and gated on
+// `Part.backflush_components`. Both legs post to the same ledger and both
+// surface here, which is why the preview's lines carry `source` and
+// `requires_opt_in` rather than assuming one origin.
+//
+// Both shapes below back PURE READS — `GET /work-orders/{id}/backflush-preview`
+// and `GET /parts/{id}/backflush-readiness`. They write nothing: no ledger row,
+// no audit row, no event. Polling them is free and records no reason.
+
+/**
+ * One thing the demand resolver could not answer cleanly about a BOM/routing.
+ *
+ * `severity` is what matters:
+ *  - `blocking` — the resolved demand is wrong or absent. These are exactly the
+ *    sentences the server joins into its 409 when a flip is refused, so they
+ *    read as complete sentences on their own.
+ *  - `advisory` — usable, but worth a human's attention, OR work-order-scoped
+ *    and therefore not gateable at part opt-in at all.
+ *
+ * `code` is the stable machine key; `detail` is the operator-facing sentence.
+ * Render `detail` — never a prettified `code` — so the UI cannot drift from the
+ * refusal the server would actually produce.
+ */
+export interface BackflushDiagnostic {
+  code: string;
+  severity: 'blocking' | 'advisory' | string;
+  detail: string;
+  bom_item_id: number | null;
+  component_part_id: number | null;
+  component_part_number: string | null;
+  operation_id: number | null;
+}
+
+/**
+ * One ISSUE row a completion would post, in the order the draw walks them.
+ *
+ * `is_shortfall` marks the row for the part of the demand no permitted lot could
+ * cover: the writer posts it as a SEPARATE issue against the last lot it drew
+ * (or the first candidate lot if it drew nothing), driving that lot negative and
+ * putting its lot number on the as-built record. A line can therefore list the
+ * same `inventory_item_id` twice — the covered take, then the remainder.
+ */
+export interface BackflushPreviewLot {
+  inventory_item_id: number;
+  lot_number: string | null;
+  location: string | null;
+  quantity: number;
+  unit_cost: number;
+  is_shortfall: boolean;
+}
+
+/**
+ * Which rule stopped a preview line from moving material. `null` when nothing did.
+ *
+ * Kept as a union of the server's own vocabulary (widened with `string` so a new
+ * server value degrades to "suppressed, reason shown raw" rather than a type error).
+ */
+export type BackflushSuppressionReason =
+  | 'converged'
+  | 'already_issued'
+  | 'ledger_consumed'
+  | 'open_operation_tie'
+  /** A blocking diagnostic stands, so the completion refuses this component and
+   *  records a `BACKFLUSH_DEMAND_REFUSED` audit row instead of issuing it. */
+  | 'blocking_diagnostic'
+  | string;
+
+/**
+ * One component's whole decision: target, what already posted, and the lots it hits.
+ *
+ * `delta_quantity` (`required_quantity - already_issued`) is what would actually
+ * post now. The leg reconciles to target and NEVER auto-reverses, so a
+ * non-positive delta is a no-op rather than a credit — which is why a suppressed
+ * line is normal rather than an error.
+ *
+ * `requires_opt_in` is true on BOM/routing lines (they move only once the part's
+ * `backflush_components` is on) and false on work-order-scoped tie lines, where
+ * the tie itself IS the opt-in and consumes regardless.
+ */
+export interface BackflushPreviewLine {
+  component_part_id: number;
+  component_part_number: string | null;
+  component_part_name: string | null;
+  unit_of_measure: string | null;
+  /** `'bom_routing'` (needs the flag) or `'work_order_tie'` (its own opt-in). */
+  source: 'bom_routing' | 'work_order_tie' | string;
+  requires_opt_in: boolean;
+  allocation_id: number | null;
+  /** The reconcile TARGET for this component. */
+  required_quantity: number;
+  /** Signed ledger net already posted against it (ISSUE − RETURN). */
+  already_issued: number;
+  /** What would post now. `0` when suppressed. */
+  delta_quantity: number;
+  suppressed: boolean;
+  suppression_reason: BackflushSuppressionReason | null;
+  available_quantity: number;
+  shortfall: number;
+  would_go_negative: boolean;
+  /**
+   * Stock that IS on hand but segregated (hold / quarantine / rejected /
+   * inactive) and therefore skipped. The difference between a purchasing signal
+   * and an MRB signal. Always 0 on a PINNED line — there, the pin is why nothing
+   * else was drawn.
+   */
+  held_quantity_skipped: number;
+  held_lot_numbers: string[];
+  pinned_inventory_item_id: number | null;
+  pinned_lot_number: string | null;
+  /**
+   * The PINNED lot went on hold / quarantine / rejected / inactive after it was
+   * pinned, and the completion will consume it anyway (recording
+   * `HELD_MATERIAL_CONSUMED`). That draw is not short, so the `held_*` fields
+   * above stay empty — this is the only warning for it.
+   */
+  pinned_lot_is_held: boolean;
+  /**
+   * No stock row for this part exists at all, so rather than driving a lot
+   * negative the completion mints a lot-less placeholder row and posts against
+   * it. Mutually exclusive with a trailing `is_shortfall` lot.
+   */
+  shortfall_creates_placeholder: boolean;
+  lots: BackflushPreviewLot[];
+}
+
+/**
+ * A dry run of one work order's component consumption. Nothing was written.
+ *
+ * `backflush_components` is the FINISHED part's current flag. BOM/routing lines
+ * are reported whether or not it is set — the operator reading this is deciding
+ * whether to set it — so read it together with each line's `requires_opt_in`.
+ *
+ * `basis` is `quantity_complete + operation scrap`. A work order that has
+ * produced nothing has a basis of 0 and therefore no BOM lines at all; that is
+ * the resolver's real behaviour, not a preview artefact.
+ */
+export interface BackflushPreviewResponse {
+  work_order_id: number;
+  work_order_number: string | null;
+  part_id: number | null;
+  part_number: string | null;
+  backflush_components: boolean;
+  basis: number;
+  lines: BackflushPreviewLine[];
+  blockers: BackflushDiagnostic[];
+  advisories: BackflushDiagnostic[];
+}
+
+/**
+ * Whether a part may opt into automatic backflush, and what refuses it if not.
+ *
+ * `eligible === (blockers.length === 0)`. It is **not authorisation and not
+ * durable**: every input it reads (BOM lines, `is_alternate`/`is_optional`/
+ * `item_type`/`quantity`, the routing's `component_part_id`) is mutable
+ * afterwards by other people, so the identical check re-runs server-side on the
+ * write that sets the flag. Never treat a stale `eligible: true` as permission —
+ * make the call and render what comes back.
+ *
+ * Only the BOM half is answerable at part scope; routing conditions need a work
+ * order and appear on the backflush preview instead.
+ */
+export interface PartBackflushReadiness {
+  part_id: number;
+  part_number: string | null;
+  /** The part's CURRENT flag, so state and eligibility render together. */
+  backflush_components: boolean;
+  eligible: boolean;
+  blockers: BackflushDiagnostic[];
+  advisories: BackflushDiagnostic[];
 }
 
 export type TimeEntryType = 'setup' | 'run' | 'rework' | 'inspection' | 'downtime' | 'break';
