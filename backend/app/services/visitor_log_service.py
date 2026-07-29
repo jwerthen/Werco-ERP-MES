@@ -4,8 +4,11 @@ Every query is tenant-scoped to the active company and filters
 ``is_deleted == False`` on reads (compliance invariants #1 / #3). State changes
 are audited via ``AuditService`` AFTER the flush that assigns the PK and BEFORE
 the terminal commit, so the row and its tamper-evident audit entry commit
-atomically. Visitor / host names are CUI and never cross an external boundary;
-the only outbound signal is an internal best-effort host email (§5).
+atomically. The only outbound signal is an internal best-effort host notification
+(§5), which as of 2026-07-29 NAMES the visitor — the earlier rule treating visitor
+names as CUI was retired when CMMC L2 was descoped (boundary decision of record:
+``docs/NOTIFICATIONS.md`` §11.1). It is still internal-only: the notification goes
+to a matched employee of the visitor's own tenant, never to an external recipient.
 """
 
 import logging
@@ -17,7 +20,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.queue import enqueue_job_best_effort
-from app.core.time_utils import to_utc_iso
+from app.core.time_utils import CENTRAL_TIME_ZONE, ensure_utc, to_utc_iso
 from app.models.user import User
 from app.models.visitor_log import VisitorLog, VisitorStatus
 from app.schemas.visitor_log import VisitorManualEntryRequest, VisitorSignInRequest
@@ -29,7 +32,8 @@ logger = logging.getLogger(__name__)
 def _match_host_user(db: Session, *, company_id: int, host_name: Optional[str]) -> Optional[User]:
     """Best-effort host match: an active user IN THIS COMPANY whose full name
     case-insensitively equals ``host_name``. Returns the user only on EXACTLY
-    one match (0 or >1 → None). Scoped by company — never cross-tenant (CUI)."""
+    one match (0 or >1 → None). Scoped by company — never cross-tenant (invariant 1:
+    a name match must never resolve to another tenant's employee)."""
     if not host_name or not host_name.strip():
         return None
     target = host_name.strip().lower()
@@ -53,9 +57,33 @@ def _notify_host_best_effort(db: Session, *, host: User, row: VisitorLog) -> Non
     off to the worker via ``enqueue_job_best_effort`` (the same sync-safe enqueue used
     before). NEVER blocks or raises — a notification failure must not fail the sign-in.
 
-    CUI-safe: visitor names are treated as CUI (they never cross the SMTP boundary), so the
-    title/body are generic; the host clicks through to the Visitor Log to see who arrived."""
+    Names the visitor (changed 2026-07-29). The old body said only that "a visitor" had
+    arrived, on the basis that visitor names were CUI — a rationale that no longer applies
+    now that CMMC L2 is descoped, and one that made the alert nearly useless: the host had
+    to log in to learn who was standing in the lobby. See the boundary decision of record in
+    docs/NOTIFICATIONS.md section 11.1. This renders the ``visitor_check_in`` template, which
+    already existed but had no caller.
+
+    Everything rendered is read from the live ``VisitorLog`` row already in scope — no extra
+    query, and none of it passes through ``redact_event_payload`` (visitor check-in is
+    direct-dispatch, not outbox-driven, so there is no stored event payload involved)."""
     try:
+        purpose = row.purpose.value if row.purpose is not None else None
+        # ``VisitorPurpose`` is a str-backed Enum; Jinja calls __str__, which renders
+        # "VisitorPurpose.MEETING" rather than "meeting" on Python 3.11. Pass .value.
+        purpose_label = purpose.replace("_", " ").title() if purpose else None
+        if purpose_label and row.purpose_note:
+            purpose_label = f"{purpose_label} - {row.purpose_note}"
+        # Emails have no client-side localizer, and the repo convention is to display
+        # Central. A lobby-arrival time shown in UTC is wrong by 5-6 hours.
+        signed_in_local = ensure_utc(row.signed_in_at)
+        signed_in_display = (
+            signed_in_local.astimezone(CENTRAL_TIME_ZONE).strftime("%b %-d, %Y at %-I:%M %p %Z")
+            if signed_in_local
+            else None
+        )
+        who = row.visitor_name or "A visitor"
+        summary = f"{who} checked in" + (f" ({row.visitor_company})" if row.visitor_company else "")
         enqueue_job_best_effort(
             "dispatch_notification_direct_job",
             event_key="visitor.check_in",
@@ -63,9 +91,19 @@ def _notify_host_best_effort(db: Session, *, host: User, row: VisitorLog) -> Non
             recipient_ids=[host.id],
             related_type="visitor_log",
             related_id=row.id,
-            title="Visitor checked in",
-            body="A visitor has checked in and named you as their host. Log in to view the visitor log.",
+            title=summary,
+            body=f"{summary} and named you as their host.",
             link="/visitor-log",
+            template="visitor_check_in",
+            # ARQ kwargs are serialized through Redis: JSON-safe primitives only,
+            # never the ORM row and never a raw datetime.
+            context={
+                "visitor_name": row.visitor_name,
+                "visitor_company": row.visitor_company,
+                "purpose": purpose_label,
+                "signed_in_at": signed_in_display,
+                "station_label": row.station_label,
+            },
         )
     except Exception:  # pragma: no cover - defensive: never fail the sign-in
         logger.exception("Best-effort host check-in notification failed for visitor_log %s", getattr(row, "id", None))
