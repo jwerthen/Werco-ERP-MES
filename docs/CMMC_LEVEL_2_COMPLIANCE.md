@@ -965,13 +965,32 @@
 **Data-flow note (SMS notification egress — SC-3.13.1 boundary):**
 - **What crosses the boundary to Twilio:** (1) the recipient's **mobile phone number** (an employee
   PII element, stored E.164), and (2) a deliberately **terse, generic message body**. Nothing else.
-- The body is machine-composed from exactly two inputs — the **catalog event label** and a
-  **sanitized record identifier** — never from caller-supplied free text. Format:
-  `Werco: {identifier} - {label}. Log in to view.` (e.g. `Werco: WO-1042 - Work order blocked / on
-  hold. Log in to view.`). The identifier passes an allowlist accepting only record-number shapes;
-  anything free-text-like is dropped and the body degrades to the bare label. **No customer names,
-  no part descriptions, no quantities, no drawing/spec text** can reach the carrier. The builder is
-  a single function (`app/services/sms_content.py`) so the rule has one auditable enforcement point.
+- The body is machine-composed from a fixed set of vetted inputs — **never from caller-supplied free
+  text**. **Changed 2026-07-29 (flagged for auditor review):** this bullet previously read "exactly
+  two inputs"; there are now **three**. The third is a single optional **closed-vocabulary
+  classifier** (an enum value such as `machine_down`), added when the notification content rules were
+  revised after CMMC L2 was deprioritized on 2026-07-28 — see the boundary decision of record in
+  `docs/NOTIFICATIONS.md` §11.1. Format:
+  `Werco: {identifier} - {label} ({classifier}). Log in to view.` (e.g. `Werco: WO-1042 - Work order
+  blocked / on hold (machine down). Log in to view.`); the classifier is omitted when absent or
+  unsafe, and is the first element dropped when the 160-char budget is tight.
+  - The **refusal of caller-composed `title`/`body` is unchanged** — `build_sms_body` still does not
+    accept them, so free text written by crons and direct dispatchers cannot reach the carrier.
+  - The identifier passes an allowlist accepting only record-number shapes; anything free-text-like
+    is dropped and the body degrades to the bare label.
+  - The classifier clears **two independent fences**: a fixed payload-**field** allowlist
+    (`_SMS_DETAIL_KEYS` — `category`, `planned_type`, `source`, all enum-valued; operator-typed
+    fields such as `title`, `note`, `reason`, `scrap_reason`, `defect_type` and `step_label` are
+    deliberately excluded), and a **value** guard (`safe_detail`) requiring a single whitespace-free
+    token of letters/`_`/`-` only, ≤ 24 chars and ≤ 3 words.
+  - **The exclusion claim still holds:** **no customer names, no part descriptions, no quantities, no
+    drawing/spec text** can reach the carrier. Digits are refused outright (excluding quantities and
+    part numbers) and any value containing whitespace is refused (excluding names and prose); the
+    field allowlist is what keeps a single-token human value out of an eligible field in the first
+    place. Widening `_SMS_DETAIL_KEYS` would put this claim at risk and is a CUI-boundary decision,
+    not a routine change.
+  - The builder remains a single function (`app/services/sms_content.py`) so the rule has one
+    auditable enforcement point.
 - Enforcement is fail-closed and layered: company egress flag → per-user opt-in → stored phone →
   `sms_eligible` event. With egress OFF, **no request leaves the boundary**.
 - Delivery provenance is retained for audit: each attempt writes a tenant-scoped `notification_logs`

@@ -4141,7 +4141,7 @@ their own inbox).
 >       "event_key": "wo.blocker_created",
 >       "severity": "critical",
 >       "title": "Work order blocked / on hold: WO-1042",
->       "body": "A work order or operation was placed on hold or blocked.",
+>       "body": "A work order or operation was placed on hold or blocked.\n\nCategory: machine_down | Source: kiosk",
 >       "link": "/work-orders/1042",
 >       "related_type": "work_order",
 >       "related_id": 1042,
@@ -4157,8 +4157,18 @@ their own inbox).
 > }
 > ```
 > `event_key` is the catalog key (see `GET /notifications/catalog`); `link` is a **relative** SPA
-> route the UI deep-links to; timestamps are UTC `Z` (display Central). Content is CUI-safe:
-> record identifier + event only — no part descriptions, customer names, or quantities.
+> route the UI deep-links to; timestamps are UTC `Z` (display Central).
+>
+> **Content (revised 2026-07-29, after CMMC L2 was descoped):** `title` is the catalog label plus
+> the record identifier. `body` is the catalog description, then a blank line, then a detail line
+> composed from a curated payload allowlist — statuses and transitions, the `quantity_*` family,
+> priorities, day counts, disposition/category/source/inspection method, and `reason` — pipe-joined,
+> each value truncated at 120 chars. When the payload carries none of those keys the body is the
+> description alone. **Part numbers and customer names are still absent**: the dispatcher reads the
+> event payload only and never re-queries to resolve `part_id` into a part number (a scope/N+1
+> decision, not a security boundary). See
+> [docs/NOTIFICATIONS.md → Content rules](NOTIFICATIONS.md#content-rules-compliance) for the
+> boundary decision of record.
 >
 > **`GET /notifications/catalog`** returns one object per catalog entry
 > (`event_key`, `label`, `description`, `category`, `severity`, `default_channels[]`,

@@ -11,12 +11,19 @@ logger = logging.getLogger(__name__)
 
 
 class NotificationEvent:
-    """Legacy notification event-type constants.
+    """Legacy notification event-type constants — **DEAD CODE, no remaining references.**
 
-    Retained for backward compatibility: the daily-digest infrastructure and the
-    visitor check-in host-email path still reference these string keys. New code drives
-    notifications through the event catalog (``notification_catalog``) + the dispatcher
-    (``notification_dispatch``), keyed by dot-notation ``event_key`` instead.
+    The previous docstring claimed the daily-digest infrastructure and the visitor
+    check-in host-email path still referenced these keys. Neither does (verified
+    2026-07-29: a repo-wide search for ``NotificationEvent`` finds only this
+    definition, and the visitor path dispatches on the catalog key
+    ``visitor.check_in``). Nothing reads these constants and nothing writes a
+    preference row keyed by them — ``NotificationPreference.preferences`` is keyed by
+    the catalog's dot-notation ``event_key``.
+
+    Notifications are driven entirely by the event catalog (``notification_catalog``)
+    + the dispatcher (``notification_dispatch``). Safe to delete; kept for one release
+    only so a stale import fails loudly rather than silently. Do not add new members.
     """
 
     WO_RELEASED = "WO_RELEASED"
