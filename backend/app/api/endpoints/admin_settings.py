@@ -866,11 +866,25 @@ def seed_labor_rates(
 def _generate_bootstrap_password() -> str:
     """Generate a strong, policy-compliant one-time bootstrap password.
 
-    Compliant by construction (upper + lower + digit + special) and unique per
-    call — never a hardcoded/well-known value. Mirrors the operator auto-password
-    convention in the users router.
+    Unique per call — never a hardcoded/well-known value. Mirrors the operator
+    auto-password convention in the users router.
+
+    Validated rather than assumed compliant: the strength policy is length plus a
+    substring blocklist (see ``validate_password_strength``), and a random token can
+    incidentally contain a blocklisted substring. That is rare, but it is a real
+    source of nondeterminism, so regenerate until the value actually passes instead
+    of trusting the shape of the f-string.
     """
-    return f"Seed!{secrets.token_urlsafe(18)}1aZ"
+    from app.schemas.user import validate_password_strength
+
+    for _ in range(10):
+        candidate = f"Seed!{secrets.token_urlsafe(18)}1aZ"
+        try:
+            return validate_password_strength(candidate)
+        except ValueError:
+            continue
+    # Unreachable in practice (each attempt fails with probability ~1e-5).
+    raise RuntimeError("Could not generate a policy-compliant bootstrap password")
 
 
 @router.post("/seed-database")

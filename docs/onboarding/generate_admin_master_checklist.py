@@ -210,7 +210,7 @@ section(story, "0", "What changed since the last plan", "READ FIRST",
         "before they hit a surprise.")
 table(story, ["PR", "Change", "What it means for you"], [
     ["#114", "User management is now Admin-only", "Only Admins create/edit/deactivate users, reset passwords, import CSV, and print badges. Managers keep a READ-ONLY user list; Supervisors lose the Users page (get /unauthorized). Managers can no longer print badges."],
-    ["#115 / #119", "Password strength enforced everywhere", "Creating/resetting/changing any password now needs 12+ chars, upper+lower+digit+special, no common words — weak values are refused (422). Operator badge accounts auto-generate a compliant password (exempt)."],
+    ["#115 / #119", "Password strength enforced everywhere", "Creating/resetting/changing any password is validated on every path — weak values are refused (422). The rule was relaxed on 2026-07-29 to follow NIST SP 800-63B and is now: 12+ chars, and no common word or pattern (matched anywhere inside). The old upper+lower+digit+special requirement is GONE — passphrases are fine. Operator badge accounts auto-generate a compliant password (exempt)."],
     ["#116", "Visitor staff back-entry added", "Admin/Manager can “Add visit” on the Visitor Log with the REAL past times after a tablet outage. Needs DB migration 064 applied."],
     ["#117", "Shop-floor back-entry toggle added", "Supervisors+ get a “Back-entry (offline catch-up)” toggle that tags labor so it's excluded from live metrics. Operators don't have it."],
     ["#113 / #118", "Doc corrections", "User-management IS now audited (older guides said it wasn't). Deploy runbook is DEPLOYMENT_RUNBOOK.md; access token is 15 min."],
@@ -288,7 +288,7 @@ section(story, "4", "Accounts, roles &amp; badges", "OWNER: ADMIN",
         "User creation, role assignment, and badge printing are now ALL Admin-only (see Section 0). Do this before any "
         "training — role determines what each person sees.")
 story.append(checklist([
-    ("Create all user accounts (Users page or CSV import, dry-run first). Have a <b>12+ char complex password</b> ready for every non-operator; operator rows auto-generate one (badge login).",
+    ("Create all user accounts (Users page or CSV import, dry-run first). Have a <b>12+ character password or passphrase</b> ready for every non-operator; operator rows auto-generate one (badge login).",
      "Weak passwords are refused (422) — e.g. “Password1234!” is rejected because it contains “password”."),
     ("Assign roles deliberately: estimators/planners = Supervisor+, purchasing approver = Manager+, receiving = Supervisor+, inspectors = Quality, shipping clerks = Shipping. Do NOT give office staff the Operator role.", None),
     ("Audit employee IDs so the <b>last 4 digits are unique</b> across all users BEFORE printing badges.",
@@ -359,7 +359,7 @@ subhead(story, "Pre-load these help-desk answers")
 story.append(checklist([
     ("<b>RBAC “broken page” wave:</b> Managers see a read-only Users list (write buttons gone by design); Supervisors get /unauthorized on /users; badge printing + account resets now route through an Admin. Not bugs.", None),
     ("<b>Account lockout:</b> 5 failed passwords → 30-min lock, and there is NO admin unlock — wait it out. “Rate limit exceeded” = wait ~60s.", None),
-    ("<b>Password rejected (422):</b> needs 12+ chars, upper/lower/number/special, no common words — surprisingly common on an admin reset.", None),
+    ("<b>Password rejected (422):</b> needs 12+ chars and no common word or pattern — the blocklist matches anywhere inside, which is what usually bites on an admin reset. There are no character-class rules; a passphrase passes.", None),
 ]))
 subhead(story, "If the network or a device dies")
 story.append(checklist([
@@ -413,7 +413,8 @@ story.append(checklist([
 story.append(Spacer(1, 10))
 story.append(HRFlowable(width="100%", thickness=0.8, color=LINE, spaceAfter=5))
 story.append(Paragraph(
-    "WERCO ERP-MES \xb7 Admin Go-Live Master Checklist \xb7 Rev E \xb7 2026-07-13 \xb7 verified against production main. "
+    "WERCO ERP-MES \xb7 Admin Go-Live Master Checklist \xb7 Rev F \xb7 2026-07-29 \xb7 Rev E verified against production "
+    "main 2026-07-13; Rev F updates the password-policy and session-timeout text only. "
     "This is the master; the 16 role/poster/form PDFs in this folder are the per-station handouts.",
     ParagraphStyle("foot", fontName="Courier", fontSize=6.8, leading=9, textColor=LIGHT)))
 
