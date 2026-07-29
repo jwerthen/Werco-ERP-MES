@@ -1,11 +1,40 @@
 # CMMC Level 2 Compliance Roadmap
 
+> # ⏸️ FROZEN — 2026-07-28
+>
+> **CMMC Level 2 certification is not being pursued at this time.** This document is kept
+> as a historical record and as the starting point for any future effort. It is **no longer
+> maintained per-PR**: do not add change-log rows for new work, and do not treat the ✅
+> markers below as current — verify against the code before relying on any claim here.
+>
+> **What did not change.** The security controls this document describes are still in the
+> code and still enforced: tenant isolation, audit logging and its tamper-evident hash chain,
+> the audit-table immutability triggers, soft delete, RBAC, the Supabase deny-by-default RLS
+> posture, and the four per-company egress switches. Descoping CMMC removed the certification
+> *paperwork discipline*, not the security posture — those controls protect tenant data on
+> their own merits, independent of any certificate.
+>
+> **What is off the backlog.** The remediation roadmap items below that were never started —
+> MFA/TOTP, encryption at rest, the SSP, the POA&M, the incident-response plan, formal
+> security training, and media protection — are no longer planned work. Nothing in production
+> changes as a result, because none of them were ever built.
+>
+> **Caveat worth re-checking.** If a customer contract ever carries a DFARS 252.204-7012
+> flow-down, some NIST SP 800-171 obligations are contractual regardless of certification
+> timing. No such commitment is evidenced in this repo as of the freeze date, but confirm
+> against actual customer POs before treating these controls as fully optional.
+>
+> **If certification is revisited.** Unfreeze this file, re-verify every control claim against
+> the code as of that date, and reconstruct the intervening control history from git history
+> and PR bodies (`git log --since=2026-07-28`). Other docs cross-reference this file by name
+> and by change-log date — those links stay valid and intentionally point at historical rows.
+
 ## Overview
 
 **CMMC Level 2** requires implementation of **110 security controls** from **NIST SP 800-171** across **14 control families**. This document tracks Werco ERP's compliance status and remediation roadmap.
 
-**Target Certification Date**: _________________  
-**Last Updated**: January 2026  
+**Target Certification Date**: Not scheduled — deprioritized 2026-07-28 (see freeze notice above)  
+**Last Updated**: January 2026 (content); frozen 2026-07-28  
 **Assessment Type**: Third-Party (C3PAO)
 
 ---

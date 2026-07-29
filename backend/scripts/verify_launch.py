@@ -59,6 +59,24 @@ def main() -> int:
     else:
         ok("CORS_ORIGINS looks production-ready")
 
+    # Warn, not fail, on purpose: ALLOWED_HOSTS defaults to "*" and this script runs
+    # against live prod after every deploy. Failing here would turn an unset env var
+    # into a red deploy. This surfaces the answer in the deploy log instead.
+    #
+    # Test the SAME condition app/main.py uses (`"*" in settings.allowed_hosts_list`),
+    # not the raw string. An empty ALLOWED_HOSTS falls back to ["*"] in that property,
+    # so a raw-string check would report "restricted" while enforcement is off.
+    allowed_hosts = settings.allowed_hosts_list
+    if "*" in allowed_hosts:
+        warn(
+            "ALLOWED_HOSTS allows any Host ('*'): Host-header validation "
+            "(TrustedHostMiddleware) is DISABLED. Set it to the API's real hostnames, "
+            "e.g. ALLOWED_HOSTS='api.wercomfg.app,healthcheck.railway.app' — and include "
+            "the health-check probe hosts or deploy health checks get a 400."
+        )
+    else:
+        ok(f"ALLOWED_HOSTS restricted ({len(allowed_hosts)} host(s))")
+
     if not settings.SENTRY_DSN:
         warn("SENTRY_DSN not set (optional but recommended).")
     else:
