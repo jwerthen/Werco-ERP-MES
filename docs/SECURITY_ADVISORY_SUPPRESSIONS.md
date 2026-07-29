@@ -17,7 +17,27 @@ justification for any gate that is not hard-blocking.
 - **Backend `pip-audit` is ADVISORY** on PRs (non-blocking,
   `continue-on-error: true`) and blocking in the same nightly workflow — see below.
 
-## Backend (`pip-audit`) — advisory, not blocking
+## Known open advisories (as of 2026-07-28)
+
+The first run of the new nightly `dependency-audit.yml` surfaced six backend
+advisories that were already present on `main` — invisible until now because
+`pip-audit` had only ever run as `continue-on-error`. **The nightly will stay red
+until these are addressed.** That is the gate working, not a misconfiguration.
+
+| Package | Pinned | Advisories | Fixed in |
+|---|---|---|---|
+| `pypdf` | 6.10.2 | GHSA-jm82-fx9c-mx94, CVE-2026-59935/59936/59937/59938 | 6.14.2 |
+| `ecdsa` (transitive) | 0.19.2 | PYSEC-2026-1325 | — |
+
+**`pypdf` is the one to prioritize.** This app parses attacker-supplied PDFs on
+the RFQ-package and laser-nest upload paths, so a PDF-parser advisory is
+directly reachable from untrusted input rather than theoretical.
+
+Bumping it is deliberately **not** bundled into the PR that added this workflow:
+6.10.2 → 6.14.2 crosses four minor versions and needs the nest-PDF extraction
+and onboarding-PDF generation exercised against it. Track it as its own change.
+
+## Backend (`pip-audit`) — advisory on PRs, blocking nightly
 
 The backend scan step runs `pip-audit -r requirements.txt -r requirements-dev.txt`
 (PyPA/OSV database). It is **scoped to this app's resolved dependency set** via
