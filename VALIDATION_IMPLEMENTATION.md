@@ -41,7 +41,8 @@ All schemas now have comprehensive validation:
   - Time validation (positive decimals)
 
 - **Users**: `backend/app/schemas/user.py`
-  - Password strength (12+ chars, upper, lower, number, special)
+  - Password strength (12+ chars + common-weak-substring blocklist; no character-class rules
+    as of 2026-07-29)
   - Name capitalization
   - Email and employee_id format validation
 
@@ -240,7 +241,7 @@ Backend validation errors return:
 2. **SQL Injection**: Handled by SQLAlchemy, UUID format validated
 3. **Injection Attacks**: SafeString validation blocks `< > { }`
 4. **File Upload**: Type, size, MIME validation
-5. **Password Strength**: Complex requirements enforced
+5. **Password Strength**: Minimum length + weak-password blocklist enforced
 6. **Audit Trail**: Validation errors logged
 
 ## AS9100D Compliance Features

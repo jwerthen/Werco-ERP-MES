@@ -131,7 +131,7 @@ Layered FastAPI app under `backend/app/`:
 - `jobs/` + `worker.py` — ARQ async jobs on Redis (email, MRP runs, long tasks). Enqueue from services; don't block request handlers.
 - `core/` — cross-cutting: `config.py` (settings), `security.py` (JWT/bcrypt), `cache.py`, `pagination.py`, `realtime.py`/`websocket.py`, `sanitization.py`.
 
-API style: REST, JSON, OpenAPI at `/docs`. JWT auth — 15-min access token, 7-day refresh, 24h absolute session cap.
+API style: REST, JSON, OpenAPI at `/docs`. JWT auth — 15-min access token, 7-day refresh, and a 7-day `SESSION_ABSOLUTE_TIMEOUT_HOURS` window that despite its name is an **idle** window, not a hard ceiling: `POST /auth/refresh` re-mints through `create_refresh_token`, which recomputes the `absolute_timeout` claim from now, so every refresh restarts it. Password policy is length + blocklist (12 chars, no common substring) with **no** character-class rules — NIST SP 800-63B 5.1.1.2; see `validate_password_strength`.
 
 ## Frontend architecture
 

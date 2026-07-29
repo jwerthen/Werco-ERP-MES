@@ -3760,15 +3760,22 @@ records, targets) require **Admin / Manager / Supervisor**.
 
 > **Password-strength policy — enforced server-side on every password-set path.** A password set
 > through `POST /users/` (create), `POST /users/{id}/reset-password`, or the self-service
-> `POST /users/change-password` must be **≥ 12 characters** and contain an **uppercase**, a
-> **lowercase**, a **number**, and a **special** character, and must not contain a common weak
-> substring (`password`, `123456`, `qwerty`, `admin`, `letmein`, `welcome`); a violation returns
-> **422**. The **same policy** — the shared `validate_password_strength` (`app/schemas/user.py`) —
+> `POST /users/change-password` must satisfy exactly **two** rules: it must be **≥ 12 characters**,
+> and it must not contain a **common weak substring** (case-insensitive) from the blocklist in
+> `_COMMON_PASSWORD_PATTERNS` — keyboard walks, perennial top-100 passwords, digit runs, and the
+> shop's own name (`werco`, `wercomfg`). A violation returns **422**; the blocklist message is
+> `"Password contains a common word or pattern that is too easy to guess"`. There are **no
+> character-class (composition) requirements** — the uppercase / lowercase / digit / special-character
+> rules were removed on 2026-07-29 per NIST SP 800-63B §5.1.1.2 (length + blocklist over composition),
+> and the blocklist was expanded from 6 entries to ~37 in the same change. A passphrase such as
+> `correct horse battery staple` is now accepted, where the old rules rejected it. The 12-character
+> minimum is unchanged and is additionally enforced as `Field(min_length=12)` on the request schemas.
+> The **same policy** — the shared `validate_password_strength` (`app/schemas/user.py`) —
 > also governs `POST /auth/register` (admin create), public self-registration
 > `POST /auth/register-public`, and the **first-admin `admin_password`** on the two company-creation
 > paths: the **unauthenticated** `POST /companies/register` (company self-registration) and
 > platform-admin `POST /platform/companies`. (`POST /companies/register` previously skipped the
-> common-substring check and `POST /platform/companies` had **no** complexity check at all — both now
+> common-substring check and `POST /platform/companies` had **no** strength check at all — both now
 > enforce the full policy, so no first-admin can be seeded with a weak password.) The user CSV import
 > (`POST /users/import-csv`) applies the same check to **user-supplied** passwords **per row** (a weak
 > password fails only that row, `reason` = `"Weak password: …"`); operator **auto-generated**

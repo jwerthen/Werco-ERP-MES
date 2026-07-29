@@ -58,7 +58,13 @@
 - [x] Role-based access control (7 roles: admin, manager, supervisor, operator, quality, shipping, viewer)
 - [x] Permission-based feature access
 - [x] JWT token authentication
-- [x] Session management with absolute timeout (24 hours)
+- [x] Session management with a configurable session timeout — ~~24 hours~~ **superseded 2026-07-29:
+  the `SESSION_ABSOLUTE_TIMEOUT_HOURS` default is now 168 hours (7 days), equal to the refresh-token
+  window.** Note also that this has never been an absolute ceiling on session life: `POST /auth/refresh`
+  re-mints the refresh token and recomputes the `absolute_timeout` claim from the current time, so
+  every refresh restarts the clock. It bounds an **idle** window — a continuously active user is not
+  forced to re-authenticate on any fixed schedule. This was equally true of the 24-hour value; the
+  prior wording overstated the control. Lowering the env var re-arms a tighter idle window.
 - [x] Account lockout after failed attempts
 - [x] Scoped single-endpoint display tokens for shop-floor TV wallboards (AC-3.1.2
   transaction/function limiting, A0.5): a `type="display"` JWT authenticates **only** the
@@ -751,10 +757,21 @@
 - [ ] **IA-3.5.3 - Multi-Factor Authentication** 🔴 CRITICAL
   - Need: MFA for all users accessing CUI
   - Effort: 2-3 weeks
-- [x] **IA-3.5.7 - Password Complexity** ✅ COMPLETE
-  - Implemented: Minimum 12 chars, plus at least one uppercase, lowercase, number, and special
-    char, and a common-weak-substring blocklist (`password`, `123456`, `qwerty`, `admin`,
-    `letmein`, `welcome`). A violation is rejected with HTTP 422.
+- [x] **IA-3.5.7 - Password Strength** ✅ IMPLEMENTED — **re-based 2026-07-29** (was titled
+  "Password Complexity")
+  - **Control re-based on length + blocklist per NIST SP 800-63B §5.1.1.2.** On 2026-07-29 the four
+    character-class rules (uppercase, lowercase, number, special char) were **removed** and the
+    common-weak-substring blocklist was **expanded from 6 entries to ~37** (keyboard walks, perennial
+    top-100 passwords, digit runs, and the shop's own name) in the same change. This is a
+    **deliberate, documented decision**, not a lapse: SP 800-63B recommends against composition rules
+    and for length plus a blocked-password check. The evidence here was concrete — the old rules
+    rejected `correct horse battery staple` (28 chars, high entropy) while accepting `Aa1!aaaaaaaa`
+    (12 chars, trivially guessable). **Auditor note:** SP 800-171 3.5.7 is worded around character
+    composition, so a C3PAO may score this control differently than SP 800-63B does. Flagged for
+    human / auditor sign-off rather than silently claimed as satisfied (see the Residual bullet).
+  - Implemented (current): minimum 12 characters, and no common weak substring from
+    `_COMMON_PASSWORD_PATTERNS` (`app/schemas/user.py`), matched case-insensitively. A violation is
+    rejected with HTTP 422. The 12-character minimum is unchanged by the re-basing.
   - Single source of truth: `validate_password_strength` in `app/schemas/user.py`, enforced
     server-side on **every** user- and first-admin-creation and password-change path —
     `POST /auth/register` (admin create), `POST /auth/register-public` (public self-registration),
@@ -1125,7 +1142,7 @@
 | Item | Effort | Owner | Status |
 |------|--------|-------|--------|
 | Multi-Factor Authentication (TOTP) | 2-3 weeks | | ⬜ Not Started |
-| Password Policy Enforcement | 1 week | | 🟡 Partial — complexity enforced server-side on all password-set paths (IA-3.5.7 ✅); history/expiration/min-age pending (IA-3.5.8/3.5.9) |
+| Password Policy Enforcement | 1 week | | 🟡 Partial — strength (length + blocklist, **no** composition rules as of 2026-07-29) enforced server-side on all password-set paths (IA-3.5.7 ✅, re-based per SP 800-63B §5.1.1.2); history/expiration/min-age pending (IA-3.5.8/3.5.9) |
 | Encryption at Rest | 2-4 weeks | | ⬜ Not Started |
 | System Security Plan (SSP) | 2-4 weeks | | ⬜ Not Started |
 
@@ -1176,15 +1193,16 @@ Frontend:
 
 ### Password Policy Implementation
 
-**Status:** the complexity portion is **implemented** — `validate_password_strength`
-(`app/schemas/user.py`, not `core/security.py`) enforces length + character classes + a
-common-weak-substring blocklist on every user-creation and password-change path (see IA-3.5.7
-above). Password history, expiration, and minimum age remain outstanding (the plan below).
+**Status:** the strength portion is **implemented** — `validate_password_strength`
+(`app/schemas/user.py`, not `core/security.py`) enforces length + a common-weak-substring
+blocklist on every user-creation and password-change path (see IA-3.5.7 above). The character-class
+requirements were removed on 2026-07-29 when the control was re-based on SP 800-63B §5.1.1.2.
+Password history, expiration, and minimum age remain outstanding (the plan below).
 
 ```
 Backend (app/schemas/user.py — validate_password_strength, DONE):
 - Minimum length: 12 characters
-- Require: uppercase, lowercase, number, special char
+- Blocklist: ~37 common weak substrings, case-insensitive (NO character-class rules)
 Remaining:
 - Password history: store last 12 hashes
 - Expiration: 90 days

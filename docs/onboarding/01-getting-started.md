@@ -153,8 +153,9 @@ The system keeps you signed in while you're working and refreshes your session q
 
 For security, though, your session won't last forever:
 
-- After a while of having the app open, the system signs you out automatically and asks you to sign in again.
-- The longest a single sign-in lasts is about **one day**. After that you'll always be asked to sign in fresh.
+- If you leave the app sitting untouched for about **15 minutes**, the system signs you out automatically and asks you to sign in again. This is the one you'll actually notice during a shift.
+- If you don't use the app at all for **7 days**, your sign-in goes stale and you'll have to sign in fresh next time.
+- As long as you keep using the app, it keeps your session going for you — there is no fixed daily re-login.
 - You may get a brief warning before you're signed out, so you can save your work.
 
 > Heads up: Never share your account or let someone else work under your sign-in. The system records who did what for audit and traceability — work done under your account is recorded as done by you. At a shared station, always sign out when you step away.
@@ -170,7 +171,7 @@ For security, though, your session won't last forever:
 | Forgot your password | Ask your administrator to reset it for you — that's the only way to get a new password today. |
 | Don't have an account yet | Your administrator creates accounts. Ask your supervisor or administrator to set you up. |
 | A screen you expected isn't in the menu | Your role may not include it. Check with your supervisor — this is usually normal. |
-| Suddenly asked to sign in again | Your session timed out (this is normal, up to about a day). Just sign in again. |
+| Suddenly asked to sign in again | Your session timed out — normally because the app sat untouched for about 15 minutes. This is normal. Just sign in again. |
 | Dashboard numbers look stale | Click the refresh button at the top of the Dashboard, or press **Ctrl + Shift + R**. |
 | Someone else's name is on your work | The previous person didn't sign out of the shared station. Sign them out (or sign in fresh) and tell your supervisor. |
 

@@ -822,8 +822,11 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 >
 > **Password-strength policy.** A password set on any of these paths — `POST /users/` (create),
 > `POST /users/{id}/reset-password`, and self-service `POST /users/change-password` — must satisfy
-> the server-side strength policy (≥ 12 chars; uppercase, lowercase, number, and special char; no
-> common weak substring), the **same policy** as `POST /auth/register`. The same policy also governs
+> the server-side strength policy (≥ 12 chars; and no common weak substring from the ~37-entry
+> blocklist in `app/schemas/user.py`), the **same policy** as `POST /auth/register`. There are **no
+> character-class requirements**: the uppercase / lowercase / number / special-char rules were removed
+> on 2026-07-29 in favor of length + blocklist per NIST SP 800-63B §5.1.1.2, and the blocklist was
+> expanded in the same change. The same policy also governs
 > the **first-admin `admin_password`** on the two company-creation paths — the unauthenticated
 > `POST /companies/register` (company self-registration) and platform-admin `POST /platform/companies`.
 > The user CSV import applies it per row to user-supplied passwords; operator auto-generated (badge)

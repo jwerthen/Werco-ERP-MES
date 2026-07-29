@@ -171,9 +171,20 @@ def _generated_email(employee_id: str, existing_emails: set[str]) -> str:
 
 
 def _generate_system_password() -> str:
-    """Generate a strong password for users authenticating by employee ID."""
-    token = secrets.token_urlsafe(18)
-    return f"Auto!{token}1aA"
+    """Generate a strong password for users authenticating by employee ID.
+
+    Validated rather than assumed compliant: the strength policy is length plus a
+    substring blocklist, and a random token can incidentally contain a blocklisted
+    substring. Regenerate until the value actually passes.
+    """
+    for _ in range(10):
+        candidate = f"Auto!{secrets.token_urlsafe(18)}1aA"
+        try:
+            return validate_password_strength(candidate)
+        except ValueError:
+            continue
+    # Unreachable in practice (each attempt fails with probability ~1e-5).
+    raise RuntimeError("Could not generate a policy-compliant system password")
 
 
 def _normalized_phone_or_400(raw: Optional[str]) -> Optional[str]:

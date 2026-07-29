@@ -566,7 +566,11 @@ CORS_ORIGINS=https://frontend-url.com
 REFRESH_TOKEN_SECRET_KEY=<64-char-random-string>
 ACCESS_TOKEN_EXPIRE_MINUTES=15
 REFRESH_TOKEN_EXPIRE_DAYS=7
-SESSION_ABSOLUTE_TIMEOUT_HOURS=24
+# Session ceiling stamped into each refresh token. Because /auth/refresh recomputes
+# the claim on every rotation, this bounds an IDLE window, not total session life.
+# Matches the code default (168h = the 7-day refresh window); lower it to re-arm a
+# tighter cap. See docs/ENVIRONMENT_VARIABLES.md#security
+SESSION_ABSOLUTE_TIMEOUT_HOURS=168
 # Host-header allowlist; default "*" disables validation. Must include the
 # health-check probe hosts (healthcheck.railway.app, localhost) or the deploy
 # fails its health check. See docs/ENVIRONMENT_VARIABLES.md#trusted-hosts-http-host-header

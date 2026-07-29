@@ -174,7 +174,7 @@ export default function CompanyRegister() {
               label="Password"
               className="space-y-2"
               labelClassName="block text-sm font-medium text-slate-300"
-              help="Min 12 chars, uppercase, lowercase, number, special char"
+              help="At least 12 characters. A passphrase of a few words works well. No common words or patterns."
             >
               {(field) => (
                 <input
