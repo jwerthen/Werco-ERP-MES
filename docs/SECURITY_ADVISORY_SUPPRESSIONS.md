@@ -8,11 +8,14 @@ justification for any gate that is not hard-blocking.
 
 - Prefer fixing over tolerating: apply any patch/minor upgrade that clears an
   advisory before accepting it.
-- **Frontend `npm audit` is a HARD gate** (must pass) — run through the
-  allowlist-aware wrapper `frontend/scripts/audit-check.mjs`. Any high/critical
-  advisory fails CI unless it carries a documented not-applicable entry.
-- **Backend `pip-audit` is ADVISORY** (non-blocking, `continue-on-error: true`)
-  — see below.
+- **Frontend `npm audit` is ADVISORY on PRs, BLOCKING nightly** (changed
+  2026-07-28) — run through the allowlist-aware wrapper
+  `frontend/scripts/audit-check.mjs`. The same command runs in two places:
+  `continue-on-error` inside ci-cd.yml's `Security Scanning` job, and
+  hard-failing in `.github/workflows/dependency-audit.yml` on a nightly
+  schedule. See "Why the frontend gate moved" below.
+- **Backend `pip-audit` is ADVISORY** on PRs (non-blocking,
+  `continue-on-error: true`) and blocking in the same nightly workflow — see below.
 
 ## Backend (`pip-audit`) — advisory, not blocking
 
@@ -81,15 +84,35 @@ signs/verifies JWTs with **HS256 (HMAC) exclusively** (`app/core/config.py`
 is never used. Revisit only if we adopt an EC JWT algorithm or remove
 `python-jose`.
 
-## Frontend (`npm run audit:ci`) — hard gate, allowlist-aware
+## Frontend (`npm run audit:ci`) — allowlist-aware, advisory on PRs
 
 The CI step `Run npm audit (Frontend)` runs `npm run audit:ci` →
 `node scripts/audit-check.mjs` (was: a bare `npm audit --audit-level=high`).
 
-**It is still a hard gate.** Any **high** or **critical** advisory fails the job
-(exit 1) unless its GHSA id is listed in `frontend/scripts/audit-allowlist.json`.
-The wrapper exists so that one documented, non-applicable advisory cannot
-red-line every unrelated PR, while a genuinely new high/critical still blocks.
+**The command still hard-fails** — any **high** or **critical** advisory exits 1
+unless its GHSA id is listed in `frontend/scripts/audit-allowlist.json`. What
+changed on 2026-07-28 is *where that failure blocks*.
+
+### Why the frontend gate moved
+
+The `Security Scanning` job sits in the `needs` chain of `deploy-production`.
+While this step was hard-blocking there, a newly-published advisory could
+red-line unrelated PRs **and** block production deploys with zero code change.
+That happened twice (axios, 2026-07-20, PR #138; react-router). The advisory
+database is a daily-moving target and does not belong on the critical path of
+shipping unrelated work — the same reasoning that already made `pip-audit`
+advisory.
+
+So the gate moved rather than disappeared:
+
+| Where | Behavior |
+|---|---|
+| `ci-cd.yml` → `Security Scanning` | runs, reports, `continue-on-error: true` — never blocks a PR or a deploy |
+| `dependency-audit.yml` (nightly 08:00 UTC + manual + on audit-tooling PRs) | same command, **hard-fails** |
+
+A red nightly run is the real signal: triage it by upgrading the dependency or
+adding a justified allowlist entry. To restore PR-blocking behavior, delete
+`continue-on-error` from the ci-cd.yml step.
 
 Properties worth knowing:
 

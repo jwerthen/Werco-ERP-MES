@@ -1,0 +1,73 @@
+# Dependency Audit — nightly supply-chain check.
+#
+# WHY THIS EXISTS (2026-07-28): the frontend `npm audit` gate used to be a hard,
+# blocking step inside ci-cd.yml's security-scan job. That job is in the `needs`
+# chain of deploy-production, so a newly-published advisory could red-line
+# unrelated PRs and block prod deploys with zero code change — twice in practice
+# (axios, 2026-07-20, PR #138; react-router). The advisory database moves daily
+# and does not belong on the critical path of shipping unrelated work.
+#
+# So the gate MOVED here rather than disappearing: `npm run audit:ci` is still
+# hard-failing (exit 1 on any un-allowlisted high/critical), it just fails on a
+# schedule instead of on someone's unrelated PR. A red run here is a real signal
+# and should be triaged — either fix the dependency or add a justified entry to
+# frontend/scripts/audit-allowlist.json (see docs/SECURITY_ADVISORY_SUPPRESSIONS.md).
+#
+# pip-audit runs here too, and unlike its advisory copy in ci-cd.yml it is
+# blocking in this workflow, for the same reason.
+#
+# This workflow is NOT a required status check and never gates a PR or a deploy.
+
+name: Dependency Audit
+
+on:
+  schedule:
+    # Nightly at 08:00 UTC (2am CST / 3am CDT) — an hour before the E2E suite.
+    - cron: '0 8 * * *'
+  workflow_dispatch:
+  pull_request:
+    # Re-run when the audit tooling or its allowlist changes, so a change to the
+    # gate itself is exercised before it merges.
+    paths:
+      - 'frontend/scripts/audit-check.mjs'
+      - 'frontend/scripts/audit-allowlist.json'
+      - 'frontend/package-lock.json'
+      - 'backend/requirements*.txt'
+      - '.github/workflows/dependency-audit.yml'
+
+jobs:
+  npm-audit:
+    name: npm audit (Frontend)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - name: Run npm audit
+        working-directory: ./frontend
+        # Needs no `npm ci` — `npm audit` resolves the tree from
+        # package-lock.json alone, so the checkout is sufficient.
+        run: npm run audit:ci
+
+  pip-audit:
+    name: pip-audit (Backend)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Run pip-audit
+        working-directory: ./backend
+        # Scans the APP's resolved dependency tree (`-r` requirements files),
+        # not the runner's ambient system Python.
+        run: |
+          pip install pip-audit==2.10.0
+          pip-audit -r requirements.txt -r requirements-dev.txt
