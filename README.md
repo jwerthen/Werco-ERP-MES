@@ -1,6 +1,6 @@
 # Werco ERP-MES
 
-A custom **Enterprise Resource Planning (ERP) + Manufacturing Execution System (MES)** for precision manufacturing (sheet metal, CNC, fabrication, welding, paint/powder coat, assembly, inspection). Built from the ground up for **AS9100D, ISO 9001, and CMMC Level 2** — in this system, audit trails, lot/serial traceability, multi-tenant isolation, and role-based access control are correctness requirements, not optional features. A query that returns another tenant's rows, or a state change that isn't recorded in the tamper-evident audit log, is treated as a bug.
+A custom **Enterprise Resource Planning (ERP) + Manufacturing Execution System (MES)** for precision manufacturing (sheet metal, CNC, fabrication, welding, paint/powder coat, assembly, inspection). Built from the ground up for **AS9100D and ISO 9001** on a secure-by-default multi-tenant foundation — in this system, audit trails, lot/serial traceability, multi-tenant isolation, and role-based access control are correctness requirements, not optional features. A query that returns another tenant's rows, or a state change that isn't recorded in the tamper-evident audit log, is treated as a bug.
 
 ## What it does
 
@@ -174,7 +174,7 @@ See **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**, **[docs/DEPLOYMENT_RUNBOOK.md]
 | [docs/AI_ALWAYS_ON.md](docs/AI_ALWAYS_ON.md) | Always-on sensors, outcome capture, Action Inbox learning loop |
 | [docs/AI_QUOTING_AGENT_RUNBOOK.md](docs/AI_QUOTING_AGENT_RUNBOOK.md) | Operating the Anthropic-powered RFQ/quoting feature |
 | [docs/IMPLEMENTATION_NOTES_AI_QUOTING_AGENT.md](docs/IMPLEMENTATION_NOTES_AI_QUOTING_AGENT.md) | AI quoting design/implementation notes |
-| [docs/CMMC_LEVEL_2_COMPLIANCE.md](docs/CMMC_LEVEL_2_COMPLIANCE.md) | CMMC L2 compliance posture |
+| [docs/CMMC_LEVEL_2_COMPLIANCE.md](docs/CMMC_LEVEL_2_COMPLIANCE.md) | CMMC L2 roadmap — **frozen 2026-07-28**, historical record only |
 | [docs/AUDIT_LOG_RETENTION_RUNBOOK.md](docs/AUDIT_LOG_RETENTION_RUNBOOK.md) | Audit-log retention operations |
 | [docs/DATABASE_BACKUP.md](docs/DATABASE_BACKUP.md) | Backup and restore procedures |
 | [docs/onboarding/](docs/onboarding/README.md) | **Employee onboarding & training** — plain-language, role-by-role guides (Getting Started, Operator/Shop-Floor, Warehouse, Planner/Supervisor/Manager, Admin/IT) with screenshots and printable PDF handouts |
@@ -186,7 +186,7 @@ See **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**, **[docs/DEPLOYMENT_RUNBOOK.md]
 
 ## Compliance
 
-Built for **AS9100D**, **ISO 9001**, and **CMMC Level 2**. The mechanisms below are enforced in code as correctness invariants:
+Built for **AS9100D** and **ISO 9001**, on a secure-by-default multi-tenant foundation. The mechanisms below are enforced in code as correctness invariants:
 
 - **Tenant isolation** — `company_id` scoping on all domain data; cross-tenant reads are defects.
 - **Tamper-evident audit log** — append-only SHA-256 hash chain over create/update/delete/status-change events; never backfilled or edited out of band. The interactive user-management endpoints (`app/api/endpoints/users.py` — create/update/activate/deactivate/role-change/password-reset) and work-center **update/deactivate** (`PUT`/`DELETE /work-centers/{id}` — deactivation also **refuses with a 409** while live operations still reference the machine) now write audit entries. **Remaining coverage gap:** interactive work-center **create** (`POST /work-centers/`) and the **status dropdown** (`POST /work-centers/{id}/status`) still emit **no** audit entries; do not represent those two actions as audited until they route through `AuditService`. (The bulk-import endpoints in both routers — `/users/import-csv`, `/work-centers/import-csv` — **do** audit every created row, tagged `source = "import"`.)
@@ -194,7 +194,7 @@ Built for **AS9100D**, **ISO 9001**, and **CMMC Level 2**. The mechanisms below 
 - **Traceability** — part/BOM revision control, critical-characteristic flags, and lot/serial genealogy; shipped data is preserved via new revisions rather than mutation.
 - **RBAC + access control** — server-side role gating, account lockout (5 failed password attempts → 30-min lock, email/password login path), JWT session caps.
 
-See **[docs/CMMC_LEVEL_2_COMPLIANCE.md](docs/CMMC_LEVEL_2_COMPLIANCE.md)**.
+**CMMC Level 2 is not being pursued at this time** (deprioritized 2026-07-28). The controls above are unaffected — they protect tenant data and the quality system on their own merits, independent of any certification. See **[docs/CMMC_LEVEL_2_COMPLIANCE.md](docs/CMMC_LEVEL_2_COMPLIANCE.md)** for the frozen historical roadmap.
 
 ## Project structure
 
@@ -235,4 +235,4 @@ Werco-ERP-MES/
 For questions or issues, contact the Werco IT department.
 
 ---
-Built for Werco Manufacturing — AS9100D / ISO 9001 / CMMC Level 2.
+Built for Werco Manufacturing — AS9100D / ISO 9001.
