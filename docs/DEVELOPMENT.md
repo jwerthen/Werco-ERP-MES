@@ -162,7 +162,44 @@ cd frontend
 npm run prepare
 cd ..
 pre-commit install
+
+# Run every hook against the whole tree (from the REPO ROOT, not backend/)
+pre-commit run --all-files
 ```
+
+The hooks are deliberately **validity and secrets only** — `check-yaml`,
+`check-toml`, `check-json`, `check-added-large-files`, `check-merge-conflict`,
+and `detect-private-key`. The whole run takes well under a second and modifies
+nothing on a clean tree.
+
+**There are intentionally no lint/format hooks.** Linting and formatting are
+enforced in CI, blocking, at the pinned versions and from the correct working
+directory — run them yourself from `backend/` (see CLAUDE.md → Commands).
+
+> **History worth knowing (fixed 2026-07-28).** `.pre-commit-config.yaml` was
+> invalid YAML from its introduction — `exclude:^.env.example$` was missing the
+> space after the colon — so `pre-commit` could not load the config and *every*
+> hook was silently dead, including `detect-private-key`. `check-yaml` could not
+> catch it, because check-yaml is configured by the very file that failed to
+> parse. `backend/tests/test_precommit_config.py` now guards against a
+> recurrence, and CI runs `detect-private-key` directly in the `Secret Scanning`
+> job so the control no longer depends on each developer having run
+> `pre-commit install`.
+>
+> Reviving the config also revealed that its black/isort/flake8/bandit hooks
+> could never have worked: they pinned black 23 / isort 5 / flake8 7.0 against
+> the repo's black 26 / isort 7 / flake8 7.3, flake8 never found `backend/.flake8`
+> (pre-commit runs from the repo root), `--extend-ignore=E203,W503` split on its
+> comma so `W503` was passed as a filename, black/isort would have rewritten 35
+> and 49 **applied** Alembic migrations respectively (their exclude settings do
+> not apply to explicitly-passed files), and bandit pointed at a nonexistent
+> `backend/pyproject.toml`. They were removed rather than repaired — CI already
+> enforces all of them correctly.
+>
+> Scope honesty: `detect-private-key` finds PRIVATE KEY blocks, not API tokens
+> or passwords, and Trivy's non-blocking fs secret scan covers only `backend/`
+> and `frontend/`. Broader secret scanning (GitHub secret scanning or gitleaks)
+> remains an open decision.
 
 ## Testing
 

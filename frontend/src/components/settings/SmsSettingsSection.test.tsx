@@ -18,7 +18,7 @@
  */
 
 import React from 'react';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import SmsSettingsSection from './SmsSettingsSection';
 import { ToastProvider } from '../ui/Toast';
@@ -483,11 +483,19 @@ describe('SmsSettingsSection — test send', () => {
   });
 });
 
-describe('SmsSettingsSection — CUI content rule', () => {
-  it('tells the user SMS bodies are terse and carry no record detail', async () => {
+describe('SmsSettingsSection — content rule', () => {
+  // The copy must match what sms_content.build_sms_body actually does. It was
+  // narrowly relaxed on 2026-07-29 to allow one closed-vocabulary classifier, so
+  // the promise now names the exclusions that still hold rather than claiming the
+  // body carries nothing but the record number.
+  it('promises the exclusions the SMS builder actually enforces', async () => {
     renderSection();
 
     const note = await screen.findByText(/text alerts are opt-in/i);
-    expect(within(note).getByText(/never customer names, part details, or quantities/i)).toBeInTheDocument();
+    // The surviving guarantees, each enforced by safe_detail + the field allowlist.
+    expect(note).toHaveTextContent(/never customer names, part details, quantities/i);
+    expect(note).toHaveTextContent(/anything an operator typed/i);
+    // The reason the SMS rule stayed tight while the email rule relaxed.
+    expect(note).toHaveTextContent(/locked phone screen/i);
   });
 });

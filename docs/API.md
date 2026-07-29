@@ -3760,15 +3760,22 @@ records, targets) require **Admin / Manager / Supervisor**.
 
 > **Password-strength policy — enforced server-side on every password-set path.** A password set
 > through `POST /users/` (create), `POST /users/{id}/reset-password`, or the self-service
-> `POST /users/change-password` must be **≥ 12 characters** and contain an **uppercase**, a
-> **lowercase**, a **number**, and a **special** character, and must not contain a common weak
-> substring (`password`, `123456`, `qwerty`, `admin`, `letmein`, `welcome`); a violation returns
-> **422**. The **same policy** — the shared `validate_password_strength` (`app/schemas/user.py`) —
+> `POST /users/change-password` must satisfy exactly **two** rules: it must be **≥ 12 characters**,
+> and it must not contain a **common weak substring** (case-insensitive) from the blocklist in
+> `_COMMON_PASSWORD_PATTERNS` — keyboard walks, perennial top-100 passwords, digit runs, and the
+> shop's own name (`werco`, `wercomfg`). A violation returns **422**; the blocklist message is
+> `"Password contains a common word or pattern that is too easy to guess"`. There are **no
+> character-class (composition) requirements** — the uppercase / lowercase / digit / special-character
+> rules were removed on 2026-07-29 per NIST SP 800-63B §5.1.1.2 (length + blocklist over composition),
+> and the blocklist was expanded from 6 entries to ~37 in the same change. A passphrase such as
+> `correct horse battery staple` is now accepted, where the old rules rejected it. The 12-character
+> minimum is unchanged and is additionally enforced as `Field(min_length=12)` on the request schemas.
+> The **same policy** — the shared `validate_password_strength` (`app/schemas/user.py`) —
 > also governs `POST /auth/register` (admin create), public self-registration
 > `POST /auth/register-public`, and the **first-admin `admin_password`** on the two company-creation
 > paths: the **unauthenticated** `POST /companies/register` (company self-registration) and
 > platform-admin `POST /platform/companies`. (`POST /companies/register` previously skipped the
-> common-substring check and `POST /platform/companies` had **no** complexity check at all — both now
+> common-substring check and `POST /platform/companies` had **no** strength check at all — both now
 > enforce the full policy, so no first-admin can be seeded with a weak password.) The user CSV import
 > (`POST /users/import-csv`) applies the same check to **user-supplied** passwords **per row** (a weak
 > password fails only that row, `reason` = `"Weak password: …"`); operator **auto-generated**
@@ -4141,7 +4148,7 @@ their own inbox).
 >       "event_key": "wo.blocker_created",
 >       "severity": "critical",
 >       "title": "Work order blocked / on hold: WO-1042",
->       "body": "A work order or operation was placed on hold or blocked.",
+>       "body": "A work order or operation was placed on hold or blocked.\n\nCategory: machine_down | Source: kiosk",
 >       "link": "/work-orders/1042",
 >       "related_type": "work_order",
 >       "related_id": 1042,
@@ -4157,8 +4164,18 @@ their own inbox).
 > }
 > ```
 > `event_key` is the catalog key (see `GET /notifications/catalog`); `link` is a **relative** SPA
-> route the UI deep-links to; timestamps are UTC `Z` (display Central). Content is CUI-safe:
-> record identifier + event only — no part descriptions, customer names, or quantities.
+> route the UI deep-links to; timestamps are UTC `Z` (display Central).
+>
+> **Content (revised 2026-07-29, after CMMC L2 was descoped):** `title` is the catalog label plus
+> the record identifier. `body` is the catalog description, then a blank line, then a detail line
+> composed from a curated payload allowlist — statuses and transitions, the `quantity_*` family,
+> priorities, day counts, disposition/category/source/inspection method, and `reason` — pipe-joined,
+> each value truncated at 120 chars. When the payload carries none of those keys the body is the
+> description alone. **Part numbers and customer names are still absent**: the dispatcher reads the
+> event payload only and never re-queries to resolve `part_id` into a part number (a scope/N+1
+> decision, not a security boundary). See
+> [docs/NOTIFICATIONS.md → Content rules](NOTIFICATIONS.md#content-rules-compliance) for the
+> boundary decision of record.
 >
 > **`GET /notifications/catalog`** returns one object per catalog entry
 > (`event_key`, `label`, `description`, `category`, `severity`, `default_channels[]`,

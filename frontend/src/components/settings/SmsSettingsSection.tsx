@@ -383,9 +383,10 @@ export default function SmsSettingsSection() {
           <h2 className="text-sm font-semibold uppercase tracking-wide text-fd-ink">Text-message alerts</h2>
         </div>
         <p className="mb-3 text-xs text-fd-mute">
-          Text alerts are opt-in and available only for the most urgent events. Messages are deliberately terse —
-          the record number and what happened, never customer names, part details, or quantities — so open the app
-          for the detail. Your in-app and email notifications are unaffected by these switches.
+          Text alerts are opt-in and available only for the most urgent events. Messages stay deliberately terse
+          because a text shows on a locked phone screen — the record number, what happened, and sometimes a
+          one-word category, but never customer names, part details, quantities, or anything an operator typed.
+          Open the app for the detail. Your in-app and email notifications are unaffected by these switches.
         </p>
 
         {!hasPhone && (

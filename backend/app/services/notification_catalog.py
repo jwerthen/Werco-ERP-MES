@@ -945,7 +945,10 @@ _ENTRIES: List[CatalogEntry] = [
         severity="info",
         default_channels=frozenset({CHANNEL_IN_APP, CHANNEL_EMAIL}),
         source_event_types=(),  # not outbox-driven: dispatched directly via dispatch_notification_direct_job
-        #                          from visitor_log_service._notify_host_best_effort (host gets in-app + CUI-safe email)
+        #                          from visitor_log_service._notify_host_best_effort. As of 2026-07-29 the host
+        #                          gets an in-app row + an email that NAMES the visitor (company, purpose,
+        #                          Central-formatted arrival time) and renders the visitor_check_in template.
+        #                          The description below is the static preferences-matrix label, not the body.
     ),
 ]
 

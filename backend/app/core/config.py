@@ -72,7 +72,22 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15  # Short-lived access tokens
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7  # Refresh tokens valid for 7 days
-    SESSION_ABSOLUTE_TIMEOUT_HOURS: int = 24  # Force re-login after 24 hours regardless
+    # Baked into each refresh token as an `absolute_timeout` claim at mint time and enforced
+    # in verify_refresh_token. NOT a hard ceiling on total session life, despite the name:
+    # POST /auth/refresh re-mints the refresh token through create_refresh_token, which takes
+    # no parameter to carry the original claim forward and recomputes it from utcnow()
+    # (security.py:66). Every refresh therefore RESETS the clock, so what this actually bounds
+    # is an IDLE window — a user who touches the app once per window is never forced to
+    # re-authenticate. That has been true since the setting was introduced and is unchanged
+    # here. A change to this value takes effect on the next mint (refresh or login).
+    #
+    # Relaxed 24h -> 168h (7 days) on 2026-07-29. The 24h value was an IA-family
+    # (NIST SP 800-171 3.1.11) session-termination rule carried over from the CMMC L2
+    # effort that is no longer being pursued; its practical effect was forcing every
+    # shop user idle for a day to re-authenticate. At 168h it equals REFRESH_TOKEN_EXPIRE_DAYS,
+    # so the refresh window itself becomes the binding limit. The mechanism is kept,
+    # not deleted: lower this env var to re-arm a tighter idle window without a code change.
+    SESSION_ABSOLUTE_TIMEOUT_HOURS: int = 168  # Idle window (see above); 168h = the 7-day refresh window
 
     # Audit-log hash chain. When True (the default and the historical behavior) every
     # audited write takes ONE GLOBAL transaction-scoped Postgres advisory lock, held

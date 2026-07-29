@@ -112,8 +112,6 @@ const emailSchema = z
   .email('Enter a valid email address')
   .max(255, 'Email must be at most 255 characters');
 
-const passwordSpecialCharRegex = /[!@#$%^&*()_+=\x5B\x5D{};':"\\|,.<>\x2F?-]/;
-
 // ============================================================================
 // PART SCHEMA
 // ============================================================================
@@ -210,19 +208,29 @@ const lastNameSchema = z.string()
   .transform((v: string) => v.trim())
   .transform((v: string) => v.charAt(0).toUpperCase() + v.slice(1));
 
-const commonPatterns = ['password', '123456', 'qwerty', 'admin', 'letmein', 'welcome'];
+// Mirrors _COMMON_PASSWORD_PATTERNS in backend/app/schemas/user.py. Keep the two in
+// sync: the server is the enforcement, this is only so the UI refuses early with the
+// same message rather than surfacing a 422 the user cannot predict.
+const commonPatterns = [
+  'password', '123456', 'qwerty', 'admin', 'letmein', 'welcome',
+  'qwertyuiop', 'asdfgh', 'zxcvbn', '1qaz', '1q2w3e', 'qazwsx',
+  'iloveyou', 'abc123', 'monkey', 'dragon', 'sunshine', 'princess',
+  'football', 'baseball', 'trustno1', 'shadow', 'master', 'superman',
+  'starwars', 'whatever', 'freedom', 'passw0rd', 'p@ssw0rd', 'login',
+  '111111', '000000', '121212', '654321', '112233',
+  'werco', 'wercomfg',
+];
 
+// Length + blocklist only. The four character-class rules were dropped on 2026-07-29
+// to match the server (NIST SP 800-63B 5.1.1.2 — length and a blocklist instead of
+// composition). Do not re-add .regex() class checks here without changing the server.
 const passwordStrengthSchema = z
   .string()
   .min(12, 'Password must be at least 12 characters')
   .max(128, 'Password must be at most 128 characters')
-  .regex(/[A-Z]/, 'Password must contain at least one uppercase letter')
-  .regex(/[a-z]/, 'Password must contain at least one lowercase letter')
-  .regex(/[0-9]/, 'Password must contain at least one number')
-  .regex(passwordSpecialCharRegex, 'Password must contain at least one special character')
   .refine(
     (val) => !commonPatterns.some(pattern => val.toLowerCase().includes(pattern)),
-    'Password contains a common pattern that is not allowed'
+    'Password contains a common word or pattern that is too easy to guess'
   );
 
 // Password strength calculator for UI feedback
@@ -232,13 +240,14 @@ export function calculatePasswordStrength(password: string): {
   color: string;
   requirements: { met: boolean; label: string }[];
 } {
+  // The first two are the enforced rules (see passwordStrengthSchema). The length
+  // tiers below them are advisory strength feedback only — a 12-character password
+  // is accepted, it just does not score "Strong".
   const requirements = [
     { met: password.length >= 12, label: 'At least 12 characters' },
-    { met: /[A-Z]/.test(password), label: 'Uppercase letter' },
-    { met: /[a-z]/.test(password), label: 'Lowercase letter' },
-    { met: /[0-9]/.test(password), label: 'Number' },
-    { met: passwordSpecialCharRegex.test(password), label: 'Special character' },
-    { met: !commonPatterns.some(p => password.toLowerCase().includes(p)), label: 'No common patterns' },
+    { met: !commonPatterns.some(p => password.toLowerCase().includes(p)), label: 'No common words or patterns' },
+    { met: password.length >= 16, label: 'At least 16 characters (stronger)' },
+    { met: password.length >= 20, label: 'At least 20 characters (strongest)' },
   ];
 
   const metCount = requirements.filter(r => r.met).length;

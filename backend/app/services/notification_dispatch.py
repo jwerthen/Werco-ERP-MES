@@ -17,10 +17,21 @@ Compliance (``NOTIFICATIONS_PLAN.md`` §8, ``PR1_DESIGN_SPEC.md`` §C/§D/§K):
 * the acting user is never notified of their own action (actor exclusion);
 * preferences are resolved in memory with NO row auto-create (§9.8);
 * mandatory-channel events force their catalog-named channel on regardless of prefs;
-* the SMS leg (§3.4) sends only CUI-safe bodies built by ``sms_content.build_sms_body``
-  from the catalog label + a sanitized record identifier — never the caller-composed
-  title/body — and only for opted-in, SMS-eligible events to users with a phone on file;
-  the ``allow_sms_egress`` kill switch is enforced fail-closed in ``sms_service``.
+* the SMS leg (§3.4) sends only bodies built by ``sms_content.build_sms_body`` from the
+  catalog label + a sanitized record identifier + at most one vetted closed-vocabulary
+  classifier — never the caller-composed title/body — and only for opted-in, SMS-eligible
+  events to users with a phone on file; the ``allow_sms_egress`` kill switch is enforced
+  fail-closed in ``sms_service``.
+
+Content rules (revised 2026-07-29, after CMMC L2 was descoped — the boundary decision of
+record is ``docs/NOTIFICATIONS.md`` §11.1; read it before widening either allowlist):
+* EMAIL/in-app bodies carry the catalog description plus a detail line composed from the
+  ``_DETAIL_KEYS`` payload allowlist (statuses, quantities, day counts, short reasons).
+  Composition reads the PAYLOAD only — no DB re-query — so part numbers and customer names
+  stay absent. That is a scope/N+1 decision, not a security boundary.
+* SMS is relaxed far less, because an SMS renders on a locked screen: one classifier from
+  the ``_SMS_DETAIL_KEYS`` FIELD allowlist, vetted again by ``safe_detail`` as a VALUE.
+  Two fences, both required. ``reason`` is in the email allowlist and NOT the SMS one.
 
 Runs only in the ARQ worker (a running event loop always exists), so emails/SMS are
 enqueued with ``await enqueue_job(...)``; never ``enqueue_job_best_effort`` (which
@@ -77,9 +88,52 @@ _IDENTIFIER_KEYS = (
     "blocker_id",
 )
 
+# Payload keys whose value may appear as the SMS classifier. This is the FIRST of
+# two fences (``sms_content.safe_detail`` is the second): it decides which FIELD is
+# eligible, so a field carrying operator-typed text can never be considered at all.
+# Every key here must hold a str-backed ENUM value, never free text -- deliberately
+# excluding "title", "note", "reason", "scrap_reason", "defect_type" and "step_label",
+# all of which are operator-typed and routinely contain customer and part detail.
+_SMS_DETAIL_KEYS = (
+    "category",
+    "planned_type",
+    "source",
+)
+
+# Payload keys allowed into the EMAIL detail line, with their display labels. Email
+# is a mailbox rather than a lock screen, so this is broader than the SMS allowlist
+# (quantities and short reasons are permitted -- see the boundary decision recorded
+# in docs/NOTIFICATIONS.md section 11.1). It is still an allowlist rather than "dump
+# the payload": that keeps a future emit site from silently widening what is mailed.
+_DETAIL_KEYS = (
+    ("status", "Status"),
+    ("old_status", "From"),
+    ("new_status", "To"),
+    ("quantity_complete", "Qty complete"),
+    ("quantity_scrapped", "Qty scrapped"),
+    ("quantity_affected", "Qty affected"),
+    ("quantity_received", "Qty received"),
+    ("quantity_accepted", "Qty accepted"),
+    ("quantity_rejected", "Qty rejected"),
+    ("old_priority", "Priority was"),
+    ("new_priority", "Priority now"),
+    ("days_late", "Days late"),
+    ("days_until_expiry", "Days to expiry"),
+    ("disposition", "Disposition"),
+    ("category", "Category"),
+    ("source", "Source"),
+    ("inspection_method", "Inspection"),
+    ("reason", "Reason"),
+)
+
+# Detail values are truncated so a long operator-typed reason cannot turn an email
+# subject line into a wall of text. Email is far more permissive than SMS, but not
+# unbounded.
+_EMAIL_DETAIL_VALUE_MAX = 120
+
 
 # ---------------------------------------------------------------------------
-# Content + link builders (CUI-safe: identifiers + event only, §11.1)
+# Content + link builders (identifier + event + allowlisted payload detail, §11.1)
 # ---------------------------------------------------------------------------
 
 
@@ -91,13 +145,60 @@ def _payload_identifier(payload: Dict) -> Optional[str]:
     return None
 
 
+def _payload_sms_detail(payload: Dict) -> Optional[str]:
+    """First fence for the SMS classifier: pick the first allowlisted ENUM field.
+
+    ``sms_content.safe_detail`` is the second fence and rejects the value if it is
+    not a single enum-shaped token. Both are required.
+    """
+    for key in _SMS_DETAIL_KEYS:
+        value = payload.get(key)
+        if value:
+            return str(value)
+    return None
+
+
+def _payload_detail_line(payload: Dict) -> Optional[str]:
+    """Compose the email detail line from the ``_DETAIL_KEYS`` allowlist.
+
+    Returns e.g. ``"Qty complete: 40 | Qty scrapped: 2 | Reason: material"`` or
+    ``None`` when the payload carries none of the allowlisted keys.
+    """
+    parts = []
+    for key, label in _DETAIL_KEYS:
+        value = payload.get(key)
+        if value is None or value == "":
+            continue
+        text = " ".join(str(value).split())
+        if len(text) > _EMAIL_DETAIL_VALUE_MAX:
+            text = text[: _EMAIL_DETAIL_VALUE_MAX - 3].rstrip() + "..."
+        parts.append(f"{label}: {text}")
+    return " | ".join(parts) if parts else None
+
+
 def _content_for_event(entry: CatalogEntry, event) -> tuple[str, str]:
-    """Title/body for an outbox event. Record identifier + catalog label only — no
-    CUI field detail (no part descriptions, customer names, or quantities)."""
+    """Title/body for an outbox event.
+
+    Title is the catalog label plus the record identifier. Body is the catalog
+    description plus a detail line composed from the ``_DETAIL_KEYS`` payload
+    allowlist -- quantities, statuses, transitions and short reasons, so the email
+    is triageable without logging in (boundary decision of record:
+    docs/NOTIFICATIONS.md section 11.1, 2026-07-29).
+
+    Reads the PAYLOAD only. The dispatcher deliberately does not query the database
+    to resolve ``part_id`` into a part number, so part numbers and customer names
+    stay absent -- that is a scope/N+1 decision, not a security boundary.
+
+    ``entry.description`` stays a static string because it is also served to the
+    preferences matrix by ``GET /notifications/catalog``; the composition happens
+    here instead of mutating the catalog.
+    """
     payload = event.event_payload or {}
     identifier = _payload_identifier(payload)
     title = f"{entry.label}: {identifier}" if identifier else entry.label
-    return title, entry.description
+    detail = _payload_detail_line(payload)
+    body = f"{entry.description}\n\n{detail}" if detail else entry.description
+    return title, body
 
 
 def _link_for_event(event) -> Optional[str]:
@@ -244,6 +345,7 @@ async def _fan_out(
     template: Optional[str],
     context: Optional[Dict],
     sms_identifier: Optional[str] = None,
+    sms_detail: Optional[str] = None,
 ) -> int:
     """Fan out to every recipient/channel. Adds rows + enqueues emails; does NOT commit.
 
@@ -346,6 +448,7 @@ async def _fan_out(
                     related_id=related_id,
                     title=title,
                     sms_identifier=sms_identifier,
+                    sms_detail=sms_detail,
                     in_app_id=in_app_id,
                 )
 
@@ -380,14 +483,21 @@ async def _dispatch_sms(
     related_id: Optional[int],
     title: Optional[str],
     sms_identifier: Optional[str],
+    sms_detail: Optional[str] = None,
     in_app_id: Optional[int],
 ) -> None:
     """Storm-check, log, and enqueue one notification SMS.
 
-    The body is built ONLY from the catalog label + a sanitized record identifier
-    (``sms_content.build_sms_body``) — never from the caller-composed ``title``/``body``,
-    which may legitimately carry CUI-ish detail that must not cross the Twilio boundary
-    (§3.4 / §11.1).
+    The body is built ONLY by ``sms_content.build_sms_body``, from the catalog label, a
+    sanitized record identifier, and at most one closed-vocabulary classifier — never from
+    the caller-composed ``title``/``body``, which is written freely and may carry names and
+    other detail that must not land on a locked phone screen (§3.4 / §11.1). ``title`` is
+    stored on the ``NotificationLog`` row below for the in-app/admin delivery view; it is
+    not an input to the body.
+
+    The classifier reaches here already field-allowlisted (``_SMS_DETAIL_KEYS``) and is
+    vetted again by ``safe_detail`` inside the builder; an unsafe value is dropped and the
+    body degrades rather than raising.
 
     A ``NotificationLog`` row is created here (``company_id`` stamped from the EVENT,
     never from the recipient) and its id handed to the job, which updates that same row
@@ -397,7 +507,7 @@ async def _dispatch_sms(
     (visible in the delivery log rather than silently vanishing) and the first overflow
     schedules the deferred collapse message.
     """
-    body = build_sms_body(label=entry.label, identifier=sms_identifier)
+    body = build_sms_body(label=entry.label, identifier=sms_identifier, detail=sms_detail)
     decision = await reserve_sms_quota(user.id)
 
     log = NotificationLog(
@@ -507,6 +617,7 @@ async def dispatch_for_event(db: Session, event) -> int:
         # The record number only -- the SMS body is built from this + the catalog
         # label, never from the payload at large (§3.4).
         sms_identifier=_payload_identifier(event.event_payload or {}),
+        sms_detail=_payload_sms_detail(event.event_payload or {}),
     )
 
 
@@ -525,6 +636,7 @@ async def dispatch_direct(
     template: Optional[str] = None,
     context: Optional[Dict] = None,
     sms_identifier: Optional[str] = None,
+    sms_detail: Optional[str] = None,
     commit: bool = True,
 ) -> int:
     """Direct path: fan out to an already-resolved recipient set (crons / MRP / scheduling).
@@ -533,10 +645,14 @@ async def dispatch_direct(
     its own writes unless ``commit=False``.
 
     ``sms_identifier`` is the record number to put in an SMS body (e.g. ``"WO-1042"``).
-    Direct callers compose ``title``/``body`` freely, and that free text must never cross
-    the Twilio boundary — so an SMS-eligible direct dispatch that omits this simply sends
+    Direct callers compose ``title``/``body`` freely, and that free text must never land on
+    a locked phone screen — so an SMS-eligible direct dispatch that omits this simply sends
     the catalog label with no identifier rather than borrowing the title (§3.4). No
-    currently-wired direct caller targets an SMS-eligible event."""
+    currently-wired direct caller targets an SMS-eligible event.
+
+    ``sms_detail`` mirrors the outbox path's closed-vocabulary classifier and is subject to
+    the same two fences: the caller must source it from an enum-valued field, and
+    ``sms_content.safe_detail`` vets the value again before it can reach a body."""
     entry = get_entry(event_key)
     if entry is None:  # pragma: no cover - programming error
         logger.error("dispatch_direct called with uncataloged event_key %r", event_key)
@@ -556,6 +672,7 @@ async def dispatch_direct(
         template=template,
         context=context,
         sms_identifier=sms_identifier,
+        sms_detail=sms_detail,
     )
     if commit:
         db.commit()

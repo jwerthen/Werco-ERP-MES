@@ -544,7 +544,8 @@ def build_sharp_edges():
          "Normal early in the week; never a week-1 metric"),
         ("Operator “can't find” Purchasing etc.", "DESIGN — role-gated navigation",
          "Working as intended"),
-        ("Logged out mid-coffee / blank login page", "DESIGN — 15-min idle logout, 24-hour session cap",
+        ("Logged out mid-coffee / blank login page", "DESIGN — 15-min idle logout (the session itself renews "
+         "while you work; it only expires after 7 days unused)",
          "Compliance behavior — log back in"),
         ("Leftover TEST records (TES001, TEST-CLQA-001...)", "CLEANUP — QA artifacts pending deactivation",
          "Never quote, receive, or issue against them"),
@@ -582,14 +583,16 @@ def build_login_card():
         "<b>Office staff:</b> Email + password at wercomfg.app/login.",
         "<b>Shop floor:</b> tap the “Badge ID” toggle and scan or type your badge number — no password. "
         "Kiosk screens go straight to the badge prompt.",
-        "Passwords: at least 12 characters with upper + lower + number + special, no common words. "
+        "Passwords: at least 12 characters, and no common word or pattern (password, admin, welcome, qwerty, "
+        "werco...). No upper/lower/number/symbol rules — a passphrase of a few plain words is easiest. "
         "Only you or an Admin can change it.",
     ])
     section(story, "Timeouts you will meet")
     bullets(story, [
         "<b>Office app: 15 minutes idle</b> logs you out (a 60-second warning appears first). "
         "<b>Kiosk screens: about 4 minutes idle</b> returns to the badge prompt — just scan back in.",
-        "<b>24 hours absolute:</b> everyone re-logs-in at least daily, no matter what.",
+        "<b>No fixed daily re-login.</b> While you keep using the app it renews your session for you. "
+        "A session only dies of old age after <b>7 days unused</b> — then you sign in fresh.",
         "<b>5 wrong passwords = locked 30 minutes.</b> There is no admin unlock — wait it out, then try once.",
         "<b>“Rate limit exceeded”</b> = too many logins from the building within a minute. "
         "Wait about 60 seconds; don't hammer the button.",

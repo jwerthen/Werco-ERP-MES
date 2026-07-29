@@ -3,8 +3,10 @@ fail-closed egress kill switch, storm control, and the dispatcher's SMS leg.
 
 The headline compliance assertions here are:
 
-* the SMS body is built ONLY from the catalog label + a sanitized record identifier --
-  free text (customer names, part descriptions, quantities) can never reach Twilio;
+* the SMS body is built ONLY from the catalog label, a sanitized record identifier and
+  an optional closed-vocabulary classifier -- free text (customer names, part
+  descriptions, quantities) can never reach Twilio. The classifier passes TWO
+  independent fences: ``_SMS_DETAIL_KEYS`` vets the FIELD, ``safe_detail`` the VALUE;
 * ``Company.allow_sms_egress`` fails CLOSED: unknown tenant, missing tenant context,
   and a DB error all deny, and a denied tenant never reaches the provider;
 * the SMS leg fires only for an SMS-ELIGIBLE event the user opted into AND has a phone
@@ -29,7 +31,7 @@ from app.models.operational_event import OperationalEvent
 from app.models.user import User, UserRole
 from app.services.notification_catalog import ALL_CHANNELS, CHANNEL_SMS, get_entry
 from app.services.notification_dispatch import dispatch_for_event
-from app.services.sms_content import build_overflow_sms_body, build_sms_body, safe_identifier
+from app.services.sms_content import build_overflow_sms_body, build_sms_body, safe_detail, safe_identifier
 
 pytestmark = [pytest.mark.requires_db]
 
@@ -585,6 +587,86 @@ def test_dispatch_direct_never_borrows_the_title_for_the_sms_body(db_session: Se
     log = _sms_logs(db_session)[0]
     assert log.body == "Werco: Quality hold raised. Log in to view."
     for leaked in ("Acme", "55-2210", "12 ea", "Ruiz", "flatness"):
+        assert leaked not in log.body
+
+
+def test_an_allowlisted_enum_detail_reaches_the_sms_body(db_session: Session, monkeypatch):
+    """The happy path for the 2026-07-29 relaxation: a closed-vocabulary classifier.
+
+    ``category`` is in ``_SMS_DETAIL_KEYS`` and ``material`` passes ``safe_detail``, so
+    the body names WHY without naming WHO or WHAT.
+    """
+    _patch_dispatch_offline(monkeypatch)
+    user = _make_user(db_session, company_id=1, role=UserRole.QUALITY)
+    _opt_in_sms(db_session, user, "ncr.created")
+
+    event = _ncr_event(company_id=1, entity_id=555)
+    event.event_payload = {"ncr_number": "NCR-555", "category": "material"}
+
+    asyncio.run(dispatch_for_event(db_session, event))
+    db_session.flush()
+
+    log = _sms_logs(db_session)[0]
+    assert log.body == "Werco: NCR-555 - NCR created (material). Log in to view."
+    assert len(log.body) <= 160
+    assert all(ord(ch) < 128 for ch in log.body), "every dispatched body must stay GSM-7"
+
+
+def test_an_operator_typed_field_never_reaches_the_sms_body(db_session: Session, monkeypatch):
+    """The FIELD fence, proven end-to-end and independently of the VALUE fence.
+
+    ``note`` / ``scrap_reason`` / ``reason`` all carry values that ``safe_detail`` would
+    happily accept -- they are single enum-shaped tokens. They are refused anyway because
+    those keys are not in ``_SMS_DETAIL_KEYS``. ``reason`` IS in the EMAIL allowlist, so
+    the same dispatch mails it while the SMS stays bare: that divergence is the point.
+    """
+    _patch_dispatch_offline(monkeypatch)
+    user = _make_user(db_session, company_id=1, role=UserRole.QUALITY)
+    _opt_in_sms(db_session, user, "ncr.created")
+
+    assert safe_detail("tooling") == "tooling", "the VALUE fence alone would have passed this"
+
+    event = _ncr_event(company_id=1, entity_id=556)
+    event.event_payload = {
+        "ncr_number": "NCR-556",
+        "note": "tooling",
+        "scrap_reason": "tooling",
+        "reason": "tooling",
+    }
+
+    asyncio.run(dispatch_for_event(db_session, event))
+    db_session.flush()
+
+    log = _sms_logs(db_session)[0]
+    assert log.body == "Werco: NCR-556 - NCR created. Log in to view."
+    assert "tooling" not in log.body
+
+    # Behind the login, the email/in-app body DOES carry the allowlisted `reason`.
+    inbox = db_session.query(Notification).filter(Notification.user_id == user.id).one()
+    assert "Reason: tooling" in inbox.body
+    # ... exactly ONCE -- the non-allowlisted `note` / `scrap_reason` twins are not mailed.
+    assert inbox.body.count("tooling") == 1
+
+
+def test_an_unsafe_value_in_an_allowlisted_field_is_still_refused(db_session: Session, monkeypatch):
+    """The VALUE fence, proven end-to-end and independently of the FIELD fence.
+
+    ``category`` is an eligible field, but if it ever carried operator-typed text the
+    body must degrade to the bare label rather than shipping a customer name to Twilio.
+    """
+    _patch_dispatch_offline(monkeypatch)
+    user = _make_user(db_session, company_id=1, role=UserRole.QUALITY)
+    _opt_in_sms(db_session, user, "ncr.created")
+
+    event = _ncr_event(company_id=1, entity_id=557)
+    event.event_payload = {"ncr_number": "NCR-557", "category": "Acme Aerospace Corp"}
+
+    asyncio.run(dispatch_for_event(db_session, event))
+    db_session.flush()
+
+    log = _sms_logs(db_session)[0]
+    assert log.body == "Werco: NCR-557 - NCR created. Log in to view."
+    for leaked in ("Acme", "Aerospace", "Corp", "("):
         assert leaked not in log.body
 
 

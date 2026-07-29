@@ -85,7 +85,8 @@ anywhere — because it would plant the well-known `admin123` / `password123` de
 
 Create the first company and its admin through the sanctioned company-onboarding flow
 (`POST /api/v1/companies/register`), which enforces the password-strength policy on the admin
-password (≥12 chars, with upper- and lower-case letters, a number, and a special character).
+password (≥12 chars, and not containing a common weak substring — there are no character-class
+requirements; a long passphrase is preferred. See `docs/API.md` → Users).
 Choose a strong password you control — **do not** reuse the demo credentials:
 
 ```powershell

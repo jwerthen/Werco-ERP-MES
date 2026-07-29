@@ -2,8 +2,11 @@
 
 Operational runbook for the Werco notification pipeline. This documents **PR 1 (Foundation +
 in-app inbox)** — the transactional outbox, the event catalog, the in-app and email channels, and
-the compliance invariants — and **PR 4 (SMS / Twilio)**, the terse CUI-safe SMS channel (see
-[SMS channel](#sms-channel-twilio)). Later PRs extend this file (see
+the compliance invariants — and **PR 4 (SMS / Twilio)**, the deliberately terse SMS channel (see
+[SMS channel](#sms-channel-twilio)). The email and SMS **content rules were revised 2026-07-29**
+after CMMC L2 was descoped — read
+[Content rules](#content-rules-compliance) before changing what a notification says. Later PRs
+extend this file (see
 [Deferred / roadmap](#deferred--roadmap) at the end). The authoritative design spec is
 [NOTIFICATIONS_PLAN.md](NOTIFICATIONS_PLAN.md); this runbook describes what is actually
 implemented.
@@ -29,7 +32,7 @@ the rest of the app.
 
 - The **SMS channel**, live over Twilio (`services/sms_service.py` + `jobs/sms_jobs.py`), gated by
   **two** default-off switches — see [SMS channel](#sms-channel-twilio).
-- The single **CUI-safe body builder** (`services/sms_content.py`) and its standing content rule
+- The single **SMS body builder** (`services/sms_content.py`) and its standing content rule
   (below, alongside the email rule).
 - **`User.phone`** made real (E.164, validated with `phonenumbers`), self-service at
   `PUT /users/me/phone` and on the admin user create/update paths — where `phone` had been a phantom
@@ -285,10 +288,21 @@ but **only entries whose source is wired today actually fire**; the rest are **d
 
 **Direct bridge**: `visitor.check_in` — the visitor sign-in host notification. Sign-in is a sync
 request path, so `visitor_log_service._notify_host_best_effort` hands off to
-`dispatch_notification_direct_job`. The host now gets an **in-app row + a CUI-safe email** (the old
-raw host-email is dropped — no double-email). The **visitor's name is intentionally omitted as CUI**;
-the host clicks through to `/visitor-log` to see who arrived. (Its catalog entry has
-`source_event_types=()` because it is driven by the direct bridge, not the outbox tee.)
+`dispatch_notification_direct_job`. The host gets an **in-app row + an email** (the old raw
+host-email is dropped — no double-email).
+
+**The notification now names the visitor (changed 2026-07-29).** Title and body read
+`Jane Smith checked in (Acme Corp) and named you as their host.`, and the email renders the
+`visitor_check_in` template — which had existed with **no caller** until this change — with
+`visitor_name`, `visitor_company`, `purpose` (plus the purpose note when present), `signed_in_at`
+and `station_label`. The rule it replaces omitted the name as CUI, which left the host with an alert
+they had to log in to act on; the basis for the change is the
+[boundary decision of record](#content-rules-compliance). Every field is read off the `VisitorLog`
+row already in scope (no extra query), the context carries **JSON-safe primitives only** (it rides
+ARQ/Redis, so no ORM row and no raw `datetime` — `signed_in_at` is pre-formatted to Central because
+an email has no client-side localizer), and `redact_event_payload` does **not** apply on this path:
+direct dispatch has no stored event payload. (Its catalog entry has `source_event_types=()` because
+it is driven by the direct bridge, not the outbox tee.)
 
 **Dormant in PR 1** — catalog rows with `source_event_types=()` that are not yet wired:
 
@@ -329,6 +343,12 @@ is skipped — the `notified_at` marker still bounds duplicates).
   - **8 new templates** (`calibration_due`, `low_stock`, `quote_expiring`, `wo_completed`,
     `scheduling_conflicts`, `mrp_complete`, `mrp_review_needed`, `expedite_required`) that used to
     drop silently, plus a generic `notification.html` used by the outbox email path.
+    **Caveat — three of the template files still have no caller**: `wo_completed` (listed above),
+    `wo_released` and `ncr_created` are never named by a `template=` argument anywhere, so adding
+    the file did not by itself make anything send. `visitor_check_in` was in that same state until
+    2026-07-29, when the host check-in path started rendering it (see [Direct
+    bridge](#what-actually-fires-in-pr-1)). Wire a caller or drop the file; don't assume a template
+    that exists is reachable.
   - **Deep links**: `base.html` renders an "Open in Werco" button + a "Manage notifications" footer
     built from `FRONTEND_BASE_URL` (see [ENVIRONMENT_VARIABLES.md](ENVIRONMENT_VARIABLES.md#email-smtp)).
     Empty `FRONTEND_BASE_URL` → the absolute link/footer are omitted.
@@ -501,32 +521,76 @@ PR 5's mention-search. Keep it that way when adding user-shaped responses.
 
 ## Content rules (compliance)
 
-### Graduated CUI-safe email rule (plan §11.1)
+### Email content rule (plan §11.1) — **relaxed 2026-07-29**
 
-Email crosses the same external-SMTP boundary as SMS, so bodies are **CUI-safe**: they carry the
-**record identifier + event + actor + deep link only** — **no** part descriptions, customer names,
-or quantities. The detail lives behind the login. Outbox content is built from the event payload's
-identifier keys (WO/NCR/receipt/PO/FAI/CAR/shipment/quote number, equipment/blocker id) + the catalog
-label; the `OperationalEvent` payload is itself redaction-filtered at emit time. If your SMTP relay is
-inside your assessed boundary (e.g. GCC-High / on-prem), this rule can be relaxed to rich templates —
-record that boundary decision here first.
+> #### Boundary decision of record — 2026-07-29
+>
+> This section is the register the original rule named ("record that boundary decision here
+> first"), so the decision is written here before the code that depends on it.
+>
+> **What changed.** CMMC Level 2 was deprioritized on 2026-07-28 (PR #163). The original rule
+> was derived from a CUI-boundary analysis: email leaves for an external SMTP relay, therefore
+> bodies carry no field detail. With no CUI programme, that rationale no longer governs.
+>
+> **Be precise about the basis.** We are **not** invoking the original escape hatch. That clause
+> allowed rich templates when the relay sits *inside an assessed boundary* — there is no
+> assessment, so that condition is not met and should not be claimed. The actual basis is
+> weaker and worth stating plainly: this is now an ordinary business judgement that the
+> operational value of a useful email outweighs the privacy cost of shop record detail sitting
+> in employees' mailboxes and on the relay. **If CMMC is ever revived, this decision must be
+> revisited — it is not an assessed control.**
+>
+> **What email bodies MAY now carry:** the record identifier and event label (as before), plus
+> the operational detail already present in the event payload — quantities, statuses,
+> transitions, day counts, and short reasons/notes — and, on the visitor check-in email, the
+> visitor's name, company and purpose.
+>
+> **What they still may NOT carry:** anything `redact_event_payload` strips at emit time
+> (credentials, tokens, `raw_text` / `document_text` / `drawing_text`, `cui`-named keys) — that
+> filter is unchanged and remains the backstop. Enrichment also reads the **payload only**; the
+> dispatcher does not re-query the database to resolve `part_id` into a part number, so part
+> numbers and customer names remain absent. That is a scope and N+1 decision, not a security
+> one — a future change may add them deliberately.
 
-### Terse CUI-safe SMS body rule (plan §3.4 / §11.1)
+Outbox content is built from the event payload's identifier keys (WO/NCR/receipt/PO/FAI/CAR/
+shipment/quote number, equipment/blocker id) + the catalog label, plus a composed detail line
+from a curated payload allowlist (see `_DETAIL_KEYS` in `services/notification_dispatch.py`).
+The `OperationalEvent` payload is itself redaction-filtered at emit time.
 
-A **standing rule**, alongside the email rule above — not a per-call judgement. Twilio is outside
-the CUI boundary and an SMS lands on an unlocked lock screen, so a body may carry **only**:
+`CatalogEntry.description` is **not** the email body builder — it is also served to the
+notification-preferences matrix by `GET /notifications/catalog`, so it stays a static string.
+Body composition lives in `_content_for_event`.
+
+### Terse SMS body rule (plan §3.4 / §11.1) — **narrowly relaxed 2026-07-29**
+
+Still a **standing rule**, not a per-call judgement — and deliberately relaxed **much less than
+email**, for a reason that has nothing to do with CMMC:
+
+> An SMS renders on a **locked phone screen**. Anyone who can see the phone can read it, without
+> unlocking it and without authenticating to anything. That exposure is real whether or not a CUI
+> programme exists, so descoping CMMC does not license putting shop detail on the wire here the
+> way it does for a mailbox. Twilio also bills **per segment**, so body length is a cost input,
+> not just a style choice.
+
+A body may carry:
 
 1. the record **identifier** (e.g. `WO-1042`, `NCR-2026-014`),
-2. the catalog **event label** (e.g. "Work order blocked / on hold"), and
-3. the **"log in to view"** pointer.
+2. the catalog **event label** (e.g. "Work order blocked / on hold"),
+3. **one short classifier** from a closed vocabulary (e.g. `machine down`, `material`) — new, and
+4. the **"log in to view"** pointer.
 
 ```
-Werco: {identifier} - {catalog label}. Log in to view.
-Werco: {catalog label}. Log in to view.            # when no safe identifier is present
+Werco: {identifier} - {catalog label} ({detail}). Log in to view.
+Werco: {identifier} - {catalog label}. Log in to view.     # no safe detail present
+Werco: {catalog label}. Log in to view.                    # no safe identifier either
 ```
 
-**Never**: customer names, part numbers or descriptions, quantities, prices, operator names,
-free-text reasons, or any other field detail. The detail lives behind the login.
+**Still never**: customer names, part numbers or descriptions, quantities, prices, operator names,
+or **any operator-typed free text** — blocker notes, scrap reasons, defect descriptions, step
+labels, and caller-composed titles all stay off SMS. The classifier comes from a fixed
+`_SMS_DETAIL_KEYS` allowlist of enum-shaped payload fields and is sanitized by `safe_detail()`,
+which refuses anything that does not look like a short closed-vocabulary token. The full detail
+still lives behind the login.
 
 `services/sms_content.py` is the **only** place an SMS body is built, and it enforces the rule
 structurally:
@@ -591,8 +655,14 @@ requirements (enforced in `notification_dispatch.py` / `notification_catalog.py`
       row, `company_id is None`, or any exception all **deny**. No phone number and no body leave
       the boundary on a denial.
 - [ ] **SMS bodies built only by `sms_content.build_sms_body`** — catalog label + sanitized
-      identifier, never the caller-composed title/body (see the terse-body rule above). Adding
-      another SMS call site means routing it through that builder.
+      identifier + at most one vetted classifier, **never the caller-composed title/body** (that
+      refusal is unchanged; see the terse-body rule above). The classifier clears **two independent
+      fences**: `_SMS_DETAIL_KEYS` in `notification_dispatch` picks the eligible payload **field**
+      (enum-valued keys only — no operator-typed field is listed), and `safe_detail()` in
+      `sms_content` vets the **value** (single whitespace-free token, letters/`_`/`-` only, ≤ 24
+      chars, ≤ 3 words). Neither alone is sufficient. Adding another SMS call site means routing it
+      through that builder; adding a key to `_SMS_DETAIL_KEYS` means confirming that field can only
+      ever hold an enum value.
 - [ ] **SMS is doubly opt-in** — per-company kill switch **and** per-user opt-in + phone; only
       `sms_eligible` catalog events are offerable, and the API rejects enabling `sms` on a
       non-eligible event with **400**.
@@ -740,6 +810,9 @@ Surfaced by the PR-1 adversarial review; each is safe in PR 1 and has a designat
 - **`dispatch_direct` callers pass no `sms_identifier`** — an SMS-eligible direct dispatch (crons /
   MRP / scheduling) would send the label-only body. Harmless today: no currently-wired direct caller
   targets an SMS-eligible event. Pass `sms_identifier` when one does.
+  (`dispatch_direct` forwards `sms_detail` to `_fan_out` alongside `sms_identifier`; both reach
+  `build_sms_body` and both are re-vetted there, so a direct caller can pass a classifier and have
+  it behave exactly as on the outbox path.)
 
 ## Deferred / roadmap
 
@@ -756,8 +829,9 @@ PR 1 is the foundation; the remaining PRs (see [NOTIFICATIONS_PLAN.md §10](NOTI
   keeps the full `{in_app, email, sms, digest}` shape per event, so no migration is needed.
 - **PR 4 — SMS**: ✅ **shipped** — `User.phone` + My Settings UI, the Twilio service/job, the
   `allow_sms_egress` admin toggle, and storm caps. Documented above:
-  [SMS channel](#sms-channel-twilio) and the terse CUI-safe body rule under
-  [Content rules](#content-rules-compliance). Still deferred from §3.4: the Twilio inbound
+  [SMS channel](#sms-channel-twilio) and the terse body rule under
+  [Content rules](#content-rules-compliance) (narrowly relaxed 2026-07-29 to allow one vetted
+  closed-vocabulary classifier). Still deferred from §3.4: the Twilio inbound
   STOP/opt-out webhook and the delivery-receipt webhook.
 - **PR 5 — Comments & mentions**: `comments` / `comment_mentions` / `entity_watchers`, `<CommentsPanel>`,
   the `comment.mention` / `comment.added` events, per-entity-type RBAC (documented in

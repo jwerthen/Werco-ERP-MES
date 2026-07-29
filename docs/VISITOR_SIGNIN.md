@@ -132,16 +132,31 @@ appears and is the accessible explanation for the disabled submit buttons (refer
 
 On a sign-in, the service does a **best-effort host match**: an *active* user **in the same company**
 whose full name case-insensitively equals the typed host name. The match succeeds only on **exactly
-one** hit (0 or >1 → no match), and it is **company-scoped only — never cross-tenant** (host names
-are CUI).
+one** hit (0 or >1 → no match), and it is **company-scoped only — never cross-tenant** (tenant
+isolation, invariant 1 — a name match must never resolve to another tenant's employee).
 
-- If a host is matched **and has an email**, an internal check-in email is **enqueued best-effort**
-  to that host (ARQ `send_email_job`, `visitor_check_in.html` template), honoring the host's
-  `VISITOR_CHECK_IN` notification preference. This uses the existing internal **SMTP** path.
-- Free-text host with no match → **no email** (only `host_name` is stored).
+- If a host is matched, `_notify_host_best_effort` enqueues the ARQ
+  `dispatch_notification_direct_job` (best-effort, never awaited inline), which fans out to the
+  host's enabled channels for the catalog event **`visitor.check_in`** — in-app + email by default.
+  There is **no `VISITOR_CHECK_IN` preference key**: channels are resolved by
+  `notification_dispatch.resolve_channels` from the host's saved `NotificationPreference` row keyed
+  on the catalog `event_key`, falling back to the catalog defaults when no row exists. The email leg
+  needs an email on file and uses the existing internal **SMTP** path, rendering
+  `visitor_check_in.html`.
+- Free-text host with no match → **no notification** (only `host_name` is stored).
 - The notification **never blocks or fails the sign-in** — a notification error is swallowed and
-  logged. Visitor and host names are CUI: this is internal SMTP to the company's **own** employee
-  only, never to an external boundary.
+  logged.
+
+**Content (changed 2026-07-29): the notification names the visitor.** Title and body read
+`Jane Smith checked in (Acme Corp) and named you as their host.`, and the email template renders
+`visitor_name`, `visitor_company`, `purpose` (with the purpose note appended when present),
+`signed_in_at` (pre-formatted to Central — an email has no client-side localizer) and
+`station_label`. Until this change the body was deliberately generic because visitor names were
+treated as CUI; that rationale went away when CMMC L2 was descoped, and the generic alert had made
+the host log in just to learn who was in the lobby. The rewritten
+[NOTIFICATIONS.md → Content rules](NOTIFICATIONS.md#content-rules-compliance) is the boundary
+decision of record. Note this template file existed but had **no caller** before 2026-07-29 — the
+email described here did not previously send.
 
 ## Captured fields
 

@@ -14,12 +14,16 @@ class NotificationPreference(Base, TenantMixin):
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, unique=True)
 
-    # Preferences stored as JSON:
+    # Preferences stored as JSON, keyed by the CATALOG ``event_key`` (dot notation) --
+    # NOT the legacy SCREAMING_CASE ``NotificationEvent`` constants. This is the key
+    # ``notification_dispatch.channels_from_pref`` looks up:
     # {
-    #   "WO_RELEASED": {"email": true, "digest": false},
-    #   "WO_LATE": {"email": true, "digest": true},
+    #   "wo.released":     {"in_app": true, "email": true,  "sms": false, "digest": false},
+    #   "visitor.check_in": {"in_app": true, "email": false, "sms": false, "digest": false},
     #   ...
     # }
+    # An absent key means "use the catalog defaults" (no row is auto-created), and the
+    # entry's mandatory_channel is forced on afterwards regardless of what is stored.
     preferences = Column(JSON, nullable=False, default={})
 
     # Digest settings

@@ -62,7 +62,12 @@ def create_refresh_token(
     Returns: (token, session_id, expiry_time)
     """
     expire = datetime.utcnow() + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
-    # Absolute session timeout - even with refresh, can't exceed this
+    # Session idle window, NOT a hard ceiling despite the claim name. This function
+    # takes no parameter to carry an existing stamp forward, and POST /auth/refresh
+    # re-mints through here on every rotation, so each refresh restarts the clock.
+    # What it actually bounds is how long a session can sit UNUSED. Corrected
+    # 2026-07-29; the old comment claimed "even with refresh, can't exceed this",
+    # which the rotation path has never honored.
     absolute_timeout = datetime.utcnow() + timedelta(hours=settings.SESSION_ABSOLUTE_TIMEOUT_HOURS)
 
     # Generate or reuse session ID for tracking

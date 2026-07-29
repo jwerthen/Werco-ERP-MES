@@ -69,7 +69,24 @@ SUPABASE_DB_PASSWORD=<your-supabase-db-pass>
 | `ALGORITHM` | No | `HS256` | JWT algorithm. Options: HS256, HS384, HS512 |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | No | `15` | Access token lifetime in minutes |
 | `REFRESH_TOKEN_EXPIRE_DAYS` | No | `7` | Refresh token lifetime in days |
-| `SESSION_ABSOLUTE_TIMEOUT_HOURS` | No | `24` | Force re-login after this many hours |
+| `SESSION_ABSOLUTE_TIMEOUT_HOURS` | No | `168` | Session ceiling stamped into each refresh token at mint time. In practice this bounds an **idle** window, not total session life — see the note below |
+
+> **What `SESSION_ABSOLUTE_TIMEOUT_HOURS` actually bounds.** `create_refresh_token`
+> (`app/core/security.py`) stamps an `absolute_timeout` claim of `utcnow() + this many hours` into
+> every refresh token it mints, and `verify_refresh_token` rejects a token once that instant has
+> passed. But `POST /auth/refresh` mints its replacement token through the same function, which
+> recomputes the claim from the current time — there is no parameter to carry the original forward.
+> **Every refresh therefore restarts the clock.** The effect is an *idle* timeout: a user who
+> exercises the app at least once per window is never forced to re-authenticate, while a user who
+> goes quiet for longer than the window must log in again. This has been the behavior since the
+> setting was introduced; it was not changed when the default was raised.
+>
+> The default was raised `24` → `168` on 2026-07-29, making it equal to
+> `REFRESH_TOKEN_EXPIRE_DAYS` (7 days) so the refresh window itself is the binding limit. The
+> mechanism was kept rather than removed: **set this env var lower to re-arm a tighter cap** (e.g.
+> `SESSION_ABSOLUTE_TIMEOUT_HOURS=24` restores the previous daily idle window) with no code change.
+> A change here only affects **newly minted** tokens — users holding a token keep the value it was
+> minted with until their next refresh or login.
 
 ### Rate Limiting
 
