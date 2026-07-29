@@ -1,49 +1,62 @@
+# Pre-commit hooks — fast local guard rails. Validity and secrets only.
+#
+# HISTORY (fixed 2026-07-28). This file was invalid YAML from its introduction:
+# line 13 read `exclude:^.env.example$` with no space after the colon, so
+# `pre-commit` could not load the config AT ALL and every hook was silently
+# dead — including `detect-private-key`. `check-yaml` could not catch it,
+# because check-yaml is configured *by* the file that failed to parse.
+# `backend/tests/test_precommit_config.py` guards against a recurrence, and
+# ci-cd.yml's `Secret Scanning` job runs detect-private-key directly so the
+# control no longer depends on anyone running `pre-commit install`.
+#
+# WHY THERE ARE NO LINT/FORMAT HOOKS HERE. Reviving the config surfaced that
+# the black/isort/flake8/mypy/bandit hooks could never have worked correctly,
+# and would have been actively harmful once loaded:
+#
+#   * VERSION SKEW. The hooks pinned black 23.12.1 / isort 5.13.2 / flake8
+#     7.0.0 while backend/requirements-dev.txt pins black 26.3.1 / isort 7.0.0
+#     / flake8 7.3.0 — the versions CI enforces. A major-version-behind black
+#     reformats code that CI's black then wants formatted differently, so the
+#     hook and the blocking CI gate would disagree on every commit. flake8
+#     7.0.0 also carries a pyflakes false positive (spurious F401/F811 on
+#     `dataclasses.field`) that 7.3.0 fixed.
+#   * WRONG CONFIG. pre-commit runs hooks from the REPO ROOT, and flake8
+#     discovers config from the cwd. There is no flake8 config at the root, so
+#     `backend/.flake8` never applied and the hook reported ~400 violations
+#     that CI accepts by policy (E711/E712 for SQLAlchemy `== None/True/False`,
+#     E501, E402).
+#   * ARG PARSING. `args: [--max-line-length=120, --extend-ignore=E203,W503]`
+#     is a YAML flow sequence, so that comma is a separator: flake8 received
+#     `W503` as a FILENAME and failed unconditionally, even on a clean tree.
+#   * APPLIED MIGRATIONS. black's `extend-exclude` and isort's `skip_glob` do
+#     NOT apply to explicitly-passed files, and pre-commit always passes
+#     filenames explicitly — so `alembic/versions` was not actually fenced. A
+#     full run rewrote 35 files under backend/alembic with black and 49 with
+#     isort. Those are APPLIED migrations against live multi-tenant data;
+#     CLAUDE.md's rule is "never edit a migration that has already been applied".
+#   * BANDIT COULD NEVER RUN. Its hook passed `-c backend/pyproject.toml`, a
+#     file that does not exist in this repo.
+#
+# All of that is already enforced correctly in CI, blocking, at the right
+# versions and the right working directory: black/isort/flake8/bandit in
+# .github/workflows/ci-cd.yml (+ pr-check.yml). Duplicating them here bought
+# nothing and cost correctness, so they are deliberately gone rather than
+# repaired. Run the real thing from `backend/` — see CLAUDE.md → Commands.
+#
+# The whitespace fixers (trailing-whitespace, end-of-file-fixer) are also out:
+# they are cosmetic, this repo has never had them, and a first run rewrites 184
+# files including applied migrations.
+#
+# What is left is fast (well under a second), has no version coupling, and
+# cannot fight CI: file validity, accidental-commit guards, and secrets.
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.5.0
     hooks:
-      - id: trailing-whitespace
-      - id: end-of-file-fixer
       - id: check-yaml
       - id: check-toml
       - id: check-json
       - id: check-added-large-files
       - id: check-merge-conflict
       - id: detect-private-key
-        exclude:^.env.example$
-
-  - repo: https://github.com/psf/black
-    rev: 23.12.1
-    hooks:
-      - id: black
-        language_version: python3.11
-        args: [--config=backend/.black]
-
-  - repo: https://github.com/pycqa/isort
-    rev: 5.13.2
-    hooks:
-      - id: isort
-        args: [--settings-path=backend/.isort.cfg]
-
-  - repo: https://github.com/pycqa/flake8
-    rev: 7.0.0
-    hooks:
-      - id: flake8
-        args: [--max-line-length=120, --extend-ignore=E203,W503]
-        exclude: ^alembic/
-
-  - repo: https://github.com/PyCQA/bandit
-    rev: 1.7.6
-    hooks:
-      - id: bandit
-        args: ['-c', 'backend/pyproject.toml']
-        additional_dependencies: ['bandit[toml]']
-        exclude: ^tests/
-
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.8.0
-    hooks:
-      - id: mypy
-        additional_dependencies: [pydantic, types-requests]
-        args: [--config-file=backend/mypy.ini]
-        exclude: ^(alembic/|tests/|frontend/)
+        exclude: ^\.env\.example$

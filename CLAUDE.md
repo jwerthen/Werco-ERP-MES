@@ -51,9 +51,20 @@ pytest -m "not slow and not requires_db"
 pytest -m evals tests/evals             # AI eval harness — excluded from the default run; offline by default,
                                         # live API opt-in via RUN_LIVE_EVALS=1 + ANTHROPIC_API_KEY (see tests/evals/README.md)
 
-# Lint / format / typecheck (also enforced by .pre-commit-config.yaml)
-black . && isort . && flake8 app && mypy app
-bandit -c pyproject.toml -r app         # security scan
+# Lint / format / typecheck — these are the exact invocations CI runs (ci-cd.yml).
+# There is NO pyproject.toml in this repo, so black and isort each need their
+# config passed explicitly or they run with 88-col defaults and reformat the
+# whole tree. Scope matters too: CI checks `app tests`, not `.` — widening it
+# reformats backend/scripts and seed files that CI does not check.
+black --config=.black app tests && isort --settings-path=.isort.cfg app tests
+flake8 app --max-line-length=120 && mypy app --config-file=mypy.ini
+bandit -r app -s B101 -ll               # security scan (same flags CI uses)
+
+# Pre-commit (run from the REPO ROOT, not backend/). Validity + secrets only:
+# check-yaml/toml/json, large files, merge conflicts, detect-private-key. It
+# deliberately carries NO lint/format hooks — those are CI-owned and the hook
+# versions drifted a major version behind the pinned ones. See the header
+# comment in .pre-commit-config.yaml before adding any.
 pre-commit run --all-files
 
 # Migrations (Alembic)

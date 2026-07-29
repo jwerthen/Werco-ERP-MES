@@ -20,6 +20,10 @@ pip-audit==2.10.0  # dependency CVE scan (PyPA/OSV); replaces deprecated `safety
 # Pre-commit Hooks
 pre-commit==4.5.1
 
+# YAML parsing — imported directly by tests/test_precommit_config.py. Present
+# transitively via bandit/pre-commit, but a direct import deserves a direct pin.
+PyYAML==6.0.3
+
 # Type Stubs
 types-python-dateutil==2.9.0.20260124
 types-requests==2.32.4.20260107
