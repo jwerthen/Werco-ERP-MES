@@ -66,7 +66,7 @@ Cross-cutting platform properties:
 - **Background work** — Redis 7 + **ARQ workers** (`app/worker.py`, `app/jobs/`) for email, MRP runs, and long tasks; enqueued from services, never blocking request handlers.
 - **Realtime** — WebSocket push for live shop-floor activity and dashboard updates.
 - **Tamper-evident audit** — the `audit_log` table is an append-only SHA-256 hash chain (`sequence_number`, `previous_hash`, `integrity_hash`); state changes flow through `AuditService`. (Known gap: the interactive user-management and work-center endpoints do not yet emit audit entries — their bulk-import endpoints do — see Compliance below.)
-- **Auth** — JWT, ~15-min access token, ~7-day rotating refresh, 24h absolute session cap; account lockout after 5 failed password attempts (the email/password login path).
+- **Auth** — JWT, ~15-min access token, ~7-day rotating refresh, ~7-day session cap (`SESSION_ABSOLUTE_TIMEOUT_HOURS`, default 168h — it restarts on every refresh, so it bounds an *idle* window rather than total session life); account lockout after 5 failed password attempts (the email/password login path). Password policy is ≥ 12 characters plus a weak-password blocklist — no character-class rules (NIST SP 800-63B §5.1.1.2).
 
 ## Tech stack
 

@@ -82,8 +82,18 @@ def _seed_random_fixture_data():
     yield
 
 
-# Test password (hashed version of "TestPassword123!")
-TEST_PASSWORD = "TestPassword123!"
+# The shared fixture password, and its bcrypt hash for seeding user rows.
+#
+# This value must PASS ``schemas.user.validate_password_strength``. It is only ever
+# hashed here or sent as a login / ``current_password`` value -- none of which runs
+# the validator -- so a non-compliant string would work today and detonate later,
+# the first time someone reuses the fixture as a ``new_password`` or a create
+# payload. It was "TestPassword123!" until 2026-07-29, when the blocklist expansion
+# left it two steps from exactly that trap (it contains "password").
+#
+# Keep it >= 12 characters and free of every entry in
+# ``app.schemas.user._COMMON_PASSWORD_PATTERNS``.
+TEST_PASSWORD = "Zephyr9!Quill-Test"
 TEST_PASSWORD_HASH = get_password_hash(TEST_PASSWORD)
 
 

@@ -1,9 +1,16 @@
 """Password-strength coverage for the company-creation schemas (PR fix/ia-password-gaps).
 
 The first-admin password on both company-creation paths must meet the SAME
-canonical AS9100D/CMMC strength policy (``schemas.user.validate_password_strength``)
-as ``/auth/register`` -- otherwise a weak first-admin credential slips in through a
+canonical strength policy (``schemas.user.validate_password_strength``) as
+``/auth/register`` -- otherwise a weak first-admin credential slips in through a
 door the per-user create/reset paths already guard.
+
+Updated 2026-07-29: that canonical policy dropped its four character-class rules
+in favor of length + an expanded blocklist (NIST SP 800-63B 5.1.1.2). What these
+tests assert is unchanged in KIND -- both doors run the one shared policy -- but
+the fixtures were rebuilt, because four of the five old violators are now valid
+passwords. Both directions are pinned: ``REJECTED_PASSWORDS`` (blocklist, incl.
+the new entries) and ``NEWLY_ACCEPTED_PASSWORDS`` (the composition relaxation).
 
 Two paths are covered:
 
@@ -29,23 +36,42 @@ from app.models.company import Company
 from app.models.user import User, UserRole
 from app.schemas.company import CompanyCreate, CompanyRegister
 
-# A password that breaks EXACTLY the common-substring rule: >= 12 chars, has an
-# uppercase, lowercase, digit and special char, but lower-cases to contain
-# "password". This is the string that USED to be accepted on /companies/register.
+# A password that breaks EXACTLY the common-substring rule: >= 12 chars, but
+# lower-cases to contain "password". This is the string that USED to be accepted on
+# /companies/register.
 COMMON_SUBSTRING_PASSWORD = "Password1234!"
 
-# A fully compliant password: >= 12 chars, upper + lower + digit + special, and no
-# common weak substring.
+# A fully compliant password: >= 12 chars and no blocklisted substring.
 STRONG_PASSWORD = "Str0ng&Unique!Pass"
 
-# Each of these breaks exactly one complexity rule while staying >= 12 chars so the
-# Field(min_length=12) guard doesn't short-circuit the strength validator.
-WEAK_COMPLEXITY_PASSWORDS = {
-    "missing_uppercase": "zephyr9!quills",
-    "missing_lowercase": "ZEPHYR9!QUILLS",
-    "missing_digit": "Zephyr!Quills",
-    "missing_special": "Zephyr9Quills",
+# Passwords the company-creation paths must still REFUSE after the 2026-07-29
+# policy relaxation.
+#
+# This dict used to be WEAK_COMPLEXITY_PASSWORDS and held one violator per
+# character-class rule (missing upper / lower / digit / special). Those four rules
+# were removed -- four of its five entries became VALID passwords -- so it is
+# rebuilt around the rule that survived and was expanded: the blocklist. Every
+# entry is >= 12 characters, so the blocklist is the sole cause of the 422 and the
+# Field(min_length=12) guard never short-circuits the strength validator.
+REJECTED_PASSWORDS = {
     "common_substring": COMMON_SUBSTRING_PASSWORD,
+    "expanded_top100_word": "Thundering-dragon-42",
+    "expanded_local_shop_name": "Quiet-werco-morning",
+    "expanded_keyboard_walk": "Silver-qazwsx-lantern",
+    "expanded_leetspeak": "Copper-passw0rd-vault",
+    "blocklist_is_case_insensitive": "Thundering-DRAGON-42",
+}
+
+# The companion set: values these paths used to refuse for missing a character
+# class and must now ACCEPT. Pinned so the relaxation is verified in both
+# directions -- deleting the reject-tests alone would leave the accept side
+# unproven, and a quietly reinstated composition rule would go unnoticed.
+NEWLY_ACCEPTED_PASSWORDS = {
+    "no_digit": "Zephyr!Quills",
+    "no_special_character": "Zephyr9Quills",
+    "no_uppercase": "zephyr9!quills",
+    "no_lowercase": "ZEPHYR9!QUILLS",
+    "passphrase_letters_and_spaces_only": "correct horse battery staple",
 }
 
 
@@ -112,12 +138,30 @@ class TestCompanyRegisterPasswordPolicy:
         assert db_session.query(User).filter(User.email == "founder@acme-precision.com").count() == 0
         assert db_session.query(Company).filter(Company.name == "Acme Precision Machining").count() == 0
 
-    @pytest.mark.parametrize("label,password", sorted(WEAK_COMPLEXITY_PASSWORDS.items()))
-    def test_register_weak_complexity_password_rejected(self, client: TestClient, label, password):
-        """Every single-rule complexity failure (no upper/lower/digit/special, or a
-        common substring) is a 422 on /companies/register."""
+    @pytest.mark.parametrize("label,password", sorted(REJECTED_PASSWORDS.items()))
+    def test_register_blocklisted_password_rejected(self, client: TestClient, label, password):
+        """Every blocklisted password -- original entries and the 2026-07-29
+        expansion, matched case-insensitively -- is a 422 on /companies/register."""
         response = client.post("/api/v1/companies/register", json=_register_payload(admin_password=password))
         assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, f"{label}: {response.text}"
+
+    @pytest.mark.parametrize("label,password", sorted(NEWLY_ACCEPTED_PASSWORDS.items()))
+    def test_register_newly_accepted_password_registers_company(self, client: TestClient, db_session, label, password):
+        """A password the OLD composition rules refused now registers successfully.
+
+        End-to-end (not just at the schema) so the relaxation is pinned on the real
+        unauthenticated door, which is the one that matters. Each case uses its own
+        company name / admin email so the parametrized runs cannot collide.
+        """
+        email = f"founder-{label.replace('_', '-')}@acme-precision.com"
+        company_name = f"Acme Precision {label}"
+        response = client.post(
+            "/api/v1/companies/register",
+            json=_register_payload(admin_password=password, admin_email=email, company_name=company_name),
+        )
+        assert response.status_code == status.HTTP_200_OK, f"{label}: {response.text}"
+        assert db_session.query(User).filter(User.email == email).count() == 1
+        assert db_session.query(Company).filter(Company.name == company_name).count() == 1
 
     def test_register_too_short_password_rejected(self, client: TestClient):
         """A password shorter than 12 chars is rejected (Field min_length -> 422)."""
@@ -157,14 +201,33 @@ class TestPlatformCompanyCreatePasswordPolicy:
         assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, response.text
         assert db_session.query(Company).filter(Company.name == "Beta Aerospace Fabrication").count() == 0
 
-    def test_platform_create_weak_password_rejected(self, client: TestClient, platform_admin_headers):
-        """A missing-complexity password is 422 on /platform/companies."""
+    def test_platform_create_blocklisted_password_rejected(self, client: TestClient, platform_admin_headers):
+        """A password hitting an EXPANDED blocklist entry is 422 on /platform/companies.
+
+        (This case previously used ``"Zephyr9Quills"`` to exercise the
+        missing-special-character rule; that rule is gone and the string is now a
+        valid password -- see ``test_platform_create_newly_accepted_password``.)
+        """
         response = client.post(
             "/api/v1/platform/companies",
             headers=platform_admin_headers,
-            json=_platform_create_payload(admin_password="Zephyr9Quills"),  # no special char
+            json=_platform_create_payload(admin_password="Thundering-dragon-42"),
         )
         assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, response.text
+
+    def test_platform_create_newly_accepted_password(self, client: TestClient, platform_admin_headers, db_session):
+        """``"Zephyr9Quills"`` (no special character) now creates the company."""
+        response = client.post(
+            "/api/v1/platform/companies",
+            headers=platform_admin_headers,
+            json=_platform_create_payload(
+                admin_password="Zephyr9Quills",
+                name="Gamma Turbine Works",
+                admin_email="admin@gamma-turbine.com",
+            ),
+        )
+        assert response.status_code == status.HTTP_200_OK, response.text
+        assert db_session.query(Company).filter(Company.name == "Gamma Turbine Works").count() == 1
 
     def test_platform_create_strong_password_accepted(self, client: TestClient, platform_admin_headers, db_session):
         """A compliant password creates the company (2xx)."""
@@ -184,7 +247,7 @@ class TestCompanySchemaPasswordValidators:
     canonical strength policy, independent of routing/auth."""
 
     def test_company_register_rejects_common_substring(self):
-        with pytest.raises(ValidationError, match="common pattern"):
+        with pytest.raises(ValidationError, match="common word or pattern"):
             CompanyRegister(**_register_payload(admin_password=COMMON_SUBSTRING_PASSWORD))
 
     def test_company_register_accepts_strong(self):
@@ -192,12 +255,22 @@ class TestCompanySchemaPasswordValidators:
         assert model.admin_password == STRONG_PASSWORD
 
     def test_company_create_rejects_common_substring(self):
-        with pytest.raises(ValidationError, match="common pattern"):
+        with pytest.raises(ValidationError, match="common word or pattern"):
             CompanyCreate(**_platform_create_payload(admin_password=COMMON_SUBSTRING_PASSWORD))
 
-    def test_company_create_rejects_missing_special(self):
-        with pytest.raises(ValidationError, match="special character"):
-            CompanyCreate(**_platform_create_payload(admin_password="Zephyr9Quills"))
+    @pytest.mark.parametrize("label,password", sorted(REJECTED_PASSWORDS.items()))
+    def test_both_schemas_reject_blocklisted(self, label, password):
+        """Both company schemas run the SAME blocklist -- neither may drift."""
+        with pytest.raises(ValidationError, match="common word or pattern"):
+            CompanyRegister(**_register_payload(admin_password=password))
+        with pytest.raises(ValidationError, match="common word or pattern"):
+            CompanyCreate(**_platform_create_payload(admin_password=password))
+
+    @pytest.mark.parametrize("label,password", sorted(NEWLY_ACCEPTED_PASSWORDS.items()))
+    def test_both_schemas_accept_newly_valid(self, label, password):
+        """Neither schema keeps a private copy of the retired composition rules."""
+        assert CompanyRegister(**_register_payload(admin_password=password)).admin_password == password
+        assert CompanyCreate(**_platform_create_payload(admin_password=password)).admin_password == password
 
     def test_company_create_accepts_strong(self):
         model = CompanyCreate(**_platform_create_payload())
