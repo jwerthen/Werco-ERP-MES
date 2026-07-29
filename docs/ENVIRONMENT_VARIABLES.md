@@ -484,6 +484,18 @@ SC-28), exactly as for carrier secrets.
 | `PROXYBOX_POLL_INTERVAL_SECONDS` | No | `1.0` | Cadence for polling `GET /jobs/{id}` for a terminal print-job state |
 | `PROXYBOX_MAX_WAIT_SECONDS` | No | `30.0` | Max wait for a terminal job state; on timeout the print returns a non-failed `timeout` result (the job may still print) rather than erroring |
 
+### Audit Log Hash Chain (CMMC AU-3.3.8)
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `AUDIT_HASH_CHAIN_ENABLED` | No | `true` | Master switch for the `audit_logs` SHA-256 hash chain. `true` (the default) is the historical behavior: advisory-locked `MAX+1` sequence allocation, `previous_hash` linked to the prior row, and a content hash per row. `false` **pauses** the chain — rows are still written with the same content, but `sequence_number` comes from a lock-free Postgres sequence, `previous_hash` is `NULL`, and `integrity_hash` is the `LEGACY_CHAIN_PAUSED` placeholder the verifier skips. |
+
+> ⚠️ **Pausing is not fully reversible.** Rows written while paused can never be made verifiable
+> retroactively, and gap-based deletion detection is permanently lost across that window. The
+> database immutability triggers (migrations `008`/`060`) are unaffected by this setting and remain in
+> force. Read `docs/AUDIT_LOG_RETENTION_RUNBOOK.md` → **Pausing the hash chain** before setting it to
+> `false`; migration `077` must be applied first (it creates the sequence the paused allocator uses).
+
 ### Audit Log Retention / Archival (CMMC AU-3.3.8)
 
 Audit logs are immutable (database triggers block UPDATE/DELETE) and are **never row-deleted** by

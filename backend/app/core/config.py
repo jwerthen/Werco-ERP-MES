@@ -74,6 +74,28 @@ class Settings(BaseSettings):
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7  # Refresh tokens valid for 7 days
     SESSION_ABSOLUTE_TIMEOUT_HOURS: int = 24  # Force re-login after 24 hours regardless
 
+    # Audit-log hash chain. When True (the default and the historical behavior) every
+    # audited write takes ONE GLOBAL transaction-scoped Postgres advisory lock, held
+    # until the caller's transaction commits, reads the chain tail, and SHA-256s the
+    # full row including old/new payloads. That lock is a system-wide serialization
+    # point across all tenants on every audited request.
+    #
+    # Set False to PAUSE the chain: rows are still written (same table, same columns,
+    # same audit content) and the 008/060 database immutability triggers still block
+    # UPDATE/DELETE, but sequence_number comes from a Postgres sequence instead of a
+    # locked tail read, previous_hash is NULL, and integrity_hash is the
+    # 'LEGACY_CHAIN_PAUSED' placeholder that the verifier already knows to skip.
+    #
+    # READ BEFORE FLIPPING — this is not fully reversible. Re-enabling relinks new
+    # rows off whatever tail exists, so the chain resumes cleanly, but rows written
+    # while paused can NEVER be made verifiable retroactively, and gap detection is
+    # permanently lost across the paused window (a sequence legitimately leaves gaps
+    # whenever a caller's transaction rolls back). What you keep while paused: the
+    # audit rows themselves, the DB-level append-only triggers, and every read path.
+    # What you lose: cryptographic proof that a row was not altered out of band.
+    # See docs/AUDIT_LOG_RETENTION_RUNBOOK.md.
+    AUDIT_HASH_CHAIN_ENABLED: bool = True
+
     @field_validator("SECRET_KEY")
     @classmethod
     def validate_secret_key(cls, v: str) -> str:
