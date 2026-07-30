@@ -20,30 +20,40 @@ justification for any gate that is not hard-blocking.
   `--ignore-vuln` flag on the command. **There is no backend allowlist file** —
   the flag plus this document is the whole record.
 
-## Known open advisories (as of 2026-07-29)
+## Known open advisories (as of 2026-07-30)
 
-The first run of the new nightly `dependency-audit.yml` surfaced six backend
-advisories that were already present on `main` — invisible until now because
-`pip-audit` had only ever run as `continue-on-error`. Both packages in that first
-run are now settled: **`pypdf` is fixed** (6.10.2 → 6.14.2, see Remediated below)
-and **`ecdsa` / PYSEC-2026-1325 is an accepted, documented suppression** (see
-below). That is the gate working, not a misconfiguration.
+**None outstanding.** Every backend advisory the nightly has surfaced is now
+fixed by upgrade rather than suppressed — with the single argued exception of
+`ecdsa` / PYSEC-2026-1325, which has no fixed version in any release and is
+justified on reachability further down.
 
-**The nightly is still red, and the `pypdf` fix did not change that.** The CI
-job itself reports **`Found 10 known vulnerabilities, ignored 1 in 4 packages`**
-— the suppressed `ecdsa` plus four *other* packages flagged since that first
-run. Do not read "pypdf fixed" as "nightly green".
+That took three passes, all recorded under Remediated below. The first run of the
+nightly `dependency-audit.yml` surfaced six advisories that were already present
+on `main` — invisible until then because `pip-audit` had only ever run as
+`continue-on-error` — which settled into `pypdf` (fixed, 6.10.2 → 6.14.2) and
+`ecdsa` (suppressed). Four more packages were flagged against already-pinned
+versions in the days after, and those were cleared together on 2026-07-30:
+`starlette`, `python-multipart`, `bleach`, and `pydantic-settings`. The gate
+finding all of this was the gate working, not a misconfiguration.
 
-| Package | Pinned | Advisories | Fixed in |
-|---|---|---|---|
-| `starlette` | 1.2.1 | PYSEC-2026-248, PYSEC-2026-249 | 1.3.0 / 1.3.1 |
-| `python-multipart` | 0.0.27 | PYSEC-2026-3036, PYSEC-2026-3037, PYSEC-2026-3040 | 0.0.30 / 0.0.31 |
-| `bleach` | 6.3.0 | GHSA-8rfp-98v4-mmr6, GHSA-gj48-438w-jh9v; GHSA-g75f-g53v-794x | 6.4.0 / — |
-| `pydantic-settings` | 2.12.0 | GHSA-4xgf-cpjx-pc3j | 2.14.2 |
+**The nightly is GREEN — confirmed by a CI run, not inferred.** A manual
+`workflow_dispatch` of `dependency-audit.yml` against the bump branch
+([run 30561938722](https://github.com/jwerthen/Werco-ERP-MES/actions/runs/30561938722),
+2026-07-30) reports:
 
-New advisories published against already-pinned versions is the normal behavior
-of a moving database, not a regression on `main` — it is the same reason the PR
-gates are advisory and the nightly is where the red lands.
+```
+No known vulnerabilities found, 1 ignored
+```
+
+Both jobs passed — `pip-audit (Backend)` and `npm audit (Frontend)`. The "1
+ignored" is `ecdsa` / PYSEC-2026-1325, the single documented suppression below.
+
+Worth recording *why* a CI run was needed rather than the local number: the local
+resolve reported `Found 2 known vulnerabilities, ignored 1 in 1 package`, the
+extra package being `setuptools` 79.0.1 / PYSEC-2026-3447 — which is declared in
+neither requirements file and so is invisible to the gate's `-r` scope. The local
+audit and the real gate disagreed, exactly as the note below warns, and the gate
+is the one that counts.
 
 > **Take the counts from a CI run, not from a local audit.** `pip-audit -r` is
 > scoped to what the two requirements files actually declare. Auditing a local
@@ -52,30 +62,21 @@ gates are advisory and the nightly is where the red lands.
 > `setuptools` 79.0.1 / PYSEC-2026-3447 is the live example: it appears in a
 > local venv as build tooling, it is pinned in **neither** requirements file, and
 > it is **absent** from the CI job's output. It is not part of this app's audited
-> surface and needs no bump. (Auditing `backend/.venv311` directly is worse
-> still — it has drifted and carries dev extras, and reports roughly three times
-> the real finding count.)
+> surface and needs no bump. This was demonstrated empirically on PR #168, where
+> the CI job reported findings across **4** packages while the same resolve in a
+> local venv reported **5** — `setuptools` was the entire difference. (Auditing
+> `backend/.venv311` directly is worse still — it has drifted and carries dev
+> extras, and reports roughly three times the real finding count.)
 
-**These four will be fixed, not suppressed, and they are out of scope for this
-change.** Every one of them except `bleach`'s GHSA-g75f-g53v-794x has a fix
-available, and this file's own [`reason` rule](#adding-an-allowlist-entry) rejects
-"no fix available" and "it is noisy" as justifications on their own. An advisory
-with a fix gets the fix. Treat them as the next hygiene pass, each with its own
-verification — a batch bump behind one green suite is exactly how a silent
-behavior change ships:
-
-- **`starlette` 1.2.1 → 1.3.x** is the same class of upgrade that already forced
-  the FastAPI bump documented below (0.128.4 → 0.136.3, because FastAPI capped
-  `starlette<1.0.0` until 0.133.0). Check FastAPI's current cap *before* pinning.
-- **`python-multipart`** sits on the file-upload path — every multipart endpoint
-  in the app parses through it. Exercise the upload paths, not just the suite.
-- **`bleach`** is **not** dev-only: it is pinned in `requirements.txt` (not
-  `requirements-dev.txt`) and `app/core/sanitization.py` does
-  `from bleach import clean`, so it is shipped input-sanitization surface. What
-  still needs determining is whether the flagged code paths are the ones we
-  call, and what to do about GHSA-g75f-g53v-794x, which has no fix.
-  (`setuptools` used to be listed here; it is not in the gate's scope at all —
-  see the note above.)
+Expect this section to have entries again. New advisories published against
+already-pinned versions is the normal behavior of a moving database, not a
+regression on `main` — it is the same reason the PR gates are advisory and the
+nightly is where the red lands. The standing rule when they land: **an advisory
+with a fix gets the fix.** This file's own [`reason` rule](#adding-an-allowlist-entry)
+rejects "no fix available" and "it is noisy" as justifications on their own, and a
+batch bump behind one green suite is exactly how a silent behavior change ships —
+verify each package on its own terms, against the code paths this app actually
+calls.
 
 ## Backend (`pip-audit`) — advisory on PRs, blocking nightly
 
@@ -137,7 +138,8 @@ database had missed; both are fixed:
   and poison `request.url.path`, bypassing path-based security checks). This
   required bumping **FastAPI 0.128.4 → 0.136.3**, because FastAPI only dropped its
   `starlette<1.0.0` cap at 0.133.0 (0.134.0+ requires `starlette>=0.46.0`).
-  `starlette==1.2.1` is now pinned explicitly in `requirements.txt`.
+  This is where `starlette` became an explicit pin in `requirements.txt` (it is
+  `1.3.1` today — see below).
   - **Application-level defense-in-depth (added on top of the upgrade):**
     `TrustedHostMiddleware` is registered **outermost** in `app/main.py` with an
     explicit `Host`-header allowlist via the `ALLOWED_HOSTS` setting (default `*`
@@ -186,9 +188,132 @@ The nightly gate then surfaced a third package, since fixed:
     80.97%; `black` / `isort` / `flake8` / `mypy` (325 files) all clean. New
     regression coverage lives in
     `backend/tests/services/test_pypdf_real_text_extraction.py`.
-  - **Post-change scan, for the record:** the `pip-audit (Backend)` job reports
+  - **Post-change scan, for the record:** the `pip-audit (Backend)` job reported
     `Found 10 known vulnerabilities, ignored 1 in 4 packages` — `pypdf` absent,
-    `ecdsa` suppressed, and the four packages above remaining.
+    `ecdsa` suppressed, and four other packages still outstanding — the four
+    cleared next.
+
+The remaining four were then cleared together (2026-07-30). **All four are
+pin-only — zero code changes** — and neither `pydantic` (stays **2.12.5**) nor
+`fastapi` (stays **0.136.3**) had to move with them: pydantic-settings 2.14.2
+requires only `pydantic>=2.7.0`, identical to 2.12.0's requirement, and FastAPI
+0.136.3 requires `starlette>=0.46.0` with **no upper cap**. `pip check` clean.
+
+- **`starlette` 1.2.1 → 1.3.1** — clears **PYSEC-2026-249 / CVE-2026-54283** and
+  **PYSEC-2026-248 / CVE-2026-54282**. Unlike the 0.52.1 → 1.2.1 bump above, this
+  one did **not** cascade into FastAPI; the `starlette<1.0.0` cap is long gone.
+  - **This is the one behavior change in the batch, and it is worth knowing.**
+    1.3.1 newly **enforces** form limits on `application/x-www-form-urlencoded`.
+    That *is* PYSEC-2026-249 (CVSS 7.5, availability): `max_fields` and
+    `max_part_size` were honored for multipart but **silently ignored** for
+    urlencoded, because `Request.form()` built `FormParser(headers, stream)` with
+    no limits. FastAPI calls `await request.form()` with no arguments, so the app
+    inherits Starlette's defaults either way.
+  - **Reachable pre-auth — this justifies the bump on its own.**
+    `POST /api/v1/auth/login` is unauthenticated and takes
+    `OAuth2PasswordRequestForm` (`app/api/endpoints/auth.py:98`), i.e. an
+    unbounded urlencoded parse that runs before any credential check. The route's
+    5/min per-IP limit (`AUTH_RATE_LIMITS` in `app/main.py`) caps *how often* that
+    parse happens; it does not bound a single oversized body.
+  - **Boundaries measured by A/B-running both versions against the real app**,
+    not read off a changelog:
+    - urlencoded **field count** — ≤1000 unchanged, >1000 → **400** (new)
+    - urlencoded **single field size** — <1 MiB unchanged, ≥1 MiB → **400** (new)
+    - **multipart** — bit-for-bit unchanged at every size; 1500 files → 400 on
+      *both* versions, confirming those limits already existed in 1.2.1
+  - **No legitimate traffic is affected, and that was verified rather than
+    assumed.** The frontend has exactly **one** urlencoded body sender — the login
+    call at `frontend/src/services/api.ts:514`; every other `URLSearchParams` in
+    the codebase builds a query string. The backend has exactly **one**
+    `OAuth2PasswordRequestForm`. Two fields: `username` and `password`.
+  - **PYSEC-2026-248 / CVE-2026-54282** is authority confusion when rebuilding
+    `request.url` from a path lacking a leading `/`. It gets a mention because
+    this app keys ~9 security decisions off `request.url.path` (CSRF exemptions,
+    the carrier-webhook sanitize skip, rate-limit selection, the kiosk-scope path
+    fence in `api/deps.py`, the read-only platform-admin write guard). Triggering
+    it needs an ASGI server that delivers a path not starting with `/`, which
+    uvicorn/gunicorn do not do for HTTP/1.1 — so it was defense-in-depth here, not
+    a live exposure. It is the residual of the same family as CVE-2026-48710
+    above, the reason `TrustedHostMiddleware` exists.
+
+- **`python-multipart` 0.0.27 → 0.0.31** — clears **PYSEC-2026-3036** and
+  **PYSEC-2026-3037** (fixed in 0.0.30) plus **PYSEC-2026-3040** (0.0.31). This is
+  the file-upload path: every multipart endpoint in the app parses through it, so
+  the A/B harness exercised real uploads rather than trusting the suite alone.
+  - **One new numeric limit in the whole range:** `MAX_BOUNDARY_LENGTH = 256`,
+    enforced in `MultipartParser.__init__`, on the live upload path. Measured
+    against real clients: httpx 32 bytes, Chrome/Edge 37, Safari 38, Firefox 41 —
+    roughly 6× headroom. Boundary length is client-chosen and unrelated to payload
+    size, so the multi-MB RFQ/nest PDFs and ZIP nest packages are unaffected.
+  - **The multipart header limits (8 headers / 4224 bytes) are *not* new** — they
+    shipped in 0.0.27 and have been live since.
+  - **Body-size gates are unchanged and remain the only ones:** the 20MB cap in
+    `qms_standards.py`, the 50MB `LASER_UPLOAD_MAX_BYTES` in `work_orders.py`, and
+    nginx's `client_max_body_size 50M`.
+  - **One caveat worth recording:** Starlette constructs the parser *outside* its
+    `try/except MultiPartException`, and `FormParserError` is not a
+    `MultiPartException` — so a >256-byte boundary surfaces as a **500** rather
+    than a clean 4xx. Attacker-only (no real client comes close), no availability
+    impact, no legitimate traffic affected.
+
+- **`pydantic-settings` 2.12.0 → 2.14.2** — clears **GHSA-4xgf-cpjx-pc3j**. Two
+  minor versions with no cascade: 2.14.2 declares `pydantic>=2.7.0`, the same
+  floor 2.12.0 declared, so `pydantic` stays at 2.12.5. `app/core/config.py`
+  instantiates `settings = Settings()` at module import, so every test run parses
+  the whole settings surface through the new version — a green suite is direct
+  evidence here, not incidental.
+
+- **`bleach` 6.3.0 → 6.4.0 — read this entry before drawing conclusions from a
+  quiet scanner.** It clears **GHSA-8rfp-98v4-mmr6** and **GHSA-gj48-438w-jh9v**.
+  It does **not** fix **GHSA-g75f-g53v-794x** (the `linkify` ReDoS) — and
+  pip-audit stops reporting that one anyway.
+  - **The scanner going quiet is a database artifact, not a fix.** Verified
+    directly: the OSV API returns **0 vulns for bleach 6.4.0** and all three for
+    6.3.0; the linkify advisory's OSV record carries an explicit affected-version
+    **list of exactly `["6.3.0"]`** — a list, not a range — published 2026-06-16,
+    *after* bleach was archived (2026-06-10) and after 6.4.0 shipped as the final
+    release the project will ever have. Diffing installed 6.3.0 against installed
+    6.4.0: `handle_email_addresses` is byte-identical, and the only change in
+    `build_email_re` is cosmetic (a `.format()` call reflowed onto one line). **The
+    regex is unchanged.**
+  - **No suppression entry and no `--ignore-vuln` flag is needed** — there is
+    nothing to suppress; the scanner is already silent. `--ignore-vuln
+    PYSEC-2026-1325` (`ecdsa`) remains the only flag on the command, unchanged.
+    Do not add one for this, and do not read its absence as "the risk was fixed".
+  - **Why the app is safe: the vulnerable code path does not exist here.** The
+    only bleach import in `app/` is `app/core/sanitization.py:1` →
+    `from bleach import clean`. `parse_email` is not even a `clean()` parameter;
+    module-level `clean()` constructs a `Cleaner` with no `filters`, so
+    `LinkifyFilter` is never instantiated; there are **zero** `linkify` references
+    anywhere in `app/`.
+  - **The input *is* attacker-controlled — say so plainly.** The `sanitize_input`
+    middleware (`app/main.py:668-699`) runs on every JSON-bodied POST/PUT/PATCH
+    **before route-level auth**, with no body-size cap. The safety here rests
+    entirely on the code path not existing, **not** on the input being safe.
+  - **`backend/tests/test_bleach_linkify_guard.py` is now the only remaining
+    protection.** Because the scanner will never warn about this again, that guard
+    is what fails if someone introduces `linkify()` — the same executable-rationale
+    pattern as the `ecdsa` guard below. Don't delete it.
+  - **bleach is now permanently unmaintained security-relevant surface**:
+    archived upstream, 6.4.0 is the terminal release, and it sits under a global
+    request-body middleware. Any future bleach advisory has no fix *by
+    construction* — the only responses left are reachability arguments like this
+    one. **Replacing or removing it is a real follow-up, not a footnote** — move
+    sanitization to a maintained library (`nh3` is the usual successor) or retire
+    the middleware in favor of output-encoding at render time. Nothing forces it
+    today; the point is that the next advisory will, with no upgrade available.
+
+**Validation (2026-07-30, covering all four bumps):** full backend suite
+**3757 passed, 2 xfailed**, coverage 80.97%; `pip check` clean; and the A/B harness
+run across both venvs (old pins vs new) produced byte-identical results everywhere
+except the one intended urlencoded-limit change documented above. One test-config
+change rode along: starlette 1.3.x reclassified its deprecations under
+`StarletteDeprecationWarning`, which subclasses `UserWarning` rather than
+`DeprecationWarning`, so `pytest.ini`'s existing `ignore::DeprecationWarning`
+stopped matching and the suite jumped from 14 to 155 warnings. A targeted,
+**message-scoped** `filterwarnings` entry in `backend/pytest.ini` restores it —
+message-scoped on purpose, since a blanket `ignore::UserWarning` would swallow
+unrelated warnings.
 
 ### Current backend suppression: ecdsa / PYSEC-2026-1325 ("Minerva", CVE-2024-23342)
 

@@ -4,19 +4,26 @@ fastapi==0.136.3
 # (missing Host-header validation poisons request.url.path, bypassing path-based
 # security checks). fastapi>=0.133 dropped the starlette<1.0.0 cap. See
 # docs/SECURITY_ADVISORY_SUPPRESSIONS.md.
-starlette==1.2.1
+#
+# >=1.3.1 fixes PYSEC-2026-249 / CVE-2026-54283 (form limits were silently
+# ignored for application/x-www-form-urlencoded, so max_fields / max_part_size
+# bounded nothing on that path) and PYSEC-2026-248 / CVE-2026-54282 (authority
+# confusion when rebuilding request.url from a path with no leading "/").
+# The former is the reachable one: POST /api/v1/auth/login is unauthenticated
+# and takes OAuth2PasswordRequestForm, i.e. an unbounded urlencoded form parse.
+starlette==1.3.1
 uvicorn[standard]==0.40.0
 gunicorn==25.0.3  # Production WSGI server
 sqlalchemy==2.0.46
 alembic==1.18.3
 psycopg2-binary==2.9.11
 pydantic==2.12.5
-pydantic-settings==2.12.0
+pydantic-settings==2.14.2  # >=2.14.2 fixes GHSA-4xgf-cpjx-pc3j; needs only pydantic>=2.7.0
 email-validator==2.3.0
 python-jose[cryptography]==3.5.0
 passlib==1.7.4
 bcrypt==4.3.0
-python-multipart==0.0.27  # 0.0.27 fixes CVE-2026-42561
+python-multipart==0.0.31  # fixes CVE-2026-42561 (0.0.27) + PYSEC-2026-3036/3037 (0.0.30) + PYSEC-2026-3040 (0.0.31)
 python-dotenv==1.2.2
 httpx==0.28.1
 pytest==9.0.3
@@ -25,7 +32,17 @@ boto3==1.42.44
 
 # Security
 slowapi==0.1.9
-bleach==6.3.0  # HTML sanitization for input validation
+# HTML sanitization for input validation. 6.4.0 fixes GHSA-8rfp-98v4-mmr6 +
+# GHSA-gj48-438w-jh9v, and is the FINAL release — bleach was archived 2026-06-10.
+#
+# GHSA-g75f-g53v-794x (linkify ReDoS) is NOT fixed by 6.4.0 and never will be.
+# pip-audit still goes quiet, because the OSV record lists an explicit version
+# list of exactly ["6.3.0"] — a database artifact, not a repair. So there is no
+# suppression entry and no --ignore-vuln flag here; nothing would warn you.
+# We are safe only because this app calls clean() and never linkify(), and
+# tests/test_bleach_linkify_guard.py is the sole thing enforcing that.
+# See docs/SECURITY_ADVISORY_SUPPRESSIONS.md.
+bleach==6.4.0
 
 # WebSocket Support
 websockets==16.0
