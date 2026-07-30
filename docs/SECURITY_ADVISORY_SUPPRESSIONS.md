@@ -36,16 +36,24 @@ versions in the days after, and those were cleared together on 2026-07-30:
 `starlette`, `python-multipart`, `bleach`, and `pydantic-settings`. The gate
 finding all of this was the gate working, not a misconfiguration.
 
-**Expected state of the nightly: green, zero findings — not yet confirmed.** A
-local resolve of `requirements.txt` + `requirements-dev.txt` against the new pins
-reports `Found 2 known vulnerabilities, ignored 1 in 1 package`, and the only
-package left in it is `setuptools` 79.0.1 / PYSEC-2026-3447, which is not in the
-gate's scope at all (see the note below). Subtract it and the CI job should report
-nothing. **That is an inference from a local audit plus a known local/CI scope
-difference, not an observed CI result** — which is exactly what the note below
-says not to trust on its own. Confirm it against the next nightly run of
-`dependency-audit.yml` (or a manual dispatch) and correct this section if it comes
-back red.
+**The nightly is GREEN — confirmed by a CI run, not inferred.** A manual
+`workflow_dispatch` of `dependency-audit.yml` against the bump branch
+([run 30561938722](https://github.com/jwerthen/Werco-ERP-MES/actions/runs/30561938722),
+2026-07-30) reports:
+
+```
+No known vulnerabilities found, 1 ignored
+```
+
+Both jobs passed — `pip-audit (Backend)` and `npm audit (Frontend)`. The "1
+ignored" is `ecdsa` / PYSEC-2026-1325, the single documented suppression below.
+
+Worth recording *why* a CI run was needed rather than the local number: the local
+resolve reported `Found 2 known vulnerabilities, ignored 1 in 1 package`, the
+extra package being `setuptools` 79.0.1 / PYSEC-2026-3447 — which is declared in
+neither requirements file and so is invisible to the gate's `-r` scope. The local
+audit and the real gate disagreed, exactly as the note below warns, and the gate
+is the one that counts.
 
 > **Take the counts from a CI run, not from a local audit.** `pip-audit -r` is
 > scoped to what the two requirements files actually declare. Auditing a local
