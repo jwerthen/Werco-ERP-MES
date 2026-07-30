@@ -322,6 +322,23 @@ class Settings(BaseSettings):
     def rate_limit_exempt_paths_list(self) -> List[str]:
         return [path.strip() for path in self.RATE_LIMIT_EXEMPT_PATHS.split(",")]
 
+    # Maximum size (bytes) of an "application/json" request body that the
+    # `sanitize_input` middleware in app/main.py will parse. Anything larger is
+    # rejected with HTTP 413 *before* the sanitizer runs — bleach.clean is
+    # quadratic in adversarial markup (192 KB of "<a " burns ~4.7 CPU-seconds vs
+    # ~0.005s for the same volume of benign text), and the middleware runs ahead
+    # of every route's auth dependency, so without this cap the cost is
+    # reachable pre-auth. Only JSON is gated: multipart/UploadFile paths (every
+    # CSV/XLSX bulk import) are untouched, as are the carrier webhooks, which
+    # HMAC-verify raw bytes and skip this middleware entirely.
+    #
+    # 256 KB clears the largest realistic bodies measured (laser-nest import at
+    # 170 nests = 183 KB; BOM create at 1000 line items = 201 KB). The known
+    # ceiling is a BOM create above roughly 1300 line items — which is why this
+    # is env-overridable rather than a constant: ops can raise it without a
+    # deploy. Raising it raises the worst-case CPU per request quadratically.
+    MAX_SANITIZED_JSON_BODY_BYTES: int = 262144  # 256 KB
+
     # CORS - Include localhost for dev; production origins must be set via env var
     CORS_ORIGINS: str = "http://localhost:3000,http://localhost:3001,http://localhost:5173,http://localhost:8000"
     CORS_ALLOW_CREDENTIALS: bool = True

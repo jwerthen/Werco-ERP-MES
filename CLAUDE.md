@@ -113,7 +113,7 @@ docker compose up      # backend + frontend + redis + worker (ARQ background job
 
 Layered FastAPI app under `backend/app/`:
 
-- `main.py` — app factory, middleware wiring (CORS, GZip, rate limiting via slowapi, Sentry, Host-header allowlist via TrustedHostMiddleware).
+- `main.py` — app factory, middleware wiring (CORS, GZip, rate limiting via slowapi, Sentry, Host-header allowlist via TrustedHostMiddleware, and `sanitize_input`, which rewrites every JSON body with a bleach-sanitized copy **before route auth** — hence the `MAX_SANITIZED_JSON_BODY_BYTES` cap (256 KB, **413** over it, checked on `Content-Length` *and* on the bytes actually read), because `bleach.clean` is quadratic in adversarial markup and the cost is otherwise reachable pre-auth; multipart uploads and carrier webhooks are deliberately exempt).
 - `api/endpoints/` — ~60 REST routers, one per domain, mounted under `/api/v1/`. Thin: validate, call a service, return a Pydantic schema.
 - `api/deps.py` — **the dependency-injection seam.** Auth, tenancy, and RBAC all flow through here. Use these rather than re-implementing:
   - `get_current_user` / `get_current_active_user`

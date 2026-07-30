@@ -128,6 +128,38 @@ Successful logins never count. Uses Redis when `REDIS_URL` is set (cross-worker)
 in-process counter; a storage outage fails open with a logged
 `employee_login_throttle_fail_open` warning.
 
+### Request Body Size (JSON sanitization)
+
+The `sanitize_input` middleware (`backend/app/main.py`) rewrites the body of every JSON-bodied
+`POST`/`PUT`/`PATCH` with an HTML-sanitized copy, and it runs **before** route-level auth
+dependencies. `bleach.clean` is **quadratic** in adversarial markup — `"<a "` repeated costs
+~0.10s at 24 KB, ~1.2s at 96 KB and ~4.7 CPU-seconds at 192 KB, against ~0.005s for 128 KB of
+benign text — so an unbounded body is a pre-auth CPU denial-of-service. This cap bounds it.
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `MAX_SANITIZED_JSON_BODY_BYTES` | No | `262144` | Maximum size in bytes of an `application/json` request body the sanitizer will parse. Over the cap the request is **rejected with HTTP 413** (`{"detail": "Request body too large: … exceeds the …-byte limit for JSON requests."}`, CORS headers applied) rather than passed through unsanitized. `262144` = 256 KB |
+
+Two gates enforce it: a `Content-Length` check **before** the body is buffered (the DoS guard —
+an oversized request is never read into memory), and a `len(body)` re-check after the read, which
+catches chunked transfer-encoding and a header that lies. It **rejects** rather than skipping
+sanitization on purpose — skipping would hand an attacker a sanitizer bypass for the price of
+padding the payload.
+
+**What it does not gate.** Only `application/json` bodies. **`multipart/form-data` / `UploadFile`
+paths are untouched** — every CSV/XLSX bulk import, RFQ package, laser-nest ZIP/PDF and PO source
+document keeps its own per-endpoint limit (the 20 MB cap in `qms_standards.py`, the 50 MB
+`LASER_UPLOAD_MAX_BYTES` in `work_orders.py`). Inbound **carrier webhooks** are untouched too:
+they skip this middleware entirely so their HMAC signature verifies against raw bytes.
+
+> **Raising it is the operational knob, and it is not free.** 256 KB clears the largest realistic
+> bodies measured — a 170-nest laser import (183 KB) and a 1000-line-item BOM create (201 KB) both
+> fit. The known ceiling is a **BOM create above roughly 1300 line items**, which will `413`; that
+> is the case to raise this for, and it is why the value is a setting rather than a constant (ops
+> can raise it without a deploy). **Worst-case CPU per request grows *quadratically* with this
+> value** — at the 256 KB default the adversarial worst case is ~9.1 CPU-seconds, and doubling the
+> cap roughly quadruples that. Prefer splitting an oversized import over widening the cap globally.
+
 ### CORS (Cross-Origin Resource Sharing)
 
 | Variable | Required | Default | Description |
@@ -667,3 +699,10 @@ Verify `REDIS_URL` or individual Redis settings. Redis is optional but recommend
 
 ### "Email not sending"
 For Gmail, ensure you're using an App Password, not your account password.
+
+### "413 Request body too large" on a large JSON save
+A JSON body exceeded `MAX_SANITIZED_JSON_BODY_BYTES` (default 256 KB). In practice this means a
+very large BOM create (above roughly 1300 line items). Raise the value on the backend service —
+but read the quadratic-cost warning under [Request Body Size](#request-body-size-json-sanitization)
+first, and prefer splitting the import. File uploads are **not** affected by this setting; a 413 on
+an upload is that endpoint's own cap (20 MB QMS standards, 50 MB `LASER_UPLOAD_MAX_BYTES`).
