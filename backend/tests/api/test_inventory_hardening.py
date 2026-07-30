@@ -696,7 +696,7 @@ def test_low_stock_rejects_non_positive_limit(client: TestClient, db_session: Se
 
     for bad in (0, -1):
         resp = client.get("/api/v1/inventory/low-stock", headers=headers_for(user), params={"limit": bad})
-        assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+        assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
     ok = client.get("/api/v1/inventory/low-stock", headers=headers_for(user), params={"limit": 1})
     assert ok.status_code == status.HTTP_200_OK, ok.text
@@ -1955,7 +1955,7 @@ def test_transactions_limit_is_capped_at_500(client: TestClient, ledger):
         headers=headers_for(ledger["a_user"]),
         params={"limit": 501},
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
     # The cap itself is a valid value.
     ok = client.get(
@@ -2038,4 +2038,4 @@ def test_transactions_rejects_out_of_range_paging(client: TestClient, ledger, pa
         headers=headers_for(ledger["a_user"]),
         params=params,
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text

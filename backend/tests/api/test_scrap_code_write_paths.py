@@ -131,7 +131,7 @@ def test_clock_out_code_and_text_both_persist(client: TestClient, db_session: Se
     [
         ("unknown", status.HTTP_404_NOT_FOUND),
         ("cross_tenant", status.HTTP_404_NOT_FOUND),
-        ("inactive", status.HTTP_422_UNPROCESSABLE_ENTITY),
+        ("inactive", status.HTTP_422_UNPROCESSABLE_CONTENT),
     ],
 )
 def test_clock_out_invalid_code_rejected_before_any_mutation(
@@ -281,7 +281,7 @@ def test_production_report_code_persists_to_entry_and_operation(client: TestClie
 
 @pytest.mark.parametrize(
     "code_kind,expected_status",
-    [("unknown", status.HTTP_404_NOT_FOUND), ("inactive", status.HTTP_422_UNPROCESSABLE_ENTITY)],
+    [("unknown", status.HTTP_404_NOT_FOUND), ("inactive", status.HTTP_422_UNPROCESSABLE_CONTENT)],
 )
 def test_production_report_invalid_code_rejected_and_nothing_persisted(
     client: TestClient, db_session: Session, code_kind: str, expected_status: int
@@ -359,7 +359,7 @@ def test_complete_wo_code_and_text_both_persist(client: TestClient, db_session: 
     [
         ("unknown", status.HTTP_404_NOT_FOUND),
         ("cross_tenant", status.HTTP_404_NOT_FOUND),
-        ("inactive", status.HTTP_422_UNPROCESSABLE_ENTITY),
+        ("inactive", status.HTTP_422_UNPROCESSABLE_CONTENT),
     ],
 )
 def test_complete_wo_invalid_code_rejected_and_wo_untouched(

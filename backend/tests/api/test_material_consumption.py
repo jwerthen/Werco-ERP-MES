@@ -823,7 +823,7 @@ def test_pinning_a_held_lot_is_refused_at_tie_time(
         "pinned_inventory_item_id": lot.id,
     }
     resp = client.post(_tie_url(wo.id), json=body, headers=headers_for(admin))
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
     assert expected_word in resp.json()["detail"]
     assert db_session.query(WorkOrderMaterialAllocation).filter_by(work_order_id=wo.id).count() == 0
 
@@ -834,7 +834,7 @@ def test_pinning_a_held_lot_is_refused_at_tie_time(
         json={"pinned_inventory_item_id": lot.id},
         headers=headers_for(admin),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
 
 def test_lot_held_after_pinning_still_consumes_but_is_audited(db_session: Session):
@@ -1942,7 +1942,7 @@ def test_pinned_lot_of_a_different_uom_part_is_422(client: TestClient, db_sessio
         },
         headers=headers_for(admin),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
     assert "Unit-of-measure mismatch" in resp.json()["detail"]
 
 
@@ -1963,14 +1963,14 @@ def test_post_qty_per_run_on_a_work_order_scoped_tie_is_422(client: TestClient, 
         json={"part_id": sheet.id, "source": "manual", "qty_planned": 5, "qty_per_run": 2.0},
         headers=headers_for(admin),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
     assert "operation-scoped ties only" in resp.json()["detail"]
     assert db_session.query(WorkOrderMaterialAllocation).filter_by(work_order_id=wo.id).count() == 0
 
     # PATCH already refused it; the two contracts now match verbatim.
     allocation = make_allocation(db_session, wo, sheet, operation=None, qty_planned=5)
     patch_resp = client.patch(_tie_url(wo.id, allocation.id), json={"qty_per_run": 2.0}, headers=headers_for(admin))
-    assert patch_resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+    assert patch_resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
     assert patch_resp.json()["detail"] == resp.json()["detail"]
 
 
@@ -3038,7 +3038,7 @@ def test_patch_refuses_both_pin_and_clear_pin(client: TestClient, db_session: Se
         json={"pinned_inventory_item_id": lot.id, "clear_pinned_inventory_item": True},
         headers=headers_for(admin),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
     db_session.expire_all()
     assert db_session.get(WorkOrderMaterialAllocation, allocation.id).pinned_inventory_item_id is None
 
@@ -3051,7 +3051,7 @@ def test_patch_refuses_lowering_qty_planned_below_qty_consumed(client: TestClien
     allocation = make_allocation(db_session, wo, sheet, operation=None, qty_planned=5, qty_consumed=3.0)
 
     resp = client.patch(_tie_url(wo.id, allocation.id), json={"qty_planned": 2}, headers=headers_for(admin))
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
     assert "already been consumed" in resp.json()["detail"]
 
     ok = client.patch(_tie_url(wo.id, allocation.id), json={"qty_planned": 3}, headers=headers_for(admin))

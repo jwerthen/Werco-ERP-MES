@@ -290,7 +290,7 @@ def test_correct_blank_reason_is_422(client: TestClient, db_session: Session):
         headers=headers_for(admin),
         json={"quantity_received": 2, "reason": "   "},
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
 
 def test_correct_cross_company_receipt_is_404(client: TestClient, db_session: Session):

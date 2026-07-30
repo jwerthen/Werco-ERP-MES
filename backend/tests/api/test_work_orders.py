@@ -1867,7 +1867,7 @@ class TestWorkOrdersValidation:
         """Test creating a work order with missing required fields."""
         invalid_data = {"customer_name": "Test Customer"}
         response = client.post("/api/v1/work-orders/", headers=auth_headers, json=invalid_data)
-        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
 
     def test_create_work_order_invalid_quantity(self, client: TestClient, auth_headers: dict, test_part: Part):
         """Test creating a work order with invalid quantity."""
@@ -1877,7 +1877,7 @@ class TestWorkOrdersValidation:
             "quantity_ordered": -10,
         }
         response = client.post("/api/v1/work-orders/", headers=auth_headers, json=invalid_data)
-        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
 
     def test_create_work_order_generates_unique_numbers(
         self, client: TestClient, auth_headers: dict, sample_work_order_data: dict

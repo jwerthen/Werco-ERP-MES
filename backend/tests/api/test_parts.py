@@ -380,7 +380,7 @@ class TestPartsValidation:
         """Test creating a part with missing required fields."""
         invalid_data = {"name": "Test Part"}
         response = client.post("/api/v1/parts/", headers=auth_headers, json=invalid_data)
-        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
 
     def test_create_part_duplicate_number(self, client: TestClient, auth_headers: dict, test_part: Part):
         """Test creating a part with duplicate number."""
@@ -402,4 +402,4 @@ class TestPartsValidation:
             "unit_of_measure": "each",
         }
         response = client.post("/api/v1/parts/", headers=auth_headers, json=invalid_data)
-        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT

@@ -180,7 +180,7 @@ def test_clock_out_scrap_without_reason_is_422_and_persists_nothing(client: Test
         json={"quantity_produced": 1, "quantity_scrapped": 2},
         headers=headers_for(operator),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
     db_session.expire_all()
     entry = db_session.get(TimeEntry, entry_id)
@@ -202,7 +202,7 @@ def test_clock_out_scrap_with_blank_reason_is_422(client: TestClient, db_session
         json={"quantity_produced": 0, "quantity_scrapped": 3, "scrap_reason": "   "},
         headers=headers_for(operator),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
     db_session.expire_all()
     entry = db_session.get(TimeEntry, entry_id)
@@ -271,7 +271,7 @@ def test_production_scrap_without_reason_is_422_and_persists_nothing(client: Tes
         json={"quantity_complete_delta": 1.0, "quantity_scrapped_delta": 2.0},
         headers=headers_for(operator),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
     db_session.expire_all()
     entry = db_session.get(TimeEntry, entry_id)
@@ -294,7 +294,7 @@ def test_production_scrap_with_blank_reason_is_422(client: TestClient, db_sessio
         json={"quantity_complete_delta": 0.0, "quantity_scrapped_delta": 1.0, "scrap_reason": "   "},
         headers=headers_for(operator),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
     db_session.expire_all()
     entry = db_session.get(TimeEntry, entry_id)

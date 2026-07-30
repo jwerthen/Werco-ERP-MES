@@ -674,7 +674,7 @@ class TestPartRequiredUnlessLaserCheck:
             headers=headers_for(admin),
             json={"work_order_type": "laser_cutting", "quantity_ordered": 3, "priority": 5},
         )
-        assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
         assert db_session.query(WorkOrder).count() == 0
 
 

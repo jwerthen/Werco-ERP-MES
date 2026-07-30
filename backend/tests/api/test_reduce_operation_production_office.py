@@ -354,7 +354,7 @@ def test_office_reduce_missing_reason_is_422(client: TestClient, db_session: Ses
     make_closed_entry(db_session, operator, wo, op, quantity_produced=5)
 
     resp = client.post(office_reduce_url(op), json={"quantity_delta": 1}, headers=headers_for(supervisor))
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
 
 def test_office_reduce_rejects_import_source_422(client: TestClient, db_session: Session):
@@ -368,7 +368,7 @@ def test_office_reduce_rejects_import_source_422(client: TestClient, db_session:
         json={"quantity_delta": 1, "reason": "nope", "source": "import"},
         headers=headers_for(supervisor),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
     db_session.expire_all()
     assert db_session.query(TimeEntry).filter(TimeEntry.operation_id == op.id).one().quantity_produced == 5
 

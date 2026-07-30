@@ -120,7 +120,7 @@ def test_station_login_pin_format_rejected(client: TestClient, db_session: Sessi
     """PIN must be 4–8 digits; malformed PINs are a 422 schema rejection."""
     station = make_kiosk_station(db_session, company_id=COMPANY_A, pin="1234")
     resp = client.post(STATION_LOGIN_URL, json={"station_id": station.id, "pin": bad_pin})
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
 
 @pytest.mark.skipif(not _RATE_LIMITING_ON, reason="Rate limiting disabled in this environment")

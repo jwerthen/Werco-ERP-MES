@@ -252,7 +252,7 @@ class TestNotificationPreferences:
             headers=_headers_for(user),
             json={"preferences": {"ncr.created": {"sms": True, "email": False}}},
         )
-        assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+        assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
     def test_preferences_are_self_scoped(self, client: TestClient, db_session: Session):
         """Two users saving prefs never touch each other's row."""

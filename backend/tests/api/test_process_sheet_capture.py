@@ -1372,7 +1372,7 @@ class TestStepAttachmentUpload:
             headers=headers,
             files={"file": ("weld.png", BytesIO(b"\x89PNG123456789"), "image/png")},
         )
-        assert too_big.status_code == status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
+        assert too_big.status_code == status.HTTP_413_CONTENT_TOO_LARGE
 
     def test_upload_rejected_on_instruction_and_measurement_steps(self, client: TestClient, db_session: Session):
         # Attachments are PHOTO/FILE evidence only — every other step type refuses
