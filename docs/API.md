@@ -4734,6 +4734,30 @@ throttled rejection is audited as `EMPLOYEE_LOGIN_BLOCKED`; a counter-storage ou
 with a logged warning (the 10/minute cap above still applies). Implementation:
 `backend/app/core/login_throttle.py`.
 
+## Request Size Limits
+
+**JSON request bodies are capped at 256 KB** (`MAX_SANITIZED_JSON_BODY_BYTES`,
+env-overridable). Every `application/json` `POST`/`PUT`/`PATCH` body is HTML-sanitized by
+middleware before the route runs, and that sanitization is quadratic in adversarial markup, so
+an oversized body is **rejected** rather than passed through unsanitized:
+
+```json
+{ "detail": "Request body too large: 300000 bytes exceeds the 262144-byte limit for JSON requests." }
+```
+
+Returned as **HTTP 413**. The check is applied to the declared `Content-Length` before the body
+is read, and again to the bytes actually received (chunked encoding, or a header that lies).
+
+**Not affected:** `multipart/form-data` uploads, which keep their own per-endpoint caps (20 MB
+for QMS standard uploads, 50 MB `LASER_UPLOAD_MAX_BYTES` for laser-nest ZIP/PDF — those also
+return **413**), and inbound carrier tracking webhooks, which bypass sanitization entirely so
+their HMAC verifies against raw bytes.
+
+The largest realistic JSON bodies fit — a 170-nest laser import is ~183 KB, a 1000-line-item BOM
+create ~201 KB. A BOM create above roughly **1300 line items** exceeds the cap; raise
+`MAX_SANITIZED_JSON_BODY_BYTES` for that case, noting the quadratic cost tradeoff in
+[Request Body Size](ENVIRONMENT_VARIABLES.md#request-body-size-json-sanitization).
+
 ## CORS
 
 Cross-Origin Resource Sharing is configured to allow requests from:
@@ -4775,6 +4799,7 @@ Response:
 | 403 | Forbidden |
 | 404 | Not Found |
 | 409 | Conflict — concurrent modification of an operation / work order / time entry on a completion or clock endpoint (the row was updated by another writer between read and commit; refresh and retry) |
+| 413 | Content Too Large — a JSON body over `MAX_SANITIZED_JSON_BODY_BYTES` (default 256 KB, rejected by middleware before the route runs), or a file upload over its endpoint's own cap (e.g. 50 MB `LASER_UPLOAD_MAX_BYTES`). See [Request Size Limits](#request-size-limits) |
 | 422 | Validation Error |
 | 429 | Too Many Requests |
 | 500 | Internal Server Error |

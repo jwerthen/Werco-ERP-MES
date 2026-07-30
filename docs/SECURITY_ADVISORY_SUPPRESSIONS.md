@@ -247,9 +247,13 @@ requires only `pydantic>=2.7.0`, identical to 2.12.0's requirement, and FastAPI
     size, so the multi-MB RFQ/nest PDFs and ZIP nest packages are unaffected.
   - **The multipart header limits (8 headers / 4224 bytes) are *not* new** — they
     shipped in 0.0.27 and have been live since.
-  - **Body-size gates are unchanged and remain the only ones:** the 20MB cap in
+  - **Body-size gates are unchanged by this bump:** the 20MB cap in
     `qms_standards.py`, the 50MB `LASER_UPLOAD_MAX_BYTES` in `work_orders.py`, and
-    nginx's `client_max_body_size 50M`.
+    nginx's `client_max_body_size 50M`. (These were the *only* ones when this entry
+    was written. A fourth — `MAX_SANITIZED_JSON_BODY_BYTES`, covering JSON bodies —
+    was added on 2026-07-30; see **The bleach DoS** below. That section also records
+    that the nginx line governs the compose stack only and does **not** protect the
+    Railway-served API.)
   - **One caveat worth recording:** Starlette constructs the parser *outside* its
     `try/except MultiPartException`, and `FormParserError` is not a
     `MultiPartException` — so a >256-byte boundary surfaces as a **500** rather
@@ -287,21 +291,24 @@ requires only `pydantic>=2.7.0`, identical to 2.12.0's requirement, and FastAPI
     `LinkifyFilter` is never instantiated; there are **zero** `linkify` references
     anywhere in `app/`.
   - **The input *is* attacker-controlled — say so plainly.** The `sanitize_input`
-    middleware (`app/main.py:668-699`) runs on every JSON-bodied POST/PUT/PATCH
-    **before route-level auth**, with no body-size cap. The safety here rests
-    entirely on the code path not existing, **not** on the input being safe.
+    middleware (`app/main.py`) runs on every JSON-bodied POST/PUT/PATCH **before
+    route-level auth**. The safety here rests entirely on the code path not
+    existing, **not** on the input being safe. (The "no body-size cap" this entry
+    originally noted alongside that is fixed — see **The bleach DoS** below — but a
+    size cap bounds *cost*, not reachability, and changes nothing about the linkify
+    argument.)
   - **`backend/tests/test_bleach_linkify_guard.py` is now the only remaining
     protection.** Because the scanner will never warn about this again, that guard
     is what fails if someone introduces `linkify()` — the same executable-rationale
     pattern as the `ecdsa` guard below. Don't delete it.
-  - **bleach is now permanently unmaintained security-relevant surface**:
-    archived upstream, 6.4.0 is the terminal release, and it sits under a global
+  - **bleach is permanently unmaintained security-relevant surface**: archived
+    upstream, 6.4.0 is the terminal release, and it sits under a global
     request-body middleware. Any future bleach advisory has no fix *by
     construction* — the only responses left are reachability arguments like this
-    one. **Replacing or removing it is a real follow-up, not a footnote** — move
-    sanitization to a maintained library (`nh3` is the usual successor) or retire
-    the middleware in favor of output-encoding at render time. Nothing forces it
-    today; the point is that the next advisory will, with no upgrade available.
+    one. Replacing it was carried here as an open follow-up; **that investigation
+    is now closed and the decision is to keep bleach** — see
+    **Replacing bleach** below for the measured reason and for what would
+    change the answer.
 
 **Validation (2026-07-30, covering all four bumps):** full backend suite
 **3757 passed, 2 xfailed**, coverage 80.97%; `pip check` clean; and the A/B harness
@@ -314,6 +321,128 @@ stopped matching and the suite jumped from 14 to 155 warnings. A targeted,
 **message-scoped** `filterwarnings` entry in `backend/pytest.ini` restores it —
 message-scoped on purpose, since a blanket `ignore::UserWarning` would swallow
 unrelated warnings.
+
+### Replacing bleach — investigated 2026-07-30, decision: KEEP bleach
+
+`bleach` is archived, 6.4.0 is terminal, and it sits under a global request-body
+middleware — so "move sanitization to a maintained library (`nh3` is the usual
+successor)" was the follow-up this file carried. **It was actually done, with measured
+differential corpora, and the answer is no.** Three candidates were evaluated against a
+**113-input corpus** of real shop text; all three were rejected on behavior. This is a
+decision, not inertia.
+
+**`nh3` — rejected. It destroys operator text, and no configuration fixes it.**
+`nh3` beats bleach on maintenance, wheels, parser quality and speed. It fails on the one
+axis that decides it: output. Measured against bleach 6.4.0, **14 of 113 inputs diverge
+irreconcilably**, and the divergence is silent truncation:
+
+| Input | bleach 6.4.0 | nh3 |
+|---|---|---|
+| `Runout<TIR spec on OP30 - see Bob` | `Runout&lt;TIR spec on OP30 - see Bob` | `Runout` |
+| `Check OD<ID before press fit, log in QMS` | escapes `<`, keeps every word | `Check OD` |
+| `Tolerance <MIN> per print, inspect 100%` | `Tolerance  per print, inspect 100%` | `Tolerance ` |
+| `Qty <set> at OP20 - verify with gage` | `Qty  at OP20 - verify with gage` | `Qty ` |
+
+Two destruction families, both in html5ever's tree builder, **neither configurable**:
+
+1. **MathML/SVG element names are parsed as foreign content and dropped along with the
+   rest of the string.** A dictionary scan found **98 ordinary English words** that
+   trigger it — `min max mean set text list line path filter degree use view stop switch
+   and or not true false sum times limit matrix vector circle template none cos sin tan
+   log` …
+2. **`<` immediately followed by a letter, with no closing `>`, discards to end of
+   input.** (`<` followed by a digit, space, `.`, `=`, `-` or `_` is safe on both.)
+
+**Why this is decisive rather than a papercut: `sanitize_input` rewrites
+`request._body`, so the sanitizer's output is what gets persisted.** Silently storing an
+NCR narrative as `"Runout"` is an AS9100D / ISO 9001 records-integrity defect with **no
+recovery path** — the original bytes are gone before anything writes a row. And
+manufacturing text is precisely the corpus that triggers it: `<`-as-"less than" beside a
+tolerance word is ordinary shop shorthand.
+
+Worth recording that the *predicted* blocker was the wrong one. The expected problem was
+nh3 deleting `<script>` inner text — which turned out to be the one thing that **is**
+configurable (`clean_content_tags=set()`). The blockers were families nobody predicted,
+which is itself the argument against swapping a sanitizer that sits on a persistence
+path.
+
+**Supply-chain footnote:** `nh3` statically links the Rust `ammonia` crate into its
+wheel, so **pip-audit / OSV cannot see ammonia advisories at all**. That is the same
+"scanner is silent, nothing was actually fixed" failure mode this file already documents
+for bleach's GHSA-g75f-g53v-794x, relocated rather than solved. Adopting nh3 would mean
+tracking ammonia releases by hand.
+
+**The other two candidates:**
+
+- **`html-sanitizer`** — lxml-based and designed around allowlists for rich text. A poor
+  fit for this app's "strip everything" use, and it adds native surface.
+- **A hand-rolled stdlib sanitizer** — rejected on principle: writing your own HTML
+  sanitizer is a classic way to introduce the vulnerability you were trying to avoid.
+
+**What keeping bleach accepts:** unmaintained, security-relevant surface on a pre-auth
+path, where the next advisory will have no fix available.
+
+**What would change the answer:**
+
+- a maintained sanitizer that is **byte-equivalent to bleach 6.4.0 on this corpus** — the
+  golden-corpus test below is the acceptance criterion, and it is executable; or
+- the middleware being **removed** — retire blanket input sanitization in favor of
+  output-encoding at render time, at which point the library choice stops mattering.
+
+**Two tests hold this in place.** `backend/tests/test_bleach_linkify_guard.py` still
+stands (it is what fails if someone introduces `linkify()`), and a **golden-corpus
+characterization test** now freezes today's sanitizer output, encoding the measured nh3
+divergences as regression bait. Any future swap fails loudly on the exact inputs that
+killed this one, instead of silently truncating records in production.
+
+### The bleach DoS — quadratic sanitization behind no body-size cap (fixed 2026-07-30)
+
+The replacement investigation did not find a replacement. It found a live production
+denial-of-service, which is the more urgent result and is **independent of which
+sanitizer is used**.
+
+`bleach.clean` is **quadratic** in adversarial input, and the middleware had **no
+body-size cap**:
+
+| Body | Time |
+|---|---|
+| `"<a " * n` — 24 KB | 0.10s |
+| — 48 KB | 0.35s (3.4×) |
+| — 96 KB | 1.23s (3.5×) |
+| — 192 KB | 4.72s (3.8×) |
+| benign text — 128 KB | 0.005s |
+
+Exposure was confirmed rather than assumed: **no app-level body cap existed anywhere**;
+`sanitize_input` runs **before route-level auth dependencies**, so the cost is reachable
+**pre-auth**; and the `client_max_body_size 50M` in `nginx/nginx.prod.conf` **does not
+protect the API** — the backend image ships no nginx and Railway serves uvicorn directly
+(that line governs the compose stack only). This was live in production.
+
+**Fixed** by a new setting plus two size gates — library-independent, so it survives any
+future sanitizer decision:
+
+- **`MAX_SANITIZED_JSON_BODY_BYTES`** (`app/core/config.py`), `int`, default **262144**
+  (256 KB), env-overridable. See
+  [Request Body Size](ENVIRONMENT_VARIABLES.md#request-body-size-json-sanitization).
+- Two gates in `sanitize_input` (`app/main.py`): a **`Content-Length` pre-read check**
+  (the DoS guard — an oversized request is never buffered) and a **post-read `len(body)`
+  check**, for chunked transfer-encoding or a header that lies. Over the cap → **HTTP
+  413**, with CORS headers applied by hand, matching the adjacent `csrf_protection`
+  precedent (this middleware is the outer layer, so a short-circuited response never
+  passes back through `CORSMiddleware`).
+- It **rejects rather than skipping sanitization.** Skipping oversized bodies would hand
+  an attacker a sanitizer bypass for the price of padding the payload.
+
+**Measured result:** worst case at the cap is **9.1 CPU-seconds**; anything larger is
+rejected in **0.0005s**, with bleach never running. Raising the setting raises that
+worst case **quadratically** — the tradeoff is documented at the env-var entry.
+
+**Scope verified:** multipart / `UploadFile` paths are untouched (every CSV/XLSX bulk
+import, RFQ package, laser-nest ZIP/PDF, PO document), as are the carrier webhooks, which
+skip this middleware entirely so their HMAC verifies against raw bytes. Sizing was
+measured against real payloads — a 170-nest laser import is 183 KB and a 1000-line-item
+BOM create is 201 KB, both under the cap; the known ceiling is a BOM create above roughly
+1300 line items, which is why the value is a setting and not a constant.
 
 ### Current backend suppression: ecdsa / PYSEC-2026-1325 ("Minerva", CVE-2024-23342)
 
