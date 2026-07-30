@@ -314,11 +314,22 @@ jobs:
         # daily-moving target, so this gate is informational rather than blocking
         # (a hard gate would flap red on every unrelated PR). Backend dependency
         # CVEs are remediated as ongoing security hygiene.
+        #
+        # --ignore-vuln PYSEC-2026-1325 mirrors the BLOCKING copy of this scan in
+        # dependency-audit.yml, so the two invocations can't drift and this log
+        # stops re-reporting a finding we've formally accepted. It is the
+        # "Minerva" P-256 timing side-channel in `ecdsa` 0.19.2: no upstream fix
+        # exists or is planned, it is only present transitively via
+        # `python-jose[cryptography]`, and the path is structurally unreachable
+        # (the cryptography backend always wins because `cryptography` is pinned
+        # directly, so `ecdsa` is never imported; this app is HS256-only).
+        # Guarded by backend/tests/test_jose_ec_backend_guard.py.
         # See docs/SECURITY_ADVISORY_SUPPRESSIONS.md.
         continue-on-error: true
         run: |
           pip install pip-audit==2.10.0
-          pip-audit -r requirements.txt -r requirements-dev.txt
+          pip-audit -r requirements.txt -r requirements-dev.txt \
+            --ignore-vuln PYSEC-2026-1325
 
   deploy-staging:
     name: Deploy to Staging

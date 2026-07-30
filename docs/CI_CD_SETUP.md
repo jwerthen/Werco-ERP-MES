@@ -248,7 +248,12 @@ npm run build
 Security scans may show warnings that don't fail the build:
 - `npm audit` findings below **high** severity (the frontend gate blocks only
   high/critical), plus a non-fatal warning for any stale allowlist entry
-- `pip-audit -r requirements.txt -r requirements-dev.txt` for Python packages (scoped to the app's dependency set)
+- `pip-audit -r requirements.txt -r requirements-dev.txt` for Python packages
+  (scoped to the app's dependency set), plus `--ignore-vuln PYSEC-2026-1325` for
+  the one accepted backend suppression — there is no backend allowlist file, so
+  that flag and
+  [Security Advisory Suppressions](SECURITY_ADVISORY_SUPPRESSIONS.md) are its
+  only record
 
 Review these periodically and update dependencies.
 
