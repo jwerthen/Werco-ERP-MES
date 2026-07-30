@@ -81,7 +81,7 @@ def _map_carrier_error(exc: CarrierError) -> HTTPException:
         # the precondition-not-met signal the UI uses to prompt enabling egress.
         return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
     if isinstance(exc, AddressInvalidError):
-        return HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+        return HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))
     if isinstance(exc, NotSupportedError):
         return HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail=str(exc))
     # CarrierError "not found" maps to 404; other provider failures are 502.

@@ -214,5 +214,5 @@ class TestOpenNcrGuards:
             headers=headers,
             json={"quantity_complete_delta": 0, "quantity_scrapped_delta": 2, "open_ncr": True},
         )
-        assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+        assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
         assert db_session.query(NonConformanceReport).count() == 0

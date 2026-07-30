@@ -467,7 +467,7 @@ class TestPackageImportRefusals:
 
         assert resp.status_code in (
             status.HTTP_400_BAD_REQUEST,
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
         ), resp.text
         assert _ties(db_session) == []
 
@@ -629,7 +629,7 @@ class TestManualNestCreatesTheSameTie:
             client, headers_for(admin), parent.id, {"cnc_number": "PRG-503", "planned_runs": 2, "qty_per_run": 2.0}
         )
 
-        assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+        assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
         assert _ties(db_session) == []
 
 

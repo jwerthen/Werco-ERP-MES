@@ -200,7 +200,7 @@ def test_put_operation_scrap_without_reason_is_422_and_persists_nothing(client: 
         json={"version": op.version, "quantity_scrapped": 2},
         headers=headers_for(operator),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
     assert resp.json()["detail"][0]["msg"].endswith(SCRAP_REASON_DETAIL)
 
     db_session.expire_all()
@@ -220,7 +220,7 @@ def test_put_operation_scrap_with_blank_reason_is_422(client: TestClient, db_ses
         json={"version": op.version, "quantity_scrapped": 3, "scrap_reason": "   "},
         headers=headers_for(operator),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
     db_session.expire_all()
     op = db_session.get(WorkOrderOperation, op_id)
@@ -322,7 +322,7 @@ def test_put_work_order_scrap_without_reason_is_422_and_persists_nothing(client:
         json={"version": 0, "quantity_scrapped": 2},
         headers=headers_for(operator),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
     assert resp.json()["detail"][0]["msg"].endswith(SCRAP_REASON_DETAIL)
 
     db_session.expire_all()
@@ -342,7 +342,7 @@ def test_put_work_order_scrap_with_blank_reason_is_422(client: TestClient, db_se
         json={"version": 0, "quantity_scrapped": 3, "scrap_reason": "   "},
         headers=headers_for(operator),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
     db_session.expire_all()
     wo = db_session.get(WorkOrder, wo_id)
@@ -426,7 +426,7 @@ def test_complete_operation_scrap_without_reason_is_422_and_persists_nothing(cli
         params={"quantity_complete": 5, "quantity_scrapped": 2},
         headers=headers_for(operator),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
     assert resp.json()["detail"] == SCRAP_REASON_DETAIL
 
     db_session.expire_all()
@@ -447,7 +447,7 @@ def test_complete_operation_scrap_with_blank_reason_is_422(client: TestClient, d
         params={"quantity_complete": 5, "quantity_scrapped": 1, "scrap_reason": "   "},
         headers=headers_for(operator),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
     db_session.expire_all()
     op = db_session.get(WorkOrderOperation, op_id)
@@ -529,7 +529,7 @@ def test_complete_work_order_scrap_without_reason_is_422_and_persists_nothing(cl
         params={"quantity_complete": 8, "quantity_scrapped": 2},
         headers=headers_for(operator),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
     assert resp.json()["detail"] == SCRAP_REASON_OR_CODE_DETAIL
 
     db_session.expire_all()
@@ -550,7 +550,7 @@ def test_complete_work_order_scrap_with_blank_reason_is_422(client: TestClient, 
         params={"quantity_complete": 8, "quantity_scrapped": 3, "scrap_reason": "   "},
         headers=headers_for(operator),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
     db_session.expire_all()
     wo = db_session.get(WorkOrder, wo_id)

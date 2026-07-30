@@ -393,7 +393,7 @@ class TestSetRunOrder:
             json={"operation_ids": list(range(1, 502))},
             headers=user_headers(manager),
         )
-        assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
 
     def test_operator_is_forbidden(self, client: TestClient, db_session: Session):
         operator = make_user(db_session, role=UserRole.OPERATOR)

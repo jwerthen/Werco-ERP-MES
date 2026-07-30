@@ -802,7 +802,7 @@ def test_explicit_null_is_a_422_not_a_null_write(client: TestClient, db_session:
         headers=headers_for(user),
         json={"version": 0, "backflush_components": None},
     )
-    assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, response.text
+    assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, response.text
     db_session.expire_all()
     assert db_session.get(Part, fg.id).backflush_components is False
 

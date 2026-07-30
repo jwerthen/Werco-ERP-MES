@@ -453,7 +453,7 @@ def test_station_login_pin_format_rejected(client: TestClient, db_session: Sessi
         "/api/v1/visitor-logs/station-login",
         json={"station_id": station.id, "pin": bad_pin},
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
 
 @pytest.mark.parametrize("good_pin", ["1234", "12345678"])
@@ -504,7 +504,7 @@ def test_sign_in_purpose_other_requires_note(client: TestClient, db_session: Ses
         headers=_station_headers(token),
         json=_valid_signin_payload(purpose="other", purpose_note=None),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
 
 def test_sign_in_purpose_other_with_note_ok(client: TestClient, db_session: Session):
@@ -532,7 +532,7 @@ def test_sign_in_requires_safety_acknowledgment(client: TestClient, db_session: 
         headers=_station_headers(token),
         json=_valid_signin_payload(safety_acknowledged=False),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
 
 def test_sign_in_persists_safety_acknowledged(client: TestClient, db_session: Session):
@@ -1328,7 +1328,7 @@ def test_manual_entry_future_signed_in_at_is_422(client: TestClient, db_session:
         headers=_headers_for(admin),
         json=_valid_manual_payload(signed_in_at=future.isoformat()),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
 
 def test_manual_entry_signed_out_before_signed_in_is_422(client: TestClient, db_session: Session):
@@ -1341,7 +1341,7 @@ def test_manual_entry_signed_out_before_signed_in_is_422(client: TestClient, db_
         headers=_headers_for(admin),
         json=_valid_manual_payload(signed_in_at=signed_in.isoformat(), signed_out_at=signed_out.isoformat()),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
 
 def test_manual_entry_future_signed_out_at_is_422(client: TestClient, db_session: Session):
@@ -1354,7 +1354,7 @@ def test_manual_entry_future_signed_out_at_is_422(client: TestClient, db_session
         headers=_headers_for(admin),
         json=_valid_manual_payload(signed_in_at=signed_in.isoformat(), signed_out_at=signed_out.isoformat()),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
 
 def test_manual_entry_purpose_other_requires_note(client: TestClient, db_session: Session):
@@ -1365,7 +1365,7 @@ def test_manual_entry_purpose_other_requires_note(client: TestClient, db_session
         headers=_headers_for(admin),
         json=_valid_manual_payload(purpose="other", purpose_note=None),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
 
 def test_manual_entry_requires_safety_acknowledgment(client: TestClient, db_session: Session):
@@ -1376,7 +1376,7 @@ def test_manual_entry_requires_safety_acknowledgment(client: TestClient, db_sess
         headers=_headers_for(admin),
         json=_valid_manual_payload(safety_acknowledged=False),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
 
 def test_manual_entry_missing_signed_in_at_is_422(client: TestClient, db_session: Session):
@@ -1389,7 +1389,7 @@ def test_manual_entry_missing_signed_in_at_is_422(client: TestClient, db_session
         headers=_headers_for(admin),
         json=payload,
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
 
 # --- 7c. Success: staff-entered, supplied times, audited, no email ---------

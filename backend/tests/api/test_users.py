@@ -337,7 +337,7 @@ class TestUserValidation:
             "role": "operator",
         }
         response = client.post("/api/v1/auth/register", headers=admin_headers, json=user_data)
-        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
 
     def test_weak_password_rejected(self, client: TestClient, admin_headers, fake_data):
         """Test weak password is rejected."""
@@ -350,7 +350,7 @@ class TestUserValidation:
             "role": "operator",
         }
         response = client.post("/api/v1/auth/register", headers=admin_headers, json=user_data)
-        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
 
     def test_invalid_role_rejected(self, client: TestClient, admin_headers, fake_data):
         """Test invalid role is rejected."""
@@ -363,7 +363,7 @@ class TestUserValidation:
             "role": "invalid_role",
         }
         response = client.post("/api/v1/auth/register", headers=admin_headers, json=user_data)
-        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
 
 
 def _valid_user_payload(**overrides) -> dict:
@@ -924,7 +924,7 @@ class TestPasswordPolicyEnforcement:
             headers=admin_headers,
             json=_valid_user_payload(email="weak-create@werco.com", employee_id="EMP-WEAK-CR", password="weak"),
         )
-        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
         assert db_session.query(User).filter_by(employee_id="EMP-WEAK-CR").count() == 0
 
     def test_create_user_strong_password_succeeds(self, client: TestClient, admin_headers):
@@ -948,7 +948,7 @@ class TestPasswordPolicyEnforcement:
             headers=admin_headers,
             json={"new_password": "weak"},
         )
-        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
 
     def test_reset_password_strong_succeeds(self, client: TestClient, admin_headers, created_user):
         """A compliant new password resets successfully."""
@@ -970,7 +970,7 @@ class TestPasswordPolicyEnforcement:
             headers=auth_headers,
             json={"current_password": test_user_credentials["password"], "new_password": "weak"},
         )
-        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
 
     def test_change_password_strong_succeeds(self, client: TestClient, auth_headers, test_user_credentials):
         """Correct current password + a compliant new password succeeds."""

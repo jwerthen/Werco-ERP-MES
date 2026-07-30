@@ -133,7 +133,7 @@ class TestCompanyRegisterPasswordPolicy:
         response = client.post(
             "/api/v1/companies/register", json=_register_payload(admin_password=COMMON_SUBSTRING_PASSWORD)
         )
-        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, response.text
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, response.text
         # Nothing was persisted for the rejected registration.
         assert db_session.query(User).filter(User.email == "founder@acme-precision.com").count() == 0
         assert db_session.query(Company).filter(Company.name == "Acme Precision Machining").count() == 0
@@ -143,7 +143,7 @@ class TestCompanyRegisterPasswordPolicy:
         """Every blocklisted password -- original entries and the 2026-07-29
         expansion, matched case-insensitively -- is a 422 on /companies/register."""
         response = client.post("/api/v1/companies/register", json=_register_payload(admin_password=password))
-        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, f"{label}: {response.text}"
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, f"{label}: {response.text}"
 
     @pytest.mark.parametrize("label,password", sorted(NEWLY_ACCEPTED_PASSWORDS.items()))
     def test_register_newly_accepted_password_registers_company(self, client: TestClient, db_session, label, password):
@@ -166,7 +166,7 @@ class TestCompanyRegisterPasswordPolicy:
     def test_register_too_short_password_rejected(self, client: TestClient):
         """A password shorter than 12 chars is rejected (Field min_length -> 422)."""
         response = client.post("/api/v1/companies/register", json=_register_payload(admin_password="Ab1!xyz"))
-        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, response.text
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, response.text
 
     def test_register_strong_password_accepted(self, client: TestClient, db_session):
         """A compliant first-admin password registers the company + admin (2xx) and
@@ -198,7 +198,7 @@ class TestPlatformCompanyCreatePasswordPolicy:
             headers=platform_admin_headers,
             json=_platform_create_payload(admin_password=COMMON_SUBSTRING_PASSWORD),
         )
-        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, response.text
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, response.text
         assert db_session.query(Company).filter(Company.name == "Beta Aerospace Fabrication").count() == 0
 
     def test_platform_create_blocklisted_password_rejected(self, client: TestClient, platform_admin_headers):
@@ -213,7 +213,7 @@ class TestPlatformCompanyCreatePasswordPolicy:
             headers=platform_admin_headers,
             json=_platform_create_payload(admin_password="Thundering-dragon-42"),
         )
-        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, response.text
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, response.text
 
     def test_platform_create_newly_accepted_password(self, client: TestClient, platform_admin_headers, db_session):
         """``"Zephyr9Quills"`` (no special character) now creates the company."""

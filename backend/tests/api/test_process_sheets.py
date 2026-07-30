@@ -796,7 +796,7 @@ class TestExplicitNullRejection:
     def test_patch_sheet_null_title_is_422(self, client: TestClient, auth_headers: dict):
         sheet = _create_sheet(client, auth_headers)
         response = client.patch(f"{BASE}/{sheet['id']}", json={"title": None}, headers=auth_headers)
-        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, response.text
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, response.text
 
     @pytest.mark.parametrize(
         "payload",
@@ -812,7 +812,7 @@ class TestExplicitNullRejection:
         sheet = _create_sheet(client, auth_headers)
         step = _add_measurement_step(client, auth_headers, sheet["id"])
         response = client.patch(f"{BASE}/{sheet['id']}/steps/{step['id']}", json=payload, headers=auth_headers)
-        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, response.text
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, response.text
 
     def test_patch_step_null_on_nullable_field_still_clears(self, client: TestClient, auth_headers: dict):
         """instruction_text maps to a nullable column — explicit null legitimately clears it."""

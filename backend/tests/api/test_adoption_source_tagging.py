@@ -248,7 +248,7 @@ def test_clock_in_rejects_unknown_source(client: TestClient, db_session: Session
         json=clock_in_payload(wo, op, wc, source="fax"),
         headers=headers_for(operator),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
 
 def test_clock_out_production_and_complete_reject_unknown_source(client: TestClient, db_session: Session):
@@ -267,21 +267,21 @@ def test_clock_out_production_and_complete_reject_unknown_source(client: TestCli
         json={"quantity_produced": 0, "quantity_scrapped": 0, "source": "fax"},
         headers=headers_for(operator),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
     resp = client.post(
         f"/api/v1/shop-floor/operations/{op_id}/production",
         json={"quantity_complete_delta": 1.0, "quantity_scrapped_delta": 0.0, "source": "fax"},
         headers=headers_for(operator),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
     resp = client.post(
         f"/api/v1/shop-floor/operations/{op_id}/complete",
         json={"quantity_complete": 10, "source": "fax"},
         headers=headers_for(supervisor),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
     db_session.expire_all()
     entry = db_session.get(TimeEntry, entry_id)
@@ -471,7 +471,7 @@ def test_production_report_rejects_overlong_scrap_reason(client: TestClient, db_
         json={"quantity_complete_delta": 0.0, "quantity_scrapped_delta": 1.0, "scrap_reason": "x" * 300},
         headers=headers_for(operator),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
     db_session.expire_all()
     entry = db_session.get(TimeEntry, entry_id)
@@ -558,7 +558,7 @@ def test_hold_rejects_unknown_source(client: TestClient, db_session: Session):
         json={"source": "fax"},
         headers=headers_for(operator),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
     db_session.expire_all()
     assert db_session.get(WorkOrderOperation, op_id).status == OperationStatus.IN_PROGRESS
@@ -668,7 +668,7 @@ def test_import_source_rejected_on_clock_in_creates_no_row(client: TestClient, d
         json=clock_in_payload(wo, op, wc, source="import"),
         headers=headers_for(operator),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
     db_session.expire_all()
     rows = db_session.query(TimeEntry).filter(TimeEntry.operation_id == op.id).all()
@@ -689,21 +689,21 @@ def test_import_source_rejected_on_clock_out_production_and_complete(client: Tes
         json={"quantity_produced": 0, "quantity_scrapped": 0, "source": "import"},
         headers=headers_for(operator),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
     resp = client.post(
         f"/api/v1/shop-floor/operations/{op_id}/production",
         json={"quantity_complete_delta": 1.0, "quantity_scrapped_delta": 0.0, "source": "import"},
         headers=headers_for(operator),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
     resp = client.post(
         f"/api/v1/shop-floor/operations/{op_id}/complete",
         json={"quantity_complete": 10, "source": "import"},
         headers=headers_for(supervisor),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
     db_session.expire_all()
     entry = db_session.get(TimeEntry, entry_id)
@@ -725,7 +725,7 @@ def test_import_source_rejected_on_hold(client: TestClient, db_session: Session)
         json={"source": "import"},
         headers=headers_for(operator),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
     db_session.expire_all()
     assert db_session.get(WorkOrderOperation, op_id).status == OperationStatus.IN_PROGRESS

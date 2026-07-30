@@ -320,7 +320,7 @@ def test_blank_code_is_rejected_by_schema_422(client: TestClient, db_session: Se
         headers=_headers_for(admin),
         json={"version": 0, "code": blank_code},
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
     errors = resp.json()["detail"]
     code_errors = [e for e in errors if e["loc"][-1] == "code"]
     assert code_errors, f"expected a validation error on 'code', got: {errors}"

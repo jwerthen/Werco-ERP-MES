@@ -636,7 +636,7 @@ def test_correction_past_the_live_bound_is_422_and_names_return_and_untie(client
 
     frozen = ledger_fingerprint(db_session)
     resp = do_return(client, supervisor, wo, allocation, quantity=3, intent="correct_over_consumption")
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
     detail = resp.json()["detail"]
     assert "return_and_untie" in detail, detail
     assert "re-consumed automatically" in detail, detail
@@ -695,7 +695,7 @@ def test_a_work_order_scoped_tie_is_bounded_by_its_plan(client: TestClient, db_s
     db_session.commit()
 
     refused = do_return(client, supervisor, wo, allocation, quantity=1, intent="correct_over_consumption")
-    assert refused.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, refused.text
+    assert refused.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, refused.text
     assert "return_and_untie" in refused.json()["detail"]
 
     allowed = do_return(client, supervisor, wo, allocation, quantity=4, intent="return_and_untie")
@@ -882,7 +882,7 @@ def test_return_and_untie_never_closes_a_tie_with_material_still_out(
         # carry no RETURN row rather than a particular issued total.)
         assert response.status_code in (
             status.HTTP_409_CONFLICT,
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
         ), response.text
         assert not any(
             row.transaction_type == TransactionType.RETURN for row in rows
@@ -915,7 +915,7 @@ def test_return_and_untie_refuses_a_partial_quantity(client: TestClient, db_sess
 
     frozen = ledger_fingerprint(db_session)
     resp = do_return(client, supervisor, wo, allocation, quantity=3, intent="return_and_untie")
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
     assert "returns everything consumed" in resp.json()["detail"]
     db_session.expire_all()
     assert ledger_fingerprint(db_session) == frozen
@@ -1214,7 +1214,7 @@ def test_a_blank_reason_is_422_from_pydantic(client: TestClient, db_session: Ses
 
     frozen = ledger_fingerprint(db_session)
     resp = do_return(client, supervisor, wo, allocation, quantity=3, intent="return_and_untie", reason=reason)
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
     db_session.expire_all()
     assert ledger_fingerprint(db_session) == frozen
     assert on_hand(db_session, sheet) == 7.0
@@ -1225,7 +1225,7 @@ def test_more_than_qty_consumed_is_422(client: TestClient, db_session: Session):
 
     frozen = ledger_fingerprint(db_session)
     resp = do_return(client, supervisor, wo, allocation, quantity=4, intent="return_and_untie")
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
     assert "only 3.0 has been consumed" in resp.json()["detail"], resp.text
     db_session.expire_all()
     assert ledger_fingerprint(db_session) == frozen
@@ -1244,7 +1244,7 @@ def test_nothing_consumed_is_422_and_points_at_untie(client: TestClient, db_sess
 
     frozen = ledger_fingerprint(db_session)
     resp = do_return(client, supervisor, wo, allocation, quantity=1, intent="correct_over_consumption")
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
     detail = resp.json()["detail"]
     assert "Nothing has been consumed" in detail, detail
     assert "Untie it instead" in detail, detail
@@ -1256,7 +1256,7 @@ def test_a_non_positive_quantity_is_422(client: TestClient, db_session: Session)
     supervisor, _operator, _sheet, _lot, wo, _op, allocation = _consumed_scenario(client, db_session)
     for bad in (0, -1):
         resp = do_return(client, supervisor, wo, allocation, quantity=bad, intent="correct_over_consumption")
-        assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+        assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
 
 def test_another_tenants_tie_is_404_never_403(client: TestClient, db_session: Session):
@@ -1760,7 +1760,7 @@ def test_lowering_qty_per_run_under_consumed_material_is_422(client: TestClient,
     url = f"/api/v1/work-orders/{wo.id}/material-allocations/{allocation.id}"
 
     resp = client.patch(url, headers=headers_for(supervisor), json={"qty_per_run": 0.5})
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
     detail = resp.json()["detail"]
     assert "qty_per_run cannot be lowered" in detail, detail
     assert "3 run(s) recorded" in detail, detail
@@ -1782,7 +1782,7 @@ def test_lowering_qty_per_run_under_consumed_material_is_422(client: TestClient,
 
     # The plan guard it is twinned with is unchanged.
     lowered_plan = client.patch(url, headers=headers_for(supervisor), json={"qty_planned": 1.0})
-    assert lowered_plan.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, lowered_plan.text
+    assert lowered_plan.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, lowered_plan.text
     assert "Return the over-consumed material first" in lowered_plan.json()["detail"]
 
 

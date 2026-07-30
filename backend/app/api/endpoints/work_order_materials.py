@@ -143,7 +143,7 @@ def _resolve_pinned_item(
     if not is_consumable_item(item):
         state = "inactive" if not item.is_active else f"'{item.status}'"
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=(
                 f"Lot {item.lot_number or item.id} is {state} and may not be tied to work: pinning it would "
                 "consume held material into product. Release the lot, or pin an available one."
@@ -155,7 +155,7 @@ def _resolve_pinned_item(
         part_uom = _uom_value(part)
         if pinned_uom and pinned_uom != part_uom:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=(
                     f"Unit-of-measure mismatch: the tie is in '{part_uom}' but the pinned lot is "
                     f"'{pinned_uom}'. No unit conversion exists — pin a lot of part "
@@ -163,7 +163,7 @@ def _resolve_pinned_item(
                 ),
             )
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"The pinned lot belongs to a different part; pin a lot of part {part.part_number}.",
         )
     return item
@@ -339,7 +339,7 @@ def _assert_qty_per_run_not_under_consumed(
     if new_target >= consumed - CONSUMPTION_EPSILON or new_target >= old_target - CONSUMPTION_EPSILON:
         return
     raise HTTPException(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         detail=(
             f"qty_per_run cannot be lowered to {new_qty_per_run}: this operation has {runs:g} run(s) "
             f"recorded, so the tie would only account for {round(new_target, 6)} "
@@ -537,7 +537,7 @@ def create_material_allocation(
 
     if payload.qty_per_run is not None and payload.work_order_operation_id is None:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="qty_per_run applies to operation-scoped ties only.",
         )
 
@@ -737,7 +737,7 @@ def update_material_allocation(
 
     if payload.clear_pinned_inventory_item and payload.pinned_inventory_item_id is not None:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=(
                 "Send either clear_pinned_inventory_item or pinned_inventory_item_id, not both — "
                 "they ask for opposite things."
@@ -750,7 +750,7 @@ def update_material_allocation(
     # qty_planned to the value the tie has genuinely consumed.
     if payload.qty_planned is not None and payload.qty_planned < consumed - CONSUMPTION_EPSILON:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=(
                 f"qty_planned cannot be lowered to {payload.qty_planned}: {consumed} "
                 f"{allocation.unit_of_measure} has already been consumed against this allocation. "
@@ -761,7 +761,7 @@ def update_material_allocation(
     if payload.qty_per_run is not None:
         if allocation.work_order_operation_id is None:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="qty_per_run applies to operation-scoped ties only.",
             )
         _assert_qty_per_run_not_under_consumed(

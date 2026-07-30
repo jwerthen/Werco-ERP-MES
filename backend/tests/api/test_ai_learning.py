@@ -284,7 +284,7 @@ class TestAIRecommendationSnooze:
             json={"days": 0},
             headers=admin_headers,
         )
-        assert bad_days.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        assert bad_days.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
 
         other_company = Company(name="Snooze Other", slug="snooze-other", is_active=True)
         db_session.add(other_company)
