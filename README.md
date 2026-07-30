@@ -72,7 +72,7 @@ Cross-cutting platform properties:
 
 | Layer | Technology |
 |-------|-----------|
-| Backend | Python 3.11, FastAPI 0.136, Starlette 1.2, Uvicorn/Gunicorn |
+| Backend | Python 3.11, FastAPI 0.136, Starlette 1.3, Uvicorn/Gunicorn |
 | ORM / DB | SQLAlchemy 2.0, Alembic 1.18, PostgreSQL (Supabase), psycopg2 |
 | Validation | Pydantic 2.12 + pydantic-settings |
 | Auth / security | python-jose (JWT), passlib + bcrypt, slowapi (rate limiting), bleach |
