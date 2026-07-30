@@ -10,10 +10,20 @@ class AuditLog(Base):
     Comprehensive audit logging for CMMC Level 2 (AU-3.3.8) and AS9100D compliance.
 
     IMMUTABILITY FEATURES:
-    - sequence_number: Monotonically increasing, gaps indicate tampering
+    - Database triggers prevent UPDATE and DELETE operations (migrations 008/060).
+      ALWAYS in force; no application setting affects them.
+    - sequence_number: Monotonically increasing; gaps indicate tampering *while the
+      hash chain is enabled*.
     - integrity_hash: SHA-256 hash of record content + previous hash (hash chain)
     - previous_hash: Links to prior record for chain verification
-    - Database triggers prevent UPDATE and DELETE operations
+
+    The hash chain is on by default but PAUSABLE at runtime via
+    settings.AUDIT_HASH_CHAIN_ENABLED. While paused, rows are written with identical
+    content but previous_hash is NULL and integrity_hash is the placeholder
+    'LEGACY_CHAIN_PAUSED' (see audit_service.PAUSED_CHAIN_PLACEHOLDER); sequence_number
+    then comes from a Postgres sequence, so gaps in that window are NORMAL and are not
+    tamper indicators. Such rows are permanently unverifiable after the fact. Details:
+    docs/AUDIT_LOG_RETENTION_RUNBOOK.md -> Pausing the hash chain.
 
     Tracks all user actions and data changes with tamper detection.
     """

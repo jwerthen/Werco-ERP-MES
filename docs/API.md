@@ -4344,6 +4344,32 @@ tenants, so the aggregate chain-verification endpoints are **platform-admin only
 > record ids) can't be scoped to a single company without leaking other tenants' data. A company
 > Admin's "are my records intact?" need is served by the per-record endpoint above.
 >
+> **The hash chain is pausable, and a paused window reports as legacy — not as tampering.** As of
+> 2026-07-29 the chain is gated on the `AUDIT_HASH_CHAIN_ENABLED` setting, which **defaults to
+> `true`** (unchanged behavior). If it is set to `false`, rows are still written, but with
+> `previous_hash = null` and `integrity_hash = "LEGACY_CHAIN_PAUSED"` — a `LEGACY_`-prefixed
+> placeholder that every one of these endpoints already skips rather than asserts correct. Effects on
+> the responses:
+> - `/integrity/verify` and `/integrity/verify-recent` return a new field
+>   **`legacy_sequence_gaps`** (int, default `0`) alongside `legacy_records`. Sequence gaps that touch
+>   a legacy/paused row are counted there **instead of** being raised as `sequence_gap` issues, so
+>   `chain_valid` stays `true` and `issues` stays empty across a paused window. Gaps are expected
+>   while paused because the sequence allocator's values are consumed even by rolled-back
+>   transactions. **A non-zero `legacy_sequence_gaps` means gap-based deletion detection does not
+>   apply over that span** — read it as a coverage caveat, not a fault. With the chain enabled, an
+>   injected gap between two non-legacy rows is still reported as a `sequence_gap` issue and still
+>   flips `chain_valid` to `false`.
+> - `/integrity/record/{sequence_number}` returns `is_legacy: true` with `hash_valid: true` and
+>   `chain_valid: true` for a paused row (skipped, not verified). The first row after a pause begins
+>   is included in that skip.
+> - `/integrity/status` counts paused rows in `legacy_records` (excluded from `protected_records`).
+>   Its **`has_gaps` flag is not legacy-aware** — a plain `total != (last - first + 1)` comparison —
+>   so it reads `true` across a paused window. `/integrity/verify` is the authoritative check.
+>
+> The database immutability triggers (migrations `008`/`060`) are independent of the setting and
+> remain in force. Full operational detail, including what is permanently lost while paused:
+> [docs/AUDIT_LOG_RETENTION_RUNBOOK.md](AUDIT_LOG_RETENTION_RUNBOOK.md) → **Pausing the hash chain**.
+>
 > **⚠️ Filtering by `resource_type` does NOT return a material's full history — read this before
 > auditing one.** `parts` and `materials` are the *same table* behind two routers, and their audit
 > rows are split across two `resource_type` values with a **discontinuity dated 2026-07-27 (PR 4.5)**:

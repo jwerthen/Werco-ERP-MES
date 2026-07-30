@@ -581,6 +581,25 @@
     /audit/integrity/record/{sequence_number} is available to a company Admin for their own
     company's records)
 
+  > **The hash chain became runtime-pausable on 2026-07-29 — this control's status now depends on a
+  > configuration setting.** `AUDIT_HASH_CHAIN_ENABLED` (`app/core/config.py`) **defaults to `true`**,
+  > which is the exact behavior described above and everywhere else in this control, so **as of this
+  > writing the control is implemented as claimed and unchanged in production.** Stating the
+  > dependency, not a finding: if the setting is ever set to `false`, audit rows continue to be
+  > written with identical content, actor attribution, tenancy, and DB-level immutability, but
+  > `sequence_number` is allocated from a Postgres sequence (migration `077`) instead of a
+  > lock-serialized tail read, `previous_hash` is `NULL`, and `integrity_hash` is the
+  > `LEGACY_CHAIN_PAUSED` placeholder — so rows written in that window carry **no cryptographic proof
+  > of non-alteration**, cannot be made verifiable retroactively, and are permanently outside
+  > gap-based deletion detection (the verifier counts such gaps in `legacy_sequence_gaps` rather than
+  > reporting them as tampering). What continues to protect those rows is the `008`/`060` DB triggers,
+  > which are **independent of the setting**. An assessor's question is therefore "was the chain
+  > enabled over the period under review?", answerable from the deployed configuration and from
+  > `legacy_records` / `legacy_sequence_gaps` on `/audit/integrity/verify`. **Any decision to run with
+  > the chain paused requires explicit compliance sign-off and a Change Log entry recording the
+  > window; none has been requested and none is recorded.** Operational detail:
+  > `docs/AUDIT_LOG_RETENTION_RUNBOOK.md` → Pausing the hash chain.
+
   > **DB-level immutability is (re)ensured by migration `060_audit_log_immutability` —
   > prod gap found and fixed 2026-07-07.** The `tr_audit_log_no_update` / `tr_audit_log_no_delete`
   > triggers this control relies on were found **missing in production**: prod was bootstrapped

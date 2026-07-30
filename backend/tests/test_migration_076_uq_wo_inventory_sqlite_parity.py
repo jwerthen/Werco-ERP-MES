@@ -99,11 +99,17 @@ def _body() -> str:
 
 @pytest.mark.unit
 def test_single_head_and_revision_chain():
-    """One head, and the 074 -> 075 -> 076 chain is intact."""
+    """One head, and the 074 -> 075 -> 076 chain is intact.
+
+    Deliberately does NOT assert that 076 is the head. It was when written, but
+    pinning that makes this test fail on every subsequent migration for a reason
+    that has nothing to do with 076 (077 tripped it). What matters here is that
+    there is exactly ONE head and that 076 is still an ancestor of it with its
+    chain intact -- both asserted below.
+    """
     scripts = _script_directory()
     heads = scripts.get_heads()
     assert len(heads) == 1, f"multiple alembic heads: {heads}"
-    assert heads[0] == REVISION, f"076 must be the head, got {heads[0]}"
 
     revision = scripts.get_revision(REVISION)
     assert revision.down_revision == DOWN_REVISION

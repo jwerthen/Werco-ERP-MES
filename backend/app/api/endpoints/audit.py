@@ -191,6 +191,13 @@ def get_integrity_status(db: Session = Depends(get_db), current_user: User = Dep
     interleaved across all tenants, so its stats cannot be scoped to one
     company without leaking other tenants' record counts and sequence ranges.
 
+    `legacy_records` counts rows with a `LEGACY_`-prefixed placeholder hash —
+    both pre-integrity-tracking rows and rows written while the hash chain was
+    paused (`AUDIT_HASH_CHAIN_ENABLED=false`); `protected_records` excludes them.
+    **`has_gaps` here is a naive `total != (last - first + 1)` comparison and is
+    NOT legacy-aware**, so it reads true across a paused window. Use
+    `/integrity/verify` for the authoritative, legacy-aware result.
+
     **CMMC Level 2 Control**: AU-3.3.8 - Protect audit information
     """
     service = AuditIntegrityService(db)
@@ -217,6 +224,17 @@ def verify_audit_integrity(
     - Sequence gaps (no records have been deleted)
 
     Platform-admin access only (the chain spans all tenants).
+
+    Rows carrying a `LEGACY_`-prefixed placeholder hash — pre-integrity-tracking
+    rows, and rows written while the chain was paused via
+    `AUDIT_HASH_CHAIN_ENABLED=false` — are counted in `legacy_records` and
+    skipped rather than asserted correct. Sequence gaps that touch such a row are
+    counted in **`legacy_sequence_gaps`** instead of being reported as
+    `sequence_gap` issues, because the paused-mode allocator legitimately burns
+    sequence values on rolled-back transactions. A non-zero `legacy_sequence_gaps`
+    means gap-based deletion detection does not apply across that span; it does
+    not affect `chain_valid`. Gaps between two non-legacy rows are still reported
+    as issues and still invalidate the chain.
 
     **CMMC Level 2 Control**: AU-3.3.8 - Protect audit information
 
@@ -246,6 +264,10 @@ def verify_recent_audit_logs(
 
     Platform-admin access only (the chain spans all tenants).
 
+    Same report shape as `/integrity/verify`, including `legacy_records` and
+    `legacy_sequence_gaps` — see that endpoint for how a paused-chain window
+    (`AUDIT_HASH_CHAIN_ENABLED=false`) is reported.
+
     **CMMC Level 2 Control**: AU-3.3.8 - Protect audit information
     """
     service = AuditIntegrityService(db)
@@ -267,6 +289,11 @@ def verify_single_record(
     Returns the record details along with verification status.
     ADMIN access; a company-scoped admin may only inspect records belonging to
     their active company, platform admins / superusers any record.
+
+    A record with a `LEGACY_`-prefixed placeholder hash (pre-integrity-tracking,
+    or written while the chain was paused via `AUDIT_HASH_CHAIN_ENABLED=false`)
+    returns `is_legacy: true` with `hash_valid`/`chain_valid` true — it is
+    **skipped**, not cryptographically verified.
     """
     record = db.query(AuditLog).filter(AuditLog.sequence_number == sequence_number).first()
 

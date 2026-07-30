@@ -1,7 +1,7 @@
 # Audit Log Retention & Archival Runbook
 
-**Version**: 1.0.0  
-**Last Updated**: 2026-06-05  
+**Version**: 1.1.0  
+**Last Updated**: 2026-07-29  
 **Compliance**: CMMC Level 2 AU-3.3.8 (Protect Audit Information) + AS9100D / ISO 9001 records control
 
 ---
@@ -9,11 +9,12 @@
 ## Table of Contents
 
 1. [Why audit logs are immutable and never deleted](#why-audit-logs-are-immutable-and-never-deleted)
-2. [How the archival job works](#how-the-archival-job-works)
-3. [Operating the archival job](#operating-the-archival-job)
-4. [Verifying and restoring an archived segment](#verifying-and-restoring-an-archived-segment)
-5. [Physical removal: the manual partition-drop procedure](#physical-removal-the-manual-partition-drop-procedure)
-6. [Reference](#reference)
+2. [Pausing the hash chain (`AUDIT_HASH_CHAIN_ENABLED`)](#pausing-the-hash-chain-audit_hash_chain_enabled)
+3. [How the archival job works](#how-the-archival-job-works)
+4. [Operating the archival job](#operating-the-archival-job)
+5. [Verifying and restoring an archived segment](#verifying-and-restoring-an-archived-segment)
+6. [Physical removal: the manual partition-drop procedure](#physical-removal-the-manual-partition-drop-procedure)
+7. [Reference](#reference)
 
 ---
 
@@ -25,13 +26,22 @@ operation**:
 
 - **Database-enforced immutability.** Migration `008_add_audit_log_integrity` installs two triggers,
   `tr_audit_log_no_update` and `tr_audit_log_no_delete`, that raise an exception on any `UPDATE` or
-  `DELETE` against the table. The application cannot mutate or delete an audit row.
+  `DELETE` against the table. The application cannot mutate or delete an audit row. **This property
+  is unconditional** — it lives in the database and no application setting affects it.
 - **A single global SHA-256 hash chain.** Every row carries `sequence_number`, `previous_hash`, and
   `integrity_hash`. Each row's hash is computed over its content plus the prior row's hash, so
   altering any historical row breaks the chain from that point forward.
 - **Gap detection.** The chain is verified by `AuditIntegrityService`. A **missing sequence number**
   is reported as a `sequence_gap` tamper indicator. Deleting an aged row would therefore read as
   tampering, even though it was "just cleanup."
+
+> **The second and third properties are conditional as of 2026-07-29.** The hash chain is now
+> runtime-pausable via the `AUDIT_HASH_CHAIN_ENABLED` setting. It **defaults to `true`**, so
+> everything above describes the shipped and currently-running behavior. If the flag is ever set to
+> `false`, rows written during that window carry no hash and no chain link, and gaps in their
+> sequence numbers are normal rather than a tamper indicator. Read
+> [Pausing the hash chain](#pausing-the-hash-chain-audit_hash_chain_enabled) before flipping it, and
+> re-read this section as "true while the chain is enabled."
 
 > **The hash chain is ONE global sequence, interleaved across all tenants.** `sequence_number` is a
 > single monotonic counter shared by every company; rows for different `company_id`s are interleaved
@@ -56,6 +66,110 @@ delete." They do not. The system reconciles them by **archiving, never deleting*
   deliberate, documented DBA **partition-drop** operation (see
   [below](#physical-removal-the-manual-partition-drop-procedure)). It is **never** an automated row
   delete and is **never** done by disabling the immutability triggers.
+
+---
+
+## Pausing the hash chain (`AUDIT_HASH_CHAIN_ENABLED`)
+
+**Current state: the chain is ENABLED.** `AUDIT_HASH_CHAIN_ENABLED` defaults to `true`
+(`backend/app/core/config.py`), which is byte-for-byte the historical behavior. Nothing in this
+section is in effect unless someone explicitly sets it to `false`. It is opt-in precisely because
+**pausing is not fully reversible.**
+
+### Why the flag exists
+
+With the chain enabled, every audited write takes **one global transaction-scoped Postgres advisory
+lock** (`_AUDIT_CHAIN_LOCK_KEY` — a single fixed key for the whole `audit_logs` table, across all
+tenants), holds it until the *caller's* transaction commits, reads the chain tail
+(`MAX(sequence_number)`), and SHA-256s the full row including the old/new JSON payloads. That lock is
+a system-wide serialization point on every audited request. The flag makes that cost removable.
+
+### What changes when paused
+
+| | Chain enabled (default) | Chain paused |
+|---|---|---|
+| Advisory lock | Taken, held to caller commit | **Not taken** |
+| Tail read (`MAX(sequence_number)`) | Every write, per retry | **None** |
+| `sequence_number` allocator | `MAX + 1` under the lock | `nextval('audit_logs_sequence_number_seq')` (lock-free) |
+| `previous_hash` | Prior row's `integrity_hash` | **`NULL`** |
+| `integrity_hash` | SHA-256 over row content + prior hash | **`'LEGACY_CHAIN_PAUSED'`** (constant placeholder) |
+| Audit row written at all | Yes | Yes — same table, same columns, same audit content |
+| Savepoint/retry wrapper | Yes | Yes (it is the caller's session-poisoning guard, not just a collision guard) |
+
+The placeholder deliberately reuses the **`LEGACY_` prefix** that migration `008` established for
+pre-chain rows, because every consumer already tests exactly that prefix and skips the row —
+`AuditIntegrityService` (hash check, chain-link check, gap check, and the `LIKE 'LEGACY_%'` count) and
+the `is_legacy` field on `GET /audit/integrity/record/{sequence_number}`. The `_CHAIN_PAUSED` suffix
+is what distinguishes a paused row from a genuine `008` backfill row.
+
+Non-PostgreSQL dialects (SQLite, i.e. the test backend) have no sequence and fall back to `MAX + 1`.
+
+### What is PERMANENTLY lost
+
+State these plainly to anyone considering the flip:
+
+1. **Rows written while paused can never be made verifiable retroactively.** There is no backfill and
+   there cannot be one — computing hashes after the fact would require writing to `audit_logs`, which
+   the `008`/`060` triggers refuse and which invariant 2 forbids anyway. Re-enabling the chain fixes
+   *subsequent* rows only.
+2. **Gap-based deletion detection is permanently gone across the paused window.** `nextval` does not
+   roll back with the caller's transaction, so a rolled-back request legitimately burns a sequence
+   number. Gaps inside a paused span are therefore normal and are **not** reported as tampering —
+   which necessarily means a *deleted* row inside that span would not be reported either. This does
+   not heal on resume; the window stays permanently ungapped-checkable.
+
+### What survives
+
+- **The audit rows themselves** — same table, same content, same tenant tagging, same actor/IP/session
+  attribution. Nothing about audit *coverage* changes.
+- **The `008`/`060` database triggers** (`tr_audit_log_no_update` / `tr_audit_log_no_delete`). These
+  are independent of the flag and remain the real protection against alteration and deletion.
+- **Every read path** — `GET /audit/`, the summary/actions/resource-type endpoints, the Audit Log UI,
+  and the archival job (which treats `LEGACY_`-prefixed rows as valid and skips their hash check).
+
+### How to pause, and how to resume
+
+Pausing and resuming are both a setting change plus a restart of the API and worker processes.
+
+1. **Before the first pause**, apply migration `077_audit_seq_paused_chain` (it ships in the normal
+   `alembic upgrade head` at container boot). It creates `audit_logs_sequence_number_seq` starting at
+   `MAX(sequence_number) + 1000` — the margin exists so the sequence cannot hand out a value the
+   still-running chain is about to allocate via `MAX + 1`. Applying it changes no behavior on its own;
+   nothing reads the sequence until the flag is `false`.
+2. **Pause:** set `AUDIT_HASH_CHAIN_ENABLED=false` and restart. The first paused row's
+   `sequence_number` jumps ahead by at least the 1000-row margin — that jump is expected, and it is
+   counted as a legacy gap, not an issue.
+3. **Resume:** set `AUDIT_HASH_CHAIN_ENABLED=true` (or remove the override) and restart. Allocation
+   returns to `MAX + 1` and the first re-enabled row links its `previous_hash` to the last paused
+   row's placeholder. The verifier skips that link (the previous row is legacy), so the chain resumes
+   cleanly from there forward and `verify_full_chain` reports `chain_valid: true`.
+4. **Re-pausing after a resume needs no manual `setval`.** The two allocators leapfrog (the resumed
+   chain advances `MAX` past the sequence's `last_value` without touching it), so the first paused
+   write after a resume can collide. `AuditService` handles it: the collision-retry path calls
+   `_resync_paused_sequence()`, which `setval`s the sequence forward to the live `MAX`, and the retry
+   succeeds. The cost is paid once per mode flip, not per write.
+
+> Do **not** `downgrade` migration `077` while the chain is paused — it drops the sequence the paused
+> allocator depends on, and audit writes will fail. Re-enable the chain first.
+
+### How a paused window reports on the verify endpoints
+
+| Endpoint | Behavior across a paused window |
+|---|---|
+| `GET /audit/integrity/verify` | Paused rows are counted in **`legacy_records`**, not verified. Gaps touching a paused row are counted in the new **`legacy_sequence_gaps`** field instead of being raised as `sequence_gap` issues, so `chain_valid` stays `true` and `issues` stays empty. A non-zero `legacy_sequence_gaps` is the signal that **gap-based deletion detection does not apply across that span.** |
+| `GET /audit/integrity/verify-recent` | Same report shape and same handling. |
+| `GET /audit/integrity/record/{sequence_number}` | A paused row returns `is_legacy: true` with `hash_valid: true` and `chain_valid: true` — it is skipped, not asserted correct. |
+| `GET /audit/integrity/status` | `legacy_records` includes paused rows and `protected_records` excludes them. **Caveat: `has_gaps` on this endpoint is a naive `total != (last - first + 1)` comparison and is NOT legacy-aware**, so it will read `true` across a paused window (including from the 1000-row start margin alone). It is a cheap stats probe; `/integrity/verify` is the authoritative check. |
+
+With the chain **enabled**, gap detection is unchanged: an injected gap between two non-legacy rows is
+still reported as a `sequence_gap` issue and still flips `chain_valid` to `false`.
+
+### If you are asked about this in an audit
+
+The honest framing: rows written during a paused window retain their **content, attribution, and
+database-enforced immutability**, but not **cryptographic proof of non-alteration**. The `008`/`060`
+triggers are what stand behind them. Do not describe a paused span as hash-chain protected, and do not
+describe the system as having no tamper controls during one either.
 
 ---
 
@@ -213,7 +327,8 @@ with open("archive.ndjson") as fh:
     for line in fh:
         r = json.loads(line)
         if (r.get("integrity_hash") or "").startswith("LEGACY_"):
-            continue  # pre-integrity-tracking rows have placeholder hashes
+            continue  # placeholder hashes: pre-integrity-tracking rows AND rows
+                      # written while the chain was paused ('LEGACY_CHAIN_PAUSED')
         expected = compute_audit_hash(
             sequence_number=r["sequence_number"],
             timestamp=r["timestamp"],          # ISO string; compute_audit_hash stringifies inputs
@@ -234,10 +349,17 @@ with open("archive.ndjson") as fh:
         assert expected == r["integrity_hash"], f"hash mismatch at seq {r['sequence_number']}"
 ```
 
+> The `LEGACY_` filter above is unchanged and still correct — `'LEGACY_CHAIN_PAUSED'` matches it, so
+> paused rows are skipped by the same branch, exactly as the live verifier skips them. A paused row's
+> `previous_hash` is `NULL` and its `integrity_hash` is the constant placeholder; do not try to
+> recompute either.
+
 **Chain continuity:** within and across files, each row's `previous_hash` must equal the
 `integrity_hash` of the row at `sequence_number - 1`. Because files are named with their
 `seq<first>-<last>` range, adjacent archives stitch together by sequence number to reconstruct a
-contiguous chain for an auditor.
+contiguous chain for an auditor. **Across a span written while the chain was paused this does not
+hold and is not expected to** — those rows have `previous_hash = NULL` and non-contiguous sequence
+numbers by design (see [Pausing the hash chain](#pausing-the-hash-chain-audit_hash_chain_enabled)).
 
 > Restoring is **read/verify only.** Do not re-insert archived rows into `audit_logs` — the
 > immutability triggers and the live sequence make re-insertion impossible and unnecessary. The
@@ -278,7 +400,11 @@ application and must be performed by a DBA with explicit sign-off.
 
 - Verify the remaining online chain: run `GET /audit/integrity/verify` (Platform Admin) over the new
   online range and confirm `chain_valid` with no `sequence_gap` issues from the new first sequence
-  forward. The dropped range is expected to be absent; document the new online floor.
+  forward. The dropped range is expected to be absent; document the new online floor. **If the
+  remaining range spans a window written while the hash chain was paused, this check is weaker than
+  it looks** — gaps there are counted in `legacy_sequence_gaps` rather than raised as issues, so a
+  clean `chain_valid` does not attest to the paused span. Record `legacy_records` and
+  `legacy_sequence_gaps` alongside the result.
 - Retain the cold-storage archive (and its `ExportEvent`) for the full records-retention obligation.
   The archive — not the online table — is now the system of record for the removed period.
 - Record the partition-drop as a maintenance/change action with the legal sign-off reference.
@@ -296,9 +422,12 @@ application and must be performed by a DBA with explicit sign-off.
 | Worker job / cron | `backend/app/worker.py` (`archive_aged_audit_logs_job`, monthly cron) |
 | Task wrapper | `backend/app/jobs/maintenance_jobs.py` (`archive_aged_audit_logs_task`) |
 | Cleanup job (audit-safe) | `backend/app/jobs/maintenance_jobs.py` (`cleanup_old_logs_task` — jobs + notifications only) |
-| Integrity verifier | `backend/app/services/audit_integrity_service.py` (`AuditIntegrityService`) |
+| Integrity verifier | `backend/app/services/audit_integrity_service.py` (`AuditIntegrityService`, `IntegrityReport.legacy_sequence_gaps`) |
 | Hash function | `backend/app/services/audit_service.py` (`compute_audit_hash`) |
-| Immutability triggers | `backend/alembic/versions/008_add_audit_log_integrity.py` |
+| Chain pause switch | `backend/app/core/config.py` (`AUDIT_HASH_CHAIN_ENABLED`, default `true`) |
+| Paused-mode placeholder / allocator | `backend/app/services/audit_service.py` (`PAUSED_CHAIN_PLACEHOLDER`, `_next_sequence_paused`, `_resync_paused_sequence`) |
+| Paused-mode sequence | `backend/alembic/versions/077_audit_sequence_for_paused_chain.py` (`audit_logs_sequence_number_seq`) |
+| Immutability triggers | `backend/alembic/versions/008_add_audit_log_integrity.py` (re-ensured by `060_audit_log_immutability.py`) |
 | Retention/governance models | `backend/app/models/governance.py` (`RetentionPolicy`, `ExportEvent`, `LegalHold`) |
 | Retention policy seed | `backend/alembic/versions/030_add_cui_governance_foundation.py` (`security_audit_record`, 1095 days) |
 | Settings | `backend/app/core/config.py` (`AUDIT_ARCHIVE_*`, `AUDIT_RETENTION_DAYS_DEFAULT`) |
