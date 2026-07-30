@@ -29,11 +29,10 @@ run are now settled: **`pypdf` is fixed** (6.10.2 → 6.14.2, see Remediated bel
 and **`ecdsa` / PYSEC-2026-1325 is an accepted, documented suppression** (see
 below). That is the gate working, not a misconfiguration.
 
-**The nightly is still red, and the `pypdf` fix did not change that.** A fresh
-resolve of `requirements.txt` + `requirements-dev.txt` today reports **13
-vulnerabilities across 6 packages**: the suppressed `ecdsa` plus five *other*
-packages flagged since that first run. Do not read "pypdf fixed" as "nightly
-green".
+**The nightly is still red, and the `pypdf` fix did not change that.** The CI
+job itself reports **`Found 10 known vulnerabilities, ignored 1 in 4 packages`**
+— the suppressed `ecdsa` plus four *other* packages flagged since that first
+run. Do not read "pypdf fixed" as "nightly green".
 
 | Package | Pinned | Advisories | Fixed in |
 |---|---|---|---|
@@ -41,13 +40,23 @@ green".
 | `python-multipart` | 0.0.27 | PYSEC-2026-3036, PYSEC-2026-3037, PYSEC-2026-3040 | 0.0.30 / 0.0.31 |
 | `bleach` | 6.3.0 | GHSA-8rfp-98v4-mmr6, GHSA-gj48-438w-jh9v; GHSA-g75f-g53v-794x | 6.4.0 / — |
 | `pydantic-settings` | 2.12.0 | GHSA-4xgf-cpjx-pc3j | 2.14.2 |
-| `setuptools` | 79.0.1 | PYSEC-2026-3447 | 83.0.0 |
 
 New advisories published against already-pinned versions is the normal behavior
 of a moving database, not a regression on `main` — it is the same reason the PR
 gates are advisory and the nightly is where the red lands.
 
-**These five will be fixed, not suppressed, and they are out of scope for this
+> **Take the counts from a CI run, not from a local audit.** `pip-audit -r` is
+> scoped to what the two requirements files actually declare. Auditing a local
+> environment instead — even a freshly built one — picks up packages that are
+> merely *present*, and reports advisories the gate will never show you.
+> `setuptools` 79.0.1 / PYSEC-2026-3447 is the live example: it appears in a
+> local venv as build tooling, it is pinned in **neither** requirements file, and
+> it is **absent** from the CI job's output. It is not part of this app's audited
+> surface and needs no bump. (Auditing `backend/.venv311` directly is worse
+> still — it has drifted and carries dev extras, and reports roughly three times
+> the real finding count.)
+
+**These four will be fixed, not suppressed, and they are out of scope for this
 change.** Every one of them except `bleach`'s GHSA-g75f-g53v-794x has a fix
 available, and this file's own [`reason` rule](#adding-an-allowlist-entry) rejects
 "no fix available" and "it is noisy" as justifications on their own. An advisory
@@ -65,9 +74,8 @@ behavior change ships:
   `from bleach import clean`, so it is shipped input-sanitization surface. What
   still needs determining is whether the flagged code paths are the ones we
   call, and what to do about GHSA-g75f-g53v-794x, which has no fix.
-- **`setuptools`** is pinned in *neither* requirements file — it arrives in the
-  resolved environment as build tooling. Decide whether it is in this app's
-  shipped surface at all before spending a bump on it.
+  (`setuptools` used to be listed here; it is not in the gate's scope at all —
+  see the note above.)
 
 ## Backend (`pip-audit`) — advisory on PRs, blocking nightly
 
@@ -178,9 +186,9 @@ The nightly gate then surfaced a third package, since fixed:
     80.97%; `black` / `isort` / `flake8` / `mypy` (325 files) all clean. New
     regression coverage lives in
     `backend/tests/services/test_pypdf_real_text_extraction.py`.
-  - **Post-change scan, for the record:** `pip-audit` on a fresh resolve reports
-    `Found 12 known vulnerabilities, ignored 1 in 5 packages` — `pypdf` absent,
-    `ecdsa` suppressed, and the five packages above remaining.
+  - **Post-change scan, for the record:** the `pip-audit (Backend)` job reports
+    `Found 10 known vulnerabilities, ignored 1 in 4 packages` — `pypdf` absent,
+    `ecdsa` suppressed, and the four packages above remaining.
 
 ### Current backend suppression: ecdsa / PYSEC-2026-1325 ("Minerva", CVE-2024-23342)
 
