@@ -4736,10 +4736,11 @@ with a logged warning (the 10/minute cap above still applies). Implementation:
 
 ## Request Size Limits
 
-**JSON request bodies are capped at 256 KB** (`MAX_SANITIZED_JSON_BODY_BYTES`,
-env-overridable). Every `application/json` `POST`/`PUT`/`PATCH` body is HTML-sanitized by
-middleware before the route runs, and that sanitization is quadratic in adversarial markup, so
-an oversized body is **rejected** rather than passed through unsanitized:
+**JSON request bodies are capped at 256 KB** (`MAX_JSON_BODY_BYTES`, env-overridable; the
+pre-rename `MAX_SANITIZED_JSON_BODY_BYTES` is still honored as a deprecated alias). Every
+`application/json` `POST`/`PUT`/`PATCH` body is size-checked by middleware before the route
+runs — ahead of route auth, so an unauthenticated caller cannot choose how many bytes the app
+buffers and parses. Over the cap the request is **rejected**:
 
 ```json
 { "detail": "Request body too large: 300000 bytes exceeds the 262144-byte limit for JSON requests." }
@@ -4750,13 +4751,18 @@ is read, and again to the bytes actually received (chunked encoding, or a header
 
 **Not affected:** `multipart/form-data` uploads, which keep their own per-endpoint caps (20 MB
 for QMS standard uploads, 50 MB `LASER_UPLOAD_MAX_BYTES` for laser-nest ZIP/PDF — those also
-return **413**), and inbound carrier tracking webhooks, which bypass sanitization entirely so
+return **413**), and inbound carrier tracking webhooks, which bypass this middleware entirely so
 their HMAC verifies against raw bytes.
 
 The largest realistic JSON bodies fit — a 170-nest laser import is ~183 KB, a 1000-line-item BOM
 create ~201 KB. A BOM create above roughly **1300 line items** exceeds the cap; raise
-`MAX_SANITIZED_JSON_BODY_BYTES` for that case, noting the quadratic cost tradeoff in
-[Request Body Size](ENVIRONMENT_VARIABLES.md#request-body-size-json-sanitization).
+`MAX_JSON_BODY_BYTES` for that case, noting the sizing guidance in
+[Request Body Size](ENVIRONMENT_VARIABLES.md#request-body-size-json).
+
+**Request bodies are stored as sent.** The API does **not** strip or rewrite HTML in request
+data — as of 2026-07-30 the middleware only measures size. Angle brackets in a note field (ASME
+Y14.5 notation such as `2.500 <REF>`, or `<` meaning "less than") round-trip byte-for-byte
+through create/read/update. Server-rendered PDFs escape at render.
 
 ## CORS
 
@@ -4799,7 +4805,7 @@ Response:
 | 403 | Forbidden |
 | 404 | Not Found |
 | 409 | Conflict — concurrent modification of an operation / work order / time entry on a completion or clock endpoint (the row was updated by another writer between read and commit; refresh and retry) |
-| 413 | Content Too Large — a JSON body over `MAX_SANITIZED_JSON_BODY_BYTES` (default 256 KB, rejected by middleware before the route runs), or a file upload over its endpoint's own cap (e.g. 50 MB `LASER_UPLOAD_MAX_BYTES`). See [Request Size Limits](#request-size-limits) |
+| 413 | Content Too Large — a JSON body over `MAX_JSON_BODY_BYTES` (default 256 KB, rejected by middleware before the route runs), or a file upload over its endpoint's own cap (e.g. 50 MB `LASER_UPLOAD_MAX_BYTES`). See [Request Size Limits](#request-size-limits) |
 | 422 | Validation Error |
 | 429 | Too Many Requests |
 | 500 | Internal Server Error |

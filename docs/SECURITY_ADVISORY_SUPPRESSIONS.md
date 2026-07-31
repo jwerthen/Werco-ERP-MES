@@ -23,9 +23,10 @@ justification for any gate that is not hard-blocking.
 ## Known open advisories (as of 2026-07-30)
 
 **None outstanding.** Every backend advisory the nightly has surfaced is now
-fixed by upgrade rather than suppressed — with the single argued exception of
-`ecdsa` / PYSEC-2026-1325, which has no fixed version in any release and is
-justified on reachability further down.
+fixed by upgrade — or, in `bleach`'s case, by **deleting the dependency** — rather
+than suppressed, with the single argued exception of `ecdsa` / PYSEC-2026-1325,
+which has no fixed version in any release and is justified on reachability
+further down.
 
 That took three passes, all recorded under Remediated below. The first run of the
 nightly `dependency-audit.yml` surfaced six advisories that were already present
@@ -35,6 +36,12 @@ on `main` — invisible until then because `pip-audit` had only ever run as
 versions in the days after, and those were cleared together on 2026-07-30:
 `starlette`, `python-multipart`, `bleach`, and `pydantic-settings`. The gate
 finding all of this was the gate working, not a misconfiguration.
+
+**`bleach` is no longer a dependency of this app** (removed 2026-07-30, later the
+same day as its 6.4.0 bump). It is out of pip-audit's scope entirely, and the
+`bleach` entries below are kept as history — see
+[bleach removed](#bleach-removed--escape-at-the-sink-2026-07-30) for the current
+state.
 
 **The nightly is GREEN — confirmed by a CI run, not inferred.** A manual
 `workflow_dispatch` of `dependency-audit.yml` against the bump branch
@@ -229,7 +236,7 @@ requires only `pydantic>=2.7.0`, identical to 2.12.0's requirement, and FastAPI
   - **PYSEC-2026-248 / CVE-2026-54282** is authority confusion when rebuilding
     `request.url` from a path lacking a leading `/`. It gets a mention because
     this app keys ~9 security decisions off `request.url.path` (CSRF exemptions,
-    the carrier-webhook sanitize skip, rate-limit selection, the kiosk-scope path
+    the carrier-webhook body-cap skip, rate-limit selection, the kiosk-scope path
     fence in `api/deps.py`, the read-only platform-admin write guard). Triggering
     it needs an ASGI server that delivers a path not starting with `/`, which
     uvicorn/gunicorn do not do for HTTP/1.1 — so it was defense-in-depth here, not
@@ -250,8 +257,9 @@ requires only `pydantic>=2.7.0`, identical to 2.12.0's requirement, and FastAPI
   - **Body-size gates are unchanged by this bump:** the 20MB cap in
     `qms_standards.py`, the 50MB `LASER_UPLOAD_MAX_BYTES` in `work_orders.py`, and
     nginx's `client_max_body_size 50M`. (These were the *only* ones when this entry
-    was written. A fourth — `MAX_SANITIZED_JSON_BODY_BYTES`, covering JSON bodies —
-    was added on 2026-07-30; see **The bleach DoS** below. That section also records
+    was written. A fourth — the JSON body cap, then named
+    `MAX_SANITIZED_JSON_BODY_BYTES` and now `MAX_JSON_BODY_BYTES` — was added on
+    2026-07-30; see **The JSON body-size cap** below. That section also records
     that the nginx line governs the compose stack only and does **not** protect the
     Railway-served API.)
   - **One caveat worth recording:** Starlette constructs the parser *outside* its
@@ -267,10 +275,19 @@ requires only `pydantic>=2.7.0`, identical to 2.12.0's requirement, and FastAPI
   the whole settings surface through the new version — a green suite is direct
   evidence here, not incidental.
 
-- **`bleach` 6.3.0 → 6.4.0 — read this entry before drawing conclusions from a
-  quiet scanner.** It clears **GHSA-8rfp-98v4-mmr6** and **GHSA-gj48-438w-jh9v**.
-  It does **not** fix **GHSA-g75f-g53v-794x** (the `linkify` ReDoS) — and
-  pip-audit stops reporting that one anyway.
+- **`bleach` 6.3.0 → 6.4.0 — SUPERSEDED. bleach was removed from the tree later
+  the same day; see [bleach removed](#bleach-removed--escape-at-the-sink-2026-07-30).**
+  This entry is retained for the "quiet scanner" lesson, which outlives the
+  package. Its two live obligations are both discharged: there was never a
+  suppression flag to remove, and `backend/tests/test_bleach_linkify_guard.py`
+  was deleted along with the dependency it guarded — replaced by
+  `tests/test_frontend_no_raw_html_render_guard.py`, which asserts bleach is
+  neither pinned nor imported. **Do not act on the "keep this guard" instruction
+  below; it applied to a dependency that no longer exists.**
+
+  The bump itself cleared **GHSA-8rfp-98v4-mmr6** and **GHSA-gj48-438w-jh9v**.
+  It did **not** fix **GHSA-g75f-g53v-794x** (the `linkify` ReDoS) — and
+  pip-audit stopped reporting that one anyway.
   - **The scanner going quiet is a database artifact, not a fix.** Verified
     directly: the OSV API returns **0 vulns for bleach 6.4.0** and all three for
     6.3.0; the linkify advisory's OSV record carries an explicit affected-version
@@ -290,25 +307,25 @@ requires only `pydantic>=2.7.0`, identical to 2.12.0's requirement, and FastAPI
     module-level `clean()` constructs a `Cleaner` with no `filters`, so
     `LinkifyFilter` is never instantiated; there are **zero** `linkify` references
     anywhere in `app/`.
-  - **The input *is* attacker-controlled — say so plainly.** The `sanitize_input`
-    middleware (`app/main.py`) runs on every JSON-bodied POST/PUT/PATCH **before
-    route-level auth**. The safety here rests entirely on the code path not
+  - **The input *was* attacker-controlled — say so plainly.** The `sanitize_input`
+    middleware (`app/main.py`) ran on every JSON-bodied POST/PUT/PATCH **before
+    route-level auth**. The safety here rested entirely on the code path not
     existing, **not** on the input being safe. (The "no body-size cap" this entry
-    originally noted alongside that is fixed — see **The bleach DoS** below — but a
-    size cap bounds *cost*, not reachability, and changes nothing about the linkify
-    argument.)
-  - **`backend/tests/test_bleach_linkify_guard.py` is now the only remaining
-    protection.** Because the scanner will never warn about this again, that guard
-    is what fails if someone introduces `linkify()` — the same executable-rationale
-    pattern as the `ecdsa` guard below. Don't delete it.
-  - **bleach is permanently unmaintained security-relevant surface**: archived
-    upstream, 6.4.0 is the terminal release, and it sits under a global
+    originally noted alongside that was fixed — see **The JSON body-size cap**
+    below — but a size cap bounds *cost*, not reachability, and changed nothing
+    about the linkify argument.)
+  - ~~**`backend/tests/test_bleach_linkify_guard.py` is now the only remaining
+    protection.**~~ *(Retired with the dependency — the guard is deleted, and
+    nothing can introduce `linkify()` in an app that does not install bleach.)*
+  - **bleach was permanently unmaintained security-relevant surface**: archived
+    upstream, 6.4.0 is the terminal release, and it sat under a global
     request-body middleware. Any future bleach advisory has no fix *by
     construction* — the only responses left are reachability arguments like this
-    one. Replacing it was carried here as an open follow-up; **that investigation
-    is now closed and the decision is to keep bleach** — see
-    **Replacing bleach** below for the measured reason and for what would
-    change the answer.
+    one. **That is the argument that ultimately removed it.** Replacing it was
+    carried here as an open follow-up; the replacement investigation concluded
+    "keep bleach" and was overturned the same day by the removal — see
+    **Replacing bleach** for the measured library comparison (still the reason a
+    swap was not the answer) and **bleach removed** for what shipped.
 
 **Validation (2026-07-30, covering all four bumps):** full backend suite
 **3757 passed, 2 xfailed**, coverage 80.97%; `pip check` clean; and the A/B harness
@@ -322,9 +339,17 @@ stopped matching and the suite jumped from 14 to 155 warnings. A targeted,
 message-scoped on purpose, since a blanket `ignore::UserWarning` would swallow
 unrelated warnings.
 
-### Replacing bleach — investigated 2026-07-30, decision: KEEP bleach
+### Replacing bleach — investigated 2026-07-30, decision: no replacement library
 
-`bleach` is archived, 6.4.0 is terminal, and it sits under a global request-body
+> **Status: the "keep bleach" half of this decision was superseded the same day.**
+> The library comparison below still stands and is *why* the sanitizer was removed
+> rather than swapped — every candidate destroyed operator text, so there was no
+> safe library to move to. The conclusion that therefore we keep bleach did not
+> survive: the middleware was deleted instead, which was already listed here as
+> one of the two things that would change the answer. Current state:
+> [bleach removed](#bleach-removed--escape-at-the-sink-2026-07-30).
+
+`bleach` is archived, 6.4.0 is terminal, and it sat under a global request-body
 middleware — so "move sanitization to a maintained library (`nh3` is the usual
 successor)" was the follow-up this file carried. **It was actually done, with measured
 differential corpora, and the answer is no.** Three candidates were evaluated against a
@@ -353,12 +378,20 @@ Two destruction families, both in html5ever's tree builder, **neither configurab
 2. **`<` immediately followed by a letter, with no closing `>`, discards to end of
    input.** (`<` followed by a digit, space, `.`, `=`, `-` or `_` is safe on both.)
 
-**Why this is decisive rather than a papercut: `sanitize_input` rewrites
-`request._body`, so the sanitizer's output is what gets persisted.** Silently storing an
+**Why this is decisive rather than a papercut: `sanitize_input` rewrote
+`request._body`, so the sanitizer's output was what got persisted.** Silently storing an
 NCR narrative as `"Runout"` is an AS9100D / ISO 9001 records-integrity defect with **no
 recovery path** — the original bytes are gone before anything writes a row. And
 manufacturing text is precisely the corpus that triggers it: `<`-as-"less than" beside a
 tolerance word is ordinary shop shorthand.
+
+**Read that argument once more, because it generalizes.** It says a sanitizer on a
+persistence path is judged on what it *destroys*, and that this corpus is full of
+angle brackets that mean "less than" rather than "start of tag". Applied to nh3 it
+rejected nh3. Applied to bleach it rejects bleach — bleach's own column above turns
+`Tolerance <MIN> per print` into `Tolerance  per print`, which is the same
+records-integrity defect at smaller amplitude. The investigation stopped one step
+short of that; the removal below is that step.
 
 Worth recording that the *predicted* blocker was the wrong one. The expected problem was
 nh3 deleting `<script>` inner text — which turned out to be the one thing that **is**
@@ -385,21 +418,127 @@ path, where the next advisory will have no fix available.
 **What would change the answer:**
 
 - a maintained sanitizer that is **byte-equivalent to bleach 6.4.0 on this corpus** — the
-  golden-corpus test below is the acceptance criterion, and it is executable; or
+  golden-corpus test was the acceptance criterion, and it was executable; or
 - the middleware being **removed** — retire blanket input sanitization in favor of
   output-encoding at render time, at which point the library choice stops mattering.
+  **This is the one that happened**, hours later. See below.
 
-**Two tests hold this in place.** `backend/tests/test_bleach_linkify_guard.py` still
-stands (it is what fails if someone introduces `linkify()`), and a **golden-corpus
-characterization test** now freezes today's sanitizer output, encoding the measured nh3
-divergences as regression bait. Any future swap fails loudly on the exact inputs that
-killed this one, instead of silently truncating records in production.
+*(The two tests that held this decision in place —
+`backend/tests/test_bleach_linkify_guard.py` and the golden-corpus characterization
+test that froze bleach's output — were deleted with the dependency. A
+characterization test whose subject no longer runs pins nothing.)*
 
-### The bleach DoS — quadratic sanitization behind no body-size cap (fixed 2026-07-30)
+### bleach removed — escape at the sink (2026-07-30)
+
+**Current state, and it supersedes both sections above.** There is no ingest-time HTML
+sanitization in this backend and **`bleach` is not a dependency**. `app/core/sanitization.py`
+is deleted. The middleware that called it, `sanitize_input`, is renamed
+`limit_json_body_size` and now does nothing but enforce the size cap.
+
+This was not a risk acceptance. The sanitizer was removed because it protected nothing,
+covered less than it claimed, and corrupted quality records. Five findings, each checked
+against the code:
+
+1. **The SPA cannot execute stored HTML.** React escapes text nodes on output, and
+   `frontend/src/` contains **zero** `dangerouslySetInnerHTML` and **zero** `innerHTML`
+   writes. A `<script>` persisted in a part note rendered as those literal characters.
+   The middleware was providing no XSS protection for the only consumer that could have
+   needed it.
+2. **Exactly one backend sink interprets markup, and it is now escaped at render.**
+   `reportlab.platypus.Paragraph` parses a mini-HTML dialect via `paraparser`; every
+   interpolation into one (`quote_pdf_service.py`, `coc_pdf_service.py`) goes through
+   the new `pdf_escape` in `app/services/pdf_text.py`. The other candidate sinks were
+   audited and are safe on their own: HTML email renders through a Jinja2 `Environment`
+   with `autoescape=select_autoescape(['html','xml'])`, `label_service` draws with
+   `canvas.drawString` (which parses nothing), and reportlab `Table` cells take plain
+   strings.
+3. **It was corrupting AS9100D records.** ASME Y14.5 drawing notation is
+   angle-bracketed — `<REF>`, `<TYP>`, `<MMC>`, `<BASIC>`, `<MIN>` — so an inspection
+   note reading `Dim is 2.500 <REF> per print` was **silently persisted** as
+   `Dim is 2.500  per print`. Same for work instructions and BOM/PO notes. This is the
+   nh3 objection above turned on bleach itself.
+4. **It never covered what it claimed.** `sanitize_dict` recursed into nested dicts but
+   **not into dicts inside lists**, and the middleware only rewrote bodies that parsed
+   to a top-level `dict` — so a top-level JSON array skipped it entirely. Between them
+   that is every BOM line, PO line and routing operation the API accepts. A control with
+   those holes was never the thing standing between this app and stored XSS.
+5. **It failed open.** The whole sanitize block sat inside `except Exception: log a
+   warning` — any sanitizer error let the raw body through with a log line nobody reads.
+
+**The rule now: store the operator's bytes verbatim; escape where they are interpreted.**
+Do not reintroduce an HTML sanitizer for input handling. If you add a sink that
+interprets markup, escape at that sink — `pdf_escape` is the pattern.
+
+**Three tests enforce this**, and they are the reason the argument stays true rather than
+decaying into a comment:
+
+- `backend/tests/test_frontend_no_raw_html_render_guard.py` — fails if
+  `dangerouslySetInnerHTML` or an `innerHTML` write appears in `frontend/src/`, and
+  separately if `bleach` is pinned in `requirements.txt` or imported anywhere in `app/`.
+  Its failure message points here. A failure means finding 1 above stopped being true.
+- `backend/tests/test_pdf_text_escaping.py` — pins `pdf_escape` behavior and the
+  escaping of the `Paragraph` sites **that exist today**, by building both PDFs with
+  hostile values and reading the text back out.
+- `backend/tests/test_escape_at_sink_guards.py` — covers the sites that **don't exist
+  yet**, which is where the argument was actually thin. A structural `ast` scan of every
+  module under `backend/app/` (including untracked ones, so a brand-new PDF service is
+  visible) fails if any value is spliced into a reportlab `Paragraph` without
+  `pdf_escape` — via f-string, `%`, `.format()`, `+`, or a local variable built from
+  one. The same file guards the *other* unenforced half: no caller may pass a non-`None`
+  `body=` to `EmailService.send_email`, because that path assigns `html_body = body` and
+  attaches it as `MIMEText(html_body, "html")` with no escaping. Jinja2 `autoescape`
+  covers only the `template=` path, so the raw-`body` path is one innocuous-looking call
+  away from being a live HTML-injection sink in outbound mail. Nothing uses it today;
+  the two ARQ relay hops that forward `body` verbatim (`worker.send_email_job` →
+  `email_jobs.send_email_task`) are permitted only because their own call sites are
+  scanned too, and the chain originates at a literal `body=None` in
+  `notification_dispatch._enqueue_email`.
+
+**What this accepts, stated plainly:** persisted strings may now contain raw markup,
+including `<script>`. That is safe only for as long as findings 1 and 2 hold, which is
+exactly what those three tests check. A future Markdown renderer, rich-text field, or
+charting library wired through `innerHTML` is an XSS sink against deliberately
+unsanitized data — the fix is to escape at that new sink, **not** to put body mutation
+back.
+
+**Supply-chain result:** one archived, permanently-unmaintained, security-relevant
+package is out of the tree, on a pre-auth path, where by construction the next advisory
+would have had no fix.
+
+#### Known regression on legacy records — correct forward, no backfill
+
+The removed middleware did not only strip tags, it **entity-encoded**. Verified against
+bleach 6.4.0: `"Smith & Sons"` was persisted as `"Smith &amp; Sons"`, `"OD<ID"` as
+`"OD&lt;ID"`. So **every row written through the JSON API while that middleware was live
+holds entity text in the database** — and customer names containing `&` are common.
+
+Before this change the PDF builders passed those raw into `Paragraph`, which parsed the
+entities back, so a Certificate of Conformance rendered `Smith & Sons` — *accidentally*
+correct. `pdf_escape` now escapes them a second time, so a re-issued CoC or quote prints
+`Smith &amp; Sons` literally.
+
+Two things bound how bad this is. The data was **already corrupt** — the SPA has always
+displayed `Smith &amp; Sons` for those rows, because React escapes too — so the PDF was
+the only view that concealed it. This change makes existing corruption *visible and
+consistent* rather than creating it. But it is a real regression on customer-facing
+compliance artifacts, introduced by a change whose stated purpose is records integrity,
+and it is recorded here rather than discovered later.
+
+**Decision: correct forward, no backfill** — the same posture as the receiving
+`NOT_REQUIRED` inspection-status correction. When an affected CoC or quote is re-issued,
+fix the source record. Do **not** "fix" this inside `pdf_escape`: `html.unescape`
+over-decodes (`&notanentity;` → `¬anentity;`, an HTML5 legacy semicolon-less match), and
+a targeted unescape of `&amp;`/`&lt;`/`&gt;` would silently destroy any legitimately
+typed entity. This is a data defect and belongs in the data.
+
+*A scoped one-time repair* — unescaping those three entities across only the columns the
+two PDF builders read — is defensible as its own reviewed change. It mutates historical
+records on live multi-tenant data, so it needs migration review, not a drive-by.
+
+### The JSON body-size cap (added 2026-07-30 as the bleach DoS fix; retained)
 
 The replacement investigation did not find a replacement. It found a live production
-denial-of-service, which is the more urgent result and is **independent of which
-sanitizer is used**.
+denial-of-service, and the cap it produced **outlived the sanitizer that motivated it**.
 
 `bleach.clean` is **quadratic** in adversarial input, and the middleware had **no
 body-size cap**:
@@ -413,36 +552,47 @@ body-size cap**:
 | benign text — 128 KB | 0.005s |
 
 Exposure was confirmed rather than assumed: **no app-level body cap existed anywhere**;
-`sanitize_input` runs **before route-level auth dependencies**, so the cost is reachable
+the middleware runs **before route-level auth dependencies**, so the cost was reachable
 **pre-auth**; and the `client_max_body_size 50M` in `nginx/nginx.prod.conf` **does not
 protect the API** — the backend image ships no nginx and Railway serves uvicorn directly
 (that line governs the compose stack only). This was live in production.
 
-**Fixed** by a new setting plus two size gates — library-independent, so it survives any
-future sanitizer decision:
+**Fixed** by a new setting plus two size gates — deliberately library-independent, which
+is why the whole thing survived the sanitizer's removal untouched:
 
-- **`MAX_SANITIZED_JSON_BODY_BYTES`** (`app/core/config.py`), `int`, default **262144**
-  (256 KB), env-overridable. See
-  [Request Body Size](ENVIRONMENT_VARIABLES.md#request-body-size-json-sanitization).
-- Two gates in `sanitize_input` (`app/main.py`): a **`Content-Length` pre-read check**
-  (the DoS guard — an oversized request is never buffered) and a **post-read `len(body)`
-  check**, for chunked transfer-encoding or a header that lies. Over the cap → **HTTP
-  413**, with CORS headers applied by hand, matching the adjacent `csrf_protection`
-  precedent (this middleware is the outer layer, so a short-circuited response never
-  passes back through `CORSMiddleware`).
-- It **rejects rather than skipping sanitization.** Skipping oversized bodies would hand
-  an attacker a sanitizer bypass for the price of padding the payload.
+- **`MAX_JSON_BODY_BYTES`** (`app/core/config.py`), `int`, default **262144**
+  (256 KB), env-overridable. Renamed from `MAX_SANITIZED_JSON_BODY_BYTES` when the
+  sanitizer went; the old name still works as a deprecated alias. See
+  [Request Body Size](ENVIRONMENT_VARIABLES.md#request-body-size-json).
+- Two gates in `limit_json_body_size` (`app/main.py`, formerly `sanitize_input`): a
+  **`Content-Length` pre-read check** (an oversized request is never buffered) and a
+  **post-read `len(body)` check**, for chunked transfer-encoding or a header that lies.
+  Over the cap → **HTTP 413**, with CORS headers applied by hand, matching the adjacent
+  `csrf_protection` precedent (this middleware is the outer layer, so a short-circuited
+  response never passes back through `CORSMiddleware`).
 
-**Measured result:** worst case at the cap is **9.1 CPU-seconds**; anything larger is
-rejected in **0.0005s**, with bleach never running. Raising the setting raises that
-worst case **quadratically** — the tradeoff is documented at the env-var entry.
+**Why the cap is still here now that bleach is gone.** The quadratic-CPU justification
+retired with the sanitizer, but the gate did not, and the rationale is no longer
+library-specific: the middleware still runs ahead of every route's auth dependency, so
+without a cap an **unauthenticated** caller decides how many bytes the app buffers into
+memory and hands to `json.loads`, and how large the resulting Python object graph gets.
+Bounding that is ordinary request-size hygiene, and the numbers below are now historical
+— they record the DoS that motivated the cap, not today's cost.
+
+**Measured result (2026-07-30, with bleach still installed):** worst case at the cap was
+**9.1 CPU-seconds**; anything larger was rejected in **0.0005s**, with bleach never
+running. Raising the setting raised that worst case **quadratically**. With bleach gone
+that quadratic term is gone with it; the cost of a body at the cap is now just parse +
+allocation, which is linear.
 
 **Scope verified:** multipart / `UploadFile` paths are untouched (every CSV/XLSX bulk
-import, RFQ package, laser-nest ZIP/PDF, PO document), as are the carrier webhooks, which
-skip this middleware entirely so their HMAC verifies against raw bytes. Sizing was
-measured against real payloads — a 170-nest laser import is 183 KB and a 1000-line-item
-BOM create is 201 KB, both under the cap; the known ceiling is a BOM create above roughly
-1300 line items, which is why the value is a setting and not a constant.
+import, RFQ package, laser-nest ZIP/PDF, PO document) and keep their own per-endpoint
+caps, as are the carrier webhooks, which skip this middleware entirely so their HMAC
+verifies against raw bytes — and so a carrier, which cannot recover from a 413 the way a
+UI client can, is never rejected by it. Sizing was measured against real payloads — a
+170-nest laser import is 183 KB and a 1000-line-item BOM create is 201 KB, both under the
+cap; the known ceiling is a BOM create above roughly 1300 line items, which is why the
+value is a setting and not a constant.
 
 ### Current backend suppression: ecdsa / PYSEC-2026-1325 ("Minerva", CVE-2024-23342)
 

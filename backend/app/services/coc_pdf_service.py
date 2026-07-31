@@ -7,10 +7,18 @@ from those facts on download -- there is no filesystem blob. Mirrors
 dependency raises ``RuntimeError`` rather than an obscure ``ImportError`` at
 module-load, a ``BytesIO`` buffer + ``SimpleDocTemplate(letter)``, and
 ``bytes`` returned. Optional fields are omitted when falsy.
+
+Every value interpolated into a ``Paragraph`` below goes through ``pdf_escape``
+— ``Paragraph`` parses a mini-HTML dialect, so an unescaped ``&`` or ``<`` in a
+customer name, a PO number or a part name is a rendering fault or a hard
+``ValueError``. See ``app/services/pdf_text.py``. The literal ``<b>`` tags and
+``&nbsp;`` entities in these templates are ours and stay unescaped.
 """
 
 from io import BytesIO
 from typing import Any, List, Optional
+
+from app.services.pdf_text import pdf_escape
 
 # AS9100D-style conformance statement stamped onto every CoC (the certified facts
 # above it identify the specific articles). Stored on the row at issue time so the
@@ -72,34 +80,35 @@ def build_certificate_of_conformance_pdf(
     story.append(Spacer(1, 8))
 
     # Header block
-    story.append(Paragraph(f"<b>Certificate Number:</b> {coc_number}", styles["Normal"]))
+    story.append(Paragraph(f"<b>Certificate Number:</b> {pdf_escape(coc_number)}", styles["Normal"]))
     if ship_date:
-        story.append(Paragraph(f"<b>Ship Date:</b> {ship_date}", styles["Normal"]))
+        story.append(Paragraph(f"<b>Ship Date:</b> {pdf_escape(ship_date)}", styles["Normal"]))
     if issued_at:
-        story.append(Paragraph(f"<b>Date Issued:</b> {issued_at}", styles["Normal"]))
+        story.append(Paragraph(f"<b>Date Issued:</b> {pdf_escape(issued_at)}", styles["Normal"]))
     if issued_by_name:
-        story.append(Paragraph(f"<b>Issued By:</b> {issued_by_name}", styles["Normal"]))
+        story.append(Paragraph(f"<b>Issued By:</b> {pdf_escape(issued_by_name)}", styles["Normal"]))
     story.append(Spacer(1, 12))
 
     # Customer block
     if customer_name:
-        story.append(Paragraph(f"<b>Customer:</b> {customer_name}", styles["Normal"]))
+        story.append(Paragraph(f"<b>Customer:</b> {pdf_escape(customer_name)}", styles["Normal"]))
     if customer_po:
-        story.append(Paragraph(f"<b>Customer PO:</b> {customer_po}", styles["Normal"]))
+        story.append(Paragraph(f"<b>Customer PO:</b> {pdf_escape(customer_po)}", styles["Normal"]))
     story.append(Spacer(1, 12))
 
     # Product block
     if work_order_number:
-        story.append(Paragraph(f"<b>Work Order:</b> {work_order_number}", styles["Normal"]))
+        story.append(Paragraph(f"<b>Work Order:</b> {pdf_escape(work_order_number)}", styles["Normal"]))
     if part_number or part_name:
+        # Escaped as one composed value; the em dash separator is ours and is not markup.
         part_display = part_number or ""
         if part_name:
             part_display = f"{part_display} — {part_name}" if part_display else part_name
-        story.append(Paragraph(f"<b>Part:</b> {part_display}", styles["Normal"]))
+        story.append(Paragraph(f"<b>Part:</b> {pdf_escape(part_display)}", styles["Normal"]))
     if revision:
-        story.append(Paragraph(f"<b>Revision:</b> {revision}", styles["Normal"]))
+        story.append(Paragraph(f"<b>Revision:</b> {pdf_escape(revision)}", styles["Normal"]))
     if quantity is not None:
-        story.append(Paragraph(f"<b>Quantity:</b> {quantity:g}", styles["Normal"]))
+        story.append(Paragraph(f"<b>Quantity:</b> {pdf_escape(f'{quantity:g}')}", styles["Normal"]))
     story.append(Spacer(1, 12))
 
     # Lot / serial table: per-serial rows when serialized, else a single lot row.
@@ -125,9 +134,12 @@ def build_certificate_of_conformance_pdf(
     story.append(lot_table)
     story.append(Spacer(1, 16))
 
-    # Conformance statement
+    # Conformance statement. Escaped even though every caller currently passes
+    # DEFAULT_COC_STATEMENT (plain prose, so escaping is a no-op today): the column
+    # is free Text on the CoC row, so a future per-company statement must not be
+    # able to break the render or smuggle markup onto a compliance artifact.
     statement = conformance_statement or DEFAULT_COC_STATEMENT
-    story.append(Paragraph(statement, styles["Normal"]))
+    story.append(Paragraph(pdf_escape(statement), styles["Normal"]))
     story.append(Spacer(1, 24))
 
     # Signature block
