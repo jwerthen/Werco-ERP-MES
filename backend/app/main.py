@@ -665,18 +665,14 @@ async def csrf_protection(request: Request, call_next):
 
 
 def _json_body_too_large_response(request: Request, size: int) -> JSONResponse:
-    """Build the 413 a JSON body over MAX_SANITIZED_JSON_BODY_BYTES is rejected with.
-
-    Rejecting (rather than skipping sanitization for oversized bodies) is deliberate:
-    a skip would let an attacker bypass the sanitizer entirely just by padding the
-    payload past the cap.
+    """Build the 413 a JSON body over MAX_JSON_BODY_BYTES is rejected with.
 
     CORS headers are applied by hand for the same reason csrf_protection does it —
     this middleware is registered AFTER CORSMiddleware, which makes it the outer
     layer, so a response short-circuited here never passes back through CORS and the
     browser would otherwise surface an opaque network error instead of the 413.
     """
-    limit = settings.MAX_SANITIZED_JSON_BODY_BYTES
+    limit = settings.MAX_JSON_BODY_BYTES
     logger.warning(f"Rejected oversized JSON body for {request.url.path}: {size} bytes (limit {limit})")
     response = JSONResponse(
         status_code=status.HTTP_413_CONTENT_TOO_LARGE,
@@ -685,25 +681,44 @@ def _json_body_too_large_response(request: Request, size: int) -> JSONResponse:
     return add_cors_headers(response, request.headers.get("origin"))
 
 
-# Input sanitization middleware - sanitize all incoming JSON data
 @app.middleware("http")
-async def sanitize_input(request: Request, call_next):
-    # Inbound carrier webhooks verify an HMAC over the EXACT raw body bytes;
-    # rewriting request._body with a sanitized copy would break that signature
-    # check. Skip sanitization for them (the handler treats the body as opaque
-    # and never echoes it). Prefix match because the path carries {provider}.
-    # This stays FIRST: the size cap below must not read or reject them either.
+async def limit_json_body_size(request: Request, call_next):
+    """Bound the size of an ``application/json`` request body; 413 over the cap.
+
+    General request-size hygiene, applied ahead of every route's auth dependency.
+    An unauthenticated caller can otherwise make the app buffer an arbitrarily
+    large body into memory and hand it to ``json.loads`` — a parse whose cost, and
+    whose peak allocation for the resulting Python object graph, scale with a
+    payload the caller chooses for free. The cap bounds both.
+
+    This middleware used to also rewrite every JSON body with a bleach-stripped
+    copy. That was removed deliberately: the mutation corrupted persisted records
+    (ASME Y14.5 drawing notation such as ``2.500 <REF>`` was silently stored as
+    ``2.500``) while protecting nothing, because the SPA renders no raw HTML and
+    the one backend sink that interprets markup — reportlab ``Paragraph`` — now
+    escapes at the point of render (``app/services/pdf_text.py``). See
+    ``tests/test_frontend_no_raw_html_render_guard.py`` for the standing guard that
+    keeps that argument true, and docs/SECURITY_ADVISORY_SUPPRESSIONS.md for the
+    reasoning. Store the operator's bytes verbatim; escape where they are
+    interpreted.
+    """
+    # Inbound carrier webhooks verify an HMAC over the EXACT raw body bytes, and a
+    # carrier cannot recover from a 413 the way a UI client can. Skip the whole
+    # middleware for them — this stays FIRST so neither gate below reads or rejects
+    # them. Prefix match because the path carries {provider}.
     if request.url.path.startswith(f"{settings.API_V1_PREFIX}/webhooks/carriers/"):
         return await call_next(request)
-    # Only process JSON requests with body
+
+    # JSON bodies only: multipart/UploadFile paths (every CSV/XLSX bulk import) are
+    # routinely far larger and are bounded by their own per-endpoint caps.
     if request.method in ("POST", "PUT", "PATCH") and request.headers.get("content-type", "").startswith(
         "application/json"
     ):
-        max_body_bytes = settings.MAX_SANITIZED_JSON_BODY_BYTES
+        max_body_bytes = settings.MAX_JSON_BODY_BYTES
 
-        # Size gate, part 1 (the DoS guard): reject on the declared Content-Length
-        # BEFORE buffering the body, so an oversized request costs us nothing.
-        # A non-numeric header is left to the server/validation layer.
+        # Gate 1: reject on the declared Content-Length BEFORE buffering the body,
+        # so an oversized request costs us nothing. A non-numeric header is left to
+        # the server/validation layer.
         content_length = request.headers.get("content-length")
         if content_length:
             try:
@@ -713,33 +728,13 @@ async def sanitize_input(request: Request, call_next):
             if declared_length > max_body_bytes:
                 return _json_body_too_large_response(request, declared_length)
 
-        try:
-            from app.core.sanitization import sanitize_dict
-
-            # Read and sanitize body
-            body = await request.body()
-
-            # Size gate, part 2 (the correctness guard): Content-Length can be
-            # absent (chunked transfer-encoding) or simply lie, so re-check the
-            # bytes we actually got. NOTE: a `return` inside this `try` is not
-            # swallowed by the `except Exception` below — only a raise would be —
-            # so the rejection really rejects.
-            if len(body) > max_body_bytes:
-                return _json_body_too_large_response(request, len(body))
-
-            if body:
-                import json
-
-                try:
-                    data = json.loads(body)
-                    if isinstance(data, dict):
-                        sanitized_data = sanitize_dict(data)
-                        # Create new request with sanitized body
-                        request._body = json.dumps(sanitized_data).encode()
-                except json.JSONDecodeError:
-                    pass  # Let validation handle invalid JSON
-        except Exception as e:
-            logger.warning(f"Input sanitization warning: {e}")
+        # Gate 2: Content-Length is absent under chunked transfer-encoding and can
+        # simply lie, so re-check the bytes that actually arrived. Starlette caches
+        # the read on request._body, so the route handler reuses these exact bytes
+        # rather than reading the stream a second time.
+        body = await request.body()
+        if len(body) > max_body_bytes:
+            return _json_body_too_large_response(request, len(body))
 
     return await call_next(request)
 

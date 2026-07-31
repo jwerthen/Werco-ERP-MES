@@ -1,7 +1,16 @@
-"""Customer-ready quote PDF generator for AI RFQ estimates."""
+"""Customer-ready quote PDF generator for AI RFQ estimates.
+
+Every value interpolated into a ``Paragraph`` below goes through
+``pdf_escape`` — ``Paragraph`` parses a mini-HTML dialect, so an unescaped
+``&`` or ``<`` in a customer name or an assumption is a rendering fault or a
+hard ``ValueError``, not a cosmetic issue. See ``app/services/pdf_text.py``.
+The literal ``<b>`` tags in these templates are ours and stay unescaped.
+"""
 
 from io import BytesIO
 from typing import Any, Dict, List, Optional
+
+from app.services.pdf_text import pdf_escape
 
 
 def build_customer_quote_pdf(
@@ -44,20 +53,25 @@ def build_customer_quote_pdf(
     styles = getSampleStyleSheet()
     story: List[Any] = []
 
-    story.append(Paragraph(f"<b>Customer Quote {quote_number} Rev {revision}</b>", styles["Title"]))
+    story.append(
+        Paragraph(
+            f"<b>Customer Quote {pdf_escape(quote_number)} Rev {pdf_escape(revision)}</b>",
+            styles["Title"],
+        )
+    )
     story.append(Spacer(1, 8))
-    story.append(Paragraph(f"<b>Customer:</b> {customer_name}", styles["Normal"]))
+    story.append(Paragraph(f"<b>Customer:</b> {pdf_escape(customer_name)}", styles["Normal"]))
     if customer_contact:
-        story.append(Paragraph(f"<b>Contact:</b> {customer_contact}", styles["Normal"]))
+        story.append(Paragraph(f"<b>Contact:</b> {pdf_escape(customer_contact)}", styles["Normal"]))
     if customer_email:
-        story.append(Paragraph(f"<b>Email:</b> {customer_email}", styles["Normal"]))
+        story.append(Paragraph(f"<b>Email:</b> {pdf_escape(customer_email)}", styles["Normal"]))
     if rfq_reference:
-        story.append(Paragraph(f"<b>RFQ Reference:</b> {rfq_reference}", styles["Normal"]))
-    story.append(Paragraph(f"<b>Quote Date:</b> {quote_date}", styles["Normal"]))
+        story.append(Paragraph(f"<b>RFQ Reference:</b> {pdf_escape(rfq_reference)}", styles["Normal"]))
+    story.append(Paragraph(f"<b>Quote Date:</b> {pdf_escape(quote_date)}", styles["Normal"]))
     if valid_until:
-        story.append(Paragraph(f"<b>Valid Until:</b> {valid_until}", styles["Normal"]))
+        story.append(Paragraph(f"<b>Valid Until:</b> {pdf_escape(valid_until)}", styles["Normal"]))
     if lead_time_label:
-        story.append(Paragraph(f"<b>Lead Time:</b> {lead_time_label}", styles["Normal"]))
+        story.append(Paragraph(f"<b>Lead Time:</b> {pdf_escape(lead_time_label)}", styles["Normal"]))
     story.append(Spacer(1, 12))
 
     table_rows = [["Part", "Qty", "Material", "Thickness", "Finish", "Line Total"]]
@@ -90,7 +104,7 @@ def build_customer_quote_pdf(
     story.append(table)
     story.append(Spacer(1, 12))
 
-    story.append(Paragraph(f"<b>Total Quote:</b> ${total_amount:,.2f}", styles["Heading3"]))
+    story.append(Paragraph(f"<b>Total Quote:</b> ${pdf_escape(f'{total_amount:,.2f}')}", styles["Heading3"]))
     story.append(Spacer(1, 10))
 
     if assumptions:
@@ -98,13 +112,13 @@ def build_customer_quote_pdf(
         for item in assumptions:
             field = item.get("field", "item")
             assumption = item.get("assumption", "")
-            story.append(Paragraph(f"- {field}: {assumption}", styles["Normal"]))
+            story.append(Paragraph(f"- {pdf_escape(field)}: {pdf_escape(assumption)}", styles["Normal"]))
         story.append(Spacer(1, 8))
 
     if exclusions:
         story.append(Paragraph("<b>Exclusions / Notes</b>", styles["Heading4"]))
         for exclusion in exclusions:
-            story.append(Paragraph(f"- {exclusion}", styles["Normal"]))
+            story.append(Paragraph(f"- {pdf_escape(exclusion)}", styles["Normal"]))
 
     doc.build(story)
     return buffer.getvalue()

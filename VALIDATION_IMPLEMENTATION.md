@@ -1,6 +1,20 @@
 # Input Validation Implementation Summary
 
-This document summarizes the comprehensive input validation system implemented forWerco ERP.
+This document summarizes the comprehensive input validation system implemented for Werco ERP.
+
+> **Partially stale — verify against code before relying on it.** The sanitization sections
+> were corrected on 2026-07-30 when ingest-time HTML sanitization was removed (see §2). The
+> following claims elsewhere in this file were **checked and found false** at the same time and
+> are **not** yet rewritten — they predate several refactors and are out of that change's scope:
+> `sanitize_string` / `sanitize_dict` / `validate_file_upload` / `validate_phone_number` no
+> longer exist (the last two never did); `SafeString` is still declared in
+> `backend/app/core/validation.py` but is **referenced by nothing**; `backend/tests/test_validation.py`
+> does not exist; `frontend/src/components/ui/FormWithValidation.tsx` and the whole
+> `frontend/src/components/forms/` directory (`PartForm`, `UserForm`, `UserLoginForm`,
+> `WorkOrderForm`) do not exist; and the password rule under
+> [Validation Rules Summary → Users](#users) contradicts the correct one in
+> [§3 Updated Schemas](#3-updated-schemas). `frontend/src/components/ui/FormField.tsx` **is**
+> current — see CLAUDE.md → Frontend architecture.
 
 ## Overview
 
@@ -17,15 +31,33 @@ Reusable Pydantic annotated types:
 - `MoneySmall` - Decimal with 4 places, 0-9999.9999
 - `Percentage` - 0-100 with 2 decimal places
 - `Email`, `Phone`, `Phone` - Validated formats
-- `SafeString` - No HTML/script injection characters
+- `SafeString` - Declared, but currently applied to no field (see the staleness note above)
 
-### 2. Sanitization (`backend/app/core/sanitization.py`)
+### 2. Escaping at the sink (`backend/app/services/pdf_text.py`)
 
-HTML sanitization utilities using bleach:
-- `sanitize_string()` - Remove HTML/JavaScript
-- `sanitize_dict()` - Sanitize all string values in dict
-- `validate_file_upload()` - Check type, size, MIME
-- `validate_phone_number()` - Phone format validation
+**There is no ingest-time HTML sanitization.** `backend/app/core/sanitization.py` and the
+`bleach` dependency were **removed on 2026-07-30**. The middleware that called them rewrote
+every JSON request body with a markup-stripped copy *before persistence*, which silently
+corrupted quality records — ASME Y14.5 drawing notation is angle-bracketed, so an inspection
+note reading `Dim is 2.500 <REF> per print` was stored as `Dim is 2.500  per print`. It also
+covered less than it claimed (`sanitize_dict` did not recurse into dicts nested in lists, and
+top-level JSON arrays skipped the middleware entirely, so BOM/PO/routing line items were never
+sanitized) and failed open on any sanitizer exception.
+
+The rule now is **store the operator's bytes verbatim; escape where they are interpreted**:
+
+- `pdf_escape()` (`backend/app/services/pdf_text.py`) — escapes `&`, `<`, `>` for the one
+  backend sink that interprets markup, reportlab `Paragraph`, which parses a mini-HTML dialect.
+  Applied at every interpolation in `quote_pdf_service.py` and `coc_pdf_service.py`.
+- HTML email is already safe — Jinja2 `Environment(autoescape=select_autoescape(['html','xml']))`.
+- Thermal labels use `canvas.drawString`, and reportlab `Table` cells take plain strings;
+  neither parses markup.
+- The SPA renders no raw HTML (zero `dangerouslySetInnerHTML`, zero `innerHTML` writes), so
+  React's output escaping covers the browser.
+
+Two guard tests keep that argument true: `backend/tests/test_frontend_no_raw_html_render_guard.py`
+and `backend/tests/test_pdf_text_escaping.py`. Full rationale:
+[docs/SECURITY_ADVISORY_SUPPRESSIONS.md → bleach removed](docs/SECURITY_ADVISORY_SUPPRESSIONS.md#bleach-removed--escape-at-the-sink-2026-07-30).
 
 ### 3. Updated Schemas
 
@@ -110,9 +142,9 @@ Mirrors backend exactly with TypeScript typing:
 ## Installation Requirements
 
 ### Backend (add to requirements.txt):
-```txt
-bleach==6.1.0  # HTML sanitization
-```
+
+Nothing. This system is pure Pydantic — no extra runtime dependency. (`bleach` was listed
+here until 2026-07-30; it is removed and must not be added back — see §2.)
 
 ### Frontend (add to package.json):
 ```json
@@ -237,9 +269,13 @@ Backend validation errors return:
 
 ## Security Features
 
-1. **XSS Prevention**: All string inputs sanitized with bleach
+1. **XSS Prevention**: escaping at the sink, **not** input sanitization — React escapes on
+   output and the SPA renders no raw HTML; reportlab `Paragraph` is escaped via `pdf_escape`;
+   HTML email autoescapes through Jinja2. Stored strings are byte-exact (see §2)
 2. **SQL Injection**: Handled by SQLAlchemy, UUID format validated
-3. **Injection Attacks**: SafeString validation blocks `< > { }`
+3. **Injection Attacks**: the `SafeString` type would block `< > { }`, but it is applied to no
+   field today — and blocking `<` would reject legitimate ASME Y14.5 notation, so do not apply
+   it to free-text quality fields
 4. **File Upload**: Type, size, MIME validation
 5. **Password Strength**: Minimum length + weak-password blocklist enforced
 6. **Audit Trail**: Validation errors logged
@@ -265,7 +301,6 @@ To add validation to new forms:
 
 ```bash
 # Backend
-pip install bleach
 pytest tests/test_validation.py -v
 
 # Frontend
@@ -277,14 +312,15 @@ npm test -- --testPathPattern=validation
 
 ### Backend:
 - `backend/app/core/validation.py` - Annotated types and validators
-- `backend/app/core/sanitization.py` - Sanitization utilities
+- ~~`backend/app/core/sanitization.py`~~ - **deleted 2026-07-30**; replaced by
+  `backend/app/services/pdf_text.py` (escape at the sink)
 - `backend/app/core/exception_handlers.py` - Error handlers
 - `backend/app/services/validation_service.py` - Async validation service
 - `backend/app/schemas/part.py` - Updated with validation
 - `backend/app/schemas/work_order.py` - Updated with validation
 - `backend/app/schemas/user.py` - Updated with validation
 - `backend/app/schemas/purchasing.py` - Updated with validation
-- `backend/requirements.txt` - Added bleach
+- `backend/requirements.txt` - ~~Added bleach~~ (removed 2026-07-30)
 
 ### Frontend:
 - `frontend/src/validation/schemas.ts` - Zod schemas

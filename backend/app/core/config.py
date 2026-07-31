@@ -1,7 +1,7 @@
 from typing import List, Optional
 from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
-from pydantic import field_validator, model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 # List of known insecure default secret key values that should be rejected
@@ -322,22 +322,32 @@ class Settings(BaseSettings):
     def rate_limit_exempt_paths_list(self) -> List[str]:
         return [path.strip() for path in self.RATE_LIMIT_EXEMPT_PATHS.split(",")]
 
-    # Maximum size (bytes) of an "application/json" request body that the
-    # `sanitize_input` middleware in app/main.py will parse. Anything larger is
-    # rejected with HTTP 413 *before* the sanitizer runs — bleach.clean is
-    # quadratic in adversarial markup (192 KB of "<a " burns ~4.7 CPU-seconds vs
-    # ~0.005s for the same volume of benign text), and the middleware runs ahead
-    # of every route's auth dependency, so without this cap the cost is
-    # reachable pre-auth. Only JSON is gated: multipart/UploadFile paths (every
-    # CSV/XLSX bulk import) are untouched, as are the carrier webhooks, which
-    # HMAC-verify raw bytes and skip this middleware entirely.
+    # Maximum size (bytes) of an "application/json" request body the app will
+    # accept. Over the cap the `limit_json_body_size` middleware in app/main.py
+    # returns HTTP 413. General request-size hygiene: the middleware runs ahead
+    # of every route's auth dependency, so without a cap an unauthenticated
+    # caller decides how many bytes the app buffers into memory and hands to
+    # json.loads, and how large the resulting Python object graph gets. Only
+    # JSON is gated: multipart/UploadFile paths (every CSV/XLSX bulk import) are
+    # untouched and carry their own per-endpoint caps, as are the carrier
+    # webhooks, which HMAC-verify raw bytes and skip the middleware entirely.
     #
     # 256 KB clears the largest realistic bodies measured (laser-nest import at
     # 170 nests = 183 KB; BOM create at 1000 line items = 201 KB). The known
     # ceiling is a BOM create above roughly 1300 line items — which is why this
     # is env-overridable rather than a constant: ops can raise it without a
-    # deploy. Raising it raises the worst-case CPU per request quadratically.
-    MAX_SANITIZED_JSON_BODY_BYTES: int = 262144  # 256 KB
+    # deploy.
+    #
+    # MAX_SANITIZED_JSON_BODY_BYTES is the pre-rename name, accepted as a
+    # deprecated fallback so an env var set while the old name shipped keeps
+    # taking effect. The "SANITIZED" was accurate only while this middleware
+    # also bleach-stripped bodies; it no longer does (see the middleware
+    # docstring). When both names are set the new one wins. Remove the fallback
+    # once no environment sets the old name.
+    MAX_JSON_BODY_BYTES: int = Field(
+        default=262144,  # 256 KB
+        validation_alias=AliasChoices("MAX_JSON_BODY_BYTES", "MAX_SANITIZED_JSON_BODY_BYTES"),
+    )
 
     # CORS - Include localhost for dev; production origins must be set via env var
     CORS_ORIGINS: str = "http://localhost:3000,http://localhost:3001,http://localhost:5173,http://localhost:8000"

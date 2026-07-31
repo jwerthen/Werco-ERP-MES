@@ -32,17 +32,15 @@ boto3==1.42.44
 
 # Security
 slowapi==0.1.9
-# HTML sanitization for input validation. 6.4.0 fixes GHSA-8rfp-98v4-mmr6 +
-# GHSA-gj48-438w-jh9v, and is the FINAL release — bleach was archived 2026-06-10.
-#
-# GHSA-g75f-g53v-794x (linkify ReDoS) is NOT fixed by 6.4.0 and never will be.
-# pip-audit still goes quiet, because the OSV record lists an explicit version
-# list of exactly ["6.3.0"] — a database artifact, not a repair. So there is no
-# suppression entry and no --ignore-vuln flag here; nothing would warn you.
-# We are safe only because this app calls clean() and never linkify(), and
-# tests/test_bleach_linkify_guard.py is the sole thing enforcing that.
+# bleach was REMOVED here, not upgraded. It was archived 2026-06-10 with 6.4.0 as
+# its final release, and it carried GHSA-g75f-g53v-794x (linkify ReDoS) with no
+# fix coming and no pip-audit signal. It backed an ingest-time middleware that
+# stripped markup from every JSON body — which mutated persisted records (ASME
+# Y14.5 notation like "2.500 <REF>" was stored as "2.500") while protecting
+# nothing: the SPA renders no raw HTML, and the one backend sink that interprets
+# markup (reportlab Paragraph) now escapes at render via app/services/pdf_text.py.
+# Do not reintroduce an HTML sanitizer for input handling; escape at the sink.
 # See docs/SECURITY_ADVISORY_SUPPRESSIONS.md.
-bleach==6.4.0
 
 # WebSocket Support
 websockets==16.0
