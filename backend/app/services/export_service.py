@@ -6,6 +6,8 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
+from app.services.export_safety import sanitize_csv_row, write_cell
+
 
 def format_value(value: Any) -> Any:
     """Format a value for export."""
@@ -34,10 +36,12 @@ def generate_csv(data: List[Dict[str, Any]], columns: Optional[List[str]] = None
 
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(headers)
+    # Headers are sanitized too: `columns` is caller-supplied (a request query
+    # param on every /export endpoint), so the header row carries tenant input.
+    writer.writerow(sanitize_csv_row(headers))
 
     for row in data:
-        writer.writerow([format_value(row.get(col)) for col in headers])
+        writer.writerow(sanitize_csv_row(format_value(row.get(col)) for col in headers))
 
     return output.getvalue()
 
@@ -71,8 +75,12 @@ def generate_excel(
         left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin')
     )
 
+    # write_cell (not ws.cell) everywhere below: it pins string cells to
+    # data_type "s" so tenant text can never be written as an <f> formula
+    # element. Non-destructive -- values are byte-identical, numerics stay
+    # numeric. See app/services/export_safety.py.
     for col_idx, header in enumerate(headers, 1):
-        cell = ws.cell(row=1, column=col_idx, value=header.replace("_", " ").title())
+        cell = write_cell(ws, 1, col_idx, header.replace("_", " ").title())
         cell.font = header_font
         cell.fill = header_fill
         cell.alignment = header_alignment
@@ -81,7 +89,7 @@ def generate_excel(
     for row_idx, row_data in enumerate(data, 2):
         for col_idx, col in enumerate(headers, 1):
             value = format_value(row_data.get(col))
-            cell = ws.cell(row=row_idx, column=col_idx, value=value)
+            cell = write_cell(ws, row_idx, col_idx, value)
             cell.border = thin_border
             if isinstance(value, (int, float)):
                 cell.alignment = Alignment(horizontal="right")

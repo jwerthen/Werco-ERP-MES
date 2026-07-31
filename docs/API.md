@@ -3651,6 +3651,10 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 > purchase orders, quotes) carries `company_id`, so a report can never return another tenant's rows. This
 > is a scoping-only fix — the request/response shape is unchanged.
 >
+> **The exported CSV is formula-neutralized, header row included** — the header comes from the
+> tenant-authored template's column list, not a fixed allowlist. Affected cells gain a leading `'`;
+> see [Spreadsheet Exports](#spreadsheet-exports-csv--xlsx).
+>
 > **Custom-report labor honesty (G3-content).** Two changes make labor columns read truthfully when
 > labor cost is not being tracked:
 > - **`estimated_hours` is no longer a selectable WORK_ORDERS column.** It has no writer anywhere in
@@ -4434,7 +4438,7 @@ See [docs/VISITOR_SIGNIN.md](VISITOR_SIGNIN.md).
 | POST | `/visitor-logs/sign-out` | Sign out an open visit by `{"visitor_log_id"}` or `{"name"}` → `VisitorLogResponse`. Name with >1 open match → **409** disambiguation; no open match → **404** | Station token **or** any authenticated user |
 | POST | `/visitor-logs/manual` | **Staff back-entry** of an offline visit with its ACTUAL past times → **201** `VisitorLogResponse`. Marks the row staff-entered (`signin_station_id` NULL + `entered_by_user_id` set); sends **no** host email. Body = sign-in body + `signed_in_at` (required, past) + `signed_out_at` (optional, ≥ `signed_in_at`, past) | Admin / Manager (staff token only — station token **rejected**) |
 | GET | `/visitor-logs/` | List visitor records for the active company (filters + offset paging) → `{"items", "total"}` | Admin / Manager / Supervisor |
-| GET | `/visitor-logs/export.csv` | Stream the visitor log as CSV (audits an `EXPORT` action) | Admin / Manager |
+| GET | `/visitor-logs/export.csv` | Stream the visitor log as CSV (audits an `EXPORT` action). Cells are formula-neutralized — visitor name / company / purpose note are free text typed at a lobby tablet; see [Spreadsheet Exports](#spreadsheet-exports-csv--xlsx) | Admin / Manager |
 | DELETE | `/visitor-logs/{id}` | Soft-delete a visitor record → **204** | Admin / Manager |
 | POST | `/visitor-logs/stations` | Create a PIN-protected sign-in station. Body `{"label", "pin"}` → **201** `SigninStationResponse` (PIN hashed, never echoed) | Admin / Manager |
 | GET | `/visitor-logs/stations` | List this company's sign-in stations (no PIN/`pin_hash`) → `{"stations"}` | Admin / Manager |
@@ -4799,6 +4803,53 @@ create ~201 KB. A BOM create above roughly **1300 line items** exceeds the cap; 
 data — as of 2026-07-30 the middleware only measures size. Angle brackets in a note field (ASME
 Y14.5 notation such as `2.500 <REF>`, or `<` meaning "less than") round-trip byte-for-byte
 through create/read/update. Server-rendered PDFs escape at render.
+
+## Spreadsheet Exports (CSV / XLSX)
+
+Every endpoint that returns a spreadsheet artifact neutralizes formula-initiating cell text before
+writing it, so an export cannot execute as a formula when the recipient opens it (CWE-1236).
+Spreadsheet applications evaluate a cell whose text begins with `=`, `+`, `-`, `@`, TAB (`0x09`) or
+CR (`0x0D`); tenant-supplied text — part descriptions, notes, customer names, visitor purposes,
+report column names — lands in those cells verbatim. Applies to:
+
+| Endpoint | Formats |
+|--------|-------------|
+| `GET /exports/{work-orders,parts,inventory,purchase-orders,purchase-orders/lines,quotes,inventory/transactions}/export` | `?format=csv` + `?format=xlsx` |
+| `GET /analytics/custom-report/export` | csv |
+| `GET /visitor-logs/export.csv` | csv |
+| `GET /estimate-workbench/{estimate_id}/export/audit.xlsx` | xlsx |
+
+**XLSX is neutralized without changing any value.** XLSX distinguishes a formula cell from a string
+cell in the markup, so any cell holding a string is pinned to a string cell (`data_type="s"`) — the
+text is written inside `<is><t>…</t></is>` with no `<f>` element. Cell values are **byte-exact**:
+`+1-555-0134`, `-0.005 TIR`, `- check bore per print` and `@rev A` export exactly as stored. Numbers,
+dates and booleans keep their types. Previously `openpyxl` turned a leading-`=` string into a real
+formula cell, so this is a behavior change in the file's *markup* only, never in its values.
+
+**CSV is neutralized with a leading `'`, which does change the bytes.** CSV carries no type
+information, so the only available neutralization is to prefix the cell with a single quote, which
+spreadsheet applications consume as "read the rest of this cell as text". The prefix is added
+**only** when a value both starts with one of the characters above **and** does not parse as a plain
+finite number — so `-5.00`, `-0.005` and `+1e3` are exported unchanged and stay usable as numbers.
+RFC 4180 quoting is unchanged and still applied *after* neutralization.
+
+> **API consumers: the CSV bytes changed for affected cells.** A client that diffs exports across
+> versions, or feeds them to a downstream parser, will see a leading `'` on cells it did not before.
+> Strip a single leading `'` if the raw value is required. **XLSX consumers need no change.** This is
+> lossy on the **exported artifact only** — the stored record is never modified, and reading the same
+> row back over the JSON API returns the original text.
+
+**Header rows are neutralized too**, because two header paths carry caller- or tenant-supplied text
+rather than a fixed allowlist:
+
+- the **`columns` query parameter** accepted by every `/exports/*` endpoint is written as row 1, so
+  `?columns==HYPERLINK(...)` previously injected the header of the export; and
+- the `GET /analytics/custom-report/export` CSV header is derived from the saved report template's
+  column list, which is tenant-authored.
+
+**Import parsing is unaffected.** The CSV/XLSX *readers* behind the bulk imports are untouched — a
+cell read back in keeps whatever text it holds — as are the static XLSX import templates
+(`GET /import/templates/{entity}`), which contain no tenant data.
 
 ## CORS
 
