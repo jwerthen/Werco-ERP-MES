@@ -4829,8 +4829,9 @@ formula cell, so this is a behavior change in the file's *markup* only, never in
 **CSV is neutralized with a leading `'`, which does change the bytes.** CSV carries no type
 information, so the only available neutralization is to prefix the cell with a single quote, which
 spreadsheet applications consume as "read the rest of this cell as text". The prefix is added
-**only** when a value both starts with one of the characters above **and** does not parse as a plain
-finite number — so `-5.00`, `-0.005` and `+1e3` are exported unchanged and stay usable as numbers.
+**only** when a value both starts with one of the characters above **and** is not a plain finite
+number (anchored — no surrounding whitespace or `_` separators, the same rule on both stacks) — so
+`-5.00`, `-0.005` and `+1e3` are exported unchanged and stay usable as numbers.
 RFC 4180 quoting is unchanged and still applied *after* neutralization.
 
 > **API consumers: the CSV bytes changed for affected cells.** A client that diffs exports across
