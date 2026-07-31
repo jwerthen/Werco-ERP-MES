@@ -33,9 +33,10 @@ from app.core.websocket import (
 )
 from app.db.database import atomic_transaction, get_db
 from app.db.locks import acquire_generator_lock
+from app.db.tenant_filter import tenant_query
 from app.models.bom import BOM, BOMItem
 from app.models.laser_nest import LaserNest
-from app.models.part import Part, PartType
+from app.models.part import Part, PartType, UnitOfMeasure, uom_label
 from app.models.routing import Routing, RoutingOperation
 from app.models.time_entry import TimeEntry, TimeEntrySource
 from app.models.user import User, UserRole
@@ -63,7 +64,10 @@ from app.services.completion_cost_service import (
     compute_and_store_estimated_cost,
     rollup_labor_hours_from_evidence,
 )
-from app.services.completion_inventory_service import apply_completion_inventory_effects
+from app.services.completion_inventory_service import (
+    apply_completion_inventory_effects,
+    apply_operation_completion_inventory_effects,
+)
 from app.services.completion_quality_service import (
     evaluate_and_record_labor_data_quality,
     record_reconcile_labor_data_quality,
@@ -91,11 +95,19 @@ from app.services.laser_nest_service import (
     build_parsed_nest_from_extraction,
     copy_laser_nest_folder,
     create_manual_laser_nest,
+    create_nest_material_allocation,
     extract_laser_nest_zip,
     manual_nest_response_dict,
     package_has_pdfs,
     parse_laser_nest_folder,
     sync_laser_nest_from_operation,
+)
+from app.services.material_consumption_service import (
+    MaterialAllocationConsumedError,
+    allocations_on_work_order,
+    cancel_open_allocations_for_work_order,
+    ledger_backed_allocation_ids,
+    reopen_allocations_cancelled_by_delete,
 )
 from app.services.migration_import_service import import_open_work_orders
 from app.services.operational_event_service import OperationalEventService
@@ -764,6 +776,21 @@ def _find_laser_work_center(db: Session, company_id: int, work_center_id: Option
     return min(candidates, key=lambda wc: (_laser_work_center_preference(wc), wc.id))
 
 
+def _find_nest_material_part(db: Session, company_id: int, part_id: int) -> Part:
+    """Resolve a nest row's ``material_part_id`` to a live, company-scoped part.
+
+    Tenant isolation is the whole point (invariant #1): an unscoped
+    ``db.query(Part).get()`` would let a planner tie -- and then deplete -- another
+    company's material. A miss is a **404, never a 403**, so a part id cannot be
+    probed for existence across tenants. Soft-deleted parts are excluded: a tie to a
+    deleted part would advertise demand nothing can satisfy.
+    """
+    part = tenant_query(db, Part, company_id).filter(Part.id == part_id, Part.is_deleted == False).first()  # noqa: E712
+    if part is None:
+        raise HTTPException(status_code=404, detail="Material part not found")
+    return part
+
+
 # Byte cap on laser-package uploads (ZIP or bare PDF), enforced while the body
 # streams to the temp file -- BEFORE any pypdf or AI work touches it. Matches
 # the nginx client_max_body_size posture (50M) so the app-layer guard holds on
@@ -827,17 +854,54 @@ def _ensure_laser_child_work_order(
     # before it can be safely added to live multi-tenant data.)
     acquire_generator_lock(db, f"laser_child_work_order:{parent_work_order.id}", company_id)
 
+    # is_deleted == False is load-bearing, not hygiene. Without it a parent-addressed
+    # import or manual add resolved a SOFT-DELETED laser child and rebuilt it -- the
+    # caller's very next act force-sets RELEASED and re-derives the quantities, so a
+    # deleted work order silently came back to life on the shop floor with none of the
+    # restore path's controls (no audited `restore` action, and the tie re-open in
+    # `reopen_allocations_cancelled_by_delete` never ran, so its material demand stayed
+    # cancelled while the work order ran). The direct-address route already refuses
+    # this -- `_load_parent_work_order` filters soft-deleted rows and 404s -- so this
+    # was the one door left open.
     child = (
         db.query(WorkOrder)
         .filter(
             WorkOrder.company_id == company_id,
             WorkOrder.parent_work_order_id == parent_work_order.id,
             WorkOrder.work_order_type == WorkOrderType.LASER_CUTTING.value,
+            WorkOrder.is_deleted == False,  # noqa: E712
         )
         .first()
     )
     if child:
         return child
+
+    # A soft-deleted child exists but no live one: REFUSE rather than silently create a
+    # second laser child alongside the deleted one. Creating one would fork the parent's
+    # nest history in two and leave the deleted work order's operations, nests and
+    # material ties stranded; 409 (the state conflicts with the request) names the work
+    # order and the one remedy that keeps that history in one place.
+    deleted_child = (
+        db.query(WorkOrder)
+        .filter(
+            WorkOrder.company_id == company_id,
+            WorkOrder.parent_work_order_id == parent_work_order.id,
+            WorkOrder.work_order_type == WorkOrderType.LASER_CUTTING.value,
+            WorkOrder.is_deleted == True,  # noqa: E712
+        )
+        .order_by(WorkOrder.id.desc())
+        .first()
+    )
+    if deleted_child is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"The laser work order for {parent_work_order.work_order_number} "
+                f"({deleted_child.work_order_number}) was deleted. It must be restored before "
+                "importing or adding nests, so its nests and material ties stay on one work order. "
+                "Restoring requires an admin or manager (POST /work-orders/{id}/restore)."
+            ),
+        )
 
     child = WorkOrder(
         company_id=company_id,
@@ -1164,6 +1228,11 @@ def _build_confirmed_pdf_nests(package_dir: str, rows: list[LaserNestImportRow])
                 # Per-row work-center override (import-side instruction; resolved
                 # and validated in _run_laser_nest_import before the atomic build).
                 work_center_id=row.work_center_id,
+                # Per-row material tie (import-side instruction; the part is resolved
+                # and tenant-validated in _run_laser_nest_import before the atomic
+                # build). No fuzzy match off row.material -- an explicit pick only.
+                material_part_id=row.material_part_id,
+                qty_per_run=row.qty_per_run,
             )
         )
     return nests
@@ -2055,6 +2124,19 @@ async def _run_laser_nest_import(
             if nest.work_center_id and nest.work_center_id not in row_work_centers:
                 row_work_centers[nest.work_center_id] = _find_laser_work_center(db, company_id, nest.work_center_id)
 
+        # Same pre-resolution for every DISTINCT per-row MATERIAL TIE, and for the
+        # same reason: a bad or cross-tenant part id must fail cleanly (404) with
+        # nothing persisted, rather than mid-build where the rebuild has already
+        # wiped the prior nests. Only the PDF confirm-and-commit path carries ties;
+        # the legacy CNC-file path has no rows, so this loop is a no-op there and
+        # those imports stay byte-identical to their pre-feature behavior.
+        row_material_parts: dict[int, Part] = {}
+        for nest in nests:
+            if nest.material_part_id and nest.material_part_id not in row_material_parts:
+                row_material_parts[nest.material_part_id] = _find_nest_material_part(
+                    db, company_id, nest.material_part_id
+                )
+
         import_source = "pdf_import" if is_pdf_import else "cnc_file_import"
 
         try:
@@ -2150,6 +2232,8 @@ async def _run_laser_nest_import(
                     created_by=current_user.id,
                     saved_storage_keys=saved_storage_keys,
                     row_work_centers=row_work_centers,
+                    row_material_parts=row_material_parts,
+                    audit=audit,
                 )
 
                 if pre_import_wo_values is not None:
@@ -2255,6 +2339,15 @@ async def _run_laser_nest_import(
                 detail="Could not import the nest package; a nest conflicts with an existing record "
                 "or a value is invalid. Review the rows and try again.",
             ) from exc
+    except MaterialAllocationConsumedError as exc:
+        # A rebuild would destroy operations that already consumed tied material,
+        # orphaning the ISSUE rows that carry their lot genealogy. Nothing was
+        # deleted (the guard runs before the wipe) -- refuse with 409 and let the
+        # planner reverse the consumption explicitly.
+        _reap_saved_blobs()
+        if os.path.isdir(package_dir):
+            shutil.rmtree(package_dir, ignore_errors=True)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         # A pre-commit validation failure (e.g. duplicate source_file, empty
         # package): no transaction committed. Reap any blobs written before the
@@ -2414,8 +2507,19 @@ def create_manual_laser_nest_endpoint(
     ``laser_cutting`` (e.g. a standalone nest WO) -- the nest is appended to it
     directly. Delegates the state change to ``create_manual_laser_nest``.
     Untouched by, and does not touch, the import flow.
+
+    An optional ``material_part_id`` ties the created nest's operation to a stock
+    material part (``qty_per_run`` defaults to 1.0), so that material is deducted when
+    the laser work order finishes -- the same tie, through the same
+    ``create_nest_material_allocation`` seam, that the package import creates. Omitting
+    it leaves the nest untied and byte-identical to its pre-feature behavior.
     """
     target_work_order = _load_parent_work_order(db, work_order_id, company_id)
+    # Resolve the material part BEFORE the transaction: it is a read-only,
+    # tenant-scoped lookup, and a 404 here must not have to unwind a partial build.
+    material_part = (
+        _find_nest_material_part(db, company_id, payload.material_part_id) if payload.material_part_id else None
+    )
 
     with atomic_transaction(db):
         parent_work_order, child_work_order = _resolve_laser_target(
@@ -2438,6 +2542,21 @@ def create_manual_laser_nest_endpoint(
             company_id=company_id,
             user_id=current_user.id,
         )
+        if material_part is not None:
+            # Same operation-scoped tie the package import creates, through the same
+            # seam, so both paths produce identical rows and identical hash-chain
+            # entries. The nest's operation is already flushed by the call above.
+            create_nest_material_allocation(
+                db,
+                work_order=child_work_order,
+                operation=nest.operation,
+                part=material_part,
+                qty_per_run=payload.qty_per_run,
+                planned_runs=nest.planned_runs,
+                company_id=company_id,
+                created_by=current_user.id,
+                audit=audit,
+            )
         # Audit BEFORE the atomic_transaction commit so the audit row commits
         # atomically with the nest (AuditService.log only flushes).
         audit.log_create(
@@ -2775,11 +2894,13 @@ def delete_work_order(
     request: Request,
     hard_delete: bool = Query(False, description="Permanently delete (only for draft/cancelled WOs)"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN])),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
 ):
     """
     Soft delete or permanently delete a work order.
+
+    Allowed for admins and managers.
 
     **Soft delete (default)**: Marks the work order as deleted but preserves data.
 
@@ -2801,6 +2922,43 @@ def delete_work_order(
                 status_code=400,
                 detail="Only draft or cancelled work orders can be hard deleted. Use soft delete instead.",
             )
+
+        # Material ties FK-reference this WO and its operations, so they must go with it
+        # -- but a tie a ledger row points at CANNOT: inventory_transactions.allocation_id
+        # has to keep resolving. Ask the LEDGER, not the qty_consumed cache: the cache is
+        # documented as non-authoritative (model docstring) and the FK carries no
+        # ON DELETE, so any drift between the two would surface as an IntegrityError 500
+        # instead of this 409.
+        tie_rows = allocations_on_work_order(db, work_order_id=wo_id, company_id=company_id)
+        blocked_ids = ledger_backed_allocation_ids(
+            db, allocation_ids=[row.id for row in tie_rows], company_id=company_id
+        )
+        if blocked_ids:
+            # Name a remedy that EXISTS. This used to say "Reverse consumption first",
+            # and PR 3's RETURN verb is deliberately NOT that remedy: a return APPENDS a
+            # compensating row carrying the same ``allocation_id``, so a fully returned
+            # tie is still ledger-backed and this guard still fires -- correctly, because
+            # the hard delete would remove the tie those rows resolve through. Soft
+            # delete is the answer, and it keeps the material history intact.
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Material movement is on the inventory ledger for {len(blocked_ids)} tied "
+                    "allocation(s) on this work order, so it cannot be permanently deleted — returning "
+                    "the material does not remove that history. Soft delete instead; the work order and "
+                    "its material record stay intact."
+                ),
+            )
+        for tie in tie_rows:
+            audit.log_delete(
+                "work_order_material_allocation",
+                tie.id,
+                f"WO {wo_number} / part {tie.part_id}",
+                old_values={"status": tie.status.value, "qty_consumed": tie.qty_consumed},
+                description=f"Removed material allocation with hard-deleted work order {wo_number}",
+                extra_data={"reason": "work_order_hard_deleted", "work_order_id": wo_id},
+            )
+            db.delete(tie)
 
         # Delete operations first
         for op in work_order.operations:
@@ -2834,6 +2992,12 @@ def delete_work_order(
 
     # Soft delete - allowed for any status
     work_order.soft_delete(current_user.id)
+
+    # Close out forward-looking material demand: every OPEN tie is auto-CANCELLED
+    # (audited). Consumption already posted STANDS -- the material was physically used
+    # and the ledger is the compliance record -- so a consumed tie never refuses the
+    # delete, it just stops accruing.
+    cancel_open_allocations_for_work_order(db, work_order=work_order, company_id=company_id, audit=audit)
 
     # Audit BEFORE the terminal commit so the audit row commits atomically with the
     # soft delete — AuditService.log() only flushes and the session never commits on teardown.
@@ -2879,6 +3043,15 @@ def restore_work_order(
     audit = AuditService(db, current_user, request)
 
     work_order.restore()
+
+    # Symmetry with the soft delete, which auto-CANCELLED every OPEN tie: put back
+    # exactly those, so restored work keeps depleting its tied material. Leaving them
+    # cancelled means the work order completes and material silently never moves — and
+    # once `backflush_components` is exposed, a consumed-then-cancelled operation tie
+    # stops suppressing the BOM backflush, double-issuing the same part. Ties cancelled
+    # for ANY other reason (a manual untie, a nest re-import) are deliberately left
+    # alone; the discriminator is the cancel's own audit reason.
+    reopen_allocations_cancelled_by_delete(db, work_order=work_order, company_id=company_id, audit=audit)
 
     # Audit BEFORE the terminal commit so the audit row commits atomically with the
     # restore — AuditService.log() only flushes and the session never commits on teardown.
@@ -3115,7 +3288,14 @@ def get_material_requirements(
                     "scrap_factor": float(item.scrap_factor or 0),
                     "scrap_allowance": round(scrap_allowance, 3),
                     "total_required": round(total_required, 3),
-                    "unit_of_measure": item.unit_of_measure or component.unit_of_measure.value,
+                    # The one other place a BOM line's unit falls back to its component
+                    # part's. Routed through ``uom_label`` so it agrees with
+                    # ``uom_disagrees`` / ``GET /bom/uom-mismatches`` on what a part's unit
+                    # IS, and so a part with a NULL ``unit_of_measure`` no longer 500s here
+                    # on ``.value`` — the column is nullable and always has been.
+                    "unit_of_measure": (
+                        item.unit_of_measure or uom_label(component.unit_of_measure) or UnitOfMeasure.EACH.value
+                    ),
                     "item_type": item.item_type.value if hasattr(item.item_type, 'value') else item.item_type,
                     "is_optional": item.is_optional,
                     "notes": item.notes,
@@ -3175,7 +3355,16 @@ def complete_work_order(
     # from a WO id); operations are locked in a deterministic id order.
     work_order = (
         db.query(WorkOrder)
-        .filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id)
+        .filter(
+            WorkOrder.id == work_order_id,
+            WorkOrder.company_id == company_id,
+            # Parity with every other completion path (invariant 3). Benign today
+            # -- a soft delete cancels every open tie, so the consumption engine
+            # this handler now drives finds nothing -- but that is a second-order
+            # property of a different verb, not a guarantee this query should be
+            # leaning on.
+            WorkOrder.is_deleted == False,  # noqa: E712
+        )
         .with_for_update()
         .first()
     )
@@ -3319,6 +3508,24 @@ def complete_work_order(
         operation.updated_at = now
         sync_laser_nest_from_operation(operation)
         affected_work_centers |= finalize_operation_completion(db, work_order, operation)
+
+        # Material consumption (incremental), for symmetry with the three other
+        # operation-completion paths. In practice a NO-OP here: force-complete never
+        # writes ``operation.quantity_complete``, so ``target = qty_per_run * (complete +
+        # scrapped)`` is 0 and the sum-delta is non-positive. Deliberately NOT "fixed"
+        # here -- whether a privileged force-complete should book produced quantity per
+        # operation is a separate product decision, and inventing one would silently
+        # deplete material for runs nobody reported. The tie still flushes through the
+        # whole-WO reconcile in apply_completion_inventory_effects below if the operation
+        # does carry produced quantity from an earlier partial report.
+        #
+        # The flush keeps an autoflush StaleDataError out of the engine's per-allocation
+        # savepoint (where it would degrade into an ALLOCATION_CONSUMPTION_FAILED audit
+        # row instead of a 409); see the shop-floor twins.
+        db.flush()
+        apply_operation_completion_inventory_effects(
+            db, work_order, operation, user_id=current_user.id, company_id=company_id, audit=audit
+        )
         audit.log_status_change(
             resource_type="work_order_operation",
             resource_id=operation.id,
@@ -3730,16 +3937,29 @@ def reduce_operation_production_office(
     segregation-of-duties front door), then reduce. No open clock-in is required --
     the supervisor is correcting from the office, not working the operation.
 
+    Scope difference from the operator's twin: a **COMPLETE operation is correctable
+    here** (``allow_completed_operation=True``). It used to 409 on both verbs, on the
+    rationale that a completed operation's downstream inventory / cost / FG effects had
+    fired and could not be walked back -- while telling the operator to "ask a
+    supervisor" whose own endpoint hit the identical refusal. PR 3's reasoned RETURN
+    verb is that walk-back: tied material a completed operation consumed comes back
+    through ``POST /work-orders/{id}/material-allocations/{alloc}/return``, and lowering
+    the completed operation's count HERE is exactly what opens the bounded
+    ``correct_over_consumption`` allowance that return is measured against. Order
+    matters: reduce first (the count is the record), then return the material the lower
+    count no longer accounts for. A TERMINAL work order is still 409 on both verbs.
+
     Everything else is identical to the shop-floor twin (one shared core, see
-    ``production_reduction_service``): before-completion scope only (COMPLETE
-    operation / terminal WO -> 409, re-checked under the op->WO row locks in the
-    completion paths' order), tenant-scoped 404, required correction ``reason``,
-    per-entry audit trail on the tamper-evident chain, best-effort OperationalEvent,
-    optimistic-lock 409, and the RECOMPUTED work-order rollup (max over non-component
-    siblings -- or, on a laser dispatch-pool WO, the pooled SUM of per-nest progress --
-    only ever lowered). Scrap fields and statuses are never touched.
+    ``production_reduction_service``): terminal-WO 409 re-checked under the op->WO row
+    locks in the completion paths' order, tenant-scoped 404, required correction
+    ``reason``, per-entry audit trail on the tamper-evident chain, best-effort
+    OperationalEvent, optimistic-lock 409, and the RECOMPUTED work-order rollup (max
+    over non-component siblings -- or, on a laser dispatch-pool WO, the pooled SUM of
+    per-nest progress -- only ever lowered). Scrap fields and statuses are never
+    touched: a corrected COMPLETE operation stays COMPLETE, it just carries a truthful
+    count.
     """
-    load_operation_for_reduction_or_http(db, operation_id, company_id)
+    load_operation_for_reduction_or_http(db, operation_id, company_id, allow_completed_operation=True)
 
     # Same loader-channel guard as the labor writes: 'import' is reserved for the
     # bulk-migration loaders and may never be claimed by an interactive correction.
@@ -3789,6 +4009,9 @@ def reduce_operation_production_office(
         notes_entry=None,
         event_source_module="work_orders",
         path="office",
+        # Must match the pre-lock call above: the same gate runs again under the row
+        # locks, so relaxing only one of the two would refuse under the lock instead.
+        allow_completed_operation=True,
     )
     operation = outcome.operation
     work_order = outcome.work_order
@@ -3963,7 +4186,23 @@ def complete_operation(
     quantity_scrapped: Optional[float] = None,
     scrap_reason: Optional[str] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    # Office verb. Previously open to ANY authenticated tenant user, VIEWER and
+    # SHIPPING included -- already wrong, and load-bearing once operation
+    # completion started moving stock: a Viewer could decrement inventory and
+    # write ledger + hash-chain rows from a page they were only meant to read.
+    #
+    # The gate MATCHES ``complete_work_order`` (its larger sibling, which
+    # completes every operation on the work order) rather than
+    # ``reduce-production``. QUALITY belongs here: excluding it would let a
+    # Quality user complete a whole work order but not one of its operations,
+    # which is incoherent. reduce-production is stricter for a reason that does
+    # not apply here -- it rewrites other operators' recorded labor.
+    #
+    # Operators are unaffected: they complete work through
+    # /shop-floor/operations/{id}/complete and the kiosk (docs/RBAC_PERMISSIONS.md).
+    current_user: User = Depends(
+        require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR, UserRole.QUALITY])
+    ),
     company_id: int = Depends(get_current_company_id),
 ):
     """Complete an operation.
@@ -4223,6 +4462,23 @@ def complete_operation(
             new_values=new_values,
             description=f"Updated operation {operation.operation_number} progress",
         )
+
+    # Material consumption (incremental): deplete THIS operation's tied material the
+    # moment the operation is COMPLETE rather than at work-order completion (one laser
+    # operation = one nest = one sheet). A terminal parent WO was refused with a 409
+    # above, so a finished / cancelled job never consumes. ``work_order`` is 404'd
+    # earlier in this handler, but the guard is kept because every downstream use in
+    # this function is written the same defensive way. Writes NOTHING for an untied
+    # operation; the whole-WO reconcile below stays the self-heal. Placed BEFORE the
+    # work-order-completion block so apply_completion_cost_rollup picks up these ledger
+    # rows on this request. The db.flush() above keeps an autoflush StaleDataError out
+    # of the engine's per-allocation savepoint, where it would be recorded as an
+    # ALLOCATION_CONSUMPTION_FAILED row instead of surfacing as a 409.
+    if is_fully_complete and work_order:
+        apply_operation_completion_inventory_effects(
+            db, work_order, operation, user_id=current_user.id, company_id=company_id, audit=audit
+        )
+
     if work_order_completed and work_order:
         audit.log_status_change(
             resource_type="work_order",

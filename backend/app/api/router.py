@@ -63,6 +63,7 @@ from app.api.endpoints import (
     visitor_logs,
     work_centers,
     work_order_blockers,
+    work_order_materials,
     work_orders,
 )
 
@@ -85,6 +86,10 @@ api_router.include_router(quality.router, prefix="/quality", tags=["Quality Mana
 api_router.include_router(scrap_reasons.router, prefix="/quality", tags=["Quality Management"])
 api_router.include_router(custom_fields.router, prefix="/custom-fields", tags=["Custom Fields"])
 api_router.include_router(work_orders.router, prefix="/work-orders", tags=["Work Orders"])
+# Sibling router under the same /work-orders prefix (work_orders.py is >4k lines and
+# already owns completion/laser-nest/import). Every path here has a LITERAL middle
+# segment, so no route above can shadow it. Mirrors the scrap_reasons/quality precedent.
+api_router.include_router(work_order_materials.router, prefix="/work-orders", tags=["Work Order Materials"])
 api_router.include_router(laser_nests.router, prefix="/laser-nests", tags=["Laser Nests"])
 api_router.include_router(work_order_blockers.router, prefix="/work-order-blockers", tags=["Work Order Blockers"])
 api_router.include_router(shop_floor.router, prefix="/shop-floor", tags=["Shop Floor"])

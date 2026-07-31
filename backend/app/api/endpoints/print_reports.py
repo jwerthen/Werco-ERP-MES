@@ -291,7 +291,11 @@ def get_purchase_order_print_data(
     po = (
         db.query(PurchaseOrder)
         .options(joinedload(PurchaseOrder.vendor), joinedload(PurchaseOrder.lines).joinedload(PurchaseOrderLine.part))
-        .filter(PurchaseOrder.id == po_id, PurchaseOrder.company_id == company_id)
+        .filter(
+            PurchaseOrder.id == po_id,
+            PurchaseOrder.company_id == company_id,
+            PurchaseOrder.is_deleted == False,  # noqa: E712
+        )
         .first()
     )
 

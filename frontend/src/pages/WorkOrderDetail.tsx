@@ -11,6 +11,9 @@ import LaserNestManualModal from '../components/laser/LaserNestManualModal';
 import LaserNestImportWizard from '../components/laser/LaserNestImportWizard';
 import LaserNestPdfPreview from '../components/laser/LaserNestPdfPreview';
 import { CompleteWorkModal, CompleteWorkSubmit } from '../components/workorders/CompleteWorkModal';
+import MaterialTiesPanel from '../components/workorders/MaterialTiesPanel';
+import OperationMaterialTieModal from '../components/workorders/OperationMaterialTieModal';
+import BackflushPreviewPanel from '../components/workorders/BackflushPreviewPanel';
 import OperationStepsPanel from '../components/processSheets/OperationStepsPanel';
 import {
   extractStepsBypassed,
@@ -56,6 +59,19 @@ import {
 } from '@heroicons/react/24/outline';
 
 const CURRENT_WORK_ORDER_STATUSES = ['released', 'in_progress', 'on_hold'];
+
+/**
+ * How many runs this operation is expected to produce — nest planned runs, else
+ * its own component quantity, else the work order's ordered quantity.
+ *
+ * Extracted so the Qty column and the material-tie editor's default planned
+ * total cannot drift apart: the tie's plan figure is `qty_per_run × runs`, and a
+ * different `runs` in the two places would show a planner one number and tie
+ * another.
+ */
+function operationRunTarget(op: WorkOrderOperation, quantityOrdered: number | null | undefined): number {
+  return Number(op.laser_nest?.planned_runs || op.component_quantity || quantityOrdered || 0);
+}
 
 interface MaterialRequirement {
   bom_item_id: number;
@@ -240,6 +256,10 @@ export default function WorkOrderDetail() {
   const { user } = useAuth();
   const { showToast } = useToast();
   const isAdminView = user?.role === 'admin' || !!user?.is_superuser;
+  // Soft-deleting a WO is admin/manager (plus superuser) — the backend widened
+  // the DELETE gate to include manager. Kept separate from isAdminView so only
+  // the Delete button opens to managers; other admin-only chrome is unchanged.
+  const canDeleteWorkOrder = user?.role === 'admin' || user?.role === 'manager' || !!user?.is_superuser;
   // Manual laser-nest manage actions are limited to admin/manager/supervisor —
   // the same trio the backend RBAC allows (routings:create maps to exactly that
   // set plus platform_admin).
@@ -250,6 +270,18 @@ export default function WorkOrderDetail() {
   const canCorrectCount = hasPermission(user?.role, 'work_orders:edit') || !!user?.is_superuser;
   // Inline due-date edit shares the same work_orders:edit tier.
   const canEditDueDate = canCorrectCount;
+  // Material-tie PATCH/untie is require_role([ADMIN, MANAGER, SUPERVISOR]) on
+  // the backend — the same tier work_orders:edit maps to. Reads are open to any
+  // authenticated tenant user, so the panel itself is not gated.
+  const canEditMaterialTies = canCorrectCount;
+  // Office operation-complete mirrors the backend gate, which is
+  // require_role([ADMIN, MANAGER, SUPERVISOR, QUALITY]) — the same set as
+  // complete_work_order, its larger sibling. QUALITY is included deliberately:
+  // it can complete an entire work order, so refusing it a single operation
+  // would be incoherent. It matters more than it looks — completing an
+  // operation now consumes tied material, so this button moves stock and writes
+  // hash-chain rows. Operators complete work from the shop floor / kiosk.
+  const canCompleteOperation = canCorrectCount || user?.role === 'quality';
   const [workOrder, setWorkOrder] = useState<WorkOrder | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -259,6 +291,15 @@ export default function WorkOrderDetail() {
   // Which operation's read-only "Process steps" evidence panel is expanded
   // (one at a time — it fetches the steps view on open).
   const [stepsOpenOpId, setStepsOpenOpId] = useState<number | null>(null);
+  // Per-operation material tie editor. `null` = closed; otherwise the operation
+  // every tie created in that dialog is scoped to (operation scope is hard-coded
+  // there, not a default — see the modal's docstring).
+  const [tieTarget, setTieTarget] = useState<WorkOrderOperation | null>(null);
+  // Freshness seam for MaterialTiesPanel. A tie write does NOT bump
+  // `work_orders.updated_at`, which is the panel's only other load dependency,
+  // so without this a tie created from the Operations table would leave a stale
+  // list sitting directly beneath it.
+  const [tieRefreshToken, setTieRefreshToken] = useState(0);
   // Drives the CompleteWorkModal: either the work-order-level completion or a
   // specific operation. `null` = closed. The modal collects qty complete + qty
   // scrapped + a scrap reason (required when scrap > 0) before we call the API.
@@ -296,6 +337,10 @@ export default function WorkOrderDetail() {
   // Manual nest entry + per-nest PDF management.
   const [nestModalOpen, setNestModalOpen] = useState(false);
   const [nestModalTarget, setNestModalTarget] = useState<LaserNestInfo | null>(null);
+  // The operation the edited nest sits on. The nest itself carries no operation
+  // id, but material ties are OPERATION-scoped, so without this the modal can't
+  // read or write the tie for the nest being edited.
+  const [nestModalOperationId, setNestModalOperationId] = useState<number | undefined>(undefined);
   const [previewNestId, setPreviewNestId] = useState<number | null>(null);
   const [nestActionId, setNestActionId] = useState<number | null>(null);
   const [nestActionError, setNestActionError] = useState('');
@@ -953,12 +998,16 @@ export default function WorkOrderDetail() {
   // --- Manual laser nest handlers -----------------------------------------
   const openAddNestModal = () => {
     setNestModalTarget(null);
+    // A nest being CREATED has no operation yet — the modal ties on the
+    // operation the create returns, not on one passed in here.
+    setNestModalOperationId(undefined);
     setNestActionError('');
     setNestModalOpen(true);
   };
 
-  const openEditNestModal = (nest: LaserNestInfo) => {
+  const openEditNestModal = (nest: LaserNestInfo, operationId?: number) => {
     setNestModalTarget(nest);
+    setNestModalOperationId(operationId);
     setNestActionError('');
     setNestModalOpen(true);
   };
@@ -1143,7 +1192,7 @@ export default function WorkOrderDetail() {
             <PrinterIcon className="h-5 w-5 mr-2" />
             Print Traveler
           </Button>
-          {isAdminView && (
+          {canDeleteWorkOrder && (
             <Button
               variant="secondary"
               onClick={handleDelete}
@@ -1654,7 +1703,7 @@ export default function WorkOrderDetail() {
                             )}
                             <button
                               type="button"
-                              onClick={() => openEditNestModal(nest)}
+                              onClick={() => openEditNestModal(nest, operation.id)}
                               className="btn-secondary btn-sm flex items-center gap-1"
                               title="Edit nest"
                             >
@@ -1919,7 +1968,7 @@ export default function WorkOrderDetail() {
                   return workOrder.operations.map((op) => {
                     const isNewGroup = op.operation_group && op.operation_group !== lastGroup;
                     if (op.operation_group) lastGroup = op.operation_group;
-                    const operationTarget = Number(op.laser_nest?.planned_runs || op.component_quantity || workOrder.quantity_ordered || 0);
+                    const operationTarget = operationRunTarget(op, workOrder.quantity_ordered);
                     
                     const groupColors: Record<string, string> = {
                       'LASER': 'bg-fd-red/15 text-fd-red',
@@ -2050,7 +2099,25 @@ export default function WorkOrderDetail() {
                             >
                               <ClipboardDocumentCheckIcon className="h-5 w-5 inline" /> Steps
                             </button>
-                            {op.status !== 'complete' && workOrder.status !== 'draft' && (
+                            {/* Per-operation material tie. Gated on
+                                `canEditMaterialTies` (work_orders:edit — the
+                                same trio the tie endpoints enforce), NOT on
+                                `canCompleteOperation`, which is a larger set:
+                                QUALITY may complete an operation but may not
+                                decide what stock it eats. The dialog is always
+                                OPERATION-scoped; it never creates a
+                                whole-work-order tie. */}
+                            {canEditMaterialTies && (
+                              <button
+                                type="button"
+                                onClick={() => setTieTarget(op)}
+                                className="text-fd-blue hover:text-blue-300 text-sm font-medium"
+                                title="Tie stock material to this operation"
+                              >
+                                <CubeIcon className="h-5 w-5 inline" /> Material
+                              </button>
+                            )}
+                            {canCompleteOperation && op.status !== 'complete' && workOrder.status !== 'draft' && (
                               <button
                                 onClick={() => handleCompleteOperation(op)}
                                 disabled={completingOpId === op.id}
@@ -2104,6 +2171,47 @@ export default function WorkOrderDetail() {
           </div>
         )}
       </div>
+
+      {/* Material Ties — the optional link between this work order (or one of
+          its operations) and the stock material it depletes. Its own stacked
+          section, deliberately not a tab: this page's content is all co-visible.
+          `workOrder.updated_at` is the freshness seam — a completion that posts
+          consumption bumps the work order, which re-runs the panel's fetch;
+          the panel adds no poller of its own. */}
+      <MaterialTiesPanel
+        workOrderId={workOrder.id}
+        workOrderUpdatedAt={workOrder.updated_at}
+        // A tie written from the Operations table above does not bump
+        // `work_orders.updated_at`, so without this the list right here would go
+        // stale the moment someone used the other door onto the same rows.
+        refreshToken={tieRefreshToken}
+        canEdit={canEditMaterialTies}
+        // Only so the panel can compute each tie's live consumption target and flag
+        // one that is OVER-consumed — the open loop an office reduce on a COMPLETE
+        // operation leaves behind, which nothing else on this page distinguishes
+        // from an ordinary tie.
+        operations={workOrder.operations}
+      />
+
+      {/* Per-operation material tie editor, opened from the Operations table.
+          Rendered once here rather than per row so only one dialog exists.
+          `onSaved` bumps the token above — a tie write does not touch the work
+          order, so nothing else would refresh the panel. */}
+      <OperationMaterialTieModal
+        open={tieTarget !== null}
+        workOrderId={workOrder.id}
+        operation={tieTarget}
+        operationTarget={tieTarget ? operationRunTarget(tieTarget, workOrder.quantity_ordered) : 0}
+        onClose={() => setTieTarget(null)}
+        onSaved={() => setTieRefreshToken((token) => token + 1)}
+      />
+
+      {/* Backflush dry run — the OTHER consumption path: BOM/routing components
+          pulled automatically at completion when the finished part has opted in.
+          A pure read that writes nothing, loaded on demand. Sits next to the tie
+          panel because both legs post to the same ledger and a planner needs to
+          see them together. */}
+      <BackflushPreviewPanel workOrderId={workOrder.id} />
 
       {/* Material Requirements */}
       {materialReqs && materialReqs.has_bom && materialReqs.materials.length > 0 && (
@@ -2188,6 +2296,9 @@ export default function WorkOrderDetail() {
             onClose={() => setNestModalOpen(false)}
             workOrderId={workOrder.id}
             nest={nestModalTarget}
+            // Operation-scoped material ties hang off this id — the edit path
+            // had been discarding it even though the caller already has it.
+            workOrderOperationId={nestModalOperationId}
             onSaved={handleNestSaved}
           />
           <LaserNestImportWizard

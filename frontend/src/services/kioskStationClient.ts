@@ -21,6 +21,7 @@
  *    the station token really is dead the next 10s queue poll 401s and locks.
  */
 
+import type { OperationDocumentsResponse } from '../types';
 import type {
   KioskBadgeTokenResponse,
   KioskClosedTimeEntry,
@@ -311,6 +312,33 @@ export async function completeOperation(
   data: { quantity_complete: number; source: string }
 ): Promise<{ closed_time_entries?: KioskClosedTimeEntry[] }> {
   return operatorFetch(operatorToken, 'POST', `/shop-floor/operations/${operationId}/complete`, data);
+}
+
+/**
+ * GET /shop-floor/operations/{id}/documents — drawing / nest / critical-dims
+ * discovery for the kiosk doc viewer (read-only). Operator (badge) token.
+ */
+export async function getOperationDocuments(
+  operatorToken: string,
+  operationId: number
+): Promise<OperationDocumentsResponse> {
+  return operatorFetch(operatorToken, 'GET', `/shop-floor/operations/${operationId}/documents`);
+}
+
+/**
+ * GET /shop-floor/documents/{id}/inline — fetch a shop-floor-served document
+ * PDF as a blob and return a same-origin object URL (caller revokes when
+ * done). Operator (badge) token. Throws KioskApiError on refusal and NEVER
+ * navigates — the crew terminal must never bounce to /login.
+ */
+export async function fetchDocumentBlob(operatorToken: string, documentId: number): Promise<string> {
+  const response = await fetch(`${API_BASE_URL}/shop-floor/documents/${documentId}/inline`, {
+    method: 'GET',
+    headers: bearerHeaders(operatorToken),
+  });
+  if (!response.ok) await throwOnError(response);
+  const blob = await response.blob();
+  return URL.createObjectURL(blob);
 }
 
 /** PUT /shop-floor/operations/{id}/hold — files the structured blocker. */

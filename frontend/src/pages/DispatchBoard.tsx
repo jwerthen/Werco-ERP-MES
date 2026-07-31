@@ -15,6 +15,15 @@
  * (six changeovers vs two) without the board ever reordering anything itself:
  * auto-batching is deliberately out of scope.
  *
+ * Material ties: a card whose operation is tied to stock material carries one
+ * more chip — how much is ESTIMATED to leave stock, and whether stock covers it.
+ * Two things it deliberately does not do. It never says material is being
+ * deducted now: consumption fires at WORK-ORDER completion, so finishing nest 1
+ * of 3 deducts nothing and all three flush when the last operation closes the
+ * WO. And it never gates anything: a shortage drives the lot negative and is
+ * flagged for purchasing, because refusing would train planners to untie
+ * material. An UNTIED operation renders no chip at all.
+ *
  * Optimistic vs server-gated (CLAUDE.md convention):
  *  - Reordering WITHIN a column is rarely rejected -> optimistic via
  *    `useOptimisticMutation`, rolling back with the server's verbatim `detail`.
@@ -76,7 +85,20 @@ import {
   nestQueueSummary,
   type NestChangeover,
 } from '../utils/nestChangeover';
+import { countShortTies, materialTieChip, type MaterialTieTone } from '../utils/materialTie';
 import type { DispatchBoardColumn, DispatchBoardRow, RunOrderUpdateResponse } from '../types';
+
+/**
+ * Material-tie chip ramp — the due-date chip's three tiers, same class shape.
+ * Advisory only: a shortage NEVER blocks production (the server drives the lot
+ * negative and writes an `ALLOCATION_SHORTAGE` audit row), so the red tier is a
+ * heads-up for purchasing, not a gate on the floor.
+ */
+const TIE_TONE_CLASS: Record<MaterialTieTone, string> = {
+  short: 'border-red-500/60 text-red-300',
+  warn: 'border-amber-500/60 text-amber-300',
+  ok: 'border-fd-line text-slate-400',
+};
 
 /** Surface the backend's message verbatim (a refusal must not be reworded). */
 function serverDetail(err: unknown, fallback: string): string {
@@ -666,6 +688,10 @@ export default function DispatchBoard() {
     // updates the cost of the order at the same moment the cards move — that
     // immediacy is the whole feedback loop.
     const nestSummary = nestQueueSummary(column.queue);
+    // Same "recompute from the queue" rule as the changeover count, for the same
+    // reason: an optimistic reorder must not leave a stale rollup behind. Zero
+    // on a column with no tied work, so an untied board shows nothing new.
+    const shortTies = countShortTies(column.queue);
     return (
       <section
         key={column.id}
@@ -711,6 +737,17 @@ export default function DispatchBoard() {
               >
                 {nestSummary.nests} nest{nestSummary.nests === 1 ? '' : 's'} · {nestSummary.changeovers} changeover
                 {nestSummary.changeovers === 1 ? '' : 's'}
+              </p>
+            )}
+            {/* Advisory rollup: how many queued jobs on this machine estimate a
+                material shortage at work-order completion. Never a gate. */}
+            {shortTies > 0 && (
+              <p
+                data-testid={`dispatch-tie-short-${column.id}`}
+                title="Estimated material shortage at work-order completion. Advisory — a shortage never blocks production."
+                className="truncate font-mono text-[11px] text-red-300"
+              >
+                {shortTies} short on material
               </p>
             )}
           </div>
@@ -1126,6 +1163,10 @@ function DispatchCard({
   // deactivated work center, so the board must never offer one.
   const otherMachines = columns.filter((candidate) => candidate.id !== column.id && candidate.is_active !== false);
   const nestSegments = nestDetailSegments(row.laser_nest);
+  // `null` for an UNTIED operation — nothing renders at all (no placeholder, no
+  // "not tied" nag): an untied work order stays byte-identical to its
+  // pre-feature self.
+  const tieChip = materialTieChip(row);
 
   return (
     <div
@@ -1210,6 +1251,20 @@ function DispatchCard({
               >
                 {pastDue ? 'Past due ' : dueToday ? 'Due today' : 'Due '}
                 {dueToday ? '' : formatCentralDate(row.due_date)}
+              </span>
+            )}
+            {/* Material tie — an ESTIMATE of what leaves stock when THIS
+                OPERATION completes (a card is an operation row), never a
+                guarantee and never "deducting now": consumption is
+                reconcile-to-target, and nothing posts until the operation flips
+                COMPLETE. The full sentence lives in the title. */}
+            {tieChip && (
+              <span
+                data-testid={`dispatch-tie-${row.operation_id}`}
+                title={tieChip.title}
+                className={`max-w-full truncate rounded border px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider ${TIE_TONE_CLASS[tieChip.tone]}`}
+              >
+                {tieChip.text}
               </span>
             )}
             <span className="font-mono text-[10px] uppercase tracking-wider text-slate-500">

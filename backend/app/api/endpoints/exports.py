@@ -296,7 +296,10 @@ def export_purchase_orders(
     """Export purchase orders to CSV or Excel."""
     query = (
         db.query(PurchaseOrder)
-        .filter(PurchaseOrder.company_id == company_id)
+        .filter(
+            PurchaseOrder.company_id == company_id,
+            PurchaseOrder.is_deleted == False,  # noqa: E712
+        )
         .options(joinedload(PurchaseOrder.vendor), joinedload(PurchaseOrder.lines).joinedload(PurchaseOrderLine.part))
     )
 

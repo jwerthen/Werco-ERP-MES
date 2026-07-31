@@ -7,7 +7,7 @@ from sqlalchemy import Float, ForeignKey, Integer, String, Text, UniqueConstrain
 from sqlalchemy.orm import relationship
 
 from app.db.database import Base
-from app.db.mixins import TenantMixin
+from app.db.mixins import SoftDeleteMixin, TenantMixin
 
 
 class POStatus(str, enum.Enum):
@@ -57,7 +57,7 @@ class InspectionMethod(str, enum.Enum):
     SAMPLING = "sampling"
 
 
-class Vendor(Base, TenantMixin):
+class Vendor(Base, SoftDeleteMixin, TenantMixin):
     """Supplier/Vendor master"""
 
     __tablename__ = "vendors"
@@ -103,7 +103,7 @@ class Vendor(Base, TenantMixin):
     documents = relationship("Document", back_populates="vendor")
 
 
-class PurchaseOrder(Base, TenantMixin):
+class PurchaseOrder(Base, SoftDeleteMixin, TenantMixin):
     """Purchase Order header"""
 
     __tablename__ = "purchase_orders"
@@ -186,7 +186,7 @@ class ReceiptStatus(str, enum.Enum):
     QUARANTINE = "quarantine"
 
 
-class POReceipt(Base, TenantMixin):
+class POReceipt(Base, SoftDeleteMixin, TenantMixin):
     """Receipt against a PO line - tracks each delivery"""
 
     __tablename__ = "po_receipts"

@@ -1,6 +1,6 @@
 # Werco ERP-MES
 
-A custom **Enterprise Resource Planning (ERP) + Manufacturing Execution System (MES)** for precision manufacturing (sheet metal, CNC, fabrication, welding, paint/powder coat, assembly, inspection). Built from the ground up for **AS9100D, ISO 9001, and CMMC Level 2** — in this system, audit trails, lot/serial traceability, multi-tenant isolation, and role-based access control are correctness requirements, not optional features. A query that returns another tenant's rows, or a state change that isn't recorded in the tamper-evident audit log, is treated as a bug.
+A custom **Enterprise Resource Planning (ERP) + Manufacturing Execution System (MES)** for precision manufacturing (sheet metal, CNC, fabrication, welding, paint/powder coat, assembly, inspection). Built from the ground up for **AS9100D and ISO 9001** on a secure-by-default multi-tenant foundation — in this system, audit trails, lot/serial traceability, multi-tenant isolation, and role-based access control are correctness requirements, not optional features. A query that returns another tenant's rows, or a state change that isn't recorded in the tamper-evident audit log, is treated as a bug.
 
 ## What it does
 
@@ -19,9 +19,9 @@ Shipped modules, grouped by domain:
 - **Work orders** — release, dispatch, and full lifecycle tracking; priority P1–P10, customer-PO linkage, auto-loaded BOM and routing.
 - **Laser nest packages** — import a zipped Ermaksan nest package (CNC program files, or nest-report PDFs auto-read by AI with review-before-commit) or a bare nest-report PDF (single- or multi-page, AI-segmented into per-nest pages with per-field confidence) onto an assembly work order to build its laser-cutting child WO, or standalone from the Work Orders page to create a released, part-less laser work order sized in sheet runs (no parent WO or part required); each nest is a clock-in-able operation, with manual per-nest entry as the alternative path (see [docs/API.md](docs/API.md) → Laser Nests).
 - **Shop-floor kiosk** — operator start/hold/resume/complete with qty produced/scrapped and notes; operator self-service over-count correction (walk back a good-count miscount on your own unapproved labor — current clock-in and your earlier sessions — before completion; audited, not scrap), plus a supervisor **Correct count** action on the work-order page for any operator's unapproved counts; badge/employee-ID login for kiosks.
-- **Operator kiosk** (`/kiosk`) — touch-first screen for fixed station terminals: badge-scan login, two-tap clock-in from the station queue, report production / complete / hold / correct over-count with structured scrap and correction reasons, idle auto-logout, and all writes tagged with the `kiosk` telemetry channel (see [docs/KIOSK.md](docs/KIOSK.md)).
+- **Operator kiosk** (`/kiosk`) — touch-first screen for fixed station terminals: badge-scan login, two-tap clock-in from the station queue, report production / complete / hold / correct over-count with structured scrap and correction reasons (scrap can file an in-process NCR in the same transaction — no hold, the machine keeps running), a full-screen controlled drawing / nest viewer with critical-dims rail, idle auto-logout, and all writes tagged with the `kiosk` telemetry channel (see [docs/KIOSK.md](docs/KIOSK.md)).
 - **Dispatch board** (`/dispatch`) — manager-controlled run order: one column per work center, drag a job up/down to set the order operators run it in (or across columns to move it to another machine), with keyboard Move up/down controls and a per-card machine select as the accessible equivalent. The rank shows as a `RUN n` chip and drives the queue order on every operator queue — kiosk, crew station, and the desktop shop-floor pages — but stays **advisory**: any queued job can still be started (admin / manager / supervisor; see [docs/API.md](docs/API.md) → Shop Floor → "Dispatch run order").
-- **TV wallboard** — read-only, full-screen `/wallboard` "Andon Wall" for shop TVs: computed shop-state headline, a priority-sorted job wall of open work-order tiles (current operation, crew, progress; down/blocked/late/running/waiting state bands), a SHIP/LATE/BLOCKED·DOWN/QUALITY exception rail, and a live TODAY band; 30s refresh, per-department filter; authenticated by scoped, revocable display tokens that can reach no other endpoint (see [docs/WALLBOARD.md](docs/WALLBOARD.md)).
+- **TV wallboard** — read-only, full-screen `/wallboard` board for shop TVs (the high-fidelity "Foundry" TV design): a HUD command bar with DOWN/BLOCKED/LATE alert chips, sync status, and a Central wall clock; a fixed 4×3 grid of priority-sorted work-order cards (current operation, stop reason, progress; down/blocked/late/running/waiting precedence) with an overflow strip; a right rail (SHIP TODAY, LATE — oldest first, BLOCKED/DOWN, open NCRs + holds); and a live TODAY KPI footer; 30s refresh, per-department filter; authenticated by scoped, revocable display tokens that can reach no other endpoint (see [docs/WALLBOARD.md](docs/WALLBOARD.md)).
 - **QR travelers & badge printing** — printed travelers carry URL QR codes (one job-page header QR plus a per-operation shop-floor deep link a phone can open directly) and an "UNCONTROLLED WHEN PRINTED" control footer (part rev, printed at / printed by); CR80 employee badges with QR-encoded employee IDs print from the Users page; `POST /scanner/resolve-action` resolves any scan — traveler URL, bare `OP:`/`WO:` code, or badge — to the operation / work order / employee and the shop-floor actions currently legal, with display-ready blocker reasons (scan-to-act lands in Phase 1; see [docs/KIOSK.md](docs/KIOSK.md) → Scanning).
 - **Scheduling & dispatch**, **OEE** tracking, **downtime** logging, and operator **time tracking / time clock**.
 
@@ -65,17 +65,17 @@ Cross-cutting platform properties:
 - **Multi-tenant** — domain tables carry `company_id` (`TenantMixin`); every query is scoped to the active company.
 - **Background work** — Redis 7 + **ARQ workers** (`app/worker.py`, `app/jobs/`) for email, MRP runs, and long tasks; enqueued from services, never blocking request handlers.
 - **Realtime** — WebSocket push for live shop-floor activity and dashboard updates.
-- **Tamper-evident audit** — the `audit_log` table is an append-only SHA-256 hash chain (`sequence_number`, `previous_hash`, `integrity_hash`); state changes flow through `AuditService`. (Known gap: the interactive user-management and work-center endpoints do not yet emit audit entries — their bulk-import endpoints do — see Compliance below.)
-- **Auth** — JWT, ~15-min access token, ~7-day rotating refresh, 24h absolute session cap; account lockout after 5 failed password attempts (the email/password login path).
+- **Tamper-evident audit** — the `audit_log` table is append-only at the database layer (triggers refuse `UPDATE`/`DELETE`) and carries a SHA-256 hash chain (`sequence_number`, `previous_hash`, `integrity_hash`); state changes flow through `AuditService`. The chain is on by default and pausable via `AUDIT_HASH_CHAIN_ENABLED` (the triggers are not). (Known gap: the interactive user-management and work-center endpoints do not yet emit audit entries — their bulk-import endpoints do — see Compliance below.)
+- **Auth** — JWT, ~15-min access token, ~7-day rotating refresh, ~7-day session cap (`SESSION_ABSOLUTE_TIMEOUT_HOURS`, default 168h — it restarts on every refresh, so it bounds an *idle* window rather than total session life); account lockout after 5 failed password attempts (the email/password login path). Password policy is ≥ 12 characters plus a weak-password blocklist — no character-class rules (NIST SP 800-63B §5.1.1.2).
 
 ## Tech stack
 
 | Layer | Technology |
 |-------|-----------|
-| Backend | Python 3.11, FastAPI 0.136, Starlette 1.2, Uvicorn/Gunicorn |
+| Backend | Python 3.11, FastAPI 0.136, Starlette 1.3, Uvicorn/Gunicorn |
 | ORM / DB | SQLAlchemy 2.0, Alembic 1.18, PostgreSQL (Supabase), psycopg2 |
 | Validation | Pydantic 2.12 + pydantic-settings |
-| Auth / security | python-jose (JWT), passlib + bcrypt, slowapi (rate limiting), bleach |
+| Auth / security | python-jose (JWT), passlib + bcrypt, slowapi (rate limiting) |
 | Background jobs | Redis 7, ARQ, croniter |
 | Realtime | websockets |
 | AI / LLM | Anthropic Claude (`anthropic` SDK) — Haiku / Sonnet / Opus tiers |
@@ -174,7 +174,7 @@ See **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**, **[docs/DEPLOYMENT_RUNBOOK.md]
 | [docs/AI_ALWAYS_ON.md](docs/AI_ALWAYS_ON.md) | Always-on sensors, outcome capture, Action Inbox learning loop |
 | [docs/AI_QUOTING_AGENT_RUNBOOK.md](docs/AI_QUOTING_AGENT_RUNBOOK.md) | Operating the Anthropic-powered RFQ/quoting feature |
 | [docs/IMPLEMENTATION_NOTES_AI_QUOTING_AGENT.md](docs/IMPLEMENTATION_NOTES_AI_QUOTING_AGENT.md) | AI quoting design/implementation notes |
-| [docs/CMMC_LEVEL_2_COMPLIANCE.md](docs/CMMC_LEVEL_2_COMPLIANCE.md) | CMMC L2 compliance posture |
+| [docs/CMMC_LEVEL_2_COMPLIANCE.md](docs/CMMC_LEVEL_2_COMPLIANCE.md) | CMMC L2 roadmap — **frozen 2026-07-28**, historical record only |
 | [docs/AUDIT_LOG_RETENTION_RUNBOOK.md](docs/AUDIT_LOG_RETENTION_RUNBOOK.md) | Audit-log retention operations |
 | [docs/DATABASE_BACKUP.md](docs/DATABASE_BACKUP.md) | Backup and restore procedures |
 | [docs/onboarding/](docs/onboarding/README.md) | **Employee onboarding & training** — plain-language, role-by-role guides (Getting Started, Operator/Shop-Floor, Warehouse, Planner/Supervisor/Manager, Admin/IT) with screenshots and printable PDF handouts |
@@ -186,15 +186,15 @@ See **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**, **[docs/DEPLOYMENT_RUNBOOK.md]
 
 ## Compliance
 
-Built for **AS9100D**, **ISO 9001**, and **CMMC Level 2**. The mechanisms below are enforced in code as correctness invariants:
+Built for **AS9100D** and **ISO 9001**, on a secure-by-default multi-tenant foundation. The mechanisms below are enforced in code as correctness invariants:
 
 - **Tenant isolation** — `company_id` scoping on all domain data; cross-tenant reads are defects.
-- **Tamper-evident audit log** — append-only SHA-256 hash chain over create/update/delete/status-change events; never backfilled or edited out of band. The interactive user-management endpoints (`app/api/endpoints/users.py` — create/update/activate/deactivate/role-change/password-reset) and work-center **update/deactivate** (`PUT`/`DELETE /work-centers/{id}` — deactivation also **refuses with a 409** while live operations still reference the machine) now write audit entries. **Remaining coverage gap:** interactive work-center **create** (`POST /work-centers/`) and the **status dropdown** (`POST /work-centers/{id}/status`) still emit **no** audit entries; do not represent those two actions as audited until they route through `AuditService`. (The bulk-import endpoints in both routers — `/users/import-csv`, `/work-centers/import-csv` — **do** audit every created row, tagged `source = "import"`.)
+- **Tamper-evident audit log** — append-only at the DB layer (migration `008`/`060` triggers refuse `UPDATE`/`DELETE`, independent of any setting), with a SHA-256 hash chain over create/update/delete/status-change events; never backfilled or edited out of band. **The hash chain is runtime-pausable** via `AUDIT_HASH_CHAIN_ENABLED` — it **defaults to on**, and pausing it is not fully reversible (rows written while paused can't be verified retroactively); see [docs/AUDIT_LOG_RETENTION_RUNBOOK.md](docs/AUDIT_LOG_RETENTION_RUNBOOK.md) → Pausing the hash chain. The interactive user-management endpoints (`app/api/endpoints/users.py` — create/update/activate/deactivate/role-change/password-reset) and work-center **update/deactivate** (`PUT`/`DELETE /work-centers/{id}` — deactivation also **refuses with a 409** while live operations still reference the machine) now write audit entries. **Remaining coverage gap:** interactive work-center **create** (`POST /work-centers/`) and the **status dropdown** (`POST /work-centers/{id}/status`) still emit **no** audit entries; do not represent those two actions as audited until they route through `AuditService`. (The bulk-import endpoints in both routers — `/users/import-csv`, `/work-centers/import-csv` — **do** audit every created row, tagged `source = "import"`.)
 - **Soft delete** — `SoftDeleteMixin` (`is_deleted` / `deleted_at` / `deleted_by`); no physical deletes on traced data.
 - **Traceability** — part/BOM revision control, critical-characteristic flags, and lot/serial genealogy; shipped data is preserved via new revisions rather than mutation.
 - **RBAC + access control** — server-side role gating, account lockout (5 failed password attempts → 30-min lock, email/password login path), JWT session caps.
 
-See **[docs/CMMC_LEVEL_2_COMPLIANCE.md](docs/CMMC_LEVEL_2_COMPLIANCE.md)**.
+**CMMC Level 2 is not being pursued at this time** (deprioritized 2026-07-28). The controls above are unaffected — they protect tenant data and the quality system on their own merits, independent of any certification. See **[docs/CMMC_LEVEL_2_COMPLIANCE.md](docs/CMMC_LEVEL_2_COMPLIANCE.md)** for the frozen historical roadmap.
 
 ## Project structure
 
@@ -235,4 +235,4 @@ Werco-ERP-MES/
 For questions or issues, contact the Werco IT department.
 
 ---
-Built for Werco Manufacturing — AS9100D / ISO 9001 / CMMC Level 2.
+Built for Werco Manufacturing — AS9100D / ISO 9001.

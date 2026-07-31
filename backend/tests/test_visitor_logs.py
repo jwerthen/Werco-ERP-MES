@@ -22,7 +22,11 @@ and the build spec:
 3. **sign-in** — creates a tenant-scoped VisitorLog, emits ``CREATE`` audit,
    enforces purpose_note-when-OTHER and the safety acknowledgment, persists the
    ack, matches the host to an in-company active user, and never blows up when
-   the best-effort host email cannot be enqueued (no Redis in tests).
+   the best-effort host email cannot be enqueued (no Redis in tests). Section 3b
+   additionally pins the CONTENT of that host notification (changed 2026-07-29 —
+   it now names the visitor): the enqueued ``template`` + ``context``, the
+   ``.value``-derived purpose label, JSON-safe primitives only (the context rides
+   ARQ/Redis), and a Central-formatted arrival time.
 4. **sign-out** — by name (1 match → out, >1 → 409 disambiguation, 0 → 404), by
    id, double sign-out guarded, ``STATUS_CHANGE`` audit emitted.
 5. **Tenant isolation** — a principal scoped to company A can never read /
@@ -43,7 +47,8 @@ and the build spec:
 The multi-company fixture shape mirrors tests/api/test_qms_standards_tenant_isolation.py.
 """
 
-from datetime import datetime, timedelta
+import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi import status
@@ -448,7 +453,7 @@ def test_station_login_pin_format_rejected(client: TestClient, db_session: Sessi
         "/api/v1/visitor-logs/station-login",
         json={"station_id": station.id, "pin": bad_pin},
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
 
 @pytest.mark.parametrize("good_pin", ["1234", "12345678"])
@@ -499,7 +504,7 @@ def test_sign_in_purpose_other_requires_note(client: TestClient, db_session: Ses
         headers=_station_headers(token),
         json=_valid_signin_payload(purpose="other", purpose_note=None),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
 
 def test_sign_in_purpose_other_with_note_ok(client: TestClient, db_session: Session):
@@ -527,7 +532,7 @@ def test_sign_in_requires_safety_acknowledgment(client: TestClient, db_session: 
         headers=_station_headers(token),
         json=_valid_signin_payload(safety_acknowledged=False),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
 
 def test_sign_in_persists_safety_acknowledged(client: TestClient, db_session: Session):
@@ -603,6 +608,186 @@ def test_sign_in_host_in_other_company_not_matched(client: TestClient, db_sessio
     assert resp.status_code == status.HTTP_201_CREATED, resp.text
     row = db_session.query(VisitorLog).filter(VisitorLog.id == resp.json()["id"]).first()
     assert row.host_user_id is None  # the company-B user must not be matched
+
+
+# ---------------------------------------------------------------------------
+# 3b. Host check-in notification CONTENT (changed 2026-07-29)
+#
+# The check-in alert now NAMES the visitor and renders the ``visitor_check_in``
+# email template, so the host learns who is standing in the lobby without logging
+# in. These tests pin the enqueued job payload, because that payload is the whole
+# contract with the worker: three traps live in it.
+#   * ``purpose`` must be the ``.value``-derived label -- a str-backed Enum renders
+#     as "VisitorPurpose.MEETING" under Jinja otherwise;
+#   * the context rides ARQ/Redis, so it must be JSON-safe primitives only (never
+#     the ORM row, never a raw datetime);
+#   * ``signed_in_at`` must be pre-formatted to CENTRAL -- an email has no
+#     client-side localizer, and a UTC lobby time is wrong by 5-6 hours.
+# ---------------------------------------------------------------------------
+
+
+def _capture_host_notifications(monkeypatch) -> list:
+    """Capture the best-effort enqueue instead of touching Redis. Returns the call list."""
+    import app.services.visitor_log_service as svc
+
+    calls = []
+    monkeypatch.setattr(svc, "enqueue_job_best_effort", lambda *a, **k: calls.append((a, k)))
+    return calls
+
+
+def _sign_in_with_host(client: TestClient, db_session: Session, monkeypatch, **payload_overrides):
+    """Sign a visitor in against a matched host; returns (calls, response, station, host)."""
+    host = _make_user(
+        db_session,
+        company_id=COMPANY_A,
+        role=UserRole.MANAGER,
+        first_name="Dana",
+        last_name="Host",
+        email=f"dana.host.{_next()}@co1.test",
+    )
+    station = _make_station(db_session, company_id=COMPANY_A, label="Front Lobby")
+    calls = _capture_host_notifications(monkeypatch)
+
+    payload = _valid_signin_payload(host_name="Dana Host", **payload_overrides)
+    resp = client.post(
+        "/api/v1/visitor-logs/sign-in",
+        headers=_station_headers(_signin_token_for(station)),
+        json=payload,
+    )
+    assert resp.status_code == status.HTTP_201_CREATED, resp.text
+    return calls, resp, station, host
+
+
+def test_check_in_notification_names_the_visitor_and_uses_the_template(
+    client: TestClient, db_session: Session, monkeypatch
+):
+    """One enqueue, carrying template="visitor_check_in" and the full visitor context."""
+    calls, resp, station, host = _sign_in_with_host(
+        client,
+        db_session,
+        monkeypatch,
+        visitor_name="Jane Smith",
+        visitor_company="Acme Corp",
+        purpose="meeting",
+    )
+
+    assert len(calls) == 1, f"expected exactly one host notification, got {calls}"
+    args, kwargs = calls[0]
+    assert args == ("dispatch_notification_direct_job",)
+    assert kwargs["event_key"] == "visitor.check_in"
+    assert kwargs["company_id"] == COMPANY_A
+    assert kwargs["recipient_ids"] == [host.id]
+    assert kwargs["related_type"] == "visitor_log"
+    assert kwargs["related_id"] == resp.json()["id"]
+    assert kwargs["link"] == "/visitor-log"
+    # The previously-dead template is now actually rendered.
+    assert kwargs["template"] == "visitor_check_in"
+
+    # The visitor is NAMED (the old body said only "a visitor has checked in").
+    assert kwargs["title"] == "Jane Smith checked in (Acme Corp)"
+    assert kwargs["body"] == "Jane Smith checked in (Acme Corp) and named you as their host."
+
+    context = kwargs["context"]
+    assert set(context) == {"visitor_name", "visitor_company", "purpose", "signed_in_at", "station_label"}
+    assert context["visitor_name"] == "Jane Smith"
+    assert context["visitor_company"] == "Acme Corp"
+    assert context["station_label"] == station.label == "Front Lobby"
+
+
+def test_check_in_title_omits_the_company_when_none_was_given(client: TestClient, db_session: Session, monkeypatch):
+    """No visitor company -> no empty parentheses in the subject line."""
+    calls, _resp, _station, _host = _sign_in_with_host(
+        client,
+        db_session,
+        monkeypatch,
+        visitor_name="Solo Visitor",
+        visitor_company=None,
+    )
+    kwargs = calls[0][1]
+    assert kwargs["title"] == "Solo Visitor checked in"
+    assert "(" not in kwargs["title"]
+    assert kwargs["context"]["visitor_company"] is None
+
+
+def test_check_in_purpose_is_a_label_not_the_enum_repr(client: TestClient, db_session: Session, monkeypatch):
+    """Regression: ``VisitorPurpose`` is a str-backed Enum.
+
+    Passing the member itself (rather than ``.value``) makes Jinja call ``__str__``,
+    which renders "VisitorPurpose.MEETING" into the host's email on Python 3.11.
+    """
+    calls, _resp, _station, _host = _sign_in_with_host(client, db_session, monkeypatch, purpose="meeting")
+
+    context = calls[0][1]["context"]
+    assert context["purpose"] == "Meeting"
+    # A plain ``str``, not the Enum member. ``json.dumps`` would happily serialize a
+    # str-backed member as "meeting" (it reads the str content), so only the TYPE check
+    # catches passing ``row.purpose`` straight through -- and Jinja's ``__str__`` call is
+    # exactly what would then render "VisitorPurpose.MEETING" into the host's email.
+    assert type(context["purpose"]) is str, f"got {type(context['purpose'])!r}"
+    assert "VisitorPurpose" not in str(context["purpose"])
+    assert "VisitorPurpose" not in json.dumps(calls[0][1])
+    assert "MEETING" not in json.dumps(calls[0][1])
+
+
+def test_check_in_purpose_other_appends_the_note(client: TestClient, db_session: Session, monkeypatch):
+    """purpose=OTHER is useless on its own, so the operator's note is appended."""
+    calls, _resp, _station, _host = _sign_in_with_host(
+        client,
+        db_session,
+        monkeypatch,
+        purpose="other",
+        purpose_note="Delivering calibration gauges",
+    )
+    assert calls[0][1]["context"]["purpose"] == "Other - Delivering calibration gauges"
+
+
+def test_check_in_context_is_json_serializable(client: TestClient, db_session: Session, monkeypatch):
+    """The context rides ARQ/Redis: JSON-safe primitives only, never an ORM row."""
+    calls, _resp, _station, _host = _sign_in_with_host(client, db_session, monkeypatch)
+
+    kwargs = calls[0][1]
+    round_tripped = json.loads(json.dumps(kwargs))  # raises TypeError on a datetime/ORM row
+    assert round_tripped["context"] == kwargs["context"]
+    for key, value in kwargs["context"].items():
+        # Exact types, not isinstance: a str-backed Enum member passes an isinstance(str)
+        # check and round-trips through json, yet renders as "VisitorPurpose.MEETING" the
+        # moment Jinja stringifies it.
+        assert type(value) in (str, int, float, bool, type(None)), f"{key}={value!r} ({type(value)!r})"
+
+
+def test_check_in_time_is_central_formatted_not_utc(client: TestClient, db_session: Session, monkeypatch):
+    """Emails have no client-side localizer, so the time is rendered Central server-side."""
+    from zoneinfo import ZoneInfo
+
+    calls, resp, _station, _host = _sign_in_with_host(client, db_session, monkeypatch)
+
+    signed_in_at = calls[0][1]["context"]["signed_in_at"]
+    assert isinstance(signed_in_at, str), "a raw datetime cannot cross the Redis boundary"
+    # A UTC render would end in "UTC"; Central is CST or CDT depending on the date.
+    assert signed_in_at.endswith(("CST", "CDT")), signed_in_at
+    assert "UTC" not in signed_in_at and "+00:00" not in signed_in_at and "Z" not in signed_in_at
+
+    # Independently recompute the expected Central wall-clock from the stored row.
+    row = db_session.query(VisitorLog).filter(VisitorLog.id == resp.json()["id"]).first()
+    stored_utc = row.signed_in_at.replace(tzinfo=timezone.utc)
+    expected = stored_utc.astimezone(ZoneInfo("America/Chicago"))
+    assert signed_in_at.startswith(expected.strftime("%b ")), signed_in_at
+    assert f"{expected.hour % 12 or 12}:{expected.minute:02d}" in signed_in_at
+    assert ("AM" if expected.hour < 12 else "PM") in signed_in_at
+
+
+def test_check_in_notification_is_skipped_without_a_matched_host(client: TestClient, db_session: Session, monkeypatch):
+    """No host match -> nobody to notify -> no enqueue at all."""
+    station = _make_station(db_session, company_id=COMPANY_A)
+    calls = _capture_host_notifications(monkeypatch)
+
+    resp = client.post(
+        "/api/v1/visitor-logs/sign-in",
+        headers=_station_headers(_signin_token_for(station)),
+        json=_valid_signin_payload(host_name="Nobody Here"),
+    )
+    assert resp.status_code == status.HTTP_201_CREATED, resp.text
+    assert calls == []
 
 
 # ===========================================================================
@@ -1143,7 +1328,7 @@ def test_manual_entry_future_signed_in_at_is_422(client: TestClient, db_session:
         headers=_headers_for(admin),
         json=_valid_manual_payload(signed_in_at=future.isoformat()),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
 
 def test_manual_entry_signed_out_before_signed_in_is_422(client: TestClient, db_session: Session):
@@ -1156,7 +1341,7 @@ def test_manual_entry_signed_out_before_signed_in_is_422(client: TestClient, db_
         headers=_headers_for(admin),
         json=_valid_manual_payload(signed_in_at=signed_in.isoformat(), signed_out_at=signed_out.isoformat()),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
 
 def test_manual_entry_future_signed_out_at_is_422(client: TestClient, db_session: Session):
@@ -1169,7 +1354,7 @@ def test_manual_entry_future_signed_out_at_is_422(client: TestClient, db_session
         headers=_headers_for(admin),
         json=_valid_manual_payload(signed_in_at=signed_in.isoformat(), signed_out_at=signed_out.isoformat()),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
 
 def test_manual_entry_purpose_other_requires_note(client: TestClient, db_session: Session):
@@ -1180,7 +1365,7 @@ def test_manual_entry_purpose_other_requires_note(client: TestClient, db_session
         headers=_headers_for(admin),
         json=_valid_manual_payload(purpose="other", purpose_note=None),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
 
 def test_manual_entry_requires_safety_acknowledgment(client: TestClient, db_session: Session):
@@ -1191,7 +1376,7 @@ def test_manual_entry_requires_safety_acknowledgment(client: TestClient, db_sess
         headers=_headers_for(admin),
         json=_valid_manual_payload(safety_acknowledged=False),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
 
 def test_manual_entry_missing_signed_in_at_is_422(client: TestClient, db_session: Session):
@@ -1204,7 +1389,7 @@ def test_manual_entry_missing_signed_in_at_is_422(client: TestClient, db_session
         headers=_headers_for(admin),
         json=payload,
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
 
 # --- 7c. Success: staff-entered, supplied times, audited, no email ---------

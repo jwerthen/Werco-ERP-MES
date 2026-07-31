@@ -10,6 +10,15 @@ interface LaserNestPdfPreviewProps {
   /** Tailwind height utility for the embedded viewer (default a compact panel). */
   heightClassName?: string;
   className?: string;
+  /**
+   * Optional transport override: resolve the PDF as an object URL yourself
+   * (e.g. the kiosk surfaces inject a fence-safe fetcher through the
+   * shop-floor inline route / crew badge token). Default: the global
+   * api.fetchLaserNestDocument — desktop callers are unchanged. Read through
+   * a ref (KioskStepsPanel's transportRef pattern), so an inline arrow is
+   * safe: only `laserNestId` re-triggers the fetch.
+   */
+  fetchBlob?: () => Promise<string>;
 }
 
 /**
@@ -29,6 +38,7 @@ export default function LaserNestPdfPreview({
   fileName,
   heightClassName = 'h-[420px]',
   className = '',
+  fetchBlob,
 }: LaserNestPdfPreviewProps) {
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -36,6 +46,10 @@ export default function LaserNestPdfPreview({
   // Hold the live object URL in a ref so the cleanup always revokes the current
   // one regardless of render timing.
   const objectUrlRef = useRef<string | null>(null);
+  // Latest injected fetcher, read at fetch time — deliberately NOT an effect
+  // dep so an unmemoized inline arrow can't retrigger a fetch loop.
+  const fetchBlobRef = useRef(fetchBlob);
+  fetchBlobRef.current = fetchBlob;
 
   useEffect(() => {
     let cancelled = false;
@@ -44,7 +58,8 @@ export default function LaserNestPdfPreview({
 
     const load = async () => {
       try {
-        const url = await api.fetchLaserNestDocument(laserNestId);
+        const fetcher = fetchBlobRef.current;
+        const url = fetcher ? await fetcher() : await api.fetchLaserNestDocument(laserNestId);
         if (cancelled) {
           window.URL.revokeObjectURL(url);
           return;

@@ -372,7 +372,7 @@ describe('OperatorKiosk process steps', () => {
     });
     renderKiosk();
 
-    fireEvent.click(await screen.findByRole('button', { name: /^complete$/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /^complete op$/i }));
     fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
 
     // Honest two-step message, verbatim missing labels…
@@ -403,7 +403,7 @@ describe('OperatorKiosk process steps', () => {
     });
     renderKiosk();
 
-    fireEvent.click(await screen.findByRole('button', { name: /^complete$/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /^complete op$/i }));
     fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
 
     // Honest INFO state (role=status, never an error alert).

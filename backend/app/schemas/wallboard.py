@@ -1,11 +1,17 @@
 """Pydantic contracts for the shop-floor TV wallboard payload (A0.5).
 
-PRIVACY: this payload renders on a public screen. Operator identity is
+PRIVACY: this payload may render on a public screen. Operator identity is
 truncated to first name + last initial (``operator_name`` / ``crew``) by the
 service — never widen it to full names / employee ids without a privacy
 review. The same discipline applies to the ship / today / quality blocks:
-counts, ages, WO/part numbers and dates ONLY — no customer names, no ship-to
-addresses, no dollar figures, no NCR titles/descriptions.
+counts, ages, WO/part numbers and dates ONLY — no ship-to addresses, no dollar
+figures, no NCR titles/descriptions.
+
+The ONE gated exception is ``WallboardJob.customer_name``: it is populated only
+for a principal explicitly authorized to see customer names (an executive
+display token opted in via ``display_tokens.show_customer_names``, or a
+signed-in privileged office role) and stays None on every public shop-floor TV.
+See ``build_wallboard_payload(..., include_customer=...)``.
 
 Back-compat: every field added after A0.5 v1 is optional/defaulted (the
 ``kpi_strip`` precedent) — an old backend → new TV renders ``—`` panels; a
@@ -152,10 +158,20 @@ class WallboardJobOp(BaseModel):
 
 
 class WallboardJob(BaseModel):
-    """One open work order tile. NO customer_name, NO dollars, NO notes."""
+    """One open work order tile. NO dollars, NO notes.
+
+    ``customer_name`` is the ONE deliberate exception to the "no customer data
+    on a public screen" rule, and it is GATED: the payload builder only
+    populates it when the request principal is authorized to see it (an
+    executive display token opted in via ``show_customer_names``, or a signed-in
+    privileged office role). It stays None for every public shop-floor TV.
+    """
 
     wo_number: str
     part_number: Optional[str] = None
+    # Gated — populated only for an authorized (executive) principal; None on
+    # public boards. See the class docstring and build_wallboard_payload.
+    customer_name: Optional[str] = None
     status: str  # released | in_progress
     qty_complete: float = 0  # WO-level
     qty_ordered: float = 0

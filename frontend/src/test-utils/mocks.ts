@@ -25,6 +25,9 @@ export const mockPart: Part = {
   reorder_quantity: 50,
   is_critical: false,
   requires_inspection: true,
+  // Automatic BOM backflush is OFF for every part until someone explicitly and
+  // deliberately turns it on — the server has no create path that can set it.
+  backflush_components: false,
   is_active: true,
   status: 'active',
   created_at: '2024-01-01T00:00:00Z',

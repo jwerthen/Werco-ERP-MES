@@ -46,8 +46,8 @@ long-lived JWT with `type="display"` that authenticates **only** `GET /shop-floo
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| POST | `/auth/display-token` | Issue a display token. Body: `{"label", "expires_days", "dept"?}` (label 1–100 chars; lifetime default **90** days, capped at **365**; optional `dept` ≤ 50 chars — the work-center-type preset the TV opens with). Response carries the one-time `token` **plus** the one-time `setup_code` + `setup_code_expires_at` (15-min TTL — see callouts) | Admin / Manager |
-| GET | `/auth/display-token` | List this company's display tokens (metadata only, incl. `dept` — the JWTs and setup codes are never returned) | Admin / Manager |
+| POST | `/auth/display-token` | Issue a display token. Body: `{"label", "expires_days", "dept"?, "show_customer_names"?}` (label 1–100 chars; lifetime default **90** days, capped at **365**; optional `dept` ≤ 50 chars — the work-center-type preset the TV opens with; `show_customer_names` bool, default **false** = public-safe — opt this display in to rendering work-order customer names on the board, gated server-side, see the wallboard callout). Response carries the one-time `token` **plus** the one-time `setup_code` + `setup_code_expires_at` (15-min TTL — see callouts) | Admin / Manager |
+| GET | `/auth/display-token` | List this company's display tokens (metadata only, incl. `dept` and `show_customer_names` — the JWTs and setup codes are never returned) | Admin / Manager |
 | POST | `/auth/display-token/{id}/setup-code` | Reissue the one-time TV setup code for an existing display → `{"id", "label", "dept", "setup_code", "setup_code_expires_at"}`. The previous code — used or not — is invalidated immediately; the new code is shown once and expires in **15 minutes**. Revoked/expired token → **400**; cross-tenant id → **404** | Admin / Manager |
 | POST | `/auth/display-token/claim` | Exchange a one-time setup code for the display JWT. Body `{"code"}` (case-, space- and dash-insensitive) → `{"token", "label", "dept", "expires_at"}`. **Every** failure mode (unknown / used / expired code, revoked / expired display) → the same generic **404** | **Public** (rate-limited **10/minute** per IP) |
 | DELETE | `/auth/display-token/{id}` | Revoke a display token (status flip, idempotent; cross-tenant id → 404) | Admin / Manager |
@@ -135,7 +135,7 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 | POST | `/work-orders/` | Create work order | Yes |
 | GET | `/work-orders/{id}` | Get work order by ID | Yes |
 | PUT | `/work-orders/{id}` | Update work order (body requires the WO's current `version` — stale → 409; also 409 if it moves a terminal WO back to a non-terminal status) | Yes |
-| DELETE | `/work-orders/{id}` | Delete work order | Admin |
+| DELETE | `/work-orders/{id}` | Delete work order (soft by default; `hard_delete=true` only for draft/cancelled) | Admin / Manager |
 | POST | `/work-orders/{id}/release` | Release to production | Yes |
 | POST | `/work-orders/{id}/start` | Start production | Yes |
 | POST | `/work-orders/{id}/complete` | Complete work order (409 if the WO is CANCELLED) | Yes |
@@ -143,7 +143,14 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 | PUT | `/work-orders/operations/{id}` | Update an operation (body now also accepts `work_center_id` — move the operation to another work center; see note below) | Admin / Manager / Supervisor |
 | POST | `/work-orders/operations/{id}/start` | Start an operation | Yes |
 | POST | `/work-orders/operations/{id}/complete` | Complete an operation (or record partial progress; 409 if the parent WO is terminal) | Yes |
-| POST | `/work-orders/operations/{id}/reduce-production` | Supervisor/office over-count correction — walk back good-count across **any** operator's **unapproved** labor on the operation, **before** completion; no clock-in required (see note below) | Admin / Manager / Supervisor |
+| POST | `/work-orders/operations/{id}/reduce-production` | Supervisor/office over-count correction — walk back good-count across **any** operator's **unapproved** labor on the operation; **a COMPLETE operation is correctable here** (unlike the operator's twin), a terminal WO is not; no clock-in required (see note below) | Admin / Manager / Supervisor |
+| GET | `/work-orders/{id}/material-allocations` | List the work order's material ties (`include_inactive`, default `true`) | Yes |
+| POST | `/work-orders/{id}/material-allocations` | Tie a material part to the work order or one of its operations (**201**) | Admin / Manager / Supervisor |
+| PATCH | `/work-orders/{id}/material-allocations/{allocation_id}` | Edit an **open** tie's quantities, lot pin, or notes | Admin / Manager / Supervisor |
+| DELETE | `/work-orders/{id}/material-allocations/{allocation_id}` | Untie (status → `cancelled`; the row is never physically deleted) | Admin / Manager / Supervisor |
+| GET | `/work-orders/{id}/material-allocations/{allocation_id}/consumption` | Per-source-lot ledger position of a tie (`issued` / `returned` / `net`) — the pre-confirm read behind the return dialog | Yes |
+| POST | `/work-orders/{id}/material-allocations/{allocation_id}/return` | **Return consumed material to its source lots** — reasoned, audited, compensating. The only verb on this router that posts inventory | Admin / Manager / Supervisor |
+| GET | `/work-orders/{id}/backflush-preview` | **Dry run (PR 4.5)** — what completing this work order would consume, per component and per lot, before anything moves. Pure read: no ledger row, no audit row, no event | Yes |
 
 > **Tenant isolation on operation/completion endpoints.** The operation- and completion-level
 > endpoints above (`/start`, `/complete`, `/operations/{id}`, `/operations/{id}/start`,
@@ -255,15 +262,224 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > receipt (logged, no error). The receipt's lot is reconstructable end-to-end via
 > [Traceability](#traceability).
 >
-> **Component backflush is opt-in per part (default off).** If the finished part has
-> `backflush_components = true` (see [Part Schema](#part-schema)), completion **auto-consumes** the
-> part's BOM components: one negative `ISSUE` `InventoryTransaction` per component (quantity scaled by
-> the produced quantity and each BOM item's `scrap_factor`), decrementing source stock and carrying the
-> consumed lot for genealogy — each **audited** and **idempotent** per component. When the flag is
-> **false** (the default) completion moves no components, so a shop that issues material manually is
-> never double-consumed. A backflush shortage (insufficient stock) **does not fail the completion** —
-> the source lot is driven negative and the shortfall is recorded as a tamper-evident
-> `BACKFLUSH_SHORTAGE` audit row plus a `backflush_shortage` warning event.
+> **Component backflush is opt-in per part (default off) — and as of PR 4.5 the flag is SETTABLE.** If
+> the finished part has `backflush_components = true` (see [Part Schema](#part-schema)), completion
+> **auto-consumes** the part's BOM components: one negative `ISSUE` `InventoryTransaction` per
+> component, decrementing source stock and carrying the consumed lot for genealogy — each **audited**
+> and **reconciled to target** per component (`reference_type='work_order_backflush'`). When the flag is
+> **false** (the default, and every part's state until somebody changes it) completion moves no
+> components, so a shop that issues material manually is never double-consumed.
+>
+> **Read the previous sentence's scope bound literally.** Until PR 4.5 the flag had no writer anywhere
+> in the application, and the sentences below described what the leg *would* do rather than observable
+> behavior. That is no longer true in principle — `PUT /parts/{id}` and `PUT /materials/{id}` can now
+> turn it on, behind the refusal gate described under [Part Schema](#part-schema) — but it remains true
+> in practice **until the first part actually opts in**: the column's `server_default` is `false` and no
+> production work order has yet reached this leg. Treat the behavior described here as **unproven in
+> production**, not as observed.
+>
+> A backflush shortage (insufficient stock, after the shared FIFO policy has walked every consumable lot
+> and skipped the segregated ones) **does not fail the completion** — the remainder is drawn negative and
+> the shortfall is recorded as a tamper-evident `BACKFLUSH_SHORTAGE` audit row plus a
+> `backflush_shortage` warning event (notification catalog `material.backflush_shortage` since PR 4.4).
+>
+> **A dry run is available before any of this happens**, and it writes nothing:
+> `GET /work-orders/{id}/backflush-preview` (below) resolves the same demand through the same issue loop
+> and the same lot policy, so the preview and the outcome cannot name different heats.
+>
+> **How component demand is resolved** (hardened while still dark; see
+> `docs/MATERIAL_CONSUMPTION_PLAN.md` → "The BOM/routing backflush leg"):
+> - **Basis is `quantity_complete + quantity_scrapped`**, each BOM line extended by its `scrap_factor`
+>   — the same basis the per-run tie engine uses, so one shop cannot report two different consumptions
+>   for the same physical event depending on whether the material was tied. A **fully-scrapped** work
+>   order therefore backflushes (it previously backflushed nothing).
+> - **Alternate, optional and `reference` BOM lines are skipped.** An alternate group is an OR, not an
+>   AND; optional lines have nothing on the work order recording which units got them; `reference`
+>   lines are documentation and tooling. This matches `mrp_service`, so planning and consumption state
+>   the same demand for one BOM. (There is still **no substitution logic** — alternates are inert
+>   columns, not a feature.)
+> - **Multi-level BOMs:** a `phantom` sub-assembly explodes into its children; a `make` sub-assembly is
+>   issued as a stocked unit and its children are **not** (they were consumed when it was built).
+> - **Routing precedence is per part, not all-or-nothing.** An operation's `component_part_id` states
+>   *that component's* demand; the BOM supplies every part the routing does not name. Previously one
+>   stray `component_part_id` disabled the entire BOM explosion for the work order. An operation naming
+>   the work order's **own** part is refused (it would ISSUE the part the FG receipt just RECEIVEd).
+> - **Suppression runs in two layers**, so tied material is never issued twice: an OPEN operation-scoped
+>   tie owns its part's demand (even before it consumes), **and** the signed ledger net suppresses any
+>   part the ledger already shows consumed against this work order's operations — recorded as a
+>   tamper-evident **`BACKFLUSH_DOUBLE_ISSUE_BLOCKED`** audit row rather than silently. A **fully
+>   returned** tie nets to zero and is deliberately allowed to re-issue: the material physically came
+>   back, so the BOM's demand is genuinely unmet again.
+> - **A blocking diagnostic REFUSES the demand it describes, and the refusal is recorded** (PR 4.5).
+>   The opt-in gate is a one-time check and everything it reads stays editable afterwards by anyone
+>   with `boms:edit`, so a BOM edited after a part was armed would otherwise move material against a
+>   figure the resolver has itself judged wrong — previously with no log line, no audit row and no
+>   event, leaving only an ordinary-looking ledger row. Each blocking diagnostic now drops **that
+>   component's** demand when it names a `component_part_id`, or the **whole leg** when it names none
+>   (the demand is then incomplete in a way no component owns — four codes today: `deleted_active_bom`,
+>   `bom_depth_exceeded`, `missing_component_part`, and the foreign-component branch of
+>   `foreign_component_part`, which carries no identity by design), and writes one
+>   **`BACKFLUSH_DEMAND_REFUSED`** audit row carrying the code, the operator sentence, the BOM line or
+>   operation it names, and the quantity that did **not** move. Under-issuing is the recoverable
+>   direction — the material is still on the shelf; over-issuing writes it into an as-built record
+>   that never contained it. `GET /work-orders/{id}/backflush-preview` reports the same refusal as
+>   `suppression_reason: "blocking_diagnostic"`, so the dry run and the outcome agree.
+>   **`refused_quantity` is attributed once per refused SCOPE, not once per row.** One BOM line can
+>   raise several blocking diagnostics and two lines can name one component, so the first row naming a
+>   given component carries the quantity and every later one carries `0` (the structural tier likewise
+>   charges its whole-leg total to the first structural row). Summing `refused_quantity` over
+>   `BACKFLUSH_DEMAND_REFUSED` therefore gives the real quantity that did not move — the rows still
+>   number one per diagnostic, because each names a different thing to fix. The same rows that carry
+>   the quantity emit the `material.backflush_demand_refused` notification, so one refused component
+>   notifies once rather than once per condition it violates.
+>
+> **Completion also consumes tied material (material allocations).** A work order can optionally be
+> **tied** to stock material via `…/material-allocations` (see "Material ties" below). Consumption is
+> **never a separate endpoint** — authority to complete the work is what authorizes the movement — and
+> it always joins the completing handler's transaction, so it is atomic with the status change. **An
+> untied work order is untouched** — no ledger row, no audit row, no event (asserted by test).
+>
+> **Consumption fires when an OPERATION completes, and again (as a reconcile) when the WORK ORDER
+> completes.** Two seams, deliberately different in scope:
+> - **Operation completion** — `apply_operation_completion_inventory_effects`, called by the four
+>   operation-completion handlers (`POST /shop-floor/clock-out/{time_entry_id}` when it closes the
+>   operation, `POST /shop-floor/operations/{id}/complete`, `POST /work-orders/operations/{id}/complete`,
+>   and the per-operation leg of `POST /work-orders/{id}/complete`) right after the operation is
+>   flipped `COMPLETE`. It reconciles **that operation's ties only**. A laser child work order carries
+>   **one operation per nest**, so completing nest 1 of 3 now deducts **nest 1's sheet**. Scope is one
+>   operation on purpose: a still-`IN_PROGRESS` operation can still be walked back by **either**
+>   reduce-production verb — including the operator's own self-service one — so consuming against one
+>   would let an operator strand material with no supervisor in the loop. (A **COMPLETE** operation is
+>   now correctable through the **office** verb, which is safe precisely because the reasoned material
+>   return exists to hand the material back; the operator verb still refuses. See "Over-count
+>   correction … (supervisor/office)" above.) Every call site
+>   is inside its handler's non-terminal branch, so a finished/cancelled job never consumes.
+> - **Work-order completion** — `apply_completion_inventory_effects`, unchanged, on all five of its
+>   existing call sites (kiosk clock-out, shop-floor and office operation complete, force-complete,
+>   reconcile-on-read). It reconciles **every** open tie on the work order and is now the **self-heal**:
+>   whatever an operation-level post missed still flushes here, and whatever already posted computes
+>   `delta = 0` and writes nothing. The FG receipt and the BOM backflush stay here and did **not** move
+>   to operation completion (per-operation they would double-receive a multi-operation job and collide
+>   with `uq_wo_inventory_issue`).
+>
+> **Reporting production is still NOT a consumption trigger.** A partial production report on an open
+> operation — `POST /shop-floor/operations/{id}/complete` short of the full quantity, or a clock-out
+> that does not close the operation — moves **no stock**. Keying 3 of 6 runs on an unfinished nest
+> deducts nothing; the sheets move when that operation closes. Client copy built on these numbers must
+> say "deducts when this operation completes", never "deducting now".
+>
+> **Force-complete is a no-op for consumption in practice.** `POST /work-orders/{id}/complete` calls
+> the seam for symmetry, but it never writes `operation.quantity_complete`, so `target` is 0 and the
+> sum-delta is non-positive: a force-completed operation's tie posts nothing unless the operation
+> already carried produced quantity from an earlier report. See
+> `docs/MATERIAL_CONSUMPTION_PLAN.md` → "Residual gaps of the operation-completion trigger".
+>
+> The two tie shapes behave differently:
+> - **Operation-scoped** ties (`work_order_operation_id` set — the laser-nest case) are reconciled
+>   **per operation** as a **sum-delta**: `target = qty_per_run × (operation
+>   quantity_complete + quantity_scrapped)`, and a negative `ISSUE` is posted for
+>   `target − qty_consumed` whenever that delta is positive. Because the target is recomputed from
+>   live operation state, the operation-completion post, a replay, and the work-order reconcile all
+>   converge instead of double-issuing — the later caller simply sees `delta = 0`
+>   (see `docs/MATERIAL_CONSUMPTION_PLAN.md` → "Capability vs. wiring"). These rows
+>   carry **`reference_type='work_order_operation'`** with `reference_id` = the **operation** id
+>   (and `reference_number` = the work-order number) — deliberately outside the
+>   `uq_wo_inventory_receipt` / `uq_wo_inventory_issue` idempotency predicates, which key on
+>   `reference_type='work_order'`.
+> - **Work-order-scoped** ties (no operation) are drained by the work-order-completion backflush, **as
+>   their own leg**, and reconciled to `qty_planned` against that tie's signed ledger net (ISSUE −
+>   RETURN, keyed on `allocation_id`). Their rows carry **`reference_type='work_order_backflush'`**
+>   with `reference_id` = the **work order**, also outside the `uq_wo_inventory_*` predicates. Unlike
+>   the BOM leg this is **not** gated on `backflush_components` — an explicit tie is itself the opt-in.
+>   The drain advances the tie's `qty_consumed` to that ledger net (never to `qty_planned` regardless
+>   of what posted) and **audits** the advance (`work_order_material_allocation` UPDATE,
+>   `extra_data.reference_type = "work_order_backflush"`), exactly as the per-run engine audits its own.
+>   Tie material **before** the work order completes.
+>
+>   > **Changed in PR 4.4 — the previous contract is stated so a stale integration is not read as a
+>   > regression.** Through PR 4 a work-order-scoped tie was *summed per part* with any BOM demand and
+>   > drained as **one** `ISSUE` row under `reference_type='work_order'`, because
+>   > `uq_wo_inventory_issue` permitted exactly one row per (work order, part). It is now **two
+>   > separately-attributed rows** — the tie row carries `allocation_id`, the BOM row has it NULL — and
+>   > the tie leg posts **first**, so a shortage lands on the derived side and the tie's lot pin gets
+>   > first claim on stock. **The total issued for a part carrying both demands is unchanged.** The
+>   > unpinned draw also spills across lots now, so one logical draw can be N rows naming N lots.
+>   > A `POST` of a work-order-scoped tie on a part carrying a **legacy** (pre-4.4) `work_order`-shaped
+>   > `ISSUE` on the same work order is still refused **409** — see the error table below — but that
+>   > refusal is now a legacy-only fence and is **unreachable** in practice.
+>
+> **Tied material counts as job-cost material.** `WorkOrder.actual_cost`, the synced `JobCost`, and
+> the analytics cost variance sum `abs(total_cost)` over the work order's `ISSUE` rows under **all
+> three** reference shapes (`work_order`, `work_order_backflush` and `work_order_operation`) — one
+> shared predicate (`work_order_ledger_filter`), so the stored
+> rollup and the analytics leg cannot drift. A nest that burned six $80 sheets contributes $480.
+>
+> **Scrap consumes**, and posts as `ISSUE` (not `SCRAP`): lot genealogy filters on `ISSUE`, so a
+> `SCRAP` row would erase audited scrap material from the as-built record. The good/scrap split is
+> recorded in the transaction `notes`.
+>
+> **Consumption never auto-reverses.** A negative delta (e.g. after an over-count walk-back) is a
+> **no-op**, never an automatic `RETURN` — the material was already cut. Reversal is a separate,
+> explicit, reasoned verb: `POST …/material-allocations/{allocation_id}/return`, shipped in PR 3 and
+> documented under **Material ties** below. (This paragraph said the verb *"does not exist yet"* for
+> three PRs after it shipped; corrected 2026-07-27.)
+>
+> **A shortage never fails the completion.** Insufficient stock drives the source lot negative,
+> writes a tamper-evident **`ALLOCATION_SHORTAGE`** audit row, and emits a
+> `material_allocation_shortage` warning event. It is the allocation twin of `BACKFLUSH_SHORTAGE` /
+> `backflush_shortage` and is deliberately kept distinct from it in the audit trail. **Both are now in
+> the notification catalog** — `material.allocation_shortage` and, since PR 4.4,
+> `material.backflush_shortage` (both Purchasing / warning, in-app + email to the Purchasing and
+> Inventory departments); the backflush event had been emitted with no catalog row since Batch 6 and
+> therefore notified nobody. The **rolled-back** case — where the draw raised and the savepoint undid
+> it, so no stock moved at all — is separately keyed as `material.allocation_consumption_failed` /
+> `material.backflush_failed`, so "stock went negative" and "stock never moved" are distinguishable
+> without opening the audit log. PR 4.5 adds a third backflush key,
+> **`material.backflush_demand_refused`** (same category / severity / channels / recipients), for the
+> case where no draw was attempted at all because a blocking diagnostic condemned the demand — see the
+> completion-time refusal above. It is emitted **once per refused scope**, not once per diagnostic.
+> See [docs/NOTIFICATIONS.md](NOTIFICATIONS.md).
+>
+> **`GET /work-orders/{id}/backflush-preview` — the dry run (PR 4.5).** Returns, for this work order,
+> what a completion would draw out of stock: one `BackflushPreviewLine` per component, each carrying
+> `required_quantity`, `already_issued`, the `delta_quantity` that would actually post, the ordered
+> `lots` the draw would hit, `shortfall` / `would_go_negative`, and — where the shared policy passed over
+> segregated stock — `held_quantity_skipped` / `held_lot_numbers`. Three fields answer questions the
+> first cut of this endpoint could not: each lot carries **`is_shortfall`** (the writer posts the unmet
+> remainder as a SECOND issue against the last lot it drew, driving that lot negative and putting *its*
+> number on the as-built record — so a line may legitimately list one `inventory_item_id` twice);
+> **`shortfall_creates_placeholder`** says the part has no stock row at all, so the completion would
+> mint a lot-less placeholder row instead; and **`pinned_lot_is_held`** says a tie's pinned lot has gone
+> on hold / quarantine / rejected *since* it was pinned and the completion will consume it anyway
+> (recording `HELD_MATERIAL_CONSUMED`) — the one warning the `held_*` fields structurally cannot carry,
+> because a pinned draw is never short. Response-level `blockers` /
+> `advisories` are the demand resolver's diagnostics for **this** work order, including the routing
+> conditions the part-level readiness check cannot see. Any authenticated tenant user; a cross-tenant or
+> unknown id is **404**.
+> - **It models the ISSUE LOOP, not just the demand resolver** — both legs in the real order
+>   (work-order-scoped ties first, so a tie's lot pin gets first claim), the legacy
+>   `('work_order', ISSUE)` fence, the reconcile-to-target delta, and the actual lot pick through the
+>   same `consumable_source_items` + `plan_stock_draw` the writer uses. Preview and outcome therefore
+>   cannot disagree about which heat gets consumed — which is exactly the failure a preview built on its
+>   own predicate would produce silently.
+> - **Pure read. It writes NOTHING** — no ledger row, no `audit_log` row (in particular no
+>   `BACKFLUSH_DOUBLE_ISSUE_BLOCKED`, which the suppression layer used to write from inside the
+>   resolver), no operational event, nothing to commit. That is **structural**, not careful: the
+>   resolution layer takes no `AuditService` at all and the recording layer is a separate function only
+>   the completion path calls. Same rule as the per-allocation consumption read on this router — a poll
+>   is not an actor and records no reason.
+> - **Lines appear whether or not the part has opted in** (each carries `requires_opt_in`, and the
+>   response carries the part's current `backflush_components`), because the operator reading it is
+>   deciding whether to opt in.
+> - **`suppression_reason` values:** `converged` (the ledger already holds the whole target — the
+>   healthy steady state), `already_issued` (a legacy pre-4.4 one-shot row fences this work order out
+>   for that part, permanently), `ledger_consumed` (a tie already drew it), `open_operation_tie` (an
+>   open operation-scoped tie owns the demand; the material still moves, on the per-run engine), and
+>   `blocking_diagnostic` (a blocking diagnostic stands, so the completion refuses that component and
+>   records `BACKFLUSH_DEMAND_REFUSED` instead of issuing it).
+> - **`basis` is `quantity_complete + operation scrap`.** A work order that has produced nothing has a
+>   basis of 0 and therefore **no BOM lines at all**. That is the resolver's real behavior, not a preview
+>   artifact — and it is why part-level readiness runs at a synthetic basis of 1.0 instead.
 >
 > **Labor-hour + cost rollup on completion is opt-in (global flag `LABOR_COST_ROLLUP_ENABLED`,
 > default OFF).** When the flag is **on**, a work order reaching **COMPLETE** (any path, including
@@ -317,12 +533,23 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > (supervisor/office).** The role-gated twin of the operator's
 > `POST /shop-floor/operations/{id}/reduce-production` (see "Over-count correction" under Shop
 > Floor for the shared semantics — one shared core, the two paths cannot drift). It walks back
-> good-count quantity that was over-reported on an operation, **before** it is complete — a
+> good-count quantity that was over-reported on an operation — a
 > miscount correction, **not** a scrap move (scrap fields and statuses are never touched).
 > Differences from the shop-floor verb:
 > - **Role-gated**: `require_role([ADMIN, MANAGER, SUPERVISOR])` — an Operator gets **403** (this
 >   verb corrects **other operators'** labor records, a Work Orders **Edit** power, not operator
 >   self-service). Kiosk-scoped tokens can't reach it (path-fenced away from `/work-orders`).
+> - **A COMPLETE operation is correctable here.** The office verb passes
+>   `allow_completed_operation=True`; the operator's twin does not, and **neither** accepts a
+>   terminal work order. Both verbs previously hit the identical 409, so the operator was told to
+>   "ask a supervisor" whose own front door refused the same thing. The refusal was set on the
+>   rationale that a completed operation's downstream inventory / cost / FG effects had fired and
+>   could not be walked back; the reasoned **material return**
+>   (`POST /work-orders/{id}/material-allocations/{alloc}/return`) is now that walk-back, and
+>   lowering a completed operation's count is precisely what opens the bounded
+>   `correct_over_consumption` allowance the return is measured against. **Order matters: reduce
+>   first** (the count is the record), then return the material the lower count no longer accounts
+>   for. A corrected COMPLETE operation stays COMPLETE — it just carries a truthful count.
 > - **No clock-in required** — the supervisor is correcting from the office, not working the
 >   operation.
 > - **Scope: ALL unapproved labor on the operation, any operator's** — the walk goes open entries
@@ -339,8 +566,12 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > Body is the same `ProductionReductionRequest` (`quantity_delta` required `> 0` finite; `reason`
 > required non-blank ≤ 255 — a **correction** reason, not a scrap reason; optional `source` /
 > `notes`). Everything else matches the shop-floor twin: **tenant-scoped 404** before any mutation,
-> **before-completion only** (COMPLETE operation / terminal WO → **409** `"Completed work can't be
-> corrected here -- ask a supervisor"`, re-checked under the op→WO row locks), **row-locked +
+> the **terminal-work-order** refusal (**409** `"This work order is complete, closed or cancelled --
+> its recorded production can no longer be corrected"` — a message deliberately **split** from the
+> operator's "ask a supervisor" one, since referring a caller to a supervisor for a terminal work
+> order would be a false referral in the other direction; re-checked under the op→WO row locks with
+> the same predicate the pre-lock read used, so the fast-fail and the authoritative check cannot
+> drift), **row-locked +
 > optimistic-locked** (concurrent stale write → **409**), the same **recomputed WO rollup** (max
 > over non-component siblings — or, on a laser dispatch-pool WO, the **sum** of per-nest progress
 > capped at the WO total — only ever lowered), a **tamper-evident `audit_log` row** (action
@@ -408,6 +639,292 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > **Laser nest WOs refuse free-form operations.** `POST /work-orders/{id}/operations` returns
 > **400** on a `laser_cutting` work order — dispatch pools are managed exclusively by the nest
 > package import and manual nest entry, so a non-nest op can never ride the laser gating exemption.
+
+> **Material ties (`/work-orders/{id}/material-allocations`).** The optional tie between a work order
+> (or one of its operations) and a **material** part — what makes stock deplete as work completes.
+> Ties are **opt-in and additive**: a work order with no allocation rows behaves exactly as it did
+> before the feature, and there is no flag on `work_orders` and no default allocation. **Exactly one
+> verb on this router posts inventory: `POST …/{allocation_id}/return`.** Every other endpoint
+> manages the planning row only; consumption happens on the completion paths (see "Completion also
+> consumes tied material" above). The return is the deliberate exception, because un-consuming can
+> never be something a completion path does for you — see "Returning consumed material" below.
+>
+> The endpoints live on a **sibling router** under the same `/work-orders` prefix
+> (`app/api/endpoints/work_order_materials.py`, OpenAPI tag **Work Order Materials**). They are no
+> longer dark: the **Materials panel on the work-order detail page** reads `GET`, drives `PATCH` /
+> `DELETE` and hosts the **return dialog** (`GET …/consumption` then `POST …/return`), and the two
+> nest-creation paths write ties server-side (see Laser Nests → "Nest material
+> ties"). The read-only floor surfaces — the dispatch-board `material_tie` chip and the kiosk
+> `material_ties` line — do **not** call this router at all; they ride the shop-floor reads, which is
+> what keeps the kiosk path fence unwidened.
+>
+> Reads are open to any authenticated tenant user; **every mutating verb** is
+> `require_role([ADMIN, MANAGER, SUPERVISOR])`. The endpoints are deliberately **not** under
+> `/api/v1/shop-floor`, so kiosk-scoped operator tokens are path-fenced away from them — tying
+> material is an office/planning act, and the **return** sits on the same side of that fence for a
+> stronger reason than the rest: moving stock back with a reason is a bigger power than tying it.
+>
+> - **`GET …/material-allocations`** — every tie on the work order, ordered by id. `include_inactive`
+>   defaults to **`true`**: `cancelled` (and `closed`) rows are the tombstones the ledger's
+>   `allocation_id` resolves to, so hiding them would make consumed material look untied. Pass
+>   `include_inactive=false` for open ties only. A tie a **nest re-import detached** reads back with
+>   `work_order_operation_id: null` — the column is cleared so the superseded operation row can be
+>   deleted — plus **`detached_from_operation_id`** naming the operation it used to be scoped to,
+>   read back off the audit chain. Without that echo a detached tie is byte-identical to one that
+>   was always work-order-scoped. It is `null` on every tie that was never detached, and it is a
+>   reporting field: the `audit_log` row remains the record of record.
+> - **`POST …/material-allocations`** → **201**. Body (`MaterialAllocationCreate`): `part_id`
+>   (**required** — the material part, never the part being produced), `work_order_operation_id`
+>   (optional; **set ⇒ operation-scoped / per-run**, omit ⇒ work-order-scoped / one-shot), `source`
+>   (`nest` | `bom` | `manual`, default `manual`), `qty_per_run` (optional, `> 0`; **operation-scoped
+>   only** — the server stores **`1.0`** when omitted on an operation-scoped tie, and sending it on a
+>   work-order-scoped tie is a **422**, the same answer `PATCH` gives, since there are no runs to
+>   scale by), `qty_planned` (**required**, `> 0`), `pinned_inventory_item_id` (optional
+>   — consume from *this* lot; omit for automatic lot selection at consume time; a **held or
+>   inactive** lot is refused with 422). The pin is honored on **both** tie shapes: an
+>   operation-scoped tie consumes from it per run, and a work-order-scoped tie carries it into the
+>   completion backflush's tie leg. **Unpinned selection is now identical on both tie shapes**
+>   (PR 4.4): `received_date ASC NULLS LAST, id ASC` FIFO across consumable lots, spilling across as
+>   many lots as the demand needs. "Consumable" is `is_active` **and**
+>   `COALESCE(status, 'available') = 'available'` — so a legacy **NULL-status** lot **is** eligible,
+>   while `on_hold` / `quarantine` / `rejected` lots are **skipped**. Through PR 4 a work-order-scoped
+>   tie instead took the **lowest-id active on-hand lot** with **no status filter**, could therefore
+>   land on a held lot and consume it (writing `HELD_MATERIAL_CONSUMED` with `pin_directed: false`),
+>   and used a single lot for the whole demand. Held stock is no longer consumed on the unpinned path;
+>   it is **disclosed on the shortage record** instead (`held_quantity_skipped` / `held_lot_numbers`),
+>   so a shortage is never reported bare against material sitting in segregated status. On a **pinned**
+>   draw the shortage record names the **pin** instead (`pinned_lot`) — there the pin, not any lot's
+>   status, is why the rest was not drawn, and the two clauses are mutually exclusive. Both live on the
+>   audit record and the event payload only; a lot that was skipped appears on **no** genealogy line. A
+>   `HELD_MATERIAL_CONSUMED` row now means one thing only: a **pinned** lot held after it was pinned
+>   (`pin_directed` is always `true`). `notes`. `unit_of_measure` is
+>   **snapshotted** server-side from the part at tie time and is not client-settable. The work order
+>   must **not** be terminal (409).
+> - **`PATCH …/material-allocations/{allocation_id}`** — all fields optional; omitted fields are left
+>   alone. Accepts `qty_per_run`, `qty_planned`, `pinned_inventory_item_id`,
+>   `clear_pinned_inventory_item` (`true` drops the pin, back to automatic lot selection — since
+>   PR 4.4 that is the **same** `received_date` FIFO over consumable lots on **both** tie shapes, per
+>   the `POST` note above; sending it **together with** a `pinned_inventory_item_id` is a **422**, since
+>   the two ask for opposite things about a field that is a genealogy fact), and `notes`. Lowering `qty_planned` **below** `qty_consumed` is a
+>   **422** — the engine never auto-reverses, so the row would immediately read as over-consumed. `part_id`,
+>   `work_order_operation_id` and `source` are **deliberately not editable** — repointing a tie after
+>   consumption posted would rewrite genealogy; untie and re-tie instead. Consumption already posted
+>   is untouched: raising `qty_per_run` re-targets the sum-delta engine so the *next* completion tops
+>   up the difference, and lowering it is a no-op until the target overtakes what was consumed.
+> - **`DELETE …/material-allocations/{allocation_id}`** — the untie. Returns **200** with the updated
+>   row; it sets `status = "cancelled"` and **never physically deletes** (the ledger's `allocation_id`
+>   back-reference must keep resolving). Idempotent: untying an already-cancelled tie is a no-op that
+>   writes no second audit row. Audited as a `log_delete(soft_delete=True)` on
+>   `work_order_material_allocation`. Still refused **409** while the **ledger** shows material out
+>   against the tie — cancelling a tie that moved stock, without moving it back, would strand the
+>   ledger's `allocation_id` rows against a tombstone with no account of where the material went. The
+>   409 names the verb that does both: `POST …/return` with `intent: "return_and_untie"`. **The basis
+>   is the signed ledger net (ISSUE − RETURN), not the `qty_consumed` cache** (re-keyed in PR 4, the
+>   last of the three guards still reading the cache), so a **fully returned** tie can be untied.
+> - **`GET …/material-allocations/{allocation_id}/consumption`** — where this tie's material came
+>   from, per source lot, and how much of each lot can still take it back. Open to **any
+>   authenticated tenant user** (like the tie list — it discloses ledger facts about material the
+>   company already owns, and a return dialog that could not show them would be asking for a
+>   confirmation nobody could give). Answers from `inventory_transactions`, **never** from the tie's
+>   `qty_consumed` cache, and works on a `cancelled` tie — whose consumption is exactly what an
+>   operator most often needs to see. Array of `MaterialConsumptionLine`:
+>   `{inventory_item_id, lot_number, issued, returned, net}`. `net` (`issued − returned`, float dust
+>   clamped to 0) is the per-lot **cap** on any further return, and the array is ordered **newest
+>   source lot first** — the exact order a return credits in, so preview and outcome cannot disagree.
+>   A lot whose `net` is 0 is still listed: it is part of the tie's movement history, and dropping it
+>   would make a fully-returned tie look as though the material had never touched that lot. There is
+>   deliberately **no lot to choose** — this is a disclosure, not a picker. Pure read; it moves
+>   nothing and writes nothing.
+>
+> **Returning consumed material — `POST …/material-allocations/{allocation_id}/return`.** The
+> reasoned reversal, and the only un-consume there is. Consumption never auto-reverses (the consume
+> path also runs from a reconcile-on-read `GET`, where there is no actor, no intent and no reason to
+> record); this is that same reversal with all three attached — the compensating-transaction +
+> required-reason + audit pattern the receiving corrections established. **Nothing historical is
+> mutated**: every credit is an **appended** positive `RETURN` `InventoryTransaction`.
+>
+> Body (`MaterialReturnRequest`): `quantity` (**required**, `> 0`, in the tie's UoM), `intent`
+> (**required**), `reason` (**required**, non-blank, ≤ 500 — validated at the Pydantic boundary, so a
+> blank one is FastAPI's own **422**).
+>
+> **Two named intents, and nothing in between:**
+>
+> | `intent` | Bound on `quantity` | Tie afterwards |
+> |---|---|---|
+> | `correct_over_consumption` | `qty_consumed − live target` | stays `open` |
+> | `return_and_untie` | must equal the **full** `qty_consumed` | `cancelled`, same transaction |
+>
+> The bound on `correct_over_consumption` is the engine's own arithmetic: it is exactly the negative
+> delta the sum-delta engine computes and refuses to execute, so after the return `qty_consumed >=
+> target` and the engine no-ops forever. Returning **less** than that on a still-open tie is refused,
+> not merely discouraged — `target` is recomputed from live operation state on **every** call
+> including a reconcile-on-read `GET`, so the material would be re-consumed on the next completion
+> *or page load*, re-running FIFO and possibly crediting a **different lot** than it came from
+> (fabricated heat/cert linkage in an as-built record, AS9100D 8.5.2). `return_and_untie`'s
+> quantity is a **confirmation**, not a choice: a mismatch is a 422 that catches a stale client
+> (a completion landed between page load and submit) rather than returning a different amount than
+> the operator was looking at.
+>
+> **Material returns to the lots it came off, or not at all.** Source lots are walked **newest-first**
+> (the reverse of how consumption posted), so a consumption that FIFO-spilled across three lots
+> returns across those same three and one logical return becomes N ledger rows. Each row carries the
+> compensated ISSUE's `reference_type` / `reference_id` (mirrored — `work_order_ledger_filter`
+> matches on reference *shape*, never on transaction type, so job cost, analytics, lot genealogy and
+> `GET /inventory/transactions?work_order_id=` pick it up unchanged), the same `allocation_id`,
+> `reason_code: "MATERIAL_RETURN"`, and the **compensated row's `unit_cost`** — never the lot's
+> current cost, since a revaluation between consume and return would strand residual material cost on
+> the job. Returning **into a negative lot is expected** (a shortage-driven consumption drove it below
+> zero) and is not guarded.
+>
+> **Idempotency is arithmetic, not an index**: capacity per `(allocation_id, inventory_item_id)` is
+> `issued − already-returned`, so a replay cannot over-credit a lot. Allowed on a **`cancelled`** tie
+> (a consumed-then-cancelled tie is a real state — a work-order soft delete cancels open ties
+> regardless of consumption — and is exactly what the hard-delete 409 points at); a **soft-deleted**
+> work order is still **404**, so restore the work order first (an audited verb that also re-opens
+> the ties the delete cancelled) rather than moving stock against a job that is currently deleted.
+>
+> Response **200** (`MaterialReturnResponse`): `allocation_id`, `work_order_id`, `part_id`,
+> `part_number`, `intent`, `unit_of_measure`, `quantity_returned`, `qty_consumed_before`,
+> `qty_consumed` (after — still a **cache**; the ledger stays authoritative, and note this is the one
+> path that makes `qty_consumed` go **down**), `status` (`open` after a correction, `cancelled` after
+> an untie), and `returned_lots[]` —
+> `{inventory_item_id, lot_number, quantity, unit_cost, transaction_id, compensated_transaction_id}`,
+> one per credited lot. Render the per-lot breakdown, never one anonymous total.
+>
+> **Server-gated, therefore non-optimistic**: the whole point is that the server may refuse. Keep a
+> loading state and render only what the server returns (the `detail` is safe to display verbatim).
+>
+> ⚠️ **A return does NOT unlock a nest re-import, a work-order hard delete, or the
+> already-issued 409 on a work-order-scoped tie.** All three key on the **existence** of ledger rows,
+> and a return *appends* a row rather than removing one — after a full `return_and_untie` the ISSUE
+> **and** RETURN rows both still name the operation a rebuild would delete. Those refusals stand,
+> correctly, and their messages say so. See `docs/MATERIAL_CONSUMPTION_PLAN.md` → Residual gaps.
+>
+> **The plain `DELETE` untie is the one refusal a full return DOES clear**, since PR 4 keyed it to the
+> **signed** net rather than to existence. That is not an inconsistency with the three above: they ask
+> "would this orphan a ledger reference?", where a RETURN row counts as durably as the ISSUE it
+> compensates, while untie asks "is material still out?", where a returned tie is holding none. Do not
+> generalize either answer to the other question.
+>
+> **Error contract** (all lookups are tenant-scoped, so a cross-tenant id is **404**, never 403):
+>
+> | Code | When |
+> |------|------|
+> | **404** | Work order unknown, cross-tenant, or soft-deleted (`"Work order not found"`) |
+> | **404** | `part_id` unknown, cross-tenant, or soft-deleted (`"Material part not found"`) |
+> | **404** | `work_order_operation_id` is not an operation **of this work order** (`"Operation not found on this work order"`) |
+> | **404** | `pinned_inventory_item_id` unknown or cross-tenant (`"Pinned inventory lot not found"`) |
+> | **404** | `allocation_id` unknown, cross-tenant, or not on this work order (`"Material allocation not found"`) |
+> | **409** | **Duplicate open tie** — this part is already tied to the same scope. At most **one open tie per (work order, part)** for work-order-scoped ties and **one per (operation, part)** for operation-scoped ones. Enforced by an app-level check *and* by two partial unique indexes, so a concurrent race returns the same 409 rather than a 500. Re-tying after a `cancelled` row exists is allowed |
+> | **409** | **Untie while material is still issued** — `DELETE` while the **signed ledger net** (ISSUE − RETURN) against this tie is positive (*"N <uom> of material is still issued against this allocation. Return the material with intent 'return_and_untie', which credits it back to its source lots and closes this tie in one step."*). The remedy is a single call; untie stays refused on its own terms, since cancelling a tie that moved stock without moving it back would strand the ledger's `allocation_id` rows against a tombstone. **The basis changed in PR 4: it reads the ledger, not the `qty_consumed` cache** — the cache misjudged this in both directions (a `correct_over_consumption` to a zero live target left it at 0 on a tie the ledger still backed; the backflush advances a work-order-scoped tie's cache to `qty_planned`, which is not what the ISSUE posted). **Signed**, not existence-keyed, so a **fully returned tie can be untied** — existence-keying would 409 forever while `return_and_untie` 422s with nothing left to return |
+> | **409** | **`PATCH` on a non-open tie** (`"This allocation is <status>; only an open tie can be edited."`) |
+> | **409** | **`POST` on a TERMINAL work order** (`complete` / `closed` / `cancelled`). Every completion path refuses to re-enter a terminal work order, so the tie could never consume — it would sit `open` at `qty_consumed` 0 advertising demand that will never be met. `PATCH` / `DELETE` / `GET` on an existing tie stay available, so a historical tie is still readable and fixable |
+> | **409** | **`POST` of a work-order-scoped tie whose part carries a LEGACY one-time issue on this work order** (*"Part X already has a one-time issue recorded against work order Y; this tie could never consume — tie the material at the operation level instead, which posts outside the one-issue-per-work-order guard."*). **Wording corrected in PR 4.4; behaviour unchanged.** The guard keys on a `reference_type='work_order'` `ISSUE` row, and since PR 4.4 **nothing writes that shape** — the backflush posts `work_order_backflush` — so it matches only **pre-4.4** rows and is that work order's permanent fence out of the reconciling engine. The 409 names the remedy, and it is deliberately **not** "return the material": a return appends a compensating row and never removes the ISSUE row, while this check (and `uq_wo_inventory_issue` behind it) keys on that row's **existence** — so a return would leave this 409 firing exactly as before, having moved stock for nothing. An operation-scoped tie posts outside the index and is unaffected. **The refusal is also UNREACHABLE and is kept deliberately**: creating a tie requires a non-terminal work order, a `work_order`-shaped component ISSUE requires the backflush, the backflush only runs at COMPLETE, and COMPLETE → non-terminal is blocked — so no client can produce the state. It costs one existence query, fails safe, and stays correct if that reachability argument ever stops holding; a refusal whose *stated reason* was false is what PR 4.4 fixed |
+> | **422** | **Cross-part / cross-UOM lot pin** — `pinned_inventory_item_id` names a lot of a *different* part. The detail names the unit-of-measure clash when the two parts also disagree on units (*"Unit-of-measure mismatch: … No unit conversion exists"*); otherwise it reads *"The pinned lot belongs to a different part"*. There is **no unit conversion anywhere in the platform** — cross-UOM is refused, never guessed |
+> | **422** | **Held or inactive lot pin** — `pinned_inventory_item_id` names a lot whose `status` is not `available` (`on_hold` / `quarantine` / `rejected`) or that is inactive (*"Lot L is 'quarantine' and may not be tied to work…"*). FIFO already skips such lots; the pinned branch does not, so pinning one would consume nonconforming material into product (AS9100D 8.7). Refused at **tie** time because consumption also runs from a `GET`, where refusing is not an option — a lot held *after* it was pinned still consumes, and writes a `HELD_MATERIAL_CONSUMED` audit row instead. **Nothing in the application ever writes a held `InventoryItem.status`** (no endpoint or schema exposes the column; it is only ever set to `available` at creation, and there is no lot-deactivation verb), so both halves of this control can currently only fire on data set outside the app — a direct DB write, an import, or a future hold verb |
+> | **422** | `qty_per_run` sent on a **work-order-scoped** tie, via `POST` **or** `PATCH` (`"qty_per_run applies to operation-scoped ties only."`) |
+> | **422** | `PATCH` sent **both** `clear_pinned_inventory_item: true` and a `pinned_inventory_item_id`. The clear used to win silently, so a caller who wanted the new pin got an unpinned tie and a 200 |
+> | **422** | `PATCH` lowering `qty_planned` **below** `qty_consumed` (*"qty_planned cannot be lowered to N: M sheets has already been consumed… Return the over-consumed material first (Return material on this tie), then lower the plan."*). Lowering it *to* the consumed quantity is allowed |
+> | **422** | `PATCH` lowering `qty_per_run` so far that the **live target** (`qty_per_run × (quantity_complete + quantity_scrapped)`) falls below `qty_consumed` — the operation-scoped twin of the `qty_planned` rule, and until this shipped the cheapest way in the API to manufacture `consumed > target`. Refused rather than merely recorded, because `target` is exactly what bounds `correct_over_consumption`: lowering `qty_per_run` toward zero would open an **unbounded** return against a tie that stays `open`, which is the middle ground the two intents exist to close. The predicate is "never **worsen** the gap", not "never have a gap" — raising `qty_per_run` on an already-over-consumed tie is allowed, since it reduces the problem. Skipped entirely when the operation is no longer on the work order (its live target is already 0) |
+> | **422** | Body validation — `qty_planned` / `qty_per_run` must be `> 0` |
+>
+> **`POST …/{allocation_id}/return` error contract.** Eleven distinct refusals. The service carries
+> the status with the refusal so the split cannot drift: **422** means "ask differently" (a bound the
+> caller can satisfy by naming the other intent or a smaller quantity), **409** means "the ledger
+> cannot express this" — receiving's *409 rather than guess* posture. **Every refusal fires before
+> the first ledger row is written**, so a refused return leaves the ledger untouched rather than
+> half-credited.
+>
+> | Code | When |
+> |------|------|
+> | **404** | Work order unknown, cross-tenant, or **soft-deleted** (`"Work order not found"`). Restore the work order first — the restore is itself audited and re-opens the ties the delete cancelled |
+> | **404** | `allocation_id` unknown, cross-tenant, or not on this work order (`"Material allocation not found"`; the service re-checks and answers *"Material tie not found on this work order."*) |
+> | **422** | **Blank reason** — FastAPI's own validation from `MaterialReturnRequest` (`min_length=1` plus a strip-and-check validator), the same boundary `ReceiptCorrection.reason` uses. The service re-asserts it, since it is callable without the schema and an unreasoned compensating movement is what the audit chain must never contain |
+> | **422** | **Non-positive `quantity`** (`gt=0` on the schema; `"Return quantity must be greater than zero."` from the service) |
+> | **422** | **Nothing consumed** (*"Nothing has been consumed against this material tie, so there is nothing to return. Untie it instead if the material is no longer needed."*) |
+> | **422** | **`quantity` exceeds `qty_consumed`** (*"Cannot return N: only M has been consumed against this tie."*) |
+> | **422** | **`correct_over_consumption` past the live bound** (*"…the work still accounts for T and only A is over-consumed. Returning more would be re-consumed automatically the next time this work order is completed or read. Use return_and_untie to give all the material back and close the tie."*). The detail names the intent to use instead |
+> | **422** | **`return_and_untie` that is not the full consumed quantity** (*"return_and_untie returns everything consumed against this tie, which is currently C, not N. Re-read the tie and confirm that quantity."*) |
+> | **422** | **Unsupported `intent`** — unreachable while the enum has two members, and deliberately exhaustive rather than a permissive fall-through: a third intent added without a bound of its own would otherwise post an **unbounded** return against a live tie |
+> | **409** | **The ledger has less returnable than asked** (*"…the ledger shows only R still returnable against this tie. The inventory ledger is authoritative and the tie's consumed quantity is only a cache; make a manual inventory adjustment if stock genuinely needs to move."*). This is the cache/ledger disagreement case — trusting `qty_consumed` here would credit stock no ISSUE row ever took |
+> | **409** | **A source lot is gone** — the stock row the consumption came off no longer exists (nothing in `app/` deletes stock rows, so this means an out-of-band write). Crediting any other lot would misstate lot traceability |
+> | **409** | **A source lot is a placeholder row** — the lot-less, finished-goods-located anchor the engine mints when a part has no stock at all. Crediting it would create unlabeled, FIFO-eligible stock out of a row that exists purely as a ledger anchor (AS9100D 8.5.2) |
+>
+> `GET …/{allocation_id}/consumption` refuses only on the two **404**s above (work order, allocation).
+>
+> **Concurrency.** The return takes `SELECT … FOR UPDATE` on the **operation, then the work order**
+> (the completion paths' order) *before* computing the bound — a return writes neither row, so
+> invariant 4's optimistic lock does not cover it, and a completion landing mid-request would
+> otherwise raise `target` underneath the check and silently invalidate the
+> `correct_over_consumption` guarantee.
+>
+> Every create, edit, untie, and **return** writes a tamper-evident `audit_log` row (`GET /audit/`)
+> on resource type `work_order_material_allocation`. A return writes the `qty_consumed` change as an
+> `UPDATE`, plus the dual `inventory` rows per credited lot (the `RETURN` ledger row and the on-hand
+> move it caused); a `return_and_untie` writes a **second** row for the cancel, stamped
+> `extra_data.reason: "material_returned"` — deliberately **not** the work-order-delete cancel
+> reason, so a delete/restore round trip cannot resurrect a tie whose material was given back. The
+> reason text lands in three places on purpose: the ledger row's `notes`, the audit `description`,
+> and `extra_data.reason`.
+
+> **Ties on work-order delete (`DELETE /work-orders/{id}`).** The two delete modes differ, and the
+> split follows the rule that posted consumption is a fact:
+> - **Soft delete** (the default) is **never refused** because of a tie. Every **open** tie is
+>   auto-**cancelled** with an audit row (`reason: "work_order_deleted"`), closing out forward-looking
+>   demand; **consumption already posted stands** — the material was physically used and the ledger is
+>   the compliance record. `POST /work-orders/{id}/restore` is the inverse: it re-**opens** exactly the
+>   ties that delete cancelled (audited, `RESTORE`), so a restored work order keeps depleting its tied
+>   material. Ties cancelled for any *other* reason — a manual untie, a nest re-import supersede — are
+>   deliberately left `cancelled`; the discriminator is the cancel's own audit `reason`. A
+>   `return_and_untie` cancel is stamped `reason: "material_returned"` for exactly this reason — a
+>   delete/restore round trip must not resurrect a tie whose material was given back.
+> - **Hard delete** (`hard_delete=true`, draft/cancelled WOs only) returns **409** when any
+>   `inventory_transactions` row actually references a tie on the work order (*"Material movement is
+>   on the inventory ledger for N tied allocation(s) on this work order, so it cannot be permanently
+>   deleted — returning the material does not remove that history. Soft delete instead; the work order
+>   and its material record stay intact."*), because a hard delete physically removes the operations
+>   and ties the ledger's
+>   consumption rows point at. The guard queries the **ledger**, not the `qty_consumed` cache: the
+>   cache is documented as non-authoritative and the `allocation_id` FK carries no `ON DELETE`, so
+>   keying on it would turn any drift into a 500 instead of this 409. **A material return does not
+>   clear this refusal** — a `RETURN` row carries the compensated ISSUE's `allocation_id`, so a fully
+>   returned tie is still ledger-backed; the message used to say "Reverse consumption first", which
+>   would now name a verb that exists and still would not help. Unconsumed ties are removed with
+>   the work order, each audited first (`reason: "work_order_hard_deleted"`).
+
+##### Material allocation schema (`MaterialAllocationResponse`)
+
+```json
+{
+  "id": 12,
+  "work_order_id": 480,
+  "work_order_operation_id": 3311,
+  "operation_number": "10",
+  "part_id": 77,
+  "part_number": "SHT-CR-0250",
+  "part_name": "Cold Rolled Sheet 0.250",
+  "source": "nest",
+  "status": "open",
+  "qty_per_run": 1.0,
+  "qty_planned": 5.0,
+  "unit_of_measure": "sheets",
+  "qty_consumed": 3.0,
+  "pinned_inventory_item_id": null,
+  "pinned_lot_number": null,
+  "notes": null,
+  "created_by": 4,
+  "created_at": "2026-07-25T14:03:11Z",
+  "updated_at": "2026-07-25T15:20:02Z"
+}
+```
+
+> `status` is one of `open` / `closed` / `cancelled` and is **the tombstone** — there is no
+> `is_deleted` on this resource. `source` is `nest` / `bom` / `manual`. `qty_consumed` is a
+> **denormalized cache**: the authoritative total is always the sum of the ledger rows carrying this
+> allocation's id (`inventory_transactions.allocation_id`) — reconcile from the ledger, not from this
+> field, in a compliance answer. `unit_of_measure` is the snapshot taken at tie time, so it stays
+> readable after the part's UoM is changed. Nothing in this release writes `closed`; ties end their
+> life either `open` or `cancelled`.
 
 #### Work Order Schema
 
@@ -478,6 +995,41 @@ mixed**:
 > to **RELEASED**, `quantity_complete`/`quantity_scrapped` zeroed, `quantity_ordered` re-derived to
 > the package's total planned runs. The audit rows commit atomically with the rebuild.
 >
+> **Re-import is refused (409) when a wiped operation already consumed tied material.** Because the
+> rebuild destroys the laser operations, any **material allocation** scoped to one of them would be
+> left pointing at nothing — and the `ISSUE` ledger rows that carry its lot genealogy reference the
+> operation id. So the import resolves the operations it is about to wipe **before deleting
+> anything** and checks their ties:
+> - Any tie the **ledger** references → **409 Conflict** (*"Cannot rebuild this work order's
+>   operations: this work order's material movement is already on the inventory ledger for N tied
+>   allocation(s), and the rebuild would delete the operations those ledger rows are recorded against
+>   — dropping them out of job cost, analytics and lot traceability. Returning the material does not
+>   change that. Raise a new work order for the corrected nest package; this one keeps its material
+>   history intact."*). **Nothing is destroyed** — the guard runs ahead of the wipe, and uploaded blobs
+>   are reaped. **This is reachable as soon as ONE nest's operation completes**, not only after the
+>   whole work order finishes: consumption moved to operation completion, so the first completed nest
+>   on a three-nest package locks that package.
+>
+>   ⚠️ **The material RETURN verb is deliberately NOT the remedy here, and the guard is keyed to the
+>   ledger rather than to `qty_consumed` precisely so it cannot be mistaken for one.** A full
+>   `return_and_untie` drives the cache to 0, but the original `ISSUE` row **and** the new `RETURN`
+>   row both still carry `reference_type='work_order_operation'` with `reference_id` = an operation
+>   the rebuild is about to delete — and `work_order_ledger_filter` resolves operation ids through a
+>   **live subquery**, so those rows would silently drop out of job cost, analytics and lot genealogy
+>   while remaining in the ledger. (The FK also has no `ON DELETE`, so on Postgres the delete raises
+>   `IntegrityError` that this endpoint reports as the misleading generic **400** below.) Returning
+>   the material retires the tie's forward-looking demand; it cannot un-write the movement history
+>   that names those operations. **The remedy is a new work order.**
+> - Ties with no ledger rows are **cancelled** (status → `cancelled`, never deleted) with an audit row
+>   (`reason: "superseded_by_reimport"`), the same posture as the superseded nests themselves, **and
+>   detached** — their `work_order_operation_id` is set NULL. That FK carries no `ON DELETE`, so a
+>   still-attached tie makes the operation delete raise `IntegrityError`, which this endpoint reports
+>   as the misleading generic **400** below; the tie's original scope is preserved in the audit row
+>   (`old_values.work_order_operation_id` / `extra_data.work_order_operation_id`).
+>
+> A laser WO with no material ties — every WO today, since ties ship dark — is unaffected: the guard
+> is one tenant-scoped SELECT that returns nothing.
+>
 > **Standalone nest work orders (no parent, no part).** The `…/standalone` pair runs the same wizard
 > flow with no work order in the path. `preview` is behaviorally identical to the `{id}` preview;
 > `import` takes the same form fields (`file`/`source_path`, optional `work_center_id`, optional
@@ -504,6 +1056,15 @@ mixed**:
 > operates **on that WO directly** — no child is nested under it. This is how re-import and manual
 > nest-add work on standalone nest WOs from the WO-detail wizard; for every other WO type the classic
 > find-or-create-child flow is unchanged.
+>
+> **A soft-deleted laser child is never rebuilt — `409`.** Find-or-create resolves only **live**
+> children (`is_deleted = false`). When the addressed parent's only laser child is **soft-deleted**,
+> `…/laser-nest-packages/import` and `…/laser-nests/manual` return **409** naming that work order and
+> the remedy (`POST /work-orders/{id}/restore`) — they neither resurrect it (the rebuild force-sets
+> `released`, which would put a deleted WO back on the floor with none of the restore path's
+> controls, including the material-tie re-open) nor fork a **second** laser child alongside it. The
+> directly-addressed route already answered **404** for a soft-deleted WO; this closes the
+> parent-addressed one.
 >
 > **Laser WOs are dispatch pools — every nest READY, no sequence gating.** A laser-cutting WO's
 > nest operations carry sequence numbers for stable labels/ordering only ("Nest N") — they have
@@ -595,8 +1156,9 @@ mixed**:
 >   then `import` re-sends the same ZIP
 >   **plus an optional `rows` form field** — a JSON array of confirmed rows
 >   `{source_file, cnc_number, nest_name, planned_runs, material, thickness, sheet_size}` (plus
->   `source_pages` on bare-PDF rows — see below — and an optional per-row `work_center_id`
->   override — see "Work-center selection" above). When
+>   `source_pages` on bare-PDF rows — see below — an optional per-row `work_center_id`
+>   override — see "Work-center selection" above — and an optional per-row **material tie**,
+>   `material_part_id` + `qty_per_run`, see below). When
 >   `rows` is present, the backend matches each row to its PDF by `source_file`, stores each PDF as
 >   a `DRAWING` `Document` (attached via `document_id`), sets `cnc_number`, writes one `log_create`
 >   audit row per nest, and builds the target laser WO — **no second AI call** (the re-sent ZIP only
@@ -607,7 +1169,9 @@ mixed**:
 >   `source_pages` optional (required on the bare-PDF path — see below): non-empty, entries
 >   **≥ 1**, ascending and consecutive,
 >   `work_center_id` optional and **> 0** (per-nest override; must resolve to an **active**,
->   company-scoped work center, else **404** before anything is persisted), and
+>   company-scoped work center, else **404** before anything is persisted),
+>   `material_part_id` optional and **> 0** with `qty_per_run` optional and **> 0** (the per-nest
+>   material tie — see "Nest material ties" below), and
 >   `cnc_number` / `nest_name` / `material` / `thickness` / `sheet_size` length-bounded as on the
 >   manual path. Import-specific **400** cases: `rows` not valid JSON / not a JSON array; any row
 >   failing validation; a **duplicate `source_file`** across rows; and a DB constraint/length fault
@@ -666,7 +1230,8 @@ mixed**:
 >
 > **Manual nest create (`POST /work-orders/{id}/laser-nests/manual`).** Body: `cnc_number`
 > (required, 1–100 chars), `planned_runs` (required, **≥ 1**), and optional `nest_name`,
-> `material`, `thickness`, `sheet_size`. Resolves the target laser WO (find-or-create the child on
+> `material`, `thickness`, `sheet_size`, plus the same optional **material tie** the import rows take
+> (`material_part_id` **> 0**, `qty_per_run` **> 0** — see "Nest material ties" below). Resolves the target laser WO (find-or-create the child on
 > an assembly WO; the addressed WO itself when it is `laser_cutting`) and an active
 > laser work center — **400** if no active laser work center exists (auto-detected with the same
 > Ermaksan-fiber-first, tube-last preference — see "Work-center selection" above). Every manual
@@ -676,6 +1241,29 @@ mixed**:
 > nest plus its backing operation (`work_order_operation_id`, `operation_status`). Besides the
 > per-nest `log_create`, the add writes a WO-level `log_update` (reason `manual_laser_nest_added`)
 > recording the forced-**RELEASED** status and the re-derived `quantity_ordered` on the laser WO.
+>
+> **Nest material ties (`material_part_id` + `qty_per_run`).** Both nest-creation paths — the PDF
+> confirm-and-commit import row and the manual create body — take an optional pair naming the stock
+> part (sheet/plate) the nest consumes. When `material_part_id` is set, the server creates an
+> **operation-scoped** `WorkOrderMaterialAllocation` on that nest's freshly-created operation
+> (`source: "nest"`, unpinned, `qty_per_run` defaulting to **1.0**, `qty_planned = qty_per_run ×
+> planned_runs`, `unit_of_measure` snapshotted from the part), so the material is deducted **when the
+> laser work order finishes** — not per nest. Omit it and the nest is untied and byte-identical to its
+> pre-feature behavior: no allocation row, no audit row.
+>
+> The tie is created **inside the import transaction**, not by a follow-up `POST` to
+> `…/material-allocations`: the import is atomic and a second call would not be, so a failed follow-up
+> would leave nests a planner believes are tied that never deplete — with no compensating verb to fix
+> it. Both paths run the same `create_nest_material_allocation` seam, so an imported tie and a
+> hand-created one produce identical rows and identical `work_order_material_allocation` `log_create`
+> hash-chain entries. Every distinct `material_part_id` is resolved **before** the rebuild wipes the
+> prior nests, so a bad or cross-tenant id is a clean **404** ("Material part not found", never 403)
+> with nothing persisted; soft-deleted parts are refused the same way. `qty_per_run` **without**
+> `material_part_id` is a **422** on the manual path / **400** on the import path rather than a
+> silently dropped field. There is deliberately **no fuzzy auto-match** from the AI-extracted
+> `material` free text to a part — a wrong auto-tie would deplete the wrong heat lot into an as-built
+> record — so the planner picks explicitly or the nest ships untied. See "Material ties" under Work
+> Orders for the tie lifecycle and `docs/MATERIAL_CONSUMPTION_PLAN.md` for the design record.
 >
 > **Manual nest edit (`PATCH /laser-nests/{id}`).** All-optional body (`cnc_number`, `nest_name`,
 > `planned_runs`, `material`, `thickness`, `sheet_size`). A `planned_runs` change **reverse-syncs**
@@ -687,8 +1275,11 @@ mixed**:
 > drawing** — optional, with **no approval workflow**, and it **never gates clock-in**. Attach
 > references a Document already uploaded via `POST /documents/upload`; non-PDF documents are
 > rejected with **400**. `GET /laser-nests/{id}/document` serves it `Content-Type: application/pdf`,
-> `Content-Disposition: inline` so the kiosk/operator station can preview it; **404** if none is
-> attached. Detach only clears the FK — the Document row and its stored bytes survive.
+> `Content-Disposition: inline` so the operator can preview it; **404** if none is attached. Kiosk
+> surfaces preview through the fence-safe `GET /shop-floor/documents/{document_id}/inline` twin
+> instead (badge-minted kiosk tokens can't reach `/laser-nests` — see Shop Floor → "Kiosk doc
+> viewer"); this route remains the desktop path. Detach only clears the FK — the Document row and
+> its stored bytes survive.
 >
 > **Soft delete (`DELETE /laser-nests/{id}`).** Soft-deletes the nest (`SoftDeleteMixin`; never a
 > hard delete) and sets its operation to **`ON_HOLD`**, which removes it from the operator/work-center
@@ -715,10 +1306,11 @@ mixed**:
 | GET | `/parts/` | List all parts | Yes |
 | POST | `/parts/` | Create part | Yes |
 | GET | `/parts/{id}` | Get part by ID | Yes |
-| PUT | `/parts/{id}` | Update part | Yes |
+| PUT | `/parts/{id}` | Update part (**409** when it turns `backflush_components` on and the part's readiness check reports blockers — see below) | Admin / Manager / Supervisor |
 | DELETE | `/parts/{id}` | Delete part (soft delete — restorable) | Admin |
 | POST | `/parts/{id}/restore` | Restore a soft-deleted part | Admin / Manager |
 | GET | `/parts/{id}/bom` | Get BOM for part | Yes |
+| GET | `/parts/{id}/backflush-readiness` | **PR 4.5** — may this part opt into automatic BOM component backflush, and what refuses it if not. Pure read (writes nothing) | Yes |
 
 #### Part Schema
 
@@ -731,17 +1323,112 @@ mixed**:
   "type": "manufactured",
   "unit_of_measure": "EA",
   "material_type": "ST-304",
-  "is_active": true,
   "backflush_components": false,
+  "is_active": true,
   "created_at": "2024-01-01T10:00:00Z"
 }
 ```
 
-> `backflush_components` (boolean, default `false`) opts this part into **component backflush on
-> work-order completion**: when a work order for this part completes, its BOM components are
-> auto-consumed via negative `ISSUE` inventory transactions. Leave it `false` (the default) when
-> material is issued manually, to avoid double-consuming stock. See the completion-inventory notes
-> under [Work Orders](#work-orders).
+> **`backflush_components` is in the payload again — and the history matters, because it was wrong in
+> both directions before it was right.** The sample originally listed the field while no part endpoint
+> returned it (the column existed on the `parts` **table** since migration `040`, but on no Pydantic
+> schema); PR 4 removed it from the sample rather than re-annotating it, because a schema block is the
+> one place a reader is entitled to take literally. **PR 4.5 put it on `PartResponse`**, so the sample is
+> accurate for the first time. `GET /parts/{id}` and the **list** endpoints agree: the list helper
+> hand-builds its kwargs, so the field is populated there explicitly rather than inherited.
+>
+> The flag (boolean, default `false`) opts a part into **component backflush on work-order completion** —
+> its BOM/routing components auto-consumed via negative `ISSUE` transactions when a work order for it
+> completes (see [Work Orders](#work-orders) → completion inventory effects).
+>
+> **Where it can be set — deliberately narrow.** The field is on **`PartResponse` and `PartUpdate` only**.
+> It is **not** on `PartBase`, therefore not on `PartCreate`: both create endpoints and both CSV importers
+> splat `Part(**data)`, so a field on `PartBase` would become settable on four write paths at once with
+> no gate. A part is always **created off** and can only be switched on through an update. Sending an
+> explicit `null` is **422** (the column is `NOT NULL`; omission, not `null`, is the "leave it alone"
+> sentinel).
+>
+> **Turning it ON is gated (409).** Both update doors — `PUT /parts/{id}` and `PUT /materials/{id}`,
+> which write the same `parts` rows through the same schema — run one **shared** refusal gate
+> (`assert_backflush_change_allowed`, defined once in `parts.py` and imported by `materials.py`; a gate in
+> only one of the two files would not be a gate). It runs **before the first field is written**, so a
+> refusal leaves the row untouched. If the part's readiness check reports any **blocking** diagnostic the
+> request is refused **409** with `detail` as a **plain string** — one sentence per blocker, joined —
+> reading *"Part {part_number} cannot enable automatic backflush: {what is wrong}. {what to change}."*
+> The **structured** form is on `GET /parts/{id}/backflush-readiness`, which the UI calls first.
+> Turning it **OFF is always allowed** (stopping automatic consumption can never issue wrong material),
+> and a request that re-states the flag's current value is not gated at all.
+>
+> **`GET /parts/{id}/backflush-readiness`** returns `{part_id, part_number, backflush_components,
+> eligible, blockers[], advisories[]}`, each diagnostic carrying a stable `code`, a `severity`
+> (`blocking` / `advisory`), an operator-facing `detail`, and optional `bom_item_id` /
+> `component_part_id` / `component_part_number` / `operation_id` context. Any authenticated tenant user.
+> **Pure read — writes nothing.** Blocking codes today: `deleted_part`, `no_demand_source`,
+> `deleted_active_bom`, `phantom_without_bom`, `alternate_group_without_primary`, `zero_bom_quantity`,
+> `negative_bom_quantity`, `unit_of_measure_mismatch`, `missing_component_part`, `circular_bom`,
+> `bom_depth_exceeded`, `foreign_component_part`; plus, on the work-order preview only,
+> `operation_names_own_part`, `operations_disagree_on_component`,
+> `routing_component_excluded_by_bom`, `routing_bom_quantity_disagreement`. Advisories:
+> `routing_only_no_bom`, `zero_quantity_ordered`, `incomplete_operation_demand`, `tie_basis_mismatch`,
+> `tie_operation_missing`.
+>
+> Two of those carry a caveat worth stating at the contract:
+> * **`no_demand_source` is blocking HERE and advisory on the preview.** At part opt-in it means
+>   "arming this would consume nothing", which is a real refusal; at work-order scope it means
+>   "this job has no BOM", which is the ordinary case for a turned part or a part-less nest package
+>   and must not paint a red banner over a healthy job.
+> * **`missing_component_part` and `foreign_component_part` never disclose a component outside this
+>   company.** A BOM line whose `component_part_id` does not resolve to a part in the active company
+>   yields `missing_component_part` carrying **only `bom_item_id`** — no `component_part_id`, no
+>   `component_part_number`, and no name in `detail`. A same-tenant **soft-deleted** component does
+>   name itself (`foreign_component_part`), because it is this company's own part and the sentence is
+>   otherwise unactionable.
+>
+> **`eligible: true` is a snapshot, never authorization — and it covers the BOM half only.** Every input
+> it reads — BOM lines and their `is_alternate` / `is_optional` / `item_type` / `quantity` /
+> `unit_of_measure` — is mutable afterwards by other people, which is why the identical check re-runs
+> server-side on the write. Readiness runs the explosion at a **synthetic basis of 1.0**, because the real
+> basis is `quantity_complete + operation scrap` and would be zero at opt-in time — which would pronounce
+> every part clean.
+>
+> **Three limits, because `eligible: true` (and the `backflush_readiness: "clean"` it writes onto the
+> audit row) is routinely overread:**
+> * **The routing half is never checked here at all.** `backflush_readiness_for_part` runs the BOM
+>   explosion and nothing else; `operation_names_own_part`, `operations_disagree_on_component`,
+>   `routing_component_excluded_by_bom` and `routing_bom_quantity_disagreement` need a work order and
+>   appear only on `GET /work-orders/{id}/backflush-preview`. An eligible part can still resolve wrong
+>   demand on a specific job.
+> * **It is a one-time check.** It is evaluated at the flip and never again — not on a BOM edit, not on a
+>   routing change, not at release, not at completion.
+> * **Nothing on the BOM or routing edit path knows a part is armed.** Anyone with `boms:edit` /
+>   `routings:edit` — the same ADMIN/MANAGER/SUPERVISOR tier — can change any input afterwards with no
+>   warning, no re-check and no notification on the editing side.
+>
+> What stands behind the flip is the **completion-time refusal** described under
+> [Work Orders](#work-orders) → completion inventory effects: a blocking diagnostic drops the demand it
+> describes and writes a `BACKFLUSH_DEMAND_REFUSED` audit row. That is a net, not a second gate.
+>
+> **Three residuals the owner accepted rather than designed around**, because exposure uses the ordinary
+> part-edit field instead of a dedicated reasoned verb: the flip is **Supervisor-tier** (the same
+> permission as editing a description); **no reason is captured** (the audit row records who, when,
+> false→true, and the readiness verdict that authorized it in `extra_data` — not why); and **a concurrent
+> flip does not 409**, because `Part` maps no `version` column, so `PartUpdate.version` is written onto an
+> unmapped attribute and last write wins. See
+> [docs/CMMC_LEVEL_2_COMPLIANCE.md](CMMC_LEVEL_2_COMPLIANCE.md) and
+> [docs/MATERIAL_CONSUMPTION_PLAN.md](MATERIAL_CONSUMPTION_PLAN.md) → Delivery, PR 4.5.
+>
+> **The flip is auditable from ONE query, through either door.** `PUT /materials/{id}` writes the same
+> `parts` row and logs this change as `resource_type="part"` (not `"material"`) for exactly that reason,
+> so *"who armed automatic stock movement, and when"* does not depend on which URL was used. The
+> canonical query recipe — the predicate, how to narrow it to arming rather than disarming, and what it
+> does and does not return — is written down once, in
+> [docs/CMMC_LEVEL_2_COMPLIANCE.md](CMMC_LEVEL_2_COMPLIANCE.md) → the 2026-07-27 (PR 4.5) changelog row,
+> item (3). `create_material` / `delete_material` still log `"material"`, so a material's *full* history
+> is still a two-resource-type query.
+>
+> A **work-order material tie** remains the way to make one specific job consume material **without**
+> this flag, and is the only one of the two with production mileage — see
+> [Work Orders](#work-orders) → "Material ties".
 
 ### BOM (Bill of Materials)
 
@@ -749,9 +1436,16 @@ mixed**:
 |--------|----------|-------------|---------------|
 | GET | `/bom/` | List all BOMs | Yes |
 | POST | `/bom/` | Create BOM | Yes |
+| GET | `/bom/uom-mismatches` | **PR 4.5** — BOM lines whose stated unit of measure disagrees with the component part's. Pure read (writes nothing). **Has a UI:** `/bom/uom-mismatches`, sidebar **Engineering → BOM Unit Mismatches** — see [below](#where-this-is-worked--the-bom-unit-mismatches-screen) | Admin / Manager / Supervisor |
 | GET | `/bom/{id}` | Get BOM by ID | Yes |
 | PUT | `/bom/{id}` | Update BOM | Yes |
 | DELETE | `/bom/{id}` | Delete BOM | Admin |
+| POST | `/bom/{id}/items` | Add a line to a BOM. ⚠️ **`unit_of_measure` changed behaviour on 2026-07-27** — see [below](#bom-line-unit-of-measure) | Admin / Manager / Supervisor |
+| PUT | `/bom/items/{id}` | Update a BOM line. ⚠️ Same — an omitted `unit_of_measure` is left alone; an explicit clear re-inherits | Admin / Manager / Supervisor |
+| DELETE | `/bom/items/{id}` | Remove a BOM line | Admin / Manager |
+
+`POST /bom/` also accepts its lines inline, so it is a BOM-line write path too and carries the
+same `unit_of_measure` change.
 
 #### BOM Item Schema
 
@@ -765,6 +1459,166 @@ mixed**:
   "is_optional": false
 }
 ```
+
+#### BOM line unit of measure
+
+> ⚠️ **BEHAVIOUR CHANGE on shipped endpoints, 2026-07-27 (owner decision).** What the server
+> stores for a BOM line that arrives **without** a `unit_of_measure` changed. **Before:** the
+> literal `"each"`, from a schema default. **After:** the **component part's own**
+> `unit_of_measure`. Same request, different stored value. No client change is required and
+> no request is newly rejected — but a client that relied on omission meaning `"each"` no
+> longer gets it, and **existing rows were not rewritten** (see the [report](#get-bomuom-mismatches--the-pre-arming-remediation-worklist)
+> immediately below).
+
+A BOM line's `unit_of_measure` is **optional on input**. When it is omitted, the server
+resolves it to the component part's own; the literal `"each"` survives only as the last
+resort — when the component cannot be resolved, or has no unit of its own. **A stated value
+always wins**, so this resolves an *absence* and never second-guesses a caller. The two
+document importers additionally normalise a stated value (`ea` → `each`, `lbs` → `pounds`)
+exactly as they always have; the two JSON paths still store the client's string verbatim.
+The **response** field stays non-null and its type is unchanged.
+
+Applies to every BOM-line write path: `POST /bom/` (lines supplied inline),
+`POST /bom/{id}/items`, `POST /bom/import/commit` and `POST /bom/import`.
+`PUT /bom/items/{id}` is the one exception and deliberately so — **it is not a
+backfill**: a request that does not mention `unit_of_measure` leaves the stored value
+untouched, and only an explicit clear (`null` or `""`) is read as "no stated unit" and
+re-inherits from the component.
+
+Why the default was wrong rather than merely arbitrary: `unit_of_measure_mismatch` is a
+**blocking** backflush diagnostic that reads a stored unit as a *stated claim*. Nothing in
+the platform converts units, so a line stating `each` against a part stocked in `sheets`
+would issue the wrong quantity of the right material — the diagnostic refuses
+`Part.backflush_components` at opt-in (**409**) and refuses that component at completion.
+Against a real sheet-metal BOM set that fired on a value nobody had chosen. **The fix was the
+default; the severity was deliberately left alone.**
+
+#### `GET /bom/uom-mismatches` — the pre-arming remediation worklist
+
+Existing lines are **not rewritten** — this series is correct-forward and does not backfill —
+so lines written before the default changed keep their stored `"each"` and still block. This
+endpoint is how a human finds and corrects them.
+
+| Query param | Default | Meaning |
+|---|---|---|
+| `part_id` | – | Only lines on this assembly part's **own** BOM. Does **not** follow nested sub-assembly BOMs, which a readiness check *does* reach — so the **unfiltered** report is the authoritative pre-arming worklist |
+| `bom_id` | – | Only lines on this BOM |
+| `component_part_id` | – | Only lines naming this component part |
+| `active_only` | `true` | Only active BOMs — the ones a backflush actually reads |
+| `skip` / `limit` | `0` / `100` (max `500`) | Paging over the matched set |
+
+Response: `{ total, returned, truncated, items[] }`, each item carrying `bom_id`,
+`bom_revision`, `bom_status`, `bom_is_active`, `part_id`, `part_number`, `bom_item_id`,
+`item_number`, `component_part_id`, `component_part_number`, `component_part_name`,
+`component_is_deleted`, `line_unit_of_measure`, `component_unit_of_measure` and
+`blocks_backflush`.
+
+- The comparison is `models.part.uom_disagrees`, the **same predicate the blocking diagnostic
+  uses**, so the report and the gate cannot list different rows. Comparison is exact-label:
+  `ea` does **not** satisfy `each` — normalise the stored value rather than expecting the gate
+  to accept it.
+- A blank unit on **either** side is not a disagreement and is not reported.
+- `blocks_backflush` is `false` on alternate / optional / reference lines: the backflush never
+  issues those, so they raise no diagnostic and refuse nothing. Work them last.
+- **`blocks_backflush: true` answers the LINE, not the whole tree — it can over-promise.** It is
+  computed from the line's own type alone. A line sitting inside a `make` sub-assembly's BOM
+  reports `true`, but `make` subtrees are walked exclude-only and collect no per-line
+  diagnostics, so that line refuses nothing when the *parent* assembly is armed (its children
+  were consumed when the sub-assembly was built). Treat `true` as "worth correcting", not as
+  "this is what is refusing my part" — the authoritative list of what actually refuses a given
+  part is `blockers` on `GET /parts/{part_id}/backflush-readiness`.
+- Soft-deleted component parts are **included** (flagged by `component_is_deleted`), because
+  the readiness explosion resolves them on purpose; filtering them out would hide a row that
+  still blocks.
+- `truncated: true` means the scan hit its candidate ceiling and `total` is a **floor**, not a
+  count — narrow the filters and run it again.
+
+##### Where this is worked — the **BOM Unit Mismatches** screen
+
+The report shipped API-only in PR 4.5 and **is no longer API-only**. It has a UI at
+**`/bom/uom-mismatches`**, reachable from the sidebar under **Engineering → BOM Unit
+Mismatches** (directly after *Bill of Materials*). Route and nav entry are both gated on
+`boms:edit` — **Admin / Manager / Supervisor**, exactly the endpoint's own
+`require_role([ADMIN, MANAGER, SUPERVISOR])` — so a role that cannot act on a row neither sees
+the link nor gets past the route guard by deep-linking. Client method:
+`api.getBOMUomMismatches(params)` in `frontend/src/services/api.ts`, typed by
+`BOMUomMismatchReport` / `BOMLineUomMismatch` / `BOMUomMismatchParams` in
+`frontend/src/types/index.ts`; the page is `frontend/src/pages/BOMUomMismatches.tsx`.
+
+What the screen is, and what it deliberately is not:
+
+- **Read-only — it finds rows and hands off.** There is no inline BOM-line editor. Every row
+  deep-links to `/bom?id={bom_id}` for the correction and to `/parts/{part_id}` for that
+  assembly's own readiness. That is deliberate: BOM-line create/update/delete currently write
+  **no audit rows at all** (a known, separately-filed gap), and making this screen the primary
+  remediation flow would put a compliance-critical correction on an un-audited endpoint.
+  Corrections stay on the BOM screen, where they already were.
+- **Server-paged** (50 rows/page over `skip`/`limit`), so column sort is deliberately
+  unavailable — sorting one page of a server-paged set reorders a window, not the worklist.
+- **Filters live in URL params** (`part_id`, `bom_id`, `component_part_id`, `active_only`,
+  `page`), so a filtered worklist is linkable and survives a reload. All five are parsed with
+  the same strict guard — a positive integer or nothing — so a hand-edited `?page=1.1` cannot
+  become a fractional `skip` the endpoint 422s, and `?page=2.5` cannot become a silently
+  non-aligned window. The two part pickers search with `active_only: false` on purpose: a
+  mismatch can name an inactive or soft-deleted component, and a picker that could not select
+  one could not filter to the very rows this report exists to disclose.
+- **`truncated` is surfaced loudly** — an amber banner above the table, and the count tile
+  renders `≥ N` with the subtitle *"Floor — scan ceiling hit"*. Read as: the total is a
+  **floor, not a count**, and this page is not evidence that a part is clean. Narrow the
+  filters and run it again.
+- **`blocks_backflush` is labelled "Line effect"**, valued *Would be issued* / *Never issued* —
+  never "blocking your part", because `true` can over-promise. A permanent panel on the screen
+  states that a line inside a `make` sub-assembly reads *Would be issued* and still refuses
+  nothing when the parent assembly is armed, and that an assembly filter does not follow nested
+  sub-assembly BOMs — so **the unfiltered list is the authoritative worklist**. The
+  authoritative *per-part* answer is the **Part readiness** link on every row
+  (`GET /parts/{part_id}/backflush-readiness`) — with the caveat the panel and the link tooltip
+  both state: that card renders only for a part typed `manufactured` / `assembly` or one already
+  armed, so a BOM hanging off a `purchased` part opens a page with **no readiness card at all**,
+  and the part type is what to correct first. The link never promises a verdict silently.
+- **`component_is_deleted` rows are kept and flagged**, not filtered: a red *Deleted part* chip,
+  a tinted row, and a marker in the CSV export.
+- **Empty means good news only when it is the whole answer.** "No rows" has four causes and the
+  screen distinguishes them, because the unfiltered copy — *"No unit-of-measure mismatches —
+  every BOM line states the unit its component part is stocked in. Nothing here is blocking a
+  part from being armed"* — is a **conclusion about the shop**, and it is earned only on page 1
+  of a complete, unfiltered scan. A **filtered** empty result says so separately and offers to
+  clear the filters. A **truncated** scan that empties a page says the scan was incomplete and
+  that the page is *not* an all-clear (the amber banner alone was not enough: printed directly
+  above the clean copy it read as a contradiction, and the clean sentence is the one shaped like
+  a conclusion). A page **past the end of the worklist** — `?page=` is durable URL state that
+  outlives the rows it was written against: a shared link, a reload after remediation, an
+  active-company switch — says exactly that and offers **Back to page 1**, because `DataTable`
+  replaces the whole container, pager included, with the empty state. So no empty page —
+  filtered, truncated, or out of range — is ever mistaken for an empty shop.
+
+##### The remediation sequence — run this BEFORE arming any real part
+
+1. **Run the report unfiltered.** Open `/bom/uom-mismatches` with no filters set (equivalently
+   `GET /bom/uom-mismatches` with no `part_id` / `bom_id` / `component_part_id`). Leave
+   `active_only=true` — those are the BOMs a backflush actually reads. Read the count; if the
+   truncation banner is up, that count is a **floor**, so narrow the filters and re-run rather
+   than reporting it as a total.
+2. **Correct the lines on the BOM screen.** Follow each row's link to `/bom?id={bom_id}` and
+   either fix the **line** (`PUT /bom/items/{id}` — state the real unit, or send
+   `unit_of_measure: null` / `""` to re-inherit the component's) or fix the **component part's
+   own** `unit_of_measure` where the stocking unit is the wrong record. Both are ordinary
+   audited human edits; neither is a backfill. ⚠️ Correcting the **part** re-scores every BOM
+   line that names it, across every assembly — so re-run the report **unfiltered** after any
+   part-side correction. Rows reading *Never issued* (alternate / optional / reference) are
+   cosmetic: work them last or not at all.
+3. **Re-check the part** with `GET /parts/{id}/backflush-readiness` — the backflush card on the
+   part page shows the same verdict and blocker list. This, not an empty report, is the
+   authoritative per-part answer: the report answers *lines*, the readiness check answers the
+   *part*, and it is the same function the arming gate runs.
+4. **Arm it** — `PUT /parts/{id}` with `backflush_components: true`. A part whose lines still
+   disagree is refused **409** with the blocker sentences as `detail`, and that refusal is the
+   control working, not a bug to route around.
+
+Clearing this list is not a lock. Every line stays editable afterwards by the same
+Admin / Manager / Supervisor tier, with nothing on the BOM edit path aware that a part is
+armed, so an empty report is evidence about the minute it was run. What backs the part after
+the flip is the completion-time refusal (`BACKFLUSH_DEMAND_REFUSED`), not this list.
 
 #### BOM Import (document upload)
 
@@ -1037,6 +1891,8 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 | GET | `/shop-floor/dashboard` | Shop floor dashboard | Yes |
 | GET | `/shop-floor/my-active-job` | Get current user's active job | Yes |
 | GET | `/shop-floor/operations` | List not-complete/cancelled operations for the desktop shop-floor pages (paginated, max 200/page; filters `work_center_id` / `status` / `search` / `due_today`) — rows in the **canonical dispatch order**, each carrying the advisory `run_order` display rank (see "Desktop parity" under the Dispatch run order note below) | Yes |
+| GET | `/shop-floor/operations/{id}/documents` | Kiosk doc-viewer discovery: the operation's controlled part drawing, live nest reference PDF, nest material, and critical SPC characteristics (see note below) | Yes |
+| GET | `/shop-floor/documents/{id}/inline` | Serve a kiosk-viewable document PDF inline — DRAWING-type or live-nest-referenced only, tenant-scoped, uniform **404** on any miss (see note below) | Yes |
 | POST | `/shop-floor/clock-in` | Clock in to operation | Yes |
 | POST | `/shop-floor/clock-out/{id}` | Clock out with production data | Yes |
 | POST | `/shop-floor/operations/{id}/start` | Start an operation | Yes |
@@ -1050,7 +1906,7 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 | GET | `/shop-floor/work-center-queue/{id}` | Get work center queue, each row carrying the live crew `roster` and the manager-set `run_order` (see notes below) | User **or** kiosk station token |
 | GET | `/shop-floor/dispatch-board` | Manager dispatch board — every **active** work center with its live queue, including work centers with an **empty** queue, plus any **deactivated** work center still holding queued work, flagged `is_active: false` (see note below) | Admin / Manager / Supervisor |
 | PUT | `/shop-floor/work-centers/{id}/run-order` | Rewrite one work center's manual run order (dense 1..N; omitted operations become unranked) → that work center's refreshed column (see note below) | Admin / Manager / Supervisor |
-| GET | `/shop-floor/wallboard` | Read-only TV wallboard snapshot (`?dept=` narrows to one work-center type, case-insensitive — scopes the work centers, the job wall (by each WO's **current** operation's work center), **and** the late/blocked lists + totals; ship/today/quality stay plant-wide) | User **or** display token |
+| GET | `/shop-floor/wallboard` | Read-only TV wallboard snapshot (`?dept=` narrows to one work-center type, case-insensitive — scopes the work centers, the `jobs` grid (by each WO's **current** operation's work center), **and** the late/blocked lists + totals; ship/today/quality stay plant-wide) | User **or** display token |
 | POST | `/shop-floor/kiosk-stations/station-login` | Unlock a crew tablet with the shared station PIN. Body `{"station_id", "pin"}` (PIN 4–8 digits) → `{"access_token", "token_type", "expires_in", "station": {"id", "label", "work_center_id", "work_center_code", "work_center_name"}}` (24 h scoped `type="kiosk"` JWT). Bad/revoked station or wrong PIN → **401** (indistinguishable; failed attempt audited) | **Public** (PIN-gated, 5/minute per IP) |
 | POST | `/shop-floor/kiosk-stations` | Create a PIN-protected crew-station kiosk bound to a work center. Body `{"label", "work_center_id", "pin"}` → **201** `KioskStationResponse` (PIN hashed, never echoed; a work center outside the active company → **404**) | Admin / Manager |
 | GET | `/shop-floor/kiosk-stations` | List this company's kiosk stations (no PIN/`pin_hash`) → `{"stations"}` | Admin / Manager |
@@ -1067,33 +1923,43 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > and a forged claim cannot widen scope. The endpoint is a **zero-write read**: deliberately no
 > reconcile-on-read, no audit rows, no events — an unattended TV polling every 30s must never
 > mutate state, and a display token has no user identity to attribute writes to. The payload is
-> built for a public screen: operator identity is truncated to "First L." (`crew` / `operator_name`),
-> and the ship/today/quality blocks carry counts, ages, WO/part numbers and dates only — **no
-> customer names, no ship-to addresses, no dollar figures, no NCR titles/descriptions**. Signed-in
-> users can call it too (their active company scopes the data). Payload:
+> built to be **public-safe by default**: operator identity is truncated to "First L." (`crew` /
+> `operator_name`), and the ship/today/quality blocks carry counts, ages, WO/part numbers and dates
+> only — **no ship-to addresses, no dollar figures, no NCR titles/descriptions**. The **one gated
+> exception** is `jobs[].customer_name`: it is populated **only** when the request principal is
+> authorized — a display token with `show_customer_names=true`, OR a signed-in user whose role is
+> `PLATFORM_ADMIN` / `ADMIN` / `MANAGER` — and is `null` for every public / un-flagged display token
+> and every other signed-in role (`build_wallboard_payload(..., include_customer=...)`, derived from
+> the principal, never from client input). Signed-in users can call it too (their active company
+> scopes the data). Payload:
 > - `work_centers[]` (`{code, name, status, active_jobs[], queued_count, blocked_count, down}`).
 >   Each active job is **one row per operation** (crew-station grouping): `{wo_number, part_number,
 >   op_name, crew[]` (up to 3 "First L." names)`, crew_count` (true headcount)`, operator_name`
 >   (back-compat alias of `crew[0]`)`, elapsed_minutes` (earliest open clock-in)`, qty_done,
 >   qty_target, is_late}`. `is_late` is server-computed: promise (`coalesce(must_ship_by,
 >   due_date)`, the OTD precedence) before today's Central date on a live, non-terminal WO — the
->   same predicate as `late_wos` / `late_total`. Still shipped in full: old TV bundles render it,
->   and a new TV falls back to it when `jobs` is absent.
-> - **`jobs[]` / `jobs_total`** — the main-wall **job wall** (2026-07-15 redesign): open
+>   same predicate as `late_wos` / `late_total`. Still shipped in full: old TV bundles render it
+>   as the machine wall, and the current (Foundry, 2026-07-22) board joins `work_centers[].down`
+>   for its card stop reasons/durations and the BLOCKED·DOWN rail rows.
+> - **`jobs[]` / `jobs_total`** — the main work-order grid (the 2026-07-15 job wall, rendered
+>   since 2026-07-22 as the Foundry 4×3 card grid): open
 >   (**RELEASED / IN_PROGRESS**) WOs — **ON_HOLD deliberately excluded** (the quality rail counts
 >   holds) — priority-sorted server-side (blocked/down → most-late → running → promise date asc),
 >   capped at **24**, with `jobs_total` the true uncapped count for `+N more`; **dept-scoped**
 >   via each WO's **current** operation's work-center type when `?dept=` is passed. Each job:
->   `{wo_number, part_number, status, qty_complete, qty_ordered` (WO-level)`, promise_date,
+>   `{wo_number, part_number, customer_name` (**gated** — see below)`, status, qty_complete, qty_ordered` (WO-level)`, promise_date,
 >   is_late, days_late` (the same shared lateness predicate)`, blocked` (any unresolved blocker
 >   on the WO)`, down` (current op's work center has an open downtime event)`, running` (current
 >   op has ≥1 open labor entry)`, ops_completed, ops_total, current_op}`; `current_op` — the
 >   lowest-sequence IN_PROGRESS op, else lowest READY, else lowest PENDING; `null` when all ops
 >   are complete — is `{sequence, name, work_center_code, work_center_name, status, qty_done,
 >   qty_target, crew[]` (≤3 "First L.")`, crew_count, elapsed_minutes}`. Job tiles carry WO/part/op
->   identifiers, dates, quantities, and "First L." crew names only — never customer names,
->   dollars, or notes. Absent only from a pre-job-wall backend (the TV then falls back to the
->   `work_centers` machine wall).
+>   identifiers, dates, quantities, and "First L." crew names only — never dollars or notes.
+>   `customer_name` is the one **gated** field: populated only for an authorized principal (display
+>   token opted in via `show_customer_names`, or a signed-in `PLATFORM_ADMIN` / `ADMIN` / `MANAGER`),
+>   `null` on every public board. Absent only from a pre-job-wall backend (the current TV then renders a
+>   `BOARD DATA UNAVAILABLE` state; only pre-redesign TV bundles still render the `work_centers`
+>   machine wall).
 > - `late_wos[]` (worst-first), `blocked_wos[]` (oldest-first) — capped at **12**; `late_wos[].due_date`
 >   carries the promise date under the original field name. **Dept-scoped** when `?dept=` is passed
 >   (late via any open op routed to a dept work center; blocked via the blocker's operation's work
@@ -1117,9 +1983,10 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 >   [docs/WALLBOARD.md](WALLBOARD.md) → KPI strip — deprecated), and `generated_at`.
 >
 > Every block/field added after A0.5 v1 is **optional** (old TVs ignore them; a new TV against an
-> old backend renders em-dashes — or the machine wall, when `jobs` is absent), and `ship` /
+> old backend renders em-dashes — or the `BOARD DATA UNAVAILABLE` grid state, when `jobs` is
+> absent), and `ship` /
 > `today` / `quality` are each independently best-effort — a failed block is `null` on that poll,
-> never a failed payload. The job wall is core like `work_centers` — computed inline, not
+> never a failed payload. The `jobs` block is core like `work_centers` — computed inline, not
 > best-effort.
 > Token issuance/revocation: see Authentication → Display tokens. Operating a TV:
 > see [docs/WALLBOARD.md](WALLBOARD.md).
@@ -1205,10 +2072,20 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > `true` — older clients ignore it. Each row:
 > `{operation_id, run_order, version, work_order_id, work_order_number, operation_number,
 > operation_name, part_number, part_name, status, priority, due_date, quantity_ordered,
-> quantity_complete, setup_time_hours, run_time_hours, laser_nest}` — `version` is the operation's
-> optimistic-lock counter, which the cross-machine move (`PUT /work-orders/operations/{id}`)
+> quantity_complete, setup_time_hours, run_time_hours, laser_nest, material_tie}` — `version` is the
+> operation's optimistic-lock counter, which the cross-machine move (`PUT /work-orders/operations/{id}`)
 > requires. Rows arrive in the queue order above. **Zero-write read**: no reconcile, no audit rows,
 > no events.
+>
+> **The zero-write guarantee covers material consumption explicitly.** The board reads material ties
+> and stock levels, and it does **not** run either consumption seam
+> (`apply_completion_inventory_effects` / `apply_operation_completion_inventory_effects`), post an `ISSUE`, or
+> advance any `qty_consumed` — `material_tie_view.py` has no write path and must never grow one. This
+> read is polled by every manager on the shop and by the kiosk queue every 10–15 seconds per station;
+> a poll is not an actor, has no intent and records no reason, so material that moved from one would
+> be unattributable in the audit chain. (Note the contrast with the *nest* block, which still syncs
+> `nest.completed_runs` on the kiosk queue read but never on the board — see below.) If a future
+> change is tempted to reconcile ties here, that is the reason not to.
 >
 > `laser_nest` is `null` for every non-laser row. For a laser-nest operation whose nest is live
 > (**soft-deleted nests are never surfaced**, same `active_laser_nest` rule as the kiosk) it carries
@@ -1221,6 +2098,29 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > `max(0, planned − completed)` — the same numbers the kiosk shows, but derived read-only: unlike
 > the kiosk payload the board never writes `nest.completed_runs` back (the same row builder serves
 > the run-order `PUT`, which commits). The same block rides the column that `PUT` returns.
+>
+> `material_tie` is `null` for every **untied** row — the client draws nothing for those, no
+> placeholder and no "not tied" nag, so an untied work order looks byte-identical to its pre-feature
+> self. When the operation carries an **open, operation-scoped** tie it is
+> `{allocation_id, part_id, part_number, unit_of_measure, qty_per_run, qty_planned, qty_consumed,
+> qty_remaining, on_hand, short_by, pinned_inventory_item_id, pinned_lot_number}`.
+> **Operation-scoped only**: a work-order-scoped tie belongs to the whole job and drains through the
+> completion backflush's own tie leg, so hanging it on cards would fan one tie across every card of that work order
+> and read as N separate ties. **One chip per card** — if an operation somehow carries two ties the
+> **first by `allocation_id`** is sent (the same one the kiosk lists first); summing them is not an
+> option, since they are different parts in different units and a merged number would be fiction.
+> `qty_remaining` is `max(0, planned − consumed)`, `on_hand` is the **pinned lot's own** stock when
+> the tie is pinned and the FIFO-eligible total for the part when it is not, and `short_by` is
+> `max(0, remaining − on_hand)` — all three derived **server-side**, floored at the engine's own
+> epsilon so float residue can't paint a false shortage. `short_by` is **advisory**: a shortage never
+> blocks production, it drives the lot negative and warns. `qty_consumed` is a **cache** — the ledger
+> rows carrying that `allocation_id` are the authoritative total. `qty_per_run` is carried **raw**
+> (`null` means "not run-scaled" and reads as 1.0, which is not the same fact as an explicit 1).
+> Ties are batched **once per response** for the whole board, so the board's cost stays flat in the
+> number of cards. The same block rides the column the run-order `PUT` returns — that response
+> **replaces** the column client-side, so omitting it there would blank every material chip and read
+> as though reordering untied the shop's material. `material_tie` defaults to `null`, so a
+> pre-feature client is unaffected by its arrival — exactly as `laser_nest` was.
 >
 > **`PUT /shop-floor/work-centers/{id}/run-order`** (Admin / Manager / Supervisor, tenant-scoped) —
 > body `{"operation_ids": [11, 9, 14]}`, the **full** desired order for that column, rank 1 first.
@@ -1286,6 +2186,106 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > update — so the crew kiosk can toast who was auto-clocked-out. Read-only addition; the
 > auto-close mutation is unchanged.
 
+> **Kiosk telemetry / routing payload additions (Foundry redesign, 2026-07-23).** Read-only field
+> additions feeding the redesigned kiosk's top bar, telemetry tiles, and complete modal — old
+> clients ignore them, no shapes changed:
+>
+> - **`GET /shop-floor/work-center-queue/{id}`** — top-level **`work_center`**
+>   (`{id, code, name, description, current_status}`, the kiosk top bar's machine identity;
+>   `null` — never 404 — when the id is unknown or cross-tenant, and deliberately not filtered on
+>   `is_active`: a deactivated work center keeps serving its queued work). Each queue row adds
+>   **`part_revision`** (the part's revision letter; `null` on a part-less WO, e.g. a standalone
+>   laser-nest WO) and **`last_report`** (below).
+> - **`GET /shop-floor/my-active-job`** — top-level **`server_time`** (UTC ISO, on the empty
+>   payload too — the kiosk clock and cycle timer run on server-corrected time, same contract as
+>   the queue read). Each job dict adds **`part_revision`**; the open entry's own session counts
+>   **`quantity_produced`** / **`quantity_scrapped`** (this clock-in's deltas, distinct from the
+>   operation totals — feeds the AVG PER PC tile); **`last_report`**; **`downtime_minutes`**
+>   (float — Σ over the operation's `WorkOrderBlocker`s of `(resolved_at or now) − reported_at`,
+>   tenant-scoped; no shift math); and **`next_operation`**.
+> - **`last_report`** — `{at, good, scrap} | null`: the operation's most recent production-evidence
+>   report — the **deltas of that single report, not totals** — stamped by
+>   `POST /operations/{id}/production` and by a quantity-carrying clock-out (backed by the new
+>   nullable `work_order_operations.last_reported_at/_good/_scrapped` columns, migration `070`;
+>   **correct-forward, no backfill** — `null` until the first post-migration report lands).
+> - **`next_operation`** — `{operation_number, name, status, work_center: {id, code, name} | null}
+>   | null`: the next routing step by `sequence` (id tiebreak) in the same WO **regardless of
+>   status** — "where the job goes", not "what is startable" — `null` on the last operation. Rides
+>   the my-active-job job dict **and** the `POST /operations/{id}/complete` response (the complete
+>   modal's "ROUTES TO" row).
+
+> **Material ties on operator reads (`/work-center-queue/{id}`, `/my-active-job`).** Both payloads
+> gained a **`material_ties`** array so the kiosk can state what leaves inventory — it rides these
+> already-authorized, already-tenant-scoped reads rather than the tie API, because
+> `/work-orders/{id}/material-allocations` sits **outside the kiosk path fence** (`deps.py` allowlists
+> `/api/v1/shop-floor` only, so a badge-minted `scope="kiosk"` token is 403 there). Same precedent as
+> `scrap_reason_codes`: carry the data on a read the fence already permits rather than widen the
+> fence. Both endpoints build it from the same batched `material_tie_view` read the dispatch board
+> uses, so the manager's chip and the operator's line cannot disagree.
+>
+> `[]` on an untied operation — the kiosk renders nothing at all for those. Each entry:
+> `{allocation_id, part_id, part_number, part_name, unit_of_measure, qty_per_run, qty_planned,
+> qty_consumed, qty_remaining, on_hand, short_by, pinned_lot_number}` — the same projection the board
+> sends, **plus `part_name`** and **minus `pinned_inventory_item_id`** (an operator reads a lot
+> *number* off a tag and the kiosk has no verb that takes the id). Open, **operation-scoped** ties
+> only. `short_by` is advisory — a shortage never blocks the job. **Pure read**: the tie read posts
+> no `ISSUE`, writes no audit row and reconciles nothing, even though `_laser_nest_payload` on the
+> same endpoint still syncs nest counters.
+>
+> **`/my-active-job` also gained `operation_quantity_scrapped`** — a **new, distinct key**, not a
+> change to the existing one. Read the two carefully, they are a live footgun:
+>
+> | Key | Scope |
+> |-----|-------|
+> | `quantity_scrapped` | **THIS TIME ENTRY's** session scrap (this clock-in's delta; feeds the AVG PER PC tile) — unchanged, pre-existing |
+> | `operation_quantity_scrapped` | The **OPERATION's** scrap total, alongside the existing `quantity_complete` |
+>
+> They are only equal on a single-session operation. The material prediction scales on
+> `(complete + scrapped)` at the **operation** level — a scrapped run still ate its sheet — so a client
+> that reaches for `quantity_scrapped` under-states the deduction on any job worked across two shifts.
+>
+> **Station disclosure note:** a station principal is an unattended, PIN-unlocked terminal with no
+> operator identity, and `material_ties` adds material part numbers and **on-hand stock** to what it
+> can read. Scoped to the tied parts of that work center's queued operations — it is not an inventory
+> browser — but it is a genuine, if small, widening of the station's disclosure surface.
+
+> **Kiosk doc viewer — `GET /shop-floor/operations/{operation_id}/documents` +
+> `GET /shop-floor/documents/{document_id}/inline` (Foundry redesign).** The full-screen
+> drawing/nest viewer's two reads. Both live under `/shop-floor` **on purpose** — badge-minted
+> kiosk-scoped operator tokens are path-fenced to that prefix, so the crew station reaches them
+> with zero fence changes — and both are open to **any authenticated user** with no role gate
+> (operators must preview the shop drawing; mirrors the documented laser-nest inline stance).
+> Pure reads: no state change, no audit rows.
+>
+> **Discovery** (`/operations/{id}/documents`, tenant-scoped **404** on a cross-tenant/missing
+> operation):
+>
+> ```json
+> {
+>   "part": {"id", "part_number", "name", "revision"},
+>   "drawing": {"document_id", "revision", "title", "status", "released_at", "file_name"},
+>   "nest": {"laser_nest_id", "nest_name", "cnc_number", "document_id", "file_name"},
+>   "material": "304 SS",
+>   "critical_dims": [{"id", "name", "nominal", "usl", "lsl", "unit_of_measure"}]
+> }
+> ```
+>
+> `part` / `drawing` / `nest` / `material` are each `null` when absent. `drawing` is the newest
+> **approved/released `DRAWING`** Document for the WO's part (`released_at DESC NULLS LAST`, then
+> `id DESC`); `nest` routes through `active_laser_nest` (a soft-deleted nest never appears), and
+> `material` is that nest's material. `critical_dims` are the part's **critical, active**
+> `SPCCharacteristic` rows — rows scoped to this routing operation's number or unscoped
+> (`operation_number` null) are preferred; when none match, all critical rows are returned rather
+> than hidden.
+>
+> **Byte serving** (`/documents/{id}/inline`) — the **single kiosk byte-serving route** (the kiosk
+> token fence blocks `/laser-nests/*` and `/documents/*`). Guard: the document must belong to the
+> active company **and** be either `document_type == DRAWING` or the reference PDF of a **live**
+> (non-deleted) laser nest in the same tenant. Any miss — cross-tenant, missing, or a document
+> that is neither — is a uniform **404**, never a 403, so the route leaks no existence
+> information. Serves exactly like `GET /laser-nests/{id}/document`: S3 stream or local file,
+> `Content-Type: application/pdf`, `Content-Disposition: inline`.
+
 > **Laser-nest payload on operator reads (`/work-center-queue/{id}`, `/my-active-job`).** So the
 > kiosk/operator station can surface the laser nest at clock-in, **every `/work-center-queue/{id}` row
 > now carries a `laser_nest` object** (it returned none before), and the `laser_nest` that
@@ -1298,7 +2298,9 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > (nullable)`, has_document` (bool — true when a reference PDF is attached)`, document_file_name`
 > (nullable) `}`. The attached PDF is served **inline** by `GET /laser-nests/{id}/document` (see Laser
 > Nests above), so `has_document` / `document_file_name` let the kiosk flag that a reference PDF is
-> attached and label it without a second round-trip.
+> attached and label it without a second round-trip. Kiosk surfaces now fetch the bytes through the
+> fence-safe `GET /shop-floor/documents/{document_id}/inline` instead (same serving, guarded — see
+> "Kiosk doc viewer" above); the `/laser-nests/{id}/document` route remains for desktop callers.
 
 > **Tenant isolation on clock/operation endpoints.** Clock-in, clock-out, and the shop-floor
 > operation start/complete endpoints scope every operation, work-order, and `TimeEntry` lookup to
@@ -1411,10 +2413,16 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > emits an `operation_production_reduced` operational event and the shop-floor / work-order / dashboard
 > real-time broadcasts. Error codes:
 > - **404** — operation missing / cross-tenant, or its work order not found.
-> - **409** — the operation is **COMPLETE** or the work order is **terminal** (COMPLETE / CLOSED /
->   CANCELLED): `"Completed work can't be corrected here -- ask a supervisor"` — **post-completion
->   corrections are an office/supervisor task by design** (they must reverse finished-goods
->   inventory/cost). A concurrent stale edit also returns **409**
+> - **409** — the operation is **COMPLETE**: `"Completed work can't be corrected here -- ask a
+>   supervisor"` — **post-completion corrections are an office/supervisor task by design**, and that
+>   referral is now honest: the office twin
+>   (`POST /work-orders/operations/{id}/reduce-production`) **accepts** a COMPLETE operation, where
+>   it used to hit this identical refusal. This operator verb keeps it: correcting finished work is a
+>   supervised act.
+> - **409** — the work order is **terminal** (COMPLETE / CLOSED / CANCELLED): `"This work order is
+>   complete, closed or cancelled -- its recorded production can no longer be corrected"`. A separate
+>   message from the one above, on **both** verbs, because no supervisor can correct it either. A
+>   concurrent stale edit also returns **409**
 >   (`"This operation was modified concurrently. Refresh and retry."`).
 > - **400** — no open clock-in of the caller on this operation
 >   (`"You must be clocked in to this operation to correct its count"`), or `quantity_delta` greater
@@ -1455,6 +2463,22 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > **optional** and may be omitted (e.g. the kiosk COMPLETE flow clocks out with zero scrap and no
 > reason). This invariant is enforced at the data boundary, so a scripted/API client can no longer
 > record reasonless scrap that the kiosk/desktop UIs already block.
+>
+> **Scrap → NCR on the production report (Foundry redesign).**
+> `POST /shop-floor/operations/{id}/production` (`ProductionReportRequest`) also accepts
+> **`open_ncr: bool = false`** and **`ncr_description`** (optional, ≤ 2000): when `open_ncr` is
+> true and the report carries scrap, the endpoint files a **`NonConformanceReport`
+> (`source=IN_PROCESS`)** for that scrap **in the same transaction** as the production write —
+> `quantity_affected` = the report's scrap delta, part/WO/lot from the work order,
+> `detected_by` = the caller, description = `ncr_description` or a generated line quoting the
+> scrap reason. Deliberately **no hold and no blocker** — the machine keeps running; Quality is
+> notified through the NCR itself plus a high-severity `ncr_created` operational event
+> (deliberate contrast with the process-step OOT quality-hold, which does hold the job). The NCR
+> create is audited (`log_create`, hash-chained). Response gains
+> **`ncr: {id, ncr_number} | null`** — the kiosk success toast quotes the real `ncr_number`;
+> `null` whenever no NCR was requested. `open_ncr` with `quantity_scrapped_delta <= 0` is a
+> **400** before any mutation (an NCR documents scrap; a scrapless one is a client bug). The
+> scrap-reason-required **422** above is unchanged and evaluated first.
 >
 > **Completion contract.** The shop-floor `/operations/{id}/complete` shares the same finalizer as
 > the office endpoint (see "Completion contract" under Work Orders): the absolute verb stores
@@ -1770,6 +2794,8 @@ the caller's most recent closed unapproved session.)
 | GET | `/quality/scrap-reason-codes` | List scrap reason codes (active only by default; `category` / `include_inactive` filters) | Yes |
 | POST | `/quality/scrap-reason-codes` | Create a scrap reason code | Admin / Manager / Quality |
 | PUT | `/quality/scrap-reason-codes/{reason_code_id}` | Update a scrap reason code (deactivate via `is_active: false`) | Admin / Manager / Quality |
+| DELETE | `/quality/ncr/{ncr_id}` | **Void** an NCR (soft-delete + status → `void`); body `{ "reason": "<non-blank>" }`. Guarded, see note | Admin / Manager / Quality |
+| POST | `/quality/ncr/{ncr_id}/restore` | Restore a voided NCR — reopens it to `open` | Admin / Manager / Quality |
 
 > **Scrap reason codes (Lean Phase 1).** The tenant's structured scrap vocabulary, referenced by the
 > optional `scrap_reason_code_id` accepted on the three scrap write paths —
@@ -1782,6 +2808,21 @@ the caller's most recent closed unapproved session.)
 > role-gated to **Admin / Manager / Quality** and write tamper-evident `audit_log` rows (resource type
 > `scrap_reason_code`). There is deliberately **no DELETE endpoint** — historical scrap rows reference
 > these ids (traceability), so retirement is `is_active: false`, never a row removal.
+
+> **NCR void + restore (`NonConformanceReport` now `SoftDeleteMixin`).** Voiding is the quality-record
+> form of a soft delete: `DELETE /quality/ncr/{ncr_id}` marks the NCR `is_deleted` **and** moves it to
+> `VOID` status (the status already existed), retaining it for AS9100D traceability and the
+> tamper-evident audit trail while dropping it from all live reads (which now filter
+> `is_deleted == false`). The request **requires a non-blank JSON body `{ "reason": "..." }`**
+> (whitespace-only → **422**); gate **Admin / Manager / Quality**. **Guardrail:** the void is **refused
+> with 400** while the NCR still **actively gates a work order** — an `OPEN`/`ACKNOWLEDGED`
+> `WorkOrderBlocker` references it — resolve the blocker first; a re-void returns **400** ("already
+> voided"). `POST /quality/ncr/{ncr_id}/restore` clears the soft-delete and reopens the NCR to
+> **`OPEN`** (the pre-void status is not preserved — a safe reset). Both actions are **fully audited**:
+> the void writes a `log_status_change` (→ `void`, reason in the description) **and** a `log_delete`
+> (`soft_delete=true`, reason in `extra_data`); restore writes a `log_update` (`action="restore"`).
+> This closes a prior gap where the ordinary `PUT /quality/ncr/{ncr_id}` update path emitted only an
+> operational event and **no** `audit_log` row.
 
 ### QMS Standards & Audit Readiness
 
@@ -1936,12 +2977,16 @@ the public paths are `/eco/eco/…`.
 | POST | `/purchasing/vendors` | Create vendor | Admin / Manager |
 | GET | `/purchasing/vendors/{vendor_id}` | Get vendor by ID | Yes |
 | PUT | `/purchasing/vendors/{vendor_id}` | Update vendor — `code` is editable (see note) | Admin / Manager |
+| DELETE | `/purchasing/vendors/{vendor_id}` | Soft-delete a vendor (also sets `is_active=false`) — guarded, see note below | Admin / Manager |
+| POST | `/purchasing/vendors/{vendor_id}/restore` | Restore a soft-deleted vendor (re-activates it) | Admin / Manager |
 | GET | `/purchasing/purchase-orders` | List purchase orders (filters: `status`, `vendor_id`) | Yes |
 | POST | `/purchasing/purchase-orders` | Create purchase order with its lines | Admin / Manager / Supervisor |
 | GET | `/purchasing/purchase-orders/{po_id}` | Get PO by ID | Yes |
 | PUT | `/purchasing/purchase-orders/{po_id}` | Update purchase order | Admin / Manager / Supervisor |
 | POST | `/purchasing/purchase-orders/{po_id}/send` | Issue a PO to the vendor — status → `sent`, stamps `order_date`; only `draft`/`approved` POs (else **400**) | Admin / Manager |
 | POST | `/purchasing/purchase-orders/{po_id}/lines` | Add a line to a `draft` PO (else **400**) and roll the PO subtotal/total | Admin / Manager / Supervisor |
+| DELETE | `/purchasing/purchase-orders/{po_id}` | Soft-delete a purchase order — guarded, see note below | Admin / Manager |
+| POST | `/purchasing/purchase-orders/{po_id}/restore` | Restore a soft-deleted purchase order | Admin / Manager |
 
 > Material receiving and incoming inspection are **not** under `/purchasing`. They live under
 > `/receiving` (see below). The duplicate `/purchasing/receiving*` endpoints were removed.
@@ -1974,6 +3019,25 @@ the public paths are `/eco/eco/…`.
 > the PO recording the subtotal/total roll (`extra_data.cause = "po_line_added"`). Audit rows are
 > flushed before the terminal commit so they commit atomically with the change. (These endpoints
 > were RBAC-gated but unaudited prior to 2026-07-12; the import loader was already per-row audited.)
+>
+> **Vendor / PO soft-delete + restore (`Vendor`, `PurchaseOrder` now `SoftDeleteMixin`).** Both
+> `DELETE` endpoints are **soft** deletes (compliance invariant #3 — never a physical `DELETE`):
+> the row is marked `is_deleted` / `deleted_at` / `deleted_by`, disappears from all list/detail reads
+> (which now filter `is_deleted == false`), and is restorable via the paired `POST .../restore`. Both
+> the delete and the restore write a tamper-evident `audit_log` row (`log_delete` with
+> `soft_delete=true` on delete; `log_update` with `action="restore"` on restore), flushed before the
+> terminal commit so it commits atomically with the change. Guardrails:
+> - **Vendor delete** additionally sets `is_active=false`, and is **refused with 400** while the vendor
+>   still has any **active** (not `closed`/`cancelled`, not soft-deleted) purchase order — close or
+>   cancel those first (the 400 names the count). A double delete returns **400** ("already deleted");
+>   restore re-sets `is_active=true`.
+> - **PO delete** is **refused with 400** when any line has received material
+>   (`quantity_received > 0`) — *"Void the receipt(s) first, then delete."* (see Receiving → void
+>   below) — so voided receipts / inventory can't be stranded behind a deleted PO. A double delete
+>   returns **400** ("already deleted").
+> - **Creating a PO against a soft-deleted or inactive vendor is refused** (**404** "Vendor not found"):
+>   `POST /purchasing/purchase-orders` now resolves the vendor with `is_deleted == false` **and**
+>   `is_active == true`.
 
 ### PO Upload (AI document extraction)
 
@@ -2009,6 +3073,8 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 | POST | `/receiving/receive` | Receive material against a PO line (`lot_number` optional — auto-assigned when blank, see below) | Admin / Manager / Supervisor |
 | GET | `/receiving/inspection-queue` | List receipts pending inspection (`days_back` optional, bounded 1–3650; **no date cutoff by default** — pending receipts never age out, so the list matches the `/stats` `pending_inspection` count) | Yes |
 | GET | `/receiving/receipt/{receipt_id}` | Get receipt detail | Yes |
+| PATCH | `/receiving/receipt/{receipt_id}` | Correct a mis-keyed receipt in place (new total `quantity_received` + optional traceability fields; required `reason`) — reconciles PO line / PO status / inventory. Guarded, see note | Admin / Manager / Supervisor |
+| POST | `/receiving/receipt/{receipt_id}/void` | Void (soft-delete) a receipt with full reversal of PO line / status / inventory; required `reason`. Terminal — no restore. Guarded, see note | Admin / Manager |
 | POST | `/receiving/inspect/{receipt_id}` | Complete inspection (accept/reject, auto-NCR on rejection) | Admin / Manager / Quality / Supervisor |
 | GET | `/receiving/history` | Receiving history with inspection results | Yes |
 | GET | `/receiving/stats` | Receiving statistics for dashboard | Yes |
@@ -2048,6 +3114,44 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 > prior values (they may still read `passed` / `visual`) — historical quality records are
 > corrected forward, not rewritten.
 
+> **Correcting or voiding a receipt (`POReceipt` now `SoftDeleteMixin`).** A mis-keyed receipt is
+> fixed with **`PATCH /receiving/receipt/{receipt_id}`** (correct in place) or reversed entirely with
+> **`POST /receiving/receipt/{receipt_id}/void`** (soft-delete). Both **require a non-blank `reason`**
+> (recorded on the tamper-evident `audit_log`) and are **fully audited**; live reads now filter
+> `is_deleted == false`.
+>
+> - **Correct** — body: `quantity_received` (the **new TOTAL** received, **> 0** — not a delta) plus
+>   optional `lot_number` / `heat_number` / `cert_number` / `serial_numbers` / `notes`, and the
+>   required `reason`. Gate **Admin / Manager / Supervisor** (the receive-tier — the same roles that
+>   `POST /receiving/receive` and post inventory adjustments). Response: the updated `ReceiptResponse`.
+> - **Void** — body: `reason` only. Gate **Admin / Manager** (tighter — void is delete authority).
+>   **Terminal: there is no restore** — to redo, re-receive.
+>
+> **What gets reconciled (both paths).** All refusal guards run **before any mutation**, so a refusal
+> never leaves the receipt half-reconciled:
+> - **PO line** — `quantity_received` is rolled to match (a void drops it to 0); the line's `is_closed`
+>   is recomputed, so a void can **reopen** a previously-closed line.
+> - **PO status** — recomputed from all lines: `received` (all closed) → `partial` (any received) →
+>   back to **`sent`** when nothing is left received (the pre-receipt open state). A status move is
+>   itself audited (`log_status_change`).
+> - **Inventory (dock-to-stock receipts only)** — a **signed compensating `InventoryTransaction`
+>   `ADJUST`** is appended (`reason_code` `RECEIPT_CORRECTION` / `RECEIPT_VOID`) to move on-hand by the
+>   delta. **AS9100D records integrity: the historical `RECEIVE` transaction is never mutated or
+>   deleted** — reversal is always a new, signed compensating row (like a manual inventory adjustment).
+>   `PENDING_INSPECTION` receipts placed no stock, so nothing is adjusted there.
+>
+> **State model — allowed only before inspection / while unconsumed.** A receipt is correctable/voidable
+> only while it is **`pending`** (awaiting inspection) or **`not_required`** (dock-to-stock accepted).
+> Refusals (all with actionable `detail`):
+> - already **inspected** (`passed` / `failed` / `partial`) → **409** — handle via NCR / inventory
+>   adjustment, not here.
+> - **lot change after stock was placed** (dock-to-stock) → **400** — void and re-receive instead.
+> - received stock for the lot **already allocated or consumed** (would drive `quantity_available`
+>   negative) → **409** — make an inventory adjustment instead.
+> - the reversal would drive the PO line's received total **negative** → **409**.
+> - the receipt's PO line no longer exists (orphaned) → **400** (never a 500).
+> - a cross-tenant / missing / already-voided receipt → **404**.
+
 > **Thermal receiving-label printing (ProxyBox / WHTP203e).** A 4×6 PDF (part / rev /
 > qty / lot / Code128, CRITICAL banner for critical parts) is rendered, stored as a
 > `Document` (`RECEIVING_LABEL`, linked via `POReceipt.label_document_id`), and sent to
@@ -2077,19 +3181,233 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| GET | `/inventory/` | List inventory items | Yes |
-| POST | `/inventory/receive` | Receive inventory into stock | Yes |
-| POST | `/inventory/issue` | Issue inventory to a work order | Yes |
-| POST | `/inventory/transfer` | Transfer inventory between locations | Yes |
+| GET | `/inventory/` | List inventory items (`part_id`, `warehouse`, `location_code`, `has_quantity`) | Yes |
+| GET | `/inventory/summary` | On-hand summary by part, with per-location breakdown | Yes |
+| GET | `/inventory/low-stock` | Parts at/below reorder point (on-hand summed per part) | Yes |
+| GET | `/inventory/locations` | List warehouse locations / bins | Yes |
+| POST | `/inventory/locations` | Create a location | Admin / Manager |
+| GET | `/inventory/transactions` | Inventory transaction (ledger) history, newest first | Yes |
+| POST | `/inventory/receive` | Receive inventory into stock | Admin / Manager / Supervisor |
+| POST | `/inventory/issue` | Issue inventory to a work order (**deprecated** — see below) | Admin / Manager / Supervisor |
+| POST | `/inventory/transfer` | Transfer inventory between locations | Admin / Manager / Supervisor |
 | POST | `/inventory/adjust` | Adjust inventory | Admin / Manager / Supervisor |
-| GET | `/inventory/{part_id}` | Get inventory for part | Yes |
+| GET | `/inventory/cycle-counts` | List cycle counts (optional `status`) | Yes |
+| POST | `/inventory/cycle-counts` | Create a cycle count (enrolls matching stock rows) | Admin / Manager / Supervisor |
+| POST | `/inventory/cycle-counts/{count_id}/start` | Open a count for counting | All roles except Viewer |
+| POST | `/inventory/cycle-counts/{count_id}/items/{item_id}/count` | Record a counted quantity | All roles except Viewer |
+| POST | `/inventory/cycle-counts/{count_id}/complete` | Complete the count (optionally apply adjustments) | Admin / Manager / Supervisor |
 
-> **Stock movements are audited.** Each of `/receive`, `/issue`, `/transfer`, and `/adjust` writes
-> tamper-evident audit rows (`GET /audit/`) — one for the `InventoryTransaction` and one per
-> stock-level change it produces (a transfer logs both the source decrement and the destination
-> increment) — flushed inside the same atomic transaction as the inventory write so the audit row
-> commits with the movement. The new `InventoryTransaction` rows are tenant-tagged with the active
+> **There is no `GET /inventory/{part_id}`.** An earlier revision of this doc listed one; no such
+> route exists in `app/api/endpoints/inventory.py`. Use `GET /inventory/?part_id=<id>` for that
+> part's stock rows, or `GET /inventory/summary` for the per-part rollup with locations.
+
+> **`/receive` and `/transfer` are role-gated (Admin / Manager / Supervisor).** Both previously
+> depended on `get_current_user` only, so any authenticated tenant user — Viewer included — could
+> create stock and write a ledger row. They now carry `require_role(STOCK_MUTATOR_ROLES)` =
+> `[ADMIN, MANAGER, SUPERVISOR]`, matching the sibling stock mutators `/inventory/issue` and
+> `/inventory/adjust` and the PO-receipt path `POST /receiving/receive`, which writes the same
+> `inventory_items` / `inventory_transactions` tables. See `docs/RBAC_PERMISSIONS.md` → Inventory.
+
+> **`POST /inventory/receive` refuses a soft-deleted part with 400.** The part lookup resolved on
+> `(id, company_id)` with no `is_deleted` predicate, so a Manager could create brand-new stock *and*
+> a ledger row against a part the business had deleted. It now returns **400** —
+> *"Part '&lt;number&gt;' is deleted - restore it or use a different part number"* — the same
+> deleted-part policy as the BOM and PO-upload import paths. An id that matches no part at all is
+> still **404 "Part not found"**. `GET /inventory/low-stock` carries the same predicate (a deleted
+> part must not raise a purchasing signal); it was incidentally covered before only because deleting
+> a part also clears `is_active`.
+
+> **`POST /inventory/issue` is role-gated and deprecated.** It now requires
+> **Admin / Manager / Supervisor** (`require_role`), matching the sibling stock-mutating
+> `/inventory/adjust`; it was previously open to any authenticated user, so any operator could
+> issue stock off a lot. The route also carries FastAPI's `deprecated=True`, so it renders struck
+> through at `/docs` and the generated OpenAPI operation has `"deprecated": true`: it ties
+> consumption to an untyped `work_order_number` string rather than a work-order id (so the ledger
+> row it writes has a NULL `reference_id` — see the `work_order_id` filter below), and is planned
+> to be superseded by a work-order-scoped
+> `POST /work-orders/{id}/issue-material`. **That replacement does not exist yet** — `/inventory/issue`
+> remains the supported path until it ships.
+
+> **Transaction-history query params (`GET /inventory/transactions`).** All filters are optional
+> and combine with AND: `part_id`, `transaction_type`, `reference_type`, `reference_id`,
+> `lot_number`, `start_date` / `end_date` (ISO-8601 datetimes, matched inclusively against
+> `created_at`), and `work_order_id`. Only `part_id` and `transaction_type` existed before this
+> pass; the rest are new.
+>
+> **`work_order_id` matches all four ledger shapes a work order's movement takes**: the
+> work-order-referencing rows (`reference_type='work_order'`, `reference_id=<id>` — the finished-good
+> receipt, plus every **legacy** pre-PR-4.4 component `ISSUE`), the **reconciled component** rows
+> (**`reference_type='work_order_backflush'`**, `reference_id=<id>` — BOM/routing backflush demand and
+> work-order-scoped tie consumption, added in PR 4.4 and able to appear as **several rows per (work
+> order, part)** when a draw spills across lots), the **operation-scoped**
+> consumption rows (`reference_type='work_order_operation'`, `reference_id=<operation id>` — per-run
+> depletion of tied material), and the id-less legacy shape `POST /inventory/issue` writes
+> (`reference_number=<WO number>`, `reference_id` NULL). The first three come from the **shared**
+> `work_order_ledger_filter` — the same predicate job costing, analytics and lot genealogy use — so
+> this list cannot disagree with the cost of the job it is listing. (Until PR 1 it matched only
+> `reference_type='work_order'` and silently under-reported an entire nest's material.) Soft-deleted
+> work orders are deliberately **not** excluded: their posted movements are still real ledger facts.
+>
+> **`reference_type` is unconstrained free text on the ledger** (`String(50)`, no CHECK / enum /
+> domain), so a client filtering `?reference_type=` must treat the value set as **open** — PR 1 added
+> `work_order_operation` and PR 4.4 added `work_order_backflush`, neither with a migration. Filter on
+> `work_order_id` rather than enumerating shapes.
+>
+> Paging is `limit` (default 100, **`ge=1, le=500`**) and `offset` (**`ge=0`**, default 0); a value
+> outside those bounds — `limit=0`, `limit=1000`, a negative `offset` — is rejected **422** by
+> FastAPI before the query runs. `limit` was previously an unvalidated `int`, so a negative or
+> unbounded value reached the database; `offset` is new and bounded from the start. Results are
+> ordered `created_at DESC, id DESC` (newest first, with the id as a stable tiebreaker), so paging
+> with increasing `offset` walks back into older history.
+>
+> The envelope is **unchanged** — a bare JSON array of transaction rows with no wrapper and no total
+> count, the same offset-paged convention as `GET /audit/`: clients over-fetch one row past the page
+> size and infer "has next page" from the overflow (the frontend `DataTable` `serverPagination`
+> contract).
+>
+> **The rows are now typed** by `InventoryTransactionResponse` (`app/schemas/inventory.py`, a
+> `UTCModel`) instead of being raw ORM objects handed to `jsonable_encoder`. Two consequences:
+> `created_at` serializes as UTC ISO-8601 **with the trailing `Z`** (the "store UTC, serve UTC (`Z`),
+> display Central" invariant — it was previously zone-less), and the nested `part` object is
+> narrowed to `{id, part_number, name, description, revision, unit_of_measure}`. The raw dump
+> included the part's entire row, standard / material / labor / overhead cost included, which a
+> ledger read has no business publishing. Every ledger column itself is unchanged and still
+> top-level, and `transaction_type` still serializes as the lowercase enum **value** (`"receive"`,
+> `"count"`, …).
+>
+> `work_order_id` is a convenience filter for "everything this work order consumed/produced". The
+> authoritative statement of what it matches is the four-shape list above; this paragraph and the
+> "known gap" that followed it described the **pre-PR-1** behaviour and were left stale through three
+> PRs. They are corrected here rather than left to contradict the list: the id-less
+> `POST /inventory/issue` shape (`reference_type='work_order'`, `reference_number` = the work-order
+> **number**, `reference_id` NULL) is matched by a local clause, and the three id-keyed shapes are
+> matched by the shared `work_order_ledger_filter`. The work-order number is resolved
+> tenant-scoped, so an unknown or other-tenant id simply matches nothing.
+>
+> ~~**Known gap — `work_order_id` does not yet match operation-scoped material consumption.**~~
+> **CLOSED in PR 1** (`work_order_operation`) **and extended in PR 4.4** (`work_order_backflush`).
+> Both are returned by this filter today. `GET /traceability/lot/{lot_number}` resolves the same three
+> shapes for its as-built genealogy, so the two reads cannot disagree.
+>
+> **`work_order_id` deliberately does not exclude soft-deleted work orders.** Voiding a work order
+> does not un-move the material it consumed — those ledger rows are still real, posted facts, and
+> this is a traceability/history read. Filtering `is_deleted == false` here would silently drop a
+> voided WO's movements (including the `reference_number`-shaped rows) from its own history.
+>
+> **TRANSFER rows are signed for movement, not for net stock.** A `transfer` row carries a
+> **positive** `quantity` together with `from_location` and `to_location`, and represents a
+> **zero net change** in on-hand — the source decrement and destination increment are two stock
+> writes recorded as one movement row. A naive `SUM(quantity)` over a filtered result set therefore
+> over-counts. Callers reconstructing "what this work order consumed" must exclude or specially
+> handle `transaction_type='transfer'` rather than summing the column blindly. For contrast, the
+> other rows this router writes are net-correct as written: `receive` is positive, `issue` is
+> negative (`-quantity`), and `adjust` / `count` carry the signed delta (`new − old` and
+> `counted − system` respectively).
+
+> **Stock movements are audited.** Each of `/receive`, `/issue`, `/transfer`, `/adjust`, and
+> `/cycle-counts/{id}/complete` writes tamper-evident audit rows (`GET /audit/`) — one for the
+> `InventoryTransaction` and one per stock-level change it produces (a transfer logs both the source
+> decrement and the destination increment) — flushed inside the same atomic transaction as the
+> inventory write so the audit row commits with the movement. The new `InventoryTransaction` rows are
+> tenant-tagged with the active `company_id`.
+>
+> `.../complete` previously wrote **no** audit rows at all despite adjusting stock. It now follows the
+> `/adjust` dual-row convention per adjusted item (`inventory` CREATE for the COUNT movement +
+> `inventory` UPDATE for the stock level) and adds one `cycle_count` STATUS_CHANGE for the count
+> itself, whose `extra_data` carries `apply_adjustments`, `items_adjusted`,
+> `measured_variance_value`, and `posted_variance_value`. `.../start` likewise now audits — a
+> `cycle_count` STATUS_CHANGE on the real SCHEDULED→IN_PROGRESS transition, or an UPDATE recording
+> the `assigned_to` change when an already-IN_PROGRESS count is re-assigned.
+>
+> **The whole cycle-count lifecycle is now on the hash chain**, closing the last two gaps:
+> `POST /cycle-counts` writes a `cycle_count` **CREATE** whose `extra_data` records the declared
+> scope (`warehouse`, `location_code`, `part_id`) and `total_items` — the step that defines the
+> count and enrolls the rows `complete` later adjusts — and
+> `.../items/{item_id}/count` writes a `cycle_count_item` **UPDATE** for every counted quantity,
+> carrying the previous values. That last one matters on a **re-count**: a second POST while the
+> count is still `IN_PROGRESS` is legal, but it silently replaces `counted_quantity` / `variance` /
+> `counted_by` on the row, so the audit entry is the only surviving record of the value it
+> overwrote. The first count of an item is logged the same way, with null old values.
+
+> **Every inventory lookup is tenant-scoped.** Location codes, lot numbers, and warehouse names are
+> **not** unique across companies, so each of these endpoints resolves them against the active
+> company only — a code or id belonging to another tenant behaves as **404 / not found**, never as a
+> valid target. This covers the `location_code` lookups on `/receive`, `/transfer`, and
+> `POST /cycle-counts`; the existing-lot row that `/receive` increments and the destination row that
+> `/transfer` increments; the per-part on-hand aggregate behind `/low-stock`; the parent count and
+> count item on `.../items/{item_id}/count`; and the inventory row that `.../complete` adjusts.
+> `POST /cycle-counts` enrolls only the active company's stock rows, and the `CycleCountItem` and
+> COUNT `InventoryTransaction` rows it and `.../complete` create are tenant-tagged with the active
 > `company_id`.
+>
+> **What the missing `company_id` stamps actually did.** `cycle_count_items.company_id` and
+> `inventory_transactions.company_id` are **NOT NULL** (`TenantMixin`; set NOT NULL by migration
+> `026_add_multi_tenancy`). The two inserts that omitted the tag therefore raised `IntegrityError`
+> at commit: `POST /cycle-counts` **always 500'd and rolled back** whenever the scope matched at
+> least one stock row, and `.../complete` **always 500'd and rolled back** whenever it had an
+> adjustment to post. No untagged and no cross-tenant row was ever persisted by either path — the
+> unscoped enrollment query and the unscoped `InventoryItem` lookup in `.../complete` were latent
+> defects masked by that constraint, not sources of bad data. The `company_id` stamps are what make
+> these two endpoints function at all, which is why the lifecycle guards and audit trail below
+> ship with them.
+
+> **Cycle-count lifecycle guards.** The count is a state machine and the endpoints now enforce it.
+> These are integrity guards, separate from authorization: `start` and `.../count` are open to every
+> role **except Viewer** (counting is the operator task, and the gate is defined by excluding the
+> one read-only role — see `docs/RBAC_PERMISSIONS.md` → Inventory); `POST /cycle-counts` and
+> `.../complete` keep their existing Admin / Manager / Supervisor gates.
+>
+> - `POST /cycle-counts/{id}/start` — **409** if the count is terminal (`COMPLETED` or `CANCELLED`).
+>   Re-opening a completed count would let a second `complete` double-post the same physical variance
+>   to the ledger; a cancelled count was deliberately abandoned. Starting an **already-IN_PROGRESS**
+>   count is still allowed (it re-assigns it to the caller) but **preserves the original
+>   `started_at`** — that timestamp is the traceability record of when counting began.
+> - `POST /cycle-counts/{id}/items/{item_id}/count` — **409** unless the parent count is
+>   `IN_PROGRESS`. A client must `start` the count first; a `SCHEDULED` count has nothing to count
+>   against, and once the count is closed the counted quantity is evidence the variance adjustment
+>   was derived from and must not be overwritten.
+> - `POST /cycle-counts/{id}/complete` — **409** if the count is already `COMPLETED` (or
+>   `CANCELLED`). This closes a **ledger double-post**: a second call appended a second COUNT
+>   `InventoryTransaction` for the same physical variance while writing the same on-hand figure,
+>   permanently diverging the ledger from stock.
+> - `POST /cycle-counts` — **404** when `location_code` does not resolve in the active company.
+>   Previously an unknown code was silently ignored, producing a count whose declared scope did not
+>   match the rows it enrolled.
+
+> **`total_variance_value` is the POSTED variance (semantic change), and `measured_variance_value`
+> is new.** `POST /cycle-counts/{id}/complete` now distinguishes two figures:
+>
+> - **posted** — the variance value of only those items that actually produced a COUNT
+>   `InventoryTransaction`, priced on **that transaction's own cost basis**: `variance ×` the
+>   **current** `InventoryItem.unit_cost`, exactly what the ledger row carries. This is what is
+>   persisted to `CycleCount.total_variance_value` and returned as `total_variance_value`, so the
+>   column reconciles against the ledger rows the completion wrote. Under `apply_adjustments=false`
+>   **nothing posts, so this figure is `0.0`** — previously the field was populated with the
+>   measured total even though no ledger row existed.
+> - **measured** — the variance value of every counted item with a non-zero variance, whether or not
+>   it posted, priced on the **enrollment-time** `CycleCountItem.unit_cost` snapshot. Returned as the
+>   **new, additive** `measured_variance_value` response field. It is *not* a new column; per-item
+>   `CycleCountItem.variance_value` remains the record of record, and the figure is also carried in
+>   the STATUS_CHANGE audit row's `extra_data`.
+>
+> The two differ whenever `apply_adjustments=false`, a count item points at a stock row that has
+> since been removed — **or the part's unit cost moved between enrollment and completion** (a
+> re-cost, or a receipt at a different price). That last case is why the two bases are stated
+> explicitly: accumulating the posted total from the enrollment-time snapshot made
+> `total_variance_value` disagree with the very COUNT rows the same request had just written.
+> Clients reading `total_variance_value` as "what the counters found" must switch to
+> `measured_variance_value`.
+
+> **Concurrency: `complete` locks the count row.** The terminal-state **409** above is
+> check-then-act, so under PostgreSQL READ COMMITTED two overlapping requests could both read
+> `IN_PROGRESS`, both pass the guard, and both post a COUNT transaction for the same physical
+> variance (FastAPI runs these sync handlers in a threadpool, so the overlap is real, and
+> `CycleCount` carries no optimistic-lock `version` column). The handler now takes a
+> `SELECT id ... FOR UPDATE` row lock on the count *before* the guard, held until the completion
+> commits. It is a deliberately separate id-only query: the main load uses
+> `joinedload(CycleCount.items)`, and PostgreSQL refuses `FOR UPDATE` across the `LEFT OUTER JOIN`
+> that produces. A count id from another tenant never resolves, so the lock is tenant-scoped too
+> (**404**).
 
 ### Traceability
 
@@ -2105,10 +3423,30 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 > the parent finished lot **and** the component part / lot / quantity consumed to build it. It is empty
 > for purchased/raw lots. Each entry carries `work_order_id`, `work_order_number`,
 > `component_part_id`, `component_part_number`, `component_part_name`, `lot_number`, and `quantity`
-> (reported positive). Component genealogy is populated by the **backflush** path, so a lot's
-> `consumed_components` is non-empty only when the producing part had `backflush_components = true`.
-> `GET /traceability/serial/{serial_number}` mirrors the lot trace's work-order and NCR collection.
-> Every query is scoped to the active company.
+> (reported positive). `GET /traceability/serial/{serial_number}` mirrors the lot trace's work-order
+> and NCR collection. Every query is scoped to the active company.
+>
+> **Three consumption sources are read, and all three must be.** Genealogy resolves ISSUE rows under
+> **`reference_type='work_order'`** (LEGACY pre-PR-4.4 one-shot BOM / work-order-scoped-tie rows,
+> `reference_id` = the work order — nothing writes this shape any more), **`work_order_backflush`**
+> (PR 4.4: the reconciling component leg — BOM/routing demand and work-order-scoped ties,
+> `reference_id` = the work order) **and** **`reference_type='work_order_operation'`** (per-run
+> consumption of material tied to
+> an operation, `reference_id` = the **operation**, mapped back to its work order here). All three collapse
+> into the same per-`(work order, component part, lot)` lines, so a nest that consumed sheets and a
+> BOM that backflushed hardware read identically. Historical rows are **not** migrated — they
+> truthfully carry `work_order` only. **Expect more lines per component than before PR 4.4**: the
+> reconciling leg spills across lots, so one logical draw of 25 over lots of 10/10/10 is three lines
+> naming three heats. That is the intended as-built record — the single summed row it replaced could
+> not express which heats went into the part. Consequently `consumed_components` is non-empty when the
+> producing part had `backflush_components = true` **or** the work order carried material ties (see
+> Work Orders → "Material ties"); it stays empty for purchased/raw lots and for untied work on a part
+> that never opted into backflush. In practice **material ties are still the only source with production
+> mileage**: PR 4.5 made `backflush_components` settable (see [Part Schema](#part-schema)), but the
+> column defaults to `false` and no work order has yet reached the BOM/routing leg. The claim here used
+> to be structural ("nothing writes the flag"); it is now merely factual, and it stops being true the
+> first time a part opts in. All three `work_order`-family reference types are also what the lot
+> and serial traces use to collect `work_orders_used`.
 
 ### Shipping
 
@@ -2458,19 +3796,110 @@ records, targets) require **Admin / Manager / Supervisor**.
 
 > **Password-strength policy — enforced server-side on every password-set path.** A password set
 > through `POST /users/` (create), `POST /users/{id}/reset-password`, or the self-service
-> `POST /users/change-password` must be **≥ 12 characters** and contain an **uppercase**, a
-> **lowercase**, a **number**, and a **special** character, and must not contain a common weak
-> substring (`password`, `123456`, `qwerty`, `admin`, `letmein`, `welcome`); a violation returns
-> **422**. The **same policy** — the shared `validate_password_strength` (`app/schemas/user.py`) —
+> `POST /users/change-password` must satisfy exactly **two** rules: it must be **≥ 12 characters**,
+> and it must not contain a **common weak substring** (case-insensitive) from the blocklist in
+> `_COMMON_PASSWORD_PATTERNS` — keyboard walks, perennial top-100 passwords, digit runs, and the
+> shop's own name (`werco`, `wercomfg`). A violation returns **422**; the blocklist message is
+> `"Password contains a common word or pattern that is too easy to guess"`. There are **no
+> character-class (composition) requirements** — the uppercase / lowercase / digit / special-character
+> rules were removed on 2026-07-29 per NIST SP 800-63B §5.1.1.2 (length + blocklist over composition),
+> and the blocklist was expanded from 6 entries to ~37 in the same change. A passphrase such as
+> `correct horse battery staple` is now accepted, where the old rules rejected it. The 12-character
+> minimum is unchanged and is additionally enforced as `Field(min_length=12)` on the request schemas.
+> The **same policy** — the shared `validate_password_strength` (`app/schemas/user.py`) —
 > also governs `POST /auth/register` (admin create), public self-registration
 > `POST /auth/register-public`, and the **first-admin `admin_password`** on the two company-creation
 > paths: the **unauthenticated** `POST /companies/register` (company self-registration) and
 > platform-admin `POST /platform/companies`. (`POST /companies/register` previously skipped the
-> common-substring check and `POST /platform/companies` had **no** complexity check at all — both now
+> common-substring check and `POST /platform/companies` had **no** strength check at all — both now
 > enforce the full policy, so no first-admin can be seeded with a weak password.) The user CSV import
 > (`POST /users/import-csv`) applies the same check to **user-supplied** passwords **per row** (a weak
 > password fails only that row, `reason` = `"Weak password: …"`); operator **auto-generated**
 > passwords (for badge/employee-ID logins) satisfy the policy by construction and are **exempt**.
+
+### User self-service (My Settings)
+
+Self-scoped profile + notification settings for the signed-in user. **No role gate beyond
+authentication** — every route reads/writes only `current_user` and never accepts a user id, so no
+caller can reach another user's phone or preferences. Backing UI: **My Settings** (`/settings`, all
+roles). See [docs/NOTIFICATIONS.md](NOTIFICATIONS.md#sms-channel-twilio).
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/users/me` | Current user's own profile (the one general route exposing `phone`) | Any authenticated user (self) |
+| PUT | `/users/me/phone` | Set or clear your own phone number (stored E.164, audited) | Any authenticated user (self) |
+| GET | `/users/me/notification-preferences` | Your **effective** per-event channel matrix | Any authenticated user (self) |
+| PUT | `/users/me/notification-preferences` | Save your **SMS** opt-ins (audited) | Any authenticated user (self) |
+| POST | `/users/me/test-sms` | Send a test SMS to your own number — **`3/minute` per IP + `3/hour` per user** | Any authenticated user (self) |
+
+> **`PUT /users/me/phone`** — body `{ "phone": "512-555-0100" }` (or `{ "phone": null }` / `""` to
+> clear); `phone` is `max_length` 32. The number is parsed against `SMS_DEFAULT_REGION` (default
+> `US`) and **normalized to E.164** before storage, so the SMS transport never has to guess a
+> country code. An unparseable/invalid number returns **400** (`"Invalid phone number: …"`) rather
+> than being stored and failing later at send time. Returns the full `UserResponse`. The change is
+> written to the tamper-evident audit log (`extra_data.source = "self_service"`) — the phone is the
+> destination of every SMS alert, so a silent redirect would be an audit gap. A no-op change
+> (same number) short-circuits without an audit row. The **admin** paths `POST /users/` and
+> `PUT /users/{id}` accept and normalize `phone` the same way (it was previously a phantom schema
+> field that was silently dropped).
+>
+> **`GET /users/me/notification-preferences`** returns the channel map the dispatcher **would apply
+> right now** — catalog defaults where the user has saved nothing, plus any mandatory channel forced
+> on — resolved through the dispatcher's own `channels_from_pref`, so the settings UI can never
+> disagree with what actually gets sent. It is **read-only and non-creating**: a user who has never
+> saved preferences gets defaults and **no** `NotificationPreference` row is written.
+> ```json
+> {
+>   "preferences": {
+>     "wo.blocker_created": { "digest": false, "email": true, "in_app": true, "sms": false }
+>   },
+>   "has_saved_preferences": false,
+>   "phone": "+15125550100",
+>   "sms_egress_enabled": false,
+>   "sms_configured": true
+> }
+> ```
+> `sms_egress_enabled` (the company kill switch) / `sms_configured` (server-side Twilio config) /
+> `phone` are what the UI uses to explain why an SMS toggle would currently be inert.
+>
+> **`PUT /users/me/notification-preferences`** — body
+> `{ "preferences": { "<event_key>": { "sms": true }, … } }`, max 200 events. **Scope: the `sms`
+> channel only.** Both models are `extra="forbid"`, so a payload carrying `in_app` / `email` /
+> `digest` fails loudly with **422** instead of silently dropping channels this endpoint does not
+> yet own (the full matrix is PR 3). Errors: an unknown `event_key` → **400**
+> (`"Unknown notification event(s): …"`); enabling `sms` on an event that is not `sms_eligible` →
+> **400** (`"SMS is not available for event(s): …"`). Events the user has never touched are seeded
+> from catalog defaults before the `sms` bit is applied, and the stored row keeps the full
+> `{in_app, email, sms, digest}` shape per event. The mandatory channel is **not** baked into the
+> stored row — the dispatcher re-applies it at send time. Audited as a
+> `notification_preference` update. Returns the same response shape as the `GET`.
+>
+> **`POST /users/me/test-sms`** — no body. Sends `Werco: test message - SMS alerts are configured
+> for your account.` to **`current_user.phone`**; the destination can never be supplied by the
+> caller, so this cannot be used to message an arbitrary number. It runs through the same
+> `sms_service` path as real notifications (so the `allow_sms_egress` kill switch is enforced
+> fail-closed) and writes a `notification_logs` row (`event_type = "sms.test"`) **before** the
+> outbound call, so the attempt is recorded even if the process dies mid-flight.
+>
+> Bounded **twice**, because it is the one authenticated route that spends carrier money per call:
+> **`3/minute` per IP** (`ENDPOINT_RATE_LIMITS` in `main.py`) and **`3/hour` per user**
+> (`SMS_TEST_HOURLY_CAP_PER_USER`, `reserve_test_sms_quota`). The per-IP limiter alone is not
+> sufficient — it keys on address, so one account multiplies it by rotating egress IPs, and it is
+> disabled entirely wherever `RATE_LIMIT_ENABLED=false`. The per-user budget is separate from
+> `SMS_HOURLY_CAP_PER_USER`, so testing never consumes the critical-alert allowance.
+>
+> Any phone number appearing in a provider/validation error is **masked** before it is written to
+> `notification_logs.error` (`***0134`), because that field is served by
+> `GET /notifications/logs` to roles that cannot see `phone`. The HTTP `detail` returned to the
+> caller is unmasked — they own the number.
+>
+> | Status | When |
+> |---|---|
+> | **200** `{ status, sid, provider_status, detail }` | Sent (`status = "sent"`), **or** Twilio unconfigured on the server (`status = "skipped"`, `detail` explains) |
+> | **400** | No phone on file; company SMS egress disabled; the stored number is invalid |
+> | **429** | Per-user hourly test budget exhausted (`3/hour`) |
+> | **503** | The quota backend (Redis) is unavailable — refuses rather than sending unmetered, and deliberately does *not* report this as a limit the user hit |
+> | **502** | Provider rejected the message, or the provider was unreachable |
 
 ### Admin Settings (Admin)
 
@@ -2500,9 +3929,10 @@ The active company's own profile and self-managed settings. Mounted under `/comp
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| GET | `/companies/me` | Get the active company (includes `allow_ai_egress` and `user_count`) | Any authenticated user |
+| GET | `/companies/me` | Get the active company (includes `allow_ai_egress`, `allow_sms_egress`, and `user_count`) | Any authenticated user |
 | PUT | `/companies/me` | Update the active company's settings | Admin |
 | PUT | `/companies/me/ai-egress` | Toggle the company's **AI document-extraction egress kill switch** (`allow_ai_egress`) | Admin |
+| PUT | `/companies/me/sms-egress` | Toggle the company's **notification-SMS egress kill switch** (`allow_sms_egress`) | Admin |
 
 > **`allow_ai_egress` is the AI-egress CUI kill switch (default OFF).** It gates **all** outbound
 > AI document-extraction egress to the Anthropic API (the AI analogue of `allow_carrier_egress` /
@@ -2518,6 +3948,21 @@ The active company's own profile and self-managed settings. Mounted under `/comp
 > **Admin Settings → AI Privacy** (`/admin/settings?tab=aiprivacy`) — interactive for Admin
 > (enabling egress requires explicit confirmation), read-only for other roles. See
 > [docs/AI_QUOTING_AGENT_RUNBOOK.md](AI_QUOTING_AGENT_RUNBOOK.md).
+
+> **`allow_sms_egress` is the notification-SMS CUI kill switch (default OFF).** It gates **all**
+> outbound notification SMS to Twilio, which sits outside the CUI boundary.
+> `PUT /companies/me/sms-egress` takes `{ "allow_sms_egress": boolean }` and returns the updated
+> `CompanyResponse`. **Admin-only** (`require_role([ADMIN])`), matching the sibling
+> `allow_ai_egress` / `allow_carrier_egress` / `allow_print_egress` controls, and it only ever
+> mutates the caller's **own active company** (`get_current_company_id`; never taken from the
+> request body). **Double-audited**: the flip writes both a field-level update **and** an
+> `sms_egress_enabled` / `sms_egress_disabled` status change on the tamper-evident trail. Every
+> company is created **OFF**; while OFF the SMS transport denies **fail-closed** on every send —
+> including messages already queued in ARQ — and nothing (not even the destination number) leaves
+> the boundary. Turning it on is necessary but not sufficient: SMS also requires server-side Twilio
+> configuration and a per-user opt-in with a saved phone number. Exposed in the UI at
+> **Admin Settings → SMS Privacy** (`/admin/settings?tab=smsprivacy`). See
+> [docs/NOTIFICATIONS.md](NOTIFICATIONS.md#sms-channel-twilio).
 
 ### Carrier Integrations (Admin)
 
@@ -2703,6 +4148,92 @@ quote statuses (accepted / rejected / converted / expired) auto-record `quote_re
 > default (operators keep the kiosk station screen; deep links are unaffected). The page shows a
 > "Top 3 today" hero — the three highest-scoring pending recommendations.
 
+### Notifications (in-app inbox)
+
+Per-user notification inbox for the bell / popover / `/notifications` page — PR 1 (Foundation +
+in-app inbox) of the notification system. See [docs/NOTIFICATIONS.md](NOTIFICATIONS.md) for the
+architecture (transactional outbox, event catalog, channels, compliance invariants). Per-user
+channel preferences and the SMS channel live under
+[User self-service (My Settings)](#user-self-service-my-settings). Every inbox
+route is **self + tenant scoped**: rows are filtered to `user_id == current_user.id` **and**
+`company_id == get_current_company_id` — there is no role gate (any authenticated user manages
+their own inbox).
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/notifications` | Paged inbox for the current user (newest first) | Yes (own rows) |
+| GET | `/notifications/unread-count` | Cheap unread badge count `{ "count": int }` | Yes (own rows) |
+| GET | `/notifications/catalog` | The event catalog for the settings matrix | Yes (all roles) |
+| POST | `/notifications/{id}/read` | Mark one notification read (404 if not owned) — **not audited** | Yes (own rows) |
+| POST | `/notifications/read-all` | Mark all of the caller's unread read `{ "updated": int }` — **not audited** | Yes (own rows) |
+| GET | `/notifications/logs` | Recent email/SMS delivery-attempt log (retained) | Yes (see below) |
+
+> **List query params (`GET /notifications`):** `unread` (`true` = only unread, `false` = only
+> read, omit = all), `category` (a catalog category, e.g. `Production` / `Quality` / `Purchasing &
+> Inventory` — an unknown value returns an empty page, never all rows), `severity`
+> (`info` | `warning` | `critical`), `page` (default 1), `page_size` (default 25, **max 100**).
+> Ordered `desc(created_at, id)`.
+>
+> **List response** (`NotificationListResponse`) — note the `pagination` object differs from the
+> generic offset paging under [Pagination](#pagination):
+> ```json
+> {
+>   "items": [
+>     {
+>       "id": 812,
+>       "event_key": "wo.blocker_created",
+>       "severity": "critical",
+>       "title": "Work order blocked / on hold: WO-1042",
+>       "body": "A work order or operation was placed on hold or blocked.\n\nCategory: machine_down | Source: kiosk",
+>       "link": "/work-orders/1042",
+>       "related_type": "work_order",
+>       "related_id": 1042,
+>       "is_read": false,
+>       "read_at": null,
+>       "created_at": "2026-07-24T15:04:11Z"
+>     }
+>   ],
+>   "pagination": {
+>     "page": 1, "page_size": 25, "total_count": 3,
+>     "total_pages": 1, "has_next": false, "has_previous": false
+>   }
+> }
+> ```
+> `event_key` is the catalog key (see `GET /notifications/catalog`); `link` is a **relative** SPA
+> route the UI deep-links to; timestamps are UTC `Z` (display Central).
+>
+> **Content (revised 2026-07-29, after CMMC L2 was descoped):** `title` is the catalog label plus
+> the record identifier. `body` is the catalog description, then a blank line, then a detail line
+> composed from a curated payload allowlist — statuses and transitions, the `quantity_*` family,
+> priorities, day counts, disposition/category/source/inspection method, and `reason` — pipe-joined,
+> each value truncated at 120 chars. When the payload carries none of those keys the body is the
+> description alone. **Part numbers and customer names are still absent**: the dispatcher reads the
+> event payload only and never re-queries to resolve `part_id` into a part number (a scope/N+1
+> decision, not a security boundary). See
+> [docs/NOTIFICATIONS.md → Content rules](NOTIFICATIONS.md#content-rules-compliance) for the
+> boundary decision of record.
+>
+> **`GET /notifications/catalog`** returns one object per catalog entry
+> (`event_key`, `label`, `description`, `category`, `severity`, `default_channels[]`,
+> `mandatory_channel`, `sms_eligible`) — the source of truth the settings UI renders (the frontend
+> never hardcodes the event list). All roles may read it.
+>
+> **Mark-read is deliberately NOT audited** — read state is UI state, not domain state, so it does
+> not write the `audit_log` hash chain (see [docs/NOTIFICATIONS.md](NOTIFICATIONS.md) §Compliance).
+>
+> **`GET /notifications/logs`** (retained delivery-attempt view): query `limit` (1–100, default 25),
+> `status` (`sent` | `failed`), `mine_only` (default `true`). A non-Admin/Manager/Supervisor caller
+> is always restricted to their own log rows regardless of `mine_only`; the full admin-scoped
+> delivery-failure view is PR 3. Rows are returned for **both** the `email` and `sms` channels
+> (`channel`); for SMS, a message suppressed by the per-user storm cap is recorded with the reason
+> in `error` rather than being silently dropped — see
+> [docs/NOTIFICATIONS.md](NOTIFICATIONS.md#storm-control). `NotificationLogResponse` returns
+> `id`, `user_id`, `event_type`, `channel`, `subject`, `body`, `sent`, `error`, `related_type`,
+> `related_id`, `sent_at`, plus — for SMS — `provider_message_id` (the Twilio message SID) and
+> `provider_status` (the provider-reported status). Those two make "did that alert actually go
+> out?" answerable from the API instead of only from the table; they are an opaque provider id and
+> a status string, not PII.
+
 ### Bulk Imports & Templates (Excel Migration Kit)
 
 One shared CSV/XLSX upload kit for go-live data migration — see
@@ -2848,6 +4379,45 @@ tenants, so the aggregate chain-verification endpoints are **platform-admin only
 > global sequence spanning every tenant, so its stats/issues (record counts, sequence ranges,
 > record ids) can't be scoped to a single company without leaking other tenants' data. A company
 > Admin's "are my records intact?" need is served by the per-record endpoint above.
+>
+> **The hash chain is pausable, and a paused window reports as legacy — not as tampering.** As of
+> 2026-07-29 the chain is gated on the `AUDIT_HASH_CHAIN_ENABLED` setting, which **defaults to
+> `true`** (unchanged behavior). If it is set to `false`, rows are still written, but with
+> `previous_hash = null` and `integrity_hash = "LEGACY_CHAIN_PAUSED"` — a `LEGACY_`-prefixed
+> placeholder that every one of these endpoints already skips rather than asserts correct. Effects on
+> the responses:
+> - `/integrity/verify` and `/integrity/verify-recent` return a new field
+>   **`legacy_sequence_gaps`** (int, default `0`) alongside `legacy_records`. Sequence gaps that touch
+>   a legacy/paused row are counted there **instead of** being raised as `sequence_gap` issues, so
+>   `chain_valid` stays `true` and `issues` stays empty across a paused window. Gaps are expected
+>   while paused because the sequence allocator's values are consumed even by rolled-back
+>   transactions. **A non-zero `legacy_sequence_gaps` means gap-based deletion detection does not
+>   apply over that span** — read it as a coverage caveat, not a fault. With the chain enabled, an
+>   injected gap between two non-legacy rows is still reported as a `sequence_gap` issue and still
+>   flips `chain_valid` to `false`.
+> - `/integrity/record/{sequence_number}` returns `is_legacy: true` with `hash_valid: true` and
+>   `chain_valid: true` for a paused row (skipped, not verified). The first row after a pause begins
+>   is included in that skip.
+> - `/integrity/status` counts paused rows in `legacy_records` (excluded from `protected_records`).
+>   Its **`has_gaps` flag is not legacy-aware** — a plain `total != (last - first + 1)` comparison —
+>   so it reads `true` across a paused window. `/integrity/verify` is the authoritative check.
+>
+> The database immutability triggers (migrations `008`/`060`) are independent of the setting and
+> remain in force. Full operational detail, including what is permanently lost while paused:
+> [docs/AUDIT_LOG_RETENTION_RUNBOOK.md](AUDIT_LOG_RETENTION_RUNBOOK.md) → **Pausing the hash chain**.
+>
+> **⚠️ Filtering by `resource_type` does NOT return a material's full history — read this before
+> auditing one.** `parts` and `materials` are the *same table* behind two routers, and their audit
+> rows are split across two `resource_type` values with a **discontinuity dated 2026-07-27 (PR 4.5)**:
+> `POST /materials/` and `DELETE /materials/{id}` log `resource_type="material"`, while
+> `PUT /materials/{id}` logs **`resource_type="part"`** — as `PUT /parts/{id}` always has. Updates
+> before that date are under `"material"`; updates after it are under `"part"`. Nothing is missing and
+> no row was rewritten (the chain is append-only), but a query filtered to one value silently returns a
+> partial trail. **Query both**, e.g. `resource_type IN ('part','material') AND resource_id = <part id>`
+> ordered by `timestamp`. The change was deliberate: it makes *"who armed automatic component
+> backflush on this part, and when"* answerable from one query regardless of which URL was used — see
+> [Parts](#parts) → `backflush_components` and
+> [docs/CMMC_LEVEL_2_COMPLIANCE.md](CMMC_LEVEL_2_COMPLIANCE.md) → the 2026-07-27 (PR 4.5) row, item (3).
 
 ### Visitor Logs
 
@@ -3171,12 +4741,17 @@ the global default applied):
 | `POST /auth/register` | 3/minute |
 | `POST /auth/register-public` | 3/minute |
 | `POST /auth/refresh` | 30/minute |
-| `POST /auth/employee-login` | 3/minute |
+| `POST /auth/employee-login` | 10/minute |
 | `POST /auth/kiosk-badge-token` | 30/minute |
 | `POST /auth/display-token/claim` | 10/minute |
 | `POST /visitor-logs/station-login` | 5/minute |
 | `POST /shop-floor/kiosk-stations/station-login` | 5/minute |
 | `POST /scanner/resolve-action` | 60/minute |
+| `POST /users/me/test-sms` | 3/minute |
+
+(`POST /users/me/test-sms` is authenticated and self-targeted, but it is the one route that spends
+real carrier money per call, so it is capped well below anything a human would click. The two
+standalone laser-nest routes carry their own **10/minute** caps — see Laser Nests.)
 
 An over-limit request returns **HTTP 429** with a `Retry-After` header (seconds until the window
 resets) and body:
@@ -3185,6 +4760,45 @@ resets) and body:
 ```
 Enforcement fails open: if the limiter backend errors, the request is allowed (the global default
 limit still applies).
+
+**`POST /auth/employee-login` additionally carries a per-IP failed-attempt throttle** — the
+compensating control for its 10/minute limit (raised from 3/minute for shift-change badge cycling
+on a shared kiosk): **8 FAILED attempts from one IP within 15 minutes → 429** ("Too many failed
+sign-in attempts — wait a few minutes") with a `Retry-After` header and a 15-minute cooldown.
+Successful logins never count toward the window; the check runs before any user lookup; each
+throttled rejection is audited as `EMPLOYEE_LOGIN_BLOCKED`; a counter-storage outage fails open
+with a logged warning (the 10/minute cap above still applies). Implementation:
+`backend/app/core/login_throttle.py`.
+
+## Request Size Limits
+
+**JSON request bodies are capped at 256 KB** (`MAX_JSON_BODY_BYTES`, env-overridable; the
+pre-rename `MAX_SANITIZED_JSON_BODY_BYTES` is still honored as a deprecated alias). Every
+`application/json` `POST`/`PUT`/`PATCH` body is size-checked by middleware before the route
+runs — ahead of route auth, so an unauthenticated caller cannot choose how many bytes the app
+buffers and parses. Over the cap the request is **rejected**:
+
+```json
+{ "detail": "Request body too large: 300000 bytes exceeds the 262144-byte limit for JSON requests." }
+```
+
+Returned as **HTTP 413**. The check is applied to the declared `Content-Length` before the body
+is read, and again to the bytes actually received (chunked encoding, or a header that lies).
+
+**Not affected:** `multipart/form-data` uploads, which keep their own per-endpoint caps (20 MB
+for QMS standard uploads, 50 MB `LASER_UPLOAD_MAX_BYTES` for laser-nest ZIP/PDF — those also
+return **413**), and inbound carrier tracking webhooks, which bypass this middleware entirely so
+their HMAC verifies against raw bytes.
+
+The largest realistic JSON bodies fit — a 170-nest laser import is ~183 KB, a 1000-line-item BOM
+create ~201 KB. A BOM create above roughly **1300 line items** exceeds the cap; raise
+`MAX_JSON_BODY_BYTES` for that case, noting the sizing guidance in
+[Request Body Size](ENVIRONMENT_VARIABLES.md#request-body-size-json).
+
+**Request bodies are stored as sent.** The API does **not** strip or rewrite HTML in request
+data — as of 2026-07-30 the middleware only measures size. Angle brackets in a note field (ASME
+Y14.5 notation such as `2.500 <REF>`, or `<` meaning "less than") round-trip byte-for-byte
+through create/read/update. Server-rendered PDFs escape at render.
 
 ## CORS
 
@@ -3227,6 +4841,7 @@ Response:
 | 403 | Forbidden |
 | 404 | Not Found |
 | 409 | Conflict — concurrent modification of an operation / work order / time entry on a completion or clock endpoint (the row was updated by another writer between read and commit; refresh and retry) |
+| 413 | Content Too Large — a JSON body over `MAX_JSON_BODY_BYTES` (default 256 KB, rejected by middleware before the route runs), or a file upload over its endpoint's own cap (e.g. 50 MB `LASER_UPLOAD_MAX_BYTES`). See [Request Size Limits](#request-size-limits) |
 | 422 | Validation Error |
 | 429 | Too Many Requests |
 | 500 | Internal Server Error |

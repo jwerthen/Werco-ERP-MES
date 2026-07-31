@@ -11,11 +11,15 @@ Covered findings:
                    consumed source lot, decrementing source stock; scrap_factor is
                    applied (produced * qty_per * (1 + scrap)).
 - INV-3/TRACE-2/TRACE-4: trace_lot AND trace_serial reconstruct the WO genealogy from
-                   the FG-receipt + component-ISSUE txns (reference_type='work_order').
+                   the FG-receipt (reference_type='work_order') + the component-ISSUE
+                   txns (reference_type='work_order_backflush' since PR 4.4).
 - Idempotency:     re-completing an already-COMPLETE WO, and a reconcile-on-read that
                    re-touches an already-COMPLETE WO, do not double-receive or double-
-                   issue (the WO RECEIVE / component ISSUE txn is the key). THE headline
-                   risk -- the finalizer re-enters on every reconcile read.
+                   issue. THE headline risk -- the finalizer re-enters on every reconcile
+                   read. TWO mechanisms since PR 4.4: the FG RECEIVE is existence-keyed
+                   (uq_wo_inventory_receipt behind it), while component consumption
+                   reconciles delta = target - signed ledger net under a shape NO index
+                   covers.
 - INV-4:           the FG-receipt + backflush stock movements land on the tamper-
                    evident audit_log hash chain.
 - MS-4:            MRP on_order reflects RELEASED/IN_PROGRESS WO output and EXCLUDES
@@ -29,9 +33,11 @@ from datetime import date, datetime, timedelta
 import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.core.security import create_access_token
+from app.db.ledger_filter import BACKFLUSH_REFERENCE_TYPE, WORK_ORDER_ID_KEYED_REFERENCE_TYPES
 from app.models.audit_log import AuditLog
 from app.models.bom import BOM, BOMItem
 from app.models.company import Company
@@ -44,8 +50,11 @@ from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation
 from app.services.audit_service import AuditService
 from app.services.completion_inventory_service import (
     FINISHED_GOODS_LOCATION,
+    _component_already_issued,
+    _existing_work_order_receipt,
     _insert_txn_with_savepoint,
     apply_completion_inventory_effects,
+    backflush_net_issued_by_part,
 )
 from app.services.mrp_service import MRPService
 from app.services.operational_event_service import OperationalEventService
@@ -226,6 +235,32 @@ def fg_receipts(db: Session, wo_id: int, *, company_id: int = COMPANY_A) -> list
     )
 
 
+def component_issues(
+    db: Session, wo_id: int, *, part_id: int = None, company_id: int = COMPANY_A
+) -> list[InventoryTransaction]:
+    """Component ISSUE rows a work order produced, under BOTH work-order-id-keyed shapes.
+
+    Since PR 4.4 the component leg posts ``work_order_backflush`` and spills across as
+    many lots as the demand needs, so a per-part TOTAL (and, where it matters, an explicit
+    row count) replaces the old "there is exactly one row under ``work_order``".
+
+    The LEGACY ``work_order`` shape stays in the predicate deliberately. Nothing writes it
+    any more, so it is how a regression that started writing it again would be caught —
+    and, more importantly here, it is what keeps ``assert component_issues(...) == []``
+    (the flag-off lock) an honest statement about the whole ledger rather than about one
+    shape the code no longer uses.
+    """
+    query = db.query(InventoryTransaction).filter(
+        InventoryTransaction.company_id == company_id,
+        InventoryTransaction.reference_type.in_(WORK_ORDER_ID_KEYED_REFERENCE_TYPES),
+        InventoryTransaction.reference_id == wo_id,
+        InventoryTransaction.transaction_type == TransactionType.ISSUE,
+    )
+    if part_id is not None:
+        query = query.filter(InventoryTransaction.part_id == part_id)
+    return query.order_by(InventoryTransaction.id).all()
+
+
 def fg_on_hand(db: Session, part_id: int, *, company_id: int = COMPANY_A) -> float:
     rows = (
         db.query(InventoryItem)
@@ -382,17 +417,7 @@ def test_backflush_off_by_default_consumes_no_components(client: TestClient, db_
     _complete_single_op_wo(client, admin, op, 4)
 
     db_session.expire_all()
-    issues = (
-        db_session.query(InventoryTransaction)
-        .filter(
-            InventoryTransaction.company_id == COMPANY_A,
-            InventoryTransaction.reference_type == "work_order",
-            InventoryTransaction.reference_id == wo.id,
-            InventoryTransaction.transaction_type == TransactionType.ISSUE,
-        )
-        .all()
-    )
-    assert issues == [], "backflush must NOT consume components when the flag is OFF"
+    assert component_issues(db_session, wo.id) == [], "backflush must NOT consume components when the flag is OFF"
 
 
 # ---------------------------------------------------------------------------
@@ -428,21 +453,14 @@ def test_backflush_on_consumes_components_and_builds_genealogy(client: TestClien
     _complete_single_op_wo(client, admin, op, 4)
 
     db_session.expire_all()
-    # 2 per unit * 4 units = 8 consumed.
-    issues = (
-        db_session.query(InventoryTransaction)
-        .filter(
-            InventoryTransaction.company_id == COMPANY_A,
-            InventoryTransaction.reference_type == "work_order",
-            InventoryTransaction.reference_id == wo.id,
-            InventoryTransaction.transaction_type == TransactionType.ISSUE,
-        )
-        .all()
-    )
+    # 2 per unit * 4 units = 8 consumed -- one lot covers it, so still exactly one row.
+    issues = component_issues(db_session, wo.id)
     assert len(issues) == 1
     assert issues[0].quantity == -8, "negative ISSUE for 8 consumed component units"
     assert issues[0].part_id == component.id
     assert issues[0].lot_number == "RAW-LOT-7", "ISSUE must carry the consumed source lot"
+    assert issues[0].reference_type == BACKFLUSH_REFERENCE_TYPE, "the reconciling leg's own shape"
+    assert issues[0].allocation_id is None, "BOM demand is not tie-driven"
 
     src = db_session.get(InventoryItem, src.id)
     assert src.quantity_on_hand == 92, "source stock decremented by 8"
@@ -514,17 +532,12 @@ def test_backflush_shortage_does_not_fail_completion(client: TestClient, db_sess
 
     # The shortage ISSUE is still RECORDED (genealogy + cost captured) and the FG was
     # still received -- the shortage must not abort either leg.
-    issues = (
-        db_session.query(InventoryTransaction)
-        .filter(
-            InventoryTransaction.company_id == COMPANY_A,
-            InventoryTransaction.reference_type == "work_order",
-            InventoryTransaction.reference_id == wo.id,
-            InventoryTransaction.transaction_type == TransactionType.ISSUE,
-        )
-        .all()
-    )
+    issues = component_issues(db_session, wo.id)
     assert sum(t.quantity for t in issues) == -8, "full demand recorded despite shortage"
+    assert [t.quantity for t in issues] == [-3.0, -5.0], (
+        "the 3 that existed are drawn as their own row and the 5 that did not are a "
+        "separate (SHORT n) row against the same lot -- both carry the lot for genealogy"
+    )
     assert len(fg_receipts(db_session, wo.id)) == 1, "FG still received under a shortage"
 
 
@@ -830,18 +843,9 @@ def test_backflush_idempotent_across_recompletion(client: TestClient, db_session
     client.get("/api/v1/work-orders/", headers=h)
 
     db_session.expire_all()
-    issues = (
-        db_session.query(InventoryTransaction)
-        .filter(
-            InventoryTransaction.company_id == COMPANY_A,
-            InventoryTransaction.reference_type == "work_order",
-            InventoryTransaction.reference_id == wo.id,
-            InventoryTransaction.transaction_type == TransactionType.ISSUE,
-            InventoryTransaction.part_id == component.id,
-        )
-        .all()
-    )
+    issues = component_issues(db_session, wo.id, part_id=component.id)
     assert len(issues) == 1, "component must not be backflushed twice"
+    assert sum(t.quantity for t in issues) == -12, "and the quantity is still exactly the demand"
     assert db_session.get(InventoryItem, src.id).quantity_on_hand == 88, "source stock stable"
 
 
@@ -933,16 +937,7 @@ def test_backflush_applies_scrap_factor(client: TestClient, db_session: Session)
     _complete_single_op_wo(client, admin, op, 5)
 
     db_session.expire_all()
-    issues = (
-        db_session.query(InventoryTransaction)
-        .filter(
-            InventoryTransaction.company_id == COMPANY_A,
-            InventoryTransaction.reference_type == "work_order",
-            InventoryTransaction.reference_id == wo.id,
-            InventoryTransaction.transaction_type == TransactionType.ISSUE,
-        )
-        .all()
-    )
+    issues = component_issues(db_session, wo.id)
     # 5 * 2 * 1.10 = 11.0 consumed.
     assert sum(t.quantity for t in issues) == pytest.approx(-11.0)
     assert db_session.get(InventoryItem, src.id).quantity_on_hand == pytest.approx(89.0)
@@ -1102,13 +1097,21 @@ def test_fg_receipt_is_tenant_isolated(client: TestClient, db_session: Session):
 # Item 1: savepoint no-op on a duplicate inventory insert
 # ===========================================================================
 #
-# Under the new partial unique index a concurrent second RECEIVE/ISSUE insert (the
+# Under the partial unique indexes a concurrent second RECEIVE/ISSUE insert (the
 # double-receive/issue race) raises IntegrityError. Each insert is wrapped in a
 # SAVEPOINT so the duplicate is a clean no-op that does NOT double on-hand and does
-# NOT abort the outer transaction. On SQLite (test DB) the postgresql_where partial
-# index is not enforced, so the IntegrityError won't fire from the DB -- so we (a)
-# prove the application-level idempotency guard makes a SECOND service call a no-op,
-# and (b) force an IntegrityError directly to prove the savepoint catch is graceful.
+# NOT abort the outer transaction.
+#
+# Dialect note (corrected by migration 076_uq_wo_inventory_sqlite_parity): the two 041
+# indexes now declare ``sqlite_where`` alongside ``postgresql_where``, so they are
+# PARTIAL on BOTH dialects and the SQLite test DB enforces exactly what production
+# Postgres enforces. For the rows these guards cover -- reference_type='work_order'
+# with RECEIVE/ISSUE -- that is the same coverage SQLite had before 076 (it previously
+# over-enforced by ignoring the predicate and blanketing EVERY reference_type). So the
+# IntegrityError below does fire from the DB here, exactly as in production. We prove
+# (a) the application-level idempotency guard makes a SECOND service call a no-op even
+# with NO index at all, (b) the index independently rejects a duplicate, and (c) the
+# savepoint catch is graceful.
 
 
 def test_second_apply_completion_effects_does_not_double_on_hand_and_does_not_raise(
@@ -1154,17 +1157,9 @@ def test_second_apply_completion_effects_does_not_double_on_hand_and_does_not_ra
     assert fg_on_hand(db_session, fg_part.id) == 4, "second apply must NOT double FG on-hand"
     assert db_session.get(InventoryItem, src.id).quantity_on_hand == 92, "second apply must NOT re-decrement"
     assert len(fg_receipts(db_session, wo.id)) == 1, "no second FG receipt"
-    issues = (
-        db_session.query(InventoryTransaction)
-        .filter(
-            InventoryTransaction.company_id == COMPANY_A,
-            InventoryTransaction.reference_type == "work_order",
-            InventoryTransaction.reference_id == wo.id,
-            InventoryTransaction.transaction_type == TransactionType.ISSUE,
-        )
-        .all()
-    )
+    issues = component_issues(db_session, wo.id)
     assert len(issues) == 1, "no second component ISSUE"
+    assert sum(t.quantity for t in issues) == -8, "and the total is still exactly the demand"
 
 
 def test_insert_txn_savepoint_catches_integrity_error_and_keeps_session_usable(db_session: Session):
@@ -1172,11 +1167,13 @@ def test_insert_txn_savepoint_catches_integrity_error_and_keeps_session_usable(d
     return False (duplicate no-op), and leave the OUTER transaction usable -- so a
     SUBSEQUENT legitimate insert (a DIFFERENT WO) still commits.
 
-    The model's ``uq_wo_inventory_receipt`` unique index already enforces RECEIVE-key
-    uniqueness in the test DB (SQLite materializes it as a full unique index), so a
-    genuine DUPLICATE of the WO RECEIVE key raises a real unique-violation
-    IntegrityError -- exactly the production race the savepoint guards. We assert the
-    catch yields a no-op (False) and keeps the OUTER transaction usable."""
+    The model's ``uq_wo_inventory_receipt`` unique index enforces RECEIVE-key
+    uniqueness in the test DB. Since 076 it is PARTIAL on SQLite too -- scoped to
+    ``reference_type = 'work_order' AND transaction_type = 'RECEIVE'``, the same
+    predicate Postgres uses -- and the rows below sit squarely inside it, so a genuine
+    DUPLICATE of the WO RECEIVE key raises a real unique-violation IntegrityError here
+    exactly as it does in production. We assert the catch yields a no-op (False) and
+    keeps the OUTER transaction usable."""
     admin = make_user(db_session)
     part = make_part(db_session)
 
@@ -1215,3 +1212,156 @@ def test_insert_txn_savepoint_catches_integrity_error_and_keeps_session_usable(d
         .all()
     )
     assert len(wo555) == 1
+
+
+# ===========================================================================
+# 076 parity: the APPLICATION layer is what enforces WO-level idempotency
+# ===========================================================================
+#
+# Migration 076_uq_wo_inventory_sqlite_parity added ``sqlite_where`` to the two 041
+# indexes so SQLite stops over-enforcing them across every reference_type. For the
+# work-order RECEIVE/ISSUE rows the guards actually cover, coverage is unchanged --
+# but that is a claim worth PROVING rather than reasoning about, in both directions:
+#
+#   * with the indexes DROPPED entirely, the application-level probes
+#     (``_existing_work_order_receipt`` / ``_component_already_issued``) must still
+#     refuse a duplicate WO RECEIVE and a duplicate (WO, component) ISSUE. If they
+#     did not, the index would have been the real guard all along -- and since it is
+#     a Postgres PARTIAL index, production would be relying on a constraint that only
+#     ever existed there. This test is what rules that out.
+#   * with the indexes PRESENT, the (now partial on both dialects) index must still
+#     independently reject the same duplicates -- i.e. 076 did not loosen the guard.
+
+
+def _drop_wo_idempotency_indexes(db: Session) -> list[str]:
+    """Drop the two 041 indexes so ONLY the application guard is left standing.
+
+    Safe within a test: the ``db_session`` fixture drop_all/create_all's the whole
+    schema per test, so nothing leaks to the next one. Returns the names still present
+    afterwards, so a silently-failed DROP cannot make the test pass for free.
+    """
+    for name in ("uq_wo_inventory_receipt", "uq_wo_inventory_issue"):
+        db.execute(text(f"DROP INDEX IF EXISTS {name}"))
+    db.commit()
+    remaining = db.execute(
+        text(
+            "SELECT name FROM sqlite_master WHERE type = 'index' "
+            "AND name IN ('uq_wo_inventory_receipt', 'uq_wo_inventory_issue')"
+        )
+    ).fetchall()
+    return [row[0] for row in remaining]
+
+
+def _backflush_fixture(db: Session):
+    """Admin + a backflush FG part (BOM: 2x component) + a stocked component lot + WO."""
+    admin = make_user(db)
+    component = make_part(db, standard_cost=2.0)
+    src = make_inventory(db, component, qty=100, lot="RAW-APPGUARD-1")
+    fg_part = make_part(db, backflush=True, standard_cost=5.0)
+    bom = BOM(part_id=fg_part.id, revision="A", is_active=True, company_id=COMPANY_A)
+    db.add(bom)
+    db.flush()
+    db.add(
+        BOMItem(
+            bom_id=bom.id,
+            component_part_id=component.id,
+            item_number=10,
+            quantity=2,
+            item_type="buy",
+            line_type="component",
+            scrap_factor=0.0,
+            company_id=COMPANY_A,
+        )
+    )
+    wo = make_wo(db, fg_part, quantity_ordered=4, quantity_complete=4)
+    db.commit()
+    return admin, component, src, fg_part, wo
+
+
+def test_app_layer_alone_refuses_duplicate_wo_receipt_and_issue_without_the_index(db_session: Session):
+    """With BOTH 041 indexes dropped, the application still enforces idempotency —
+    by TWO different mechanisms since PR 4.4, and the difference is the point.
+
+    The original claim behind 076 was that WO-level double-receive / double-issue is
+    prevented by the application's check-then-insert and not by an index. That is now
+    only half the story, and stating it the old way would be actively wrong:
+
+    * **FG receipt — still EXISTENCE-keyed.** ``_existing_work_order_receipt`` reports
+      "already done" and the second apply writes nothing. Unchanged.
+    * **Component consumption — now ARITHMETIC.** The leg posts
+      ``work_order_backflush``, which ``uq_wo_inventory_issue`` never covered and
+      ``_component_already_issued`` (deliberately unchanged, now a LEGACY fence) does not
+      match. It reconciles ``delta = target − signed ledger net`` instead, so the second
+      apply computes ``8 − 8 = 0`` and writes nothing.
+
+    That makes this test STRONGER than it was for the component leg, not weaker: with the
+    indexes dropped there is no longer any index behind that row even in principle, so a
+    clean second no-op here is the *only* evidence the convergence works. Both probes are
+    named explicitly, with their now-different expected answers, so a refactor that
+    re-points either one fails HERE rather than silently in production.
+    """
+    admin, component, src, fg_part, wo = _backflush_fixture(db_session)
+
+    assert _drop_wo_idempotency_indexes(db_session) == [], "the 041 indexes must really be gone"
+
+    audit = AuditService(db_session, admin)
+    apply_completion_inventory_effects(db_session, wo, user_id=admin.id, company_id=COMPANY_A, audit=audit)
+    db_session.flush()
+    assert fg_on_hand(db_session, fg_part.id) == 4
+    assert db_session.get(InventoryItem, src.id).quantity_on_hand == 92
+
+    # FG receipt: existence-keyed, exactly as before.
+    assert _existing_work_order_receipt(db_session, wo.id, COMPANY_A) is True
+    # Component: the legacy fence matches NOTHING this engine wrote -- that is what makes
+    # PR 4.4 correct-forward with no backfill -- and convergence comes from the net.
+    assert _component_already_issued(db_session, wo.id, component.id, COMPANY_A) is False
+    assert backflush_net_issued_by_part(
+        db_session, work_order_id=wo.id, company_id=COMPANY_A, part_ids=[component.id]
+    ) == {component.id: 8.0}
+
+    # Second application with NO index behind either leg: still a clean no-op.
+    apply_completion_inventory_effects(db_session, wo, user_id=admin.id, company_id=COMPANY_A, audit=audit)
+    db_session.commit()
+
+    db_session.expire_all()
+    assert fg_on_hand(db_session, fg_part.id) == 4, "the existence probe alone must prevent the double FG receipt"
+    assert (
+        db_session.get(InventoryItem, src.id).quantity_on_hand == 92
+    ), "the delta arithmetic alone must prevent the double component issue"
+    assert len(fg_receipts(db_session, wo.id)) == 1, "exactly one WO-level RECEIVE, enforced by the app layer"
+    issues = component_issues(db_session, wo.id, part_id=component.id)
+    assert len(issues) == 1, "exactly one (WO, component) ISSUE, enforced by the app layer"
+    assert sum(t.quantity for t in issues) == -8, "and the quantity is still exactly the demand"
+
+
+def test_partial_index_still_independently_rejects_duplicate_wo_receipt_and_issue(db_session: Session):
+    """076 did not loosen the guard: with the app probes bypassed, the index still bites.
+
+    Inserts the duplicates directly (no service call, so no application check runs),
+    against the post-076 PARTIAL SQLite indexes. Both must raise -- proving the DB
+    backstop for reference_type='work_order' RECEIVE/ISSUE survived the parity fix
+    intact, which is the invariant 041 exists for.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    admin = make_user(db_session)
+    part = make_part(db_session)
+
+    def _txn(transaction_type: TransactionType, reference_id: int) -> InventoryTransaction:
+        return InventoryTransaction(
+            company_id=COMPANY_A,
+            part_id=part.id,
+            transaction_type=transaction_type,
+            quantity=1,
+            reference_type="work_order",
+            reference_id=reference_id,
+            created_by=admin.id,
+        )
+
+    for transaction_type, reference_id in ((TransactionType.RECEIVE, 901), (TransactionType.ISSUE, 902)):
+        db_session.add(_txn(transaction_type, reference_id))
+        db_session.commit()
+        db_session.add(_txn(transaction_type, reference_id))
+        with pytest.raises(IntegrityError):
+            db_session.commit()
+        db_session.rollback()

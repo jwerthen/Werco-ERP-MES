@@ -648,10 +648,12 @@ def test_flag_on_actual_cost_is_labor_plus_material_plus_overhead(client, db_ses
     wo = make_wo(db_session, part, status_=WorkOrderStatus.IN_PROGRESS, quantity_ordered=5)
     op = make_op(db_session, wo, wc, sequence=10, status_=OperationStatus.IN_PROGRESS)
     make_closed_entry(db_session, admin, wo, op, duration_hours=4.0)
-    # $400 of ISSUE'd material on the WO (one ISSUE txn -- the SQLite test DB ignores the
-    # partial-index predicate and treats uq_wo_inventory_issue/receipt as full unique
-    # indexes, so a single txn keeps the fixture index-clean while still proving the
-    # material leg is summed via Σ|ISSUE total_cost|).
+    # $400 of ISSUE'd material on the WO, as ONE ISSUE txn for one component -- enough to
+    # prove the material leg is summed via Σ|ISSUE total_cost|. (Historical note: this used
+    # to be a workaround for the SQLite test DB ignoring the partial-index predicate and
+    # treating uq_wo_inventory_issue/receipt as FULL unique indexes. Migration
+    # 076_uq_wo_inv_sqlite_parity fixed that -- both indexes are partial on SQLite too now,
+    # and uq_wo_inventory_issue keys on part_id anyway, so several components would be fine.)
     comp = make_part(db_session)
     make_issue_txn(db_session, wo, comp, admin, total_cost=400.0)
     db_session.commit()
@@ -665,7 +667,7 @@ def test_flag_on_actual_cost_is_labor_plus_material_plus_overhead(client, db_ses
     db_session.expire_all()
     wo = db_session.get(WorkOrder, wo.id)
     # labor   = 4 hr x $100 = 400
-    # material= |−150| + |−250| = 400
+    # material= |ISSUE total_cost| = 400
     # overhead= 4 hr x $20 = 80
     # total   = 880
     assert wo.actual_hours == pytest.approx(4.0)

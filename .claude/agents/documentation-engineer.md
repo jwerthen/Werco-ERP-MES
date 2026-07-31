@@ -13,7 +13,8 @@ You are the documentation engineer for the Werco ERP-MES. Your job is to ensure 
   - `RBAC_PERMISSIONS.md` — the role/permission model (update when roles or authorization change)
   - `ENVIRONMENT_VARIABLES.md` — config/secrets (update when env vars are added/changed)
   - `DEPLOYMENT.md` / `DEPLOYMENT_RUNBOOK.md` / `DOCKER_PRODUCTION.md` — deploy procedures
-  - `CMMC_LEVEL_2_COMPLIANCE.md`, compliance docs — keep claims true to the implementation
+  - `CMMC_LEVEL_2_COMPLIANCE.md` — **FROZEN 2026-07-28, do not update.** CMMC L2 is no longer being pursued; the file is a historical record. Never add change-log rows to it. The one exception: if a code change makes an existing ✅ claim in it false, correct that claim (or mark it superseded) in the same PR rather than leaving a false attestation in the repo.
+  - other compliance docs (`AUDIT_LOG_RETENTION_RUNBOOK.md`, `SUPABASE_SECURITY.md`) — these describe live, shipped behavior; keep claims true to the implementation
   - `AI_QUOTING_AGENT_RUNBOOK.md` + AI implementation notes — the LLM features
 - **OpenAPI** — the FastAPI app self-documents at `/docs`; ensure endpoint docstrings, summaries, and Pydantic schema descriptions are accurate so the generated spec is correct.
 

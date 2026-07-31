@@ -25,6 +25,7 @@ jest.mock('./AdaptivePromptPanel', () => ({ __esModule: true, default: () => nul
 jest.mock('./Tour', () => ({ __esModule: true, TourMenu: () => null }));
 jest.mock('./ui/BottomNav', () => ({ __esModule: true, default: () => null }));
 jest.mock('./ai/CopilotPanel', () => ({ __esModule: true, CopilotPanel: () => null }));
+jest.mock('./NotificationBell', () => ({ __esModule: true, default: () => null }));
 jest.mock('./GlobalSearch', () => ({
   __esModule: true,
   default: () => null,

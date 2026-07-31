@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { Modal } from '../ui/Modal';
@@ -7,8 +7,16 @@ import {
   LaserNestManualFormData,
   LaserNestManualFormInput,
 } from '../../validation/schemas';
-import { LaserNestInfo, LaserNestManualResponse, LaserNestExtractionConfidence } from '../../types';
+import {
+  LaserNestInfo,
+  LaserNestManualInput,
+  LaserNestManualResponse,
+  LaserNestExtractionConfidence,
+  MaterialAllocation,
+  Part,
+} from '../../types';
 import api from '../../services/api';
+import { toDisplayString } from '../../utils/apiError';
 
 interface LaserNestManualModalProps {
   open: boolean;
@@ -17,6 +25,15 @@ interface LaserNestManualModalProps {
   workOrderId: number;
   /** When set, the modal edits an existing nest (PATCH) instead of creating. */
   nest?: LaserNestInfo | null;
+  /**
+   * EDIT mode only: the work-order operation that backs this nest.
+   *
+   * `LaserNestInfo` carries no operation id, and a tie is addressed by
+   * operation — so without this the modal cannot see or change the nest's
+   * material tie, and the tie controls stay hidden. Ignored on the create path
+   * (the backend ties the operation it creates).
+   */
+  workOrderOperationId?: number;
   /**
    * Called after a successful create/update so the parent can refresh.
    * On a partial create (nest saved, PDF attach failed) it is still called —
@@ -28,6 +45,29 @@ interface LaserNestManualModalProps {
 
 const FIELD_LABEL = 'text-xs font-medium text-fd-mute';
 const ERR = 'mt-1 text-xs text-fd-red';
+
+/**
+ * Explicit page size for the sheet-part list: `api.getMaterials` falls into an
+ * unbounded `while (true)` loop pulling 500 rows at a time when `limit` is
+ * omitted.
+ */
+const MATERIAL_OPTION_LIMIT = 500;
+
+/** A sheet-part choice in the picker. */
+interface MaterialOption {
+  id: number;
+  label: string;
+}
+
+/**
+ * Manual-create body plus the sheet-part tie fields. The shared
+ * `LaserNestManualInput` is intersected rather than edited because that type is
+ * owned elsewhere; the backend accepts both keys on the manual-create route.
+ */
+type ManualNestCreateBody = LaserNestManualInput & {
+  material_part_id?: number;
+  qty_per_run?: number;
+};
 
 const PDF_ATTACH_FAILED_MESSAGE =
   "Nest created, but the PDF didn't attach — use Attach PDF on the nest row to retry.";
@@ -58,6 +98,7 @@ export default function LaserNestManualModal({
   onClose,
   workOrderId,
   nest,
+  workOrderOperationId,
   onSaved,
 }: LaserNestManualModalProps) {
   const isEdit = Boolean(nest);
@@ -74,6 +115,11 @@ export default function LaserNestManualModal({
   // attach step fails and the user re-submits. Holds the id of the nest this
   // modal session already created.
   const createdNestIdRef = useRef<number | null>(null);
+  // Sheet-part tie: the pickable material parts, plus (edit mode) the OPEN
+  // operation-scoped tie already on this nest's operation. Both are optional
+  // chrome — a failed load hides the controls rather than blocking the nest.
+  const [materials, setMaterials] = useState<Part[]>([]);
+  const [existingTie, setExistingTie] = useState<MaterialAllocation | null>(null);
 
   const {
     register,
@@ -91,6 +137,8 @@ export default function LaserNestManualModal({
       material: '',
       thickness: '',
       sheet_size: '',
+      material_part_id: '',
+      qty_per_run: 1,
     },
   });
 
@@ -104,6 +152,10 @@ export default function LaserNestManualModal({
       material: nest?.material ?? '',
       thickness: nest?.thickness ?? '',
       sheet_size: nest?.sheet_size ?? '',
+      // The tie is seeded asynchronously below; start from "untied" so a failed
+      // read can never present someone else's tie as this nest's.
+      material_part_id: '',
+      qty_per_run: 1,
     });
     setPdfFile(null);
     setSubmitError('');
@@ -111,8 +163,68 @@ export default function LaserNestManualModal({
     setExtracting(false);
     setExtractHint(null);
     setFileInputKey((k) => k + 1);
+    setExistingTie(null);
     createdNestIdRef.current = null;
   }, [open, nest, reset]);
+
+  // Load the sheet-part options and — in edit mode, when the caller told us
+  // which operation backs this nest — the tie already on it. Declared AFTER the
+  // seed effect so its `reset` cannot clobber the values set here.
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const parts = await api.getMaterials({ active_only: true, limit: MATERIAL_OPTION_LIMIT });
+        if (!cancelled) setMaterials(parts ?? []);
+      } catch {
+        if (!cancelled) setMaterials([]);
+      }
+      if (!isEdit || workOrderOperationId == null) return;
+      try {
+        const ties = await api.getMaterialAllocations(workOrderId, false);
+        if (cancelled) return;
+        // OPEN + operation-scoped only: `closed` is never written (a fully
+        // consumed tie stays `open`), and a work-order-scoped tie is not this
+        // nest's tie.
+        const tie =
+          (ties ?? []).find((t) => t.status === 'open' && t.work_order_operation_id === workOrderOperationId) ?? null;
+        setExistingTie(tie);
+        if (tie) {
+          setValue('material_part_id', tie.part_id);
+          setValue('qty_per_run', tie.qty_per_run ?? 1);
+        }
+      } catch {
+        if (!cancelled) setExistingTie(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [open, isEdit, workOrderId, workOrderOperationId, setValue]);
+
+  const materialOptions = useMemo<MaterialOption[]>(() => {
+    const options: MaterialOption[] = materials.map((part) => ({
+      id: part.id,
+      label: part.part_number ? `${part.part_number} — ${part.name}` : part.name,
+    }));
+    // Keep an existing tie's part selectable even when the (capped, filtered,
+    // or failed) material load didn't return it — otherwise the picker reads as
+    // untied while the tie is very much live.
+    if (existingTie && !options.some((option) => option.id === existingTie.part_id)) {
+      options.push({
+        id: existingTie.part_id,
+        label:
+          [existingTie.part_number, existingTie.part_name].filter(Boolean).join(' — ') ||
+          `Part ${existingTie.part_id}`,
+      });
+    }
+    return options;
+  }, [materials, existingTie]);
+
+  // Ties are addressable on create (the backend ties the operation it creates)
+  // and, in edit mode, only when the caller supplied the operation id.
+  const showTieControls = materialOptions.length > 0 && (!isEdit || workOrderOperationId != null);
 
   /**
    * Fill the form from an extraction result WITHOUT clobbering anything the user
@@ -183,11 +295,87 @@ export default function LaserNestManualModal({
     }
   };
 
+  /**
+   * Bring the tie on this nest's operation in line with the form (edit path
+   * only — the nest PATCH cannot carry a tie).
+   *
+   * `part_id` is fixed at creation, since changing what a tie points at after
+   * consumption posted would rewrite genealogy — so a part swap is
+   * untie-then-re-tie. Every verb is server-GATED (409 on untie after
+   * consumption, 422 when the new plan sits under what was consumed), so this
+   * stays strictly NON-optimistic: state moves only on what the server
+   * returned, and a failure propagates to the caller's error banner. If the
+   * untie lands and the re-tie is refused, the nest is genuinely untied — which
+   * is what the banner then says.
+   */
+  const reconcileTie = async (data: LaserNestManualFormData) => {
+    if (workOrderOperationId == null) return;
+    const desiredPartId = data.material_part_id ?? null;
+    const perRun = data.qty_per_run ?? 1;
+    const planned = perRun * data.planned_runs;
+
+    if (desiredPartId == null) {
+      if (existingTie) {
+        await api.deleteMaterialAllocation(workOrderId, existingTie.id);
+        setExistingTie(null);
+      }
+      return;
+    }
+
+    if (existingTie && existingTie.part_id === desiredPartId) {
+      if (existingTie.qty_per_run !== perRun || existingTie.qty_planned !== planned) {
+        setExistingTie(
+          await api.updateMaterialAllocation(workOrderId, existingTie.id, {
+            qty_per_run: perRun,
+            qty_planned: planned,
+          })
+        );
+      }
+      return;
+    }
+
+    // The swap is two verbs and there is no server-side swap (nor a RETURN verb
+    // until PR 3), so the window between them is real. If the untie lands and
+    // the re-tie is refused, the nest ends GENUINELY UNTIED and its material
+    // will silently never deplete — the exact outcome this feature exists to
+    // prevent. Say so explicitly rather than surfacing the bare server detail,
+    // which would read as "nothing happened".
+    const hadTie = existingTie !== null;
+    if (existingTie) {
+      await api.deleteMaterialAllocation(workOrderId, existingTie.id);
+      setExistingTie(null);
+    }
+    try {
+      setExistingTie(
+        await api.createMaterialAllocation(workOrderId, {
+          part_id: desiredPartId,
+          work_order_operation_id: workOrderOperationId,
+          source: 'nest',
+          qty_per_run: perRun,
+          qty_planned: planned,
+        })
+      );
+    } catch (err: any) {
+      if (!hadTie) throw err;
+      const detail = toDisplayString(err?.response?.data?.detail) || 'the server refused it';
+      throw Object.assign(
+        new Error(
+          `The previous sheet part was untied, but the new one could not be tied: ${detail} ` +
+            'This nest is now UNTIED — its material will not deplete. Re-tie it before releasing the work.'
+        ),
+        // The submit handlers surface `response.data.detail` and fall back to a
+        // generic string; a bare Error would be swallowed by that fallback and
+        // this warning — the one that matters most — would never reach the user.
+        { isTieSwapFailure: true }
+      );
+    }
+  };
+
   const onSubmit = async (data: LaserNestManualFormData) => {
     setBusy(true);
     setSubmitError('');
 
-    // --- Edit path: PATCH the changed fields, unchanged behavior. ---
+    // --- Edit path: PATCH the changed fields, then reconcile the tie. ---
     if (isEdit && nest) {
       try {
         await api.updateLaserNest(nest.id, {
@@ -198,10 +386,15 @@ export default function LaserNestManualModal({
           thickness: data.thickness,
           sheet_size: data.sheet_size,
         });
+        if (showTieControls) await reconcileTie(data);
         onSaved();
         onClose();
       } catch (err: any) {
-        setSubmitError(err?.response?.data?.detail || 'Failed to update laser nest');
+        setSubmitError(
+          err?.isTieSwapFailure
+            ? err.message
+            : toDisplayString(err?.response?.data?.detail) || 'Failed to update laser nest'
+        );
       } finally {
         setBusy(false);
       }
@@ -214,14 +407,21 @@ export default function LaserNestManualModal({
     try {
       let nestId = createdNestIdRef.current;
       if (nestId === null) {
-        const created: LaserNestManualResponse = await api.createManualLaserNest(workOrderId, {
+        // The tie keys ride on the create body — the backend ties the operation
+        // it creates for this nest. Spread only when set, so an untied nest
+        // POSTs exactly the body it did before this feature existed.
+        const body: ManualNestCreateBody = {
           cnc_number: data.cnc_number,
           planned_runs: data.planned_runs,
           nest_name: data.nest_name,
           material: data.material,
           thickness: data.thickness,
           sheet_size: data.sheet_size,
-        });
+          ...(data.material_part_id != null
+            ? { material_part_id: data.material_part_id, qty_per_run: data.qty_per_run ?? 1 }
+            : {}),
+        };
+        const created: LaserNestManualResponse = await api.createManualLaserNest(workOrderId, body);
         nestId = created.id;
         createdNestIdRef.current = nestId;
       }
@@ -253,7 +453,11 @@ export default function LaserNestManualModal({
         onClose();
       }
     } catch (err: any) {
-      setSubmitError(err?.response?.data?.detail || 'Failed to add laser nest');
+      setSubmitError(
+        err?.isTieSwapFailure
+          ? err.message
+          : toDisplayString(err?.response?.data?.detail) || 'Failed to add laser nest'
+      );
     } finally {
       setBusy(false);
     }
@@ -323,6 +527,44 @@ export default function LaserNestManualModal({
             <span className={FIELD_LABEL}>Sheet size</span>
             <input type="text" {...register('sheet_size')} className="input mt-1 w-full" placeholder='e.g. 48" x 96"' />
           </label>
+
+          {showTieControls && (
+            <>
+              <label className="block">
+                <span className={FIELD_LABEL}>Sheet part</span>
+                <select {...register('material_part_id')} className="input mt-1 w-full">
+                  <option value="">(none)</option>
+                  {materialOptions.map((option) => (
+                    <option key={option.id} value={String(option.id)}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                {errors.material_part_id && <p className={ERR}>{errors.material_part_id.message}</p>}
+              </label>
+
+              <label className="block">
+                <span className={FIELD_LABEL}>Sheets per run</span>
+                <input
+                  type="number"
+                  min={0}
+                  step="any"
+                  {...register('qty_per_run')}
+                  className="input mt-1 w-full"
+                />
+                {errors.qty_per_run && <p className={ERR}>{errors.qty_per_run.message}</p>}
+              </label>
+
+              {/* Consumption fires when this nest's OPERATION completes, never
+                  per run: reporting runs on a still-open nest deducts nothing,
+                  because an IN_PROGRESS operation is still reducible and
+                  consumption never auto-reverses. Say so plainly. */}
+              <p className="text-xs text-fd-faint sm:col-span-2">
+                Optional. Tied sheets leave inventory when this nest's operation completes, not per run. FIFO picks
+                the lot at that moment.
+              </p>
+            </>
+          )}
 
           {!isEdit && (
             <div className="block sm:col-span-2">

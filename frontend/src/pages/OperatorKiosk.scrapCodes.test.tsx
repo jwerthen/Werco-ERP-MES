@@ -71,10 +71,9 @@ function renderKiosk() {
   );
 }
 
-/** Enter 3 good then 2 scrap through the shared keypad. */
-function enterThreeGoodTwoScrap() {
-  fireEvent.click(screen.getByTestId('kiosk-key-3'));
-  fireEvent.click(screen.getByTestId('kiosk-qty-scrap'));
+/** Open the report overlay on the SCRAP tab and enter 2 scrap on the keypad. */
+async function openScrapTabAndEnterTwo() {
+  fireEvent.click(await screen.findByTestId('kiosk-active-scrap'));
   fireEvent.click(screen.getByTestId('kiosk-key-2'));
 }
 
@@ -94,22 +93,22 @@ describe('OperatorKiosk scrap-code payloads', () => {
     mockedApi.getScrapReasonCodes.mockResolvedValue(CODES as any);
   });
 
-  it('REPORT PRODUCTION sends scrap_reason_code_id (no detail -> no scrap_reason) with source:"kiosk"', async () => {
+  it('SCRAP reports send scrap_reason_code_id (no detail -> no scrap_reason) with source:"kiosk"', async () => {
     mockedApi.reportOperationProduction.mockResolvedValue({});
     renderKiosk();
 
-    fireEvent.click(await screen.findByRole('button', { name: /report production/i }));
     // Codes mode: the picker is the company vocabulary, not the legacy tiles.
-    enterThreeGoodTwoScrap();
+    await openScrapTabAndEnterTwo();
     expect(screen.getByTestId('kiosk-qty-confirm')).toBeDisabled();
     expect(screen.queryByRole('button', { name: 'Out of tolerance' })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'OT — Out of tolerance' }));
     fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
 
+    // Category "operator" is not quality-related → the NCR toggle stays OFF.
     await waitFor(() =>
       expect(mockedApi.reportOperationProduction).toHaveBeenCalledWith(31, {
-        quantity_complete_delta: 3,
+        quantity_complete_delta: 0,
         quantity_scrapped_delta: 2,
         scrap_reason: undefined,
         scrap_reason_code_id: 7,
@@ -118,22 +117,25 @@ describe('OperatorKiosk scrap-code payloads', () => {
     );
   });
 
-  it('REPORT PRODUCTION sends the optional typed detail as scrap_reason alongside the code id', async () => {
+  it('sends the optional typed detail as scrap_reason alongside the code id (material code -> NCR default ON)', async () => {
     mockedApi.reportOperationProduction.mockResolvedValue({});
     renderKiosk();
 
-    fireEvent.click(await screen.findByRole('button', { name: /report production/i }));
-    enterThreeGoodTwoScrap();
+    await openScrapTabAndEnterTwo();
     fireEvent.click(screen.getByRole('button', { name: 'MAT — Material defect' }));
     fireEvent.change(screen.getByTestId('kiosk-scrap-detail'), { target: { value: 'porosity on face' } });
     fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
 
     await waitFor(() =>
       expect(mockedApi.reportOperationProduction).toHaveBeenCalledWith(31, {
-        quantity_complete_delta: 3,
+        quantity_complete_delta: 0,
         quantity_scrapped_delta: 2,
         scrap_reason: 'porosity on face',
         scrap_reason_code_id: 9,
+        // A "material" category code is quality-related → NCR defaults ON and
+        // the detail text doubles as the NCR description.
+        open_ncr: true,
+        ncr_description: 'porosity on face',
         source: 'kiosk',
       })
     );
@@ -144,7 +146,7 @@ describe('OperatorKiosk scrap-code payloads', () => {
     mockedApi.completeOperation.mockResolvedValue({});
     renderKiosk();
 
-    fireEvent.click(await screen.findByRole('button', { name: /^complete$/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /^complete op$/i }));
     // GOOD prefills with the remaining quantity (50 - 5 = 45); add 2 scrap.
     fireEvent.click(screen.getByTestId('kiosk-qty-scrap'));
     fireEvent.click(screen.getByTestId('kiosk-key-2'));
@@ -167,8 +169,7 @@ describe('OperatorKiosk scrap-code payloads', () => {
     mockedApi.reportOperationProduction.mockResolvedValue({});
     renderKiosk();
 
-    fireEvent.click(await screen.findByRole('button', { name: /report production/i }));
-    enterThreeGoodTwoScrap();
+    await openScrapTabAndEnterTwo();
 
     // Legacy vocabulary renders; no codes-mode detail input.
     fireEvent.click(screen.getByRole('button', { name: 'Material defect' }));
@@ -177,10 +178,12 @@ describe('OperatorKiosk scrap-code payloads', () => {
 
     await waitFor(() =>
       expect(mockedApi.reportOperationProduction).toHaveBeenCalledWith(31, {
-        quantity_complete_delta: 3,
+        quantity_complete_delta: 0,
         quantity_scrapped_delta: 2,
         scrap_reason: 'Material defect',
         scrap_reason_code_id: undefined,
+        // Legacy "Material defect" is the conservative quality-related default.
+        open_ncr: true,
         source: 'kiosk',
       })
     );

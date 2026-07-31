@@ -3,9 +3,14 @@ Comprehensive Audit Service for AS9100D and CMMC Level 2 Compliance.
 Provides centralized audit logging for all entity changes with tamper detection.
 
 CMMC Level 2 Control: AU-3.3.8 - Protect Audit Information
-- Immutable audit logs with hash chain integrity
-- Sequence numbers for gap detection
-- SHA-256 cryptographic hashing
+- Immutable audit logs (DB triggers, migrations 008/060 -- always in force)
+- Hash chain integrity: sequence numbers for gap detection + SHA-256 cryptographic
+  hashing. ON BY DEFAULT but PAUSABLE at runtime via settings.AUDIT_HASH_CHAIN_ENABLED
+  (see ``log()`` and ``PAUSED_CHAIN_PLACEHOLDER`` below). Paused, rows keep their full
+  audit content and DB-level immutability but carry no hash and no chain link, gaps in
+  sequence_number are normal, and they can never be verified retroactively. The
+  immutability triggers are independent of that setting.
+  See docs/AUDIT_LOG_RETENTION_RUNBOOK.md -> Pausing the hash chain.
 """
 
 import hashlib
@@ -19,6 +24,7 @@ from sqlalchemy import desc, inspect, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.logging import get_correlation_id, get_logger
 from app.models.audit_log import AuditLog
 from app.models.user import User
@@ -37,6 +43,38 @@ _AUDIT_CHAIN_LOCK_KEY = (zlib.crc32(b"audit_log_chain") & 0x7FFFFFFF) - 0x400000
 # the advisory lock is absent, e.g. SQLite in tests, or a genuinely concurrent
 # insert). Each retry re-reads the chain tail so the chain stays contiguous.
 _MAX_SEQUENCE_RETRIES = 5
+
+# Placeholder written into integrity_hash while the chain is paused
+# (settings.AUDIT_HASH_CHAIN_ENABLED = False). Reuses the 'LEGACY_' prefix that
+# migration 008 established for pre-chain rows, because every consumer already
+# tests exactly that prefix and skips the row: audit_integrity_service (3 Python
+# sites + one SQL LIKE) and the /audit/integrity/record endpoint's `is_legacy`.
+# The suffix makes a paused row distinguishable from a genuine 008 backfill.
+# integrity_hash is String(64) NOT NULL with no unique constraint, so a repeated
+# constant is fine.
+PAUSED_CHAIN_PLACEHOLDER = "LEGACY_CHAIN_PAUSED"
+
+# Postgres sequence backing sequence_number while the chain is paused. Created by
+# migration 077, started safely past the current MAX. nextval() takes no
+# transaction-scoped lock, which is the entire point: it is the only allocator
+# that actually removes the global funnel rather than relocating it to the unique
+# index. Gaps are expected and normal — nextval does not roll back with the
+# caller's transaction.
+_AUDIT_SEQUENCE_NAME = "audit_logs_sequence_number_seq"
+
+# The two statements are written as plain literals rather than f-strings over
+# _AUDIT_SEQUENCE_NAME on purpose: an f-string here trips bandit B608
+# (hardcoded_sql_expressions), which is a blocking CI gate. It is a false positive —
+# the only interpolated value would be a module constant, never user input — but a
+# literal is clearer than a `# nosec` and costs nothing. Tests assert that
+# _AUDIT_SEQUENCE_NAME actually appears in both, so the name cannot drift silently.
+_NEXTVAL_SQL = "SELECT nextval('audit_logs_sequence_number_seq')"
+_RESYNC_SEQUENCE_SQL = (
+    "SELECT setval('audit_logs_sequence_number_seq', GREATEST("
+    "(SELECT COALESCE(MAX(sequence_number), 0) FROM audit_logs), "
+    "(SELECT last_value FROM audit_logs_sequence_number_seq)"
+    "), true)"
+)
 
 
 def compute_audit_hash(
@@ -294,6 +332,83 @@ class AuditService:
             return
         self.db.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _AUDIT_CHAIN_LOCK_KEY})
 
+    def _next_sequence_paused(self) -> int:
+        """Allocate ``sequence_number`` while the hash chain is paused.
+
+        PostgreSQL: ``nextval`` on the dedicated sequence. Lock-free, which is the
+        whole reason the paused mode exists — allocating with the old MAX+1 tail
+        read but no advisory lock would NOT remove the serialization, it would just
+        move it onto the unique index and, after exhausting the retry budget, drop
+        the audit row entirely. A state change with no audit row is worse than a
+        state change with no hash.
+
+        Other dialects (SQLite in tests): fall back to MAX+1. Correct there because
+        the test backend is effectively single-writer, and the savepoint/retry
+        wrapper in ``log()`` still covers a residual collision.
+        """
+        bind = self.db.get_bind()
+        dialect = bind.dialect.name if bind is not None else ""
+        if dialect == "postgresql":
+            # SAVEPOINT around nextval, and this is not defensive padding. If the
+            # sequence is absent — migration 077 not applied yet, 077 downgraded
+            # while paused, or a Postgres DB bootstrapped by create_all which never
+            # runs migrations — nextval raises UndefinedTable and PostgreSQL aborts
+            # the ENTIRE transaction (SQLSTATE 25P02). log()'s broad except would
+            # swallow the error, but every later statement in the CALLER's
+            # transaction then fails with InFailedSqlTransaction, so the business
+            # write dies too. That would break this class's core contract that an
+            # audit failure never propagates to the caller, and would turn a
+            # migration-ordering slip into an outage of every audited endpoint.
+            #
+            # A savepoint contains the abort, and we then degrade to the MAX+1
+            # allocator: slower and not lock-free, but correct. Losing the
+            # performance win is vastly better than losing the write.
+            nested = self.db.begin_nested()
+            try:
+                next_sequence = int(self.db.execute(text(_NEXTVAL_SQL)).scalar_one())
+                nested.commit()
+                return next_sequence
+            except Exception as exc:
+                nested.rollback()
+                logger.error(
+                    f"Audit sequence '{_AUDIT_SEQUENCE_NAME}' unavailable while the hash chain is paused "
+                    f"({exc}); falling back to MAX+1 allocation. Apply migration 077 — until then audit "
+                    f"writes still work but the global serialization this mode removes is back."
+                )
+        next_sequence, _ = self._get_next_sequence_and_previous_hash()
+        return next_sequence
+
+    def _resync_paused_sequence(self) -> None:
+        """Advance the paused-mode sequence past the table's current MAX.
+
+        Needed because the two allocators can leapfrog each other. Concretely:
+        pause (sequence hands out 6001..6050), resume (the chain allocates MAX+1 =
+        6051..6070 and never touches the sequence, which is still at 6050), then
+        pause again — ``nextval`` now returns 6051, which the resumed chain already
+        used. Every retry collides, and after the retry budget ``log()`` DROPS the
+        audit row. A state change with no audit row is the worst outcome available
+        here, so this is a correctness fix, not a tidiness one.
+
+        Called only from the collision-retry path, so the steady state pays nothing:
+        the extra MAX read happens once after a mode flip, not on every write. It is
+        also idempotent and safe to call concurrently — setval to a GREATEST() can
+        only move the counter forward.
+        """
+        bind = self.db.get_bind()
+        dialect = bind.dialect.name if bind is not None else ""
+        if dialect != "postgresql":
+            return
+        # Savepoint for the same reason as _next_sequence_paused: a missing
+        # sequence here would abort the caller's transaction, and this runs on an
+        # error path where the caller is already mid-write.
+        nested = self.db.begin_nested()
+        try:
+            self.db.execute(text(_RESYNC_SEQUENCE_SQL))
+            nested.commit()
+        except Exception as exc:
+            nested.rollback()
+            logger.error(f"Could not resync audit sequence '{_AUDIT_SEQUENCE_NAME}': {exc}")
+
     def _get_next_sequence_and_previous_hash(self) -> Tuple[int, Optional[str]]:
         """
         Get the next sequence number and previous hash for chain integrity.
@@ -377,35 +492,48 @@ class AuditService:
             # company resolved at construction). Not part of the hash input.
             effective_company_id = company_id if company_id is not None else self.company_id
 
+            chain_enabled = settings.AUDIT_HASH_CHAIN_ENABLED
+
             # Serialize the global chain's allocate+insert against concurrent
             # writers on PostgreSQL. Auto-releases at txn end; no-op on SQLite.
-            self._acquire_chain_lock()
+            # Skipped entirely while paused — this lock IS the cost being removed.
+            if chain_enabled:
+                self._acquire_chain_lock()
 
             # Allocate + insert under a savepoint, retrying a residual unique
             # sequence_number collision. Re-read the tail on every attempt so the
             # chain stays contiguous and ``previous_hash`` tracks the live tail.
+            # The savepoint wrapper is kept in BOTH modes: it is the caller's
+            # session-poisoning guard, not merely a collision guard.
             for attempt in range(_MAX_SEQUENCE_RETRIES):
-                # Get next sequence number and previous hash (for chain integrity)
-                sequence_number, previous_hash = self._get_next_sequence_and_previous_hash()
+                if chain_enabled:
+                    # Get next sequence number and previous hash (for chain integrity)
+                    sequence_number, previous_hash = self._get_next_sequence_and_previous_hash()
 
-                # Compute integrity hash
-                integrity_hash = compute_audit_hash(
-                    sequence_number=sequence_number,
-                    timestamp=timestamp,
-                    user_id=user_id,
-                    user_email=user_email,
-                    action=action,
-                    resource_type=resource_type,
-                    resource_id=resource_id,
-                    resource_identifier=resource_identifier,
-                    description=description,
-                    old_values=old_values,
-                    new_values=new_values,
-                    ip_address=self._ip_address,
-                    session_id=correlation_id,
-                    success=success_str,
-                    previous_hash=previous_hash,
-                )
+                    # Compute integrity hash
+                    integrity_hash = compute_audit_hash(
+                        sequence_number=sequence_number,
+                        timestamp=timestamp,
+                        user_id=user_id,
+                        user_email=user_email,
+                        action=action,
+                        resource_type=resource_type,
+                        resource_id=resource_id,
+                        resource_identifier=resource_identifier,
+                        description=description,
+                        old_values=old_values,
+                        new_values=new_values,
+                        ip_address=self._ip_address,
+                        session_id=correlation_id,
+                        success=success_str,
+                        previous_hash=previous_hash,
+                    )
+                else:
+                    # Paused: lock-free allocation, no tail read, no hash. The row
+                    # is otherwise identical — same table, same audit content.
+                    sequence_number = self._next_sequence_paused()
+                    previous_hash = None
+                    integrity_hash = PAUSED_CHAIN_PLACEHOLDER
 
                 log_entry = AuditLog(
                     sequence_number=sequence_number,
@@ -447,6 +575,13 @@ class AuditService:
                     # so the caller's outer txn stays usable, then re-read the tail
                     # and retry with a freshly built entry on the next iteration.
                     nested.rollback()
+                    if not chain_enabled:
+                        # Paused mode: a collision here almost certainly means the
+                        # sequence has fallen behind the table (the chain ran in
+                        # enabled mode since the last pause and allocated MAX+1 past
+                        # the sequence's last_value). Jump it forward, otherwise
+                        # every remaining retry collides too and the row is lost.
+                        self._resync_paused_sequence()
                     continue
 
             # Exhausted retries without inserting; fall through to best-effort.

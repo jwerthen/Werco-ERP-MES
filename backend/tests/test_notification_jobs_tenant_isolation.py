@@ -3,9 +3,17 @@
 The four daily-digest jobs in ``app/jobs/notification_jobs.py`` were leaking cross-tenant:
 they queried entities globally and fanned out to every active user. The fix makes each job
 iterate active companies via ``_active_company_ids(db)`` and, per company, (a) scope the
-entity query by ``company_id`` and (b) pass ``company_id=cid`` to
-``get_notification_recipients`` so a tenant's overdue work / low stock / due calibrations /
-expiring quotes only ever notify that SAME tenant's users (invariant #1).
+entity query by ``company_id`` and (b) resolve recipients tenant-scoped
+(``get_notification_recipients(..., company_id=cid)``) so a tenant's overdue work / low
+stock / due calibrations / expiring quotes only ever notify that SAME tenant's users
+(invariant #1).
+
+Notification pipeline PR 1: the crons were repointed off the removed
+``NotificationService.send_notification`` onto ``dispatch_direct(event_key=..., company_id=cid,
+recipients=...)`` (the transactional-outbox dispatcher). These tests patch
+``notification_jobs.dispatch_direct`` with a recorder so they never touch Redis, and assert
+the NEW, stronger invariant: every ``dispatch_direct`` call carries a ``company_id`` that
+matches the triggering entity's company AND a recipient set drawn only from that company.
 
 Two latent runtime bugs were fixed in passing and are guarded here:
 - the calibration digest uses the ``Equipment`` model (a non-existent ``Calibration`` class
@@ -16,13 +24,9 @@ Two latent runtime bugs were fixed in passing and are guarded here:
 Each test seeds COMPANY_A and COMPANY_B with a qualifying entity and a distinct user, runs the
 job against the in-test session (monkeypatching the module-level ``SessionLocal``), and asserts:
   (a) the job runs to completion without raising (the calibration/low-stock fixes),
-  (b) every ``send_notification`` recipient set is scoped to the SAME company as the entity
-      that triggered it (no cross-tenant leak), and
+  (b) every ``dispatch_direct`` call's ``company_id`` + recipient set is scoped to the SAME
+      company as the entity that triggered it (no cross-tenant leak), and
   (c) one company's failure does not abort the others (best-effort per-company loop).
-
-``NotificationService.send_notification`` is patched to a recorder so the test never touches
-Redis (the real immediate-email path enqueues a job) and so we can inspect exactly which
-recipients / related entity each call carried.
 """
 
 import asyncio
@@ -173,36 +177,50 @@ def _make_expiring_quote(db: Session, *, company_id: int) -> Quote:
 
 
 class _Recorder:
-    """Captures every send_notification call so we can inspect recipient tenant scoping."""
+    """Captures every dispatch_direct call so we can inspect tenant scoping."""
 
     def __init__(self):
         self.calls = []
 
-    async def record(self, *, users, related_type=None, related_id=None, event_type=None, **kwargs):
-        # ``users`` is the recipient list the job built from get_notification_recipients.
-        self.calls.append(
-            {
-                "users": list(users),
-                "related_type": related_type,
-                "related_id": related_id,
-                "event_type": event_type,
-            }
-        )
-
 
 def _install(monkeypatch, db_session, recorder):
-    """Route the job at the in-test session and capture notifications instead of enqueuing."""
+    """Route the job at the in-test session and capture dispatch_direct calls instead of
+    fanning out (which would touch Redis)."""
     monkeypatch.setattr(notification_jobs, "SessionLocal", lambda: db_session)
 
-    async def fake_send(self, *args, **kwargs):
-        return await recorder.record(**kwargs)
+    async def _fake_dispatch_direct(
+        db,
+        *,
+        event_key,
+        company_id,
+        recipients,
+        related_type=None,
+        related_id=None,
+        title=None,
+        body=None,
+        link=None,
+        actor_user_id=None,
+        template=None,
+        context=None,
+        commit=True,
+    ):
+        recorder.calls.append(
+            {
+                "event_key": event_key,
+                "company_id": company_id,
+                "recipients": list(recipients),
+                "related_type": related_type,
+                "related_id": related_id,
+            }
+        )
+        return 0
 
-    monkeypatch.setattr(notification_jobs.NotificationService, "send_notification", fake_send, raising=True)
+    monkeypatch.setattr(notification_jobs, "dispatch_direct", _fake_dispatch_direct, raising=True)
 
 
-def _company_of_users(db: Session, user_ids) -> set:
+def _company_of_users(db: Session, users) -> set:
     """The set of company_ids for the recipient users (recipients may be ids or User objects)."""
-    ids = [u.id if isinstance(u, User) else u for u in user_ids]
+    ids = [u.id if isinstance(u, User) else u for u in users]
     if not ids:
         return set()
     rows = db.query(User.company_id).filter(User.id.in_(ids)).all()
@@ -228,16 +246,22 @@ def test_calibrations_digest_runs_and_is_tenant_scoped(db_session: Session, monk
     result = asyncio.run(notification_jobs.check_calibrations_task())
     assert result["calibrations_7day"] >= 2
 
-    # Both equipments produced a notification.
     by_related = {(c["related_type"], c["related_id"]): c for c in recorder.calls}
     assert ("Equipment", eq_a.id) in by_related
     assert ("Equipment", eq_b.id) in by_related
 
-    # (b) Each equipment's recipients belong ONLY to that equipment's company.
-    assert _company_of_users(db_session, by_related[("Equipment", eq_a.id)]["users"]) == {COMPANY_A}
-    assert _company_of_users(db_session, by_related[("Equipment", eq_b.id)]["users"]) == {COMPANY_B}
-    assert b_user.id not in [u for u in by_related[("Equipment", eq_a.id)]["users"]]
-    assert a_user.id not in [u for u in by_related[("Equipment", eq_b.id)]["users"]]
+    # (b) Each call is scoped to the right tenant: company_id AND recipients.
+    call_a = by_related[("Equipment", eq_a.id)]
+    call_b = by_related[("Equipment", eq_b.id)]
+    assert call_a["company_id"] == COMPANY_A
+    assert call_b["company_id"] == COMPANY_B
+    assert call_a["event_key"] == "calibration.due"
+    assert _company_of_users(db_session, call_a["recipients"]) == {COMPANY_A}
+    assert _company_of_users(db_session, call_b["recipients"]) == {COMPANY_B}
+    a_ids = {u.id for u in call_a["recipients"]}
+    b_ids = {u.id for u in call_b["recipients"]}
+    assert b_user.id not in a_ids
+    assert a_user.id not in b_ids
 
 
 # ---------------------------------------------------------------------------
@@ -266,13 +290,14 @@ def test_late_work_orders_digest_is_tenant_scoped(db_session: Session, monkeypat
     assert ("WorkOrder", wo_a.id) in by_related
     assert ("WorkOrder", wo_b.id) in by_related
 
-    # Company A's overdue WO never targets a company-B user, and vice versa.
-    a_recipients = by_related[("WorkOrder", wo_a.id)]["users"]
-    b_recipients = by_related[("WorkOrder", wo_b.id)]["users"]
-    assert _company_of_users(db_session, a_recipients) == {COMPANY_A}
-    assert _company_of_users(db_session, b_recipients) == {COMPANY_B}
-    a_ids = {u.id if isinstance(u, User) else u for u in a_recipients}
-    b_ids = {u.id if isinstance(u, User) else u for u in b_recipients}
+    call_a = by_related[("WorkOrder", wo_a.id)]
+    call_b = by_related[("WorkOrder", wo_b.id)]
+    assert call_a["company_id"] == COMPANY_A and call_a["event_key"] == "wo.late"
+    assert call_b["company_id"] == COMPANY_B
+    assert _company_of_users(db_session, call_a["recipients"]) == {COMPANY_A}
+    assert _company_of_users(db_session, call_b["recipients"]) == {COMPANY_B}
+    a_ids = {u.id for u in call_a["recipients"]}
+    b_ids = {u.id for u in call_b["recipients"]}
     assert b_super.id not in a_ids and b_mgr.id not in a_ids
     assert a_super.id not in b_ids and a_mgr.id not in b_ids
 
@@ -298,17 +323,18 @@ def test_low_stock_digest_runs_and_is_tenant_scoped(db_session: Session, monkeyp
     result = asyncio.run(notification_jobs.check_low_stock_task())
     assert result["low_stock_items"] >= 2
 
-    # Exactly one low-stock notification per company (the digest sends one bundled call).
+    # Exactly one low-stock dispatch per company (the digest sends one bundled call).
     by_company = {}
     for c in recorder.calls:
-        companies = _company_of_users(db_session, c["users"])
-        assert len(companies) == 1, "a low-stock notification mixed recipients across tenants"
-        by_company.setdefault(next(iter(companies)), []).append(c)
+        assert c["event_key"] == "stock.low"
+        companies = _company_of_users(db_session, c["recipients"])
+        assert len(companies) == 1, "a low-stock dispatch mixed recipients across tenants"
+        assert companies == {c["company_id"]}, "recipients must belong to the call's company_id"
+        by_company.setdefault(c["company_id"], []).append(c)
 
     assert set(by_company) == {COMPANY_A, COMPANY_B}
-    # No cross-tenant recipient ever appears.
-    a_ids = {u.id if isinstance(u, User) else u for c in by_company[COMPANY_A] for u in c["users"]}
-    b_ids = {u.id if isinstance(u, User) else u for c in by_company[COMPANY_B] for u in c["users"]}
+    a_ids = {u.id for c in by_company[COMPANY_A] for u in c["recipients"]}
+    b_ids = {u.id for c in by_company[COMPANY_B] for u in c["recipients"]}
     assert b_user.id not in a_ids
     assert a_user.id not in b_ids
 
@@ -350,10 +376,14 @@ def test_quote_expiry_digest_is_tenant_scoped(db_session: Session, monkeypatch):
     by_related = {(c["related_type"], c["related_id"]): c for c in recorder.calls}
     assert ("Quote", quote_a.id) in by_related
     assert ("Quote", quote_b.id) in by_related
-    assert _company_of_users(db_session, by_related[("Quote", quote_a.id)]["users"]) == {COMPANY_A}
-    assert _company_of_users(db_session, by_related[("Quote", quote_b.id)]["users"]) == {COMPANY_B}
-    a_ids = {u.id if isinstance(u, User) else u for u in by_related[("Quote", quote_a.id)]["users"]}
-    b_ids = {u.id if isinstance(u, User) else u for u in by_related[("Quote", quote_b.id)]["users"]}
+    call_a = by_related[("Quote", quote_a.id)]
+    call_b = by_related[("Quote", quote_b.id)]
+    assert call_a["company_id"] == COMPANY_A and call_a["event_key"] == "quote.expiring"
+    assert call_b["company_id"] == COMPANY_B
+    assert _company_of_users(db_session, call_a["recipients"]) == {COMPANY_A}
+    assert _company_of_users(db_session, call_b["recipients"]) == {COMPANY_B}
+    a_ids = {u.id for u in call_a["recipients"]}
+    b_ids = {u.id for u in call_b["recipients"]}
     assert b_user.id not in a_ids
     assert a_user.id not in b_ids
 
@@ -364,8 +394,8 @@ def test_quote_expiry_digest_is_tenant_scoped(db_session: Session, monkeypatch):
 
 
 def test_one_company_failure_does_not_abort_others(db_session: Session, monkeypatch):
-    """Late-WO digest: make the FIRST company's send_notification blow up and assert the
-    SECOND company still gets its notification (the per-company try/except is best-effort)."""
+    """Late-WO digest: make the FIRST company's dispatch blow up and assert the SECOND
+    company still gets its notification (the per-company try/except is best-effort)."""
     _make_user(db_session, company_id=COMPANY_A, role=UserRole.MANAGER)
     _make_user(db_session, company_id=COMPANY_B, role=UserRole.MANAGER)
     part_a = _make_part(db_session, company_id=COMPANY_A)
@@ -379,12 +409,13 @@ def test_one_company_failure_does_not_abort_others(db_session: Session, monkeypa
     # Companies are iterated in id order (COMPANY_A first). Blow up only on company A's WO.
     seen = []
 
-    async def flaky_send(self, *, related_id=None, **kwargs):
+    async def _flaky_dispatch(db, *, related_id=None, **kwargs):
         if related_id == wo_a.id:
             raise RuntimeError("boom for company A")
         seen.append(related_id)
+        return 0
 
-    monkeypatch.setattr(notification_jobs.NotificationService, "send_notification", flaky_send, raising=True)
+    monkeypatch.setattr(notification_jobs, "dispatch_direct", _flaky_dispatch, raising=True)
 
     # The job swallows the per-company error and returns normally.
     result = asyncio.run(notification_jobs.check_late_work_orders_task())

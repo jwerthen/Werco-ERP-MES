@@ -283,13 +283,15 @@ ROLE_CARDS = [
             ]),
             ("Vendors", "bullets", [
                 "Vendor create/edit is Manager and up. Approving a vendor stamps its approval date.",
-                "There is no delete button for vendors — a mis-entry goes to the admin. "
-                "Never create a duplicate as a workaround.",
+                "Wrong vendor? Managers and admins can <b>Delete Vendor</b> — a soft-delete that deactivates the "
+                "record but keeps it for audit and can be restored. It is refused while the vendor still has an "
+                "active PO, so close or cancel those first. Never create a duplicate as a workaround.",
             ]),
         ],
         traps=[
             "Bulk-imported POs land directly in SENT status — immediately receivable. A typo'd import instantly "
-            "“issues” POs, which is why imports are admin-driven.",
+            "“issues” POs, which is why imports are admin-driven. A bad PO can be soft-deleted "
+            "(<b>Delete PO</b>, Manager/Admin) as long as nothing has been received against it.",
         ],
     ),
     dict(
@@ -306,6 +308,12 @@ ROLE_CARDS = [
                 "A 409 “egress is disabled” means the admin has not enabled label printing — not a printer fault.",
                 "Items flagged <b>requires inspection</b> land in the inspection queue. Quality signs those off — "
                 "receiving does not.",
+            ]),
+            ("Fix a mistake", "bullets", [
+                "Keyed the wrong quantity or lot? Don't re-receive a correction. On the receipt use <b>CORRECT</b> "
+                "(Supervisor+) to fix the numbers or lot in place, or <b>VOID</b> (Manager/Admin) to undo the whole "
+                "receipt — both require a reason and reconcile the PO and inventory automatically. Once a receipt "
+                "is inspected or its stock has been issued, corrections go through Quality instead.",
             ]),
         ],
         traps=[
@@ -524,8 +532,8 @@ def build_sharp_edges():
          "Open the routing itself for the real list"),
         ("BOM / Routing Release fires instantly", "QUIRK — no confirmation dialog",
          "Treat Release as final; a mistake means a new revision"),
-        ("Can't delete a customer / vendor / lot", "GAP — no UI deactivate path",
-         "Route mis-entries to the admin; never work around with duplicates"),
+        ("Can't delete a customer or lot", "GAP — no UI deactivate path (vendors now soft-delete + restore)",
+         "Route customer/lot mis-entries to the admin; never work around with duplicates"),
         ("“Rate limit exceeded” at login", "DESIGN — 5/min email, 3/min badge, per building IP",
          "Wait about 60 seconds; don't hammer the button"),
         ("“Account is locked”", "DESIGN — 5 failed passwords locks 30 minutes",
@@ -536,7 +544,8 @@ def build_sharp_edges():
          "Normal early in the week; never a week-1 metric"),
         ("Operator “can't find” Purchasing etc.", "DESIGN — role-gated navigation",
          "Working as intended"),
-        ("Logged out mid-coffee / blank login page", "DESIGN — 15-min idle logout, 24-hour session cap",
+        ("Logged out mid-coffee / blank login page", "DESIGN — 15-min idle logout (the session itself renews "
+         "while you work; it only expires after 7 days unused)",
          "Compliance behavior — log back in"),
         ("Leftover TEST records (TES001, TEST-CLQA-001...)", "CLEANUP — QA artifacts pending deactivation",
          "Never quote, receive, or issue against them"),
@@ -574,14 +583,16 @@ def build_login_card():
         "<b>Office staff:</b> Email + password at wercomfg.app/login.",
         "<b>Shop floor:</b> tap the “Badge ID” toggle and scan or type your badge number — no password. "
         "Kiosk screens go straight to the badge prompt.",
-        "Passwords: at least 12 characters with upper + lower + number + special, no common words. "
+        "Passwords: at least 12 characters, and no common word or pattern (password, admin, welcome, qwerty, "
+        "werco...). No upper/lower/number/symbol rules — a passphrase of a few plain words is easiest. "
         "Only you or an Admin can change it.",
     ])
     section(story, "Timeouts you will meet")
     bullets(story, [
         "<b>Office app: 15 minutes idle</b> logs you out (a 60-second warning appears first). "
         "<b>Kiosk screens: about 4 minutes idle</b> returns to the badge prompt — just scan back in.",
-        "<b>24 hours absolute:</b> everyone re-logs-in at least daily, no matter what.",
+        "<b>No fixed daily re-login.</b> While you keep using the app it renews your session for you. "
+        "A session only dies of old age after <b>7 days unused</b> — then you sign in fresh.",
         "<b>5 wrong passwords = locked 30 minutes.</b> There is no admin unlock — wait it out, then try once.",
         "<b>“Rate limit exceeded”</b> = too many logins from the building within a minute. "
         "Wait about 60 seconds; don't hammer the button.",

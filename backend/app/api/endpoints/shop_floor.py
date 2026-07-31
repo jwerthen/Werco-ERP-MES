@@ -2,11 +2,13 @@ import hashlib
 import json
 import logging
 import math
+import os
 from collections import defaultdict
 from datetime import date, datetime, timezone
-from typing import Optional
+from typing import Optional, Sequence
 
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, Request, Response, UploadFile
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import and_, func, or_
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -36,8 +38,11 @@ from app.core.websocket import (
 from app.db.database import get_db
 from app.db.tenant_filter import tenant_query
 from app.models.audit_log import AuditLog
+from app.models.document import Document, DocumentType
 from app.models.laser_nest import LaserNest
+from app.models.quality import NCRSource, NonConformanceReport
 from app.models.scrap_reason import ScrapReasonCode
+from app.models.spc import SPCCharacteristic
 from app.models.time_entry import TimeEntry, TimeEntrySource, TimeEntryType
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
@@ -81,7 +86,10 @@ from app.services.completion_cost_service import (
     rollup_labor_hours_for_closed_entries,
     rollup_labor_hours_from_evidence,
 )
-from app.services.completion_inventory_service import apply_completion_inventory_effects
+from app.services.completion_inventory_service import (
+    apply_completion_inventory_effects,
+    apply_operation_completion_inventory_effects,
+)
 from app.services.completion_quality_service import (
     evaluate_and_record_labor_data_quality,
     record_reconcile_labor_data_quality,
@@ -94,6 +102,7 @@ from app.services.completion_signal_service import (
 )
 from app.services.labor_cost_service import is_labor_cost_rollup_enabled
 from app.services.laser_nest_service import active_laser_nest, sync_laser_nest_from_operation
+from app.services.material_tie_view import MaterialTieView, tie_views_for_operations
 from app.services.operation_action_gates import (
     CLOCK_IN_ALLOWED_STATUSES,
     MSG_WRONG_WORK_CENTER,
@@ -115,6 +124,7 @@ from app.services.quality_gate_service import (
 )
 from app.services.scheduling_service import SchedulingService
 from app.services.scrap_reason_service import resolve_scrap_reason_code_or_http
+from app.services.storage_service import is_s3_ref, open_ref_stream, ref_exists
 from app.services.wallboard_service import (
     LABOR_ENTRY_TYPES,
     build_wallboard_payload,
@@ -181,6 +191,20 @@ class ProductionReportRequest(BaseModel):
         "backfill). Omit to keep the active entry's existing channel. 'import' is rejected (422) here "
         "(reserved for the bulk-migration loaders); a kiosk-scoped operator token forces 'kiosk' "
         "regardless of this hint.",
+    )
+    # Kiosk Foundry redesign (scrap -> NCR): file a Non-Conformance Report for the
+    # scrap in THIS report, in the same transaction. Deliberately NO hold and NO
+    # blocker (contrast with the process-step OOT quality hold) -- the machine
+    # keeps running; Quality is notified through the NCR + operational event.
+    open_ncr: bool = Field(
+        False,
+        description="File an NCR (source=in_process) for this report's scrap in the same transaction. "
+        "Requires quantity_scrapped_delta > 0 (400 otherwise). No hold/blocker is created.",
+    )
+    ncr_description: Optional[str] = Field(
+        None,
+        max_length=2000,
+        description="Optional operator narrative for the NCR; falls back to the scrap reason text/code.",
     )
 
     @model_validator(mode="after")
@@ -660,13 +684,159 @@ def _laser_nest_payload(operation: WorkOrderOperation) -> Optional[dict]:
     }
 
 
+def _material_ties_payload(ties: Optional[Sequence[MaterialTieView]]) -> list[dict]:
+    """Serialize an operation's open material ties for the KIOSK payloads.
+
+    ``[]`` for an untied operation -- the kiosk renders nothing at all for it
+    (no placeholder, no "not tied" nag), the surface half of the invariant that
+    an untied work order looks byte-identical to its pre-feature self.
+
+    Rides the queue/active-job payloads on purpose. The tie API
+    (``/work-orders/{id}/material-allocations``) sits OUTSIDE the kiosk path
+    fence (``deps.py`` allowlists ``/api/v1/shop-floor`` only), so a
+    badge-minted ``scope="kiosk"`` token is 403 there. This is the same
+    precedent the scrap reason codes set below: carry the data on an
+    already-authorized, already-tenant-scoped read rather than widening the
+    fence.
+
+    ``qty_consumed`` is a CACHE (the ledger is authoritative) and the numbers
+    here describe what happens when THIS OPERATION completes -- which, on a
+    kiosk COMPLETE screen, is the action the operator is about to fire. It is
+    still never per run: reporting production on a still-open operation posts
+    nothing, because an ``IN_PROGRESS`` operation is still reducible and
+    consumption never auto-reverses.
+
+    Deliberately omits ``pinned_inventory_item_id``: the lot NUMBER is what an
+    operator reads off a tag, and the kiosk has no verb that takes the id.
+    """
+    if not ties:
+        return []
+    return [
+        {
+            "allocation_id": tie.allocation_id,
+            "part_id": tie.part_id,
+            "part_number": tie.part_number,
+            "part_name": tie.part_name,
+            "unit_of_measure": tie.unit_of_measure,
+            # Raw: NULL means "not run-scaled" (reads as 1.0), which is not the
+            # same fact as an explicit 1 -- the client decides how to show it.
+            "qty_per_run": tie.qty_per_run,
+            "qty_planned": tie.qty_planned,
+            "qty_consumed": tie.qty_consumed,
+            "qty_remaining": tie.qty_remaining,
+            "on_hand": tie.on_hand,
+            # Advisory only: a shortage warns, it never blocks production.
+            "short_by": tie.short_by,
+            "pinned_lot_number": tie.pinned_lot_number,
+        }
+        for tie in ties
+    ]
+
+
+def _last_report_payload(operation: Optional[WorkOrderOperation]) -> Optional[dict]:
+    """Kiosk LAST REPORT tile: the operation's most recent production-evidence
+    report (deltas from that single report, stamped by /production and by a
+    quantity-carrying clock-out). None until the first report lands
+    (correct-forward -- historical rows are never backfilled)."""
+    if operation is None or operation.last_reported_at is None:
+        return None
+    return {
+        "at": to_utc_iso(operation.last_reported_at),
+        "good": operation.last_reported_good,
+        "scrap": operation.last_reported_scrapped,
+    }
+
+
+def _next_operation_payload(db: Session, operation: Optional[WorkOrderOperation], company_id: int) -> Optional[dict]:
+    """Next routing step after ``operation`` in its work order ("ROUTES TO ...").
+
+    Next by ``sequence`` (id as the duplicate-sequence tiebreak), regardless of
+    status -- the kiosk shows where the job goes, not what is startable. None on
+    the last operation. Tenant-scoped like every other read here.
+    """
+    if operation is None:
+        return None
+    next_op = (
+        db.query(WorkOrderOperation)
+        .options(joinedload(WorkOrderOperation.work_center))
+        .filter(
+            WorkOrderOperation.work_order_id == operation.work_order_id,
+            WorkOrderOperation.company_id == company_id,
+            or_(
+                WorkOrderOperation.sequence > operation.sequence,
+                and_(
+                    WorkOrderOperation.sequence == operation.sequence,
+                    WorkOrderOperation.id > operation.id,
+                ),
+            ),
+        )
+        .order_by(WorkOrderOperation.sequence, WorkOrderOperation.id)
+        .first()
+    )
+    if next_op is None:
+        return None
+    wc = next_op.work_center
+    return {
+        "operation_number": next_op.operation_number,
+        "name": next_op.name,
+        "status": next_op.status.value if hasattr(next_op.status, "value") else next_op.status,
+        "work_center": {"id": wc.id, "code": wc.code, "name": wc.name} if wc else None,
+    }
+
+
+def _as_utc_naive(value: datetime) -> datetime:
+    """Normalize a possibly tz-aware DB timestamp to naive UTC for arithmetic.
+
+    WorkOrderBlocker columns are ``DateTime(timezone=True)`` (aware on Postgres,
+    naive on SQLite); mixing them with ``datetime.utcnow()`` would raise.
+    """
+    if value.tzinfo is not None:
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
+
+
+def _operation_downtime_minutes(db: Session, operation_id: int, company_id: int) -> float:
+    """Total blocker downtime for one operation, in minutes (float).
+
+    Sum over the operation's WorkOrderBlockers of ``(resolved_at or now) -
+    reported_at``: resolved/dismissed blockers contribute their closed span
+    (the service always stamps resolved_at on both), open ones accrue to now.
+    Simple and per-operation -- deliberately no shift math (no shift model
+    exists).
+    """
+    rows = (
+        db.query(WorkOrderBlocker.reported_at, WorkOrderBlocker.resolved_at)
+        .filter(
+            WorkOrderBlocker.company_id == company_id,
+            WorkOrderBlocker.operation_id == operation_id,
+        )
+        .all()
+    )
+    now = datetime.utcnow()
+    total_seconds = 0.0
+    for reported_at, resolved_at in rows:
+        if reported_at is None:
+            continue
+        end = _as_utc_naive(resolved_at) if resolved_at is not None else now
+        total_seconds += max(0.0, (end - _as_utc_naive(reported_at)).total_seconds())
+    return round(total_seconds / 60.0, 2)
+
+
 @router.get("/my-active-job")
 def get_my_active_job(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Get the current user's active time entries (clocked in jobs)"""
+    """Get the current user's active time entries (clocked in jobs).
+
+    Each job carries ``material_ties`` (the open, operation-scoped material tied
+    to it, with on-hand and shortage) so the single-operator kiosk can read the
+    deduction straight off the running job, and ``operation_quantity_scrapped``
+    (the OPERATION's scrap total) -- distinct from ``quantity_scrapped``, which
+    is this time ENTRY's session scrap and would under-state a prediction that
+    scales on ``complete + scrapped`` across sessions.
+    """
     # Eager-load operation, work_order, and work_order.part in a single
     # query so we don't issue 2*N extra SELECTs iterating active entries.
     active_entries = (
@@ -686,7 +856,19 @@ def get_my_active_job(
     )
 
     if not active_entries:
-        return {"active_jobs": [], "active_job": None}
+        # server_time rides the empty payload too -- the kiosk clock keeps its
+        # skew correction between jobs (same pattern as work-center-queue).
+        return {"active_jobs": [], "active_job": None, "server_time": to_utc_iso(datetime.utcnow())}
+
+    # Material ties for the jobs this operator is clocked into, in ONE batched
+    # read (an operator can hold several open entries). Company-scoped to the
+    # ACTIVE company, so an entry on another tenant's operation simply yields no
+    # ties rather than leaking one. Pure read -- nothing here consumes.
+    material_ties = tie_views_for_operations(
+        db,
+        company_id=company_id,
+        operation_ids=[entry.operation_id for entry in active_entries if entry.operation_id is not None],
+    )
 
     jobs = []
     for entry in active_entries:
@@ -704,6 +886,8 @@ def get_my_active_job(
                 "work_order_number": work_order.work_order_number if work_order else None,
                 "part_number": work_order.part.part_number if work_order and work_order.part else None,
                 "part_name": work_order.part.name if work_order and work_order.part else None,
+                # Kiosk viewer/running panel: the part's revision letter (REV chip).
+                "part_revision": work_order.part.revision if work_order and work_order.part else None,
                 "operation_name": operation.name if operation else None,
                 "operation_number": operation.operation_number if operation else None,
                 "work_center_name": entry.work_center.name if entry.work_center else None,
@@ -717,18 +901,243 @@ def get_my_active_job(
                 "quantity_complete": (
                     float(operation.quantity_complete) if operation and operation.quantity_complete else 0
                 ),
+                # OPERATION-level scrap total, alongside quantity_complete above.
+                #
+                # A DISTINCT key from "quantity_scrapped" below on purpose: that
+                # one is THIS TIME ENTRY's session scrap, and the two are only
+                # equal on a single-session operation. The material prediction
+                # scales on (complete + scrapped) at the OPERATION level -- a
+                # scrapped run still ate its sheet -- so reading the session
+                # figure would under-state the deduction on any job worked
+                # across two shifts. Additive: the existing key is untouched.
+                "operation_quantity_scrapped": (float(operation.quantity_scrapped or 0) if operation else 0.0),
+                # Kiosk session tiles (AVG PER PC): THIS entry's own session counts,
+                # distinct from the operation totals above.
+                "quantity_produced": float(entry.quantity_produced or 0),
+                "quantity_scrapped": float(entry.quantity_scrapped or 0),
                 # G5-A: surface approval state on the active-job list serializer (these
                 # are open entries so typically null, but kept uniform with TimeEntryResponse).
                 "approved": to_utc_iso(entry.approved) if entry.approved else None,
                 "approved_by": entry.approved_by,
                 "laser_nest": _laser_nest_payload(operation) if operation else None,
+                # Open, operation-scoped material ties for THIS job. [] when
+                # untied -- the running panel renders nothing for those.
+                "material_ties": _material_ties_payload(material_ties.get(entry.operation_id)),
+                # Kiosk telemetry tiles: most recent production report, next routing
+                # step ("ROUTES TO"), and the blocker downtime clock for this op.
+                "last_report": _last_report_payload(operation),
+                "next_operation": _next_operation_payload(db, operation, company_id),
+                "downtime_minutes": (_operation_downtime_minutes(db, operation.id, company_id) if operation else 0.0),
             }
         )
 
     return {
         "active_jobs": jobs,
         "active_job": jobs[0] if jobs else None,
+        # Timer skew correction: the kiosk cycle timer/clock run on corrected
+        # server time, not the tablet's (same contract as work-center-queue).
+        "server_time": to_utc_iso(datetime.utcnow()),
     }
+
+
+@router.get("/operations/{operation_id}/documents")
+def get_operation_documents(
+    operation_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Kiosk doc-viewer discovery read: what is viewable for this operation.
+
+    Pure read (no state change, no audit): the controlled part drawing (newest
+    approved/released DRAWING Document for the WO's part), the operation's laser
+    nest reference PDF, the nest material, and the part's critical SPC
+    characteristics. Lives under /shop-floor so a badge-minted kiosk-scoped
+    token passes the path fence; any authenticated user may call it (mirrors
+    the laser-nest inline preview stance). Bytes are served separately by
+    GET /shop-floor/documents/{document_id}/inline.
+    """
+    operation = (
+        db.query(WorkOrderOperation)
+        .options(
+            joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part),
+            joinedload(WorkOrderOperation.laser_nest).joinedload(LaserNest.document),
+        )
+        .filter(
+            WorkOrderOperation.id == operation_id,
+            WorkOrderOperation.company_id == company_id,
+        )
+        .first()
+    )
+    if not operation:
+        raise HTTPException(status_code=404, detail="Operation not found")
+
+    work_order = operation.work_order
+    part = work_order.part if work_order else None
+    part_payload = (
+        {
+            "id": part.id,
+            "part_number": part.part_number,
+            "name": part.name,
+            "revision": part.revision,
+        }
+        if part
+        else None
+    )
+
+    # Controlled drawing: newest approved/released DRAWING for the part.
+    # released_at DESC NULLS LAST, portably (is_(None).asc() = non-null first,
+    # same trick as the dispatch run_order sort), then id DESC.
+    drawing_payload = None
+    if part is not None:
+        drawing = (
+            tenant_query(db, Document, company_id)
+            .filter(
+                Document.part_id == part.id,
+                Document.document_type == DocumentType.DRAWING,
+                Document.status.in_(("approved", "released")),
+            )
+            .order_by(Document.released_at.is_(None).asc(), Document.released_at.desc(), Document.id.desc())
+            .first()
+        )
+        if drawing is not None:
+            drawing_payload = {
+                "document_id": drawing.id,
+                "revision": drawing.revision,
+                "title": drawing.title,
+                "status": drawing.status,
+                "released_at": to_utc_iso(drawing.released_at),
+                "file_name": drawing.file_name,
+            }
+
+    # Nest tab: soft-delete-guarded, same helper _laser_nest_payload uses.
+    nest = active_laser_nest(operation)
+    nest_payload = (
+        {
+            "laser_nest_id": nest.id,
+            "nest_name": nest.nest_name,
+            "cnc_number": nest.cnc_number,
+            "document_id": nest.document_id,
+            "file_name": nest.document.file_name if nest.document else None,
+        }
+        if nest
+        else None
+    )
+
+    # CRITICAL DIMS rail: the part's critical SPC characteristics. Prefer rows
+    # scoped to THIS routing operation or unscoped (operation_number NULL); when
+    # none match, fall back to every critical row rather than hiding them.
+    # SPCCharacteristic.operation_number is an Integer while the routing op
+    # number is a string ("OP10"/"10") -- compare on the digits.
+    critical_dims: list[dict] = []
+    if part is not None:
+        op_number_digits = "".join(ch for ch in str(operation.operation_number or "") if ch.isdigit())
+        op_number_int = int(op_number_digits) if op_number_digits else None
+        rows = (
+            tenant_query(db, SPCCharacteristic, company_id)
+            .filter(
+                SPCCharacteristic.part_id == part.id,
+                SPCCharacteristic.is_critical == True,  # noqa: E712
+                SPCCharacteristic.is_active == True,  # noqa: E712
+            )
+            .order_by(SPCCharacteristic.id)
+            .all()
+        )
+        preferred = [row for row in rows if row.operation_number is None or row.operation_number == op_number_int]
+        critical_dims = [
+            {
+                "id": row.id,
+                "name": row.name,
+                "nominal": row.specification_nominal,
+                "usl": row.specification_usl,
+                "lsl": row.specification_lsl,
+                "unit_of_measure": row.unit_of_measure,
+            }
+            for row in (preferred or rows)
+        ]
+
+    return {
+        "part": part_payload,
+        "drawing": drawing_payload,
+        "nest": nest_payload,
+        "material": nest.material if nest else None,
+        "critical_dims": critical_dims,
+    }
+
+
+@router.get("/documents/{document_id}/inline")
+def get_shop_floor_document_inline(
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Serve a kiosk-viewable document PDF INLINE -- the single shop-floor
+    byte-serving route (the kiosk token path fence blocks /laser-nests and
+    /documents, so the viewer fetches bytes here).
+
+    Guard: the document must belong to the active company AND be either a
+    controlled part drawing (DRAWING type, approved/released status, linked to
+    a part) or the reference PDF of a live (non-deleted) laser nest in the
+    same tenant. Nest reference PDFs are stored as released DRAWINGs with no
+    part_id, so they are servable ONLY through the live-nest branch -- a
+    soft-deleted nest's PDF stops serving, and a draft/obsolete part drawing
+    never serves at the point of use. Any miss is a 404 -- never a 403 -- so
+    the route leaks no existence information about other documents. Read-only,
+    any authenticated user, no role gate: operators must preview the shop
+    drawing (the documented laser-nest inline stance). Serving mirrors
+    laser_nests.py: S3 stream or local FileResponse, forced inline
+    application/pdf.
+    """
+    document = tenant_query(db, Document, company_id).filter(Document.id == document_id).first()
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    is_controlled_part_drawing = (
+        document.document_type == DocumentType.DRAWING
+        and document.status in ("approved", "released")
+        and document.part_id is not None
+    )
+    if not is_controlled_part_drawing:
+        nest_reference = (
+            tenant_query(db, LaserNest, company_id)
+            .filter(
+                LaserNest.document_id == document.id,
+                LaserNest.is_deleted == False,  # noqa: E712
+            )
+            .first()
+        )
+        if nest_reference is None:
+            # 404 (not 403): a non-kiosk-viewable document must be indistinguishable
+            # from a nonexistent one.
+            raise HTTPException(status_code=404, detail="Document not found")
+
+    # Header-safe filename: drop quotes/control chars and anything outside
+    # printable ASCII (a stored name must never be able to break or forge the
+    # header). ASCII-only on purpose: latin-1 high bytes (e.g. 0xF8 "ø") are
+    # encodable by starlette but arrive as invalid UTF-8 at any client that
+    # decodes header bytes as UTF-8 -- RFC 9110 field values want ASCII.
+    raw_filename = document.file_name or f"document-{document.id}.pdf"
+    filename = "".join(c for c in raw_filename if c.isprintable() and c not in '"\\' and ord(c) < 127)
+    inline_disposition = f'inline; filename="{filename or f"document-{document.id}.pdf"}"'
+
+    if is_s3_ref(document.file_path):
+        if not ref_exists(document.file_path):
+            raise HTTPException(status_code=404, detail="File not found")
+        return StreamingResponse(
+            open_ref_stream(document.file_path),
+            media_type="application/pdf",
+            headers={"Content-Disposition": inline_disposition},
+        )
+
+    if not document.file_path or not os.path.exists(document.file_path):
+        raise HTTPException(status_code=404, detail="File not found")
+
+    return FileResponse(
+        document.file_path,
+        media_type="application/pdf",
+        headers={"Content-Disposition": inline_disposition},
+    )
 
 
 @router.post("/clock-in", response_model=TimeEntryResponse)
@@ -1094,6 +1503,17 @@ def clock_out(
             operation.quantity_reworked = float(operation.quantity_reworked or 0) + float(
                 clock_out_data.quantity_produced or 0
             )
+        # Kiosk telemetry (LAST REPORT tile): a quantity-carrying clock-out IS a
+        # production report -- stamp it as the operation's most recent one so the
+        # tile survives the session close. Deltas from THIS write, not totals.
+        # Inside the non-terminal branch on purpose: a terminal WO's operations
+        # are never mutated (G6-A above).
+        closing_good = float(clock_out_data.quantity_produced or 0)
+        closing_scrap = float(clock_out_data.quantity_scrapped or 0)
+        if closing_good > 0 or closing_scrap > 0:
+            operation.last_reported_at = datetime.utcnow()
+            operation.last_reported_good = closing_good
+            operation.last_reported_scrapped = closing_scrap
         sync_laser_nest_from_operation(operation)
 
     # G6-A: never accrue cost/hours onto a terminal WO.
@@ -1197,6 +1617,23 @@ def clock_out(
 
             affected_work_centers = finalize_operation_completion(db, work_order, operation)
             work_order_completed = work_order.status == WorkOrderStatus.COMPLETE
+
+            # Material consumption (incremental): deplete THIS operation's tied material
+            # now that it is COMPLETE, rather than waiting for the whole work order --
+            # a laser child carries one operation per nest, so nest 1 of 3 must move its
+            # sheet when nest 1 closes. Reached only inside `not wo_is_terminal`, so a
+            # finished/cancelled job never consumes. No-op (not one write) when the
+            # operation carries no tie; the whole-WO reconcile below still self-heals.
+            #
+            # The flush is load-bearing: the consume engine issues SELECTs while the
+            # version-mapped WorkOrder/WorkOrderOperation rows are dirty, and an
+            # AUTOFLUSH StaleDataError raised inside its per-allocation savepoint would
+            # be swallowed into an ALLOCATION_CONSUMPTION_FAILED row instead of
+            # surfacing as this handler's documented 409.
+            db.flush()
+            apply_operation_completion_inventory_effects(
+                db, work_order, operation, user_id=current_user.id, company_id=company_id, audit=audit
+            )
             # PERF-5: commit=False joins this scheduling refresh into the handler's
             # single unit of work, so the WO/op state change is committed atomically
             # with the audit rows / cost rollup / quality exceptions written below
@@ -1225,7 +1662,15 @@ def clock_out(
     quality_exceptions: list[QualityException] = []
     if operation_completed or work_order_completed:
         db.flush()
-        audit = AuditService(db, current_user)
+        # NOTE: this branch used to construct its own ``AuditService(db, current_user)``,
+        # SHADOWING the request-scoped one this handler already injects. Two problems,
+        # both fixed by simply using the injected instance: (a) the tied-material
+        # consumption above runs BEFORE this point, so the consumption rows and the
+        # completion status-change rows would have been written by two different
+        # services; and (b) the back-fill audit row further down explicitly documents
+        # itself as using "the request-scoped AuditService so the row captures
+        # ip_address / user_agent" -- which the shadow silently made false whenever an
+        # operation completed on the same call.
         if operation_completed and operation:
             audit.log_status_change(
                 resource_type="work_order_operation",
@@ -1566,12 +2011,38 @@ def get_work_center_queue(
     as before. Each queued item carries a ``roster`` of the open (labor)
     TimeEntries on that operation so the crew kiosk can render per-person
     timers; ``server_time`` lets the client correct clock skew.
+
+    Each item also carries ``material_ties``: the open, operation-scoped material
+    tied to that work, with on-hand and shortage, so the kiosk can state what
+    leaves inventory when the WORK ORDER completes (never per run). It rides this
+    payload rather than the tie API because the latter sits outside the kiosk path
+    fence -- the same precedent as ``scrap_reason_codes`` below. ``[]`` on an
+    untied operation.
+
+    DISCLOSURE: a station principal is an unattended, PIN-unlocked terminal with
+    no operator identity, and ``material_ties`` adds material part numbers and
+    ON-HAND STOCK to what it can read. The read is scoped to the tied parts of
+    THIS work center's queued operations -- it is not an inventory browser -- but
+    it is a genuine (small) widening of the station's disclosure surface.
+
+    The tie read itself writes nothing (unlike ``_laser_nest_payload``, which
+    still syncs nest counters here): a poll is not an actor, has no intent and
+    records no reason, so it must never move stock.
     """
     company_id = principal.company_id
     if principal.kind == "station" and principal.work_center_id != work_center_id:
         # The station is physically bound to one work center (from the DB row,
         # never the client) — it can never read another work center's queue.
         raise HTTPException(status_code=403, detail="Kiosk station may only read its own work center queue")
+
+    # Kiosk top bar (machine identity): the work center itself, tenant-scoped.
+    # None (not 404) when the id is unknown/cross-tenant — this read has always
+    # answered an unknown work center with an empty queue, and a tenant-scoped
+    # miss must not leak that the id exists elsewhere. Deliberately no is_active
+    # filter: deactivated work centers keep serving their queued work (PR #143).
+    work_center = (
+        db.query(WorkCenter).filter(WorkCenter.id == work_center_id, WorkCenter.company_id == company_id).first()
+    )
 
     # Shared with the manager dispatch board (dispatch_service.queued_operations_query)
     # so the operator's tablet and the manager's board can never disagree on WHAT is
@@ -1630,6 +2101,17 @@ def get_work_center_queue(
     # counts as recorded when its live conforming records cover every WO serial.
     step_counts = process_sheet_service.step_counts_for_operations(db, company_id, operations)
 
+    # Material ties (PR 2): the sheet/stock tied to each queued operation, so the
+    # kiosk job card can state what leaves inventory when the WORK ORDER finishes.
+    # ONE batched read for the whole queue -- this endpoint is polled every 10-15s
+    # per station, shop-wide, so a per-card query would be that cadence times the
+    # card count. Tenant scope is `company_id` above: the STATION'S OWN company
+    # from its kiosk_stations row for a station principal, the active company for
+    # a user -- never client input, never current_user.company_id. Pure read: it
+    # writes nothing and reconciles nothing (consumption is a completion-path
+    # verb and must never fire from a poll).
+    material_ties = tie_views_for_operations(db, company_id=company_id, operation_ids=operation_ids)
+
     # Gap-free rank for the RUN chip: stored ranks go sparse as jobs complete or
     # move away, and "RUN 4" on a three-job queue reads as a missing job.
     run_positions = dispatch_service.display_positions(operations)
@@ -1646,6 +2128,8 @@ def get_work_center_queue(
                 "work_order_number": wo.work_order_number,
                 "part_number": wo.part.part_number if wo.part else None,
                 "part_name": wo.part.name if wo.part else None,
+                # Kiosk job card / viewer title: the part's revision letter (REV chip).
+                "part_revision": wo.part.revision if wo.part else None,
                 "operation_number": op.operation_number,
                 "operation_name": op.name,
                 "work_center_id": op.work_center_id,
@@ -1667,9 +2151,14 @@ def get_work_center_queue(
                 "setup_time_hours": op.setup_time_hours,
                 "run_time_hours": op.run_time_hours,
                 "laser_nest": _laser_nest_payload(op),
+                # Open, operation-scoped material ties. [] when untied -- render
+                # nothing at all for those (see _material_ties_payload).
+                "material_ties": _material_ties_payload(material_ties.get(op.id)),
                 "roster": roster_by_operation.get(op.id, []),
                 "steps_total": op_step_counts["steps_total"],
                 "steps_recorded": op_step_counts["steps_recorded"],
+                # Kiosk LAST REPORT tile: the op's most recent production report.
+                "last_report": _last_report_payload(op),
             }
         )
 
@@ -1698,6 +2187,19 @@ def get_work_center_queue(
 
     return {
         "queue": queue,
+        # Kiosk top bar: machine identity for the header (code, name, mute
+        # description line, status tag). Null when unknown/cross-tenant.
+        "work_center": (
+            {
+                "id": work_center.id,
+                "code": work_center.code,
+                "name": work_center.name,
+                "description": work_center.description,
+                "current_status": work_center.current_status,
+            }
+            if work_center
+            else None
+        ),
         # Timer skew correction: honest per-person timers are computed against
         # the server clock, not the tablet's.
         "server_time": to_utc_iso(datetime.utcnow()),
@@ -1736,6 +2238,12 @@ def get_dispatch_board(
     orders and labels the queue and NEVER gates whether an operation can start.
     Do not confuse it with ``sequence``, which is routing precedence within one
     work order and does gate.
+
+    Each row carries ``material_tie`` when the operation has an open,
+    OPERATION-scoped material tie -- part, planned/consumed quantity, on-hand and
+    shortage, batched once for the whole board. Null on every untied operation:
+    the client draws nothing for those. Work-order-scoped ties are deliberately
+    excluded (one tie would otherwise fan across every card of that job).
 
     Read-only: no reconcile, no writes, no audit rows.
     """
@@ -1776,6 +2284,11 @@ def set_work_center_run_order(
     order) rather than N per-operation rows: it is one manager action. The audit
     row is written before the terminal commit so it lands atomically with the
     rank rewrite (invariant 2).
+
+    The response is a FULL board column and the client swaps it in wholesale, so
+    it must carry everything the GET board carried -- ``material_tie`` included
+    (see the tie map built below), or a reorder would look like it untied the
+    shop's material.
     """
     work_center = dispatch_service.resolve_active_work_center_or_http(db, company_id, work_center_id)
 
@@ -1798,7 +2311,15 @@ def set_work_center_run_order(
         )
         # Project the response BEFORE the commit: commit expires every loaded row,
         # which would re-issue the whole queue read (and its part joins) lazily.
-        column = dispatch_service.board_column(work_center, refreshed)
+        #
+        # The tie map is REQUIRED here, not decorative: this response REPLACES the
+        # whole column on the manager's board, so building the column without it
+        # would blank every material chip the GET had just drawn -- a drag-reorder
+        # would look like it untied the shop's material. Built before the commit
+        # for the same expiry reason, and it is a pure read (invariant: the board
+        # projection stays write-free even though this handler commits).
+        tie_info = dispatch_service.material_tie_info(db, company_id, refreshed)
+        column = dispatch_service.board_column(work_center, refreshed, tie_info=tie_info)
         db.commit()
     except StaleDataError:
         db.rollback()
@@ -2288,8 +2809,13 @@ def shop_floor_wallboard(
     DELIBERATELY side-effect free: no reconcile-on-read, no audit rows, no
     events — an unattended TV polling every 30s must never mutate state, and
     a display token has no user identity to attribute writes to.
+
+    Customer names are redacted UNLESS the principal is authorized to see them
+    (``principal.show_customer`` — a display token opted in via
+    ``show_customer_names``, or a signed-in privileged office role); the default
+    keeps public shop-floor TVs customer-free.
     """
-    return build_wallboard_payload(db, principal.company_id, dept=dept)
+    return build_wallboard_payload(db, principal.company_id, dept=dept, include_customer=principal.show_customer)
 
 
 @router.get("/active-users")
@@ -2764,6 +3290,13 @@ def report_operation_production(
         raise HTTPException(status_code=400, detail="Quantity cannot be negative")
     if good_delta == 0 and scrap_delta == 0:
         raise HTTPException(status_code=400, detail="Enter a completed or scrap quantity")
+    # Scrap -> NCR (Kiosk Foundry redesign): an NCR documents scrap, so filing one
+    # from a report that carries none is a client bug -- refuse before any mutation.
+    if production_data.open_ncr and scrap_delta <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="open_ncr requires a scrap quantity: report quantity_scrapped_delta greater than 0",
+        )
 
     # A0.1 adoption-telemetry channel (kiosk-token forcing + import guard) resolved
     # before any mutation so a disallowed 'import' 422s without touching the entry.
@@ -2829,6 +3362,12 @@ def report_operation_production(
     # entry is re-processed work -- track it for first-pass yield.
     if active_entry.entry_type == TimeEntryType.REWORK and good_delta > 0:
         operation.quantity_reworked = float(operation.quantity_reworked or 0) + good_delta
+    # Kiosk telemetry (LAST REPORT tile): stamp THIS report as the operation's most
+    # recent production evidence -- the deltas of this single report, not totals.
+    # Always at least one of the two is > 0 (both-zero was refused above).
+    operation.last_reported_at = datetime.utcnow()
+    operation.last_reported_good = good_delta
+    operation.last_reported_scrapped = scrap_delta
     operation.updated_at = datetime.utcnow()
     sync_laser_nest_from_operation(operation)
 
@@ -2857,7 +3396,8 @@ def report_operation_production(
     sync_work_order_quantity_complete(work_order, operation, all_operations_complete=False)
     work_order.updated_at = datetime.utcnow()
 
-    AuditService(db, current_user).log(
+    audit_service = AuditService(db, current_user)
+    audit_service.log(
         action="REPORT_OPERATION_PRODUCTION",
         resource_type="work_order_operation",
         resource_id=operation_id,
@@ -2870,6 +3410,79 @@ def report_operation_production(
             + (f". Notes: {production_data.notes}" if production_data.notes else "")
         ),
     )
+
+    # Scrap -> NCR (Kiosk Foundry redesign): file the NCR in the SAME transaction
+    # as the production write, following the create_quality_hold pattern (number
+    # generation, audit log_create, ncr_created event) -- but deliberately with NO
+    # blocker and NO hold: the machine keeps running, Quality is notified through
+    # the NCR + high-severity operational event.
+    ncr_payload: Optional[dict] = None
+    if production_data.open_ncr:
+        # Service->endpoint edge kept function-local on purpose (create_quality_hold
+        # precedent): quality.py owns the canonical company-scoped NCR number
+        # generator and importing it beats a third copy drifting.
+        from app.api.endpoints.quality import generate_ncr_number
+
+        scrap_reason_text = (production_data.scrap_reason or "").strip()
+        if not scrap_reason_text and scrap_code is not None:
+            scrap_reason_text = f"{scrap_code.code} — {scrap_code.name}"
+        ncr_description = (production_data.ncr_description or "").strip() or (
+            f"Operator scrap report on WO {work_order.work_order_number} "
+            f"op {operation.operation_number}: {scrap_delta} scrapped. Reason: {scrap_reason_text}"
+        )
+        ncr = NonConformanceReport(
+            ncr_number=generate_ncr_number(db, company_id),
+            part_id=work_order.part_id,
+            work_order_id=work_order.id,
+            lot_number=work_order.lot_number,
+            quantity_affected=scrap_delta,
+            source=NCRSource.IN_PROCESS,
+            title=(f"Operator scrap report — WO {work_order.work_order_number} op {operation.operation_number}")[:255],
+            description=ncr_description,
+            detected_by=current_user.id,
+            detected_date=date.today(),
+        )
+        ncr.company_id = company_id
+        db.add(ncr)
+        db.flush()
+        audit_service.log_create(
+            "ncr",
+            ncr.id,
+            ncr.ncr_number,
+            new_values=ncr,
+            description=(
+                f"NCR {ncr.ncr_number} filed from an operator scrap report on "
+                f"WO {work_order.work_order_number} op {operation.operation_number}"
+            ),
+            extra_data={
+                "work_order_id": work_order.id,
+                "work_order_operation_id": operation.id,
+                "quantity_scrapped_delta": scrap_delta,
+                "scrap_reason": scrap_reason,
+                "scrap_reason_code": scrap_code.code if scrap_code else None,
+                "source": recorded_source,
+            },
+        )
+        OperationalEventService(db).emit_best_effort(
+            company_id=company_id,
+            event_type="ncr_created",
+            source_module="shop_floor",
+            entity_type="ncr",
+            entity_id=ncr.id,
+            work_order_id=work_order.id,
+            operation_id=operation.id,
+            user_id=current_user.id,
+            severity="high",
+            event_payload={
+                "ncr_number": ncr.ncr_number,
+                "title": ncr.title,
+                "source": NCRSource.IN_PROCESS.value,
+                "quantity_affected": scrap_delta,
+                "scrap_reason": scrap_reason,
+                "scrap_reason_code": scrap_code.code if scrap_code else None,
+            },
+        )
+        ncr_payload = {"id": ncr.id, "ncr_number": ncr.ncr_number}
 
     try:
         db.commit()
@@ -2929,6 +3542,9 @@ def report_operation_production(
             "quantity_scrapped": active_entry.quantity_scrapped,
             "clock_out": to_utc_iso(active_entry.clock_out),
         },
+        # Scrap -> NCR: the NCR this report filed (open_ncr=true), else null. The
+        # kiosk success toast quotes the real ncr_number from here.
+        "ncr": ncr_payload,
     }
 
 
@@ -3116,6 +3732,7 @@ def complete_operation(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """
     Mark operation as complete (full or partial).
@@ -3365,8 +3982,18 @@ def complete_operation(
         if is_labor_cost_rollup_enabled(company_id):
             rollup_labor_hours_for_closed_entries(work_order, operation, open_entries)
 
-    # Create audit log
-    audit = AuditService(db, current_user)
+    # Create audit log. The flush mirrors the clock-out twin: the tied-material
+    # consumption below issues SELECTs while the version-mapped WorkOrder /
+    # WorkOrderOperation rows are dirty, and an AUTOFLUSH StaleDataError raised inside
+    # its per-allocation savepoint would be swallowed into an
+    # ALLOCATION_CONSUMPTION_FAILED row instead of surfacing as this handler's 409.
+    db.flush()
+    # The request-scoped AuditService is INJECTED (see the signature), not built
+    # here. A local ``AuditService(db, current_user)`` carries no ``request``, so
+    # every row this handler writes -- including the material-consumption rows
+    # below, which move stock -- would land with NULL ip_address / user_agent and
+    # lose "source of the event" (NIST SP 800-171 3.3.1). That was the defect
+    # removed from ``clock_out``; this is its twin.
     audit.log(
         action="COMPLETE_OPERATION" if is_fully_complete else "UPDATE_OPERATION_PROGRESS",
         resource_type="work_order_operation",
@@ -3377,6 +4004,19 @@ def complete_operation(
             + (f". Notes: {completion_data.notes}" if completion_data.notes else "")
         ),
     )
+
+    # Material consumption (incremental): deplete THIS operation's tied material as soon
+    # as the operation is COMPLETE, not at work-order completion -- one laser operation
+    # is one nest, and its sheet leaves stock when the nest closes. A terminal parent WO
+    # was already refused with a 409 above (TERMINAL_WO_STATUSES), so a finished /
+    # cancelled job can never reach here. Writes NOTHING when the operation is untied;
+    # the whole-WO reconcile in apply_completion_inventory_effects below remains the
+    # self-heal for anything this missed. Placed BEFORE the work-order-completion block
+    # so apply_completion_cost_rollup sees these ledger rows on the same request.
+    if is_fully_complete:
+        apply_operation_completion_inventory_effects(
+            db, work_order, operation, user_id=current_user.id, company_id=company_id, audit=audit
+        )
 
     # EVT-2: emit the uniform completion OperationalEvents in-process (before the
     # terminal commit so they land atomically with the status change). This scan/
@@ -3530,6 +4170,9 @@ def complete_operation(
         # Crew-station kiosk: the open entries this completion auto-closed
         # (empty on a partial/progress update).
         "closed_time_entries": closed_time_entries,
+        # Kiosk complete modal ("ROUTES TO"): the next routing step, null on the
+        # last operation.
+        "next_operation": _next_operation_payload(db, operation, company_id),
     }
 
 

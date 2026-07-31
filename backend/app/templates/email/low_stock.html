@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+
+{# CUI-safe: item COUNT only -- no part descriptions or quantities. #}
+{% block content %}
+<h2>Low Stock Alert</h2>
+
+<div class="alert alert-warning">
+    <strong>{{ count }}</strong> item(s) are at or below their reorder point.
+</div>
+
+<p>Log in to Werco to review inventory and create purchase orders.</p>
+{% endblock %}

@@ -24,6 +24,16 @@ jest.mock('../services/api', () => ({
   },
 }));
 
+// Inventory gates its Receive / Transfer affordances on the caller's role, so the
+// page needs an auth context. Manager holds inventory:adjust + inventory:transfer.
+jest.mock('../context/AuthContext', () => ({
+  useAuth: () => ({
+    user: { id: 1, role: 'manager', is_superuser: false },
+    isAuthenticated: true,
+    isLoading: false,
+  }),
+}));
+
 const mockedApi = api as jest.Mocked<typeof api>;
 
 // Two manufactured parts on hand; part 7 is the one flagged low stock.

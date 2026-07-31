@@ -189,6 +189,40 @@ jobs:
           REFRESH_TOKEN_SECRET_KEY: ci-config-validation-placeholder-not-secret
         run: docker compose config -q
 
+  secret-scan:
+    name: Secret Scanning
+    runs-on: ubuntu-latest
+    # No `needs:` — this is cheap and should report even if the build is broken.
+    #
+    # Added 2026-07-28. Until then the repo had no ENFORCING secret-detection
+    # gate: the only dedicated control was `detect-private-key` in
+    # .pre-commit-config.yaml, and that file was invalid YAML so pre-commit
+    # could never load it (see the note at the top of that file). Running the
+    # hook here rather than trusting a local `pre-commit install` makes it
+    # enforced for every contributor.
+    #
+    # (Trivy's fs scan in the security-scan job does enable its secret scanner
+    # by default, but it blocks nothing: the backend SARIF upload is
+    # continue-on-error, the frontend SARIF is never uploaded, and it covers
+    # only backend/ and frontend/ — not the repo root or .github/.)
+    #
+    # Scope honesty: `detect-private-key` finds PRIVATE KEY blocks, not API
+    # tokens, passwords, or connection strings. It is a floor, not full secret
+    # scanning — GitHub secret scanning or gitleaks would be the next step, and
+    # that is a deliberate open decision, not an oversight.
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Scan all files for committed private keys
+        run: |
+          pip install pre-commit
+          pre-commit run detect-private-key --all-files
+
   security-scan:
     name: Security Scanning
     runs-on: ubuntu-latest
@@ -200,7 +234,9 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Run Trivy vulnerability scanner (Backend)
-        uses: aquasecurity/trivy-action@master
+        # Pinned, not @master: a floating branch ref runs whatever upstream
+        # pushed, in a job that holds `security-events: write`. Bump deliberately.
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: 'fs'
           scan-ref: './backend'
@@ -210,23 +246,53 @@ jobs:
       - name: Upload Trivy results to GitHub Security
         uses: github/codeql-action/upload-sarif@v4
         # Non-fatal: the SARIF upload needs code scanning (GitHub Advanced Security),
-        # which fails on push if unavailable. The Trivy scan still runs (informational);
-        # npm audit remains the hard security gate.
+        # which fails on push if unavailable. The Trivy scan still runs (informational).
+        # NOTE (2026-07-28): nothing in this job blocks any more — npm audit became
+        # advisory here too. The blocking dependency gate now lives in
+        # .github/workflows/dependency-audit.yml (nightly). See the npm audit step below.
         continue-on-error: true
         with:
           sarif_file: 'backend-trivy-results.sarif'
 
       - name: Run Trivy vulnerability scanner (Frontend)
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: 'fs'
           scan-ref: './frontend'
           format: 'sarif'
           output: 'frontend-trivy-results.sarif'
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+        # No `cache: 'npm'`: this job has no defaults.working-directory, so the
+        # cache-dependency glob would resolve from the repo root (no lockfile
+        # there). Same trap documented on setup-python below. Nothing is
+        # installed here anyway — see the next step.
+
       - name: Run npm audit (Frontend)
         working-directory: ./frontend
-        run: npm audit --audit-level=high
+        # Allowlist-aware wrapper around `npm audit --json`.
+        #
+        # ADVISORY HERE (changed 2026-07-28), BLOCKING NIGHTLY. This job sits in
+        # the `needs` chain of deploy-production, so while this step was a hard
+        # gate a newly-published advisory could red-line unrelated PRs *and*
+        # block prod deploys with zero code change (the 2026-07-20 axios
+        # incident, PR #138; react-router was the second occurrence). The
+        # advisory database is a daily-moving target and does not belong on the
+        # critical path of shipping unrelated work — the same reasoning already
+        # applied to pip-audit below.
+        #
+        # The gate itself is NOT gone: .github/workflows/dependency-audit.yml
+        # runs this exact command nightly and hard-fails there, so a real
+        # advisory still turns something red and is visible in the Actions tab.
+        # Promote back to blocking by deleting `continue-on-error` here.
+        # Verified to need no `npm ci` — `npm audit` resolves the tree from
+        # package-lock.json alone, so the checkout is sufficient.
+        # See docs/SECURITY_ADVISORY_SUPPRESSIONS.md.
+        continue-on-error: true
+        run: npm run audit:ci
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -248,11 +314,22 @@ jobs:
         # daily-moving target, so this gate is informational rather than blocking
         # (a hard gate would flap red on every unrelated PR). Backend dependency
         # CVEs are remediated as ongoing security hygiene.
+        #
+        # --ignore-vuln PYSEC-2026-1325 mirrors the BLOCKING copy of this scan in
+        # dependency-audit.yml, so the two invocations can't drift and this log
+        # stops re-reporting a finding we've formally accepted. It is the
+        # "Minerva" P-256 timing side-channel in `ecdsa` 0.19.2: no upstream fix
+        # exists or is planned, it is only present transitively via
+        # `python-jose[cryptography]`, and the path is structurally unreachable
+        # (the cryptography backend always wins because `cryptography` is pinned
+        # directly, so `ecdsa` is never imported; this app is HS256-only).
+        # Guarded by backend/tests/test_jose_ec_backend_guard.py.
         # See docs/SECURITY_ADVISORY_SUPPRESSIONS.md.
         continue-on-error: true
         run: |
           pip install pip-audit==2.10.0
-          pip-audit -r requirements.txt -r requirements-dev.txt
+          pip-audit -r requirements.txt -r requirements-dev.txt \
+            --ignore-vuln PYSEC-2026-1325
 
   deploy-staging:
     name: Deploy to Staging

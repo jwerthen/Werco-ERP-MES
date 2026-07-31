@@ -103,6 +103,28 @@ class LaserNestManualCreate(BaseModel):
     material: Optional[str] = Field(None, max_length=100)
     thickness: Optional[str] = Field(None, max_length=50)
     sheet_size: Optional[str] = Field(None, max_length=100)
+    material_part_id: Optional[int] = Field(
+        None,
+        gt=0,
+        description="Optional material tie: the stock part (sheet/plate) this nest consumes. Creates an "
+        "operation-scoped material allocation on the nest's operation, so the material is deducted when "
+        "the laser work order finishes. Must resolve to a non-deleted part in this company.",
+    )
+    qty_per_run: Optional[float] = Field(
+        None,
+        gt=0,
+        description="Material consumed per completed run (e.g. sheets per nest run). Defaults to 1.0 when "
+        "``material_part_id`` is supplied without it; requires ``material_part_id``.",
+    )
+
+    @model_validator(mode="after")
+    def _validate_material_tie(self) -> "LaserNestManualCreate":
+        # A per-run quantity with nothing to consume is meaningless -- and silently
+        # dropping it would let a planner believe material will deplete when no tie
+        # exists at all. Refuse at the data boundary (Pydantic ValueError -> 422).
+        if self.qty_per_run is not None and self.material_part_id is None:
+            raise ValueError("qty_per_run requires material_part_id")
+        return self
 
 
 class LaserNestUpdate(BaseModel):
@@ -231,6 +253,19 @@ class LaserNestImportRow(BaseModel):
         description="Per-nest work-center override: this nest's operation is created on this work center "
         "instead of the package-level laser work center. Must resolve to an active work center.",
     )
+    material_part_id: Optional[int] = Field(
+        None,
+        gt=0,
+        description="Per-nest material tie: the stock part (sheet/plate) this nest consumes. Creates an "
+        "operation-scoped material allocation on the nest's operation, so the material is deducted when "
+        "the laser work order finishes. Must resolve to a non-deleted part in this company.",
+    )
+    qty_per_run: Optional[float] = Field(
+        None,
+        gt=0,
+        description="Material consumed per completed run (e.g. sheets per nest run). Defaults to 1.0 when "
+        "``material_part_id`` is supplied without it; requires ``material_part_id``.",
+    )
     source_pages: Optional[List[int]] = Field(
         None,
         description=(
@@ -256,6 +291,16 @@ class LaserNestImportRow(BaseModel):
         if any(later != earlier + 1 for earlier, later in zip(value, value[1:])):
             raise ValueError("source_pages must be ascending and consecutive")
         return value
+
+    @model_validator(mode="after")
+    def _validate_material_tie(self) -> "LaserNestImportRow":
+        # A per-run quantity with nothing to consume is meaningless -- and silently
+        # dropping it would let a planner believe material will deplete when no tie
+        # exists at all. Rows are validated before anything is persisted, so this is
+        # a clean 400 on the import endpoint.
+        if self.qty_per_run is not None and self.material_part_id is None:
+            raise ValueError("qty_per_run requires material_part_id")
+        return self
 
 
 class WorkOrderOperationCreate(WorkOrderOperationBase):

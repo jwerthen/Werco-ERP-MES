@@ -468,7 +468,7 @@ def test_create_certification_cross_company_user_422(client: TestClient, db_sess
         json={"user_id": op_b.id, "certification_type": "welding", "certification_name": "W-1"},
         headers=headers_for(admin_a),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
     assert db_session.query(OperatorCertification).count() == 0
     assert _audit_count(db_session, "operator_certification") == 0
 
@@ -503,7 +503,7 @@ def test_create_training_cross_company_work_center_422(client: TestClient, db_se
         },
         headers=headers_for(admin_a),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
     assert db_session.query(TrainingRecord).count() == 0
 
 
@@ -519,7 +519,7 @@ def test_update_training_repoint_cross_company_work_center_422(client: TestClien
         json={"work_center_id": wc_b.id},
         headers=headers_for(admin_a),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
     db_session.expire_all()
     assert db_session.query(TrainingRecord).get(record.id).work_center_id is None
 
@@ -535,7 +535,7 @@ def test_create_skill_entry_cross_company_work_center_422(client: TestClient, db
         json={"user_id": op_a.id, "work_center_id": wc_b.id, "skill_level": 3},
         headers=headers_for(admin_a),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
     assert db_session.query(SkillMatrix).count() == 0
 
 
@@ -550,7 +550,7 @@ def test_create_skill_entry_cross_company_user_422(client: TestClient, db_sessio
         json={"user_id": op_b.id, "work_center_id": wc_a.id, "skill_level": 3},
         headers=headers_for(admin_a),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
     assert db_session.query(SkillMatrix).count() == 0
 
 

@@ -71,7 +71,7 @@ from .maintenance import (
     MaintenanceWorkOrder,
 )
 from .mrp import MRPAction, MRPRequirement, MRPRun, MRPRunStatus, PlanningAction
-from .notification import DigestQueue, NotificationLog, NotificationPreference
+from .notification import DigestQueue, Notification, NotificationLog, NotificationPreference
 from .oee import OEERecord, OEETarget
 from .operational_event import OperationalEvent
 from .operator_certification import (
@@ -164,6 +164,7 @@ from .work_order_blocker import (
     WorkOrderBlockerSeverity,
     WorkOrderBlockerStatus,
 )
+from .work_order_material import AllocationSource, AllocationStatus, WorkOrderMaterialAllocation
 
 __all__ = [
     "Company",
@@ -203,6 +204,9 @@ __all__ = [
     "WorkOrderBlockerCategory",
     "WorkOrderBlockerSeverity",
     "WorkOrderBlockerStatus",
+    "WorkOrderMaterialAllocation",
+    "AllocationSource",
+    "AllocationStatus",
     "TimeEntry",
     "InventoryItem",
     "InventoryTransaction",
@@ -224,6 +228,7 @@ __all__ = [
     "JobStatus",
     "JobPriority",
     "NotificationPreference",
+    "Notification",
     "NotificationLog",
     "DigestQueue",
     "Webhook",

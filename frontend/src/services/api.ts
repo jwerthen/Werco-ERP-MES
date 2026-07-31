@@ -26,6 +26,17 @@ import {
   LaserNestPackageImportResult,
   DispatchBoardResponse,
   RunOrderUpdateResponse,
+  OperationDocumentsResponse,
+  MaterialAllocation,
+  MaterialAllocationCreatePayload,
+  MaterialAllocationUpdatePayload,
+  MaterialConsumptionLine,
+  MaterialReturnRequest,
+  MaterialReturnResult,
+  BackflushPreviewResponse,
+  PartBackflushReadiness,
+  BOMUomMismatchParams,
+  BOMUomMismatchReport,
 } from '../types';
 import { ScanResolveRequest, ScanResolveResult } from '../types/scan';
 import {
@@ -68,6 +79,15 @@ import {
   WorkOrderImportResponse,
 } from '../types/importKit';
 import { RoutingImportResponse } from '../types/engineering';
+import {
+  NotificationCatalogEntry,
+  NotificationItem,
+  NotificationListParams,
+  NotificationListResponse,
+  NotificationPreferences,
+  NotificationPreferencesUpdate,
+  TestSmsResponse,
+} from '../types/notification';
 import {
   AddressValidationRequest,
   AddressValidationResult,
@@ -269,18 +289,32 @@ class ApiService {
           } catch (refreshError) {
             // Refresh failed, logout and redirect
             this.logout();
-            window.location.href = '/login';
+            this.redirectToLoginUnlessKiosk();
             return Promise.reject(refreshError);
           }
         }
-        
+
         if (error.response?.status === 401 && !isAuthEndpoint) {
           this.logout();
-          window.location.href = '/login';
+          this.redirectToLoginUnlessKiosk();
         }
         return Promise.reject(error);
       }
     );
+  }
+
+  /**
+   * Hard-redirect to the login page after a dead session — EXCEPT on the
+   * /kiosk surface. The kiosk is an unattended shop terminal: navigating it to
+   * /login would strand the station on the office login form. There we only
+   * clear the session (logout() above already dispatched
+   * `werco:auth-token-changed`, which AuthContext listens for to flip
+   * `isAuthenticated`, so OperatorKiosk falls back to its badge screen without
+   * a reload) and let the caller's promise reject.
+   */
+  private redirectToLoginUnlessKiosk(): void {
+    if (window.location.pathname.startsWith('/kiosk')) return;
+    window.location.href = '/login';
   }
 
   private async refreshAccessToken(): Promise<void> {
@@ -398,6 +432,42 @@ class ApiService {
    *  so the next dashboard fetch revalidates instead of serving a stale 304 body. */
   private invalidateDashboardCache() {
     this.invalidateCache('/shop-floor/dashboard');
+  }
+
+  /**
+   * Drop every cached body a material-tie mutation invalidates.
+   *
+   * The Dispatch Board renders an operation-scoped tie as a chip, so a stale
+   * 304 there would show pre-tie chips immediately after a planner ties (or
+   * unties) material. The work order's own reads — the Materials tab, the
+   * detail page, the tie list itself — are invalidated by URL prefix; the
+   * substring match deliberately over-invalidates sibling ids (`/work-orders/12`
+   * also clears `/work-orders/123`), which costs one revalidation and never
+   * serves a stale tie.
+   */
+  private invalidateMaterialTieCache(workOrderId: number) {
+    this.invalidateCache('/shop-floor/dispatch-board');
+    this.invalidateCache(`/work-orders/${workOrderId}`);
+  }
+
+  /**
+   * Drop every cached body a PART mutation invalidates.
+   *
+   * `invalidateMaterialTieCache` above covers the dispatch board and
+   * `/work-orders/{id}` and nothing else, so a `/parts/{id}` write falls
+   * entirely outside it. That matters for `backflush_components`: the flag rides
+   * on the part row, is echoed by `GET /parts/{id}` AND by the list endpoints
+   * (`_part_to_response` hand-builds it), and it changes what a backflush
+   * preview resolves — so a stale 304 on any of those would show a part still
+   * reading "off" after it was switched on.
+   *
+   * The `/parts` prefix deliberately over-invalidates (`/parts/12` also clears
+   * `/parts/123` and the list), which costs one revalidation and never serves a
+   * stale flag.
+   */
+  private invalidatePartCache(partId: number) {
+    this.invalidateCache('/parts');
+    this.invalidateCache(`/parts/${partId}`);
   }
 
   setToken(token: string) {
@@ -1011,6 +1081,246 @@ class ApiService {
     return window.URL.createObjectURL(new Blob([response.data], { type: 'application/pdf' }));
   }
 
+  // --- Material ties (work-order material allocations) ----------------------
+  // The OPTIONAL tie between a work order (or one of its operations) and stock
+  // material: /work-orders/{id}/material-allocations[/{allocation_id}].
+  //
+  // Reads are open to any authenticated tenant user; every mutating verb is
+  // ADMIN / MANAGER / SUPERVISOR server-side — gate the UI to match.
+  //
+  // These are SERVER-GATED actions (409 on untie-after-consumption, 409 on a
+  // terminal work order, 422 on a held-lot pin, 422 on an ambiguous pin edit),
+  // so callers must stay NON-OPTIMISTIC: keep a loading state and render only
+  // what the server returns. Do not wrap them in useOptimisticMutation.
+
+  /**
+   * Every material tie on a work order, oldest first.
+   *
+   * `include_inactive` defaults to TRUE, matching the server: cancelled rows are
+   * the tombstones the ledger's `allocation_id` resolves to, so hiding them
+   * makes consumed material look untied. Pass `false` for the LIVE (open) ties
+   * only — and note that a fully consumed tie is still `open` (`closed` is never
+   * written), so derive "fully consumed" from `qty_consumed >= qty_planned`.
+   */
+  async getMaterialAllocations(workOrderId: number, includeInactive = true): Promise<MaterialAllocation[]> {
+    const response = await this.api.get<MaterialAllocation[]>(
+      `/work-orders/${workOrderId}/material-allocations`,
+      { params: { include_inactive: includeInactive } }
+    );
+    return response.data;
+  }
+
+  /**
+   * Tie a material part to a work order (or to one of its operations).
+   *
+   * 409 when the tie could never consume (terminal work order, or a
+   * work-order-scoped tie whose part already backflushed); 422 when
+   * `qty_per_run` rides on a work-order-scoped tie or the pinned lot is held.
+   * Surface the server's `detail` verbatim.
+   */
+  async createMaterialAllocation(
+    workOrderId: number,
+    payload: MaterialAllocationCreatePayload
+  ): Promise<MaterialAllocation> {
+    const response = await this.api.post<MaterialAllocation>(
+      `/work-orders/${workOrderId}/material-allocations`,
+      payload
+    );
+    this.invalidateMaterialTieCache(workOrderId);
+    return response.data;
+  }
+
+  /** Edit an OPEN tie's quantities, lot pin, or notes (409 once cancelled). */
+  async updateMaterialAllocation(
+    workOrderId: number,
+    allocationId: number,
+    payload: MaterialAllocationUpdatePayload
+  ): Promise<MaterialAllocation> {
+    const response = await this.api.patch<MaterialAllocation>(
+      `/work-orders/${workOrderId}/material-allocations/${allocationId}`,
+      payload
+    );
+    this.invalidateMaterialTieCache(workOrderId);
+    return response.data;
+  }
+
+  /**
+   * Untie: sets `status = 'cancelled'`. The row is NEVER physically deleted, so
+   * this resolves with the UPDATED allocation (status `cancelled`) — not a 204.
+   * Refused 409 once any material has been consumed; reversal is a separate,
+   * reasoned verb that does not exist yet.
+   */
+  async deleteMaterialAllocation(workOrderId: number, allocationId: number): Promise<MaterialAllocation> {
+    const response = await this.api.delete<MaterialAllocation>(
+      `/work-orders/${workOrderId}/material-allocations/${allocationId}`
+    );
+    this.invalidateMaterialTieCache(workOrderId);
+    return response.data;
+  }
+
+  /**
+   * Where this tie's material came from, grouped per lot — the pre-confirm read
+   * for the RETURN panel. Pure read; it moves nothing.
+   *
+   * `net` (`issued - returned`) is the per-lot cap on any further return, and
+   * the array is ordered newest source lot first, the same order the return
+   * credits in. Show it BEFORE confirming so the actor sees which heat/cert lots
+   * the material goes back to — a return can never be directed at a lot of the
+   * caller's choosing.
+   */
+  async getMaterialAllocationConsumption(
+    workOrderId: number,
+    allocationId: number
+  ): Promise<MaterialConsumptionLine[]> {
+    const response = await this.api.get<MaterialConsumptionLine[]>(
+      `/work-orders/${workOrderId}/material-allocations/${allocationId}/consumption`
+    );
+    return response.data;
+  }
+
+  /**
+   * Return consumed material to its SOURCE lots — the reasoned reversal the
+   * engine deliberately refuses to do automatically (invariant 6b). Appends a
+   * signed compensating `RETURN` transaction per lot; never edits history.
+   *
+   * ADMIN / MANAGER / SUPERVISOR only, like every other tie mutator — moving
+   * stock back with a reason is a stronger power than tying it, not a weaker
+   * one, and this stays outside the kiosk path fence. Gate the UI to match.
+   *
+   * SERVER-GATED, therefore NON-OPTIMISTIC by contract: keep a loading state and
+   * render only what the server returns. Do not wrap it in
+   * `useOptimisticMutation`. The refusals it is built to produce are
+   * **422** on a `correct_over_consumption` that would push `qty_consumed` below
+   * the tie's live target (the detail names which intent to use instead), 422 on
+   * a blank reason, and 4xx when a source lot can no longer take the credit.
+   * Show `detail` verbatim.
+   *
+   * A full return does NOT unlock nest re-import — that guard reads the LEDGER,
+   * and both the ISSUE and RETURN rows still reference the operation a rebuild
+   * would delete. Do not promise otherwise in the confirm copy.
+   */
+  async returnMaterialAllocation(
+    workOrderId: number,
+    allocationId: number,
+    payload: MaterialReturnRequest
+  ): Promise<MaterialReturnResult> {
+    const response = await this.api.post<MaterialReturnResult>(
+      `/work-orders/${workOrderId}/material-allocations/${allocationId}/return`,
+      payload
+    );
+    // The tie AND its work-order reads (incl. the consumption read above, which
+    // shares the `/work-orders/{id}` prefix) plus the dispatch-board tie chips.
+    this.invalidateMaterialTieCache(workOrderId);
+    // Unlike every other tie verb, a return MOVES STOCK — on-hand, lot rows and
+    // the transaction ledger are all stale the moment it lands.
+    this.invalidateCache('/inventory');
+    return response.data;
+  }
+
+  // --- BOM/routing backflush (PR 4.5) ---------------------------------------
+  // The OTHER consumption path: driven off the finished part's BOM and routing
+  // rather than an explicit tie, and gated on `Part.backflush_components`.
+  //
+  // Three of the four below are PURE READS — they write nothing at all, not even
+  // an audit row, so they are safe to call on render and safe to re-call. The
+  // odd one out is the flip itself (`setPartBackflush`), and it is SERVER-GATED
+  // (409 while any blocking readiness diagnostic stands), so like the tie verbs
+  // above it must stay NON-OPTIMISTIC: keep a loading state, render only what
+  // the server returns, and surface `detail` verbatim. Do not wrap it in
+  // useOptimisticMutation.
+
+  /**
+   * The BOM lines whose stated unit of measure contradicts their component
+   * part's — the remediation worklist that gates arming a real part.
+   *
+   * Pure read, gated ADMIN / MANAGER / SUPERVISOR (the roles that can actually
+   * edit a BOM line or flip the flag). Offset-paged: pass `skip`/`limit` and
+   * page against `total`.
+   *
+   * Two things the caller MUST NOT smooth over:
+   *
+   * 1. **`truncated` means `total` is a FLOOR, not a count.** The scan hit its
+   *    own candidate ceiling. Render it as a plain total and the screen lies
+   *    about how much work is left; say so and narrow the filters instead.
+   * 2. **`blocks_backflush` answers the LINE, not the tree.** A line inside a
+   *    `make` sub-assembly reports true and still refuses nothing when the
+   *    parent is armed. The authoritative per-part answer is `blockers` on
+   *    `getPartBackflushReadiness`.
+   *
+   * `part_id` narrows to that assembly's OWN BOM and does not follow nested
+   * sub-assemblies, so the UNFILTERED report is the authoritative worklist.
+   */
+  async getBOMUomMismatches(params?: BOMUomMismatchParams): Promise<BOMUomMismatchReport> {
+    const response = await this.api.get<BOMUomMismatchReport>('/bom/uom-mismatches', { params });
+    return response.data;
+  }
+
+  /**
+   * Whether a part may opt into automatic backflush, and what refuses it if not.
+   *
+   * Pure read; open to any authenticated tenant user. `eligible` is a SNAPSHOT,
+   * never authorisation — every input it reads (BOM lines, alternates, routing
+   * component ids) is mutable by other people, so the identical check re-runs
+   * server-side on the write. Call it to explain, then let the write decide.
+   *
+   * Only the BOM half is answerable at part scope; routing conditions need a
+   * work order and come back from `getWorkOrderBackflushPreview`.
+   */
+  async getPartBackflushReadiness(partId: number): Promise<PartBackflushReadiness> {
+    const response = await this.api.get<PartBackflushReadiness>(`/parts/${partId}/backflush-readiness`);
+    return response.data;
+  }
+
+  /**
+   * Turn `Part.backflush_components` on or off.
+   *
+   * There is deliberately NO dedicated endpoint: the owner chose the ordinary
+   * part-edit field, so this is a narrow `PUT /parts/{id}` carrying only
+   * `version` (required by `PartUpdate`) and the flag. It is kept OUT of the
+   * `PartUpdate` client type on purpose — mirroring the server, where the field
+   * is absent from `PartBase`/`PartCreate` so no create path or CSV importer can
+   * set it — so that this method is the single client door onto the flag.
+   *
+   * SERVER-GATED. Enabling is refused **409** while the part's readiness check
+   * reports blockers, with `detail` a PLAIN STRING: one sentence per blocker,
+   * joined. Show it verbatim — a human is meant to read it and go fix a BOM
+   * line. Disabling is always allowed.
+   *
+   * Two residuals the caller must not paper over: the flip is Supervisor-tier
+   * (the same permission as editing a description), and Part optimistic locking
+   * is COSMETIC — `Part` maps no version column, so a concurrent flip does not
+   * 409 and last write wins. Re-read the part after this resolves rather than
+   * trusting a locally-toggled value.
+   */
+  async setPartBackflush(partId: number, version: number, enabled: boolean): Promise<Part> {
+    const response = await this.api.put<Part>(`/parts/${partId}`, {
+      version,
+      backflush_components: enabled,
+    });
+    this.invalidatePartCache(partId);
+    return response.data;
+  }
+
+  /**
+   * Dry run: what completing this work order would draw out of stock, per
+   * component and per lot, before anything moves.
+   *
+   * Pure read — no ledger row, no audit row, no operational event, nothing to
+   * commit. That is structural on the server (the resolution layer takes no
+   * AuditService at all), not a convention, which is why it is safe to fetch on
+   * demand from a detail page.
+   *
+   * It models the ISSUE LOOP, not just the demand resolver — both legs in the
+   * real order, the legacy one-shot fence, the reconcile-to-target delta, and
+   * the actual lot pick — so preview and outcome cannot disagree about which
+   * heat gets consumed. Lines appear whether or not the part has opted in; each
+   * carries `requires_opt_in`.
+   */
+  async getWorkOrderBackflushPreview(workOrderId: number): Promise<BackflushPreviewResponse> {
+    const response = await this.api.get<BackflushPreviewResponse>(`/work-orders/${workOrderId}/backflush-preview`);
+    return response.data;
+  }
+
   async getWorkOrderBlockers(params?: {
     work_order_id?: number;
     status?: WorkOrderBlockerStatus;
@@ -1112,6 +1422,31 @@ class ApiService {
     return response.data;
   }
 
+  // --- Kiosk doc viewer (shop-floor-fenced document reads) ------------------
+
+  /**
+   * GET /shop-floor/operations/{id}/documents — drawing / nest / critical-dims
+   * discovery for the kiosk doc viewer (read-only, no state change).
+   */
+  async getOperationDocuments(operationId: number): Promise<OperationDocumentsResponse> {
+    const response = await this.api.get<OperationDocumentsResponse>(
+      `/shop-floor/operations/${operationId}/documents`
+    );
+    return response.data;
+  }
+
+  /**
+   * Fetch a shop-floor-served document PDF (GET /shop-floor/documents/{id}/inline)
+   * through the authenticated Axios client as a blob and return a same-origin
+   * object URL — mirrors fetchLaserNestDocument. The endpoint requires the JWT,
+   * so a bare `src="/api/..."` would NOT send the auth header. Callers must
+   * revoke the URL when done.
+   */
+  async fetchShopFloorDocumentBlob(documentId: number): Promise<string> {
+    const response = await this.api.get(`/shop-floor/documents/${documentId}/inline`, { responseType: 'blob' });
+    return window.URL.createObjectURL(new Blob([response.data], { type: 'application/pdf' }));
+  }
+
   // --- Dispatch Board (manager-controlled run order) ------------------------
   // The board is one column per work center; rows arrive server-sorted (ranked
   // work first by run_order, then unranked by priority -> due date -> sequence).
@@ -1150,6 +1485,93 @@ class ApiService {
 
   async getNotificationLogs(params?: { limit?: number; status?: string }) {
     const response = await this.api.get('/notifications/logs', { params });
+    return response.data;
+  }
+
+  // --- In-app notification inbox (self + tenant scoped) ---------------------
+  // Backed by the rebuilt notifications endpoints; response shapes mirror
+  // backend/app/schemas/notification.py exactly. `getNotificationLogs` above is
+  // the separate email/SMS delivery-attempt log, retained for the admin view.
+
+  /** Paged in-app inbox for the current user (server pagination + filters). */
+  async getNotifications(params?: NotificationListParams): Promise<NotificationListResponse> {
+    const { page, pageSize, unread, category, severity } = params || {};
+    const query: Record<string, string | number | boolean> = {};
+    if (page != null) query.page = page;
+    if (pageSize != null) query.page_size = pageSize;
+    if (unread != null) query.unread = unread;
+    if (category) query.category = category;
+    if (severity) query.severity = severity;
+    const response = await this.api.get<NotificationListResponse>('/notifications', { params: query });
+    return response.data;
+  }
+
+  /** Cheap unread badge count for the bell (returns the raw count). */
+  async getUnreadCount(): Promise<number> {
+    const response = await this.api.get<{ count: number }>('/notifications/unread-count');
+    return response.data.count ?? 0;
+  }
+
+  /** Mark one notification read (NOT audited — UI state). Returns the updated row. */
+  async markNotificationRead(id: number): Promise<NotificationItem> {
+    const response = await this.api.post<NotificationItem>(`/notifications/${id}/read`);
+    return response.data;
+  }
+
+  /** Mark all of the current user's unread notifications read. Returns the count updated. */
+  async markAllNotificationsRead(): Promise<{ updated: number }> {
+    const response = await this.api.post<{ updated: number }>('/notifications/read-all');
+    return response.data;
+  }
+
+  /** The notification event catalog (drives the settings matrix + filter options). */
+  async getNotificationCatalog(): Promise<NotificationCatalogEntry[]> {
+    const response = await this.api.get<NotificationCatalogEntry[]>('/notifications/catalog');
+    return response.data;
+  }
+
+  // --- Self-service notification settings (My Settings) ---------------------
+  // Per-user, self-scoped. The SMS slice lands in PR 4; PR 3 extends the same
+  // preferences endpoints with the full channel matrix + digest controls.
+
+  /** The current user's notification preferences (per-event channel flags + digest). */
+  async getMyNotificationPreferences(): Promise<NotificationPreferences> {
+    const response = await this.api.get<NotificationPreferences>('/users/me/notification-preferences');
+    return response.data;
+  }
+
+  /**
+   * Merge-update the current user's notification preferences. Send only the keys
+   * you intend to change — the server merges per event/channel, so a partial save
+   * (e.g. the SMS column alone) never clobbers email/digest choices.
+   */
+  async updateMyNotificationPreferences(
+    payload: NotificationPreferencesUpdate,
+  ): Promise<NotificationPreferences> {
+    const response = await this.api.put<NotificationPreferences>(
+      '/users/me/notification-preferences',
+      payload,
+    );
+    return response.data;
+  }
+
+  /**
+   * Set (or clear, with `null`) the current user's SMS number. The server
+   * validates/normalizes to E.164 via `phonenumbers` and audits the change;
+   * a bad number comes back as a 400 whose `detail` is safe to display.
+   */
+  async updateMyPhone(phone: string | null): Promise<User> {
+    const response = await this.api.put<User>('/users/me/phone', { phone });
+    return response.data;
+  }
+
+  /**
+   * Send a one-off test SMS to the current user's saved number. Fails closed with
+   * a server-side 4xx when company SMS egress is off or no number is on file — no
+   * provider credential is ever returned to the client.
+   */
+  async sendTestSms(): Promise<TestSmsResponse> {
+    const response = await this.api.post<TestSmsResponse>('/users/me/test-sms');
     return response.data;
   }
 
@@ -1730,6 +2152,19 @@ class ApiService {
     return response.data;
   }
 
+  // Void (soft-delete) an NCR. The reason is REQUIRED and rides in the DELETE
+  // body (recorded on the tamper-evident audit trail). Server-gated: 400 (with
+  // actionable detail) when the NCR is blocking work order(s) — show verbatim.
+  async voidNCR(id: number, reason: string): Promise<{ message: string; can_restore: boolean }> {
+    const response = await this.api.delete(`/quality/ncr/${id}`, { data: { reason } });
+    return response.data;
+  }
+
+  async restoreNCR(id: number) {
+    const response = await this.api.post(`/quality/ncr/${id}/restore`);
+    return response.data;
+  }
+
   async getCARs(params?: { status?: string }) {
     const response = await this.api.get('/quality/car', { params });
     return response.data;
@@ -1864,6 +2299,18 @@ class ApiService {
     return response.data;
   }
 
+  // Soft-delete a vendor. Server-gated: 400 (with actionable detail) when the
+  // vendor still has active purchase orders — surface the detail verbatim.
+  async deleteVendor(id: number): Promise<{ message: string; can_restore: boolean }> {
+    const response = await this.api.delete(`/purchasing/vendors/${id}`);
+    return response.data;
+  }
+
+  async restoreVendor(id: number) {
+    const response = await this.api.post(`/purchasing/vendors/${id}/restore`);
+    return response.data;
+  }
+
   async getPurchaseOrders(params?: { status?: string; vendor_id?: number }) {
     const response = await this.api.get('/purchasing/purchase-orders', { params });
     return response.data;
@@ -1896,6 +2343,18 @@ class ApiService {
 
   async getPurchaseOrderPrintData(poId: number) {
     const response = await this.api.get(`/print/purchase-orders/${poId}/print-data`);
+    return response.data;
+  }
+
+  // Soft-delete a purchase order. Server-gated: 400 (with actionable detail) when
+  // the PO has received material (void the receipt(s) first) — show it verbatim.
+  async deletePurchaseOrder(id: number): Promise<{ message: string; can_restore: boolean }> {
+    const response = await this.api.delete(`/purchasing/purchase-orders/${id}`);
+    return response.data;
+  }
+
+  async restorePurchaseOrder(id: number) {
+    const response = await this.api.post(`/purchasing/purchase-orders/${id}/restore`);
     return response.data;
   }
 
@@ -3004,6 +3463,34 @@ class ApiService {
 
   async getReceiptDetail(receiptId: number) {
     const response = await this.api.get(`/receiving/receipt/${receiptId}`);
+    return response.data;
+  }
+
+  // Correct a mis-keyed receipt. `quantity_received` is the NEW total (>0), not a
+  // delta; the endpoint reconciles the PO line / PO status / (dock-to-stock)
+  // inventory. `reason` is required. Server-gated: 400/409 (already inspected,
+  // lot change after stock placed, stock consumed, etc.) — show detail verbatim.
+  async correctReceipt(
+    receiptId: number,
+    data: {
+      quantity_received: number;
+      lot_number?: string;
+      heat_number?: string;
+      cert_number?: string;
+      serial_numbers?: string;
+      notes?: string;
+      reason: string;
+    }
+  ) {
+    const response = await this.api.patch(`/receiving/receipt/${receiptId}`, data);
+    return response.data;
+  }
+
+  // Void (soft-delete) a receipt, unwinding everything it propagated. Terminal —
+  // a voided receipt is not restorable; re-receive to redo. `reason` is required.
+  // Same class of 400/409 refusals as correctReceipt — surface detail verbatim.
+  async voidReceipt(receiptId: number, reason: string): Promise<{ message: string }> {
+    const response = await this.api.post(`/receiving/receipt/${receiptId}/void`, { reason });
     return response.data;
   }
 
@@ -4147,6 +4634,18 @@ class ApiService {
   // AI-backed features degrade gracefully. Returns the updated CompanyResponse.
   async updateCompanyAiEgress(allow: boolean): Promise<Company> {
     const response = await this.api.put('/companies/me/ai-egress', { allow_ai_egress: allow });
+    return response.data;
+  }
+
+  // Per-company SMS egress kill switch (CUI / data-egress control). ADMIN-only
+  // server-side (mirrors the sibling AI / carrier / print egress switches);
+  // flipping it is recorded on the tamper-evident audit trail. When OFF, no
+  // message body or mobile number leaves the system boundary to the commercial
+  // SMS carrier and every SMS notification is suppressed (fail-closed). No
+  // provider credential is ever exchanged over this route — it carries one
+  // boolean. Returns the updated CompanyResponse.
+  async updateCompanySmsEgress(allow: boolean): Promise<Company> {
+    const response = await this.api.put('/companies/me/sms-egress', { allow_sms_egress: allow });
     return response.data;
   }
 

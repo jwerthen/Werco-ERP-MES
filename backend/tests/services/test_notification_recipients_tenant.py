@@ -1,13 +1,14 @@
-"""Tenant-isolation tests for get_notification_recipients (Batch-1 hardening).
+"""Tenant-isolation tests for get_notification_recipients (Batch-1 hardening +
+notification pipeline PR 1).
 
 ``get_notification_recipients`` originally returned every active user across ALL
 tenants for a given role/department. The MRP and scheduling jobs (per-company)
 used it to pick "managers" to email, so each tenant's run fanned its alerts out
 to every other tenant's managers -- a tenant-isolation defect (invariant #1).
 
-The function now takes an optional ``company_id``: when provided it restricts to
-that tenant's users; when ``None`` (the default) it preserves the legacy
-all-tenants behavior for the periodic cross-tenant jobs that still want it.
+The all-tenants ``company_id=None`` default was REMOVED in PR 1 (§8.3): the
+function now takes ``company_id`` as a REQUIRED keyword-only argument -- there is
+no all-tenants mode. Every caller resolves recipients for a single tenant.
 """
 
 import pytest
@@ -87,17 +88,20 @@ def test_recipients_scoped_by_department_and_company(db_session: Session):
 
 
 @pytest.mark.requires_db
-def test_recipients_default_none_is_backward_compatible_all_tenants(db_session: Session):
-    """Without company_id the legacy all-tenants behavior is preserved (the
-    periodic notification_jobs tasks still rely on it)."""
+def test_recipients_company_id_is_required_no_all_tenants_mode(db_session: Session):
+    """PR 1 (§8.3) removed the all-tenants default: ``company_id`` is now a REQUIRED
+    keyword-only argument. Omitting it is a TypeError, not a silent cross-tenant fan-out."""
     a_mgr = _make_user(db_session, company_id=1, role=UserRole.MANAGER)
     b_mgr = _make_user(db_session, company_id=2, role=UserRole.MANAGER)
 
-    recipients = get_notification_recipients(db_session, role="manager")
-    ids = {u.id for u in recipients}
+    with pytest.raises(TypeError):
+        get_notification_recipients(db_session, role="manager")  # no company_id -> refused
 
+    # And when scoped, isolation holds -- company 2's manager is never returned for company 1.
+    recipients = get_notification_recipients(db_session, role="manager", company_id=1)
+    ids = {u.id for u in recipients}
     assert a_mgr.id in ids
-    assert b_mgr.id in ids, "default (company_id=None) must keep returning all tenants' managers"
+    assert b_mgr.id not in ids, "no all-tenants mode: company 2's manager must be excluded"
 
 
 @pytest.mark.requires_db

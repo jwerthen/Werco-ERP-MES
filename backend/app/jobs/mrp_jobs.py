@@ -5,7 +5,8 @@ from app.db.session import SessionLocal
 from app.models.company import Company
 from app.services.mrp_auto_service import MRPAutoMode, MRPAutoService
 from app.services.mrp_service import MRPService
-from app.services.notification_service import NotificationEvent, NotificationService, get_notification_recipients
+from app.services.notification_dispatch import dispatch_direct
+from app.services.notification_service import get_notification_recipients
 
 logger = logging.getLogger(__name__)
 
@@ -87,17 +88,27 @@ async def _run_mrp_for_company(db, company_id: int, mode: str, planning_horizon_
             f"{results['errors']} errors"
         )
 
-        # Send notification to planners (scoped to this tenant)
-        notification_service = NotificationService(db)
+        # Notify planners (scoped to this tenant) via the notification dispatcher.
         planners = get_notification_recipients(db, role="manager", company_id=company_id)
 
         if planners:
-            await notification_service.send_notification(
-                event_type=NotificationEvent.CAPACITY_OVERLOAD,  # Reusing event
-                users=planners,
-                subject=f"MRP Run {mrp_run.run_number} Completed",
-                context={"mrp_run": mrp_run, "results": results, "mode": mode},
+            await dispatch_direct(
+                db,
+                event_key="mrp.completed",
+                company_id=company_id,
+                recipients=planners,
+                related_type="MRPRun",
+                related_id=mrp_run.id,
+                title=f"MRP Run {mrp_run.run_number} Completed",
+                body=f"MRP run {mrp_run.run_number} completed with {mrp_run.total_actions} action(s).",
+                link="/mrp",
                 template="mrp_complete",
+                context={
+                    "run_number": mrp_run.run_number,
+                    "total_actions": mrp_run.total_actions,
+                    "mode": mode,
+                    "link_path": "/mrp",
+                },
             )
 
         return {
@@ -110,16 +121,25 @@ async def _run_mrp_for_company(db, company_id: int, mode: str, planning_horizon_
 
     # Review mode - just notify about actions
     if mrp_run.total_actions > 0:
-        notification_service = NotificationService(db)
         planners = get_notification_recipients(db, role="manager", company_id=company_id)
 
         if planners:
-            await notification_service.send_notification(
-                event_type=NotificationEvent.CAPACITY_OVERLOAD,
-                users=planners,
-                subject=f"MRP Run {mrp_run.run_number}: {mrp_run.total_actions} Actions Need Review",
-                context={"mrp_run": mrp_run},
+            await dispatch_direct(
+                db,
+                event_key="mrp.review_needed",
+                company_id=company_id,
+                recipients=planners,
+                related_type="MRPRun",
+                related_id=mrp_run.id,
+                title=f"MRP Run {mrp_run.run_number}: {mrp_run.total_actions} Actions Need Review",
+                body=f"MRP run {mrp_run.run_number} produced {mrp_run.total_actions} action(s) needing review.",
+                link="/mrp",
                 template="mrp_review_needed",
+                context={
+                    "run_number": mrp_run.run_number,
+                    "total_actions": mrp_run.total_actions,
+                    "link_path": "/mrp",
+                },
             )
 
     return {

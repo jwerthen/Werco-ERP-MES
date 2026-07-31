@@ -112,8 +112,6 @@ const emailSchema = z
   .email('Enter a valid email address')
   .max(255, 'Email must be at most 255 characters');
 
-const passwordSpecialCharRegex = /[!@#$%^&*()_+=\x5B\x5D{};':"\\|,.<>\x2F?-]/;
-
 // ============================================================================
 // PART SCHEMA
 // ============================================================================
@@ -210,19 +208,29 @@ const lastNameSchema = z.string()
   .transform((v: string) => v.trim())
   .transform((v: string) => v.charAt(0).toUpperCase() + v.slice(1));
 
-const commonPatterns = ['password', '123456', 'qwerty', 'admin', 'letmein', 'welcome'];
+// Mirrors _COMMON_PASSWORD_PATTERNS in backend/app/schemas/user.py. Keep the two in
+// sync: the server is the enforcement, this is only so the UI refuses early with the
+// same message rather than surfacing a 422 the user cannot predict.
+const commonPatterns = [
+  'password', '123456', 'qwerty', 'admin', 'letmein', 'welcome',
+  'qwertyuiop', 'asdfgh', 'zxcvbn', '1qaz', '1q2w3e', 'qazwsx',
+  'iloveyou', 'abc123', 'monkey', 'dragon', 'sunshine', 'princess',
+  'football', 'baseball', 'trustno1', 'shadow', 'master', 'superman',
+  'starwars', 'whatever', 'freedom', 'passw0rd', 'p@ssw0rd', 'login',
+  '111111', '000000', '121212', '654321', '112233',
+  'werco', 'wercomfg',
+];
 
+// Length + blocklist only. The four character-class rules were dropped on 2026-07-29
+// to match the server (NIST SP 800-63B 5.1.1.2 — length and a blocklist instead of
+// composition). Do not re-add .regex() class checks here without changing the server.
 const passwordStrengthSchema = z
   .string()
   .min(12, 'Password must be at least 12 characters')
   .max(128, 'Password must be at most 128 characters')
-  .regex(/[A-Z]/, 'Password must contain at least one uppercase letter')
-  .regex(/[a-z]/, 'Password must contain at least one lowercase letter')
-  .regex(/[0-9]/, 'Password must contain at least one number')
-  .regex(passwordSpecialCharRegex, 'Password must contain at least one special character')
   .refine(
     (val) => !commonPatterns.some(pattern => val.toLowerCase().includes(pattern)),
-    'Password contains a common pattern that is not allowed'
+    'Password contains a common word or pattern that is too easy to guess'
   );
 
 // Password strength calculator for UI feedback
@@ -232,13 +240,14 @@ export function calculatePasswordStrength(password: string): {
   color: string;
   requirements: { met: boolean; label: string }[];
 } {
+  // The first two are the enforced rules (see passwordStrengthSchema). The length
+  // tiers below them are advisory strength feedback only — a 12-character password
+  // is accepted, it just does not score "Strong".
   const requirements = [
     { met: password.length >= 12, label: 'At least 12 characters' },
-    { met: /[A-Z]/.test(password), label: 'Uppercase letter' },
-    { met: /[a-z]/.test(password), label: 'Lowercase letter' },
-    { met: /[0-9]/.test(password), label: 'Number' },
-    { met: passwordSpecialCharRegex.test(password), label: 'Special character' },
-    { met: !commonPatterns.some(p => password.toLowerCase().includes(p)), label: 'No common patterns' },
+    { met: !commonPatterns.some(p => password.toLowerCase().includes(p)), label: 'No common words or patterns' },
+    { met: password.length >= 16, label: 'At least 16 characters (stronger)' },
+    { met: password.length >= 20, label: 'At least 20 characters (strongest)' },
   ];
 
   const metCount = requirements.filter(r => r.met).length;
@@ -329,21 +338,48 @@ const optionalTrimmed = (max: number) =>
       return trimmed ? trimmed : undefined;
     });
 
-export const laserNestManualSchema = z.object({
-  cnc_number: z
-    .string()
-    .trim()
-    .min(1, 'CNC number is required')
-    .max(100, 'CNC number must be at most 100 characters'),
-  planned_runs: z.coerce
-    .number({ error: 'Enter a number' })
-    .int('Whole sheets only')
-    .min(1, 'At least 1 run'),
-  nest_name: optionalTrimmed(255),
-  material: optionalTrimmed(100),
-  thickness: optionalTrimmed(50),
-  sheet_size: optionalTrimmed(100),
-});
+/**
+ * A `<select>`/number control that may legitimately be left blank yields `''`,
+ * which `z.coerce.number()` would happily turn into `0`. Fold the empty string
+ * to `undefined` FIRST so "not set" never reaches the wire as a zero.
+ */
+const optionalPositiveNumber = (check: (schema: z.ZodNumber) => z.ZodNumber) =>
+  z
+    .union([z.literal(''), check(z.coerce.number({ error: 'Enter a number' }))])
+    .optional()
+    .transform((v) => (v === '' || v == null ? undefined : v));
+
+export const laserNestManualSchema = z
+  .object({
+    cnc_number: z
+      .string()
+      .trim()
+      .min(1, 'CNC number is required')
+      .max(100, 'CNC number must be at most 100 characters'),
+    planned_runs: z.coerce
+      .number({ error: 'Enter a number' })
+      .int('Whole sheets only')
+      .min(1, 'At least 1 run'),
+    nest_name: optionalTrimmed(255),
+    material: optionalTrimmed(100),
+    thickness: optionalTrimmed(50),
+    sheet_size: optionalTrimmed(100),
+    /**
+     * OPTIONAL sheet-part tie (the material this nest consumes). Always an
+     * explicit pick — never inferred from the free-text `material` field, since
+     * a wrong tie depletes the wrong heat lot into an as-built record. Omitted
+     * => the nest stays untied and behaves exactly as it did pre-feature.
+     */
+    material_part_id: optionalPositiveNumber((n) => n.int('Pick a sheet part').positive('Pick a sheet part')),
+    /** Sheets consumed per completed run. Meaningless without a sheet part. */
+    qty_per_run: optionalPositiveNumber((n) => n.positive('Sheets per run must be greater than 0')),
+  })
+  // A tie without a per-run quantity would be sent as a bare part id and the
+  // API would silently default it to 1.0 — make the planner state it.
+  .refine((data) => data.material_part_id == null || (data.qty_per_run != null && data.qty_per_run > 0), {
+    message: 'Enter sheets per run for the tied sheet part',
+    path: ['qty_per_run'],
+  });
 
 // ============================================================================
 // PROCESS SHEETS (engineering library)
@@ -571,6 +607,46 @@ export const visitorManualEntrySchema = z
   });
 
 // ============================================================================
+// SMS / NOTIFICATION SETTINGS
+// ============================================================================
+
+/** E.164: `+`, a non-zero country digit, then 7–14 more digits (max 15 total). */
+const E164_PATTERN = /^\+[1-9]\d{7,14}$/;
+
+/**
+ * Strip human formatting and coerce the common US shorthands to E.164 so the
+ * field accepts `(512) 555-0142`, `512-555-0142`, and `1 512 555 0142` as well
+ * as a fully-qualified `+15125550142`. Anything else must already carry its own
+ * `+<country code>`; the SERVER remains the source of truth (it re-validates and
+ * normalizes with `phonenumbers` and its 422 detail is surfaced verbatim).
+ * Returns `''` for a blank input, which means "clear my number".
+ */
+export const normalizePhoneInput = (raw: string | null | undefined): string => {
+  const cleaned = (raw ?? '').replace(/[\s().\-–—]/g, '').trim();
+  if (!cleaned) return '';
+  if (/^\d{10}$/.test(cleaned)) return `+1${cleaned}`;
+  if (/^1\d{10}$/.test(cleaned)) return `+${cleaned}`;
+  return cleaned;
+};
+
+/** True when the raw field value normalizes to a plausible E.164 number. */
+export const isValidPhoneInput = (raw: string | null | undefined): boolean =>
+  E164_PATTERN.test(normalizePhoneInput(raw));
+
+/**
+ * My Settings → mobile number (SMS). An empty value is valid and means "remove
+ * my number", which also stops every SMS notification for this user.
+ */
+export const smsPhoneSchema = z.object({
+  phone: z
+    .string()
+    .trim()
+    .refine((value) => value === '' || isValidPhoneInput(value), {
+      error: 'Enter a mobile number with its country code, e.g. +1 512 555 0142',
+    }),
+});
+
+// ============================================================================
 // TYPES
 // ============================================================================
 
@@ -592,3 +668,4 @@ export type VendorFormData = z.infer<typeof vendorSchema>;
 // form fields hold before validation).
 export type VisitorManualEntryFormData = z.output<typeof visitorManualEntrySchema>;
 export type VisitorManualEntryFormInput = z.input<typeof visitorManualEntrySchema>;
+export type SmsPhoneFormData = z.infer<typeof smsPhoneSchema>;

@@ -1,20 +1,43 @@
 import re
 import secrets
 from datetime import datetime
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
-from pydantic import BaseModel, EmailStr, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.core.security import get_password_hash, verify_password
 from app.db.database import get_db
+from app.models.company import Company
+from app.models.notification import NotificationLog, NotificationPreference
 from app.models.user import User, UserRole
+from app.schemas.notification import (
+    NotificationPreferencesResponse,
+    NotificationPreferencesUpdate,
+    TestSMSResponse,
+)
 from app.schemas.user import validate_password_strength
 from app.services.audit_service import AuditService
 from app.services.import_service import ImportFileError, parse_import_file
+from app.services.notification_catalog import ALL_CHANNELS, CATALOG, CHANNEL_SMS, get_entry
+from app.services.notification_dispatch import channels_from_pref, get_preference_row
+from app.services.sms_content import build_test_sms_body
+from app.services.sms_service import (
+    SMS_TEST_HOURLY_CAP_PER_USER,
+    TEST_QUOTA_CAPPED,
+    TEST_QUOTA_UNAVAILABLE,
+    InvalidPhoneNumberError,
+    SMSEgressDisabledError,
+    SMSPermanentError,
+    normalize_phone,
+    reserve_test_sms_quota,
+    scrub_phone_numbers,
+    send_sms,
+    sms_configured,
+)
 
 router = APIRouter()
 
@@ -80,7 +103,22 @@ class PasswordChange(BaseModel):
         return validate_password_strength(v)
 
 
+class UserPhoneUpdate(BaseModel):
+    """Self-service phone number change. ``None``/empty clears the number."""
+
+    phone: Optional[str] = Field(None, max_length=32, description="Phone number; stored normalized to E.164")
+
+
 class UserResponse(BaseModel):
+    """User payload for the SELF profile and ADMIN/MANAGER user-management routes.
+
+    FIELD MINIMIZATION (§8.12): this is the ONLY user schema that carries ``phone``,
+    and every route using it is either self-scoped (``GET /users/me``, the self-service
+    routes below) or gated to ADMIN/MANAGER user management. General user serialization
+    goes through ``app.schemas.user.UserResponse`` (auth/token/platform browse) and the
+    per-domain ``UserSummary``-style schemas, none of which expose a phone number.
+    """
+
     id: int
     version: Optional[int] = 0
     email: str
@@ -133,9 +171,60 @@ def _generated_email(employee_id: str, existing_emails: set[str]) -> str:
 
 
 def _generate_system_password() -> str:
-    """Generate a strong password for users authenticating by employee ID."""
-    token = secrets.token_urlsafe(18)
-    return f"Auto!{token}1aA"
+    """Generate a strong password for users authenticating by employee ID.
+
+    Validated rather than assumed compliant: the strength policy is length plus a
+    substring blocklist, and a random token can incidentally contain a blocklisted
+    substring. Regenerate until the value actually passes.
+    """
+    for _ in range(10):
+        candidate = f"Auto!{secrets.token_urlsafe(18)}1aA"
+        try:
+            return validate_password_strength(candidate)
+        except ValueError:
+            continue
+    # Unreachable in practice (each attempt fails with probability ~1e-5).
+    raise RuntimeError("Could not generate a policy-compliant system password")
+
+
+def _normalized_phone_or_400(raw: Optional[str]) -> Optional[str]:
+    """Validate + normalize a phone number to E.164, or ``None`` when cleared.
+
+    Storage is E.164 only (§3.4) so the SMS transport never has to guess a country
+    code. An unparseable number is a 400 rather than a silently-stored string that
+    would fail at send time.
+    """
+    if raw is None:
+        return None
+    value = str(raw).strip()
+    if not value:
+        return None
+    try:
+        return normalize_phone(value)
+    except InvalidPhoneNumberError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _effective_preferences(pref: Optional[NotificationPreference]) -> Dict[str, Dict[str, bool]]:
+    """Resolve every catalog event's channels exactly as the dispatcher would.
+
+    Uses the dispatcher's own ``channels_from_pref`` so the settings UI and the delivery
+    path can never disagree. Read-only: it NEVER creates a preference row (§3.7/§9.8).
+    """
+    return {
+        event_key: {channel: channel in channels_from_pref(pref, entry) for channel in sorted(ALL_CHANNELS)}
+        for event_key, entry in CATALOG.items()
+    }
+
+
+def _default_channel_map(entry) -> Dict[str, bool]:
+    """Materialize a catalog entry's defaults into the persisted 4-key channel shape.
+
+    The mandatory channel is deliberately NOT forced on here — the stored row records
+    the user's own choice, and the dispatcher re-applies mandatory at send time, so a
+    later catalog change to the mandatory set takes effect without rewriting rows.
+    """
+    return {channel: channel in entry.default_channels for channel in sorted(ALL_CHANNELS)}
 
 
 def _reject_platform_admin_assignment(role: Optional[UserRole]) -> None:
@@ -194,8 +283,263 @@ def pending_approval_summary(
 
 @router.get("/me", response_model=UserResponse)
 def get_current_user_info(current_user: User = Depends(get_current_user)):
-    """Get current user info"""
+    """Get current user info (self-profile — the one general route that exposes phone)."""
     return current_user
+
+
+# ---------------------------------------------------------------------------
+# Self-service profile + notification settings (My Settings)
+#
+# All routes here are SELF-scoped: they read/write only ``current_user`` and never
+# accept a user id, so no role gate beyond authentication is required and no user can
+# reach another user's phone or preferences.
+# ---------------------------------------------------------------------------
+
+
+@router.put("/me/phone", response_model=UserResponse, summary="Set your own phone number")
+def update_my_phone(
+    payload: UserPhoneUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Set or clear the current user's phone number (stored E.164, audited).
+
+    The number is the target of every SMS notification, so the change is recorded on
+    the tamper-evident trail — a silently redirected alert channel would be an audit
+    gap. Sending remains gated by the company's ``allow_sms_egress`` kill switch and by
+    per-event SMS opt-in; a phone alone sends nothing.
+    """
+    new_phone = _normalized_phone_or_400(payload.phone)
+    previous = current_user.phone
+    if new_phone == previous:
+        return current_user
+
+    current_user.phone = new_phone
+    audit.log_update(
+        "user",
+        current_user.id,
+        current_user.employee_id,
+        old_values={"phone": previous},
+        new_values={"phone": new_phone},
+        description=f"Updated own phone number for user {current_user.employee_id}",
+        extra_data={"source": "self_service"},
+    )
+    db.commit()
+    db.refresh(current_user)
+    return current_user
+
+
+@router.get(
+    "/me/notification-preferences",
+    response_model=NotificationPreferencesResponse,
+    summary="Get your effective notification preferences",
+)
+def get_my_notification_preferences(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Return the channel matrix the dispatcher would apply for this user right now.
+
+    Read-only and NON-creating: a user who has never saved preferences simply sees the
+    catalog defaults (no ``NotificationPreference`` row is written — §3.7/§9.8).
+    ``sms_egress_enabled`` / ``sms_configured`` / ``phone`` let the UI explain why an
+    SMS toggle would currently be inert.
+    """
+    pref = get_preference_row(db, current_user.id)
+    allow_sms = db.query(Company.allow_sms_egress).filter(Company.id == company_id).scalar()
+    return NotificationPreferencesResponse(
+        preferences=_effective_preferences(pref),
+        has_saved_preferences=pref is not None,
+        phone=current_user.phone,
+        sms_egress_enabled=bool(allow_sms),
+        sms_configured=sms_configured(),
+    )
+
+
+@router.put(
+    "/me/notification-preferences",
+    response_model=NotificationPreferencesResponse,
+    summary="Update your notification preferences (PR 4 scope: the SMS channel)",
+)
+def update_my_notification_preferences(
+    payload: NotificationPreferencesUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Save the current user's SMS opt-ins (audited).
+
+    Scope: this PR owns the **SMS** channel only — no catalog event ships SMS in its
+    defaults, so without an explicit opt-in here the SMS leg is unreachable. The row it
+    writes keeps the full ``{in_app, email, sms, digest}`` shape per event (seeded from
+    catalog defaults for events the user has never touched), so PR 3's complete matrix
+    extends the same rows without a migration.
+
+    This is the ONLY place a ``NotificationPreference`` row is created, and it stamps
+    ``company_id`` from the active company (the TenantMixin column that today's
+    auto-create path omits — §9.8).
+    """
+    unknown = sorted(key for key in payload.preferences if get_entry(key) is None)
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Unknown notification event(s): {', '.join(unknown)}")
+
+    not_eligible = sorted(
+        key for key, change in payload.preferences.items() if change.sms and not get_entry(key).sms_eligible
+    )
+    if not_eligible:
+        raise HTTPException(
+            status_code=400,
+            detail=f"SMS is not available for event(s): {', '.join(not_eligible)}",
+        )
+
+    pref = get_preference_row(db, current_user.id)
+    created = pref is None
+    if pref is None:
+        pref = NotificationPreference(user_id=current_user.id, preferences={})
+        # TenantMixin column is non-null: stamp it from the ACTIVE company.
+        pref.company_id = company_id
+        db.add(pref)
+
+    stored = dict(pref.preferences) if isinstance(pref.preferences, dict) else {}
+    previous = {key: dict(value) for key, value in stored.items() if isinstance(value, dict)}
+
+    for event_key, change in payload.preferences.items():
+        entry = get_entry(event_key)
+        base = stored.get(event_key)
+        if not isinstance(base, dict):
+            base = _default_channel_map(entry)
+        merged = {channel: bool(base.get(channel, False)) for channel in sorted(ALL_CHANNELS)}
+        merged[CHANNEL_SMS] = change.sms
+        stored[event_key] = merged
+
+    # Reassign (not mutate) so SQLAlchemy detects the JSON change.
+    pref.preferences = stored
+    db.flush()
+
+    audit.log_update(
+        "notification_preference",
+        pref.id,
+        current_user.employee_id,
+        old_values={"preferences": previous},
+        new_values={"preferences": stored},
+        description=(
+            f"{'Created' if created else 'Updated'} notification preferences for user {current_user.employee_id}"
+        ),
+        extra_data={"source": "self_service", "changed_events": sorted(payload.preferences.keys())},
+    )
+    db.commit()
+    db.refresh(pref)
+
+    allow_sms = db.query(Company.allow_sms_egress).filter(Company.id == company_id).scalar()
+    return NotificationPreferencesResponse(
+        preferences=_effective_preferences(pref),
+        has_saved_preferences=True,
+        phone=current_user.phone,
+        sms_egress_enabled=bool(allow_sms),
+        sms_configured=sms_configured(),
+    )
+
+
+@router.post("/me/test-sms", response_model=TestSMSResponse, summary="Send yourself a test SMS")
+async def send_test_sms(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Send a test SMS to the current user's own number.
+
+    Self-only: the destination is ``current_user.phone`` and can never be supplied by
+    the caller, so this endpoint cannot be used to message an arbitrary number. It goes
+    through the same ``sms_service`` path as real notifications, so the
+    ``allow_sms_egress`` kill switch is enforced fail-closed here too.
+
+    Bounded twice: per-IP in ``main.py`` (ENDPOINT_RATE_LIMITS) and — because the per-IP
+    limit keys on address alone, so one account can multiply it by rotating egress IPs
+    and it is disabled entirely wherever ``RATE_LIMIT_ENABLED=false`` — per-identity via
+    :func:`reserve_test_sms_quota`. Every attempt is logged to ``notification_logs``.
+    """
+    if not current_user.phone:
+        raise HTTPException(status_code=400, detail="Add a phone number before sending a test message")
+
+    quota = await reserve_test_sms_quota(current_user.id)
+    if quota == TEST_QUOTA_CAPPED:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Test-message limit reached ({SMS_TEST_HOURLY_CAP_PER_USER} per hour). Try again later.",
+        )
+    if quota == TEST_QUOTA_UNAVAILABLE:
+        # Refuse rather than send unmetered, but don't claim a limit the user never hit.
+        raise HTTPException(
+            status_code=503,
+            detail="Test messaging is temporarily unavailable. Try again shortly.",
+        )
+
+    body = build_test_sms_body()
+    # Persist the attempt BEFORE the outbound call so the delivery log records it even
+    # if the provider call (or this process) dies mid-flight.
+    log = NotificationLog(
+        company_id=company_id,
+        user_id=current_user.id,
+        event_type="sms.test",
+        channel=CHANNEL_SMS,
+        subject="Test SMS",
+        body=body,
+        sent=False,
+    )
+    db.add(log)
+    db.commit()
+
+    def _fail(error: str, status_code: int, detail: str) -> HTTPException:
+        log.error = error
+        db.commit()
+        return HTTPException(status_code=status_code, detail=detail)
+
+    try:
+        result = await send_sms(db=db, company_id=company_id, to=current_user.phone, body=body)
+    except SMSEgressDisabledError:
+        raise _fail(
+            "SMS egress is disabled for this company",
+            400,
+            "SMS is turned off for this company. An admin can enable it in Admin Settings.",
+        )
+    except InvalidPhoneNumberError as exc:
+        # Scrubbed on the way into notification_logs.error (SUPERVISOR can read that
+        # field but not `phone`); the caller is the number's owner, so the HTTP detail
+        # they get back is unscrubbed.
+        raise _fail(f"invalid phone number on file: {scrub_phone_numbers(str(exc))}", 400, str(exc))
+    except SMSPermanentError as exc:
+        raise _fail(
+            f"provider rejected the message: {scrub_phone_numbers(str(exc))}",
+            502,
+            "The SMS provider rejected the message. Check the number and try again.",
+        )
+    except Exception:
+        raise _fail(
+            "transport failure",
+            502,
+            "Could not reach the SMS provider. Try again shortly.",
+        )
+
+    log.sent = result.sent
+    log.provider_message_id = result.sid
+    log.provider_status = result.provider_status
+    log.error = None if result.sent else f"skipped: {result.reason}"
+    db.commit()
+
+    if not result.sent:
+        return TestSMSResponse(
+            status=result.status,
+            detail="SMS is not configured on this server. Ask an administrator to finish Twilio setup.",
+        )
+    return TestSMSResponse(
+        status=result.status,
+        sid=result.sid,
+        provider_status=result.provider_status,
+        detail="Test message sent.",
+    )
 
 
 @router.get("/{user_id}", response_model=UserResponse)
@@ -247,6 +591,8 @@ def create_user(
         hashed_password=get_password_hash(user_in.password),
         role=user_in.role,
         department=user_in.department,
+        # Previously dropped on the floor (the schema field was a phantom, §9.4).
+        phone=_normalized_phone_or_400(user_in.phone),
     )
     user.company_id = company_id
     db.add(user)
@@ -518,6 +864,11 @@ def update_user(
     # not change their OWN role. Editing one's own other fields stays allowed.
     if user_id == current_user.id and "role" in update_data and update_data["role"] != user.role:
         raise HTTPException(status_code=400, detail="You cannot change your own role")
+
+    # Phone now persists (it was a phantom field, §9.4) -- normalize to E.164 so the
+    # admin path can't store a number the SMS transport would reject at send time.
+    if "phone" in update_data:
+        update_data["phone"] = _normalized_phone_or_400(update_data["phone"])
 
     # Check email uniqueness if changing
     if "email" in update_data and update_data["email"] != user.email:

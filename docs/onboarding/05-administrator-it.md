@@ -18,7 +18,7 @@ Go to **Users** (under **Administration**) to see everyone in your company.
 ### Create a user
 1. Click **Add User** (top right).
 2. Fill in **First Name**, **Last Name**, **Employee ID**, and **Email**.
-3. Enter a **Password**. It must meet the rules shown under the field: at least 12 characters, upper and lowercase letters, at least one number, at least one special character, and no common words like "password", "admin", or "welcome".
+3. Enter a **Password**. It must meet the rules shown under the field: at least 12 characters, and no common word or pattern like "password", "admin", "welcome", or "werco". There is **no** upper/lower/number/symbol requirement — a passphrase of a few plain words is the easiest way to meet the rule.
 4. Pick a **Role** (see [Roles & permissions](#roles--permissions) below) and optionally a **Department**.
 5. Click **Create**.
 
@@ -163,7 +163,7 @@ For each type:
 3. Choose your file and click **Validate file (dry run)**. Nothing is written yet — you get a preview of how many rows **would** be created, plus a per-row error table.
 4. Fix any errors and validate again until clean, then click **Commit import**. Rows with errors are skipped and reported; good rows are created.
 
-> Tip: For employees, operators can be imported without an email or password (they'll use badge login) — the system auto-generates a strong password for them. Non-operators need a password in the row, or set a **Default Password** for the whole import. Any password you supply must meet the same strength rules as the Add User form (12+ characters, upper and lowercase, a number, a special character, no common words) — rows with a weak password are rejected in the dry-run/commit error table, so fix them before committing.
+> Tip: For employees, operators can be imported without an email or password (they'll use badge login) — the system auto-generates a strong password for them. Non-operators need a password in the row, or set a **Default Password** for the whole import. Any password you supply must meet the same strength rules as the Add User form (12+ characters, no common word or pattern) — rows with a weak password are rejected in the dry-run/commit error table, so fix them before committing.
 
 > Moving the whole shop off Excel for go-live? Follow the step-by-step load order, rehearsal plan, and cutover checklist in the [Excel migration runbook](../EXCEL_MIGRATION_RUNBOOK.md).
 
@@ -206,8 +206,8 @@ Use this for internal audits, customer audits, and incident response. Because op
 The system is built for **AS9100D, ISO 9001, and CMMC Level 2**. Here are the controls you can point to:
 
 - **Account lockout.** After 5 failed password sign-in attempts (the Email path), the account locks for 30 minutes.
-- **Strong passwords.** Minimum 12 characters with mixed case, a number, a special character, and no common words like "password", "admin", or "welcome".
-- **Session limits.** Sign-ins refresh silently in the background but are capped — users are forced to re-authenticate after the session limit (24 hours), so a walk-away session can't stay open indefinitely.
+- **Strong passwords.** Minimum 12 characters, screened against a blocklist of common words and patterns (keyboard walks, top-100 passwords, digit runs, and "werco"/"wercomfg"). Following NIST SP 800-63B, there are no character-class ("complexity") requirements — length plus the blocklist is the control.
+- **Session limits.** Sign-ins refresh silently in the background. Two limits apply: the browser signs a user out after **15 minutes of inactivity**, and a session that goes unused for longer than the absolute session limit (**7 days**, `SESSION_ABSOLUTE_TIMEOUT_HOURS`) can no longer be refreshed and requires a fresh sign-in. Note the absolute limit is **re-armed on every background refresh**, so it bounds how long a session may sit *idle* — it is not a fixed ceiling on total session age, and someone using the app regularly is not forced onto a re-login schedule.
 - **Tenant isolation.** Every company's data is completely separated; users only ever see their own company's records.
 - **Role-based access.** Sensitive actions are restricted to the right roles and enforced on the server, not just hidden in the screen.
 - **Tamper-evident audit trail.** Operational state changes — work order release/start/complete, BOM and routing releases, receiving and inspection, shipments, OEE, operator certifications, and the like — and user-account changes (create, edit, activate/deactivate, role change, password reset) are recorded in a tamper-evident log with before/after values, the user, and the time. A password reset records that a reset happened and by whom; the new password itself is never stored.
@@ -238,7 +238,7 @@ If you're a Platform Admin overseeing more than one company, a **company selecto
 |---------|------------|
 | New user can't sign in | Confirm the account is **Active** (not deactivated) and, for self-registered users, that you **Approved** it. Check they're using the right email/password. |
 | Account is locked out | After 5 failed password attempts (the Email sign-in) it locks for 30 minutes. Wait it out, or reset the password and have them try again. Badge sign-in has no password and can't cause a lockout. |
-| Password won't save | It must meet all the listed rules: 12+ characters, upper and lowercase, a number, a special character, and no common words like "password", "admin", or "welcome". |
+| Password won't save | It must meet both listed rules: at least 12 characters, and no common word or pattern like "password", "admin", "welcome", or "werco". Note the blocklist matches **anywhere inside** the password, so "Password1234!" is refused even though it is long and mixed-case. |
 | Can't change an Employee ID or work center Code | These are fixed after creation. Deactivate the record and create a new one if it's truly wrong. |
 | Can't remove a Work Center Type | The type is **in use** by an existing work center. Reassign or remove those work centers first. |
 | Operator can't badge in at the kiosk | Set them up on the **Employees** tab in Admin Settings with a 4-digit ID, and make sure the account is Active. |

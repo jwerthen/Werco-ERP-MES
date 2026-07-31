@@ -236,18 +236,80 @@ def test_office_reduce_approved_evidence_needs_unapprove_first(client: TestClien
     assert db_session.get(WorkOrderOperation, op.id).quantity_complete == 8
 
 
-def test_office_reduce_completed_operation_is_409(client: TestClient, db_session: Session):
+def test_office_reduce_completed_operation_is_allowed(client: TestClient, db_session: Session):
+    """PR 3: a COMPLETE operation IS correctable through the office verb.
+
+    This asserted 409 until the reasoned RETURN verb landed. The refusal's whole
+    justification was that a completed operation's downstream inventory / cost / FG
+    effects had fired and could not be walked back -- while the operator's twin told the
+    caller to "ask a supervisor" whose own endpoint hit the identical refusal.
+    ``material_consumption_service.return_tied_material`` is that walk-back, and lowering
+    the completed operation's count here is exactly what opens the bounded
+    ``correct_over_consumption`` allowance it is measured against.
+
+    The relaxation is scoped: the operator's self-service verb still 409s
+    (``test_reduce_completed_operation_is_409`` in the shop-floor suite) and a TERMINAL
+    work order still 409s on both (the test below).
+    """
     supervisor = make_user(db_session, role=UserRole.SUPERVISOR)
     operator = make_user(db_session)
     wo, op, _wc = make_wo_op(db_session, op_status=OperationStatus.COMPLETE)
-    make_closed_entry(db_session, operator, wo, op, quantity_produced=5)
+    entry = make_closed_entry(db_session, operator, wo, op, quantity_produced=5)
+    db_session.get(WorkOrderOperation, op.id).quantity_complete = 5
+    db_session.commit()
 
     resp = client.post(
         office_reduce_url(op),
-        json={"quantity_delta": 1, "reason": "too late"},
+        json={"quantity_delta": 1, "reason": "counted the scrap tray twice"},
         headers=headers_for(supervisor),
     )
-    assert resp.status_code == status.HTTP_409_CONFLICT, resp.text
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+
+    db_session.expire_all()
+    assert db_session.get(TimeEntry, entry.id).quantity_produced == 4
+    live_op = db_session.get(WorkOrderOperation, op.id)
+    assert live_op.quantity_complete == 4
+    assert live_op.status == OperationStatus.COMPLETE, "a corrected COMPLETE operation stays COMPLETE"
+
+
+def test_office_reduce_survives_a_reconcile_on_read(client: TestClient, db_session: Session):
+    """An audited correction must not be undone by somebody loading the page.
+
+    Deliberately carries NO material tie and no inventory of any kind: this is a
+    production-record integrity defect on its own, and the material-consumption suite's
+    re-issue failure (``test_reconcile_on_read_must_not_redraw_returned_material``) is a
+    downstream consequence of it, not a separate bug.
+    """
+    supervisor = make_user(db_session, role=UserRole.SUPERVISOR)
+    operator = make_user(db_session)
+    wo, op, wc = make_wo_op(db_session, op_status=OperationStatus.COMPLETE)
+    add_operation(db_session, wo, wc, sequence=20, quantity_complete=0)  # keeps the WO non-terminal
+    make_closed_entry(db_session, operator, wo, op, quantity_produced=5)
+    db_session.get(WorkOrderOperation, op.id).quantity_complete = 5
+    db_session.commit()
+
+    assert (
+        client.post(
+            office_reduce_url(op),
+            json={"quantity_delta": 1, "reason": "counted the scrap tray twice"},
+            headers=headers_for(supervisor),
+        ).status_code
+        == status.HTTP_200_OK
+    )
+    db_session.expire_all()
+    assert db_session.get(WorkOrderOperation, op.id).quantity_complete == 4
+
+    # A plain detail GET. A read must not rewrite a production record.
+    assert client.get(f"/api/v1/work-orders/{wo.id}", headers=headers_for(supervisor)).status_code == status.HTTP_200_OK
+    db_session.rollback()
+    db_session.expire_all()
+
+    assert (
+        db_session.query(TimeEntry).filter(TimeEntry.operation_id == op.id).one().quantity_produced == 4
+    ), "the labor evidence still reads the corrected quantity"
+    assert (
+        db_session.get(WorkOrderOperation, op.id).quantity_complete == 4
+    ), "a read reverted the supervisor's audited correction back to the planned target"
 
 
 @pytest.mark.parametrize(
@@ -292,7 +354,7 @@ def test_office_reduce_missing_reason_is_422(client: TestClient, db_session: Ses
     make_closed_entry(db_session, operator, wo, op, quantity_produced=5)
 
     resp = client.post(office_reduce_url(op), json={"quantity_delta": 1}, headers=headers_for(supervisor))
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
 
 def test_office_reduce_rejects_import_source_422(client: TestClient, db_session: Session):
@@ -306,7 +368,7 @@ def test_office_reduce_rejects_import_source_422(client: TestClient, db_session:
         json={"quantity_delta": 1, "reason": "nope", "source": "import"},
         headers=headers_for(supervisor),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
     db_session.expire_all()
     assert db_session.query(TimeEntry).filter(TimeEntry.operation_id == op.id).one().quantity_produced == 5
 

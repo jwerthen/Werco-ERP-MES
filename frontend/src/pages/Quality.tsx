@@ -27,6 +27,7 @@ import {
   DocumentMagnifyingGlassIcon,
   TagIcon,
   XMarkIcon,
+  XCircleIcon,
 } from '@heroicons/react/24/outline';
 
 type TabType = 'ncr' | 'car' | 'fai' | 'scrap';
@@ -167,6 +168,13 @@ export default function QualityPage() {
   // (ADMIN/MANAGER/QUALITY) via the quality:approve permission.
   const { can } = usePermissions();
   const canManageScrapCodes = can('quality:approve');
+  // Voiding an NCR mirrors DELETE /quality/ncr/{id} (require_role ADMIN / MANAGER
+  // / QUALITY). usePermissions().can already returns true for a superuser, and
+  // quality:approve is held by exactly admin/manager/quality — so this matches.
+  const canVoidNCR = can('quality:approve');
+  const [voidNCRTarget, setVoidNCRTarget] = useState<NCR | null>(null);
+  const [voidNCRReason, setVoidNCRReason] = useState('');
+  const [voidNCRSaving, setVoidNCRSaving] = useState(false);
   const [scrapCodes, setScrapCodes] = useState<ScrapReasonCode[]>([]);
   const [scrapCodesLoading, setScrapCodesLoading] = useState(false);
   const [scrapCodesError, setScrapCodesError] = useState(false);
@@ -219,6 +227,29 @@ export default function QualityPage() {
       loadData();
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to create NCR');
+    }
+  };
+
+  // Void an NCR. Server-GATED (a blocking NCR is refused with an actionable
+  // 400), so this stays non-optimistic: await, then reflect only the result —
+  // success toast + list refresh, or the verbatim server detail on failure.
+  const handleSubmitVoidNCR = async () => {
+    if (!voidNCRTarget || voidNCRSaving) return;
+    if (!voidNCRReason.trim()) {
+      showToast('error', 'A reason is required to void an NCR');
+      return;
+    }
+    setVoidNCRSaving(true);
+    try {
+      const result = await api.voidNCR(voidNCRTarget.id, voidNCRReason.trim());
+      showToast('success', result?.message || `NCR ${voidNCRTarget.ncr_number} voided`);
+      setVoidNCRTarget(null);
+      setVoidNCRReason('');
+      loadData();
+    } catch (err: any) {
+      showToast('error', err.response?.data?.detail || 'Failed to void NCR');
+    } finally {
+      setVoidNCRSaving(false);
     }
   };
 
@@ -390,6 +421,24 @@ export default function QualityPage() {
     [ncrs, ncrStatusFilter]
   );
 
+  const renderNCRVoidAction = (ncr: NCR) =>
+    canVoidNCR ? (
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          setVoidNCRReason('');
+          setVoidNCRTarget(ncr);
+        }}
+        title="Void NCR"
+        aria-label={`Void NCR ${ncr.ncr_number}`}
+        className="inline-flex items-center gap-1.5 border border-red-500/40 text-red-300 hover:border-red-500 hover:text-red-200 text-sm px-3 py-1 transition-colors"
+      >
+        <XCircleIcon className="h-4 w-4" aria-hidden="true" />
+        Void
+      </button>
+    ) : null;
+
   const ncrColumns = useMemo<Array<DataTableColumn<NCR>>>(() => [
     {
       key: 'ncr_number',
@@ -442,7 +491,19 @@ export default function QualityPage() {
       csv: (ncr) => formatCentralDate(ncr.created_at),
       render: (ncr) => <span className="text-sm">{formatCentralDate(ncr.created_at)}</span>,
     },
-  ], []);
+    ...(canVoidNCR
+      ? [
+          {
+            key: 'actions',
+            header: 'Action',
+            align: 'right' as const,
+            render: (ncr: NCR) => (
+              <div className="flex items-center justify-end gap-2">{renderNCRVoidAction(ncr)}</div>
+            ),
+          },
+        ]
+      : []),
+  ], [canVoidNCR]);
 
   const carColumns = useMemo<Array<DataTableColumn<CAR>>>(() => [
     {
@@ -802,6 +863,7 @@ export default function QualityPage() {
                     { label: 'Disposition', value: <StatusBadge status={ncr.disposition} colorMap={dispositionColors} /> },
                     { label: 'Date', value: formatCentralDate(ncr.created_at) },
                   ]}
+                  actions={renderNCRVoidAction(ncr)}
                 />
               )}
             />
@@ -1382,6 +1444,54 @@ export default function QualityPage() {
                 <Button type="submit">Create FAI</Button>
               </div>
             </form>
+      </Modal>
+
+      {/* Void NCR Modal — needs a required reason, so it's a Modal (not ConfirmDialog). */}
+      <Modal open={!!voidNCRTarget} onClose={() => setVoidNCRTarget(null)} size="md" closeOnBackdrop={false}>
+        {voidNCRTarget && (
+          <>
+            <div className="flex items-start gap-3 mb-4">
+              <div className="p-2 rounded-full bg-red-500/20 flex-shrink-0">
+                <ExclamationTriangleIcon className="h-5 w-5 text-red-500" aria-hidden="true" />
+              </div>
+              <div>
+                <h2 className="text-lg font-semibold text-white">Void NCR {voidNCRTarget.ncr_number}</h2>
+                <p className="text-sm text-slate-300 mt-1">
+                  Voiding removes this non-conformance report from active lists while preserving the record for
+                  audit/restore. A reason is required and recorded on the audit trail. The server will refuse a void
+                  while the NCR is blocking a work order.
+                </p>
+              </div>
+            </div>
+
+            <FormField label="Reason for Void" required labelClassName="block text-sm font-medium text-slate-300 mb-1">
+              {(field) => (
+                <textarea
+                  {...field}
+                  value={voidNCRReason}
+                  onChange={(e) => setVoidNCRReason(e.target.value)}
+                  className="input w-full"
+                  rows={3}
+                  placeholder="Why is this NCR being voided?"
+                />
+              )}
+            </FormField>
+
+            <div className="flex justify-end gap-3 mt-6">
+              <Button variant="secondary" onClick={() => setVoidNCRTarget(null)}>
+                Cancel
+              </Button>
+              <LoadingButton
+                variant="danger"
+                loading={voidNCRSaving}
+                loadingText="Voiding…"
+                onClick={handleSubmitVoidNCR}
+              >
+                Void NCR
+              </LoadingButton>
+            </div>
+          </>
+        )}
       </Modal>
     </div>
   );

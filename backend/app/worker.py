@@ -10,6 +10,11 @@ from arq import cron
 
 from app.core.queue import get_redis_settings
 
+# Import for side effects: attaches the transactional-outbox SQLAlchemy Session listeners
+# in the worker process so operational events committed here (e.g. cron writes) also tee
+# into the notification pipeline.
+from app.services import notification_outbox  # noqa: F401
+
 logger = logging.getLogger(__name__)
 
 
@@ -23,6 +28,43 @@ async def send_email_job(ctx, to: str, subject: str, body: str, template: str = 
     from app.jobs.email_jobs import send_email_task
 
     return await send_email_task(to, subject, body, template, context)
+
+
+async def send_sms_job(
+    ctx,
+    *,
+    company_id: int,
+    user_id: int,
+    body: str,
+    notification_log_id: int = None,
+    event_type: str = "sms",
+):
+    """Send one notification SMS via Twilio (gated by ``Company.allow_sms_egress``).
+
+    Enqueued by the notification dispatcher's SMS leg. Takes ``user_id`` rather than a
+    phone number so PII stays out of the Redis payload and the recipient is re-resolved
+    tenant-scoped + active at send time. Re-raises on transport failure so ARQ retries.
+    """
+    from app.jobs.sms_jobs import send_sms_task
+
+    return await send_sms_task(
+        company_id=company_id,
+        user_id=user_id,
+        body=body,
+        notification_log_id=notification_log_id,
+        event_type=event_type,
+    )
+
+
+async def send_sms_overflow_job(ctx, *, company_id: int, user_id: int):
+    """Storm-control collapse: one "…and N more" SMS standing in for suppressed alerts.
+
+    Enqueued deferred (``SMS_COLLAPSE_DELAY_SECONDS``) by the dispatcher when a user's
+    per-hour SMS cap is first exceeded.
+    """
+    from app.jobs.sms_jobs import send_sms_overflow_task
+
+    return await send_sms_overflow_task(company_id=company_id, user_id=user_id)
 
 
 async def send_webhook_job(ctx, webhook_id: int, event: str, payload: dict, company_id: int = None):
@@ -203,6 +245,57 @@ async def poll_tracking_job(ctx):
     return await poll_tracking_task()
 
 
+async def dispatch_notification_job(ctx, event_id: int):
+    """Fan out notifications for one committed OperationalEvent (transactional outbox).
+
+    Enqueued by the after_commit tee (and the relay sweeper). Idempotent + crash-safe via
+    the event's ``notified_at`` marker.
+    """
+    from app.jobs.notification_jobs import dispatch_notification_task
+
+    return await dispatch_notification_task(event_id)
+
+
+async def relay_pending_notifications_job(ctx):
+    """5-min sweeper: re-enqueue catalog-mapped events whose notifications never dispatched
+    (covers a Redis outage at after_commit-enqueue time)."""
+    from app.jobs.notification_jobs import relay_pending_notifications_task
+
+    return await relay_pending_notifications_task()
+
+
+async def dispatch_notification_direct_job(
+    ctx,
+    *,
+    event_key: str,
+    company_id: int,
+    recipient_ids: list,
+    related_type: str = None,
+    related_id: int = None,
+    title: str,
+    body: str = None,
+    link: str = None,
+    template: str = None,
+    context: dict = None,
+):
+    """Run ``dispatch_direct`` in the worker for a sync request-path caller (e.g. visitor
+    check-in), which cannot await the async dispatcher itself."""
+    from app.jobs.notification_jobs import dispatch_notification_direct_task
+
+    return await dispatch_notification_direct_task(
+        event_key=event_key,
+        company_id=company_id,
+        recipient_ids=recipient_ids,
+        related_type=related_type,
+        related_id=related_id,
+        title=title,
+        body=body,
+        link=link,
+        template=template,
+        context=context,
+    )
+
+
 # ============================================================================
 # STARTUP/SHUTDOWN
 # ============================================================================
@@ -234,6 +327,8 @@ class WorkerSettings:
     # Job functions
     functions = [
         send_email_job,
+        send_sms_job,
+        send_sms_overflow_job,
         send_webhook_job,
         run_mrp_job,
         run_mrp_auto_draft_job,
@@ -251,6 +346,9 @@ class WorkerSettings:
         process_tracking_webhook_job,
         print_receiving_label_job,
         run_oee_auto_calc_job,
+        dispatch_notification_job,
+        relay_pending_notifications_job,
+        dispatch_notification_direct_job,
     ]
 
     # Cron jobs (scheduled tasks)
@@ -266,6 +364,9 @@ class WorkerSettings:
         cron(cleanup_old_logs_job, weekday=0, hour=2, minute=0),  # Sunday 2 AM
         cron(archive_aged_audit_logs_job, day=1, hour=3, minute=0),  # 1st of month, 3 AM
         cron(poll_tracking_job, minute={0, 30}),  # every 30 min (tracking poll fallback)
+        # Notification relay sweeper: every 5 min re-enqueue catalog-mapped events whose
+        # after_commit enqueue was lost (e.g. Redis outage). See notification_jobs.
+        cron(relay_pending_notifications_job, minute=set(range(0, 60, 5))),
     ]
 
     # Lifecycle

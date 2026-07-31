@@ -25,15 +25,17 @@ import {
   CpuChipIcon,
   TvIcon,
   PrinterIcon,
+  ChatBubbleLeftRightIcon,
 } from '@heroicons/react/24/outline';
 import CarrierIntegrationsTab from '../components/admin/CarrierIntegrationsTab';
 import PrintIntegrationsTab from '../components/admin/PrintIntegrationsTab';
 import AIUsageTab from '../components/admin/AIUsageTab';
 import AIEgressTab from '../components/admin/AIEgressTab';
+import SmsEgressTab from '../components/admin/SmsEgressTab';
 import DisplayTokensTab from '../components/admin/DisplayTokensTab';
 import { EmptyState, ErrorState, FormField, useToast } from '../components/ui';
 
-type TabKey = 'materials' | 'machines' | 'finishes' | 'labor' | 'workcenters' | 'workcentertypes' | 'services' | 'overhead' | 'employees' | 'roles' | 'carriers' | 'printing' | 'aiusage' | 'aiprivacy' | 'displays' | 'audit';
+type TabKey = 'materials' | 'machines' | 'finishes' | 'labor' | 'workcenters' | 'workcentertypes' | 'services' | 'overhead' | 'employees' | 'roles' | 'carriers' | 'printing' | 'aiusage' | 'aiprivacy' | 'smsprivacy' | 'displays' | 'audit';
 
 const MATERIAL_CATEGORIES = ['steel', 'stainless', 'aluminum', 'brass', 'copper', 'titanium', 'plastic', 'other'];
 const MACHINE_TYPES = ['cnc_mill_3axis', 'cnc_mill_4axis', 'cnc_mill_5axis', 'cnc_lathe', 'laser_fiber', 'laser_co2', 'plasma', 'waterjet', 'press_brake', 'punch_press'];
@@ -55,6 +57,7 @@ const tabs: { key: TabKey; label: string; icon: React.ComponentType<any> }[] = [
   { key: 'printing', label: 'Label Printing', icon: PrinterIcon },
   { key: 'aiusage', label: 'AI Usage & Cost', icon: CpuChipIcon },
   { key: 'aiprivacy', label: 'AI Privacy', icon: ShieldCheckIcon },
+  { key: 'smsprivacy', label: 'SMS Privacy', icon: ChatBubbleLeftRightIcon },
   { key: 'displays', label: 'Wallboard Displays', icon: TvIcon },
   { key: 'audit', label: 'Audit Log', icon: ClockIcon },
 ];
@@ -381,7 +384,7 @@ export default function AdminSettings() {
       {/* Tab content */}
       <div className="card">
         {/* Show inactive toggle (not for configuration-only tabs) */}
-        {!['overhead', 'audit', 'workcentertypes', 'roles', 'carriers', 'printing', 'aiusage', 'aiprivacy', 'displays'].includes(activeTab) && (
+        {!['overhead', 'audit', 'workcentertypes', 'roles', 'carriers', 'printing', 'aiusage', 'aiprivacy', 'smsprivacy', 'displays'].includes(activeTab) && (
           <div className="flex items-center justify-between mb-4 pb-4 border-b border-surface-200">
             <label className="flex items-center gap-2 cursor-pointer">
               <input
@@ -418,7 +421,7 @@ export default function AdminSettings() {
           <div className="flex items-center justify-center py-12">
             <div className="spinner h-8 w-8"></div>
           </div>
-        ) : loadError && !['carriers', 'printing', 'aiusage', 'aiprivacy', 'displays'].includes(activeTab) ? (
+        ) : loadError && !['carriers', 'printing', 'aiusage', 'aiprivacy', 'smsprivacy', 'displays'].includes(activeTab) ? (
           <ErrorState
             message="Could not load this settings tab."
             onRetry={() => loadTabData(activeTab)}
@@ -456,6 +459,7 @@ export default function AdminSettings() {
             {activeTab === 'printing' && <PrintIntegrationsTab />}
             {activeTab === 'aiusage' && <AIUsageTab />}
             {activeTab === 'aiprivacy' && <AIEgressTab />}
+            {activeTab === 'smsprivacy' && <SmsEgressTab />}
             {activeTab === 'displays' && <DisplayTokensTab />}
             {activeTab === 'audit' && <AuditLogTable data={auditLog} />}
           </>

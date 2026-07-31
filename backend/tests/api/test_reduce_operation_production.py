@@ -513,7 +513,7 @@ def test_reduce_missing_reason_is_422(client: TestClient, db_session: Session):
     make_open_entry(db_session, operator, wo, op, quantity_produced=5)
 
     resp = client.post(reduce_url(op), json={"quantity_delta": 1}, headers=headers_for(operator))
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
 
 def test_reduce_blank_reason_is_422(client: TestClient, db_session: Session):
@@ -526,7 +526,7 @@ def test_reduce_blank_reason_is_422(client: TestClient, db_session: Session):
         json={"quantity_delta": 1, "reason": "   "},
         headers=headers_for(operator),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
 
 @pytest.mark.parametrize("bad_delta", [0, -1, "nan", "inf"])
@@ -540,7 +540,7 @@ def test_reduce_non_positive_or_non_finite_delta_is_422(client: TestClient, db_s
         json={"quantity_delta": bad_delta, "reason": "bad number"},
         headers=headers_for(operator),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
 
 # ===========================================================================
@@ -916,7 +916,7 @@ def test_reduce_rejects_import_source_422_without_mutating(client: TestClient, d
         json={"quantity_delta": 2, "reason": "should not apply", "source": "import"},
         headers=headers_for(operator),
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
     db_session.expire_all()
     assert db_session.get(WorkOrderOperation, op.id).quantity_complete == 5

@@ -466,7 +466,7 @@ def test_create_eco_with_cross_tenant_affected_part_is_422(client: TestClient, d
             "affected_parts": [foreign_part.id],
         },
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
     # No ECO leaked for company A.
     assert db_session.query(EngineeringChangeOrder).filter(EngineeringChangeOrder.company_id == COMPANY_A).count() == 0
 
@@ -485,7 +485,7 @@ def test_create_eco_with_nonexistent_affected_work_order_is_422(client: TestClie
             "affected_work_orders": [999999],
         },
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
 
 def test_update_eco_with_cross_tenant_affected_document_is_422_and_no_mutation(client: TestClient, db_session: Session):
@@ -498,7 +498,7 @@ def test_update_eco_with_cross_tenant_affected_document_is_422_and_no_mutation(c
         headers=headers_for(a_user),
         json={"affected_documents": [foreign_doc.id]},
     )
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
     eco_after = _reload(db_session, EngineeringChangeOrder, eco_a.id)
     assert eco_after.affected_documents is None, "rejected affected-id update must not persist"

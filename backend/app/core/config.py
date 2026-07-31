@@ -1,7 +1,7 @@
 from typing import List, Optional
 from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
-from pydantic import field_validator, model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 # List of known insecure default secret key values that should be rejected
@@ -72,7 +72,44 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15  # Short-lived access tokens
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7  # Refresh tokens valid for 7 days
-    SESSION_ABSOLUTE_TIMEOUT_HOURS: int = 24  # Force re-login after 24 hours regardless
+    # Baked into each refresh token as an `absolute_timeout` claim at mint time and enforced
+    # in verify_refresh_token. NOT a hard ceiling on total session life, despite the name:
+    # POST /auth/refresh re-mints the refresh token through create_refresh_token, which takes
+    # no parameter to carry the original claim forward and recomputes it from utcnow()
+    # (security.py:66). Every refresh therefore RESETS the clock, so what this actually bounds
+    # is an IDLE window — a user who touches the app once per window is never forced to
+    # re-authenticate. That has been true since the setting was introduced and is unchanged
+    # here. A change to this value takes effect on the next mint (refresh or login).
+    #
+    # Relaxed 24h -> 168h (7 days) on 2026-07-29. The 24h value was an IA-family
+    # (NIST SP 800-171 3.1.11) session-termination rule carried over from the CMMC L2
+    # effort that is no longer being pursued; its practical effect was forcing every
+    # shop user idle for a day to re-authenticate. At 168h it equals REFRESH_TOKEN_EXPIRE_DAYS,
+    # so the refresh window itself becomes the binding limit. The mechanism is kept,
+    # not deleted: lower this env var to re-arm a tighter idle window without a code change.
+    SESSION_ABSOLUTE_TIMEOUT_HOURS: int = 168  # Idle window (see above); 168h = the 7-day refresh window
+
+    # Audit-log hash chain. When True (the default and the historical behavior) every
+    # audited write takes ONE GLOBAL transaction-scoped Postgres advisory lock, held
+    # until the caller's transaction commits, reads the chain tail, and SHA-256s the
+    # full row including old/new payloads. That lock is a system-wide serialization
+    # point across all tenants on every audited request.
+    #
+    # Set False to PAUSE the chain: rows are still written (same table, same columns,
+    # same audit content) and the 008/060 database immutability triggers still block
+    # UPDATE/DELETE, but sequence_number comes from a Postgres sequence instead of a
+    # locked tail read, previous_hash is NULL, and integrity_hash is the
+    # 'LEGACY_CHAIN_PAUSED' placeholder that the verifier already knows to skip.
+    #
+    # READ BEFORE FLIPPING — this is not fully reversible. Re-enabling relinks new
+    # rows off whatever tail exists, so the chain resumes cleanly, but rows written
+    # while paused can NEVER be made verifiable retroactively, and gap detection is
+    # permanently lost across the paused window (a sequence legitimately leaves gaps
+    # whenever a caller's transaction rolls back). What you keep while paused: the
+    # audit rows themselves, the DB-level append-only triggers, and every read path.
+    # What you lose: cryptographic proof that a row was not altered out of band.
+    # See docs/AUDIT_LOG_RETENTION_RUNBOOK.md.
+    AUDIT_HASH_CHAIN_ENABLED: bool = True
 
     @field_validator("SECRET_KEY")
     @classmethod
@@ -285,6 +322,33 @@ class Settings(BaseSettings):
     def rate_limit_exempt_paths_list(self) -> List[str]:
         return [path.strip() for path in self.RATE_LIMIT_EXEMPT_PATHS.split(",")]
 
+    # Maximum size (bytes) of an "application/json" request body the app will
+    # accept. Over the cap the `limit_json_body_size` middleware in app/main.py
+    # returns HTTP 413. General request-size hygiene: the middleware runs ahead
+    # of every route's auth dependency, so without a cap an unauthenticated
+    # caller decides how many bytes the app buffers into memory and hands to
+    # json.loads, and how large the resulting Python object graph gets. Only
+    # JSON is gated: multipart/UploadFile paths (every CSV/XLSX bulk import) are
+    # untouched and carry their own per-endpoint caps, as are the carrier
+    # webhooks, which HMAC-verify raw bytes and skip the middleware entirely.
+    #
+    # 256 KB clears the largest realistic bodies measured (laser-nest import at
+    # 170 nests = 183 KB; BOM create at 1000 line items = 201 KB). The known
+    # ceiling is a BOM create above roughly 1300 line items — which is why this
+    # is env-overridable rather than a constant: ops can raise it without a
+    # deploy.
+    #
+    # MAX_SANITIZED_JSON_BODY_BYTES is the pre-rename name, accepted as a
+    # deprecated fallback so an env var set while the old name shipped keeps
+    # taking effect. The "SANITIZED" was accurate only while this middleware
+    # also bleach-stripped bodies; it no longer does (see the middleware
+    # docstring). When both names are set the new one wins. Remove the fallback
+    # once no environment sets the old name.
+    MAX_JSON_BODY_BYTES: int = Field(
+        default=262144,  # 256 KB
+        validation_alias=AliasChoices("MAX_JSON_BODY_BYTES", "MAX_SANITIZED_JSON_BODY_BYTES"),
+    )
+
     # CORS - Include localhost for dev; production origins must be set via env var
     CORS_ORIGINS: str = "http://localhost:3000,http://localhost:3001,http://localhost:5173,http://localhost:8000"
     CORS_ALLOW_CREDENTIALS: bool = True
@@ -392,6 +456,38 @@ class Settings(BaseSettings):
     SMTP_PASSWORD: str = ""
     SMTP_FROM: str = "noreply@werco.com"
     SMTP_FROM_NAME: str = "Werco ERP System"
+
+    # Base URL of the SPA, used to build absolute deep links in notification emails
+    # (e.g. "https://app.werco.com"). Empty in dev/test -> emails render relative-less
+    # links gracefully. No trailing slash.
+    FRONTEND_BASE_URL: str = ""
+
+    # SMS Configuration (Twilio) -- the notification SMS channel (PR 4).
+    #
+    # ALL values come from the environment; nothing is ever hardcoded. Every field is
+    # optional and empty by default, so an unconfigured environment SOFT-SKIPS SMS
+    # (logged, no raise) exactly like the unconfigured SMTP path.
+    #
+    # Two auth modes are supported; ``sms_service`` prefers the FIRST that resolves:
+    #   1. API-key auth (PREFERRED): TWILIO_ACCOUNT_SID + TWILIO_API_KEY_SID (SK...)
+    #      + TWILIO_API_KEY_SECRET. Revocable per key without rotating the account
+    #      credential -- the CMMC-friendlier posture.
+    #   2. Legacy auth-token auth: TWILIO_ACCOUNT_SID + TWILIO_AUTH_TOKEN.
+    #
+    # Sending additionally requires a sender: TWILIO_MESSAGING_SERVICE_SID (preferred
+    # -- it carries the pool/compliance registration) or TWILIO_FROM_NUMBER (E.164).
+    #
+    # NOTE: these credentials only permit egress for companies whose
+    # ``Company.allow_sms_egress`` CUI kill switch is ON (fail-closed in sms_service).
+    TWILIO_ACCOUNT_SID: str = ""
+    TWILIO_API_KEY_SID: str = ""
+    TWILIO_API_KEY_SECRET: str = ""
+    TWILIO_AUTH_TOKEN: str = ""
+    TWILIO_FROM_NUMBER: str = ""
+    TWILIO_MESSAGING_SERVICE_SID: str = ""
+    # Default region used to parse a phone number typed without a country code
+    # (shop-local: US). Stored values are always normalized to E.164.
+    SMS_DEFAULT_REGION: str = "US"
 
     # Webhook Configuration
     WEBHOOK_ENCRYPTION_KEY: str = ""

@@ -33,9 +33,10 @@ from __future__ import annotations
 import logging
 from typing import Iterable, Optional
 
-from sqlalchemy import func
+from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
+from app.db.ledger_filter import work_order_ledger_filter
 from app.models.inventory import InventoryTransaction, TransactionType
 from app.models.time_entry import TimeEntry, TimeEntryType
 from app.models.work_order import WorkOrder, WorkOrderOperation
@@ -193,19 +194,46 @@ def _labor_and_overhead_cost(db: Session, work_order: WorkOrder, company_id: int
 
 
 def _issued_material_cost(db: Session, work_order: WorkOrder, company_id: int) -> float:
-    """Total cost of material ISSUEd to the WO (the Batch-6 backflush/issue txns).
+    """NET cost of material consumed by the WO: ISSUE (backflush + tied) minus RETURN.
 
-    Sums ``abs(total_cost)`` over every ISSUE ``InventoryTransaction`` referencing this
+    Sums ``abs(total_cost)`` over every ISSUE ``InventoryTransaction`` belonging to this
     work order (ISSUE quantities are stored negative, so ``total_cost`` may be negative;
-    we take the magnitude). Tenant-scoped.
+    we take the magnitude) and SUBTRACTS the magnitude of every RETURN row. Tenant-scoped.
+
+    "Belonging to" is ``work_order_ledger_filter``, which spans ALL THREE reference shapes
+    (``work_order``, ``work_order_backflush``, ``work_order_operation``). Filtering on
+    ``reference_type='work_order'`` alone silently dropped every operation-scoped
+    consumption row -- for the headline nest case, the entire material leg of the job --
+    out of ``WorkOrder.actual_cost``, the synced ``JobCost``, and the analytics variance,
+    and it would now drop every reconciled component row too.
+    ``analytics_service._issued_material_cost`` calls the same helper, so the two can no
+    longer drift.
+
+    **The sign is why RETURN cannot simply join the type filter.** A RETURN is the reasoned
+    compensating credit for consumption (PR 3), carrying the SAME reference shape as the
+    ISSUE rows it compensates -- so the shared predicate picks it up for free -- and its
+    ``unit_cost`` is copied from that ISSUE row, so the two cancel exactly. Widening the
+    filter while keeping a bare ``abs()`` would have made a return INCREASE the job's
+    material cost. The CASE below is the whole fix.
+
+    No clamp at zero: a RETURN is bounded by what the tie actually issued, so the net is
+    structurally >= 0 and a negative here would be real drift worth surfacing rather than
+    hiding. (The window-scoped COGS reads in ``analytics_service`` DO clamp -- there a
+    negative is legitimately reachable by issuing before the window and returning inside
+    it, which is a reporting-boundary artifact rather than drift.)
     """
+    # ISSUE -> +|total_cost|, RETURN -> -|total_cost|. Keyed on transaction_type, NOT on
+    # the stored sign, so the ISSUE leg is bit-for-bit the previous expression.
+    signed_cost = case(
+        (InventoryTransaction.transaction_type == TransactionType.RETURN, -func.abs(InventoryTransaction.total_cost)),
+        else_=func.abs(InventoryTransaction.total_cost),
+    )
     total = (
-        db.query(func.coalesce(func.sum(func.abs(InventoryTransaction.total_cost)), 0.0))
+        db.query(func.coalesce(func.sum(signed_cost), 0.0))
         .filter(
             InventoryTransaction.company_id == company_id,
-            InventoryTransaction.reference_type == "work_order",
-            InventoryTransaction.reference_id == work_order.id,
-            InventoryTransaction.transaction_type == TransactionType.ISSUE,
+            work_order_ledger_filter(work_order.id, company_id),
+            InventoryTransaction.transaction_type.in_((TransactionType.ISSUE, TransactionType.RETURN)),
         )
         .scalar()
     )
@@ -215,8 +243,9 @@ def _issued_material_cost(db: Session, work_order: WorkOrder, company_id: int) -
 def compute_and_store_actual_cost(db: Session, work_order: WorkOrder, company_id: int) -> dict[str, float]:
     """Populate ``WorkOrder.actual_cost`` = labor + issued material + overhead (COST-1).
 
-    Computes from the (already rolled-up) actual hours at the shared WC rate plus the
-    cost of material ISSUEd to the WO (Batch-6 ISSUE txns) plus overhead. Stores the
+    Computes from the (already rolled-up) actual hours at the shared WC rate plus the NET
+    cost of material consumed by the WO (ISSUE txns less any reasoned RETURN credit, see
+    ``_issued_material_cost``) plus overhead. Stores the
     total on ``work_order.actual_cost`` and returns the breakdown so the JobCost sync /
     caller can reuse it without recomputing. Monotonic-up is NOT applied to cost (it is
     a deterministic function of hours+material that are themselves monotonic-up).

@@ -337,7 +337,7 @@ class TestUserValidation:
             "role": "operator",
         }
         response = client.post("/api/v1/auth/register", headers=admin_headers, json=user_data)
-        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
 
     def test_weak_password_rejected(self, client: TestClient, admin_headers, fake_data):
         """Test weak password is rejected."""
@@ -350,7 +350,7 @@ class TestUserValidation:
             "role": "operator",
         }
         response = client.post("/api/v1/auth/register", headers=admin_headers, json=user_data)
-        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
 
     def test_invalid_role_rejected(self, client: TestClient, admin_headers, fake_data):
         """Test invalid role is rejected."""
@@ -363,7 +363,7 @@ class TestUserValidation:
             "role": "invalid_role",
         }
         response = client.post("/api/v1/auth/register", headers=admin_headers, json=user_data)
-        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
 
 
 def _valid_user_payload(**overrides) -> dict:
@@ -642,7 +642,10 @@ class TestUserAuditLogging:
         and neither the new password nor its hash appears ANYWHERE in the row's
         value fields (this endpoint deliberately passes no values, so the
         assertion is meaningful, not vacuous)."""
-        new_password = "BrandNewP@ssw0rd!42"
+        # NOT "BrandNewP@ssw0rd!42" -- the 2026-07-29 blocklist expansion added
+        # "p@ssw0rd", so that literal is now a 422 and would break this audit test
+        # for a reason that has nothing to do with auditing.
+        new_password = "BrandNewSecret!42"
         response = client.post(
             f"/api/v1/users/{created_user['id']}/reset-password",
             headers=admin_headers,
@@ -679,7 +682,10 @@ class TestUserAuditLogging:
 
         Mirrors ``test_reset_password_emits_audit_without_any_secret`` for the
         admin-reset path; this pins the NEW self-service audit event."""
-        new_password = "BrandNewP@ssw0rd!42"
+        # NOT "BrandNewP@ssw0rd!42" -- the 2026-07-29 blocklist expansion added
+        # "p@ssw0rd", so that literal is now a 422 and would break this audit test
+        # for a reason that has nothing to do with auditing.
+        new_password = "BrandNewSecret!42"
         response = client.post(
             "/api/v1/users/change-password",
             headers=auth_headers,
@@ -741,54 +747,148 @@ class TestUserAuditLogging:
         assert row.new_values == {"status": "active"}
 
 
-# A password satisfying every rule: >= 12 chars, upper + lower + digit + special,
-# and no common weak substring. Reused across the strength-policy tests below.
+# A password satisfying the policy: >= 12 characters and no blocklisted substring.
+# It also happens to mix case/digit/punctuation, which the policy no longer
+# REQUIRES -- see NEWLY_VALID_PASSWORDS below for the proof that it doesn't.
 STRONG_PASSWORD = "Zephyr9!Quill"
+
+# Values that the four character-class rules used to REJECT and the current policy
+# ACCEPTS. Pinned as accept-cases (not merely as deleted reject-cases) so that
+# silently reinstating a composition rule fails loudly here instead of quietly
+# narrowing what a shop user is allowed to choose.
+#
+# The last entry is the concrete example from the validator's docstring: a long,
+# high-entropy passphrase the old rules refused because it has no digit, no
+# uppercase and no special character (the special-character class did not even
+# include the space).
+NEWLY_VALID_PASSWORDS = {
+    "no_digit": "Zephyr!Quills",
+    "no_special_character": "Zephyr9Quills",
+    "no_uppercase": "zephyr9!quills",
+    "no_lowercase": "ZEPHYR9!QUILLS",
+    "passphrase_letters_and_spaces_only": "correct horse battery staple",
+}
+
+# A sample of the entries ADDED to _COMMON_PASSWORD_PATTERNS on 2026-07-29. Each
+# violator is >= 12 characters so the blocklist rule is the SOLE cause of failure,
+# and each covers a different family of the expansion.
+NEW_BLOCKLIST_SAMPLES = {
+    "top100_word": "Thundering-dragon-42",
+    "local_shop_name": "Quiet-werco-morning",
+    "keyboard_walk": "Silver-qazwsx-lantern",
+    "top100_phrase": "Amber-trustno1-harbor",
+    "leetspeak_password": "Copper-passw0rd-vault",
+}
 
 
 @pytest.mark.unit
 class TestPasswordStrengthPolicy:
     """Unit coverage for the canonical ``validate_password_strength`` policy.
 
-    One assertion per rule: a strong password is accepted (returned unchanged)
-    and each individual failure mode is rejected with its own message. Every
-    violator string breaks EXACTLY one rule, so the asserted message is the sole
-    cause and not an incidental co-failure.
+    The policy is exactly TWO rules -- at least 12 characters, and no blocklisted
+    substring -- following NIST SP 800-63B 5.1.1.2. The four character-class rules
+    (uppercase / lowercase / digit / special) were REMOVED on 2026-07-29; the tests
+    that asserted them were deleted rather than inverted, and are replaced by the
+    accept-cases in ``NEWLY_VALID_PASSWORDS`` so the relaxation is pinned in BOTH
+    directions.
+
+    Every violator string below breaks EXACTLY one rule (all blocklist violators
+    are >= 12 characters), so the asserted message is the sole cause and not an
+    incidental co-failure. ``test_reports_every_failure_together`` is the one
+    deliberate exception, and says so.
     """
 
     def test_accepts_strong_password(self):
         """A compliant password passes and is returned unchanged."""
         assert validate_password_strength(STRONG_PASSWORD) == STRONG_PASSWORD
 
+    # --- length rule (UNCHANGED by the 2026-07-29 relaxation) ---------------
+
     def test_rejects_too_short(self):
-        """< 12 characters is rejected (all other rules satisfied)."""
+        """< 12 characters is rejected (the blocklist rule is satisfied)."""
         with pytest.raises(ValueError, match="at least 12 characters"):
             validate_password_strength("Ab1!xyz")
 
-    def test_rejects_no_uppercase(self):
-        """Missing an uppercase letter is rejected."""
-        with pytest.raises(ValueError, match="uppercase"):
-            validate_password_strength("zephyr9!quill")
+    def test_rejects_eleven_characters(self):
+        """The length floor still holds at the boundary: 11 characters is rejected.
 
-    def test_rejects_no_lowercase(self):
-        """Missing a lowercase letter is rejected."""
-        with pytest.raises(ValueError, match="lowercase"):
-            validate_password_strength("ZEPHYR9!QUILL")
+        Pinned explicitly because the relaxation deliberately kept the 12-character
+        minimum -- it is the rule the blocklist trade depends on.
+        """
+        eleven = "Zephyrquill"
+        assert len(eleven) == 11
+        with pytest.raises(ValueError, match="at least 12 characters"):
+            validate_password_strength(eleven)
 
-    def test_rejects_no_digit(self):
-        """Missing a digit is rejected."""
-        with pytest.raises(ValueError, match="number"):
-            validate_password_strength("Zephyr!Quills")
+    def test_accepts_exactly_twelve_characters(self):
+        """12 characters is accepted -- letters only, no character-class rules."""
+        twelve = "Zephyrquills"
+        assert len(twelve) == 12
+        assert validate_password_strength(twelve) == twelve
 
-    def test_rejects_no_special(self):
-        """Missing a special character is rejected."""
-        with pytest.raises(ValueError, match="special character"):
-            validate_password_strength("Zephyr9Quills")
+    # --- character-class rules are GONE ------------------------------------
+
+    @pytest.mark.parametrize("label,password", sorted(NEWLY_VALID_PASSWORDS.items()))
+    def test_accepts_password_missing_a_character_class(self, label, password):
+        """A password missing a character class the old policy demanded is ACCEPTED.
+
+        This is the behavior change: these five strings were all 422s before
+        2026-07-29 and are valid now.
+        """
+        assert validate_password_strength(password) == password, label
+
+    # --- blocklist rule (EXPANDED by the same change) -----------------------
 
     def test_rejects_common_pattern(self):
-        """A common weak substring (e.g. 'password') is rejected."""
-        with pytest.raises(ValueError, match="common pattern"):
+        """An original-six weak substring (``password``) is still rejected."""
+        with pytest.raises(ValueError, match="common word or pattern"):
             validate_password_strength("Password1234!")
+
+    @pytest.mark.parametrize("label,password", sorted(NEW_BLOCKLIST_SAMPLES.items()))
+    def test_rejects_expanded_blocklist_entry(self, label, password):
+        """A sample of the NEWLY added blocklist entries is rejected.
+
+        The blocklist expansion is what makes dropping the composition rules a
+        trade rather than a net weakening, so it needs its own coverage: without
+        these, shrinking ``_COMMON_PASSWORD_PATTERNS`` back to six would pass.
+        """
+        assert len(password) >= 12, f"{label}: violator must isolate the blocklist rule"
+        with pytest.raises(ValueError, match="common word or pattern"):
+            validate_password_strength(password)
+
+    def test_blocklist_is_case_insensitive(self):
+        """The blocklist matches regardless of case -- upper-casing is not an escape."""
+        for variant in ("Thundering-DRAGON-42", "thundering-dragon-42", "ThUnDeRiNg-DrAgOn-42"):
+            with pytest.raises(ValueError, match="common word or pattern"):
+                validate_password_strength(variant)
+
+    def test_blocklist_matches_as_a_substring_not_a_whole_string(self):
+        """A blocklisted term buried mid-password still fails (substring match)."""
+        with pytest.raises(ValueError, match="common word or pattern"):
+            validate_password_strength("xxxxtrustno1xxxxx")
+
+    def test_accepts_password_that_merely_resembles_a_blocklist_entry(self):
+        """A near-miss is NOT rejected -- the check is substring, not fuzzy.
+
+        Negative control for the expansion: it must not have become so broad that
+        ordinary words are refused.
+        """
+        for allowed in ("Zephyr-lantern-quill", "Thundering-wagon-42"):
+            assert validate_password_strength(allowed) == allowed
+
+    # --- message shape ------------------------------------------------------
+
+    def test_reports_every_failure_together(self):
+        """Both rules failing yields both messages, joined -- not just the first.
+
+        The ONLY test here whose violator breaks more than one rule, on purpose:
+        ``"dragon42"`` is 8 characters AND blocklisted.
+        """
+        with pytest.raises(ValueError) as exc:
+            validate_password_strength("dragon42")
+        message = str(exc.value)
+        assert "at least 12 characters" in message
+        assert "common word or pattern" in message
 
 
 @pytest.mark.api
@@ -800,6 +900,21 @@ class TestPasswordPolicyEnforcement:
     strong one — so a weak credential cannot enter through any door.
     """
 
+    # --- fixture hygiene ----------------------------------------------------
+
+    def test_shared_fixture_password_satisfies_the_policy(self, test_user_credentials):
+        """The suite-wide ``conftest.TEST_PASSWORD`` must itself pass the policy.
+
+        It is only ever hashed or sent as a login / ``current_password`` value, and
+        none of those run the validator — so a non-compliant fixture password works
+        fine right up until someone reuses it as a ``new_password`` or in a create
+        payload, and then fails for a reason that looks nothing like the cause. The
+        2026-07-29 blocklist expansion is exactly the kind of change that can make a
+        long-standing fixture non-compliant overnight; this asserts it did not.
+        """
+        password = test_user_credentials["password"]
+        assert validate_password_strength(password) == password
+
     # --- POST /users/ (create, Admin-only) ---------------------------------
 
     def test_create_user_weak_password_rejected(self, client: TestClient, admin_headers, db_session):
@@ -809,7 +924,7 @@ class TestPasswordPolicyEnforcement:
             headers=admin_headers,
             json=_valid_user_payload(email="weak-create@werco.com", employee_id="EMP-WEAK-CR", password="weak"),
         )
-        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
         assert db_session.query(User).filter_by(employee_id="EMP-WEAK-CR").count() == 0
 
     def test_create_user_strong_password_succeeds(self, client: TestClient, admin_headers):
@@ -833,7 +948,7 @@ class TestPasswordPolicyEnforcement:
             headers=admin_headers,
             json={"new_password": "weak"},
         )
-        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
 
     def test_reset_password_strong_succeeds(self, client: TestClient, admin_headers, created_user):
         """A compliant new password resets successfully."""
@@ -855,7 +970,7 @@ class TestPasswordPolicyEnforcement:
             headers=auth_headers,
             json={"current_password": test_user_credentials["password"], "new_password": "weak"},
         )
-        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
 
     def test_change_password_strong_succeeds(self, client: TestClient, auth_headers, test_user_credentials):
         """Correct current password + a compliant new password succeeds."""

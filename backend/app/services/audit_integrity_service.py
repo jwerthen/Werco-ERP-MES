@@ -7,6 +7,18 @@ This service provides:
 - Hash chain verification to detect tampering
 - Sequence gap detection
 - Integrity reports for compliance audits
+
+Legacy/paused rows: any row whose ``integrity_hash`` carries the ``LEGACY_`` prefix is
+SKIPPED by every check here rather than asserted correct. That covers both
+pre-integrity-tracking rows (migration 008 backfill) and rows written while the hash
+chain was paused via ``AUDIT_HASH_CHAIN_ENABLED=false`` (placeholder
+``LEGACY_CHAIN_PAUSED``). Gaps touching such a row are counted in
+``IntegrityReport.legacy_sequence_gaps`` instead of being reported as ``sequence_gap``
+issues, because the paused-mode sequence allocator burns values on rolled-back
+transactions. Consequence to state plainly: across a paused window this service offers
+no tamper evidence — the DB-level immutability triggers (migrations 008/060), which no
+setting can disable, are what protect those rows. See
+``docs/AUDIT_LOG_RETENTION_RUNBOOK.md`` -> Pausing the hash chain.
 """
 
 from dataclasses import dataclass
@@ -19,7 +31,7 @@ from sqlalchemy.orm import Session
 from app.core.logging import get_logger
 from app.core.time_utils import to_utc_iso
 from app.models.audit_log import AuditLog
-from app.services.audit_service import compute_audit_hash
+from app.services.audit_service import PAUSED_CHAIN_PLACEHOLDER, compute_audit_hash
 
 logger = get_logger(__name__)
 
@@ -47,7 +59,14 @@ class IntegrityReport:
     last_sequence: int
     chain_valid: bool
     issues: List[IntegrityIssue]
-    legacy_records: int  # Records from before integrity tracking
+    legacy_records: int  # Records from before integrity tracking, or written while paused
+    # Sequence gaps that fall inside a legacy/paused segment. Reported separately
+    # rather than as issues: while the hash chain is paused, sequence_number comes
+    # from a Postgres sequence whose values are consumed even by rolled-back
+    # transactions, so gaps there are expected and are NOT evidence of tampering.
+    # A non-zero value here means gap-based deletion detection does not apply
+    # across that span. Defaulted so existing constructions stay valid.
+    legacy_sequence_gaps: int = 0
 
     @property
     def is_valid(self) -> bool:
@@ -63,6 +82,7 @@ class IntegrityReport:
             "chain_valid": self.chain_valid,
             "is_valid": self.is_valid,
             "legacy_records": self.legacy_records,
+            "legacy_sequence_gaps": self.legacy_sequence_gaps,
             "issue_count": len(self.issues),
             "issues": [
                 {
@@ -140,6 +160,15 @@ class AuditIntegrityService:
 
         Returns: (is_valid, issue_if_any)
         """
+        # Skip chain verification for legacy records — including the CURRENT one.
+        # Without this, the first row written while the hash chain was paused
+        # (integrity_hash = 'LEGACY_CHAIN_PAUSED', previous_hash = NULL) is reported
+        # as a chain_break by GET /audit/integrity/record/{seq}, which calls this
+        # method unconditionally. The `previous` check below is not enough: it only
+        # covers the row AFTER a legacy row, not the legacy row itself.
+        if current.integrity_hash and current.integrity_hash.startswith('LEGACY_'):
+            return True, None
+
         # First record has no previous
         if current.sequence_number == 1:
             if current.previous_hash is not None:
@@ -194,6 +223,9 @@ class AuditIntegrityService:
         legacy_count = 0
         records_checked = 0
         chain_valid = True
+        # Gaps that fall inside (or on the boundary of) a legacy/paused segment.
+        # Counted rather than reported as issues — see the gap check below.
+        legacy_gaps = 0
 
         # Get total count and range
         total_records = self.db.query(AuditLog).count()
@@ -228,11 +260,17 @@ class AuditIntegrityService:
         # Process in batches
         previous_record = None
         expected_sequence = first_seq
+        previous_was_legacy = False
 
         # If not starting from 1, get the previous record for chain verification
         if start_sequence and start_sequence > 1:
             previous_record = self.db.query(AuditLog).filter(AuditLog.sequence_number == start_sequence - 1).first()
             expected_sequence = start_sequence
+            previous_was_legacy = bool(
+                previous_record
+                and previous_record.integrity_hash
+                and previous_record.integrity_hash.startswith('LEGACY_')
+            )
 
         offset = 0
         while True:
@@ -242,21 +280,45 @@ class AuditIntegrityService:
 
             for record in batch:
                 records_checked += 1
+                record_is_legacy = bool(record.integrity_hash and record.integrity_hash.startswith('LEGACY_'))
 
-                # Check for sequence gaps
+                # Check for sequence gaps.
+                #
+                # Legacy-aware, and this is load-bearing rather than cosmetic. Gap
+                # detection is the ONE check that does not already skip legacy rows,
+                # and while the hash chain is paused sequence_number comes from a
+                # Postgres sequence. nextval() does not roll back with the caller's
+                # transaction, so a gap is the NORMAL, expected result of any rolled-back
+                # request (a plain GET can roll back an audit row). Without this branch
+                # every verify run would report sequence_gap issues forever and flip
+                # chain_valid to false permanently — false tampering alarms that would
+                # train the reader to ignore the endpoint.
+                #
+                # Be clear about what this costs: across a paused window, deletion
+                # detection via gaps is genuinely GONE. The DB-level immutability
+                # triggers (migrations 008/060) remain the protection against deletes.
                 if record.sequence_number != expected_sequence:
-                    chain_valid = False
-                    issues.append(
-                        IntegrityIssue(
-                            sequence_number=expected_sequence,
-                            issue_type='sequence_gap',
-                            description=f'Missing sequence number(s) between {expected_sequence - 1} and {record.sequence_number}',
-                            record_id=record.id,
-                            expected_value=str(expected_sequence),
-                            actual_value=str(record.sequence_number),
+                    gap_spans_legacy = record_is_legacy or previous_was_legacy
+                    if not gap_spans_legacy:
+                        chain_valid = False
+                        issues.append(
+                            IntegrityIssue(
+                                sequence_number=expected_sequence,
+                                issue_type='sequence_gap',
+                                description=(
+                                    f'Missing sequence number(s) between '
+                                    f'{expected_sequence - 1} and {record.sequence_number}'
+                                ),
+                                record_id=record.id,
+                                expected_value=str(expected_sequence),
+                                actual_value=str(record.sequence_number),
+                            )
                         )
-                    )
+                    else:
+                        legacy_gaps += 1
                     expected_sequence = record.sequence_number
+
+                previous_was_legacy = record_is_legacy
 
                 # Count legacy records
                 if record.integrity_hash and record.integrity_hash.startswith('LEGACY_'):
@@ -293,6 +355,7 @@ class AuditIntegrityService:
             chain_valid=chain_valid,
             issues=issues,
             legacy_records=legacy_count,
+            legacy_sequence_gaps=legacy_gaps,
         )
 
     def verify_recent(self, count: int = 100) -> IntegrityReport:
@@ -338,16 +401,33 @@ class AuditIntegrityService:
         last = self.db.query(AuditLog).order_by(AuditLog.sequence_number.desc()).first()
 
         legacy_count = self.db.query(AuditLog).filter(AuditLog.integrity_hash.like('LEGACY_%')).count()
+        # Rows written while the hash chain was PAUSED, counted separately from
+        # migration 008's pre-chain backfill. Both are 'LEGACY_'-prefixed and both
+        # land in legacy_records, but they answer different questions: 008 rows are
+        # "older than the chain", paused rows are "the chain was deliberately off".
+        # An assessor asking "was the chain enabled over the period under review?"
+        # needs the second number specifically, so do not make them infer it.
+        paused_count = self.db.query(AuditLog).filter(AuditLog.integrity_hash == PAUSED_CHAIN_PLACEHOLDER).count()
+
+        # NOTE: has_gaps is a naive count-vs-range comparison and is deliberately
+        # NOT legacy-aware, unlike verify_full_chain. It reads True across any
+        # paused window — including from migration 077's start margin alone — and
+        # was already True for any historical rolled-back-transaction gap. Treat it
+        # as a cheap statistical probe, not a tamper signal; /integrity/verify is
+        # the authority. Do not wire an alert to this field.
+        has_gaps = total != (last.sequence_number - first.sequence_number + 1) if first and last else False
 
         return {
             "status": "active",
             "total_records": total,
             "legacy_records": legacy_count,
+            "paused_records": paused_count,
             "protected_records": total - legacy_count,
             "first_sequence": first.sequence_number if first else None,
             "last_sequence": last.sequence_number if last else None,
             "expected_count": (last.sequence_number - first.sequence_number + 1) if first and last else 0,
-            "has_gaps": total != (last.sequence_number - first.sequence_number + 1) if first and last else False,
+            "has_gaps": has_gaps,
+            "has_gaps_is_legacy_aware": False,
         }
 
 

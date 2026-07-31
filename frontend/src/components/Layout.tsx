@@ -14,6 +14,8 @@ import AdaptivePromptPanel from './AdaptivePromptPanel';
 import { CopilotPanel } from './ai/CopilotPanel';
 import api from '../services/api';
 import { useKeyboardShortcuts, GLOBAL_SHORTCUTS } from '../hooks/useKeyboardShortcuts';
+import { usePermissions } from '../hooks/usePermissions';
+import type { Permission } from '../utils/permissions';
 import { useKeyboardShortcutsContext } from '../context/KeyboardShortcutsContext';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useScrollRestoration } from '../hooks/useScrollRestoration';
@@ -57,10 +59,13 @@ import {
   ArrowUpTrayIcon,
   RocketLaunchIcon,
   BellAlertIcon,
+  BellIcon,
   UserPlusIcon,
   UserGroupIcon,
   QueueListIcon,
+  ScaleIcon,
 } from '@heroicons/react/24/outline';
+import NotificationBell from './NotificationBell';
 
 interface LayoutProps {
   children: React.ReactNode;
@@ -74,6 +79,14 @@ interface NavItem {
   badge?: number;
   adminOnly?: boolean;
   platformOnly?: boolean;
+  /**
+   * RBAC gate for this entry, matched against the SERVER's gate on the page's
+   * endpoint(s) — not "who might find it interesting". An item whose permission
+   * the user lacks is dropped (and a parent group left with no visible children
+   * goes with it), so nobody is offered a link into a guaranteed 403.
+   * Omitted = visible to any role that gets past the streamlined-nav filter.
+   */
+  permission?: Permission;
 }
 
 /**
@@ -93,6 +106,7 @@ const navSections: NavSection[] = [
     items: [
       { name: 'Dashboard', href: '/', icon: HomeIcon },
       { name: 'Action Inbox', href: '/action-inbox', icon: BellAlertIcon },
+      { name: 'Notifications', href: '/notifications', icon: BellIcon },
     ],
   },
   {
@@ -126,6 +140,15 @@ const navSections: NavSection[] = [
         children: [
           { name: 'Parts', href: '/parts', icon: CubeIcon },
           { name: 'Bill of Materials', href: '/bom', icon: DocumentDuplicateIcon },
+          // Pre-arming remediation worklist for automatic backflush. Gated to
+          // ADMIN / MANAGER / SUPERVISOR to match the endpoint's own gate
+          // (bom.py -> list_bom_uom_mismatches); `boms:edit` is exactly that set.
+          {
+            name: 'BOM Unit Mismatches',
+            href: '/bom/uom-mismatches',
+            icon: ScaleIcon,
+            permission: 'boms:edit',
+          },
           { name: 'Routing', href: '/routing', icon: ListBulletIcon },
           { name: 'Process Sheets', href: '/process-sheets', icon: ClipboardDocumentCheckIcon },
           { name: 'Engineering Changes', href: '/engineering-changes', icon: DocumentDuplicateIcon },
@@ -437,6 +460,9 @@ const HudShift = React.memo(function HudShift() {
 
 export default function Layout({ children }: LayoutProps) {
   const { user, logout, logoutWithEmployeeId } = useAuth();
+  // Drives `NavItem.permission` gating below. `can` is memoized on `user`, so it
+  // is a stable dependency for the nav memo.
+  const { can } = usePermissions();
   const location = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [logoutModalOpen, setLogoutModalOpen] = useState(false);
@@ -548,6 +574,23 @@ export default function Layout({ children }: LayoutProps) {
       }),
     }));
 
+    // Permission-gated entries (`NavItem.permission`) are dropped for roles that
+    // lack them, at BOTH levels — a collapsible group whose children all vanish
+    // is dropped with them, so no group opens onto nothing. Entries with no
+    // `permission` are untouched, so this changes nothing for existing items.
+    const permitted = (item: NavItem): boolean => !item.permission || can(item.permission);
+    const withPermissions: NavSection[] = withApprovalBadge
+      .map((section) => ({
+        ...section,
+        items: section.items
+          .filter(permitted)
+          .map((item) =>
+            item.children ? { ...item, children: item.children.filter(permitted) } : item
+          )
+          .filter((item) => !item.children || item.children.length > 0),
+      }))
+      .filter((section) => section.items.length > 0);
+
     // RBAC-gated nav visibility: kiosk and operator roles see a streamlined set.
     let allowed: ((item: NavItem) => boolean) | null = null;
     if (isKiosk) {
@@ -558,13 +601,13 @@ export default function Layout({ children }: LayoutProps) {
       allowed = (item) => operatorAllowed.has(item.name);
     }
 
-    if (!allowed) return withApprovalBadge;
+    if (!allowed) return withPermissions;
 
     // Drop empty sections so no orphan headers render for streamlined roles.
-    return withApprovalBadge
+    return withPermissions
       .map((section) => ({ ...section, items: section.items.filter(allowed!) }))
       .filter((section) => section.items.length > 0);
-  }, [isKiosk, isOperator, pendingApprovalCount]);
+  }, [isKiosk, isOperator, pendingApprovalCount, can]);
 
   useEffect(() => {
     if (!isAdminUser) {
@@ -824,6 +867,9 @@ export default function Layout({ children }: LayoutProps) {
                     <span className="hidden md:inline font-mono text-xs">copilot</span>
                   </button>
                 )}
+
+                {/* Notification bell + unread badge (poll-only in PR 1; WS push is PR 2) */}
+                {!isKiosk && <NotificationBell />}
 
                 {/* HUD status cluster */}
                 <div className="hidden xl:flex items-center gap-3.5 pl-1 font-mono text-[11px]">

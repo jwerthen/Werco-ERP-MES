@@ -72,13 +72,22 @@ def test_station_login_rate_limited_after_five_attempts(client: TestClient):
     _assert_rate_limited(client.post(STATION_LOGIN, json=payload))
 
 
-def test_employee_login_rate_limited_after_three_attempts(client: TestClient):
-    """/auth/employee-login carries a tighter 3/min limit (kiosk badge login)."""
-    payload = {"employee_id": "0000"}
+def test_employee_login_rate_limited_after_ten_attempts(client: TestClient, test_user):
+    """/auth/employee-login allows 10 requests/min, then 429 (kiosk badge login).
 
-    for i in range(3):
+    Raised from 3/min for the Kiosk Foundry redesign: a shift change cycles
+    several badges through ONE shared station within a minute. Uses SUCCESSFUL
+    logins so this stays a pure slowapi-limit test — failed attempts are ALSO
+    counted by the per-IP failed-attempt throttle (8 failures/15 min → 429,
+    ``tests/api/test_employee_login_throttle.py``), which fires first on a
+    failure-only sequence. Together: successes budgeted at 10/min, failures
+    hard-stopped at 8 per 15 minutes.
+    """
+    payload = {"employee_id": test_user.employee_id}
+
+    for i in range(10):
         r = client.post(EMPLOYEE_LOGIN, json=payload)
-        assert r.status_code == 401, f"attempt {i} unexpectedly {r.status_code}: {r.text}"
+        assert r.status_code == 200, f"attempt {i} unexpectedly {r.status_code}: {r.text}"
 
     _assert_rate_limited(client.post(EMPLOYEE_LOGIN, json=payload))
 

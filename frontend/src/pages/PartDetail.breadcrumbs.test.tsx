@@ -20,6 +20,12 @@ import PartDetail from './PartDetail';
 
 // On mount PartDetail fires getPart + getBOMByPart + getRoutingByPart +
 // getPartReadiness (in a Promise.all). updatePart is mocked defensively.
+//
+// PR 4.5 added the Backflush card to the Overview tab, which fires
+// `getPartBackflushReadiness` on mount. This is the hand-written-api-mock
+// liability the material-tie panel already recorded: there is no shared mock
+// factory, so a new client method a rendered child calls has to be added to
+// every suite that renders it, or the whole file dies on `is not a function`.
 jest.mock('../services/api', () => ({
   __esModule: true,
   default: {
@@ -28,7 +34,21 @@ jest.mock('../services/api', () => ({
     getRoutingByPart: jest.fn(),
     getPartReadiness: jest.fn(),
     updatePart: jest.fn(),
+    getPartBackflushReadiness: jest.fn(),
+    setPartBackflush: jest.fn(),
   },
+}));
+
+// PR 4.5 also made PartDetail call `useAuth()` (to gate the backflush toggle on
+// `parts:edit`), and `useAuth` THROWS outside an AuthProvider rather than
+// returning a null user — so a page test either provides the context or mocks
+// the hook. Mocked, like every other page suite in this directory.
+jest.mock('../context/AuthContext', () => ({
+  useAuth: () => ({
+    user: { id: 1, role: 'admin', is_superuser: false },
+    isAuthenticated: true,
+    isLoading: false,
+  }),
 }));
 
 const mockedApi = api as jest.Mocked<typeof api>;
@@ -69,6 +89,14 @@ describe('PartDetail breadcrumbs', () => {
     mockedApi.getBOMByPart.mockResolvedValue(bom as any);
     mockedApi.getRoutingByPart.mockResolvedValue(routing as any);
     mockedApi.getPartReadiness.mockResolvedValue(readiness as any);
+    mockedApi.getPartBackflushReadiness.mockResolvedValue({
+      part_id: 7,
+      part_number: 'PN-7001',
+      backflush_components: false,
+      eligible: true,
+      blockers: [],
+      advisories: [],
+    } as any);
   });
 
   it('renders a breadcrumb whose parent link points to the Parts list route', async () => {

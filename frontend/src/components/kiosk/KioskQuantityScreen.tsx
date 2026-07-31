@@ -1,8 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import KioskKeypad from './KioskKeypad';
 import KioskReasonGrid from './KioskReasonGrid';
-import { SCRAP_REASONS } from './kioskConstants';
-import { ScrapReasonCodeOption, scrapCodeLabel } from '../../types/scrapReason';
+import { activeScrapCodes, resolveScrapSelection, scrapReasonTiles } from './scrapReasonOptions';
+import { ScrapReasonCodeOption } from '../../types/scrapReason';
 
 interface KioskQuantityScreenProps {
   title: string;
@@ -63,12 +63,9 @@ export default function KioskQuantityScreen({
   const [scrapReason, setScrapReason] = useState<string | null>(null);
   const [scrapDetail, setScrapDetail] = useState('');
 
-  const codes = scrapCodes && scrapCodes.length > 0 ? scrapCodes : null;
+  const codes = activeScrapCodes(scrapCodes);
   const codesMode = codes != null;
-  const reasonTiles = useMemo(
-    () => (codes ? codes.map((code) => ({ value: String(code.id), label: scrapCodeLabel(code) })) : SCRAP_REASONS),
-    [codes]
-  );
+  const reasonTiles = useMemo(() => scrapReasonTiles(codes), [codes]);
 
   // If the codes list settles AFTER a reason tile was already tapped (rare —
   // codes are fetched at page mount), the stored value belongs to the other
@@ -88,12 +85,8 @@ export default function KioskQuantityScreen({
       onConfirm(goodQty, scrapQty, null, null);
       return;
     }
-    if (codes) {
-      const detail = scrapDetail.trim();
-      onConfirm(goodQty, scrapQty, detail || null, scrapReason != null ? Number(scrapReason) : null);
-      return;
-    }
-    onConfirm(goodQty, scrapQty, scrapReason, null);
+    const { reason, codeId } = resolveScrapSelection(codes, scrapReason, scrapDetail);
+    onConfirm(goodQty, scrapQty, reason, codeId);
   };
 
   const fieldClasses = (field: 'good' | 'scrap', tone: 'green' | 'red') => {

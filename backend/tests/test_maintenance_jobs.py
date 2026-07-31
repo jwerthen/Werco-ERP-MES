@@ -30,7 +30,7 @@ from app.core.config import settings
 from app.models.audit_log import AuditLog
 from app.models.governance import ExportEvent
 from app.models.job import Job, JobStatus
-from app.models.notification import NotificationLog
+from app.models.notification import Notification, NotificationLog
 from app.models.user import User, UserRole
 from app.services.audit_archival_service import ARCHIVE_EXPORT_TYPE, ARCHIVE_RECORD_TYPE
 from app.services.audit_service import AuditService
@@ -64,7 +64,7 @@ def _frozen_utcnow(when: datetime):
         yield
 
 
-def _make_user(db: Session) -> User:
+def _make_user(db: Session, *, is_active: bool = True) -> User:
     n = _next()
     user = User(
         email=f"maint-user-{n}@werco.test",
@@ -73,13 +73,32 @@ def _make_user(db: Session) -> User:
         last_name="User",
         hashed_password="$2b$12$abcdefghijklmnopqrstuv",
         role=UserRole.OPERATOR,
-        is_active=True,
+        is_active=is_active,
         company_id=1,
     )
     db.add(user)
     db.commit()
     db.refresh(user)
     return user
+
+
+def _seed_in_app_notification(db: Session, user_id: int, *, is_read: bool, age_days: int) -> Notification:
+    """Seed a canonical in-app Notification row, backdating created_at to ``age_days``."""
+    notif = Notification(
+        company_id=1,
+        user_id=user_id,
+        event_key="wo.late",
+        severity="warning",
+        title="Notice",
+        is_read=is_read,
+    )
+    db.add(notif)
+    db.flush()
+    # created_at uses a server default; backdate explicitly so age is deterministic.
+    notif.created_at = datetime.utcnow() - timedelta(days=age_days)
+    db.add(notif)
+    db.commit()
+    return notif
 
 
 def _seed_old_audit_row(db: Session, *, age_days: int = 400) -> AuditLog:
@@ -151,15 +170,29 @@ def _seed_old_notification(db: Session, user_id: int) -> NotificationLog:
 
 
 async def test_cleanup_old_logs_preserves_audit_but_purges_ephemeral(db_session: Session, monkeypatch):
-    """The headline regression: cleanup deletes the old Job + NotificationLog
-    while the old audit row SURVIVES (audit logs are never purged)."""
+    """The headline regression: cleanup deletes the old Job + NotificationLog + the
+    retention-eligible in-app notifications while the old audit row SURVIVES (audit
+    logs are never purged).
+
+    The retention extension (§5) adds two counts to the result: read notifications
+    older than the 90-day window, and unread rows belonging to deactivated users.
+    """
     monkeypatch.setattr(maintenance_jobs, "SessionLocal", lambda: db_session)
 
     user = _make_user(db_session)
+    deactivated = _make_user(db_session, is_active=False)
     audit_row = _seed_old_audit_row(db_session)
     old_job = _seed_old_completed_job(db_session)
     recent_job = _seed_recent_pending_job(db_session)
     old_notif = _seed_old_notification(db_session, user_id=user.id)
+
+    # In-app inbox rows exercising the retention rules:
+    old_read = _seed_in_app_notification(db_session, user.id, is_read=True, age_days=120)  # pruned (aged read)
+    recent_read = _seed_in_app_notification(db_session, user.id, is_read=True, age_days=5)  # kept (recent)
+    active_unread = _seed_in_app_notification(db_session, user.id, is_read=False, age_days=200)  # kept (unread/active)
+    deactivated_unread = _seed_in_app_notification(  # pruned (unread of a deactivated user)
+        db_session, deactivated.id, is_read=False, age_days=1
+    )
 
     # Capture primary keys as plain ints up front: the task closes the session in
     # its finally block, detaching ORM instances, so we query by id afterwards.
@@ -169,11 +202,19 @@ async def test_cleanup_old_logs_preserves_audit_but_purges_ephemeral(db_session:
         recent_job.id,
         old_notif.id,
     )
+    old_read_id, recent_read_id, active_unread_id, deactivated_unread_id = (
+        old_read.id,
+        recent_read.id,
+        active_unread.id,
+        deactivated_unread.id,
+    )
 
     result = await maintenance_jobs.cleanup_old_logs_task(days_to_keep=90)
 
     assert result["jobs_deleted"] == 1
-    assert result["notifications_deleted"] == 1
+    assert result["notification_logs_deleted"] == 1
+    assert result["notifications_read_deleted"] == 1
+    assert result["notifications_deactivated_deleted"] == 1
 
     # Audit row is untouched — this is the whole point.
     assert db_session.query(AuditLog).filter(AuditLog.id == audit_id).count() == 1
@@ -182,6 +223,13 @@ async def test_cleanup_old_logs_preserves_audit_but_purges_ephemeral(db_session:
     assert db_session.query(Job).filter(Job.id == old_job_id).count() == 0
     assert db_session.query(Job).filter(Job.id == recent_job_id).count() == 1
     assert db_session.query(NotificationLog).filter(NotificationLog.id == old_notif_id).count() == 0
+
+    # In-app notification retention: aged-read and deactivated-user-unread pruned;
+    # recent-read and active-user-unread retained.
+    assert db_session.query(Notification).filter(Notification.id == old_read_id).count() == 0
+    assert db_session.query(Notification).filter(Notification.id == deactivated_unread_id).count() == 0
+    assert db_session.query(Notification).filter(Notification.id == recent_read_id).count() == 1
+    assert db_session.query(Notification).filter(Notification.id == active_unread_id).count() == 1
 
 
 async def test_cleanup_old_logs_keeps_recent_completed_job(db_session: Session, monkeypatch):

@@ -1,4 +1,3 @@
-import re
 from datetime import datetime
 from typing import Optional
 
@@ -7,34 +6,91 @@ from pydantic import BaseModel, EmailStr, Field, field_validator
 from app.models.user import UserRole
 from app.schemas.base import UTCModel
 
-# Common weak substrings rejected by the password-strength policy.
-_COMMON_PASSWORD_PATTERNS = ("password", "123456", "qwerty", "admin", "letmein", "welcome")
+# Weak substrings rejected by the password-strength policy.
+#
+# This list is load-bearing. When the four character-class rules were dropped on
+# 2026-07-29 (see validate_password_strength), NIST SP 800-63B's trade is explicit:
+# composition rules are removed *and replaced* by a blocklist check. Shipping only
+# the removal would be a net weakening, so the list was expanded from six entries to
+# the common-credential families below plus the shop's own name.
+#
+# Entries are matched as case-insensitive SUBSTRINGS, so keep them >=4 characters —
+# a 3-character entry rejects far too much (e.g. "abc" would reject "Fabricator").
+_COMMON_PASSWORD_PATTERNS = (
+    # Original six.
+    "password",
+    "123456",
+    "qwerty",
+    "admin",
+    "letmein",
+    "welcome",
+    # Keyboard walks.
+    "qwertyuiop",
+    "asdfgh",
+    "zxcvbn",
+    "1qaz",
+    "1q2w3e",
+    "qazwsx",
+    # Perennial top-100 entries.
+    "iloveyou",
+    "abc123",
+    "monkey",
+    "dragon",
+    "sunshine",
+    "princess",
+    "football",
+    "baseball",
+    "trustno1",
+    "shadow",
+    "master",
+    "superman",
+    "starwars",
+    "whatever",
+    "freedom",
+    "passw0rd",
+    "p@ssw0rd",
+    "login",
+    # Digit runs.
+    "111111",
+    "000000",
+    "121212",
+    "654321",
+    "112233",
+    # Local context — the highest-yield additions for a single-shop deployment.
+    "werco",
+    "wercomfg",
+)
 
 
 def validate_password_strength(value: str) -> str:
-    """Canonical AS9100D/CMMC password-strength policy.
+    """Canonical password-strength policy: length + blocklist, no composition rules.
 
     Single source of truth reused by public registration, the admin-driven user
-    create/reset paths, and CSV import so a weak password cannot enter through any
-    path. Rules: at least 12 characters, at least one uppercase, lowercase, digit,
-    and special character, and no common weak substring. Raises ``ValueError`` with
-    every failure joined (Pydantic surfaces it as HTTP 422); returns the value
-    unchanged on success.
+    create/reset paths, company registration, and CSV import, so a weak password
+    cannot enter through any path. Raises ``ValueError`` with every failure joined
+    (Pydantic surfaces it as HTTP 422); returns the value unchanged on success.
+
+    Rules: at least 12 characters, and no common weak substring.
+
+    The four character-class requirements (upper/lower/digit/special) were removed on
+    2026-07-29. This follows NIST SP 800-63B section 5.1.1.2, which recommends against
+    composition rules and for length plus a blocklist check — the composition rules
+    were actively inverting the security ordering here. Concretely, they rejected
+    ``correct horse battery staple`` (28 characters, high entropy, and the special-
+    character class did not even include the space) while accepting ``Aa1!aaaaaaaa``
+    (12 characters, trivially guessable). The trade is only sound because the
+    blocklist was expanded at the same time; do not shrink ``_COMMON_PASSWORD_PATTERNS``
+    without restoring something in its place.
+
+    The 12-character minimum is deliberately unchanged, and is additionally enforced
+    as a Pydantic ``Field(min_length=12)`` on four schemas and as ``minLength={12}``
+    on five frontend inputs. Changing it means changing all of those together.
     """
     errors = []
     if len(value) < 12:
         errors.append("Password must be at least 12 characters")
-    if not re.search(r'[A-Z]', value):
-        errors.append("Password must contain at least one uppercase letter")
-    if not re.search(r'[a-z]', value):
-        errors.append("Password must contain at least one lowercase letter")
-    if not re.search(r'[0-9]', value):
-        errors.append("Password must contain at least one number")
-    if not re.search(r'[!@#$%^&*()_+\-=\[\]{};\':"\\|,.<>\/?]', value):
-        errors.append("Password must contain at least one special character (!@#$%^&*()_+-=[]{};\':\"\\|,.<>/?)")
-    # Check for common patterns
     if any(pattern in value.lower() for pattern in _COMMON_PASSWORD_PATTERNS):
-        errors.append("Password contains a common pattern that is not allowed")
+        errors.append("Password contains a common word or pattern that is too easy to guess")
     if errors:
         raise ValueError("; ".join(errors))
     return value

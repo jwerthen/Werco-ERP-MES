@@ -197,6 +197,16 @@ class WorkOrderOperation(Base, TenantMixin):
     # scrap=0 writes have no code; the free-text scrap_reason stays as narrative detail.
     scrap_reason_code_id = Column(Integer, ForeignKey("scrap_reason_codes.id"), nullable=True)
 
+    # Kiosk telemetry (Foundry redesign): the most recent production-evidence report
+    # on this operation -- stamped by POST /shop-floor/operations/{id}/production and
+    # by a quantity-carrying clock-out. The good/scrapped values are THAT report's
+    # deltas (the kiosk renders "LAST REPORT 14:02 +48"), not running totals. All
+    # three nullable: historical rows have no last report (correct-forward, no
+    # backfill -- migration 070). Naive-UTC DateTime like the sibling timestamps.
+    last_reported_at = Column(DateTime, nullable=True)
+    last_reported_good = Column(Float, nullable=True)
+    last_reported_scrapped = Column(Float, nullable=True)
+
     # Scheduling
     scheduled_start = Column(DateTime, nullable=True)
     scheduled_end = Column(DateTime, nullable=True)

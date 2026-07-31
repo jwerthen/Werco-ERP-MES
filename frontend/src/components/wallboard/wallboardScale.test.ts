@@ -1,11 +1,11 @@
 /**
- * Rem-scaling discipline guard (spec §5 / impl notes).
+ * Rem-scaling discipline guard.
  *
  * The wallboard root scales via fontSize calc(100vh / 67.5) and EVERY size in
- * the tree must be rem (Tailwind arbitrary values like text-[4.5rem],
- * border-[0.0625rem]). One stray fixed-px class (text-xl, bare `border`)
- * reintroduces the 4K half-size bug — so this test scans the wallboard
- * sources instead of hoping a reviewer catches it.
+ * the tree must be rem (Tailwind arbitrary values like text-[2.875rem]).
+ * One stray fixed-px class (text-xl, a bare hairline utility) reintroduces
+ * the 4K half-size bug — so this test scans the wallboard sources instead of
+ * hoping a reviewer catches it.
  */
 
 import fs from 'fs';
@@ -23,12 +23,12 @@ const sources: string[] = [
 ];
 
 describe('wallboard rem-scaling discipline', () => {
-  it('scans the expected sources (incl. the JobWall/JobTile job wall)', () => {
-    // 9 components (ExceptionRail, FloorGrid, IdleStrip, JobRow, JobTile,
-    // JobWall, TodayBand, WallboardHeader, WorkCenterTile) + the page.
+  it('scans the expected sources (the Foundry board components + the page)', () => {
+    // 8 components (HudBar, WoCard, WoGrid, ShipTodayPanel, LatePanel,
+    // BlockedDownPanel, QualitySplitRow, TodayKpiBar) + the page.
     expect(sources.length).toBeGreaterThanOrEqual(9);
-    expect(sources.some(file => file.endsWith('JobWall.tsx'))).toBe(true);
-    expect(sources.some(file => file.endsWith('JobTile.tsx'))).toBe(true);
+    expect(sources.some(file => file.endsWith('HudBar.tsx'))).toBe(true);
+    expect(sources.some(file => file.endsWith('WoCard.tsx'))).toBe(true);
     expect(sources.some(file => file.endsWith('.test.tsx'))).toBe(false);
   });
 
@@ -38,8 +38,8 @@ describe('wallboard rem-scaling discipline', () => {
       const src = fs.readFileSync(file, 'utf8');
       // No preset text-size classes — the type scale is explicit rem values.
       expect(src).not.toMatch(/\btext-(xs|sm|base|lg|[2-9]?xl)\b/);
-      // No bare `border` / `border-{t,r,b,l,x,y}` (1px fixed) — hairlines are
-      // border-[0.0625rem] so they scale with the root.
+      // No bare hairline utilities (1px fixed) — edges are inline-style rem
+      // values so they scale with the root.
       expect(src).not.toMatch(/["'\s`]border(?:-[trblxy])?(?=["'\s`])/);
     }
   );

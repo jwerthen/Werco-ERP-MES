@@ -5,11 +5,12 @@ Analytics Service - Core aggregation and calculation logic
 import logging
 from collections import defaultdict
 from datetime import date, datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import Date, and_, case, cast, func, or_
 from sqlalchemy.orm import Session, joinedload
 
+from app.db.ledger_filter import work_order_ledger_filter
 from app.models.downtime import DowntimeEvent, DowntimePlannedType
 from app.models.inventory import InventoryItem, InventoryTransaction, TransactionType
 from app.models.part import Part
@@ -85,6 +86,31 @@ DEFAULT_TARGETS = {
 # silently dropped (OEE-5). A window with no staffed time at the WC is genuinely
 # uncomputable -> the value helpers return None ("n/a"), never a misleading 0/100.
 PRODUCTION_BEARING_ENTRY_TYPES = [TimeEntryType.RUN, TimeEntryType.REWORK]
+
+
+# Every ledger transaction_type that moves material ONTO or OFF a job / out of stock as
+# cost of goods. ISSUE is the consumption; RETURN is its reasoned compensating credit
+# (PR 3) -- material that came back off a job and therefore never became COGS.
+CONSUMPTION_TRANSACTION_TYPES = (TransactionType.ISSUE, TransactionType.RETURN)
+
+
+def _signed_cogs_cost() -> Any:
+    """``+|total_cost|`` for an ISSUE, ``-|total_cost|`` for a RETURN.
+
+    Every COGS/material read in this module used to be ``SUM(abs(total_cost))`` filtered
+    to ISSUE. Simply widening that filter to include RETURN would have made a return
+    INCREASE cost -- ``abs()`` erases exactly the distinction that matters -- so the sign
+    is switched on ``transaction_type``, never on the stored value. Because the CASE keys
+    on the type rather than the sign, the ISSUE leg evaluates to precisely the old
+    expression and a dataset with no RETURN rows is numerically unchanged.
+
+    Callers must pair this with a ``transaction_type.in_(CONSUMPTION_TRANSACTION_TYPES)``
+    filter: the ``else_`` branch is the ISSUE branch and assumes nothing else is selected.
+    """
+    return case(
+        (InventoryTransaction.transaction_type == TransactionType.RETURN, -func.abs(InventoryTransaction.total_cost)),
+        else_=func.abs(InventoryTransaction.total_cost),
+    )
 
 
 def calculate_trend(current: float, prior: float) -> Tuple[TrendDirection, float]:
@@ -1083,6 +1109,7 @@ class AnalyticsService:
             self.db.query(func.count(NonConformanceReport.id))
             .filter(
                 NonConformanceReport.company_id == self.company_id,
+                NonConformanceReport.is_deleted == False,  # noqa: E712
                 NonConformanceReport.status.in_(
                     [NCRStatus.OPEN, NCRStatus.UNDER_REVIEW, NCRStatus.PENDING_DISPOSITION]
                 ),
@@ -1096,6 +1123,7 @@ class AnalyticsService:
             self.db.query(func.count(NonConformanceReport.id))
             .filter(
                 NonConformanceReport.company_id == self.company_id,
+                NonConformanceReport.is_deleted == False,  # noqa: E712
                 NonConformanceReport.created_at <= datetime.combine(prior_end, datetime.max.time()),
                 or_(NonConformanceReport.closed_date.is_(None), NonConformanceReport.closed_date > prior_end),
             )
@@ -1206,18 +1234,27 @@ class AnalyticsService:
 
     def _get_turnover_value(self, start: date, end: date) -> float:
         """Calculate inventory turnover ratio."""
-        # COGS approximation: sum of issued inventory value
+        # COGS approximation: sum of issued inventory value, NET of returns to stock.
+        # Material credited back off a job never became cost of goods sold, so a RETURN
+        # must REDUCE this -- and because a bare ``abs()`` would have added it instead,
+        # the sign is switched on transaction_type rather than the stored value.
         cogs = (
-            self.db.query(func.sum(func.abs(InventoryTransaction.total_cost)))
+            self.db.query(func.sum(_signed_cogs_cost()))
             .filter(
                 InventoryTransaction.company_id == self.company_id,
-                InventoryTransaction.transaction_type == TransactionType.ISSUE,
+                InventoryTransaction.transaction_type.in_(CONSUMPTION_TRANSACTION_TYPES),
                 InventoryTransaction.created_at >= datetime.combine(start, datetime.min.time()),
                 InventoryTransaction.created_at <= datetime.combine(end, datetime.max.time()),
             )
             .scalar()
             or 0
         )
+        # Clamp: unlike the work-order-scoped read, this one is WINDOW-scoped, so material
+        # issued before ``start`` and returned inside it nets negative purely as a
+        # reporting-boundary artifact. A negative COGS would make the turnover ratio
+        # meaningless. With no RETURN rows the sum is a sum of magnitudes and this is a
+        # no-op, so the pre-PR-3 value is unchanged.
+        cogs = max(0.0, float(cogs))
 
         # Average inventory value
         avg_inventory = (
@@ -1557,22 +1594,40 @@ class AnalyticsService:
         )
 
     def _issued_material_cost(self, work_order_id: int) -> float:
-        """Cost of material ISSUEd to a WO (Batch-6 ISSUE txns), tenant-scoped.
+        """NET material cost of a WO: ISSUE (backflush AND tied) minus RETURN, tenant-scoped.
 
-        Mirrors ``completion_cost_service._issued_material_cost`` so the analytics
-        material leg equals the rollup's material leg. ISSUE quantities/costs are stored
-        negative, so the magnitude is summed.
+        Shares ``work_order_ledger_filter`` with ``completion_cost_service`` -- the same
+        predicate, not a re-implementation -- so the analytics material leg cannot drift
+        from the stored rollup's. It spans all three reference shapes:
+        ``reference_type='work_order'`` (FG receipt, plus LEGACY pre-PR-4.4 one-shot
+        component ISSUE rows), ``reference_type='work_order_backflush'`` (the reconciling
+        component leg -- BOM demand and work-order-scoped ties, N rows per part) and
+        ``reference_type='work_order_operation'`` (per-run consumption of tied material,
+        keyed on the OPERATION). ISSUE quantities/costs are stored negative, so the
+        magnitude is summed.
+
+        The two services shared only the ledger predicate, NOT the type predicate -- which
+        is exactly how a docstring claiming they "cannot drift" could still be wrong -- so
+        the RETURN netting is applied in BOTH, identically. A RETURN carries the same
+        reference shape as the ISSUE it compensates (so it arrives through the shared
+        predicate unbidden) and a ``unit_cost`` copied from that row (so they cancel
+        exactly); summing it with a bare ``abs()`` would turn a credit into extra cost.
         """
+        # ISSUE -> +|total_cost|, RETURN -> -|total_cost|. Same CASE as
+        # ``completion_cost_service._issued_material_cost``; keep the two in step.
         total = (
-            self.db.query(func.coalesce(func.sum(func.abs(InventoryTransaction.total_cost)), 0.0))
+            self.db.query(func.coalesce(func.sum(_signed_cogs_cost()), 0.0))
             .filter(
                 InventoryTransaction.company_id == self.company_id,
-                InventoryTransaction.reference_type == "work_order",
-                InventoryTransaction.reference_id == work_order_id,
-                InventoryTransaction.transaction_type == TransactionType.ISSUE,
+                work_order_ledger_filter(work_order_id, self.company_id),
+                InventoryTransaction.transaction_type.in_(CONSUMPTION_TRANSACTION_TYPES),
             )
             .scalar()
         )
+        # Deliberately NOT clamped at zero: a RETURN is bounded by what the tie issued and
+        # priced off that ISSUE row, so the net is structurally >= 0 here and a negative
+        # would be real drift worth surfacing. The WINDOW-scoped COGS reads below DO clamp,
+        # because there a negative is an ordinary reporting-boundary artifact.
         return float(total or 0.0)
 
     # ============ QUALITY METRICS ============
@@ -1584,6 +1639,7 @@ class AnalyticsService:
             self.db.query(NonConformanceReport.disposition, func.count(NonConformanceReport.id).label('count'))
             .filter(
                 NonConformanceReport.company_id == self.company_id,
+                NonConformanceReport.is_deleted == False,  # noqa: E712
                 NonConformanceReport.created_at >= datetime.combine(start_date, datetime.min.time()),
                 NonConformanceReport.created_at <= datetime.combine(end_date, datetime.max.time()),
             )
@@ -1693,13 +1749,14 @@ class AnalyticsService:
         Query reduction: ~97% fewer database calls
         """
         # OPTIMIZATION: Bulk query for COGS by part (single query instead of N)
+        # NET of returns: material credited back off a job never became cost of goods, so
+        # a RETURN subtracts. Summing it under the old bare ``abs()`` would have counted a
+        # return as MORE COGS and inflated the part's turnover.
         cogs_by_part = (
-            self.db.query(
-                InventoryTransaction.part_id, func.sum(func.abs(InventoryTransaction.total_cost)).label('cogs')
-            )
+            self.db.query(InventoryTransaction.part_id, func.sum(_signed_cogs_cost()).label('cogs'))
             .filter(
                 InventoryTransaction.company_id == self.company_id,
-                InventoryTransaction.transaction_type == TransactionType.ISSUE,
+                InventoryTransaction.transaction_type.in_(CONSUMPTION_TRANSACTION_TYPES),
                 InventoryTransaction.created_at >= datetime.combine(start_date, datetime.min.time()),
                 InventoryTransaction.created_at <= datetime.combine(end_date, datetime.max.time()),
             )
@@ -1707,8 +1764,12 @@ class AnalyticsService:
             .all()
         )
 
-        # Build lookup dict for O(1) access
-        cogs_map = {row.part_id: float(row.cogs or 0) for row in cogs_by_part}
+        # Build lookup dict for O(1) access. Clamped at 0 for the same window-boundary
+        # reason as ``_get_turnover_value``: a part issued before ``start_date`` and
+        # returned inside the window would otherwise report negative COGS and a negative
+        # turnover. With no RETURN rows every value is already a sum of magnitudes, so the
+        # clamp is a no-op and the pre-PR-3 numbers stand.
+        cogs_map = {row.part_id: max(0.0, float(row.cogs or 0)) for row in cogs_by_part}
 
         # OPTIMIZATION: Bulk query for average inventory value by part
         avg_inv_by_part = (

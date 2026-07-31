@@ -4,12 +4,13 @@ from typing import Any, Dict, Iterable, List, NoReturn, Optional, Sequence, Set,
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
-from sqlalchemy.orm import Session, joinedload, selectinload
+from sqlalchemy import String, cast, func
+from sqlalchemy.orm import Session, aliased, joinedload, selectinload
 
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
 from app.models.bom import BOM, BOMItem, BOMItemType, BOMLineType
-from app.models.part import Part, PartType, UnitOfMeasure
+from app.models.part import Part, PartType, UnitOfMeasure, uom_disagrees, uom_label
 from app.models.user import User, UserRole
 from app.schemas.bom import (
     BOMCreate,
@@ -20,7 +21,9 @@ from app.schemas.bom import (
     BOMItemResponse,
     BOMItemUpdate,
     BOMItemWithChildren,
+    BOMLineUomMismatch,
     BOMResponse,
+    BOMUomMismatchReport,
     BOMUpdate,
     ComponentPartInfo,
     PartInfo,
@@ -33,6 +36,7 @@ from app.schemas.bom_import import (
     BOMImportResponse,
 )
 from app.services.audit_service import AuditService
+from app.services.completion_inventory_service import bom_line_is_backflush_consumed
 from app.services.import_service import (
     MAX_CONSECUTIVE_BLANK_ROWS,
     MAX_IMPORT_COLUMNS,
@@ -132,6 +136,41 @@ def _normalize_uom(value: Optional[str]) -> str:
         "liter": "liters",
     }
     return mapping.get(val, val)
+
+
+def _component_default_uom(component: Optional[Part]) -> str:
+    """The unit a BOM line INHERITS when its author stated none: the component part's own.
+
+    Owner decision, 2026-07-27. The literal ``"each"`` this replaced was a default nobody
+    chose, and the BLOCKING ``unit_of_measure_mismatch`` diagnostic
+    (``completion_inventory_service``) reads a stored unit as a STATED CLAIM -- so on a
+    sheet-metal shop's data, where components are stocked in sheets / lbs / ft, the
+    automatic-backflush opt-in refused nearly every part over a value the shop never typed.
+
+    ``"each"`` survives only as the last resort: a component that cannot be resolved, or
+    one whose own ``unit_of_measure`` is NULL. Falling back to the column default keeps a
+    line's unit non-null the way it has always been, and a component with no stocking unit
+    is silent in ``uom_disagrees`` anyway, so this cannot manufacture a mismatch.
+    """
+    return uom_label(getattr(component, "unit_of_measure", None)) or UnitOfMeasure.EACH.value
+
+
+def _resolve_line_uom(stated: Optional[str], component: Optional[Part], *, normalize_stated: bool = False) -> str:
+    """The unit of measure to STORE on a BOM line: what the caller said, else the part's.
+
+    Used by all four BOM-line write paths (see the module note on ``add_bom_item``). A
+    stated value always wins -- this resolves an ABSENCE, it does not second-guess a human.
+
+    ``normalize_stated`` is the one difference between the doors and is intentional: the
+    two importer paths already ran free-text spreadsheet/LLM values through
+    ``_normalize_uom`` (``ea`` -> ``each``, ``lbs`` -> ``pounds``) before this change and
+    still do, while the two JSON API paths have always stored the client's string verbatim.
+    Turning normalisation on for the API paths would silently rewrite a value a client sent
+    on purpose, which is a bigger behaviour change than the default this fixes.
+    """
+    if stated is not None and str(stated).strip():
+        return _normalize_uom(stated) if normalize_stated else str(stated)
+    return _component_default_uom(component)
 
 
 def _coerce_item_type(value: Optional[str]) -> str:
@@ -711,7 +750,9 @@ def _create_from_import_payload(
             quantity=quantity if quantity > 0 else 1.0,
             item_type=item_type,
             line_type=line_type,
-            unit_of_measure=_normalize_uom(uom),
+            # BOM-LINE WRITE PATH 1 of 4 (review-commit importer). A row whose UOM column
+            # was blank / unmapped inherits the component part's unit, not "each".
+            unit_of_measure=_resolve_line_uom(uom, component_part, normalize_stated=True),
             reference_designator=item.reference_designator,
             find_number=item.find_number,
             notes=item.notes,
@@ -1063,7 +1104,9 @@ async def import_bom_or_part(
                 quantity=quantity if quantity > 0 else 1.0,
                 item_type=item_type,
                 line_type=line_type,
-                unit_of_measure=_normalize_uom(uom),
+                # BOM-LINE WRITE PATH 2 of 4 (one-shot upload+commit importer). Same rule
+                # as path 1: an unstated unit inherits the component part's.
+                unit_of_measure=_resolve_line_uom(uom, component_part, normalize_stated=True),
                 reference_designator=item.get("reference_designator"),
                 find_number=item.get("find_number"),
                 notes=item.get("notes"),
@@ -1269,8 +1312,11 @@ def create_bom(
 
     # Add items
     for item_data in bom_in.items:
-        # Validate component part exists
-        component = db.query(Part).filter(Part.id == item_data.component_part_id).first()
+        # Validate component part exists IN THIS COMPANY (invariant #1). Unscoped, this
+        # resolved another tenant's Part -- which since the UoM change is not merely a
+        # disclosure through ``build_bom_item_response`` but a WRITE: ``_resolve_line_uom``
+        # would stamp that foreign part's stocking unit onto this tenant's bom_items row.
+        component = db.query(Part).filter(Part.id == item_data.component_part_id, Part.company_id == company_id).first()
         if not component:
             raise HTTPException(status_code=400, detail=f"Component part ID {item_data.component_part_id} not found")
 
@@ -1278,7 +1324,15 @@ def create_bom(
         if item_data.component_part_id == bom_in.part_id:
             raise HTTPException(status_code=400, detail="BOM cannot contain itself as a component")
 
-        item = BOMItem(bom_id=bom.id, company_id=company_id, **item_data.model_dump())
+        # BOM-LINE WRITE PATH 3 of 4 (BOM created with its lines in one call). The schema
+        # no longer supplies a literal "each", so an omitted unit arrives as ``None`` here
+        # and inherits the component part's. Resolved BEFORE the splat, because the splat
+        # would otherwise hand ``BOMItem`` an explicit ``None`` and leave whether the
+        # column default fires up to SQLAlchemy's insert-time treatment of it.
+        line_values = item_data.model_dump()
+        line_values["unit_of_measure"] = _resolve_line_uom(line_values.get("unit_of_measure"), component)
+
+        item = BOMItem(bom_id=bom.id, company_id=company_id, **line_values)
         db.add(item)
 
     db.commit()
@@ -1286,6 +1340,156 @@ def create_bom(
 
     # Return with full response
     return get_bom(bom.id, db, current_user, company_id)
+
+
+# How many CANDIDATE rows the mismatch scan will pull before it stops and says so. The
+# SQL predicate has already narrowed to disagreeing lines by the time this bites, so a
+# tenant would need thousands of genuinely-wrong lines to reach it; the ceiling exists so
+# that a pathological BOM set degrades into a truthful "there are at least this many"
+# rather than into an unbounded query behind a synchronous request.
+_UOM_MISMATCH_SCAN_CEILING = 5000
+
+
+# DECLARED BEFORE ``@router.get("/{bom_id}")`` ON PURPOSE. FastAPI matches routes in
+# declaration order, and ``/{bom_id}`` is a single-segment path parameter that would
+# happily swallow the literal ``/uom-mismatches`` and 422 on the int conversion. Moving
+# this below that route silently breaks the endpoint. Keep it here.
+@router.get(
+    "/uom-mismatches",
+    response_model=BOMUomMismatchReport,
+    summary="BOM lines whose stated unit of measure disagrees with the component part's",
+)
+def list_bom_uom_mismatches(
+    part_id: Optional[int] = Query(None, description="Only lines on this assembly part's own BOM(s)"),
+    bom_id: Optional[int] = Query(None, description="Only lines on this BOM"),
+    component_part_id: Optional[int] = Query(None, description="Only lines naming this component part"),
+    active_only: bool = Query(True, description="Only active BOMs — the ones a backflush actually reads"),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Every BOM line in this company whose stated unit contradicts its component part's.
+
+    **This is the gate on arming a real part for automatic backflush.** The BLOCKING
+    ``unit_of_measure_mismatch`` diagnostic refuses ``Part.backflush_components`` at opt-in
+    and refuses that component at completion, and nothing in the platform converts units —
+    a line stating ``each`` against a part stocked in ``sheets`` would issue the wrong
+    quantity of the right material. New lines now inherit the component's unit
+    (``_resolve_line_uom``), but this series is **correct-forward and does not backfill**:
+    lines written before that change keep what they have. This endpoint is how a human
+    finds and corrects them, deliberately, one at a time.
+
+    **Pure read — writes nothing.** No ledger row, no audit row, no operational event.
+
+    The comparison is ``models.part.uom_disagrees``, the SAME predicate the diagnostic
+    uses, so the two cannot list different rows. In particular ``ea`` does NOT satisfy
+    ``each`` here — that is not a bug to fix by teaching this synonyms, it is a stored
+    value a human should normalise, because the gate will keep refusing it either way.
+
+    Scope notes, so the numbers are read correctly:
+
+    * ``part_id`` narrows to lines on that assembly's OWN BOM. It does NOT follow nested
+      sub-assembly BOMs, which a readiness check for that part DOES reach. **The
+      unfiltered report is the authoritative pre-arming worklist**; the filter is for
+      working one assembly at a time.
+    * ``blocks_backflush`` is False on alternate / optional / reference lines — the
+      backflush never issues those, so they raise no diagnostic and refuse nothing.
+    * Soft-deleted component parts are INCLUDED (with ``component_is_deleted``), because
+      the readiness explosion resolves them on purpose; filtering them out here would hide
+      a row that still blocks.
+
+    Gated to ADMIN / MANAGER / SUPERVISOR: it is a remediation worklist, and that is
+    exactly the set of roles that can edit a BOM line (``PUT /bom/items/{id}``) or arm the
+    flag (``PUT /parts/{id}``). Handing it to someone who cannot act on it buys nothing.
+    """
+    assembly_part = aliased(Part)
+    component_part = aliased(Part)
+
+    # SQL-side narrowing only. It reproduces ``uom_disagrees`` closely enough to be a cheap
+    # pre-filter, but it is NOT the authority: ``Part.unit_of_measure`` is a native enum
+    # (hence the cast — Postgres will not apply string functions to it), and SQL ``trim``
+    # strips spaces where Python's ``strip`` strips all whitespace. That gap can only ever
+    # let a row THROUGH to the Python check below, never hide one from it, so the
+    # authoritative predicate runs in Python on every candidate.
+    line_label = func.lower(func.trim(func.coalesce(BOMItem.unit_of_measure, "")))
+    part_label = func.lower(func.trim(func.coalesce(cast(component_part.unit_of_measure, String), "")))
+
+    query = (
+        db.query(BOMItem, BOM, assembly_part, component_part)
+        .join(BOM, BOM.id == BOMItem.bom_id)
+        .join(assembly_part, assembly_part.id == BOM.part_id)
+        .join(component_part, component_part.id == BOMItem.component_part_id)
+        .filter(
+            # Tenant isolation on every table the row is assembled from. ``BOMItem`` is
+            # scoped explicitly rather than inherited through its BOM because the backflush
+            # explosion scopes it the same way (``_explode_backflush_bom``), and a report
+            # that walked a wider set than the gate does would list rows nobody can act on.
+            BOM.company_id == company_id,
+            BOMItem.company_id == company_id,
+            assembly_part.company_id == company_id,
+            component_part.company_id == company_id,
+            line_label != "",
+            part_label != "",
+            line_label != part_label,
+        )
+    )
+
+    if active_only:
+        query = query.filter(BOM.is_active == True)  # noqa: E712
+    if bom_id is not None:
+        query = query.filter(BOM.id == bom_id)
+    if part_id is not None:
+        query = query.filter(BOM.part_id == part_id)
+    if component_part_id is not None:
+        query = query.filter(BOMItem.component_part_id == component_part_id)
+
+    candidates = (
+        query.order_by(
+            assembly_part.part_number.asc(),
+            BOM.id.asc(),
+            BOMItem.item_number.asc(),
+            BOMItem.id.asc(),
+        )
+        .limit(_UOM_MISMATCH_SCAN_CEILING + 1)
+        .all()
+    )
+    truncated = len(candidates) > _UOM_MISMATCH_SCAN_CEILING
+    candidates = candidates[:_UOM_MISMATCH_SCAN_CEILING]
+
+    # Two passes on purpose. ``uom_disagrees`` is the AUTHORITY (the SQL predicate above is
+    # only a narrowing pre-filter), so an accurate ``total`` genuinely requires walking every
+    # candidate -- but building a response model for each one does not. A tenant mid-
+    # remediation can hold thousands of legacy ``each`` lines, and constructing all of them to
+    # return a page of 100 wasted the work on every page the client asked for.
+    passing = [row for row in candidates if uom_disagrees(row[0].unit_of_measure, row[3].unit_of_measure)]
+
+    rows: List[BOMLineUomMismatch] = []
+    for item, bom, assembly, component in passing[skip : skip + limit]:
+        rows.append(
+            BOMLineUomMismatch(
+                bom_id=bom.id,
+                bom_revision=bom.revision,
+                bom_status=bom.status,
+                bom_is_active=bool(bom.is_active),
+                part_id=assembly.id,
+                part_number=assembly.part_number or "",
+                bom_item_id=item.id,
+                item_number=item.item_number,
+                component_part_id=component.id,
+                component_part_number=component.part_number or "",
+                component_part_name=component.name,
+                component_is_deleted=bool(getattr(component, "is_deleted", False)),
+                # The NORMALISED labels the comparison actually used, not the raw column
+                # text: what the row shows has to be what the gate compared.
+                line_unit_of_measure=uom_label(item.unit_of_measure),
+                component_unit_of_measure=uom_label(component.unit_of_measure),
+                blocks_backflush=bom_line_is_backflush_consumed(item),
+            )
+        )
+
+    return BOMUomMismatchReport(total=len(passing), returned=len(rows), truncated=truncated, items=rows)
 
 
 @router.get("/{bom_id}", response_model=BOMResponse)
@@ -1493,8 +1697,9 @@ def add_bom_item(
         if not bom:
             raise HTTPException(status_code=404, detail="BOM not found")
 
-        # Validate component exists
-        component = db.query(Part).filter(Part.id == item_in.component_part_id).first()
+        # Validate component exists IN THIS COMPANY (invariant #1) -- see the matching
+        # scoping in ``create_bom``. A 404 rather than a 403 so a foreign id cannot be probed.
+        component = db.query(Part).filter(Part.id == item_in.component_part_id, Part.company_id == company_id).first()
         if not component:
             raise HTTPException(status_code=404, detail="Component part not found")
 
@@ -1508,8 +1713,10 @@ def add_bom_item(
                 status_code=400, detail="Adding this component would create a circular reference in the BOM structure"
             )
 
-        # Inherit customer_name from parent assembly if component doesn't have one
-        parent_part = db.query(Part).filter(Part.id == bom.part_id).first()
+        # Inherit customer_name from parent assembly if component doesn't have one.
+        # Tenant-scoped for the same reason: this line WRITES onto ``component``, so an
+        # unscoped pair here was a cross-tenant write, not just a read.
+        parent_part = db.query(Part).filter(Part.id == bom.part_id, Part.company_id == company_id).first()
         if parent_part and parent_part.customer_name and not component.customer_name:
             component.customer_name = parent_part.customer_name
 
@@ -1531,6 +1738,11 @@ def add_bom_item(
                 item_data['line_type'] = val.value.lower()
             elif isinstance(val, str):
                 item_data['line_type'] = val.lower()
+
+        # BOM-LINE WRITE PATH 4 of 4 (single add — the one the BOM page and the part BOM
+        # tab actually use; NEITHER of them sends a unit at all). An unstated unit inherits
+        # the component part's rather than the literal "each" the schema used to supply.
+        item_data['unit_of_measure'] = _resolve_line_uom(item_data.get('unit_of_measure'), component)
 
         item = BOMItem(bom_id=bom_id, company_id=company_id, **item_data)
         db.add(item)
@@ -1592,7 +1804,14 @@ def update_bom_item(
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Update a BOM item"""
+    """Update a BOM item.
+
+    A request that does not mention ``unit_of_measure`` leaves it alone (``exclude_unset``)
+    — this endpoint is NOT a backfill, and existing lines keep what they have. A request
+    that CLEARS it (explicit ``null`` / blank) is treated as "no stated unit" and resolves
+    to the component part's, the same rule the four create paths use, rather than writing a
+    NULL nobody asked for.
+    """
     item = (
         db.query(BOMItem)
         .options(joinedload(BOMItem.component_part))
@@ -1604,6 +1823,8 @@ def update_bom_item(
         raise HTTPException(status_code=404, detail="BOM item not found")
 
     update_data = item_in.model_dump(exclude_unset=True)
+    if "unit_of_measure" in update_data:
+        update_data["unit_of_measure"] = _resolve_line_uom(update_data["unit_of_measure"], item.component_part)
     for field, value in update_data.items():
         setattr(item, field, value)
 

@@ -423,7 +423,7 @@ def test_inspection_queue_days_back_is_bounded(client: TestClient, db_session: S
         headers=headers_for(user),
     )
 
-    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
 
 def _make_orphan_receipt(db: Session, *, company_id: int, received_by: int) -> POReceipt:

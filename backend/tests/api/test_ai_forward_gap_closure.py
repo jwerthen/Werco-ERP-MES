@@ -6,7 +6,6 @@ from fastapi.testclient import TestClient
 
 from app.models.ai_learning import AIRecommendation
 from app.models.company import Company
-from app.models.notification import NotificationLog
 from app.models.operational_event import OperationalEvent
 from app.models.part import Part
 from app.models.work_center import WorkCenter
@@ -95,13 +94,17 @@ class TestAIForwardGapClosure:
         db_session.refresh(operation)
         assert operation.status == OperationStatus.ON_HOLD
         assert db_session.query(WorkOrderBlocker).filter_by(work_order_id=work_order.id, company_id=1).count() == 1
-        assert db_session.query(NotificationLog).filter_by(event_type="WO_BLOCKED", company_id=1).count() >= 1
         assert (
             db_session.query(AIRecommendation)
             .filter_by(target_entity_type="work_order_blocker", source_module="shop_floor", company_id=1)
             .count()
             == 1
         )
+        # The synchronous WO_BLOCKED NotificationLog write was removed (the deleted
+        # _create_notification_logs). Blocker notifications now flow through the
+        # transactional outbox: create_blocker emits this OperationalEvent, and the
+        # after_commit tee dispatches it (nothing is written synchronously in-test
+        # without Redis/worker). Asserting the emit proves the new trigger fired.
         assert (
             db_session.query(OperationalEvent).filter_by(event_type="work_order_blocker_created", company_id=1).count()
             == 1

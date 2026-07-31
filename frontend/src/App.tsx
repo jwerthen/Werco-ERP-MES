@@ -36,11 +36,14 @@ const Parts = lazyWithRetry(() => import('./pages/PartsNew'));
 const PartDetail = lazyWithRetry(() => import('./pages/PartDetail'));
 const PartEdit = lazyWithRetry(() => import('./pages/PartEdit'));
 const BOM = lazyWithRetry(() => import('./pages/BOM'));
+const BOMUomMismatches = lazyWithRetry(() => import('./pages/BOMUomMismatches'));
 const Routing = lazyWithRetry(() => import('./pages/Routing'));
 const ProcessSheets = lazyWithRetry(() => import('./pages/ProcessSheets'));
 const SetupWizard = lazyWithRetry(() => import('./pages/SetupWizard'));
 const ImportCenter = lazyWithRetry(() => import('./pages/ImportCenter'));
 const ActionInbox = lazyWithRetry(() => import('./pages/ActionInbox'));
+const Notifications = lazyWithRetry(() => import('./pages/Notifications'));
+const MySettings = lazyWithRetry(() => import('./pages/MySettings'));
 const Warehouse = lazyWithRetry(() => import('./pages/Warehouse'));
 const Materials = lazyWithRetry(() => import('./pages/Materials'));
 const MRP = lazyWithRetry(() => import('./pages/MRP'));
@@ -129,6 +132,13 @@ const routeAccessRequirements: RouteAccessRequirement[] = [
   { prefix: '/print/shipping-label', permission: 'shipping:view' },
   { prefix: '/shop-floor', permission: 'work_orders:view' },
   { prefix: '/parts', permission: 'parts:view' },
+  // The unit-mismatch worklist is gated ADMIN / MANAGER / SUPERVISOR server-side
+  // (bom.py -> list_bom_uom_mismatches) — the roles that can actually edit a BOM
+  // line or arm `Part.backflush_components`. `boms:edit` is exactly that set, so
+  // a Viewer/Operator with boms:view is not routed into a guaranteed 403.
+  // `getRouteAccessRequirement` picks the LONGEST matching prefix, so this wins
+  // over the `/bom` entry below.
+  { prefix: '/bom/uom-mismatches', permission: 'boms:edit' },
   { prefix: '/bom', permission: 'boms:view' },
   { prefix: '/routing', permission: 'routings:view' },
   { prefix: '/engineering-changes', anyOf: ['parts:view', 'boms:view', 'routings:view'] },
@@ -430,6 +440,15 @@ function AppRoutes() {
           </Layout>
         </PrivateRoute>
       } />
+      {/* Declared AFTER /bom is fine — react-router v6 ranks by specificity, not
+          declaration order — but the access requirement above must stay longest-prefix. */}
+      <Route path="/bom/uom-mismatches" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><BOMUomMismatches /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
       <Route path="/routing" element={
         <PrivateRoute>
           <Layout>
@@ -464,6 +483,22 @@ function AppRoutes() {
         <PrivateRoute>
           <Layout>
             <LazyRoute><ActionInbox /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
+      {/* In-app notification inbox — all authenticated roles (auth-only gate). */}
+      <Route path="/notifications" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><Notifications /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
+      {/* Per-user notification settings (self-scoped) — all authenticated roles. */}
+      <Route path="/settings" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><MySettings /></LazyRoute>
           </Layout>
         </PrivateRoute>
       } />

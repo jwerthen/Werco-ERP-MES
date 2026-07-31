@@ -49,9 +49,11 @@ from app.schemas.print_profile import (
 from app.schemas.purchasing import (
     InspectionQueueItem,
     InspectionResultResponse,
+    ReceiptCorrection,
     ReceiptCreate,
     ReceiptInspection,
     ReceiptResponse,
+    ReceiptVoidRequest,
 )
 from app.services.audit_service import AuditService
 from app.services.operational_event_service import OperationalEventService
@@ -128,7 +130,10 @@ def get_open_purchase_orders(
     """
     query = (
         db.query(PurchaseOrder)
-        .filter(PurchaseOrder.company_id == company_id)
+        .filter(
+            PurchaseOrder.company_id == company_id,
+            PurchaseOrder.is_deleted == False,  # noqa: E712
+        )
         .options(
             joinedload(PurchaseOrder.vendor),
             joinedload(PurchaseOrder.lines).joinedload(PurchaseOrderLine.part),
@@ -201,7 +206,11 @@ def get_purchase_order_for_receiving(
             joinedload(PurchaseOrder.lines).joinedload(PurchaseOrderLine.part),
             joinedload(PurchaseOrder.lines).joinedload(PurchaseOrderLine.receipts),
         )
-        .filter(PurchaseOrder.id == po_id, PurchaseOrder.company_id == company_id)
+        .filter(
+            PurchaseOrder.id == po_id,
+            PurchaseOrder.company_id == company_id,
+            PurchaseOrder.is_deleted == False,  # noqa: E712
+        )
         .first()
     )
 
@@ -212,6 +221,10 @@ def get_purchase_order_for_receiving(
     for line in po.lines:
         receipts_data = []
         for r in line.receipts:
+            # Exclude soft-deleted receipts from the per-PO receipt history
+            # (the joinedload relationship has no is_deleted scope).
+            if r.is_deleted:
+                continue
             receipts_data.append(
                 {
                     "receipt_id": r.id,
@@ -507,6 +520,7 @@ def get_inspection_queue(
         )
         .filter(
             POReceipt.company_id == company_id,
+            POReceipt.is_deleted == False,  # noqa: E712
             POReceipt.status == ReceiptStatus.PENDING_INSPECTION,
         )
     )
@@ -567,7 +581,11 @@ def get_receipt_detail(
             joinedload(POReceipt.receiver),
             joinedload(POReceipt.inspector),
         )
-        .filter(POReceipt.id == receipt_id, POReceipt.company_id == company_id)
+        .filter(
+            POReceipt.id == receipt_id,
+            POReceipt.company_id == company_id,
+            POReceipt.is_deleted == False,  # noqa: E712
+        )
         .first()
     )
 
@@ -970,6 +988,430 @@ def _create_ncr_for_rejection(
     return ncr
 
 
+# ===========================================================================
+# Receipt correction / void.
+#
+# The most delicate write path in receiving: a mis-keyed received quantity is
+# corrected (or the whole receipt voided) by SAFELY unwinding everything the
+# receive already propagated -- the PO line's quantity_received / is_closed, the
+# PO status, and (dock-to-stock only) the placed inventory. It NEVER mutates or
+# deletes the historical RECEIVE inventory transaction; it appends a compensating
+# signed ADJUST transaction (mirroring the inventory /adjust endpoint) so the full
+# movement history is preserved for AS9100D traceability.
+#
+# Only two states are correctable/voidable (the endpoints enforce this strictly):
+#   1. PENDING_INSPECTION  -- inspection_status PENDING, NO inventory placed yet.
+#   2. Dock-to-stock ACCEPTED -- requires_inspection False, inspection_status
+#      NOT_REQUIRED, inventory already placed (quantity_accepted == received).
+# Any INSPECTED receipt (inspection_status passed / failed / partial) is REFUSED
+# -- corrections after inspection go through the NCR / inventory-adjustment paths.
+# Anything even slightly ambiguous is refused with an actionable 409/400 rather
+# than risking a corrupt inventory or PO total.
+# ===========================================================================
+
+# Inspection results that mean a real incoming inspection has been recorded, so
+# the receipt is no longer safely correctable/voidable here.
+_INSPECTED_STATUSES = (
+    InspectionStatus.PASSED,
+    InspectionStatus.FAILED,
+    InspectionStatus.PARTIAL,
+)
+
+# Float dust tolerance for the "would this go negative / is there enough on hand"
+# guards (quantities are stored as Float).
+_QTY_EPSILON = 1e-6
+
+
+def _reconcile_receipt_quantity(
+    db: Session,
+    receipt: POReceipt,
+    po_line: PurchaseOrderLine,
+    po: PurchaseOrder,
+    new_qty: float,
+    *,
+    audit: AuditService,
+    reason: str,
+    current_user: User,
+    company_id: int,
+) -> None:
+    """Take a receipt from its current quantity_received (Q_old) to ``new_qty``
+    (0 for a void) and reconcile every downstream side effect.
+
+    ALL refusal guards run BEFORE any mutation, so a refusal can never leave the
+    PO line / inventory half-reconciled. The caller commits; audit rows are
+    flushed here (before the terminal commit) via the AuditService.
+    """
+    q_old = float(receipt.quantity_received or 0.0)
+    delta = new_qty - q_old
+    is_void = new_qty == 0
+    # State discriminator: dock-to-stock (requires_inspection False) placed
+    # inventory; PENDING_INSPECTION (requires_inspection True) did not. State 3
+    # (inspected) is refused by the caller before we get here.
+    inventory_placed = not receipt.requires_inspection
+
+    # ---- GUARDS (no mutation yet) -----------------------------------------
+    new_line_received = float(po_line.quantity_received or 0.0) + delta
+    if new_line_received < -_QTY_EPSILON:
+        # Arithmetic bug-state: reversing this receipt would drive the PO line's
+        # received total below zero. Refuse rather than corrupt the PO total.
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Cannot correct/void: reversing this receipt would drive the PO line's received "
+                "quantity negative. Make a manual inventory / PO adjustment instead."
+            ),
+        )
+
+    inv_item: Optional[InventoryItem] = None
+    location_code: Optional[str] = None
+    if inventory_placed and abs(delta) > _QTY_EPSILON:
+        # Re-find the SAME InventoryItem the receive created. The receive path keys
+        # it on (company_id, part_id, location_code, lot_number) where location_code
+        # is receipt.location.code or the "RECV-01" default, and lot_number is the
+        # receipt's (possibly auto-assigned) lot. Warehouse is NOT part of the key.
+        location_code = receipt.location.code if receipt.location else "RECV-01"
+        inv_item = (
+            db.query(InventoryItem)
+            .filter(
+                InventoryItem.company_id == company_id,
+                InventoryItem.part_id == po_line.part_id,
+                InventoryItem.location == location_code,
+                InventoryItem.lot_number == receipt.lot_number,
+            )
+            .first()
+        )
+        if inv_item is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot reconcile inventory for this receipt automatically; make a manual inventory adjustment.",
+            )
+        if delta < 0:
+            to_remove = -delta
+            # Only reverse stock that is still on hand AND unallocated/unconsumed.
+            if float(inv_item.quantity_available or 0.0) + _QTY_EPSILON < to_remove:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Cannot correct/void: the received stock for this lot has already been "
+                        "allocated or consumed. Make an inventory adjustment instead."
+                    ),
+                )
+
+    # ---- MUTATIONS --------------------------------------------------------
+    # 1. PO line roll-back / roll-forward (clamp float dust to exactly 0).
+    po_line.quantity_received = max(new_line_received, 0.0)
+    # Closed iff fully received -- same comparison as the forward receive path,
+    # applied so it can also REOPEN a line that a void drops below ordered.
+    po_line.is_closed = po_line.quantity_received >= po_line.quantity_ordered
+
+    # 2. Recompute PO status the same way receive_material does, plus the reverse
+    #    transition back to SENT (the pre-receipt open state) when nothing is left
+    #    received.
+    old_po_status = po.status
+    all_lines = (
+        db.query(PurchaseOrderLine)
+        .filter(
+            PurchaseOrderLine.purchase_order_id == po.id,
+            PurchaseOrderLine.company_id == company_id,
+        )
+        .all()
+    )
+    all_closed = all(line.is_closed for line in all_lines)
+    any_received = any((line.quantity_received or 0) > 0 for line in all_lines)
+    if all_closed:
+        po.status = POStatus.RECEIVED
+    elif any_received:
+        po.status = POStatus.PARTIAL
+    else:
+        po.status = POStatus.SENT
+
+    # 3. Inventory reconciliation (dock-to-stock only). Append a compensating
+    #    signed ADJUST transaction -- NEVER touch the historical RECEIVE row.
+    if inv_item is not None:
+        old_on_hand = inv_item.quantity_on_hand
+        inv_item.quantity_on_hand = float(inv_item.quantity_on_hand or 0.0) + delta
+        inv_item.quantity_available = inv_item.quantity_on_hand - float(inv_item.quantity_allocated or 0.0)
+
+        txn = InventoryTransaction(
+            company_id=company_id,
+            inventory_item_id=inv_item.id,
+            part_id=po_line.part_id,
+            transaction_type=TransactionType.ADJUST,
+            quantity=delta,
+            from_location=location_code,
+            to_location=location_code,
+            lot_number=receipt.lot_number,
+            reference_type="po_receipt",
+            reference_id=receipt.id,
+            reference_number=receipt.receipt_number,
+            reason_code="RECEIPT_VOID" if is_void else "RECEIPT_CORRECTION",
+            notes=(
+                f"Receipt {receipt.receipt_number} "
+                + ("voided" if is_void else f"corrected {q_old}->{new_qty}")
+                + f": {reason}"
+            ),
+            unit_cost=inv_item.unit_cost,
+            total_cost=abs(delta) * float(inv_item.unit_cost or 0.0),
+            created_by=current_user.id,
+        )
+        db.add(txn)
+        db.flush()
+
+        audit.log_update(
+            "inventory",
+            inv_item.id,
+            f"{po_line.part_id}/{receipt.lot_number}@{location_code}",
+            old_values={"quantity_on_hand": old_on_hand},
+            new_values={"quantity_on_hand": inv_item.quantity_on_hand},
+            description=(
+                f"Receipt {receipt.receipt_number} "
+                + ("void" if is_void else "correction")
+                + f" adjusted inventory {old_on_hand}->{inv_item.quantity_on_hand} "
+                f"(part {po_line.part_id} lot {receipt.lot_number} @ {location_code})"
+            ),
+        )
+
+    # 4. PO status-change audit (only when it actually moved).
+    if po.status != old_po_status:
+        audit.log_status_change(
+            "purchase_order",
+            po.id,
+            po.po_number,
+            old_po_status.value if hasattr(old_po_status, "value") else old_po_status,
+            po.status.value if hasattr(po.status, "value") else po.status,
+        )
+
+    # 5. Receipt quantity fields. Dock-to-stock keeps accepted == received; a
+    #    PENDING_INSPECTION receipt has placed nothing, so accepted stays 0.
+    receipt.quantity_received = new_qty
+    if inventory_placed:
+        receipt.quantity_accepted = new_qty
+
+    # 6. Best-effort operational event (non-fatal), mirroring receive_material.
+    OperationalEventService(db).emit_best_effort(
+        company_id=company_id,
+        event_type="receipt_voided" if is_void else "receipt_corrected",
+        source_module="purchasing",
+        entity_type="po_receipt",
+        entity_id=receipt.id,
+        user_id=current_user.id,
+        severity="medium",
+        event_payload={
+            "receipt_number": receipt.receipt_number,
+            "po_id": po.id,
+            "po_number": po.po_number,
+            "po_line_id": po_line.id,
+            "part_id": po_line.part_id,
+            "old_quantity_received": q_old,
+            "new_quantity_received": new_qty,
+            "delta": delta,
+            "reason": reason,
+        },
+    )
+
+
+def _load_correctable_receipt(db: Session, receipt_id: int, company_id: int) -> POReceipt:
+    """Load a live (not soft-deleted) receipt tenant-scoped, with the PO line / PO /
+    location eager-loaded, and enforce the shared correctable/voidable state model.
+
+    Raises 404 (missing / cross-tenant / already-voided), 400 (orphaned PO line, so
+    there is no part/price/PO context to reconcile), or 409 (already inspected).
+    """
+    receipt = (
+        db.query(POReceipt)
+        .options(
+            joinedload(POReceipt.po_line).joinedload(PurchaseOrderLine.purchase_order),
+            joinedload(POReceipt.location),
+        )
+        .filter(
+            POReceipt.id == receipt_id,
+            POReceipt.company_id == company_id,
+            POReceipt.is_deleted == False,  # noqa: E712
+        )
+        .first()
+    )
+    if not receipt:
+        raise HTTPException(status_code=404, detail="Receipt not found")
+
+    # An orphaned receipt (dangling PO line, or a PO line with no purchase order)
+    # cannot be reconciled -- there is no part/price/PO context to unwind. Refuse
+    # with a clear 400, never a 500.
+    if receipt.po_line is None or receipt.po_line.purchase_order is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Receipt's PO line no longer exists, so it cannot be corrected or voided here. "
+                "Contact an administrator to repair the receipt record."
+            ),
+        )
+
+    if receipt.inspection_status in _INSPECTED_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This receipt has already been inspected. Corrections after inspection must be handled "
+                "via the NCR / inventory adjustment, not here."
+            ),
+        )
+
+    return receipt
+
+
+@router.patch("/receipt/{receipt_id}", response_model=ReceiptResponse)
+def correct_receipt(
+    receipt_id: int,
+    payload: ReceiptCorrection,
+    db: Session = Depends(get_db),
+    # Receive-tier: the same roles that can /receive and post inventory adjustments.
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Correct a mis-keyed received quantity (and optional traceability fields).
+
+    Allowed only for a PENDING_INSPECTION or dock-to-stock ACCEPTED receipt (never
+    an inspected one). ``quantity_received`` is the NEW total received quantity; the
+    PO line, PO status, and (dock-to-stock) inventory are reconciled to match by
+    appending a compensating signed ADJUST transaction -- the historical RECEIVE
+    transaction is never mutated or deleted.
+    """
+    receipt = _load_correctable_receipt(db, receipt_id, company_id)
+    po_line = receipt.po_line
+    po = po_line.purchase_order
+
+    new_qty = float(payload.quantity_received)
+    # Dock-to-stock placed inventory keyed on the lot; changing the lot after that
+    # would orphan the placed stock. Refuse -- void and re-receive instead.
+    inventory_placed = not receipt.requires_inspection
+    if inventory_placed and payload.lot_number is not None:
+        new_lot = payload.lot_number.strip()
+        if new_lot and new_lot != receipt.lot_number:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Lot number cannot be changed after stock has been received into inventory; "
+                    "void and re-receive instead."
+                ),
+            )
+
+    old_values = {
+        "quantity_received": receipt.quantity_received,
+        "quantity_accepted": receipt.quantity_accepted,
+        "lot_number": receipt.lot_number,
+        "heat_number": receipt.heat_number,
+        "cert_number": receipt.cert_number,
+        "serial_numbers": receipt.serial_numbers,
+        "notes": receipt.notes,
+    }
+
+    # Reconcile quantities + downstream. Any refusal (409) raises before mutating.
+    _reconcile_receipt_quantity(
+        db,
+        receipt,
+        po_line,
+        po,
+        new_qty,
+        audit=audit,
+        reason=payload.reason,
+        current_user=current_user,
+        company_id=company_id,
+    )
+
+    # Apply optional field edits AFTER reconcile (so the inventory re-find used the
+    # original lot). lot_number is only editable when no stock was placed (state 1).
+    if not inventory_placed and payload.lot_number is not None:
+        new_lot = payload.lot_number.strip()
+        if new_lot:
+            receipt.lot_number = new_lot
+    if payload.heat_number is not None:
+        receipt.heat_number = payload.heat_number
+    if payload.cert_number is not None:
+        receipt.cert_number = payload.cert_number
+    if payload.serial_numbers is not None:
+        receipt.serial_numbers = payload.serial_numbers
+    if payload.notes is not None:
+        receipt.notes = payload.notes
+
+    new_values = {
+        "quantity_received": receipt.quantity_received,
+        "quantity_accepted": receipt.quantity_accepted,
+        "lot_number": receipt.lot_number,
+        "heat_number": receipt.heat_number,
+        "cert_number": receipt.cert_number,
+        "serial_numbers": receipt.serial_numbers,
+        "notes": receipt.notes,
+    }
+    audit.log_update(
+        "receipt",
+        receipt.id,
+        receipt.receipt_number,
+        old_values=old_values,
+        new_values=new_values,
+        description=f"Corrected receipt: {payload.reason}",
+    )
+
+    db.commit()
+    db.refresh(receipt)
+    return receipt
+
+
+@router.post("/receipt/{receipt_id}/void")
+def void_receipt(
+    receipt_id: int,
+    payload: ReceiptVoidRequest,
+    db: Session = Depends(get_db),
+    # Void == delete authority: ADMIN / MANAGER only (tighter than correct).
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Void (soft-delete) a receipt, unwinding everything it propagated.
+
+    Allowed only for a PENDING_INSPECTION or dock-to-stock ACCEPTED receipt. The PO
+    line, PO status, and (dock-to-stock) inventory are fully reversed (a compensating
+    signed ADJUST transaction is appended; the RECEIVE row is preserved), then the
+    receipt is soft-deleted. Terminal -- there is no restore; to redo, re-receive.
+    """
+    receipt = _load_correctable_receipt(db, receipt_id, company_id)
+    po_line = receipt.po_line
+    po = po_line.purchase_order
+
+    old_values = {
+        "quantity_received": receipt.quantity_received,
+        "quantity_accepted": receipt.quantity_accepted,
+        "status": receipt.status.value if hasattr(receipt.status, "value") else receipt.status,
+        "lot_number": receipt.lot_number,
+    }
+
+    # Reverse everything down to zero. Any refusal (409) raises before mutating.
+    _reconcile_receipt_quantity(
+        db,
+        receipt,
+        po_line,
+        po,
+        0,
+        audit=audit,
+        reason=payload.reason,
+        current_user=current_user,
+        company_id=company_id,
+    )
+
+    receipt.soft_delete(current_user.id)
+
+    audit.log_delete(
+        "receipt",
+        receipt.id,
+        receipt.receipt_number,
+        old_values=old_values,
+        description=f"Voided receipt: {payload.reason}",
+        soft_delete=True,
+        extra_data={"reason": payload.reason},
+    )
+
+    db.commit()
+    return {"message": f"Receipt {receipt.receipt_number} voided"}
+
+
 @router.get("/history")
 def get_receiving_history(
     days: int = 30,
@@ -989,7 +1431,11 @@ def get_receiving_history(
             joinedload(POReceipt.receiver),
             joinedload(POReceipt.inspector),
         )
-        .filter(POReceipt.company_id == company_id, POReceipt.received_at >= cutoff)
+        .filter(
+            POReceipt.company_id == company_id,
+            POReceipt.is_deleted == False,  # noqa: E712
+            POReceipt.received_at >= cutoff,
+        )
     )
 
     if status:
@@ -1048,6 +1494,7 @@ def get_receiving_stats(
         db.query(func.count(POReceipt.id))
         .filter(
             POReceipt.company_id == company_id,
+            POReceipt.is_deleted == False,  # noqa: E712
             POReceipt.status == ReceiptStatus.PENDING_INSPECTION,
         )
         .scalar()
@@ -1056,7 +1503,11 @@ def get_receiving_stats(
     # Count received in period
     received_count = (
         db.query(func.count(POReceipt.id))
-        .filter(POReceipt.company_id == company_id, POReceipt.received_at >= cutoff)
+        .filter(
+            POReceipt.company_id == company_id,
+            POReceipt.is_deleted == False,  # noqa: E712
+            POReceipt.received_at >= cutoff,
+        )
         .scalar()
     )
 
@@ -1065,6 +1516,7 @@ def get_receiving_stats(
         db.query(func.count(POReceipt.id))
         .filter(
             POReceipt.company_id == company_id,
+            POReceipt.is_deleted == False,  # noqa: E712
             POReceipt.inspected_at >= cutoff,
             POReceipt.status != ReceiptStatus.PENDING_INSPECTION,
         )
@@ -1076,6 +1528,7 @@ def get_receiving_stats(
         db.query(func.count(POReceipt.id))
         .filter(
             POReceipt.company_id == company_id,
+            POReceipt.is_deleted == False,  # noqa: E712
             POReceipt.inspected_at >= cutoff,
             POReceipt.quantity_rejected > 0,
         )
@@ -1089,7 +1542,11 @@ def get_receiving_stats(
             func.sum(POReceipt.quantity_accepted).label("total_accepted"),
             func.sum(POReceipt.quantity_rejected).label("total_rejected"),
         )
-        .filter(POReceipt.company_id == company_id, POReceipt.received_at >= cutoff)
+        .filter(
+            POReceipt.company_id == company_id,
+            POReceipt.is_deleted == False,  # noqa: E712
+            POReceipt.received_at >= cutoff,
+        )
         .first()
     )
 

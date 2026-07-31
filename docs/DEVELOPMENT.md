@@ -162,7 +162,44 @@ cd frontend
 npm run prepare
 cd ..
 pre-commit install
+
+# Run every hook against the whole tree (from the REPO ROOT, not backend/)
+pre-commit run --all-files
 ```
+
+The hooks are deliberately **validity and secrets only** — `check-yaml`,
+`check-toml`, `check-json`, `check-added-large-files`, `check-merge-conflict`,
+and `detect-private-key`. The whole run takes well under a second and modifies
+nothing on a clean tree.
+
+**There are intentionally no lint/format hooks.** Linting and formatting are
+enforced in CI, blocking, at the pinned versions and from the correct working
+directory — run them yourself from `backend/` (see CLAUDE.md → Commands).
+
+> **History worth knowing (fixed 2026-07-28).** `.pre-commit-config.yaml` was
+> invalid YAML from its introduction — `exclude:^.env.example$` was missing the
+> space after the colon — so `pre-commit` could not load the config and *every*
+> hook was silently dead, including `detect-private-key`. `check-yaml` could not
+> catch it, because check-yaml is configured by the very file that failed to
+> parse. `backend/tests/test_precommit_config.py` now guards against a
+> recurrence, and CI runs `detect-private-key` directly in the `Secret Scanning`
+> job so the control no longer depends on each developer having run
+> `pre-commit install`.
+>
+> Reviving the config also revealed that its black/isort/flake8/bandit hooks
+> could never have worked: they pinned black 23 / isort 5 / flake8 7.0 against
+> the repo's black 26 / isort 7 / flake8 7.3, flake8 never found `backend/.flake8`
+> (pre-commit runs from the repo root), `--extend-ignore=E203,W503` split on its
+> comma so `W503` was passed as a filename, black/isort would have rewritten 35
+> and 49 **applied** Alembic migrations respectively (their exclude settings do
+> not apply to explicitly-passed files), and bandit pointed at a nonexistent
+> `backend/pyproject.toml`. They were removed rather than repaired — CI already
+> enforces all of them correctly.
+>
+> Scope honesty: `detect-private-key` finds PRIVATE KEY blocks, not API tokens
+> or passwords, and Trivy's non-blocking fs secret scan covers only `backend/`
+> and `frontend/`. Broader secret scanning (GitHub secret scanning or gitleaks)
+> remains an open decision.
 
 ## Testing
 
@@ -428,7 +465,8 @@ Two migrations back the work-order-completion concurrency fixes (see
 ### Completion-inventory migrations (Batch 6 — FG receipt + backflush)
 
 Two migrations back the work-order-completion inventory side-effects (see
-`docs/WORK_ORDER_COMPLETION_REMEDIATION.md`, Rank 9 / Batch 6):
+`docs/WORK_ORDER_COMPLETION_REMEDIATION.md`, Rank 9 / Batch 6), plus a later dialect-parity fix to the
+second of them:
 
 - **`040_add_part_backflush_flag`** — adds the opt-in flag the backflush logic keys off:
   `parts.backflush_components BOOLEAN NOT NULL DEFAULT false`. The `server_default='false'` backfills
@@ -454,8 +492,45 @@ Two migrations back the work-order-completion inventory side-effects (see
   RECEIVE/ISSUE groups exist, the migration **lists the offending `(company_id, reference_id[,
   part_id])` groups and raises** rather than deleting any rows — an operator resolves them deliberately
   (keep the earliest min-id row), then re-runs. Idempotent (`IF NOT EXISTS` / inspector + `pg_indexes`
-  guard) and reversible; Postgres-only (skipped on SQLite, where `create_all` still emits a full unique
-  index from the model and the app-level guard applies).
+  guard) and reversible; the migration body itself is Postgres-only (skipped on SQLite — partial
+  indexes + `CONCURRENTLY` were treated as Postgres features), with `create_all` emitting the indexes
+  from the model on SQLite and the app-level guard applying either way.
+
+  > **What `uq_wo_inventory_issue` guards TODAY (PR 4.4, 2026-07-27) — read this before assuming the
+  > component backflush is index-protected.** Both indexes are **unchanged** and stay exactly as
+  > defined here; PR 4.4 ships **no migration at all** (head stays `076_uq_wo_inv_sqlite_parity`) and
+  > the lockstep tests in `tests/test_migration_075_*.py` / `tests/test_migration_076_*.py` pass
+  > **unmodified**. What changed is which rows arrive under the predicate. Reconciled component
+  > consumption now posts `reference_type='work_order_backflush'`, deliberately **outside** it, because
+  > reconcile-to-target needs N rows per (work order, part) plus a later top-up row. So
+  > `uq_wo_inventory_receipt` still guards the live finished-goods `RECEIVE`, while
+  > `uq_wo_inventory_issue` now covers **only legacy (pre-4.4) component ISSUE rows** — no new row can
+  > ever trip it, and it is retained as a permanent fence over that history rather than as a live
+  > guard. The current leg's non-duplication is **arithmetic** (`delta = target − signed ledger net`,
+  > serialized by the pre-existing `SELECT … FOR UPDATE` on `work_orders`), not schema-enforced. Adding
+  > a `reference_type` value needed no migration: the column is unconstrained `String(50)` free text
+  > with no CHECK, enum or domain — the same way PR 1 introduced `work_order_operation`. See
+  > `docs/MATERIAL_CONSUMPTION_PLAN.md` → "The reconciling backflush and one lot policy (PR 4.4)".
+
+- **`076_uq_wo_inv_sqlite_parity`** (file `076_uq_wo_inventory_sqlite_parity.py`) — **dialect-parity
+  fix for the two `041` indexes.** They declared only `postgresql_where`, which SQLite ignores, so on
+  SQLite — local dev and the entire pytest suite — they degraded into **full** unique indexes covering
+  *every* `reference_type`. The test environment therefore enforced a constraint production does not:
+  legitimate repeated movements under one reference (a second compensating `ADJUST` on one
+  `po_receipt`, several `SHIP` rows for one shipment, the many-rows-per-operation material-consumption
+  path) were rejected locally though Postgres accepts them. The model now declares `sqlite_where`
+  alongside `postgresql_where` **from the same predicate constant** — correct on both dialects because
+  SQLAlchemy binds the uppercase enum *member name* (`'RECEIVE'`/`'ISSUE'`) under Postgres **and**
+  SQLite (verified at the bind-processor level, not assumed) — so `create_all` now builds them
+  partial, and the migration rebuilds them partial on existing SQLite DBs. **On Postgres it is a
+  deliberate no-op** (guarded on dialect, emits zero DDL): those indexes are already correct, and
+  rebuilding a unique index on the hottest ledger table would take a real lock and briefly drop the
+  live double-receive guard for no behavioral gain. Coverage for the rows the guards exist for
+  (`reference_type='work_order'` RECEIVE/ISSUE) is **unchanged** on both dialects. Idempotent
+  (reflects `dialect_options['sqlite_where']` and rebuilds only a genuinely-degraded index) and
+  reversible — the `downgrade` really restores the full-index shape, and because that shape is
+  *stricter* it pre-checks and **raises with the offending groups itemized rather than deleting any
+  ledger row** (the `041` posture).
 
 ### Completion-path performance indexes (Batch 9 — reconcile/predecessor read paths)
 

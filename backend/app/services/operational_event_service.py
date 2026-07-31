@@ -94,6 +94,19 @@ class OperationalEventService:
         )
         self.db.add(event)
         self.db.flush()
+
+        # Transactional outbox (§3.1): if this event type drives notifications, mark its
+        # (now id-assigned) row on the session so the after_commit tee enqueues dispatch
+        # once the caller's transaction actually commits. Import the catalog lazily to
+        # avoid a circular import. Uncataloged event types are deliberately ignored.
+        try:
+            from app.services.notification_catalog import SOURCE_EVENT_TYPE_TO_KEY
+
+            if event_type in SOURCE_EVENT_TYPE_TO_KEY:
+                self.db.info.setdefault("pending_notification_event_ids", []).append(event.id)
+        except Exception:  # noqa: BLE001 - the outbox marker must never fail an emit
+            logger.warning("failed to mark operational event %s for notification outbox", event.id, exc_info=True)
+
         return event
 
     def emit_best_effort(

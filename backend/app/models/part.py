@@ -55,6 +55,45 @@ class UnitOfMeasure(str, enum.Enum):
     LITERS = "liters"
 
 
+def uom_label(value) -> str:
+    """A ``unit_of_measure`` (enum, enum value or raw string) as a comparable lowercase str.
+
+    ``Part.unit_of_measure`` is a native enum column and ``BOMItem.unit_of_measure`` is a
+    free ``String(20)``, so the two sides of any line-vs-part question arrive in different
+    shapes. This flattens both. ``None`` / blank flattens to ``""`` -- a MISSING unit, which
+    is not the same claim as a WRONG one.
+    """
+    return str(getattr(value, "value", value) or "").strip().lower()
+
+
+def uom_disagrees(line_value, part_value) -> bool:
+    """True when a BOM line's stated unit of measure CONTRADICTS its component part's.
+
+    THE single predicate behind every line-vs-part unit comparison in the platform. Two
+    readers depend on it agreeing with itself exactly:
+
+    * ``completion_inventory_service._record_bom_line_diagnostics`` raises the BLOCKING
+      ``unit_of_measure_mismatch`` diagnostic, which refuses ``Part.backflush_components``
+      at opt-in AND refuses that component at completion.
+    * ``GET /bom/uom-mismatches`` lists the rows a human has to correct first.
+
+    A report that disagreed with the gate would be worse than no report: it would either
+    hide a row that still blocks, or send someone to fix a row that never did.
+
+    Blank on either side is NOT a disagreement. A line that states no unit makes no claim
+    to contradict, and a part with no stocking unit gives nothing to contradict it -- so
+    both are silent here, exactly as the diagnostic has always been.
+
+    Comparison is by exact normalised label, deliberately: ``ea`` does NOT equal ``each``
+    here. Teaching this synonyms would make the gate accept lines it currently refuses,
+    which is a softening of a blocking control, not a bug fix. The report surfaces those
+    rows so a human normalises the stored value instead.
+    """
+    line = uom_label(line_value)
+    part = uom_label(part_value)
+    return bool(line) and bool(part) and line != part
+
+
 class Part(Base, SoftDeleteMixin, TenantMixin):
     __tablename__ = "parts"
     __table_args__ = (UniqueConstraint('company_id', 'part_number', name='uq_parts_company_part_number'),)

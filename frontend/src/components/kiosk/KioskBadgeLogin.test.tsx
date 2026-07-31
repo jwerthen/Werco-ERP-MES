@@ -27,7 +27,7 @@ describe('KioskBadgeLogin', () => {
     fireEvent.click(screen.getByTestId('kiosk-badge-key-9'));
     fireEvent.click(screen.getByTestId('kiosk-badge-key-9'));
     fireEvent.click(screen.getByTestId('kiosk-badge-key-1'));
-    fireEvent.click(screen.getByRole('button', { name: /log in/i }));
+    fireEvent.click(screen.getByRole('button', { name: /sign in/i }));
 
     await waitFor(() => expect(onLogin).toHaveBeenCalledWith('991'));
   });
@@ -68,6 +68,6 @@ describe('KioskBadgeLogin', () => {
 
     fireEvent.keyDown(window, { key: 'Enter' });
     expect(onLogin).not.toHaveBeenCalled();
-    expect(screen.getByRole('button', { name: /log in/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /sign in/i })).toBeDisabled();
   });
 });

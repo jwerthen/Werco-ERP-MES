@@ -286,7 +286,8 @@ export default function WorkOrders() {
   const { user } = useAuth();
   const navigate = useNavigate();
   const { showToast } = useToast();
-  const canDeleteWorkOrders = user?.role === 'admin' || !!user?.is_superuser;
+  // Backend now permits admin AND manager (plus superuser) to soft-delete a WO.
+  const canDeleteWorkOrders = user?.role === 'admin' || user?.role === 'manager' || !!user?.is_superuser;
   // Matches the backend RBAC on the nest endpoints (admin/manager/supervisor,
   // + platform_admin) — the same gate WorkOrderDetail uses for nest actions.
   const canImportNests = hasPermission(user?.role, 'routings:create');

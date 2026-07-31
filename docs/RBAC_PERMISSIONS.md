@@ -39,6 +39,15 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 | Release | ✓ | ✓ | ✓ | | | | |
 | Complete | ✓ | ✓ | ✓ | ✓ | ✓ | | |
 | Approve labor (TimeEntry) | ✓ | ✓ | ✓ | | ✓ | | |
+| View material ties | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Tie / edit / untie material | ✓ | ✓ | ✓ | | | | |
+
+> **Delete — code now matches the matrix (Admin + Manager).** `DELETE /api/v1/work-orders/{id}`
+> (`app/api/endpoints/work_orders.py`) was previously gated **stricter than this matrix** —
+> `require_role([ADMIN])` — while the **Delete** row above already listed Admin **and** Manager. The
+> gate is now `require_role([ADMIN, MANAGER])`, so a Manager can soft-delete a work order as documented.
+> Soft/hard-delete and restore behavior is otherwise unchanged (default soft delete; `hard_delete=true`
+> only for draft/cancelled WOs). See `docs/API.md` → Work Orders.
 
 > **Approve labor — endpoint mapping (Batch 11B / G5-A).** The shop-floor labor sign-off
 > `POST /api/v1/shop-floor/time-entries/{id}/approve` and `…/unapprove` (which set / clear
@@ -68,7 +77,9 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > Authorization is by **evidence, not role**: the walk-back is bounded to the caller's **own
 > unapproved** entries on the operation (crew-safe — never another operator's count; **approved**
 > labor is excluded — approval is the immutability boundary, G5-A) and is refused **409** once
-> the operation/WO is complete (post-completion corrections stay an office/supervisor task). It is
+> the operation is COMPLETE or the WO is terminal (post-completion corrections stay an
+> office/supervisor task — and that referral is now honest, since the office twin below **accepts** a
+> COMPLETE operation where it used to hit the identical refusal). It is
 > tenant-scoped (a cross-tenant id → **404** before any mutation) and writes a tamper-evident
 > `audit_log` row (action `reduce_operation_production`, old→new quantity + the operator-supplied
 > reason). See `docs/API.md` → Shop Floor → "Over-count correction".
@@ -79,8 +90,20 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > labor record, which is a supervisory power, not self-service. No clock-in is required. Approved
 > entries stay excluded on this path too — the front door for signed-off labor is
 > `POST /shop-floor/time-entries/{id}/unapprove` (the audited Approve-labor row, which forbids
-> self-unapproval), then reduce. Same tenant-scoped **404**, before-completion **409**, and
-> tamper-evident audit row as the shop-floor verb; the supervisor's optional note is recorded on
+> self-unapproval), then reduce. Same tenant-scoped **404** and tamper-evident audit row as the
+> shop-floor verb.
+>
+> **The office/operator split on a COMPLETE operation is a role decision, not a mechanism detail.**
+> The office verb passes `allow_completed_operation=True` and the operator verb does not, so a
+> completed operation is correctable **only** by Admin / Manager / Supervisor; a **terminal work
+> order** is refused on both, with its own distinct message so neither verb makes a referral the
+> other cannot honor. The refusal being relaxed dated from a production incident and was justified
+> on "downstream inventory / cost / FG effects have fired and cannot be walked back" — the reasoned
+> **material return** above is that walk-back, which is what makes the relaxation a supervised
+> correction rather than a loosened control. Note that the two powers travel together by design:
+> the same tier that can lower a completed operation's count is the tier that can hand the material
+> back, so neither half can be exercised without the authority to do the other. The supervisor's
+> optional note is recorded on
 > the **audit row only**, never written onto another operator's labor record. In the UI this is
 > the **Correct count** action on the work-order detail page, gated on `work_orders:edit`. See
 > `docs/API.md` → Work Orders → "Over-count correction … (supervisor/office)".
@@ -135,6 +158,108 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > operator-facing (any authenticated user), so the resolver bypasses no role check. See
 > `docs/API.md` → Scanner.
 
+> **Material ties — endpoint mapping.** Tying stock material to a work order (the tie that makes
+> inventory deplete as work completes) is a **planning act**, gated to the Work Orders **Edit** row
+> above. On `app/api/endpoints/work_order_materials.py`:
+>
+> | Verb | Endpoint | Gate |
+> |------|----------|------|
+> | List ties | `GET /api/v1/work-orders/{id}/material-allocations` | `get_current_active_user` — any authenticated tenant user |
+> | Tie material | `POST /api/v1/work-orders/{id}/material-allocations` | `require_role([ADMIN, MANAGER, SUPERVISOR])` |
+> | Edit a tie | `PATCH /api/v1/work-orders/{id}/material-allocations/{allocation_id}` | `require_role([ADMIN, MANAGER, SUPERVISOR])` |
+> | Untie | `DELETE /api/v1/work-orders/{id}/material-allocations/{allocation_id}` | `require_role([ADMIN, MANAGER, SUPERVISOR])` |
+> | Read a tie's per-lot consumption | `GET /api/v1/work-orders/{id}/material-allocations/{allocation_id}/consumption` | `get_current_active_user` — any authenticated tenant user |
+> | **Return consumed material** | `POST /api/v1/work-orders/{id}/material-allocations/{allocation_id}/return` | `require_role([ADMIN, MANAGER, SUPERVISOR])` |
+> | Tie a nest at creation | `POST /api/v1/work-orders/{id}/laser-nests/manual` and the four `…/laser-nest-packages/{preview,import}` routes, via the optional `material_part_id` | `require_role([ADMIN, MANAGER, SUPERVISOR])` — the endpoints' own pre-existing gate |
+>
+> **The return verb sits in the same tier as the tie verbs, and outside the kiosk path fence, for a
+> stronger reason than the rest of them.** Every other verb on this router manages a **planning row**;
+> the return is the one that **moves stock** and writes tamper-evident ledger rows. Reading it as
+> "just another tie mutation" and later relaxing it to operator self-service would be the mistake this
+> paragraph exists to prevent: **moving material back with a reason is a bigger power than tying it,
+> not a smaller one.** It is a supervised reversal of a physical fact, it credits specific heat/cert
+> lots, and it is the only self-service path that can lower a tie's `qty_consumed`. Keeping it under
+> `/work-orders` rather than `/api/v1/shop-floor` means a crew-station or kiosk-scoped operator token
+> is path-fenced away from it entirely — an operator who over-reported a count asks a supervisor,
+> exactly as they do for the office reduce-production verb. The read half
+> (`…/consumption`) is deliberately **broad**, like the tie list: it discloses ledger facts about
+> material the company already owns, and a return dialog that could not show which lots the material
+> goes back to would be asking for a confirmation nobody could give.
+>
+> **The matrix rows above hold now that a UI exists** (the work-order Materials panel, the nest
+> wizard's sheet-part picker, the Dispatch Board chip, the kiosk deduction line). Nothing was
+> re-gated: the nest-creation paths already required Admin / Manager / Supervisor, which is the same
+> set the tie verbs require, so a nest tie created inside the import transaction cannot be a
+> privilege escalation around `POST …/material-allocations`.
+>
+> The read is deliberately broad — a tie is shop-visible context ("this job burns *that* sheet"),
+> and the same rows are already reachable through lot traceability. **Operator gets 403 on all four
+> mutating verbs**; deciding what material a job consumes — or handing it back — is not operator
+> self-service, unlike the
+> shop-floor production verbs. The router is mounted under `/work-orders`, **not**
+> `/api/v1/shop-floor`, so kiosk-scoped operator tokens are **path-fenced away from it** entirely —
+> a crew-station token cannot tie, untie or return material even if it reached the route.
+>
+> **The floor reads ties without reaching that router, and the fence is unchanged.** The Dispatch
+> Board's `material_tie` and the kiosk's `material_ties` ride
+> `GET /shop-floor/dispatch-board` (Admin / Manager / Supervisor) and
+> `GET /shop-floor/work-center-queue/{id}` + `GET /shop-floor/my-active-job` (any authenticated user,
+> **or** a crew-station token for its own work center) — reads the fence already permits, carrying
+> data rather than granting a new capability. The same precedent as `scrap_reason_codes`. Both are
+> **pure reads**: they post no `ISSUE`, write no audit row and reconcile nothing. Note the small
+> disclosure widening this implies for a **station** principal — an unattended, PIN-unlocked terminal
+> with no operator identity can now see material part numbers and on-hand stock for the parts tied to
+> its own work center's queued operations (not an inventory browser, but not nothing).
+>
+> Every lookup (work order, part, operation, pinned lot, allocation) is **tenant-scoped**: a
+> cross-tenant id is **404**, never 403, so an id cannot be probed. Every create / edit / untie /
+> return writes
+> a tamper-evident `audit_log` row on resource type `work_order_material_allocation`. Untie is
+> `status = cancelled` — the row is **never physically deleted**, because the ledger's
+> `allocation_id` back-reference must keep resolving — and is refused **409** while the **ledger**
+> still shows material issued against the tie (the signed ISSUE − RETURN net, not the `qty_consumed`
+> cache, so a fully returned tie can be untied); the 409 names `POST …/return` with
+> `intent: "return_and_untie"`, which credits the material back to its source lots **and** cancels the
+> tie in one transaction.
+> A return additionally requires a **non-blank reason** and writes it on the ledger row, in the audit
+> description and in `extra_data.reason`; it appends compensating `RETURN` transactions and never
+> edits a historical row.
+>
+> **The consumption itself has no endpoint and no separate gate.** It runs inside the existing
+> completion paths — `apply_operation_completion_inventory_effects` when an **operation** completes and
+> `apply_completion_inventory_effects` when the **work order** does — so whoever is authorized to
+> complete the work is what authorizes the resulting stock movement, including the operator-facing
+> kiosk and shop-floor completion verbs and the reconcile-on-read GET. **The reversal is the
+> asymmetric case, deliberately**: consuming needs no gate beyond the authority to complete the work,
+> while un-consuming has its own endpoint, its own Admin/Manager/Supervisor gate and a mandatory
+> reason. That asymmetry is the point — production authorizes depletion because production happened;
+> nothing on the floor happens that authorizes putting material back, so somebody has to say why. **The attributed actor is
+> whoever completed the operation the material was consumed against** — with the trigger at operation
+> completion that is the operator who finished nest 1 of 3, not whoever later closed the job. (Through
+> PR 2 it was the other way round and this paragraph said so; the reconcile-on-read GET is still the
+> one path with no meaningful actor, which is exactly why it is **not** a per-operation trigger — see
+> `docs/MATERIAL_CONSUMPTION_PLAN.md` → Residual gaps.) **No role gained a capability — and one role LOST one.** An Operator
+> could already drive consumption by completing a job's last operation, so what changed is when and how
+> often, not who. In the other direction, `POST /api/v1/work-orders/operations/{id}/complete` — the
+> **office** operation-complete verb — was gated to **Admin / Manager / Supervisor / Quality** in the same
+> change, matching `complete-work-order` (its larger sibling, which completes every operation on the work
+> order). Quality is included deliberately: refusing it a single operation while allowing it the whole work
+> order would be incoherent. `reduce-production` stays stricter for a reason that does not apply here — it
+> rewrites other operators' recorded labor.
+> It had been open to any authenticated tenant user, **Viewer and Shipping included**, while its office
+> siblings were already gated. That gap predates this work,
+> but it became load-bearing the moment completing an operation began decrementing stock: a Viewer could
+> move inventory and write hash-chain rows from a page they were only supposed to read. The UI button is
+> gated to the same tier. **Operators are unaffected** — they complete work through
+> `/api/v1/shop-floor/operations/{id}/complete` and the kiosk, which is the documented design above, not
+> through the office page. This is deliberate: material depletes
+> because production happened, not because someone was granted an inventory power. The stock
+> decrement, the `ISSUE` ledger row, and any `ALLOCATION_SHORTAGE` are audited on the hash chain
+> regardless of which path drove them. Lifecycle side effects follow the same rule — nest re-import
+> and work-order delete cancel or refuse ties under **their own** existing gates (Admin / Manager /
+> Supervisor for import; Admin / Manager for WO delete). See `docs/API.md` → Work Orders →
+> "Material ties" and [docs/MATERIAL_CONSUMPTION_PLAN.md](MATERIAL_CONSUMPTION_PLAN.md).
+
 ### Parts
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
@@ -142,7 +267,52 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 | View | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Create | ✓ | ✓ | ✓ | | | | |
 | Edit | ✓ | ✓ | ✓ | | | | |
+| **Arm automatic BOM backflush** (`backflush_components`) | ✓ | ✓ | ✓ | | | | |
+| View backflush readiness / dry-run preview | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Delete | ✓ | | | | | | |
+
+> **The backflush row is the ordinary Edit row, and that is a recorded decision, not an omission**
+> (`feat/backflush-exposure`, PR 4.5). `Part.backflush_components` opts a part into **automatic
+> consumption of its BOM/routing components out of stock** on every future work-order completion — a
+> permanent, shop-wide policy change that writes the lots it drew onto the as-built record. It is set as
+> an ordinary field on `PUT /parts/{id}` (and on `PUT /materials/{id}`, which writes the same `parts`
+> rows through the same schema), so its authorization tier is whatever those endpoints already enforce:
+> **`require_role([ADMIN, MANAGER, SUPERVISOR])` — the same permission as editing a description.** The
+> owner chose this over a dedicated reasoned verb limited to Admin/Manager. Three consequences are
+> **accepted residuals**, recorded in `docs/CMMC_LEVEL_2_COMPLIANCE.md`: a **supervisor** can arm it;
+> **no reason is captured** (the audit row records who, when, false→true, and the readiness verdict in
+> `extra_data` — not why); and **a concurrent flip does not 409**, because `Part` maps no `version`
+> column, so optimistic locking on parts is cosmetic and last write wins.
+>
+> **The role gate is not the only gate.** Enabling is refused **409** while the part's readiness check
+> reports a blocking diagnostic, through one shared function (`assert_backflush_change_allowed`) defined
+> in `parts.py` and **imported** by `materials.py` — a gate in only one of the two files would not be a
+> gate. **Disabling is never refused.** Neither door accepts the field on **create**: it is absent from
+> `PartBase`/`PartCreate`, so `POST /parts/`, `POST /materials/` and both CSV importers cannot set it,
+> and a part is always created **off**.
+>
+> **⚠️ But the gate protects the instant of the flip and nothing after it, which matters for how the
+> permission should be read.** The readiness check runs the part's **BOM** explosion only — the routing
+> half is not evaluated at part scope at all — it is evaluated **once**, and it is never re-run on a BOM
+> edit, a routing change, a release or a completion. Every input it read stays editable afterwards by the
+> **same ADMIN/MANAGER/SUPERVISOR tier** through `boms:edit` / `routings:edit`, and **nothing on those
+> edit paths knows the part is armed**. So the recorded verdict `backflush_readiness: "clean"` asserts
+> less than a reader assumes: not "this part's demand resolves correctly", only "no blocking diagnostic
+> in its BOM at that instant". What backs it afterwards is a completion-time refusal
+> (`BACKFLUSH_DEMAND_REFUSED`), which is a net, not a second gate. **Practically: granting `boms:edit` or
+> `routings:edit` is, for an armed part, granting the ability to change what automatically leaves stock.**
+>
+> **Auditing who armed it is ONE query, through either door.** `PUT /materials/{id}` writes the same
+> `parts` row and logs the change as `resource_type="part"`, not `"material"`, so the trail is not split
+> by which URL was used (`create_material` / `delete_material` still log `"material"`). The canonical
+> query recipe lives in [docs/CMMC_LEVEL_2_COMPLIANCE.md](CMMC_LEVEL_2_COMPLIANCE.md) → the 2026-07-27
+> (PR 4.5) changelog row, item (3) — written down once, on purpose.
+>
+> The two read companions — `GET /parts/{id}/backflush-readiness` and
+> `GET /work-orders/{id}/backflush-preview` — follow the read-broad rule at the top of this document
+> (any authenticated user in the tenant) and are **pure reads: they write nothing**, not even an audit
+> row. See `docs/API.md` → Parts → Part Schema, and
+> [docs/MATERIAL_CONSUMPTION_PLAN.md](MATERIAL_CONSUMPTION_PLAN.md) → "Exposing the flag (PR 4.5)".
 
 ### BOMs
 
@@ -151,8 +321,44 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 | View | ✓ | ✓ | ✓ | ✓ | ✓ | | ✓ |
 | Create | ✓ | ✓ | ✓ | | | | |
 | Edit | ✓ | ✓ | ✓ | | | | |
+| **View unit-of-measure mismatch report** (`GET /bom/uom-mismatches`) | ✓ | ✓ | ✓ | | | | |
+| **BOM Unit Mismatches page** (`/bom/uom-mismatches`) — nav entry + route, `boms:edit` | ✓ | ✓ | ✓ | | | | |
 | Delete | ✓ | ✓ | | | | | |
 | Release | ✓ | ✓ | | | | | |
+
+> **The unit-of-measure mismatch report is gated to the Edit tier, not the View tier — deliberately**
+> (`feat/backflush-exposure`, PR 4.5). It is a **remediation worklist**, not a browse view: every row on
+> it is a BOM line someone has to go and correct before the part it belongs to can be armed for automatic
+> backflush. ADMIN / MANAGER / SUPERVISOR is exactly the set that can act on a row — edit the line
+> (`PUT /bom/items/{id}`) or arm the flag (`PUT /parts/{id}`) — so handing the list to a role that can do
+> neither buys nothing. It is a **pure read: it writes nothing**, not even an audit row. Note this is
+> *narrower* than the two backflush read companions above, which are open to any authenticated tenant
+> user because they answer a question about one part a user is already looking at. See `docs/API.md` →
+> BOM (Bill of Materials).
+>
+> **The screen carries the same gate, in both places it can be enforced.** PR 4.5 shipped the report
+> API-only; the follow-up added the **BOM Unit Mismatches** page at **`/bom/uom-mismatches`** (sidebar:
+> Engineering → *BOM Unit Mismatches*, directly after *Bill of Materials*). Both the nav entry and the
+> route require **`boms:edit`**, whose role set — `{platform_admin, admin, manager, supervisor}` — is
+> exactly the endpoint's `require_role([ADMIN, MANAGER, SUPERVISOR])`. So the link is not rendered for a
+> role that cannot act on a row, **and** the route guard refuses a deep link from one; the API gate then
+> refuses the fetch regardless, which is the enforcement that actually counts. The route entry is
+> `{ prefix: '/bom/uom-mismatches', permission: 'boms:edit' }` and wins over the `/bom` → `boms:view`
+> entry because `getRouteAccessRequirement` matches the **longest** prefix — a page gated *more* tightly
+> than the parent it sits under, which is the reason that longest-prefix rule exists. Nav gating needed a
+> small mechanism that did not exist before: `NavItem` gained an optional `permission`, and
+> `visibleNavigation` filters items **and** collapsible-group children by it, dropping a group left with
+> no visible children so no group opens onto nothing. Every pre-existing nav item carries no
+> `permission`, so nothing else changed.
+>
+> **What the page can and cannot do is part of the gate's rationale.** It is **read-only**: rows
+> deep-link to `/bom?id={bom_id}` and to the assembly part, and there is no inline BOM-line editor,
+> because BOM-line create/update/delete write **no audit rows at all** today — making this screen the
+> primary remediation flow would put a compliance-critical correction on an un-audited endpoint. The
+> corrections themselves therefore run through the ordinary, already-gated BOM edit path. See
+> `docs/API.md` → BOM → *Where this is worked — the BOM Unit Mismatches screen*, and
+> [docs/MATERIAL_CONSUMPTION_PLAN.md](MATERIAL_CONSUMPTION_PLAN.md) → "Exposing the flag (PR 4.5)" for
+> the run-report → correct-lines → re-check-readiness → arm sequence.
 
 ### Routings
 
@@ -225,7 +431,105 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 |------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
 | View | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Adjust | ✓ | ✓ | ✓ | | | | |
+| Issue | ✓ | ✓ | ✓ | | | | |
+| Receive | ✓ | ✓ | ✓ | | | | |
 | Transfer | ✓ | ✓ | ✓ | | | | |
+| Create location | ✓ | ✓ | | | | | |
+| Create / complete cycle count | ✓ | ✓ | ✓ | | | | |
+| Start (open) cycle count | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
+| Record count on an item | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
+
+> **Issue — now enforced in code (Admin / Manager / Supervisor).** `POST /api/v1/inventory/issue`
+> (`app/api/endpoints/inventory.py`) was previously gated only by `get_current_user` — **any**
+> authenticated user in the tenant could issue stock off a lot, with no role restriction. It is now
+> `require_role([ADMIN, MANAGER, SUPERVISOR])`, the same set as the sibling stock-mutating
+> `/inventory/adjust`, which is what the **Issue** row above records. The endpoint is additionally
+> marked **deprecated** in favor of a planned work-order-scoped `POST /work-orders/{id}/issue-material`
+> (that replacement is not implemented yet — `/inventory/issue` is still the supported path). See
+> `docs/API.md` → Inventory.
+
+> **Receive / Transfer — now enforced in code (Admin / Manager / Supervisor).** `POST
+> /api/v1/inventory/receive` and `POST /api/v1/inventory/transfer` previously depended on
+> `get_current_user` only, so **any** authenticated user in the tenant — Viewer included — could
+> create stock and write a ledger row. Both now carry `require_role([ADMIN, MANAGER, SUPERVISOR])`,
+> matching the sibling stock mutators `/inventory/issue` and `/inventory/adjust` and the PO-receipt
+> path `POST /receiving/receive`, which writes the same `inventory_items` /
+> `inventory_transactions` tables. The **Transfer** row above was previously intended policy the
+> server did not enforce; it is now an enforced control, and the new **Receive** row records the
+> gate that closed the same gap on the receive path. (An earlier revision of this section described
+> both as un-gated drift — that is no longer true.)
+>
+> The UI layer now agrees with the server on this one: `frontend/src/pages/Inventory.tsx` hides the
+> **Receive Inventory** button and drops the per-row **Transfer** action (column and mobile-card
+> affordance) for roles without `inventory:adjust` / `inventory:transfer`, which resolve to exactly
+> Admin / Manager / Supervisor (+ Platform Admin, who bypasses `require_role` server-side). Per the
+> [Access enforcement model](#access-enforcement-model) the UI gate remains cosmetic — the server
+> gate is the control.
+
+> **Cycle counts — endpoint mapping.** On `app/api/endpoints/inventory.py`:
+>
+> | Step | Endpoint | Gate |
+> |------|----------|------|
+> | Create + enroll stock rows | `POST /inventory/cycle-counts` | `require_role(STOCK_MUTATOR_ROLES)` = `[ADMIN, MANAGER, SUPERVISOR]` |
+> | Open for counting | `POST /inventory/cycle-counts/{id}/start` | `require_role(COUNT_WRITE_ROLES)` = everyone except Viewer |
+> | Record a counted quantity | `POST /inventory/cycle-counts/{id}/items/{item_id}/count` | `require_role(COUNT_WRITE_ROLES)` = everyone except Viewer |
+> | Complete + post adjustments | `POST /inventory/cycle-counts/{id}/complete` | `require_role(STOCK_MUTATOR_ROLES)` = `[ADMIN, MANAGER, SUPERVISOR]` |
+>
+> **`start` and `record_count` now exclude Viewer — the only cycle-count policy change.** Both were
+> bare `get_current_user`, so **Viewer** — the read-only role, which
+> `frontend/src/utils/permissions.ts` grants `inventory:view` and nothing else — could open a count
+> and write the counted quantities a manager's ledger-posting `complete` derives its adjustment
+> from. That is a write, and a quality record at that, so it does not belong to a read-only role.
+>
+> The gate is deliberately defined by **exclusion**
+> (`COUNT_WRITE_ROLES = [ADMIN, MANAGER, SUPERVISOR, OPERATOR, QUALITY, SHIPPING]`, in
+> `app/api/endpoints/inventory.py`): every *working* role keeps both verbs, so the entire shop-floor
+> counting path is preserved and only the read-only role loses access. Counting is the operator
+> task; the privileged steps stay *creating* the count (which enrolls the stock rows) and
+> *completing* it (which posts the variance to the ledger), both unchanged at
+> `[ADMIN, MANAGER, SUPERVISOR]`.
+>
+> **Do not narrow `start` further.** An earlier revision of this pass gated it to Admin / Manager /
+> Supervisor; that was reverted before merge, because combined with the `record_count` IN_PROGRESS
+> requirement below it would leave an operator unable to work a `SCHEDULED` count at all (unable to
+> open one, and **409** on any attempt to count into it) — a shop-floor capability regression rather
+> than a hardening. The operator path — `start` a scheduled count, then `record_count` into it — is
+> pinned by
+> `backend/tests/api/test_inventory_hardening.py::test_operator_can_start_a_scheduled_count_and_record_into_it`,
+> and every non-Viewer role is pinned by `test_start_allowed_for_every_working_role` /
+> `test_record_count_allowed_for_every_working_role`.
+>
+> Beyond authorization, the hardening pass added **integrity guards and audit coverage** to these
+> two steps:
+>
+> - `start` returns **409** on a terminal count (`COMPLETED` / `CANCELLED`) — re-opening a completed
+>   count would let a second `complete` double-post the same physical variance to the ledger.
+> - `start` writes a `cycle_count` STATUS_CHANGE audit row on the real `SCHEDULED → IN_PROGRESS`
+>   transition, and preserves the original `started_at` when an already-started count is re-assigned
+>   (audited as an UPDATE of `assigned_to`, not a fabricated second transition).
+> - `record_count` returns **409** unless the parent count is `IN_PROGRESS`. A counted quantity is
+>   the quality record the variance adjustment derives from: once the count is closed that record is
+>   evidence and must not be overwritten, and before it is opened there is nothing to count against.
+> - `record_count` writes a `cycle_count_item` **UPDATE** audit row on every counted quantity. A
+>   re-POST while the count is still `IN_PROGRESS` is legal (a genuine re-count) but silently
+>   replaces `counted_quantity` / `variance` / `counted_by` — the audit row is the only surviving
+>   record of what it overwrote.
+> - `POST /inventory/cycle-counts` writes a `cycle_count` **CREATE** audit row carrying the declared
+>   scope (`warehouse`, `location_code`, `part_id`) and the number of stock rows enrolled, so "who
+>   scoped this count, and which rows did `complete` later adjust" is answerable from the hash chain.
+>
+> Also changed by the same hardening pass:
+> `record_count` is now **tenant-scoped** — it resolves the parent count *and* the count item
+> against the active company (**404** otherwise), where it previously matched on ids alone. That was
+> a real authorization defect in the code, though not an exploitable one in the field: the only
+> writer of `cycle_count_items` is `POST /inventory/cycle-counts`, which omitted the NOT NULL
+> `company_id` stamp and therefore always failed with `IntegrityError` whenever it enrolled a row,
+> so no cross-tenant `cycle_count_items` row could exist to be written onto (rows predating
+> migration `026_add_multi_tenancy` were backfilled to the single seeded company). `POST
+> /inventory/cycle-counts` now enrolls only the active company's inventory rows and stamps
+> `company_id` on each `CycleCountItem`, and `.../complete` adjusts only this company's stock.
+> See `docs/API.md` → Inventory for the lifecycle guards (**409** on terminal counts, **404** on an
+> unresolvable `location_code`) and the audit rows these steps now write.
 
 ### Purchasing
 
@@ -234,6 +538,8 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 | View | ✓ | ✓ | ✓ | | | | ✓ |
 | Create | ✓ | ✓ | ✓ | | | | |
 | Approve | ✓ | ✓ | | | | | |
+| Delete / restore vendor (soft) | ✓ | ✓ | | | | | |
+| Delete / restore purchase order (soft) | ✓ | ✓ | | | | | |
 
 > **Read enforcement:** Per the [Access enforcement model](#access-enforcement-model),
 > Purchasing list/detail reads (`list_vendors`, `list_purchase_orders`, and the
@@ -243,6 +549,18 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > restriction. Only the write/approve actions (Create, Approve, send, line edits) are
 > role-gated. Receiving (below) follows the same read-broad / write-restricted pattern.
 
+> **Vendor / PO soft-delete + restore — endpoint mapping.** `DELETE /purchasing/vendors/{id}`,
+> `POST /purchasing/vendors/{id}/restore`, `DELETE /purchasing/purchase-orders/{id}`, and
+> `POST /purchasing/purchase-orders/{id}/restore` (`app/api/endpoints/purchasing.py`) are enforced **in
+> code** to the two **Delete / restore** rows above — `require_role([ADMIN, MANAGER])`. `Vendor` and
+> `PurchaseOrder` gained `SoftDeleteMixin` (migration `071_soft_delete_purchasing_ncr`), so these are
+> **soft** deletes (never physical — invariant #3): the row is flagged `is_deleted`, drops out of all
+> reads, and is restorable. Both the delete and the restore write a tamper-evident `audit_log` row.
+> Guardrails are server-enforced: a **vendor** delete also deactivates it (`is_active=false`) and is
+> refused (**400**) while it has an active PO; a **PO** delete is refused (**400**) when any line has
+> received material (void the receipts first); and opening a PO against a soft-deleted/inactive vendor
+> is refused (**404**). See `docs/API.md` → Purchasing.
+
 ### Receiving
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
@@ -250,6 +568,8 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 | View | ✓ | ✓ | ✓ | | ✓ | | ✓ |
 | Create | ✓ | ✓ | ✓ | | | | |
 | Inspect | ✓ | ✓ | ✓ | | ✓ | | |
+| Correct receipt (in place) | ✓ | ✓ | ✓ | | | | |
+| Void receipt (soft-delete) | ✓ | ✓ | | | | | |
 | Print / reprint receiving label | ✓ | ✓ | ✓ | | | | |
 | Configure print profile | ✓ | | | | | | |
 
@@ -264,6 +584,23 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > path existed under `/api/v1/purchasing`; that duplicate has been removed, so `/api/v1/receiving`
 > is the single source of truth. Receiving reads follow the same read-broad / write-restricted
 > pattern noted for Purchasing above.
+
+> **Correct / void receipt — endpoint mapping.** Fixing a mis-keyed receipt is enforced **in code** on
+> `app/api/endpoints/receiving.py`:
+> - **`PATCH /receiving/receipt/{receipt_id}`** (correct in place — new total quantity + optional
+>   traceability fields, required reason) → `require_role([ADMIN, MANAGER, SUPERVISOR])`, the **Correct
+>   receipt** row — the same receive-tier set that may `POST /receiving/receive` and post inventory
+>   adjustments.
+> - **`POST /receiving/receipt/{receipt_id}/void`** (soft-delete + full reversal, required reason) →
+>   `require_role([ADMIN, MANAGER])`, the **Void receipt** row — deliberately tighter (void is delete
+>   authority; Supervisor can correct but not void).
+>
+> `POReceipt` gained `SoftDeleteMixin` (migration `071_soft_delete_purchasing_ncr`); void is a soft
+> delete (invariant #3) and is **terminal — there is no restore** (re-receive to redo). Both actions
+> require a non-blank `reason`, are fully tamper-evidently audited, and reconcile the PO line, PO
+> status, and (dock-to-stock) inventory — the historical `RECEIVE` transaction is never mutated;
+> reversal is a signed compensating `ADJUST`. Corrections/voids are refused after the receipt is
+> inspected, or once its stock has been allocated/consumed. See `docs/API.md` → Receiving & Inspection.
 
 > **Thermal receiving-label printing (ProxyBox / WHTP203e).** Manually (re)printing the
 > 4×6 receiving label — `POST /receiving/receipt/{receipt_id}/print-label` — is enforced
@@ -335,6 +672,7 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 | Approve | ✓ | ✓ | | | ✓ | | |
 | Calibration | ✓ | ✓ | | | ✓ | | |
 | Manage scrap reason codes | ✓ | ✓ | | | ✓ | | |
+| Void / restore NCR | ✓ | ✓ | | | ✓ | | |
 
 > **Inspect — endpoint mapping.** The shop-floor inspection sign-off
 > `POST /api/v1/shop-floor/operations/{operation_id}/inspection` (which records
@@ -353,6 +691,17 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > authenticated user in the tenant, including Operators via the kiosk/desktop scrap pickers — so
 > the matrix row above reflects the server-enforced **write** control. There is no delete endpoint:
 > retirement is `is_active: false` (historical scrap rows reference these ids — traceability).
+>
+> **Void / restore NCR — endpoint mapping.** `DELETE /quality/ncr/{ncr_id}` (void) and
+> `POST /quality/ncr/{ncr_id}/restore` (`app/api/endpoints/quality.py`) are enforced **in code** to the
+> **Void / restore NCR** row above — `require_role([ADMIN, MANAGER, QUALITY])`. `NonConformanceReport`
+> gained `SoftDeleteMixin` (migration `071_soft_delete_purchasing_ncr`); a void is a soft delete
+> (invariant #3) that also moves the NCR to the existing `VOID` status, requires a **non-blank
+> `reason`**, and is **refused (400)** while the NCR still actively gates a work order (an
+> `OPEN`/`ACKNOWLEDGED` `WorkOrderBlocker` references it). Restore reopens it to `OPEN`. Both are
+> tamper-evidently audited — the void writes a status-change **and** a delete row, closing a prior gap
+> where the `PUT /quality/ncr/{id}` update path wrote no `audit_log` row at all. See `docs/API.md` →
+> Quality.
 
 ### Operator Certifications & Training
 
@@ -425,6 +774,26 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 | Edit | ✓ | | | | | | |
 | Delete | ✓ | | | | | | |
 | Roles | ✓ | | | | | | |
+| Own profile + notification settings (`/users/me/*`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+> **Self-scoped `/users/me/*` routes are open to every authenticated role — by construction, not by
+> grant.** `GET /users/me`, `PUT /users/me/phone`, `GET`/`PUT /users/me/notification-preferences`,
+> and `POST /users/me/test-sms` (`app/api/endpoints/users.py`) carry **no `require_role`**: they
+> read and write only `current_user` and **never accept a user id**, so there is no id to authorize
+> and no path to another user's record. The backing UI is **My Settings** (`/settings`), routed for
+> all authenticated roles. Notes:
+> - **Phone changes are audited** on both the self-service path (`extra_data.source =
+>   "self_service"`) and the Admin `POST /users/` / `PUT /users/{id}` paths — the phone is the
+>   destination of every SMS alert. Numbers are normalized to E.164; an invalid number is **400**.
+> - **`phone` is field-minimized**: it serializes only in the self-profile / Admin-Manager
+>   user-management `UserResponse`, never in general user serialization. See
+>   [docs/NOTIFICATIONS.md](NOTIFICATIONS.md#phone-is-field-minimized).
+> - **`POST /users/me/test-sms` targets the caller's own number only** (never a caller-supplied
+>   destination), is gated by the company `allow_sms_egress` kill switch, and is rate-limited
+>   **3/minute** per IP.
+> - Saving preferences cannot bypass a **mandatory** channel: the dispatcher re-applies the
+>   catalog's `mandatory_channel` at send time regardless of the stored row, so a mandatory-critical
+>   event can never be fully muted.
 
 > **User writes are Admin-only, and both `require_role([ADMIN])`** — `POST /users/` (create),
 > `PUT /users/{id}` (edit, incl. role assignment), and `DELETE /users/{id}` (deactivate) all gate to
@@ -453,8 +822,11 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 >
 > **Password-strength policy.** A password set on any of these paths — `POST /users/` (create),
 > `POST /users/{id}/reset-password`, and self-service `POST /users/change-password` — must satisfy
-> the server-side strength policy (≥ 12 chars; uppercase, lowercase, number, and special char; no
-> common weak substring), the **same policy** as `POST /auth/register`. The same policy also governs
+> the server-side strength policy (≥ 12 chars; and no common weak substring from the ~37-entry
+> blocklist in `app/schemas/user.py`), the **same policy** as `POST /auth/register`. There are **no
+> character-class requirements**: the uppercase / lowercase / number / special-char rules were removed
+> on 2026-07-29 in favor of length + blocklist per NIST SP 800-63B §5.1.1.2, and the blocklist was
+> expanded in the same change. The same policy also governs
 > the **first-admin `admin_password`** on the two company-creation paths — the unauthenticated
 > `POST /companies/register` (company self-registration) and platform-admin `POST /platform/companies`.
 > The user CSV import applies it per row to user-supplied passwords; operator auto-generated (badge)
@@ -667,6 +1039,7 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 | Audit Logs | ✓ | ✓ | | | | | |
 | AI usage & cost summary (`/ai-usage/summary`) | ✓ | ✓ | | | | | |
 | AI egress kill switch (`PUT /companies/me/ai-egress`) | ✓ | | | | | | |
+| SMS egress kill switch (`PUT /companies/me/sms-egress`) | ✓ | | | | | | |
 | Wallboard display tokens (`/auth/display-token` issue/list/revoke + setup-code reissue) | ✓ | ✓ | | | | | |
 | Visitor sign-in stations (`/visitor-logs/stations` create/list/revoke/reset-pin) | ✓ | ✓ | | | | | |
 | Crew kiosk stations (`/shop-floor/kiosk-stations` create/list/revoke/reset-pin) | ✓ | ✓ | | | | | |
@@ -747,6 +1120,21 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > other roles. See [docs/API.md](API.md) →
 > Company (self-service) and [docs/AI_QUOTING_AGENT_RUNBOOK.md](AI_QUOTING_AGENT_RUNBOOK.md).
 
+> **SMS egress kill switch (`PUT /api/v1/companies/me/sms-egress`).** Enforced **in code** via
+> `require_role([ADMIN])` — **Admin-only**, for the same reason as the AI switch above: it gates all
+> outbound notification SMS to **Twilio, which sits outside the CUI boundary**, so flipping it is a
+> CUI-boundary decision reserved to Admins. It only ever mutates the caller's **own active company**
+> (`get_current_company_id`; never taken from the request body). Flipping `Company.allow_sms_egress`
+> writes tamper-evident `audit_log` rows **twice** — a field update **and** an
+> `sms_egress_enabled` / `sms_egress_disabled` status change. Every company is created **OFF**, and
+> the switch is re-resolved **fail-closed before every send** (unknown tenant, missing company row,
+> or a DB error all deny), so turning it off also stops messages already queued in ARQ. Surfaced in
+> the UI at **Admin Settings → SMS Privacy** (`/admin/settings?tab=smsprivacy`). Note this is only
+> the *company* half of the gate — SMS additionally requires a **per-user** opt-in with a saved
+> phone number (self-service, see Users above), and only `sms_eligible` catalog events are
+> offerable. See [docs/API.md](API.md) → Company (self-service) and
+> [docs/NOTIFICATIONS.md](NOTIFICATIONS.md#sms-channel-twilio).
+
 > **Wallboard display tokens (`/auth/display-token`, A0.5).** Issue / list / revoke / setup-code
 > reissue (`POST /auth/display-token/{id}/setup-code`) are enforced
 > **in code** via `require_role([ADMIN, MANAGER])` and tenant-scoped to the active company;
@@ -758,7 +1146,12 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > and carries no user identity** — it is a single-endpoint credential for an unattended TV. What it
 > **can** do: authenticate the read-only `GET /shop-floor/wallboard` (via the dedicated
 > `get_display_or_user` dependency), scoped to the issuing company (taken from the `display_tokens`
-> DB row, never from the client). What it **cannot** do: reach any other endpoint (`verify_token`
+> DB row, never from the client). A per-display **`show_customer_names`** flag (Boolean, default
+> `false`; migration `072`) additionally gates whether the board reveals work-order **customer
+> names**; for **signed-in** callers of the same endpoint that content is gated by **role** —
+> only **Platform Admin / Admin / Manager** see customer names, and every other role (Supervisor /
+> Operator / Quality / Shipping / Viewer) plus every un-flagged display token gets the redacted,
+> public-safe board (`docs/WALLBOARD.md` → Customer names — gated). What it **cannot** do: reach any other endpoint (`verify_token`
 > accepts only `type == "access"` JWTs, so a display token gets **401** everywhere else), write
 > anything (the wallboard endpoint performs zero writes), or outlive revocation/expiry (the DB row
 > is re-checked on every request; a revoked token dies on the TV's next ~30s poll). As with AI

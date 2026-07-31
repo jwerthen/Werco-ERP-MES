@@ -80,12 +80,11 @@ const roleLabels: Record<UserRole, string> = {
   viewer: 'View Only',
 };
 
+// Must mirror validate_password_strength in backend/app/schemas/user.py.
 const passwordRequirements = [
-  'At least 12 characters',
-  'Uppercase and lowercase letters',
-  'At least one number',
-  'At least one special character',
-  'No common words like password, admin, or welcome',
+  'At least 12 characters — longer is better',
+  'A passphrase of a few words works well and is easier to remember',
+  'No common words or patterns like password, admin, welcome, or werco',
 ];
 
 const approvableRoles: UserRole[] = ['operator', 'supervisor', 'quality', 'shipping', 'manager', 'admin', 'viewer'];

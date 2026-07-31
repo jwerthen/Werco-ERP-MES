@@ -69,7 +69,24 @@ SUPABASE_DB_PASSWORD=<your-supabase-db-pass>
 | `ALGORITHM` | No | `HS256` | JWT algorithm. Options: HS256, HS384, HS512 |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | No | `15` | Access token lifetime in minutes |
 | `REFRESH_TOKEN_EXPIRE_DAYS` | No | `7` | Refresh token lifetime in days |
-| `SESSION_ABSOLUTE_TIMEOUT_HOURS` | No | `24` | Force re-login after this many hours |
+| `SESSION_ABSOLUTE_TIMEOUT_HOURS` | No | `168` | Session ceiling stamped into each refresh token at mint time. In practice this bounds an **idle** window, not total session life — see the note below |
+
+> **What `SESSION_ABSOLUTE_TIMEOUT_HOURS` actually bounds.** `create_refresh_token`
+> (`app/core/security.py`) stamps an `absolute_timeout` claim of `utcnow() + this many hours` into
+> every refresh token it mints, and `verify_refresh_token` rejects a token once that instant has
+> passed. But `POST /auth/refresh` mints its replacement token through the same function, which
+> recomputes the claim from the current time — there is no parameter to carry the original forward.
+> **Every refresh therefore restarts the clock.** The effect is an *idle* timeout: a user who
+> exercises the app at least once per window is never forced to re-authenticate, while a user who
+> goes quiet for longer than the window must log in again. This has been the behavior since the
+> setting was introduced; it was not changed when the default was raised.
+>
+> The default was raised `24` → `168` on 2026-07-29, making it equal to
+> `REFRESH_TOKEN_EXPIRE_DAYS` (7 days) so the refresh window itself is the binding limit. The
+> mechanism was kept rather than removed: **set this env var lower to re-arm a tighter cap** (e.g.
+> `SESSION_ABSOLUTE_TIMEOUT_HOURS=24` restores the previous daily idle window) with no code change.
+> A change here only affects **newly minted** tokens — users holding a token keep the value it was
+> minted with until their next refresh or login.
 
 ### Rate Limiting
 
@@ -95,7 +112,7 @@ requests get **HTTP 429** with a `Retry-After` header and body `{"detail": "Rate
 | `/api/v1/auth/register` | 3/minute |
 | `/api/v1/auth/register-public` | 3/minute |
 | `/api/v1/auth/refresh` | 30/minute |
-| `/api/v1/auth/employee-login` | 3/minute |
+| `/api/v1/auth/employee-login` | 10/minute |
 | `/api/v1/visitor-logs/station-login` | 5/minute |
 | `/api/v1/scanner/resolve-action` | 60/minute |
 
@@ -103,6 +120,52 @@ These limits are not configurable by env var — they are defined in `backend/ap
 (`AUTH_RATE_LIMITS` / `ENDPOINT_RATE_LIMITS`). Enforcement **fails open**: if the limiter
 backend errors, the request is allowed (the global default limit still applies) and a warning
 is logged. Blocked attempts emit a `logger.warning`.
+
+`/api/v1/auth/employee-login` additionally carries a **per-IP failed-attempt throttle**
+(`backend/app/core/login_throttle.py`, not env-configurable) as the compensating control for its
+10/minute limit: 8 FAILED attempts from one IP within 15 minutes → 429 with a 15-minute cooldown.
+Successful logins never count. Uses Redis when `REDIS_URL` is set (cross-worker), else an
+in-process counter; a storage outage fails open with a logged
+`employee_login_throttle_fail_open` warning.
+
+### Request Body Size (JSON)
+
+The `limit_json_body_size` middleware (`backend/app/main.py`) caps the size of every JSON-bodied
+`POST`/`PUT`/`PATCH`, and it runs **before** route-level auth dependencies. That ordering is the
+whole reason for the cap: without it an **unauthenticated** caller decides how many bytes the app
+buffers into memory and hands to `json.loads`, and how large the resulting Python object graph
+gets. General request-size hygiene, not a defense against any specific payload.
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `MAX_JSON_BODY_BYTES` | No | `262144` | Maximum size in bytes of an `application/json` request body the app will accept. Over the cap the request is **rejected with HTTP 413** (`{"detail": "Request body too large: … exceeds the …-byte limit for JSON requests."}`, CORS headers applied) before the route runs. `262144` = 256 KB |
+| `MAX_SANITIZED_JSON_BODY_BYTES` | No | — | **Deprecated alias for `MAX_JSON_BODY_BYTES`, still honored.** The pre-rename name, kept so an environment that already sets it keeps taking effect. If both are set, `MAX_JSON_BODY_BYTES` wins. Migrate to the new name; the fallback goes away once no environment sets the old one |
+
+Two gates enforce it: a `Content-Length` check **before** the body is buffered (so an oversized
+request is never read into memory), and a `len(body)` re-check after the read, which catches
+chunked transfer-encoding and a header that lies.
+
+> **The "SANITIZED" in the old name is history.** This middleware used to also rewrite every JSON
+> body with a `bleach`-stripped copy — mutating data *before* persistence. That was removed on
+> 2026-07-30 along with the `bleach` dependency: it corrupted quality records (ASME Y14.5 notation
+> like `2.500 <REF>` was silently stored as `2.500`) while protecting nothing, because the SPA
+> renders no raw HTML and the one backend sink that interprets markup (reportlab `Paragraph`) now
+> escapes at render. Only the size cap remains. See
+> [SECURITY_ADVISORY_SUPPRESSIONS.md → bleach removed](SECURITY_ADVISORY_SUPPRESSIONS.md#bleach-removed--escape-at-the-sink-2026-07-30).
+
+**What it does not gate.** Only `application/json` bodies. **`multipart/form-data` / `UploadFile`
+paths are untouched** — every CSV/XLSX bulk import, RFQ package, laser-nest ZIP/PDF and PO source
+document keeps its own per-endpoint limit (the 20 MB cap in `qms_standards.py`, the 50 MB
+`LASER_UPLOAD_MAX_BYTES` in `work_orders.py`). Inbound **carrier webhooks** are untouched too:
+they skip this middleware entirely so their HMAC signature verifies against raw bytes.
+
+> **Raising it is the operational knob.** 256 KB clears the largest realistic bodies measured — a
+> 170-nest laser import (183 KB) and a 1000-line-item BOM create (201 KB) both fit. The known
+> ceiling is a **BOM create above roughly 1300 line items**, which will `413`; that is the case to
+> raise this for, and it is why the value is a setting rather than a constant (ops can raise it
+> without a deploy). Raising it raises the peak memory an unauthenticated request can make a worker
+> allocate, roughly linearly — the *quadratic* cost this warning used to carry was `bleach.clean`,
+> which no longer runs. Prefer splitting an oversized import over widening the cap globally.
 
 ### CORS (Cross-Origin Resource Sharing)
 
@@ -166,8 +229,13 @@ ALLOWED_HOSTS=api.werco.com,erp.werco.com,*.up.railway.app,healthcheck.railway.a
 > location is **not** an env var — the warehouse (`MAIN`) and location (`FINISHED-GOODS`) are module
 > constants (`FINISHED_GOODS_WAREHOUSE` / `FINISHED_GOODS_LOCATION` in
 > `app/services/completion_inventory_service.py`). Likewise, **component backflush on completion** is
-> not a global switch: it is a per-part database flag (`parts.backflush_components`, default `false`),
-> set on the part record, not via configuration. Neither has an environment variable.
+> not a global switch: it is a per-part database flag (`parts.backflush_components`, default `false`).
+> **Since PR 4.5 (2026-07-27) it is settable — but only through `PUT /parts/{id}` / `PUT /materials/{id}`,
+> behind a readiness refusal gate (409), and never on create or import.** It is still per-part, still
+> default-off, and no production part has opted in, so the backflush leg still has not run in production.
+> Corrects the previous text here, which said it was "not settable *anywhere* today". See
+> `docs/MATERIAL_CONSUMPTION_PLAN.md` → "Exposing the flag (PR 4.5)" and `docs/API.md` → Parts → Part
+> Schema. Neither the FG-receipt location nor this flag has an environment variable.
 >
 > The **operator-qualification gate** (Batch 11C / G5-B) adds **no** env var either: its minimum
 > `SkillMatrix` skill level is the module constant `MIN_SKILL_LEVEL = 2` in
@@ -284,11 +352,28 @@ REDIS_URL=redis://default:xxx@xxx.railway.internal:6379
 | `SMTP_PASSWORD` | No | - | SMTP password or app-specific password |
 | `SMTP_FROM` | No | `noreply@werco.com` | From email address |
 | `SMTP_FROM_NAME` | No | `Werco ERP System` | From display name |
+| `FRONTEND_BASE_URL` | No | `""` (empty) | Base URL used to build **absolute** deep links + the "Manage notifications" footer in outbound emails (e.g. `https://app.werco.com`). Empty by default → the link button/footer are omitted (relative `link` only). No trailing slash. |
 
 **Gmail Setup:**
 1. Enable 2FA on your Google account
 2. Generate an App Password at https://myaccount.google.com/apppasswords
 3. Use the app password as `SMTP_PASSWORD`
+
+> **`SMTP_*` are now live `Settings`, not dead config.** As of the notification foundation (PR 1),
+> `EmailService` reads `settings.SMTP_HOST/PORT/USER/PASSWORD/FROM/FROM_NAME` — previously these
+> six fields existed on `Settings` but the email path read `os.getenv` directly, so setting them
+> had no effect (fixed defect §9.3). With SMTP unset, email sends log a skip and return without
+> raising (so unconfigured dev doesn't spam ARQ retries); a real transport failure now propagates
+> so the job retries and records the outcome. Eight previously-missing templates plus deep links
+> now actually send — **verify SPF/DKIM/DMARC on the `SMTP_FROM` domain** before enabling in prod
+> (deliverability checklist in [docs/NOTIFICATIONS.md](NOTIFICATIONS.md)).
+>
+> **SMS egress kill switch — no env var.** The Twilio egress gate is the per-company **database**
+> column `Company.allow_sms_egress` (Boolean, non-null, **default OFF** for every tenant), the same
+> fail-closed pattern as `allow_ai_egress` / `allow_carrier_egress` / `allow_print_egress` — it is a
+> DB flag, not configuration. Setting the `TWILIO_*` variables below is necessary but **not
+> sufficient**: the per-company switch (Admin Settings → SMS Privacy) and a per-user opt-in + phone
+> number are both still required. See **SMS (Twilio)** below.
 
 > **Visitor sign-in tablet — no new variables.** The visitor sign-in feature
 > ([docs/VISITOR_SIGNIN.md](VISITOR_SIGNIN.md)) introduces **no new environment variables**. The
@@ -296,6 +381,49 @@ REDIS_URL=redis://default:xxx@xxx.railway.internal:6379
 > employee only), and the scoped station signin token reuses the existing JWT signing keys
 > (`SECRET_KEY` / `ALGORITHM` under **Security** above) — the same keys that sign access, refresh, and
 > wallboard display tokens.
+
+### SMS (Twilio)
+
+Credentials for the notification **SMS channel** (see
+[docs/NOTIFICATIONS.md → SMS channel](NOTIFICATIONS.md#sms-channel-twilio)). All optional and empty
+by default. Set them on the **Railway backend service** (and the worker service, if it runs
+separately — `send_sms_job` executes there); they are **never committed** —
+`backend/.env.example` ships the names with empty values only.
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `TWILIO_ACCOUNT_SID` | Conditional³ | `""` | Twilio account SID (`AC…`). Required for **either** auth mode — in API-key mode it identifies the account the key acts on |
+| `TWILIO_API_KEY_SID` | Conditional³ | `""` | API-key SID (`SK…`) — **preferred** auth mode. Revocable per key without rotating the account credential |
+| `TWILIO_API_KEY_SECRET` | Conditional³ | `""` | Secret paired with `TWILIO_API_KEY_SID` |
+| `TWILIO_AUTH_TOKEN` | Conditional³ | `""` | Legacy account auth token — the **fallback** auth mode, used only when the two API-key values are not both set |
+| `TWILIO_MESSAGING_SERVICE_SID` | Conditional³ | `""` | Messaging service SID (`MG…`) — **preferred** sender; carries the pool / compliance registration |
+| `TWILIO_FROM_NUMBER` | Conditional³ | `""` | Sending number in E.164 (e.g. `+15125550100`). Used only when no messaging service SID is set |
+| `SMS_DEFAULT_REGION` | No | `US` | Region used to parse a phone number typed **without** a country code. Stored numbers are always normalized to E.164 |
+
+> ³ **Valid combinations.** SMS is considered configured only when **credentials AND a sender**
+> resolve (`sms_service.sms_configured()`):
+>
+> - **Credentials** — `TWILIO_ACCOUNT_SID` **+** (`TWILIO_API_KEY_SID` **and**
+>   `TWILIO_API_KEY_SECRET`) — *preferred*; **or** `TWILIO_ACCOUNT_SID` **+** `TWILIO_AUTH_TOKEN`.
+>   API-key mode wins whenever both API-key values are present.
+> - **Sender** — `TWILIO_MESSAGING_SERVICE_SID` **or** `TWILIO_FROM_NUMBER`
+>   (messaging service takes precedence).
+>
+> A partial set (e.g. an account SID with neither an API key pair nor an auth token) counts as
+> **unconfigured**.
+
+> **SMS is inert without these — and inert *with* them until two DB switches are on.** Unconfigured,
+> `send_sms` logs and returns a `skipped` result **without raising** (the same posture as
+> unconfigured SMTP), so dev/test never spams ARQ retries and delivery rows read
+> `skipped: not_configured`. Configured, sending still requires the per-company
+> `Company.allow_sms_egress` kill switch (Admin-only, default OFF) **and** a per-user opt-in plus a
+> saved phone number. The full turn-on sequence and the "no SMS arrived" checklist are in
+> [docs/NOTIFICATIONS.md](NOTIFICATIONS.md) → Operational.
+
+> **Never commit or paste credential values.** Rotate by issuing a new Twilio API key and updating
+> `TWILIO_API_KEY_SID` / `TWILIO_API_KEY_SECRET` — the preferred mode exists precisely so the
+> account-level `TWILIO_AUTH_TOKEN` does not have to be rotated. The client is a process-level
+> singleton built on first use, so a credential change takes effect on redeploy/restart.
 
 ### File Storage
 
@@ -412,6 +540,18 @@ SC-28), exactly as for carrier secrets.
 | `PROXYBOX_POLL_INTERVAL_SECONDS` | No | `1.0` | Cadence for polling `GET /jobs/{id}` for a terminal print-job state |
 | `PROXYBOX_MAX_WAIT_SECONDS` | No | `30.0` | Max wait for a terminal job state; on timeout the print returns a non-failed `timeout` result (the job may still print) rather than erroring |
 
+### Audit Log Hash Chain (CMMC AU-3.3.8)
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `AUDIT_HASH_CHAIN_ENABLED` | No | `true` | Master switch for the `audit_logs` SHA-256 hash chain. `true` (the default) is the historical behavior: advisory-locked `MAX+1` sequence allocation, `previous_hash` linked to the prior row, and a content hash per row. `false` **pauses** the chain — rows are still written with the same content, but `sequence_number` comes from a lock-free Postgres sequence, `previous_hash` is `NULL`, and `integrity_hash` is the `LEGACY_CHAIN_PAUSED` placeholder the verifier skips. |
+
+> ⚠️ **Pausing is not fully reversible.** Rows written while paused can never be made verifiable
+> retroactively, and gap-based deletion detection is permanently lost across that window. The
+> database immutability triggers (migrations `008`/`060`) are unaffected by this setting and remain in
+> force. Read `docs/AUDIT_LOG_RETENTION_RUNBOOK.md` → **Pausing the hash chain** before setting it to
+> `false`; migration `077` must be applied first (it creates the sequence the paused allocator uses).
+
 ### Audit Log Retention / Archival (CMMC AU-3.3.8)
 
 Audit logs are immutable (database triggers block UPDATE/DELETE) and are **never row-deleted** by
@@ -525,6 +665,7 @@ Set these manually in Railway dashboard:
 - `ALLOWED_HOSTS` - Comma-separated hostnames the API serves (enables Host-header validation; see [Trusted Hosts](#trusted-hosts-http-host-header)). On Railway you **must** include `healthcheck.railway.app` and `localhost` (the health-check probes) alongside your public domain / `*.up.railway.app`, or the deploy's health check returns `400` and the release never goes live
 - `STORAGE_BACKEND=s3` + `S3_BUCKET_NAME` / `S3_ENDPOINT_URL` / `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_REGION` - Railway has **no persistent volume**, so the default `local` document storage loses files on every redeploy; see [File Storage](#file-storage)
 - `REACT_APP_API_URL` - Your backend URL (for frontend service)
+- `TWILIO_*` / `SMS_DEFAULT_REGION` - **Only if using the notification SMS channel.** Set on the backend service (and the worker service, if separate); see [SMS (Twilio)](#sms-twilio). Leave unset to keep SMS off
 
 ## Security Best Practices
 
@@ -565,3 +706,11 @@ Verify `REDIS_URL` or individual Redis settings. Redis is optional but recommend
 
 ### "Email not sending"
 For Gmail, ensure you're using an App Password, not your account password.
+
+### "413 Request body too large" on a large JSON save
+A JSON body exceeded `MAX_JSON_BODY_BYTES` (default 256 KB; the old
+`MAX_SANITIZED_JSON_BODY_BYTES` name still works). In practice this means a very large BOM create
+(above roughly 1300 line items). Raise the value on the backend service — but read the sizing note
+under [Request Body Size](#request-body-size-json) first, and prefer splitting the import. File
+uploads are **not** affected by this setting; a 413 on an upload is that endpoint's own cap (20 MB
+QMS standards, 50 MB `LASER_UPLOAD_MAX_BYTES`).
