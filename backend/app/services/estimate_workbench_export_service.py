@@ -20,6 +20,7 @@ from app.models.estimate_workbench import (
 )
 from app.models.rfq_quote import QuoteEstimate, RfqPackage
 from app.services.estimate_workbench_service import build_verification_report
+from app.services.export_safety import harden_workbook
 from app.services.quote_pdf_service import build_customer_quote_pdf
 
 
@@ -392,6 +393,13 @@ def build_workbench_audit_xlsx(
                 action.get("anchor"),
             ]
         )
+
+    # Every sheet above is built with ws.append, so pin string cells in one pass
+    # right before save: tenant text (part numbers, descriptions, verification
+    # notes) can never be written as an <f> formula element, and a row added to
+    # any builder above is covered without a second thought. Non-destructive --
+    # values stay byte-identical and numerics stay numeric.
+    harden_workbook(wb)
 
     buf = BytesIO()
     wb.save(buf)

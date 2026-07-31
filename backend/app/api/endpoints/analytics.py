@@ -38,6 +38,7 @@ from app.schemas.analytics import (
 )
 from app.services.adoption_metrics_service import get_adoption_metrics
 from app.services.analytics_service import AnalyticsService, get_date_range
+from app.services.export_safety import sanitize_csv_mapping, sanitize_csv_row
 from app.services.flow_metrics_service import get_flow_metrics, get_wip_aging
 from app.services.prediction_service import PredictionService
 from app.services.quality_yield_service import get_fpy_rty, get_scrap_pareto
@@ -324,10 +325,13 @@ def _export_csv(data: List[dict], filename: str) -> StreamingResponse:
     if not data:
         raise HTTPException(status_code=400, detail="No data to export")
 
+    fieldnames = list(data[0].keys())
     output = io.StringIO()
-    writer = csv.DictWriter(output, fieldnames=data[0].keys())
-    writer.writeheader()
-    writer.writerows(data)
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    # Neutralize spreadsheet formulas (CWE-1236). Header included: the column
+    # list comes from a tenant-authored report template, not a fixed allowlist.
+    writer.writerow(dict(zip(fieldnames, sanitize_csv_row(fieldnames))))
+    writer.writerows(sanitize_csv_mapping(row) for row in data)
 
     output.seek(0)
     return StreamingResponse(

