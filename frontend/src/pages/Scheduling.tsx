@@ -4,14 +4,13 @@ import { addDays, startOfWeek, isBefore, isAfter, isSameDay } from 'date-fns';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { buildWsUrl, getAccessToken } from '../services/realtime';
 import { usePermissions } from '../hooks/usePermissions';
-import { calculateDispatchScore } from '../utils/dispatchScore';
+import { KioskRunOrderChip } from '../components/kiosk/KioskQueueCard';
 import {
   formatCentralDate,
   formatInCentralTime,
   getCentralDateStamp,
   getCentralTodayDate,
   getCentralTodayISODate,
-  getDateSortValue,
   toCentralCalendarDate,
 } from '../utils/centralTime';
 import {
@@ -64,6 +63,15 @@ interface ScheduledJob {
   remaining_hours: number;
   setup_hours: number;
   run_hours: number;
+  /** Current op's work-center code, straight off the payload (chip context on a cross-machine list). */
+  work_center_code?: string | null;
+  /**
+   * Manager-dictated run order (Dispatch Board): the CURRENT operation's
+   * gap-free display position within its work center's live dispatch queue.
+   * `null`/absent = unranked or not on the live queue. Display-only — a
+   * per-machine rank is never a sort key on this cross-machine list.
+   */
+  run_order?: number | null;
 }
 
 interface DragState {
@@ -94,10 +102,6 @@ interface CapacityForDate {
   utilization_pct: number;
   overloaded: boolean;
   jobs_on_date: { work_order_id: number; work_order_number: string; operation_name: string; hours: number; projected?: boolean }[];
-}
-
-interface DispatchQueueJob extends ScheduledJob {
-  dispatchScore: number;
 }
 
 interface CapacityHeatmapDay {
@@ -227,31 +231,16 @@ export default function Scheduling() {
 
   const openJobs = useMemo(() => jobs.filter((job) => job.status !== 'complete'), [jobs]);
 
-  const dispatchQueue = useMemo<DispatchQueueJob[]>(() => {
-    return openJobs
-      .map((job) => ({
-        ...job,
-        dispatchScore: calculateDispatchScore({
-          priority: job.priority,
-          dueDate: job.due_date || null,
-          remainingHours: job.remaining_hours,
-          scheduledStart: job.scheduled_start || null,
-          status: job.status,
-        }),
-      }))
-      .sort((a, b) => {
-        if (a.dispatchScore !== b.dispatchScore) return b.dispatchScore - a.dispatchScore;
-        if (a.priority !== b.priority) return a.priority - b.priority;
-        const aDue = getDateSortValue(a.due_date);
-        const bDue = getDateSortValue(b.due_date);
-        if (aDue !== bDue) return aDue - bDue;
-        return a.work_order_number.localeCompare(b.work_order_number);
-      });
-  }, [openJobs]);
+  // The queue renders in SERVER order — no client re-sort. GET
+  // /scheduling/work-orders already orders by priority -> due date -> WO number,
+  // and `run_order` (the current op's rank on its work center's live dispatch
+  // queue) is display-only chip context: a per-machine rank is NOT a global
+  // sort key on this cross-machine list.
+  const scheduleQueue = openJobs;
 
   const queueRows = useMemo(
-    () => (showScheduledRows ? dispatchQueue : dispatchQueue.filter((job) => !job.scheduled_start)),
-    [dispatchQueue, showScheduledRows]
+    () => (showScheduledRows ? scheduleQueue : scheduleQueue.filter((job) => !job.scheduled_start)),
+    [scheduleQueue, showScheduledRows]
   );
 
   const filteredQueueRows = useMemo(() => {
@@ -272,16 +261,16 @@ export default function Scheduling() {
   }, [queueRows, searchQuery, filterWorkCenter]);
 
   const selectedQueueJobs = useMemo(
-    () => dispatchQueue.filter((job) => selectedWorkOrderIds.has(job.work_order_id)),
-    [dispatchQueue, selectedWorkOrderIds]
+    () => scheduleQueue.filter((job) => selectedWorkOrderIds.has(job.work_order_id)),
+    [scheduleQueue, selectedWorkOrderIds]
   );
 
   useEffect(() => {
     setSelectedWorkOrderIds((previous) => {
-      const activeIds = new Set(dispatchQueue.map((job) => job.work_order_id));
+      const activeIds = new Set(scheduleQueue.map((job) => job.work_order_id));
       return new Set(Array.from(previous).filter((id) => activeIds.has(id)));
     });
-  }, [dispatchQueue]);
+  }, [scheduleQueue]);
 
   const stats = useMemo(() => {
     const unscheduledCount = openJobs.filter((j) => !j.scheduled_start).length;
@@ -602,7 +591,7 @@ export default function Scheduling() {
   };
 
   const handleAutoScheduleAll = async () => {
-    const unscheduledIds = dispatchQueue
+    const unscheduledIds = scheduleQueue
       .filter((job) => !job.scheduled_start)
       .map((job) => job.work_order_id);
 
@@ -669,7 +658,7 @@ export default function Scheduling() {
 
   const runBulkAction = async (
     actionKey: string,
-    actionRunner: (job: DispatchQueueJob) => Promise<'success' | 'skipped'>
+    actionRunner: (job: ScheduledJob) => Promise<'success' | 'skipped'>
   ) => {
     if (selectedQueueJobs.length === 0) {
       showToast('info', 'Select at least one work order first.');
@@ -1381,7 +1370,7 @@ export default function Scheduling() {
                   />
                 </th>
                 <th className="px-4 py-2 text-left text-xs font-medium text-slate-400 uppercase">WO #</th>
-                <th className="px-4 py-2 text-center text-xs font-medium text-slate-400 uppercase">Dispatch</th>
+                <th className="px-4 py-2 text-center text-xs font-medium text-slate-400 uppercase">Run</th>
                 <th className="px-4 py-2 text-left text-xs font-medium text-slate-400 uppercase">Current Op</th>
                 <th className="px-4 py-2 text-left text-xs font-medium text-slate-400 uppercase">Progress</th>
                 <th className="px-4 py-2 text-left text-xs font-medium text-slate-400 uppercase">Part</th>
@@ -1406,9 +1395,7 @@ export default function Scheduling() {
                   </td>
                   <td className="px-4 py-2 font-medium text-werco-primary">{job.work_order_number}</td>
                   <td className="px-4 py-2 text-center">
-                    <span className="inline-flex items-center justify-center min-w-[56px] px-2 py-1 rounded text-xs font-semibold bg-blue-500/20 text-blue-300">
-                      {job.dispatchScore}
-                    </span>
+                    <KioskRunOrderChip item={job} size="sm" />
                   </td>
                   <td className="px-4 py-2 text-sm">{job.current_operation_name}</td>
                   <td className="px-4 py-2">
@@ -1419,7 +1406,7 @@ export default function Scheduling() {
                     <div className="text-xs text-slate-400">{job.part_name}</div>
                   </td>
                   <td className="px-4 py-2 text-sm">
-                    {workCenters.find(wc => wc.id === job.work_center_id)?.code}
+                    {job.work_center_code || workCenters.find(wc => wc.id === job.work_center_id)?.code}
                   </td>
                   <td className="px-4 py-2 text-right text-sm">
                     {job.remaining_hours.toFixed(1)}h

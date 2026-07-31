@@ -31,23 +31,34 @@ export function KioskStepsChip({ item }: { item: Pick<KioskQueueItem, 'steps_tot
  * be started, so the chip only DISPLAYS the rank — it never reorders client-side.
  * Renders nothing when the operation is unranked (`run_order` null/absent).
  * `active` = this op is the operator's running job → solid green (Foundry 1b).
+ *
+ * The ONE run-chip implementation for every surface that lists work as a queue:
+ * the kiosk/crew cards AND the desktop shop-floor pages (ShopFloor,
+ * ShopFloorSimple, Scheduling). The default `kiosk` size is sized for the
+ * Foundry kiosk card; `sm` is the same chip tightened for dense desktop rows.
+ * Do not fork a second implementation.
  */
 export function KioskRunOrderChip({
   item,
   active = false,
+  size = 'kiosk',
 }: {
   item: Pick<KioskQueueItem, 'run_order'>;
   active?: boolean;
+  size?: 'kiosk' | 'sm';
 }) {
   const rank = item.run_order;
   if (rank === null || rank === undefined) return null;
   const numeric = Number(rank);
   if (!Number.isFinite(numeric)) return null;
+  const compact = size === 'sm';
   return (
     <span
       data-testid="kiosk-run-order-chip"
       aria-label={`Run order ${numeric}`}
-      className={`inline-flex items-center gap-1 rounded-[3px] px-2 py-1 font-mono text-[11px] font-bold uppercase tracking-[0.06em] ${
+      className={`inline-flex items-center gap-1 rounded-[3px] font-mono font-bold uppercase tracking-[0.06em] ${
+        compact ? 'px-1.5 py-0.5 text-[10px]' : 'px-2 py-1 text-[11px]'
+      } ${
         active
           ? 'bg-fd-green text-[#04101f]'
           : 'border border-fd-line-bright bg-fd-raised text-fd-ink'

@@ -5,13 +5,12 @@ import { WorkCenter, QueueItem, ActiveJob } from '../types';
 import { usePermissions } from '../hooks/usePermissions';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { buildWsUrl, getAccessToken } from '../services/realtime';
-import { calculateDispatchScore } from '../utils/dispatchScore';
 import {
   formatCentralDate,
   formatCentralTime,
-  getDateSortValue,
   isDateBeforeTodayInCentral,
 } from '../utils/centralTime';
+import { KioskRunOrderChip } from '../components/kiosk/KioskQueueCard';
 import { useToast } from '../components/ui/Toast';
 import { Button, EmptyState, ErrorState, FormField, StatusBadge, statusColor, statusVariant } from '../components/ui';
 import {
@@ -365,34 +364,13 @@ export default function ShopFloor() {
     return 'bg-surface-100 text-surface-600';
   };
 
-  const sortedQueue = useMemo(() => {
-    return [...queue].sort((a, b) => {
-      const aScore = calculateDispatchScore({
-        priority: a.priority,
-        dueDate: a.due_date || null,
-        remainingHours: Number(a.setup_time_hours || 0) + Number(a.run_time_hours || 0),
-        scheduledStart: null,
-        status: a.status,
-      });
-      const bScore = calculateDispatchScore({
-        priority: b.priority,
-        dueDate: b.due_date || null,
-        remainingHours: Number(b.setup_time_hours || 0) + Number(b.run_time_hours || 0),
-        scheduledStart: null,
-        status: b.status,
-      });
-      if (aScore !== bScore) return bScore - aScore;
-      if (a.priority !== b.priority) return a.priority - b.priority;
-      const aDue = getDateSortValue(a.due_date);
-      const bDue = getDateSortValue(b.due_date);
-      if (aDue !== bDue) return aDue - bDue;
-      return a.work_order_number.localeCompare(b.work_order_number);
-    });
-  }, [queue]);
-
+  // The queue renders in SERVER order — no client re-sort. The work-center-queue
+  // payload is the same canonical order the kiosks honor (manager-dictated
+  // run_order first, then priority/due date/sequence), so re-sorting here would
+  // break the Dispatch Board's promise that its run order is what operators see.
   const priorityFocusQueue = useMemo(() => {
-    return sortedQueue.slice(0, 5);
-  }, [sortedQueue]);
+    return queue.slice(0, 5);
+  }, [queue]);
 
   const handlePriorityChange = async (workOrderId: number, priorityRaw: string) => {
     const priority = parseInt(priorityRaw, 10);
@@ -622,12 +600,14 @@ export default function ShopFloor() {
         ))}
       </div>
 
-      {/* Priority Focus Queue — slim cross-linked strip into the table below */}
+      {/* Up Next — slim cross-linked strip into the table below. The first 5 of
+          the server's queue order (the Dispatch Board's run order), NOT a score
+          ranking. */}
       {priorityFocusQueue.length > 0 && (
         <div className="card" data-tour="sf-complete">
           <div className="flex items-center justify-between mb-2">
-            <h2 className="text-sm font-semibold text-surface-900">Priority Focus Queue</h2>
-            <span className="text-xs text-surface-500">Top {priorityFocusQueue.length} to run next</span>
+            <h2 className="text-sm font-semibold text-surface-900">Up Next</h2>
+            <span className="text-xs text-surface-500">First {priorityFocusQueue.length} in queue order</span>
           </div>
           <div className="flex flex-wrap gap-2">
             {priorityFocusQueue.map((item, idx) => {
@@ -665,7 +645,7 @@ export default function ShopFloor() {
               Job Queue
             </h2>
             <p className="text-xs text-surface-500">
-              {workCenters.find(wc => wc.id === selectedWorkCenter)?.name} &bull; <span className="tabular-nums">{sortedQueue.length}</span> job{sortedQueue.length !== 1 ? 's' : ''}
+              {workCenters.find(wc => wc.id === selectedWorkCenter)?.name} &bull; <span className="tabular-nums">{queue.length}</span> job{queue.length !== 1 ? 's' : ''}
             </p>
           </div>
           {canEditPriority && (
@@ -697,7 +677,7 @@ export default function ShopFloor() {
               if (selectedWorkCenter) loadQueue(selectedWorkCenter);
             }}
           />
-        ) : sortedQueue.length === 0 ? (
+        ) : queue.length === 0 ? (
           <EmptyState
             className="py-12"
             icon={QueueListIcon}
@@ -721,7 +701,9 @@ export default function ShopFloor() {
                 </tr>
               </thead>
               <tbody>
-                {sortedQueue.map((item) => {
+                {/* Rows render in server order — the same canonical run-order
+                    sort the kiosks show. Do not re-sort client-side. */}
+                {queue.map((item) => {
                   const progress = (item.quantity_complete / item.quantity_ordered) * 100;
                   const isOverdue = Boolean(item.due_date && isDateBeforeTodayInCentral(item.due_date));
                   const isExpanded = expandedRows.has(item.work_order_id);
@@ -765,7 +747,10 @@ export default function ShopFloor() {
                           )}
                         </td>
                         <td>
-                          <span className="font-semibold text-werco-600">{item.work_order_number}</span>
+                          <div className="flex items-center gap-2">
+                            <KioskRunOrderChip item={item} size="sm" />
+                            <span className="font-semibold text-werco-600">{item.work_order_number}</span>
+                          </div>
                         </td>
                         <td aria-label="Part">
                           <div>

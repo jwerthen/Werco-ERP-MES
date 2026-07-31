@@ -6,8 +6,17 @@ from fastapi.testclient import TestClient
 
 from app.models.audit_log import AuditLog
 from app.models.part import Part
+from app.models.user import UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation
+from tests.api.kiosk_test_helpers import (
+    COMPANY_B,
+    make_user,
+    make_wo_with_operation,
+    make_work_center,
+    queue_url,
+    user_headers,
+)
 
 
 @pytest.mark.api
@@ -839,3 +848,189 @@ class TestSchedulingAuditRows:
         assert fresh.scheduled_start is None
         assert fresh.scheduled_end is None
         assert fresh.status == OperationStatus.READY
+
+
+# ---------------------------------------------------------------------------
+# GET /scheduling/work-orders — canonical server order + the RUN chip fields
+# ---------------------------------------------------------------------------
+
+SCHEDULABLE_URL = "/api/v1/scheduling/work-orders"
+
+
+def _schedulable_rows(client: TestClient, headers: dict, **params) -> list:
+    resp = client.get(SCHEDULABLE_URL, headers=headers, params=params)
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    return resp.json()
+
+
+@pytest.mark.api
+@pytest.mark.requires_db
+class TestGetSchedulableWorkOrders:
+    """The planners' Dispatch Queue read, run-order-first (owner decision).
+
+    Rows arrive in the server's canonical CROSS-machine order — priority, due
+    date, then ``work_order_number`` as the deterministic tiebreak — and the
+    client renders that order verbatim (the old client dispatch-score re-sort
+    is gone). Each row also carries the current op's ``work_center_code`` and
+    ``run_order``: the same gap-free position the kiosk / shop-floor /
+    Dispatch Board RUN chip shows, computed from the work center's FULL live
+    queue; null when the op is unranked or not queued. A per-machine rank is
+    display context here, never a sort key.
+    """
+
+    def test_rows_arrive_priority_due_date_then_wo_number(self, client: TestClient, db_session):
+        """Rows the OLD client score would have inverted. The deleted
+        utils/dispatchScore.ts gave overdue P5 work ~366 points vs ~160 for
+        far-future P1 work, so the score sort led with the overdue P5 row.
+        The server's SQL order (priority, due_date, work_order_number) puts
+        the P1 row first — and breaks a full priority+due tie by WO number,
+        not by id/creation order."""
+        manager = make_user(db_session, role=UserRole.MANAGER)
+        wc = make_work_center(db_session)
+
+        wo_p1_future, _ = make_wo_with_operation(db_session, work_center=wc)
+        wo_p5_overdue, _ = make_wo_with_operation(db_session, work_center=wc)
+        wo_tie_zz, _ = make_wo_with_operation(db_session, work_center=wc)
+        wo_tie_aa, _ = make_wo_with_operation(db_session, work_center=wc)
+
+        wo_p1_future.priority = 1
+        wo_p1_future.due_date = date.today() + timedelta(days=60)
+        wo_p5_overdue.priority = 5
+        wo_p5_overdue.due_date = date.today() - timedelta(days=30)
+        # Same priority AND due date: only the WO-number tiebreak decides. The
+        # EARLIER-created WO gets the lexicographically LATER number, so an id
+        # or creation-order tiebreak could not fake this result.
+        for wo in (wo_tie_zz, wo_tie_aa):
+            wo.priority = 5
+            wo.due_date = date.today() + timedelta(days=10)
+        wo_tie_zz.work_order_number = f"ZZ-{wo_tie_zz.work_order_number}"
+        wo_tie_aa.work_order_number = f"AA-{wo_tie_aa.work_order_number}"
+        db_session.commit()
+
+        rows = _schedulable_rows(client, user_headers(manager), work_center_id=wc.id)
+        assert [row["work_order_number"] for row in rows] == [
+            wo_p1_future.work_order_number,  # priority 1 beats everything, however far out its due date
+            wo_p5_overdue.work_order_number,  # the old score sort's #1 pick lands mid-list on priority
+            wo_tie_aa.work_order_number,  # AA-* before ZZ-*: WO number, not creation order
+            wo_tie_zz.work_order_number,
+        ]
+
+    def test_run_order_matches_kiosk_position_over_the_full_queue(self, client: TestClient, db_session):
+        """Parity with the kiosk RUN chip, including full-queue semantics: rank 1
+        at the laser belongs to a later-sequence op of a WO this endpoint emits
+        under ANOTHER work center, so the emitted laser rows take positions 2
+        and 3 — the numbers the operator sees at the machine — never 1 and 2
+        renumbered over this endpoint's filtered row set."""
+        manager = make_user(db_session, role=UserRole.MANAGER)
+        wc_mill = make_work_center(db_session)
+        wc_laser = make_work_center(db_session)
+
+        # WO-X: current op at the MILL; its later laser op is READY (laser-nest
+        # style cross-WC readiness) and holds the laser's rank 1.
+        wo_x, op_x_mill = make_wo_with_operation(db_session, work_center=wc_mill)
+        laser_rank1 = WorkOrderOperation(
+            work_order_id=wo_x.id,
+            work_center_id=wc_laser.id,
+            sequence=20,
+            operation_number="OP20",
+            name="Laser trim",
+            status=OperationStatus.READY,
+            run_order=1,
+            company_id=1,
+        )
+        db_session.add(laser_rank1)
+        _, op_y = make_wo_with_operation(db_session, work_center=wc_laser)
+        _, op_z = make_wo_with_operation(db_session, work_center=wc_laser)
+        op_y.run_order = 10  # sparse stored ranks: the wire value must be the gap-free position
+        op_z.run_order = 20
+        db_session.commit()
+
+        rows = _schedulable_rows(client, user_headers(manager), work_center_id=wc_laser.id)
+        assert [(row["current_operation_id"], row["run_order"]) for row in rows] == [
+            (op_y.id, 2),
+            (op_z.id, 3),
+        ]
+        assert all(row["work_center_code"] == wc_laser.code for row in rows)
+
+        # Byte-for-byte the kiosk queue's chip numbers for the same operations.
+        kiosk_resp = client.get(queue_url(wc_laser.id), headers=user_headers(manager))
+        assert kiosk_resp.status_code == status.HTTP_200_OK, kiosk_resp.text
+        kiosk_positions = {row["operation_id"]: row["run_order"] for row in kiosk_resp.json()["queue"]}
+        assert kiosk_positions[laser_rank1.id] == 1
+        assert kiosk_positions[op_y.id] == 2
+        assert kiosk_positions[op_z.id] == 3
+
+        # WO-X's own row surfaces under the mill with its op-10 context: queued
+        # there but unranked, so the chip stays off.
+        mill_rows = _schedulable_rows(client, user_headers(manager), work_center_id=wc_mill.id)
+        assert [(row["work_order_id"], row["current_operation_id"]) for row in mill_rows] == [(wo_x.id, op_x_mill.id)]
+        assert mill_rows[0]["work_center_code"] == wc_mill.code
+        assert mill_rows[0]["run_order"] is None
+
+    def test_pending_and_unranked_rows_carry_null_run_order(self, client: TestClient, db_session):
+        """A PENDING current op is emitted (only all-COMPLETE WOs are skipped) but
+        is NOT on the live dispatch queue: run_order must be null even when a
+        stale stored rank exists, and it must not steal a position — the lone
+        ranked READY op is RUN 1 (gap-free position, not its raw stored 5)."""
+        manager = make_user(db_session, role=UserRole.MANAGER)
+        wc = make_work_center(db_session)
+        _, op_pending = make_wo_with_operation(db_session, work_center=wc, op_status=OperationStatus.PENDING)
+        _, op_unranked = make_wo_with_operation(db_session, work_center=wc)
+        _, op_ranked = make_wo_with_operation(db_session, work_center=wc)
+        op_pending.run_order = 1  # stale rank left behind by a status change
+        op_ranked.run_order = 5
+        db_session.commit()
+
+        rows = _schedulable_rows(client, user_headers(manager), work_center_id=wc.id)
+        by_op = {row["current_operation_id"]: row["run_order"] for row in rows}
+        assert by_op == {op_pending.id: None, op_unranked.id: None, op_ranked.id: 1}
+
+    def test_all_complete_skip_and_work_center_filter_unchanged(self, client: TestClient, db_session):
+        """The endpoint's pre-existing filter semantics survive the rework: a WO
+        whose every op is COMPLETE never emits, work_center_id narrows to WOs
+        whose CURRENT op sits at that center, and another tenant's WOs stay
+        invisible either way."""
+        manager = make_user(db_session, role=UserRole.MANAGER)
+        wc = make_work_center(db_session)
+        other_wc = make_work_center(db_session)
+        wo_done, _ = make_wo_with_operation(db_session, work_center=wc, op_status=OperationStatus.COMPLETE)
+        wo_live, _ = make_wo_with_operation(db_session, work_center=wc)
+        wo_other, _ = make_wo_with_operation(db_session, work_center=other_wc)
+        foreign_wc = make_work_center(db_session, company_id=COMPANY_B)
+        wo_foreign, _ = make_wo_with_operation(db_session, company_id=COMPANY_B, work_center=foreign_wc)
+
+        filtered_ids = [
+            row["work_order_id"] for row in _schedulable_rows(client, user_headers(manager), work_center_id=wc.id)
+        ]
+        assert filtered_ids == [wo_live.id]
+
+        # Unfiltered read (membership only — sibling tests on this worker DB may
+        # contribute rows of their own).
+        unfiltered_ids = {row["work_order_id"] for row in _schedulable_rows(client, user_headers(manager))}
+        assert wo_live.id in unfiltered_ids
+        assert wo_other.id in unfiltered_ids
+        assert wo_done.id not in unfiltered_ids, "an all-COMPLETE WO must never emit"
+        assert wo_foreign.id not in unfiltered_ids, "cross-tenant leak: another company's WO surfaced"
+
+    def test_soft_deleted_wo_neither_lists_nor_schedules(self, client: TestClient, db_session):
+        """Invariant 3 (soft delete): a soft-deleted RELEASED WO must not appear
+        in the planners' Dispatch Queue and must 404 on the schedule verbs —
+        pre-existing gap (neither query filtered ``is_deleted``) closed on this
+        branch; a deleted WO could previously still list AND be rescheduled."""
+        manager = make_user(db_session, role=UserRole.MANAGER)
+        wc = make_work_center(db_session)
+        wo_live, _ = make_wo_with_operation(db_session, work_center=wc)
+        wo_deleted, _ = make_wo_with_operation(db_session, work_center=wc)
+        wo_deleted.soft_delete(manager.id)
+        db_session.commit()
+
+        listed_ids = {row["work_order_id"] for row in _schedulable_rows(client, user_headers(manager))}
+        assert wo_live.id in listed_ids
+        assert wo_deleted.id not in listed_ids, "soft-deleted WO surfaced in the scheduling list"
+
+        resp = client.put(
+            f"/api/v1/scheduling/work-orders/{wo_deleted.id}/schedule",
+            headers=user_headers(manager),
+            json={"scheduled_start": date.today().isoformat()},
+        )
+        assert resp.status_code == status.HTTP_404_NOT_FOUND, "soft-deleted WO must not be reschedulable"

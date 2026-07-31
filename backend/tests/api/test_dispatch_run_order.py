@@ -1,10 +1,12 @@
 """Dispatch run order: queue ordering, the manager board, and the rank rewrite.
 
-Covers the three surfaces that share ``app.services.dispatch_service``:
+Covers the surfaces that share ``app.services.dispatch_service``:
 
 * ``GET /shop-floor/work-center-queue/{id}``   — operator/crew kiosk queue read
 * ``GET /shop-floor/dispatch-board``           — manager board (all active WCs)
 * ``PUT /shop-floor/work-centers/{id}/run-order`` — the rank rewrite
+* ``GET /shop-floor/operations``               — desktop shop-floor list (canonical
+  order + the same gap-free ``run_order`` the kiosk RUN chip shows)
 
 Headline invariants:
 1. ORDER — ranked work (``run_order`` 1..N) sorts before unranked (NULL) work,
@@ -703,3 +705,97 @@ class TestSchedulingRoutesAreTenantScoped:
         assert resp.status_code == status.HTTP_404_NOT_FOUND, resp.text
         db_session.expire_all()
         assert db_session.get(WorkOrderOperation, op.id).work_center_id == own_wc.id
+
+
+# --------------------------------------------------------------------------
+# 5. GET /shop-floor/operations — the desktop shop-floor list
+# --------------------------------------------------------------------------
+
+OPERATIONS_URL = "/api/v1/shop-floor/operations"
+
+
+def _operations_rows(client: TestClient, headers: dict, **params) -> list:
+    resp = client.get(OPERATIONS_URL, headers=headers, params=params)
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    return resp.json()["operations"]
+
+
+class TestDesktopOperationsRunOrder:
+    """The desktop pages render the SERVER order verbatim (owner decision), so the
+    /operations payload must be in canonical dispatch order and carry the same
+    gap-free ``run_order`` the kiosk RUN chip shows."""
+
+    def test_single_work_center_filter_matches_kiosk_queue_order(self, client: TestClient, db_session: Session):
+        """Ranked-first, manager's order, unranked tail — byte-for-byte the kiosk
+        queue order. The unranked op gets the earliest due date so only the
+        NULLS-LAST run_order key can put it behind the ranked ones."""
+        manager = make_user(db_session, role=UserRole.MANAGER)
+        wc = make_work_center(db_session)
+        ops = [make_wo_with_operation(db_session, work_center=wc)[1] for _ in range(3)]
+        _, unranked = make_wo_with_operation(db_session, work_center=wc)
+        unranked.work_order.due_date = date.today()
+        # Rank in reverse id order: the sort must follow run_order, not id.
+        for rank, op in enumerate(reversed(ops), start=1):
+            op.run_order = rank
+        db_session.commit()
+
+        kiosk_order = _queue_ids(client, wc.id, user_headers(manager))
+        desktop_order = [row["id"] for row in _operations_rows(client, user_headers(manager), work_center_id=wc.id)]
+        assert desktop_order == kiosk_order == [ops[2].id, ops[1].id, ops[0].id, unranked.id]
+
+    def test_run_order_is_the_kiosk_gap_free_position(self, client: TestClient, db_session: Session):
+        """Sparse stored ranks (1, 3) surface as positions (1, 2); unranked is null —
+        identical numbers to the kiosk payload for the same operations."""
+        manager = make_user(db_session, role=UserRole.MANAGER)
+        wc = make_work_center(db_session)
+        _, sparse_high = make_wo_with_operation(db_session, work_center=wc)
+        _, sparse_low = make_wo_with_operation(db_session, work_center=wc)
+        _, unranked = make_wo_with_operation(db_session, work_center=wc)
+        sparse_high.run_order = 3
+        sparse_low.run_order = 1
+        db_session.commit()
+
+        rows = _operations_rows(client, user_headers(manager), work_center_id=wc.id)
+        assert [(row["id"], row["run_order"]) for row in rows] == [
+            (sparse_low.id, 1),
+            (sparse_high.id, 2),
+            (unranked.id, None),
+        ]
+
+        kiosk = client.get(queue_url(wc.id), headers=user_headers(manager)).json()["queue"]
+        assert [(row["operation_id"], row["run_order"]) for row in kiosk] == [
+            (row["id"], row["run_order"]) for row in rows
+        ]
+
+    def test_rows_group_by_work_center_code_across_centers(self, client: TestClient, db_session: Session):
+        """Unfiltered, the list follows the board's column order — WorkCenter.code —
+        not creation/id order (codes are overridden to invert creation order)."""
+        manager = make_user(db_session, role=UserRole.MANAGER)
+        wc_created_first = make_work_center(db_session)
+        wc_created_second = make_work_center(db_session)
+        wc_created_first.code = "ZZZ-LAST"
+        wc_created_second.code = "AAA-FIRST"
+        _, op_zzz = make_wo_with_operation(db_session, work_center=wc_created_first)
+        _, op_aaa = make_wo_with_operation(db_session, work_center=wc_created_second)
+        db_session.commit()
+
+        rows = _operations_rows(client, user_headers(manager))
+        assert [row["id"] for row in rows] == [op_aaa.id, op_zzz.id]
+
+    def test_not_queued_operation_carries_no_run_order(self, client: TestClient, db_session: Session):
+        """A PENDING op is on the desktop list (it excludes only COMPLETE by default)
+        but NOT on the kiosk queue — its run_order must be null even when a stale
+        stored rank exists, and it must not steal a position from queued work."""
+        manager = make_user(db_session, role=UserRole.MANAGER)
+        wc = make_work_center(db_session)
+        _, pending = make_wo_with_operation(db_session, work_center=wc, op_status=OperationStatus.PENDING)
+        _, ready = make_wo_with_operation(db_session, work_center=wc)
+        pending.run_order = 1  # stale rank left behind by a status change
+        ready.run_order = 2
+        db_session.commit()
+
+        rows = _operations_rows(client, user_headers(manager), work_center_id=wc.id)
+        by_id = {row["id"]: row["run_order"] for row in rows}
+        assert by_id[pending.id] is None
+        # The READY op is the queue's only ranked member: position 1, not raw rank 2.
+        assert by_id[ready.id] == 1

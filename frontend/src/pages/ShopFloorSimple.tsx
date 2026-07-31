@@ -3,12 +3,10 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import api from '../services/api';
 import { usePermissions } from '../hooks/usePermissions';
 import { ActiveJob, LaserNestInfo } from '../types';
-import { calculateDispatchScore } from '../utils/dispatchScore';
 import {
   formatCentralDate,
   formatCentralDateTime,
   formatCentralTime,
-  getDateSortValue,
   isDateBeforeTodayInCentral,
   isDateTodayInCentral,
 } from '../utils/centralTime';
@@ -31,6 +29,7 @@ import LaserNestOperatorPanel from '../components/laser/LaserNestOperatorPanel';
 import { Button, ConfirmDialog, Modal, SelectField, statusColor, statusVariant } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { HOLD_REASONS } from '../components/kiosk/kioskConstants';
+import { KioskRunOrderChip } from '../components/kiosk/KioskQueueCard';
 import {
   EMPTY_SCRAP_SELECTION,
   ScrapReasonFields,
@@ -69,6 +68,13 @@ interface Operation {
   can_check_in?: boolean;
   blocked_by_previous_operations?: boolean;
   laser_nest?: LaserNestInfo | null;
+  /**
+   * Manager-dictated run order (Dispatch Board), 1..N per work center —
+   * gap-free display position, same semantics as the kiosk queue payload.
+   * `null`/absent = unranked. The server already returns rows in canonical
+   * run-order-first order; this rank is DISPLAY-only, never a client sort key.
+   */
+  run_order?: number | null;
 }
 
 interface WorkCenter {
@@ -235,6 +241,7 @@ export default function ShopFloorSimple() {
           can_check_in: item.can_check_in,
           blocked_by_previous_operations: item.blocked_by_previous_operations,
           laser_nest: item.laser_nest,
+          run_order: item.run_order ?? null,
         }));
       }
 
@@ -458,35 +465,17 @@ export default function ShopFloorSimple() {
     () => (actionableOnly ? operations.filter(op => actionableStatuses.has(op.status)) : operations),
     [actionableOnly, operations, actionableStatuses]
   );
-  const sortedVisibleOperations = useMemo(() => {
-    return [...visibleOperations].sort((a, b) => {
-      const aScore = calculateDispatchScore({
-        priority: a.priority,
-        dueDate: a.due_date || null,
-        remainingHours: Math.max(0, Number(a.quantity_ordered || 0) - Number(a.quantity_complete || 0)),
-        scheduledStart: null,
-        status: a.status,
-      });
-      const bScore = calculateDispatchScore({
-        priority: b.priority,
-        dueDate: b.due_date || null,
-        remainingHours: Math.max(0, Number(b.quantity_ordered || 0) - Number(b.quantity_complete || 0)),
-        scheduledStart: null,
-        status: b.status,
-      });
-      if (aScore !== bScore) return bScore - aScore;
-      if (a.priority !== b.priority) return a.priority - b.priority;
-      const aDue = getDateSortValue(a.due_date);
-      const bDue = getDateSortValue(b.due_date);
-      if (aDue !== bDue) return aDue - bDue;
-      return a.work_order_number.localeCompare(b.work_order_number);
-    });
-  }, [visibleOperations]);
+  // Operations render in SERVER order — no client re-sort. GET
+  // /shop-floor/operations returns the canonical dispatch order (manager-dictated
+  // run_order first, then priority/due date/sequence, grouped by work center), so
+  // a single-work-center filter shows EXACTLY the work-center-queue order the
+  // kiosks honor. Re-sorting here (the old dispatch-score sort) broke the
+  // Dispatch Board's promise that its run order is what operators see.
   const priorityFocusQueue = useMemo(() => {
-    const ranked = [...sortedVisibleOperations]
-      .filter((op) => ['pending', 'ready', 'in_progress', 'on_hold'].includes(op.status));
-    return ranked.slice(0, 5);
-  }, [sortedVisibleOperations]);
+    return visibleOperations
+      .filter((op) => ['pending', 'ready', 'in_progress', 'on_hold'].includes(op.status))
+      .slice(0, 5);
+  }, [visibleOperations]);
 
   const selectedWorkCenter = useMemo(
     () => workCenters.find((wc) => wc.id === workCenterId) || null,
@@ -617,6 +606,7 @@ export default function ShopFloorSimple() {
       requires_inspection: false,
       can_check_in: true,
       blocked_by_previous_operations: false,
+      run_order: null,
     };
   };
 
@@ -1486,7 +1476,10 @@ export default function ShopFloorSimple() {
                     <p className="text-[11px] font-semibold uppercase tracking-wider text-werco-300">
                       Next Recommended Job
                     </p>
-                    <p className="mt-1 text-lg font-bold text-white">{op.work_order_number}</p>
+                    <div className="mt-1 flex items-center gap-2">
+                      <KioskRunOrderChip item={op} size="sm" />
+                      <p className="text-lg font-bold text-white">{op.work_order_number}</p>
+                    </div>
                     <p className="text-sm text-slate-300">
                       {op.operation_number} - {op.operation_name}
                     </p>
@@ -1529,15 +1522,15 @@ export default function ShopFloorSimple() {
 
       {/*
         De-dup: the desktop "Most Important Next" focus card was the first five
-        rows of the operations grid duplicated. The grid below is already sorted
-        by the same dispatch score (overdue → priority → due date), so the top
-        rows ARE the focus queue — rendering it twice was redundant. The mobile
-        "Next Job" strip stays (it's the single top pick on a small screen where
-        the full grid is far down). priorityFocusQueue still backs that strip.
+        rows of the operations grid duplicated. The grid below renders the
+        server's canonical dispatch order (run_order first), so the top rows ARE
+        the focus queue — rendering it twice was redundant. The mobile "Next Job"
+        strip stays (it's the single top pick on a small screen where the full
+        grid is far down). priorityFocusQueue still backs that strip.
       */}
 
       {/* Operations Grid */}
-      {sortedVisibleOperations.length === 0 ? (
+      {visibleOperations.length === 0 ? (
         <div className="card text-center py-16">
           <CubeIcon className="h-12 w-12 text-slate-400 mx-auto mb-4" />
           <p className="text-slate-300 font-medium">
@@ -1560,7 +1553,9 @@ export default function ShopFloorSimple() {
         </div>
       ) : (
         <div ref={operationsRef} className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4" data-tour="sf-operations">
-          {sortedVisibleOperations.map(op => {
+          {/* Cards render in server order — the same canonical run-order sort
+              the kiosks show. Do not re-sort client-side. */}
+          {visibleOperations.map(op => {
             const progress = op.quantity_ordered > 0
               ? (op.quantity_complete / op.quantity_ordered) * 100 
               : 0;
@@ -1583,6 +1578,7 @@ export default function ShopFloorSimple() {
                 <div className="flex items-start justify-between mb-3">
                   <div>
                     <div className="flex items-center gap-2">
+                      <KioskRunOrderChip item={op} size="sm" />
                       <span className="font-bold text-werco-primary text-lg">{op.work_order_number}</span>
                       {overdue && (
                         <span className="px-2 py-0.5 bg-red-500/20 text-red-400 text-xs font-semibold rounded">

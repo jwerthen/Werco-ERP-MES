@@ -12,8 +12,8 @@ When you sign in, the system takes you straight to the **Shop Floor Operations**
 
 > Heads up: Your administrator or IT will create your account and give you your sign-in details. At many stations you sign in with your employee badge number instead of a password. Never share your sign-in.
 
-![Shop floor kiosk showing the Most Important Next focus list and work cards](images/shopfloor-kiosk-queue.png)
-*The kiosk opens to your station's work, ranked so the most important job is on top.*
+![Shop floor kiosk showing the work queue cards in running order](images/shopfloor-kiosk-queue.png)
+*The kiosk opens to your station's work, listed in running order — the first job is what to run next.*
 
 > Heads up: The **SHIFT** marker in the top bar shows which shift is running right now, based on the shop clock (Central time): **A** for the day shift (5:30 AM – 4:00 PM) and **B** for the night shift (3:30 PM – 2:00 AM). During the 3:30–4:00 PM overlap it reads **A** until 4:00 PM, then flips to **B**. Between 2:00 AM and 5:30 AM, when no shift is scheduled, it shows a dash (**—**). The marker is informational only — it doesn't change what work you see or what you can do.
 
@@ -22,7 +22,7 @@ When you sign in, the system takes you straight to the **Shop Floor Operations**
 Run through this every time you start, before you touch a part:
 
 1. **Confirm your station.** Look at the **Work Center Status** cards near the top. The card with the bright outline is your selected station. If it's wrong, tap the correct one (or use the **Change Station** link on a phone/tablet). What you'll see: the screen filters down to just that station's work.
-2. **Review the queue.** Read the **Most Important Next** list. That's your recommended order of work.
+2. **Review the queue.** The job cards are listed in running order — that's your recommended order of work (see [Your work queue](#your-work-queue-what-to-run-first)).
 3. **Open the details before a new part.** For any part you haven't run before, tap **Details** first and read the setup and run instructions. Don't start cutting metal on a part you haven't read up on.
 
 ---
@@ -40,18 +40,19 @@ If the screen shows a red **OFFLINE** banner, the kiosk lost its connection — 
 
 ---
 
-## Your work queue: Most Important Next
+## Your work queue: what to run first
 
-The **Most Important Next** panel is your focus list. It shows the top jobs to work, in order. The system ranks them automatically using:
+The job cards are already listed in running order — first card first. The order comes from the system, not your screen, so it's the same order the station kiosks show and the same order your manager set on the Dispatch Board:
 
-1. **Overdue and due pressure** — anything past its due date or due today floats to the top. Overdue jobs are flagged **OVERDUE** in red.
-2. **Work order priority** — shown as a tag from **P1** (highest) down to **P10** (lowest). P1 and P2 show in red, P3–P5 in amber.
-3. **A dispatch score** that balances priority, due date, and how much work is left, with due date as the tie-breaker.
+1. **Jobs your manager put in a running order come first**, each marked **RUN 1**, **RUN 2**, and so on — the same chips as the station kiosk. Work them in that order unless your lead says otherwise.
+2. **Everything without a RUN mark comes after them**, sorted by work order priority — shown as a tag from **P1** (highest) down to **P10** (lowest); P1 and P2 show in red, P3–P5 in amber — then due date, then step order. Overdue jobs are flagged **OVERDUE** in red.
 
-**Run the job at the top of the list unless your supervisor tells you otherwise.** If you do need to work something out of order, that's fine — just add a note when you record your work so the next person understands why.
+**Run the first job you can start unless your supervisor tells you otherwise.** The order is a recommendation, not a lock — you can still start any job on the list. If you do work something out of order, that's fine — just add a note when you record your work so the next person understands why.
 
-![Most Important Next focus list with numbered, priority-tagged jobs](images/shopfloor-kiosk-queue.png)
-*Work top-down. Number 1 is the system's best pick for what to run next.*
+On a phone or tablet, the **Next Recommended Job** strip at the top shows the first job in the queue so you don't have to scroll for it.
+
+![Work queue with RUN-numbered and priority-tagged jobs](images/shopfloor-kiosk-queue.png)
+*Work top-down. The first card is what the shop wants run next.*
 
 ---
 
