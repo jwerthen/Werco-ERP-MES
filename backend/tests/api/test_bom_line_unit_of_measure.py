@@ -653,13 +653,17 @@ def test_a_component_with_no_stocking_unit_falls_back_to_each_and_raises_nothing
     assert "unit_of_measure_mismatch" not in readiness_blockers(client, user, fg.id)
 
 
-def test_an_unresolvable_component_falls_back_to_each_rather_than_writing_null(client: TestClient, db_session: Session):
-    """The last resort: ``_resolve_line_uom`` handed no component at all.
+def test_an_unresolvable_component_keeps_the_existing_unit_rather_than_writing_null(
+    client: TestClient, db_session: Session
+):
+    """The last resort: the tenant-scoped component lookup resolves nothing at all.
 
     Reachable through ``PUT /bom/items/{id}`` when the line's FK points at a part that is
     not there — constructible here only because SQLite does not enforce foreign keys, and
     on Postgres the same state arrives via a hard delete. The requirement is that it
-    resolves rather than 500-ing or storing a NULL.
+    neither 500s nor stores a NULL, and (since the tenant-scoped resolution fix) that it
+    inherits NOTHING: with no in-tenant component to inherit from, the line keeps the
+    value it already had instead of manufacturing an ``each`` nobody stated.
     """
     user = make_user(db_session)
     fg = make_part(db_session)
@@ -675,8 +679,32 @@ def test_an_unresolvable_component_falls_back_to_each_rather_than_writing_null(c
     response = client.put(f"/api/v1/bom/items/{line.id}", headers=headers_for(user), json={"unit_of_measure": None})
 
     assert response.status_code == status.HTTP_200_OK, response.text
-    assert response.json()["unit_of_measure"] == "each"
-    assert stored_uom(db_session, line.id) == "each"
+    assert response.json()["unit_of_measure"] == "pounds"
+    assert stored_uom(db_session, line.id) == "pounds"
+
+
+def test_update_never_inherits_a_foreign_components_unit(client: TestClient, db_session: Session):
+    """Defense-in-depth (invariant #1): a MIS-PARENTED line whose FK names another
+    company's part must not read that row. The old code resolved a cleared unit through
+    the unscoped ``component_part`` relationship, so clearing the unit stamped the
+    FOREIGN company's stocking unit onto this company's line — foreign master data
+    silently steering this company's backflush. Now the scoped lookup misses and the
+    line keeps its own value."""
+    user = make_user(db_session)
+    fg = make_part(db_session)
+    foreign_sheet = make_part(db_session, uom="sheets", part_type="raw_material", company_id=COMPANY_B)
+    line = raw_line(
+        db_session,
+        make_bom(db_session, fg),
+        foreign_sheet,
+        unit_of_measure="pounds",
+    )
+
+    response = client.put(f"/api/v1/bom/items/{line.id}", headers=headers_for(user), json={"unit_of_measure": None})
+
+    assert response.status_code == status.HTTP_200_OK, response.text
+    assert response.json()["unit_of_measure"] == "pounds", "the foreign unit must never be inherited"
+    assert stored_uom(db_session, line.id) == "pounds"
 
 
 def test_a_blank_string_unit_is_treated_as_unstated_not_as_a_claim(client: TestClient, db_session: Session):

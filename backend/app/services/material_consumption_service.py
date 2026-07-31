@@ -60,18 +60,39 @@ Both funnel into ``_consume_allocation_under_savepoint`` -> ``_consume_one_alloc
 so the savepoint boundary, the ``ALLOCATION_CONSUMPTION_FAILED`` record and the
 arithmetic itself exist exactly once.
 
-**What carries concurrency is the WORK-ORDER LOCK, not this engine.** The convergence
-argument above is a SEQUENTIAL one: it holds for a re-entry that observes the previous
-call's committed ``qty_consumed``. It does not, on its own, make two *simultaneous*
-completions of one operation safe -- these rows sit outside ``uq_wo_inventory_issue``
-by design and ``WorkOrderMaterialAllocation`` carries no ``version`` column, so nothing
-here would stop both racers from computing the same positive delta and both posting.
-What actually serializes them is invariant #4: ``WorkOrder`` and ``WorkOrderOperation``
-map ``version_id_col`` directly, so every call site that drives a completion takes the
-optimistic lock and a stale concurrent writer raises ``StaleDataError`` (-> HTTP 409)
-before it can reach here. Treat that lock as load-bearing for this engine: a future
-call site that mutates neither row would step outside the protection, and the
-per-allocation savepoint is damage control, not a substitute.
+**Concurrency is carried by TWO locks, one per race.** The convergence argument above
+is a SEQUENTIAL one: it holds for a re-entry that observes the previous call's
+committed ``qty_consumed``. It does not, on its own, make two *simultaneous*
+completions safe -- these rows sit outside ``uq_wo_inventory_issue`` by design and
+``WorkOrderMaterialAllocation`` carries no ``version`` column, so nothing here would
+stop both racers from computing the same positive delta and both posting.
+
+* **Same work order:** invariant #4. ``WorkOrder`` and ``WorkOrderOperation`` map
+  ``version_id_col`` directly, so every call site that drives a completion takes the
+  optimistic lock and a stale concurrent writer raises ``StaleDataError`` (-> HTTP
+  409) before it can reach here. Treat that lock as load-bearing: a future call site
+  that mutates neither row would step outside the protection, and the per-allocation
+  savepoint is damage control, not a substitute.
+* **Different work orders sharing a lot:** the WO lock says nothing about two
+  completions of DIFFERENT work orders drawing the same ``InventoryItem`` row, so the
+  read-modify-write of ``quantity_on_hand`` holds ``FOR UPDATE`` row locks on the
+  source lots -- ``consumable_source_items(..., for_update=True)``, the pinned-lot
+  lookup, and the return verb's source-row fetch all take them. The lock-ordering
+  rule: the WO lock is always taken first (every entry point already holds it), and
+  each locking QUERY acquires its inventory rows in ascending-id order (lock by
+  ``id``, re-sort to FIFO in Python), which removes the classic opposite-order
+  deadlock WITHIN one candidate-lot set. That is deadlock REDUCTION, not proof:
+  ordering holds per query, and one completion transaction issues several locking
+  queries in sequence (allocation by allocation, component by component), so two
+  transactions interleaving different parts -- or a completion racing
+  ``/inventory/transfer``'s source+destination pair or a cycle count's bulk lock --
+  can still deadlock. The backstop is Postgres deadlock DETECTION (one victim gets an
+  error, never a hang) plus this engine's own design: the per-allocation savepoint
+  contains the failure and sum-delta reconcile-to-target re-posts the missing delta
+  on the next completion or reconcile-on-read. Don't build on a no-deadlock
+  guarantee; build on detect-and-converge.
+  ``with_for_update`` is a no-op on the SQLite test backend; a dialect-compile test
+  pins the Postgres SQL.
 
 **Scrap consumes.** A scrapped run physically used the sheet, so scrap is inside
 ``target``. It is posted as ``TransactionType.ISSUE``, NOT ``SCRAP``: lot genealogy
@@ -368,7 +389,20 @@ CONSUMABLE_ITEM_CLAUSES = (
 )
 
 
-def consumable_source_items(db: Session, part_id: int, company_id: int) -> list[InventoryItem]:
+def _fifo_sort_key(item: InventoryItem):
+    """The FIFO order as a Python sort key: ``received_date ASC NULLS LAST, id ASC``.
+
+    Mirrors the SQL ``ORDER BY`` in ``consumable_source_items`` exactly, for the
+    ``for_update`` branch which must ACQUIRE locks in ascending-id order (the
+    per-query lock-ordering rule -- see the module docstring's concurrency section)
+    and re-sort in Python for the draw.
+    """
+    return (item.received_date is None, item.received_date, item.id)
+
+
+def consumable_source_items(
+    db: Session, part_id: int, company_id: int, *, for_update: bool = False
+) -> list[InventoryItem]:
     """FIFO-ordered consumable stock for a part (tenant-scoped).
 
     THE one lot-selection policy, shared by BOTH engines -- the operation-scoped tie
@@ -382,21 +416,40 @@ def consumable_source_items(db: Session, part_id: int, company_id: int) -> list[
     ``received_date ASC NULLS LAST, id ASC``: oldest receipt first, rows with no
     received date last (they cannot be ordered by age, so they are the fallback), and
     ``id`` as the deterministic tie-break.
+
+    ``for_update=True`` is for the two CONSUMING engines (never the preview, which is a
+    pure read): it takes ``FOR UPDATE`` row locks on the candidate lots before the
+    read-modify-write of ``quantity_on_hand``. Locks are ACQUIRED in ascending-id order
+    -- the per-query lock-ordering rule that removes opposite-order acquisition within
+    one candidate-lot set (it narrows, but does not eliminate, cross-transaction
+    deadlocks; see the module docstring's concurrency section for the detect-and-
+    converge backstop) -- and the rows are then re-sorted in Python to the same FIFO
+    order the plain branch emits in SQL, so the draw itself is byte-identical.
+    ``with_for_update`` is a no-op on the SQLite test backend, as everywhere else in
+    this codebase; ``test_inventory_row_locking.py`` compiles the query for the
+    postgresql dialect to pin the ``FOR UPDATE``.
     """
-    return (
-        db.query(InventoryItem)
-        .filter(
-            InventoryItem.company_id == company_id,
-            InventoryItem.part_id == part_id,
-            *CONSUMABLE_ITEM_CLAUSES,
-            InventoryItem.quantity_on_hand > 0,
-        )
-        .order_by(
-            InventoryItem.received_date.is_(None),
-            InventoryItem.received_date.asc(),
-            InventoryItem.id.asc(),
-        )
-        .all()
+    items = consumable_source_query(db, part_id, company_id, for_update=for_update).all()
+    if for_update:
+        items.sort(key=_fifo_sort_key)
+    return items
+
+
+def consumable_source_query(db: Session, part_id: int, company_id: int, *, for_update: bool = False):
+    """The query behind ``consumable_source_items``, exposed so the postgresql
+    dialect-compile test can assert the ``FOR UPDATE`` without executing it."""
+    query = db.query(InventoryItem).filter(
+        InventoryItem.company_id == company_id,
+        InventoryItem.part_id == part_id,
+        *CONSUMABLE_ITEM_CLAUSES,
+        InventoryItem.quantity_on_hand > 0,
+    )
+    if for_update:
+        return query.order_by(InventoryItem.id.asc()).with_for_update()
+    return query.order_by(
+        InventoryItem.received_date.is_(None),
+        InventoryItem.received_date.asc(),
+        InventoryItem.id.asc(),
     )
 
 
@@ -810,12 +863,16 @@ def _consume_one_allocation(
 
     held_item: Optional[InventoryItem] = None
     if allocation.pinned_inventory_item_id is not None:
+        # FOR UPDATE: the read-modify-write of ``quantity_on_hand`` below must hold the
+        # row lock, or two completions of DIFFERENT work orders drawing this lot race
+        # (the WO optimistic lock only serializes same-WO). No-op on SQLite.
         pinned = (
             db.query(InventoryItem)
             .filter(
                 InventoryItem.id == allocation.pinned_inventory_item_id,
                 InventoryItem.company_id == company_id,
             )
+            .with_for_update()
             .first()
         )
         source_items = [pinned] if pinned is not None else []
@@ -825,7 +882,7 @@ def _consume_one_allocation(
             # actually taken from this lot is known.
             held_item = pinned
     else:
-        source_items = consumable_source_items(db, allocation.part_id, company_id)
+        source_items = consumable_source_items(db, allocation.part_id, company_id, for_update=True)
 
     available_total = sum(float(i.quantity_on_hand or 0) for i in source_items)
 
@@ -1695,6 +1752,9 @@ def _resolve_return_source_lots(
     item_ids = {step.inventory_item_id for step in steps}
     if not item_ids:
         return {}
+    # FOR UPDATE, acquired in ascending-id order (the shared lock-ordering rule): the
+    # return credits ``quantity_on_hand`` back with the same read-modify-write shape the
+    # consume engine uses, so it takes the same row locks. No-op on SQLite.
     items = {
         item.id: item
         for item in db.query(InventoryItem)
@@ -1702,6 +1762,8 @@ def _resolve_return_source_lots(
             InventoryItem.company_id == company_id,
             InventoryItem.id.in_(item_ids),
         )
+        .order_by(InventoryItem.id.asc())
+        .with_for_update()
         .all()
     }
     for item_id in sorted(item_ids):

@@ -703,8 +703,15 @@ def _scenario(db: Session, user: User, wc: WorkCenter, *, handler: str):
     effect. Force-complete is work-order-scoped by nature, so it gets one operation and
     its fingerprint legitimately includes the finished-goods receipt -- which is fine,
     because control and subject are compared to each other, not to zero.
+
+    Force-complete uses a PRODUCTION work order: a laser dispatch-pool WO deliberately
+    books NO finished-goods receipt any more (its ``quantity_complete`` counts nest
+    runs, not product -- the phantom-FG fix), which would leave this handler's control
+    fingerprint empty and defeat the "the FG receipt legitimately posts" channel. The
+    three per-operation handlers keep the laser shape (dispatch pools are exempt from
+    the predecessor gate, which is what lets one operation complete in isolation).
     """
-    wo = make_wo(db, make_part(db, standard_cost=9.0), quantity_ordered=4)
+    wo = make_wo(db, make_part(db, standard_cost=9.0), quantity_ordered=4, laser=(handler != "force_complete"))
     op1 = make_op(db, wo, wc, sequence=10, runs=2.0)
     if handler != "force_complete":
         make_op(db, wo, wc, sequence=20, runs=2.0)

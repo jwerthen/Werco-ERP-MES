@@ -13,9 +13,12 @@
  *  - a tied row must carry a per-run quantity > 0 (the API enforces `gt=0`);
  *  - a re-import pre-fills each row from the tie its nest already carries,
  *    because importing CANCELS and DETACHES every existing tie;
- *  - the consumed-tie 409 explains that there is no reversal verb yet.
+ *  - the consumed-tie 409 renders the server's self-contained refusal verbatim
+ *    (the old "no reversal verb yet" client addendum is retired — the RETURN
+ *    verb shipped).
  *
- * Copy invariant: consumption fires at WORK-ORDER completion, never per run.
+ * Copy invariant: consumption fires when EACH OPERATION (one per nest)
+ * completes, never per run — `utils/materialTie.ts` owns that copy.
  */
 
 import React from 'react';
@@ -200,8 +203,8 @@ describe('package-level default', () => {
     expect(screen.getByLabelText('Sheet part for sheet-2.pdf')).toHaveValue('31');
     expect(screen.getByLabelText('Sheets per run for sheet-1.pdf')).toHaveValue(2);
 
-    // 2/run x (5 + 2) runs = 14 sheets, deducted at WORK-ORDER completion —
-    // never "deducting now" and never per run.
+    // 2/run x (5 + 2) runs = 14 sheets, each nest's share deducted as ITS
+    // operation completes — never "deducting now" and never per run.
     const chip = screen.getByText(/sheets deducted as each nest completes/i);
     expect(chip).toHaveTextContent('2 tied — 14 sheets deducted as each nest completes');
     expect(screen.queryByText(/deducting now/i)).not.toBeInTheDocument();
@@ -302,29 +305,30 @@ describe('re-import pre-fill', () => {
 });
 
 describe('consumed-tie refusal', () => {
-  it('explains that nothing was destroyed and that there is no reversal verb yet', async () => {
+  it('renders the ledger-backed 409 refusal verbatim, with no client addendum', async () => {
+    // The current backend wording (material_consumption_service): self-contained
+    // — it says what stands on the ledger, that returning the material does not
+    // unlock the rebuild, and that the remedy is a new work order.
+    const detail =
+      "Cannot rebuild this work order's operations: this work order's material movement is " +
+      'already on the inventory ledger for 2 tied allocation(s), and the rebuild would delete ' +
+      'the operations those ledger rows are recorded against — dropping them out of job cost, ' +
+      'analytics and lot traceability. Returning the material does not change that. Raise a ' +
+      'new work order for the corrected nest package; this one keeps its material history intact.';
     mockApi.importLaserNestPackage.mockRejectedValue({
-      response: {
-        status: 409,
-        data: {
-          detail:
-            "Cannot rebuild this work order's operations: material has already been consumed " +
-            'against 2 tied allocation(s). Reverse consumption first.',
-        },
-      },
+      response: { status: 409, data: { detail } },
     });
 
     render(<LaserNestImportWizard open workOrderId={42} onClose={jest.fn()} onImported={jest.fn()} />);
     await previewPackage();
     fireEvent.click(screen.getByRole('button', { name: /^import 2 nests$/i }));
 
-    const banner = await screen.findByText(/material has already been consumed/i);
-    // The server's own words survive verbatim...
-    expect(banner).toHaveTextContent('Reverse consumption first.');
-    // ...and the UI adds what the server can't say: nothing was lost, and the
-    // only path today is a new work order (the RETURN verb ships in PR 3).
-    expect(banner).toHaveTextContent(/nothing was imported and the existing nests are untouched/i);
-    expect(banner).toHaveTextContent(/need a new work order/i);
+    const banner = await screen.findByText(/already on the inventory ledger/i);
+    expect(banner).toHaveTextContent(detail);
+    // The retired client addendum claimed reversal "is not available yet" —
+    // false since returnMaterialAllocation shipped. It must never come back.
+    expect(banner).not.toHaveTextContent(/not available yet/i);
+    expect(banner).not.toHaveTextContent(/nothing was imported/i);
   });
 
   it('renders a structured (object) 409 detail as text instead of crashing', async () => {

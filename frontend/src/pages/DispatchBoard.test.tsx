@@ -1141,6 +1141,19 @@ describe('DispatchBoard — material ties', () => {
     expect(screen.getByLabelText('Move WO-20260719-004 Operation up')).toBeEnabled();
   });
 
+  it('words the rollup title as per-OPERATION timing, never work-order completion', async () => {
+    // Same pin as the chip-title test above: the pre-PR-2.5 copy deferred the
+    // shortage to "work-order completion", which now understates — each
+    // operation's completion posts its own draw.
+    renderBoard();
+    await findColumn('Ermaksan Fiber Laser');
+
+    const title = screen.getByTestId('dispatch-tie-short-2').getAttribute('title') || '';
+    expect(title).toContain('as these operations complete');
+    expect(title).toContain('never blocks production');
+    expect(title.toLowerCase()).not.toContain('work-order completion');
+  });
+
   it('rolls the short ties up per column, and says nothing when none are short', async () => {
     renderBoard();
     await findColumn('Ermaksan Fiber Laser');

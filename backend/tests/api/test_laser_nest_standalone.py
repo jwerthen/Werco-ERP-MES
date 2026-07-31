@@ -667,7 +667,9 @@ class TestPartRequiredUnlessLaserCheck:
     def test_create_endpoint_still_requires_part_id(self, client, db_session):
         """The relaxation is READ-side only: ``WorkOrderCreate`` keeps part_id
         required, so POST /work-orders/ cannot mint a part-less WO -- not even a
-        laser_cutting one. Part-less WOs are born ONLY via the standalone import."""
+        laser_cutting one. Part-less WOs are born ONLY via the standalone import.
+        (This request now 422s twice over: missing part_id AND the laser_cutting
+        type refusal below.)"""
         admin = make_user(db_session, role=UserRole.ADMIN)
         resp = client.post(
             "/api/v1/work-orders/",
@@ -676,6 +678,67 @@ class TestPartRequiredUnlessLaserCheck:
         )
         assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
         assert db_session.query(WorkOrder).count() == 0
+
+    def _make_real_part(self, db_session) -> Part:
+        _ensure_company(db_session, COMPANY_A)
+        n = _next()
+        part = Part(
+            part_number=f"SALONE-P-{n}",
+            name=f"Part {n}",
+            description="wo-type-gate fixture part",
+            part_type="manufactured",
+            unit_of_measure="each",
+            is_active=True,
+            company_id=COMPANY_A,
+        )
+        db_session.add(part)
+        db_session.commit()
+        db_session.refresh(part)
+        return part
+
+    def test_create_endpoint_refuses_laser_cutting_even_with_a_real_part(self, client, db_session):
+        """B3 follow-up: ``work_order_type`` was a free string persisted verbatim, so an
+        API client could mint a 'laser_cutting' WO WITH a real part and routed ops --
+        which would then silently lose its FG receipt and backflush at completion (the
+        nest-dispatch skips key on exactly that type). The create schema now refuses the
+        value outright; nest WOs are minted only internally by the import/dispatch flow."""
+        admin = make_user(db_session, role=UserRole.ADMIN)
+        part = self._make_real_part(db_session)
+        resp = client.post(
+            "/api/v1/work-orders/",
+            headers=headers_for(admin),
+            json={"part_id": part.id, "work_order_type": "laser_cutting", "quantity_ordered": 3, "priority": 5},
+        )
+        assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+        assert "laser_cutting" in resp.text
+        assert db_session.query(WorkOrder).count() == 0, "the refusal must create nothing"
+
+    def test_create_endpoint_refuses_unknown_work_order_type(self, client, db_session):
+        """The vocabulary is closed: an arbitrary string can no longer be persisted as a
+        work_order_type (it would otherwise ride every type-keyed predicate unvalidated)."""
+        admin = make_user(db_session, role=UserRole.ADMIN)
+        part = self._make_real_part(db_session)
+        resp = client.post(
+            "/api/v1/work-orders/",
+            headers=headers_for(admin),
+            json={"part_id": part.id, "work_order_type": "totally_made_up", "quantity_ordered": 3, "priority": 5},
+        )
+        assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+        assert "work_order_type must be one of" in resp.text
+        assert db_session.query(WorkOrder).count() == 0
+
+    def test_create_endpoint_production_type_still_works(self, client, db_session):
+        """Positive control for the new gate: the explicit (and default) 'production'
+        type keeps creating normally."""
+        admin = make_user(db_session, role=UserRole.ADMIN)
+        part = self._make_real_part(db_session)
+        resp = client.post(
+            "/api/v1/work-orders/?auto_routing=false",
+            headers=headers_for(admin),
+            json={"part_id": part.id, "work_order_type": "production", "quantity_ordered": 3, "priority": 5},
+        )
+        assert resp.status_code == status.HTTP_201_CREATED, resp.text
+        assert resp.json()["work_order_type"] == "production"
 
 
 # --------------------------------------------------------------------------- #

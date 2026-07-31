@@ -2,13 +2,13 @@ from datetime import date, datetime
 from typing import Dict, List, Optional, Sequence
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session, joinedload
 
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.db.database import atomic_transaction, get_db
-from app.db.ledger_filter import WORK_ORDER_REFERENCE_TYPE, work_order_ledger_filter
+from app.db.ledger_filter import LEDGER_QUANTITY_EPSILON, WORK_ORDER_REFERENCE_TYPE, work_order_ledger_filter
 from app.models.inventory import (
     CycleCount,
     CycleCountItem,
@@ -107,21 +107,85 @@ def _audit_stock_movement(
     )
 
 
-def _load_inventory_items(db: Session, company_id: int, item_ids: Sequence[int]) -> Dict[int, InventoryItem]:
+def _load_inventory_items(
+    db: Session, company_id: int, item_ids: Sequence[int], *, for_update: bool = False
+) -> Dict[int, InventoryItem]:
     """Tenant-scoped bulk load of stock rows, keyed by id.
 
     Replaces a per-item ``SELECT`` inside the cycle-count completion loop:
     ``create_cycle_count`` enrolls every stock row in a warehouse, so that loop is
     inherently bulk. Rows belonging to another company are simply absent from the
     map, which is what makes the caller's "skip anything not ours" guard work.
+
+    ``for_update=True`` takes ``FOR UPDATE`` row locks, acquired in ascending-id order
+    (the same lock-ordering rule as the consumption engine, so a completion drawing the
+    same lots concurrently cannot deadlock against a cycle-count posting). No-op on the
+    SQLite test backend.
     """
     loaded: Dict[int, InventoryItem] = {}
-    ids = [i for i in item_ids if i is not None]
+    ids = sorted(i for i in item_ids if i is not None)
     for start in range(0, len(ids), _IN_CHUNK):
         chunk = ids[start : start + _IN_CHUNK]
-        rows = db.query(InventoryItem).filter(InventoryItem.company_id == company_id, InventoryItem.id.in_(chunk)).all()
-        loaded.update({row.id: row for row in rows})
+        query = db.query(InventoryItem).filter(InventoryItem.company_id == company_id, InventoryItem.id.in_(chunk))
+        if for_update:
+            query = query.order_by(InventoryItem.id.asc()).with_for_update()
+        loaded.update({row.id: row for row in query.all()})
     return loaded
+
+
+def _find_stock_row(
+    db: Session,
+    *,
+    company_id: int,
+    part_id: int,
+    location_code: str,
+    lot_number: Optional[str],
+    for_update: bool = False,
+) -> Optional[InventoryItem]:
+    """The existing stock row for (part, location, lot), tenant-scoped. Shared by
+    ``/receive`` and ``/transfer``.
+
+    ``lot_number`` branches to ``IS NULL`` when the incoming lot is ``None``: the naive
+    ``lot_number == None`` comparison compiles to ``lot_number = NULL``, which never
+    matches in SQL, so every lot-less receive minted a brand-new fragment row instead of
+    incrementing the one that was already there.
+
+    ``for_update=True`` locks the row before the read-modify-write of
+    ``quantity_on_hand`` (no-op on SQLite; the postgresql dialect-compile test in
+    ``test_inventory_row_locking.py`` pins the ``FOR UPDATE``). Ordered by id so a
+    legacy fragmented set resolves deterministically to its oldest row.
+    """
+    return _stock_row_query(
+        db,
+        company_id=company_id,
+        part_id=part_id,
+        location_code=location_code,
+        lot_number=lot_number,
+        for_update=for_update,
+    ).first()
+
+
+def _stock_row_query(
+    db: Session,
+    *,
+    company_id: int,
+    part_id: int,
+    location_code: str,
+    lot_number: Optional[str],
+    for_update: bool = False,
+):
+    """The query behind ``_find_stock_row``, exposed for the dialect-compile test."""
+    lot_clause = InventoryItem.lot_number.is_(None) if lot_number is None else InventoryItem.lot_number == lot_number
+    query = db.query(InventoryItem).filter(
+        InventoryItem.company_id == company_id,
+        InventoryItem.part_id == part_id,
+        InventoryItem.location == location_code,
+        lot_clause,
+    )
+    query = query.order_by(InventoryItem.id.asc())
+    if for_update:
+        query = query.with_for_update()
+    return query
 
 
 @router.get("/low-stock")
@@ -210,9 +274,13 @@ class LocationCreate(BaseModel):
     is_receivable: bool = True
 
 
+# Movement quantities are strictly positive (Field(gt=0)): a NEGATIVE issue would MINT
+# stock while writing a positive-quantity ISSUE ledger row with a negative total_cost, a
+# negative receive would remove stock, and a negative transfer would move dest->source
+# against locations/lots the response never named. Direction is the verb, never the sign.
 class ReceiveItemRequest(BaseModel):
     part_id: int
-    quantity: float
+    quantity: float = Field(gt=0)
     location_code: str
     lot_number: Optional[str] = None
     serial_number: Optional[str] = None
@@ -225,21 +293,24 @@ class ReceiveItemRequest(BaseModel):
 
 class IssueItemRequest(BaseModel):
     inventory_item_id: int
-    quantity: float
+    quantity: float = Field(gt=0)
     work_order_number: Optional[str] = None
     notes: Optional[str] = None
 
 
 class TransferRequest(BaseModel):
     inventory_item_id: int
-    quantity: float
+    quantity: float = Field(gt=0)
     to_location_code: str
     notes: Optional[str] = None
 
 
 class AdjustmentRequest(BaseModel):
     inventory_item_id: int
-    new_quantity: float
+    # Absolute target on-hand: zero is a legitimate write-off, negative is not a state a
+    # manual adjustment may DICTATE (only the shortage engine drives a lot negative, and
+    # the manual remedy is adjusting it back UP).
+    new_quantity: float = Field(ge=0)
     reason_code: str
     notes: Optional[str] = None
 
@@ -253,7 +324,8 @@ class CycleCountCreate(BaseModel):
 
 
 class CountItemRequest(BaseModel):
-    counted_quantity: float
+    # A physical count observation can be zero (nothing on the shelf) but never negative.
+    counted_quantity: float = Field(ge=0)
     notes: Optional[str] = None
 
 
@@ -280,6 +352,7 @@ def create_location(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     existing = (
         db.query(InventoryLocation)
@@ -292,6 +365,19 @@ def create_location(
     location = InventoryLocation(**loc_in.model_dump())
     location.company_id = company_id
     db.add(location)
+    db.flush()
+
+    # Tamper-evident audit trail (invariant #2): a location is the scoping anchor for
+    # receives, transfers and cycle counts, so its creation is a state change the hash
+    # chain must record. Written before the commit so it lands with the row.
+    audit.log_create(
+        "inventory_location",
+        location.id,
+        location.code,
+        new_values=location,
+        description=f"Created inventory location {location.code} (warehouse {location.warehouse})",
+    )
+
     db.commit()
     db.refresh(location)
     return location
@@ -319,7 +405,10 @@ def list_inventory(
     if location_code:
         query = query.filter(InventoryItem.location == location_code)
     if has_quantity:
-        query = query.filter(InventoryItem.quantity_on_hand > 0)
+        # != 0, not > 0: the shortage posture deliberately drives a lot NEGATIVE rather
+        # than fail a completion, and a driven-negative lot is a discrepancy someone has
+        # to see and fix — filtering it out made it invisible to the one list view.
+        query = query.filter(InventoryItem.quantity_on_hand != 0)
 
     return query.order_by(InventoryItem.part_id, InventoryItem.location).all()
 
@@ -418,16 +507,15 @@ def receive_inventory(
         raise HTTPException(status_code=404, detail="Location not found")
 
     # Check for existing inventory at this location with same lot (tenant-scoped, so a
-    # matching lot in another company can never be the row we increment)
-    existing = (
-        db.query(InventoryItem)
-        .filter(
-            InventoryItem.company_id == company_id,
-            InventoryItem.part_id == receive_in.part_id,
-            InventoryItem.location == receive_in.location_code,
-            InventoryItem.lot_number == receive_in.lot_number,
-        )
-        .first()
+    # matching lot in another company can never be the row we increment). Shared helper:
+    # NULL-safe on a lot-less receive, and row-locked for the increment below.
+    existing = _find_stock_row(
+        db,
+        company_id=company_id,
+        part_id=receive_in.part_id,
+        location_code=receive_in.location_code,
+        lot_number=receive_in.lot_number,
+        for_update=True,
     )
 
     old_quantity_on_hand = existing.quantity_on_hand if existing else None
@@ -519,7 +607,7 @@ def receive_inventory(
     return {"message": "Inventory received", "inventory_item_id": inv_item.id, "quantity": receive_in.quantity}
 
 
-@router.post("/issue", deprecated=True, summary="Issue inventory to work order (deprecated)")
+@router.post("/issue", deprecated=True, summary="Issue inventory manually (deprecated)")
 def issue_inventory(
     issue_in: IssueItemRequest,
     db: Session = Depends(get_db),
@@ -527,17 +615,37 @@ def issue_inventory(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Issue inventory to work order.
+    """Issue inventory manually (deprecated).
 
-    DEPRECATION NOTICE: this free-form issue verb is slated for removal in favor of
-    the work-order-scoped ``POST /work-orders/{id}/issue-material``, which ties the
-    consumption to a specific work order (and operation) rather than an untyped
-    ``work_order_number`` string. Role gate matches the sibling ``/inventory/adjust``
-    stock-mutating endpoint.
+    DEPRECATION NOTICE: this free-form issue verb is slated for removal. Work-order
+    material consumption goes through material ties (``work_order_material_allocations``
+    -- consumption posts automatically as operations/work orders complete), and manual
+    stock corrections go through ``POST /inventory/adjust``. Role gate matches the
+    sibling ``/inventory/adjust`` stock-mutating endpoint.
+
+    Work-order attribution is REFUSED here (400): this endpoint could only record it as
+    ``reference_type='work_order'`` + ``reference_number`` with NO ``reference_id``,
+    a shape invisible to ``work_order_ledger_filter`` -- i.e. to job costing, lot
+    genealogy, analytics and the backflush nets. A movement the work-order record
+    cannot see is worse than no attribution at all.
     """
+    if issue_in.work_order_number:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Work-order attribution is not supported on this deprecated endpoint: the row it would "
+                "write is invisible to work-order material history and job costing. Tie the material to "
+                "the work order (material allocations) so consumption posts through the completion flows, "
+                "or use POST /inventory/adjust for a manual correction."
+            ),
+        )
+
+    # FOR UPDATE (no-op on SQLite): the decrement below is a read-modify-write, and the
+    # consumption engine may be drawing the same lot concurrently.
     inv_item = (
         db.query(InventoryItem)
         .filter(InventoryItem.id == issue_in.inventory_item_id, InventoryItem.company_id == company_id)
+        .with_for_update()
         .first()
     )
     if not inv_item:
@@ -561,8 +669,9 @@ def issue_inventory(
             from_location=inv_item.location,
             lot_number=inv_item.lot_number,
             serial_number=inv_item.serial_number,
-            reference_type="work_order" if issue_in.work_order_number else None,
-            reference_number=issue_in.work_order_number,
+            # Always None: work-order attribution is refused above (see docstring).
+            reference_type=None,
+            reference_number=None,
             unit_cost=inv_item.unit_cost,
             total_cost=issue_in.quantity * inv_item.unit_cost,
             notes=issue_in.notes,
@@ -619,9 +728,18 @@ def transfer_inventory(
     mutators. Previously this endpoint took only ``get_current_user``, so the server
     under-enforced its own documented policy.
     """
+    # FOR UPDATE (no-op on SQLite): both the source decrement and the destination
+    # increment below are read-modify-writes racing the consumption engine.
+    # Lock ordering caveat: this handler locks source-by-id first, then destination
+    # by (part, location, lot) -- the pair is NOT id-ordered relative to each other,
+    # so two opposing concurrent transfers of the same part (or a transfer racing the
+    # engine's ascending-id lock set) can deadlock. Postgres detects it and aborts one
+    # victim with an error (never a hang), and nothing partial commits. A two-phase
+    # ascending-id acquisition would close the window if this ever shows up in practice.
     inv_item = (
         db.query(InventoryItem)
         .filter(InventoryItem.id == transfer_in.inventory_item_id, InventoryItem.company_id == company_id)
+        .with_for_update()
         .first()
     )
     if not inv_item:
@@ -649,16 +767,17 @@ def transfer_inventory(
         inv_item.quantity_available = inv_item.quantity_on_hand - inv_item.quantity_allocated
 
         # Add to destination (or create new). Tenant-scoped so the destination row we
-        # increment is always this company's stock.
-        dest_inv = (
-            db.query(InventoryItem)
-            .filter(
-                InventoryItem.company_id == company_id,
-                InventoryItem.part_id == inv_item.part_id,
-                InventoryItem.location == transfer_in.to_location_code,
-                InventoryItem.lot_number == inv_item.lot_number,
-            )
-            .first()
+        # increment is always this company's stock. Shared helper: NULL-safe when the
+        # source row is lot-less (the naive ``lot_number == None`` never matched, so a
+        # lot-less transfer always minted a new destination fragment), and row-locked
+        # for the increment.
+        dest_inv = _find_stock_row(
+            db,
+            company_id=company_id,
+            part_id=inv_item.part_id,
+            location_code=transfer_in.to_location_code,
+            lot_number=inv_item.lot_number,
+            for_update=True,
         )
 
         dest_old_quantity = dest_inv.quantity_on_hand if dest_inv else None
@@ -754,9 +873,12 @@ def adjust_inventory(
     audit: AuditService = Depends(get_audit_service),
 ):
     """Adjust inventory quantity"""
+    # FOR UPDATE (no-op on SQLite): the absolute SET below is derived from the read
+    # (``variance``), so a concurrent movement between read and write would be lost.
     inv_item = (
         db.query(InventoryItem)
         .filter(InventoryItem.id == adjust_in.inventory_item_id, InventoryItem.company_id == company_id)
+        .with_for_update()
         .first()
     )
     if not inv_item:
@@ -893,10 +1015,13 @@ def create_cycle_count(
     # Add items to count. Tenant-scoped: warehouse / location codes are not unique
     # across companies, so an unscoped scan would enroll another tenant's stock rows
     # into this count (and complete_cycle_count would then adjust them).
+    # != 0, not > 0: a lot the shortage posture drove NEGATIVE is exactly the row a
+    # cycle count exists to reconcile — enrolling only positive rows made it
+    # permanently uncountable.
     query = db.query(InventoryItem).filter(
         InventoryItem.company_id == company_id,
         InventoryItem.is_active == True,
-        InventoryItem.quantity_on_hand > 0,
+        InventoryItem.quantity_on_hand != 0,
     )
 
     if count.warehouse:
@@ -1199,12 +1324,14 @@ def complete_cycle_count(
     #                       snapshotted on the count item, regardless of posting.
     #   posted_variance   — what actually hit the ledger: only the items that produced
     #                       a COUNT InventoryTransaction, priced on the SAME basis as
-    #                       that transaction (the CURRENT InventoryItem.unit_cost).
+    #                       that transaction (the CURRENT InventoryItem.unit_cost and
+    #                       the CURRENT-basis quantity delta).
     # They differ whenever apply_adjustments is false, a count item points at a stock
-    # row that is gone or belongs to another tenant, OR the part's unit cost moved
-    # between enrollment and completion. Mixing the bases is what used to make
-    # ``CycleCount.total_variance_value`` fail to reconcile with the very rows this
-    # completion wrote.
+    # row that is gone or belongs to another tenant, the part's unit cost moved
+    # between enrollment and completion, OR stock moved between enrollment and
+    # completion (routine now that operation completion consumes tied material).
+    # Mixing the bases is what used to make ``CycleCount.total_variance_value`` fail
+    # to reconcile with the very rows this completion wrote.
     measured_variance = 0.0
     posted_variance = 0.0
     items_adjusted = 0
@@ -1219,7 +1346,11 @@ def complete_cycle_count(
         adjustable_ids = (
             [i.inventory_item_id for i in count.items if i.is_counted and i.variance] if apply_adjustments else []
         )
-        inventory_by_id = _load_inventory_items(db, company_id, adjustable_ids)
+        # FOR UPDATE (no-op on SQLite): on-hand is read below to compute the
+        # current-basis delta, then written absolutely — a concurrent movement (the
+        # consumption engine runs on every operation completion) between that read and
+        # the write would otherwise be silently lost.
+        inventory_by_id = _load_inventory_items(db, company_id, adjustable_ids, for_update=apply_adjustments)
 
         for item in count.items:
             # A null variance means the row was never really counted; writing
@@ -1238,9 +1369,33 @@ def complete_cycle_count(
             if not inv:
                 continue
 
+            # TWO bases, deliberately kept apart (both are stated on the ledger row):
+            #   enrollment basis — counted - system_quantity (the snapshot taken when the
+            #                      count was created). That is the QUALITY figure: what
+            #                      the counters found vs. what the system said then. It
+            #                      stays on ``item.variance`` untouched.
+            #   current basis    — counted - on-hand AS OF THIS COMPLETION (read under
+            #                      the row lock above). That is what the ledger row must
+            #                      carry: the ledger records actual stock movement, and
+            #                      any movement between enrollment and completion (now
+            #                      routine — operation-completion consumption) makes the
+            #                      two differ. Posting the enrollment variance while
+            #                      writing on-hand absolutely made SUM(ledger) diverge
+            #                      from on-hand permanently and silently resurrected
+            #                      consumed stock.
             old_qty = inv.quantity_on_hand
+            current_delta = float(item.counted_quantity or 0.0) - float(old_qty or 0.0)
             inv.quantity_on_hand = item.counted_quantity
             inv.quantity_available = inv.quantity_on_hand - inv.quantity_allocated
+
+            if abs(current_delta) <= LEDGER_QUANTITY_EPSILON:
+                # On-hand already equals the counted figure (up to the shared ledger
+                # epsilon: fractional consumption leaves ~1e-15 float residues that
+                # must not post as a COUNT row), so there is no stock movement to
+                # record. The count outcome is already on the count item; a
+                # zero-quantity ledger row is never posted (existing convention).
+                # On-hand was still snapped to the counted figure above.
+                continue
 
             # Create adjustment transaction. company_id is NOT NULL on
             # inventory_transactions (TenantMixin — migration 026), so omitting it
@@ -1252,22 +1407,27 @@ def complete_cycle_count(
                 inventory_item_id=inv.id,
                 part_id=inv.part_id,
                 transaction_type=TransactionType.COUNT,
-                quantity=item.variance,
+                quantity=current_delta,
                 from_location=inv.location,
                 to_location=inv.location,
                 lot_number=inv.lot_number,
                 reason_code="cycle_count",
-                notes=f"Cycle count {count.count_number}. System: {old_qty}, Counted: {item.counted_quantity}",
+                notes=(
+                    f"Cycle count {count.count_number}. Counted: {item.counted_quantity}; "
+                    f"on-hand at completion: {old_qty} (current-basis delta {current_delta:+g}); "
+                    f"system at enrollment: {item.system_quantity} "
+                    f"(enrollment variance {(item.variance or 0):+g})"
+                ),
                 unit_cost=inv.unit_cost,
-                total_cost=abs(item.variance) * inv.unit_cost,
+                total_cost=abs(current_delta) * inv.unit_cost,
                 created_by=current_user.id,
             )
             db.add(txn)
             db.flush()
 
-            # Priced on the ledger row's OWN basis (current unit cost), not the
-            # enrollment-time snapshot on the count item — see the note above.
-            posted_variance += item.variance * (inv.unit_cost or 0.0)
+            # Priced on the ledger row's OWN basis (current unit cost, current-basis
+            # delta), not the enrollment-time snapshot — see the note above.
+            posted_variance += current_delta * (inv.unit_cost or 0.0)
             items_adjusted += 1
 
             # Tamper-evident audit trail (hash chain), same dual-row convention as

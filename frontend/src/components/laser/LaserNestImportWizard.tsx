@@ -169,23 +169,17 @@ async function loadOrEmpty<T>(load: () => Promise<T[]>): Promise<T[]> {
 /**
  * Import failure text.
  *
- * The consumed-tie refusal (409) is special-cased because the bare server
- * detail ends "Reverse consumption first" and **there is no reversal verb yet**
- * — pointing the planner at a self-service fix that does not exist would send
- * them hunting. What is true today: nothing was imported, nothing was deleted,
- * and these nests need a new work order. The detail is normalized because 409s
- * on this feature can carry an object rather than a string.
+ * The detail is normalized because 409s on this feature can carry an object
+ * rather than a string — and that is ALL this does. The consumed-tie re-import
+ * refusal used to be special-cased with a client addendum ("reversing
+ * consumption is not available yet"); the RETURN verb has since shipped and the
+ * server's refusal is now self-contained (nothing was destroyed, a return does
+ * not unlock the rebuild, the remedy is a new work order), so the detail
+ * renders verbatim.
  */
 function importErrorMessage(err: any): string {
   const detail = toDisplayString(err?.response?.data?.detail).trim();
-  if (!detail) return 'Failed to import laser nest package.';
-  if (err?.response?.status === 409 && /already been consumed/i.test(detail)) {
-    return (
-      `${detail} Nothing was imported and the existing nests are untouched. ` +
-      'Reversing consumption is not available yet, so these nests need a new work order.'
-    );
-  }
-  return detail;
+  return detail || 'Failed to import laser nest package.';
 }
 
 function fieldValue(row: EditableRow, field: LaserNestConfidenceField): string {
