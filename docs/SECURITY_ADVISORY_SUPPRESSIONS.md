@@ -579,8 +579,9 @@ because only `str` values are pinned.
 **CSV is fixed destructively, because CSV has no type system.** The only signal a reader has is the
 text itself, so the sole neutralization available is a leading single quote (`'`), which spreadsheet
 applications consume as "read the rest of this cell as text". Collateral is bounded: the prefix is
-applied only when a value **both** starts with a formula-initiating character **and** does not parse
-as a plain finite number, so `-5.00`, `-0.005` and `+1e3` stay usable as numbers. RFC 4180 quoting is
+applied only when a value **both** starts with a formula-initiating character **and** is not a plain
+finite number (anchored — no surrounding whitespace or `_` separators, the same rule on both stacks),
+so `-5.00`, `-0.005` and `+1e3` stay usable as numbers. RFC 4180 quoting is
 unchanged and still applied *after* neutralization.
 
 **State the loss precisely: it is lossy on the exported artifact, never on stored data.** That is the

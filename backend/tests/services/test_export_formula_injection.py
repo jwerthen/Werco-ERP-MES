@@ -118,6 +118,15 @@ def test_sanitize_csv_value_still_prefixes_non_finite_lookalikes():
     assert sanitize_csv_value("-nan") == "'-nan"
 
 
+@pytest.mark.parametrize("value", ["\t5", "\r5", "\t-5.0", "-1_000"])
+def test_sanitize_csv_value_number_exemption_is_anchored(value):
+    """Parity with the frontend's ``PLAIN_NUMBER_RE`` (``utils/csv.ts``): the
+    number exemption must not trim. ``float()`` accepts surrounding whitespace
+    and ``_`` digit separators, so it would pass ``"\\t5"`` through raw — a
+    TAB-prefixed cell, the exact payload class the neutralization exists for."""
+    assert sanitize_csv_value(value) == "'" + value
+
+
 def test_sanitize_csv_row_and_mapping():
     assert sanitize_csv_row(["=A1", "ok", 5]) == ["'=A1", "ok", 5]
     assert sanitize_csv_mapping({"a": "=A1", "b": "ok"}) == {"a": "'=A1", "b": "ok"}

@@ -27,8 +27,10 @@ prefix the value with a single quote (``'``), which spreadsheet apps consume as
 from the stored value for affected cells -- an honest, deliberate trade, and it
 is why the XLSX path does not do this. Stored data is never modified. Collateral
 is minimized: the prefix is added only when the value both starts with a
-formula-initiating character *and* does not parse as a plain finite number, so
-``-5.00``, ``-0.005`` and ``+1e3`` stay usable as numbers in the spreadsheet.
+formula-initiating character *and* is not a plain finite number (anchored, no
+surrounding whitespace or ``_`` separators — the same rule as the frontend's
+``PLAIN_NUMBER_RE``), so ``-5.00``, ``-0.005`` and ``+1e3`` stay usable as
+numbers in the spreadsheet.
 Sanitization runs before ``csv.writer`` sees the value, so RFC 4180 quoting of
 commas/quotes/newlines is unaffected.
 
@@ -36,7 +38,7 @@ These helpers assume an export of *stored data*. Do not use them on a sheet
 that is deliberately meant to contain formulas.
 """
 
-import math
+import re
 from typing import Any, Dict, Iterable, List, Mapping
 
 # OWASP CSV-injection set: the characters that make a spreadsheet treat cell
@@ -54,18 +56,24 @@ def is_formula_initiating(value: Any) -> bool:
     return isinstance(value, str) and value[:1] in FORMULA_INITIATING_CHARS
 
 
+# Mirrors PLAIN_NUMBER_RE in ``frontend/src/utils/csv.ts`` — the two must stay
+# in lockstep. Anchored and whitespace-free on purpose: ``float()`` would be
+# wrong here because it trims whitespace and accepts ``_`` digit separators, so
+# it reports ``"\t5"`` and ``"-1_000"`` as numbers — and a TAB-prefixed value is
+# exactly the payload class this module exists to neutralize.
+_PLAIN_NUMBER_RE = re.compile(r"^[+-]?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$", re.IGNORECASE)
+
+
 def _is_plain_number(text: str) -> bool:
     """True when ``text`` is just a finite number (``-5.00``, ``+1e3``, ``-0.005``).
 
     Such values are only "formula-initiating" by accident of their sign, and
     prefixing them would strand the recipient with text where they expect a
-    number. ``nan``/``inf`` are excluded: they are not numbers a spreadsheet can
-    use, so they fall through to the normal neutralization.
+    number. ``nan``/``inf`` and shapes only ``float()`` accepts (surrounding
+    whitespace, ``_`` separators) don't match: they take the normal
+    neutralization path.
     """
-    try:
-        return math.isfinite(float(text))
-    except (TypeError, ValueError):
-        return False
+    return _PLAIN_NUMBER_RE.match(text) is not None
 
 
 def sanitize_csv_value(value: Any) -> Any:
