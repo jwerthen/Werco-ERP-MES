@@ -5,6 +5,7 @@ import { Part, PartType } from '../types';
 import { CustomerNameOption } from '../types/api';
 import { partTypeColors } from '../types/engineering';
 import { ENGINEERING_PART_TYPE_OPTIONS } from '../utils/catalogGroups';
+import { escapeCsvField, neutralizeCsvFormula } from '../utils/csv';
 import { StatusBadge } from '../components/ui/StatusBadge';
 import { Modal } from '../components/ui/Modal';
 import { FormField } from '../components/ui';
@@ -349,13 +350,16 @@ export default function PartsPage() {
       'is_critical',
       'requires_inspection',
     ];
-    const escapeCell = (value: unknown) => {
-      const text = String(value ?? '');
-      return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
-    };
+    // Cells carry tenant-supplied text (part name, drawing number, customer
+    // part number), so they go through the shared escapeCsvField — formula-
+    // trigger neutralization first, then RFC 4180 quoting. See utils/csv.ts.
     return [
       headers.join(','),
-      ...rows.map(part => headers.map(header => escapeCell((part as unknown as Record<string, unknown>)[header])).join(',')),
+      ...rows.map(part =>
+        headers
+          .map(header => escapeCsvField((part as unknown as Record<string, unknown>)[header]))
+          .join(',')
+      ),
     ].join('\n');
   };
 
@@ -373,8 +377,15 @@ export default function PartsPage() {
 
   const copySelectedParts = async () => {
     if (selectedParts.length === 0) return;
+    // Tab-separated for pasting straight into a spreadsheet — which is exactly why each
+    // field is neutralized: a part name of `=HYPERLINK(...)` would otherwise paste as a
+    // live formula, the same injection class as the CSV export above. No RFC 4180
+    // quoting here: this is TSV for the clipboard, not a CSV file.
+    const cell = (value: unknown) => neutralizeCsvFormula(String(value ?? ''));
     const text = selectedParts
-      .map(part => `${part.part_number}\t${part.revision}\t${part.name}\t${part.part_type}\t${part.status}`)
+      .map(part =>
+        [part.part_number, part.revision, part.name, part.part_type, part.status].map(cell).join('\t')
+      )
       .join('\n');
     try {
       await navigator.clipboard.writeText(text);

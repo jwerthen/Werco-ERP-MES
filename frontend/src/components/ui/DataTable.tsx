@@ -25,6 +25,7 @@ import { Skeleton } from './Skeleton';
 import { ErrorState } from './ErrorState';
 import { EmptyState } from './EmptyState';
 import { MobileDataList } from './MobileDataCard';
+import { escapeCsvField } from '../../utils/csv';
 
 export type SortDir = 'asc' | 'desc';
 export type ColumnAlign = 'left' | 'right' | 'center';
@@ -124,15 +125,6 @@ function compareValues(a: string | number | null, b: string | number | null): nu
   return String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: 'base' });
 }
 
-/** Quote a CSV field per RFC 4180 when it contains a comma, quote, or newline. */
-function escapeCsv(value: string | number): string {
-  const s = String(value ?? '');
-  if (/[",\n\r]/.test(s)) {
-    return `"${s.replace(/"/g, '""')}"`;
-  }
-  return s;
-}
-
 function csvCellValue<T>(col: DataTableColumn<T>, row: T): string | number {
   if (col.csv) return col.csv(row);
   if (col.accessor) {
@@ -193,13 +185,18 @@ function defaultGroupHeader(groupKey: string, rows: unknown[]): React.ReactNode 
   );
 }
 
+/**
+ * Serialize columns + rows to CSV. Cells go through the shared `escapeCsvField`
+ * (utils/csv.ts), which neutralizes spreadsheet formula triggers before applying
+ * RFC 4180 quoting — tenant-supplied text lands in these cells.
+ */
 export function buildCsv<T>(columns: Array<DataTableColumn<T>>, rows: T[]): string {
   const exportable = columns.filter((c) => c.csv || c.accessor);
   const headerLine = exportable
-    .map((c) => escapeCsv(typeof c.header === 'string' ? c.header : c.key))
+    .map((c) => escapeCsvField(typeof c.header === 'string' ? c.header : c.key))
     .join(',');
   const dataLines = rows.map((row) =>
-    exportable.map((c) => escapeCsv(csvCellValue(c, row))).join(',')
+    exportable.map((c) => escapeCsvField(csvCellValue(c, row))).join(',')
   );
   return [headerLine, ...dataLines].join('\n');
 }

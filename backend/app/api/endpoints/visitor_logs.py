@@ -48,6 +48,7 @@ from app.schemas.visitor_log import (
 )
 from app.services import signin_station_service, visitor_log_service
 from app.services.audit_service import AuditService
+from app.services.export_safety import sanitize_csv_row
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -267,22 +268,26 @@ def export_visitors_csv(
             entry_type = "station"
         else:
             entry_type = "staff_live"
+        # Visitor names / companies / purpose notes are free text typed at a
+        # lobby tablet -- neutralize spreadsheet formulas (CWE-1236).
         writer.writerow(
-            [
-                r.id,
-                r.visitor_name,
-                r.visitor_company or "",
-                r.visitor_phone or "",
-                r.host_name or "",
-                r.purpose.value if r.purpose else "",
-                r.purpose_note or "",
-                r.safety_acknowledged,
-                r.status.value if r.status else "",
-                to_utc_iso(r.signed_in_at) or "",
-                to_utc_iso(r.signed_out_at) or "",
-                r.station_label or "",
-                entry_type,
-            ]
+            sanitize_csv_row(
+                [
+                    r.id,
+                    r.visitor_name,
+                    r.visitor_company or "",
+                    r.visitor_phone or "",
+                    r.host_name or "",
+                    r.purpose.value if r.purpose else "",
+                    r.purpose_note or "",
+                    r.safety_acknowledged,
+                    r.status.value if r.status else "",
+                    to_utc_iso(r.signed_in_at) or "",
+                    to_utc_iso(r.signed_out_at) or "",
+                    r.station_label or "",
+                    entry_type,
+                ]
+            )
         )
 
     audit = AuditService(db, user=current_user, request=request, company_id=company_id)

