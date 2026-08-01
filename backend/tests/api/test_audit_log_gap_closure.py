@@ -265,10 +265,12 @@ def test_issue_writes_inventory_create_and_update(client: TestClient, db_session
     loc = make_location(db_session, company_id=1)
     item = make_inventory_item(db_session, company_id=1, part=part, location=loc, qty=10)
 
+    # No work_order_number: WO attribution is refused on this deprecated endpoint (it
+    # would write a reference_number-only row invisible to work_order_ledger_filter).
     resp = client.post(
         "/api/v1/inventory/issue",
         headers=headers_for(admin),
-        json={"inventory_item_id": item.id, "quantity": 3, "work_order_number": "WO-XYZ"},
+        json={"inventory_item_id": item.id, "quantity": 3},
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
 

@@ -21,6 +21,9 @@ fix must hold:
   COMPLETE does NOT flip the WO to COMPLETE / IN_PROGRESS     (state service guard)
 - ``update_work_order`` moving a CANCELLED/CLOSED WO back to
   a non-terminal status (IN_PROGRESS)                         -> 409   (work_orders.py)
+- ``update_work_order`` flipping ANY non-COMPLETE/CLOSED WO --
+  including CANCELLED -- to COMPLETE/CLOSED (fabricated
+  completion, B6 + audit follow-up)                           -> 409   (work_orders.py)
 - regression: a normal IN_PROGRESS WO still completes fine.
 
 The 409 (or no-op for the read path) must occur BEFORE any mutation, so every
@@ -444,20 +447,35 @@ def test_update_work_order_closed_to_in_progress_is_409(client: TestClient, db_s
     assert wo_after.status == WorkOrderStatus.CLOSED, "closed WO must not be reopened via update"
 
 
-def test_update_work_order_terminal_to_terminal_is_allowed(client: TestClient, db_session: Session):
-    """The guard only blocks terminal -> NON-terminal. A terminal -> terminal move
-    (CANCELLED -> CLOSED, e.g. archiving a cancelled job) is NOT blocked here."""
+@pytest.mark.parametrize("target_status", ["complete", "closed"])
+def test_update_work_order_cancelled_to_complete_or_closed_is_409(
+    client: TestClient, db_session: Session, target_status: str
+):
+    """CONTRACT CHANGE (audit follow-up on B6): CANCELLED -> COMPLETE/CLOSED is refused.
+
+    This test previously pinned CANCELLED -> CLOSED as an allowed archival move, but
+    both targets present a cancelled job as a finished one whose completion effect
+    chain (FG receipt, tied consumption, backflush, completion audit shape) never ran
+    -- and never can, since every completion verb and the reconcile refuse terminal
+    WOs. Guard 1 (terminal -> non-terminal) cannot catch it because the target is
+    terminal too, so the completion-bypass guard's source exemption is now
+    COMPLETE/CLOSED only, not all of TERMINAL_WO_STATUSES."""
     admin = make_user(db_session)
     wo, _op, _wc = make_wo_with_op(db_session, wo_status=WorkOrderStatus.CANCELLED)
 
     resp = client.put(
         f"/api/v1/work-orders/{wo.id}",
         headers=headers_for(admin),
-        json={"version": wo.version, "status": "closed"},
+        json={"version": wo.version, "status": target_status},
     )
-    assert resp.status_code == status.HTTP_200_OK, resp.text
+    assert resp.status_code == status.HTTP_409_CONFLICT, resp.text
+    assert "cancelled" in resp.json()["detail"].lower()
+
     wo_after = _reload(db_session, WorkOrder, wo.id)
-    assert wo_after.status == WorkOrderStatus.CLOSED
+    assert wo_after.status == WorkOrderStatus.CANCELLED, "a cancelled WO must never present as finished"
+    assert wo_after.actual_end is None
+    rows = _committed_status_change_rows(db_session, resource_type="work_order", resource_id=wo.id)
+    assert rows == [], "a refused status flip must not write a status-change audit row"
 
 
 # ---------------------------------------------------------------------------
@@ -646,3 +664,126 @@ def test_clock_out_on_in_progress_wo_still_rolls_up(client: TestClient, db_sessi
     assert op_after.status == OperationStatus.COMPLETE, "non-terminal op completes on full qty"
     assert float(op_after.quantity_complete or 0) == 5.0, "qty rolled up on a live WO"
     assert float(wo_after.actual_hours or 0) > 0.0, "labor accrued on a live WO"
+
+
+# ---------------------------------------------------------------------------
+# 8. The OTHER direction on the generic PUTs (findings B6/B7): a blind setattr to
+#    COMPLETE/CLOSED would mark the job/operation finished while PERMANENTLY
+#    bypassing the completion effect chain (FG receipt, tied-material consumption,
+#    backflush, finalize_operation_completion) -- and every completion verb plus the
+#    reconcile refuse terminal WOs afterwards, so nothing ever heals it.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("target_status", ["complete", "closed"])
+def test_update_work_order_non_terminal_to_complete_is_409(client: TestClient, db_session: Session, target_status: str):
+    admin = make_user(db_session)
+    wo, _op, _wc = make_wo_with_op(db_session, wo_status=WorkOrderStatus.IN_PROGRESS)
+
+    resp = client.put(
+        f"/api/v1/work-orders/{wo.id}",
+        headers=headers_for(admin),
+        json={"version": wo.version, "status": target_status},
+    )
+    assert resp.status_code == status.HTTP_409_CONFLICT, resp.text
+    detail = resp.json()["detail"]
+    assert "/complete" in detail, "the refusal must point at the completion endpoint"
+
+    wo_after = _reload(db_session, WorkOrder, wo.id)
+    assert wo_after.status == WorkOrderStatus.IN_PROGRESS, "the WO must be untouched"
+
+
+def test_update_work_order_other_status_edits_still_work(client: TestClient, db_session: Session):
+    """The guard is surgical: RELEASED -> IN_PROGRESS (and every other non-completion
+    status edit) keeps working through the generic PUT."""
+    admin = make_user(db_session)
+    wo, _op, _wc = make_wo_with_op(db_session, wo_status=WorkOrderStatus.RELEASED)
+
+    resp = client.put(
+        f"/api/v1/work-orders/{wo.id}",
+        headers=headers_for(admin),
+        json={"version": wo.version, "status": "in_progress"},
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    assert _reload(db_session, WorkOrder, wo.id).status == WorkOrderStatus.IN_PROGRESS
+
+
+def test_update_work_order_complete_to_closed_still_allowed(client: TestClient, db_session: Session):
+    """COMPLETE -> CLOSED is an archival move between terminal states, not a completion
+    bypass -- it must survive the new guard (both are terminal, so neither guard fires)."""
+    admin = make_user(db_session)
+    wo, _op, _wc = make_wo_with_op(db_session, wo_status=WorkOrderStatus.COMPLETE)
+
+    resp = client.put(
+        f"/api/v1/work-orders/{wo.id}",
+        headers=headers_for(admin),
+        json={"version": wo.version, "status": "closed"},
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    assert _reload(db_session, WorkOrder, wo.id).status == WorkOrderStatus.CLOSED
+
+
+def test_update_work_order_already_complete_may_resend_complete(client: TestClient, db_session: Session):
+    """Idempotence: a client that echoes the CURRENT status (already COMPLETE) in an
+    unrelated edit is not creating a completion path -- only the transition is refused."""
+    admin = make_user(db_session)
+    wo, _op, _wc = make_wo_with_op(db_session, wo_status=WorkOrderStatus.COMPLETE)
+
+    resp = client.put(
+        f"/api/v1/work-orders/{wo.id}",
+        headers=headers_for(admin),
+        json={"version": wo.version, "status": "complete", "notes": "post-completion note"},
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    wo_after = _reload(db_session, WorkOrder, wo.id)
+    assert wo_after.status == WorkOrderStatus.COMPLETE
+    assert wo_after.notes == "post-completion note"
+
+
+def test_update_operation_to_complete_is_409(client: TestClient, db_session: Session):
+    """B7: the generic operation PUT was a FIFTH completion path -- no
+    finalize_operation_completion, no operation-scoped tied-material consumption."""
+    admin = make_user(db_session)
+    wo, op, _wc = make_wo_with_op(db_session, wo_status=WorkOrderStatus.IN_PROGRESS)
+
+    resp = client.put(
+        f"/api/v1/work-orders/operations/{op.id}",
+        headers=headers_for(admin),
+        json={"version": op.version, "status": "complete"},
+    )
+    assert resp.status_code == status.HTTP_409_CONFLICT, resp.text
+    assert "/complete" in resp.json()["detail"], "the refusal must point at the completion endpoints"
+
+    op_after = _reload(db_session, WorkOrderOperation, op.id)
+    assert op_after.status == OperationStatus.IN_PROGRESS, "the operation must be untouched"
+
+
+def test_update_operation_other_status_edits_still_work(client: TestClient, db_session: Session):
+    """Non-completion status edits (e.g. back to READY) keep working."""
+    admin = make_user(db_session)
+    wo, op, _wc = make_wo_with_op(db_session, wo_status=WorkOrderStatus.IN_PROGRESS)
+
+    resp = client.put(
+        f"/api/v1/work-orders/operations/{op.id}",
+        headers=headers_for(admin),
+        json={"version": op.version, "status": "ready"},
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    assert _reload(db_session, WorkOrderOperation, op.id).status == OperationStatus.READY
+
+
+def test_update_operation_already_complete_may_resend_complete(client: TestClient, db_session: Session):
+    """Idempotence: a client that includes the CURRENT status (already COMPLETE) in an
+    unrelated edit is not creating a completion path -- only the transition is refused."""
+    admin = make_user(db_session)
+    wo, op, _wc = make_wo_with_op(db_session, wo_status=WorkOrderStatus.IN_PROGRESS, op_status=OperationStatus.COMPLETE)
+
+    resp = client.put(
+        f"/api/v1/work-orders/operations/{op.id}",
+        headers=headers_for(admin),
+        json={"version": op.version, "status": "complete", "name": "Renamed op"},
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    op_after = _reload(db_session, WorkOrderOperation, op.id)
+    assert op_after.status == OperationStatus.COMPLETE
+    assert op_after.name == "Renamed op"

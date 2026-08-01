@@ -1711,13 +1711,51 @@ def test_issue_allowed_for_authorized_roles(client: TestClient, db_session: Sess
     resp = client.post(
         "/api/v1/inventory/issue",
         headers=headers_for(user),
-        json={"inventory_item_id": item.id, "quantity": 3, "work_order_number": "WO-RBAC"},
+        json={"inventory_item_id": item.id, "quantity": 3},
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
 
     after = _reload(db_session, InventoryItem, item.id)
     assert float(after.quantity_on_hand) == 7.0
     assert float(after.quantity_available) == 7.0
+
+
+def test_issue_refuses_work_order_attribution_with_400(client: TestClient, db_session: Session):
+    """A ``work_order_number`` on the deprecated manual issue writes a
+    reference_number-only row that ``work_order_ledger_filter`` (job costing, lot
+    genealogy, the backflush nets) can never see — so it is refused outright, with no
+    stock movement and no ledger row."""
+    user, item = _issue_fixture(db_session, UserRole.MANAGER)
+
+    resp = client.post(
+        "/api/v1/inventory/issue",
+        headers=headers_for(user),
+        json={"inventory_item_id": item.id, "quantity": 3, "work_order_number": "WO-0001"},
+    )
+    assert resp.status_code == status.HTTP_400_BAD_REQUEST, resp.text
+    assert "material allocations" in resp.json()["detail"]
+
+    after = _reload(db_session, InventoryItem, item.id)
+    assert float(after.quantity_on_hand) == 10.0, "a refused issue must not move stock"
+    assert db_session.query(InventoryTransaction).count() == 0
+
+
+def test_plain_issue_writes_no_work_order_reference(client: TestClient, db_session: Session):
+    """The surviving manual issue is reference-less: nothing this endpoint writes may
+    masquerade as work-order-attributed."""
+    user, item = _issue_fixture(db_session, UserRole.MANAGER)
+
+    resp = client.post(
+        "/api/v1/inventory/issue",
+        headers=headers_for(user),
+        json={"inventory_item_id": item.id, "quantity": 2},
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+
+    txn = db_session.query(InventoryTransaction).one()
+    assert txn.reference_type is None
+    assert txn.reference_number is None
+    assert txn.reference_id is None
 
 
 # ---------------------------------------------------------------------------
@@ -2039,3 +2077,375 @@ def test_transactions_rejects_out_of_range_paging(client: TestClient, ledger, pa
         params=params,
     )
     assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
+
+
+# ---------------------------------------------------------------------------
+# Movement signs are validated at the schema (finding B5)
+# ---------------------------------------------------------------------------
+
+
+def _sign_fixture(db: Session):
+    user = make_user(db, company_id=COMPANY_A, role=UserRole.MANAGER)
+    part = make_part(db, company_id=COMPANY_A)
+    loc = make_location(db, company_id=COMPANY_A)
+    item = make_inventory_item(db, company_id=COMPANY_A, part=part, location=loc.code, qty=10.0)
+    return user, part, loc, item
+
+
+@pytest.mark.parametrize("qty", [0, -5])
+def test_receive_rejects_non_positive_quantity(client: TestClient, db_session: Session, qty):
+    """A negative RECEIVE removed stock while writing a positive-looking receipt."""
+    user, part, loc, item = _sign_fixture(db_session)
+    resp = client.post(
+        "/api/v1/inventory/receive",
+        headers=headers_for(user),
+        json={"part_id": part.id, "quantity": qty, "location_code": loc.code},
+    )
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
+    assert float(_reload(db_session, InventoryItem, item.id).quantity_on_hand) == 10.0
+
+
+@pytest.mark.parametrize("qty", [0, -3])
+def test_issue_rejects_non_positive_quantity(client: TestClient, db_session: Session, qty):
+    """A negative ISSUE MINTED stock while writing a positive-quantity ISSUE ledger
+    row with a negative total_cost."""
+    user, part, loc, item = _sign_fixture(db_session)
+    resp = client.post(
+        "/api/v1/inventory/issue",
+        headers=headers_for(user),
+        json={"inventory_item_id": item.id, "quantity": qty},
+    )
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
+    assert float(_reload(db_session, InventoryItem, item.id).quantity_on_hand) == 10.0
+    assert db_session.query(InventoryTransaction).count() == 0
+
+
+@pytest.mark.parametrize("qty", [0, -2])
+def test_transfer_rejects_non_positive_quantity(client: TestClient, db_session: Session, qty):
+    """A negative TRANSFER moved stock dest->source, against locations the response
+    never named."""
+    user, part, loc, item = _sign_fixture(db_session)
+    dest = make_location(db_session, company_id=COMPANY_A)
+    resp = client.post(
+        "/api/v1/inventory/transfer",
+        headers=headers_for(user),
+        json={"inventory_item_id": item.id, "quantity": qty, "to_location_code": dest.code},
+    )
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
+    assert float(_reload(db_session, InventoryItem, item.id).quantity_on_hand) == 10.0
+
+
+def test_adjust_rejects_negative_target_but_allows_zero(client: TestClient, db_session: Session):
+    """``new_quantity`` is an absolute target: zero is a legitimate write-off,
+    negative is not a state a manual adjustment may dictate."""
+    user, part, loc, item = _sign_fixture(db_session)
+
+    refused = client.post(
+        "/api/v1/inventory/adjust",
+        headers=headers_for(user),
+        json={"inventory_item_id": item.id, "new_quantity": -1, "reason_code": "damage"},
+    )
+    assert refused.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, refused.text
+    assert float(_reload(db_session, InventoryItem, item.id).quantity_on_hand) == 10.0
+
+    zeroed = client.post(
+        "/api/v1/inventory/adjust",
+        headers=headers_for(user),
+        json={"inventory_item_id": item.id, "new_quantity": 0, "reason_code": "damage"},
+    )
+    assert zeroed.status_code == status.HTTP_200_OK, zeroed.text
+    assert float(_reload(db_session, InventoryItem, item.id).quantity_on_hand) == 0.0
+
+
+def test_record_count_rejects_negative_counted_quantity(client: TestClient, db_session: Session):
+    """A physical count observation can be zero but never negative -- a negative
+    counted quantity would drive on-hand negative at completion."""
+    user, part, loc, item = _sign_fixture(db_session)
+    count = _seed_cycle_count(db_session, company_id=COMPANY_A, inventory_items=[item])
+    count_item = db_session.query(CycleCountItem).filter(CycleCountItem.cycle_count_id == count.id).one()
+
+    resp = client.post(
+        f"/api/v1/inventory/cycle-counts/{count.id}/items/{count_item.id}/count",
+        headers=headers_for(user),
+        json={"counted_quantity": -4},
+    )
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
+    assert _reload(db_session, CycleCountItem, count_item.id).is_counted is False
+
+
+# ---------------------------------------------------------------------------
+# Lot-less receive/transfer merge onto one row (finding B10)
+# ---------------------------------------------------------------------------
+
+
+def test_two_lotless_receives_increment_one_row(client: TestClient, db_session: Session):
+    """``lot_number == None`` compiles to ``= NULL`` which never matches, so every
+    lot-less receive minted a brand-new fragment row. The IS NULL branch merges them."""
+    user = make_user(db_session, company_id=COMPANY_A, role=UserRole.MANAGER)
+    part = make_part(db_session, company_id=COMPANY_A)
+    loc = make_location(db_session, company_id=COMPANY_A)
+
+    for qty in (4.0, 6.0):
+        resp = client.post(
+            "/api/v1/inventory/receive",
+            headers=headers_for(user),
+            json={"part_id": part.id, "quantity": qty, "location_code": loc.code},
+        )
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+
+    db_session.expire_all()
+    rows = db_session.query(InventoryItem).filter(InventoryItem.part_id == part.id).all()
+    assert len(rows) == 1, "two lot-less receives to the same part+location must share one stock row"
+    assert rows[0].lot_number is None
+    assert float(rows[0].quantity_on_hand) == 10.0
+    assert float(rows[0].quantity_available) == 10.0
+
+
+def test_lotless_transfer_merges_into_existing_lotless_destination_row(client: TestClient, db_session: Session):
+    user = make_user(db_session, company_id=COMPANY_A, role=UserRole.MANAGER)
+    part = make_part(db_session, company_id=COMPANY_A)
+    src = make_location(db_session, company_id=COMPANY_A)
+    dst = make_location(db_session, company_id=COMPANY_A)
+    src_item = make_inventory_item(
+        db_session, company_id=COMPANY_A, part=part, location=src.code, qty=10.0, lot_number=""
+    )
+    # Explicit NULL lots on both rows (make_inventory_item defaults to a generated lot).
+    src_item.lot_number = None
+    dst_item = make_inventory_item(db_session, company_id=COMPANY_A, part=part, location=dst.code, qty=3.0)
+    dst_item.lot_number = None
+    db_session.commit()
+
+    resp = client.post(
+        "/api/v1/inventory/transfer",
+        headers=headers_for(user),
+        json={"inventory_item_id": src_item.id, "quantity": 4.0, "to_location_code": dst.code},
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+
+    db_session.expire_all()
+    rows = db_session.query(InventoryItem).filter(InventoryItem.part_id == part.id).all()
+    assert len(rows) == 2, "the transfer must merge into the existing lot-less destination row, not mint a third"
+    assert float(_reload(db_session, InventoryItem, src_item.id).quantity_on_hand) == 6.0
+    assert float(_reload(db_session, InventoryItem, dst_item.id).quantity_on_hand) == 7.0
+
+
+# ---------------------------------------------------------------------------
+# Driven-negative lots stay visible and countable (finding B11)
+# ---------------------------------------------------------------------------
+
+
+def test_list_inventory_default_filter_includes_negative_lots(client: TestClient, db_session: Session):
+    """The shortage posture deliberately drives a lot negative; ``has_quantity=True``
+    filtered ``> 0`` so the discrepancy was invisible to the one list view."""
+    user = make_user(db_session, company_id=COMPANY_A)
+    part = make_part(db_session, company_id=COMPANY_A)
+    loc = make_location(db_session, company_id=COMPANY_A)
+    negative = make_inventory_item(db_session, company_id=COMPANY_A, part=part, location=loc.code, qty=-5.0)
+    make_inventory_item(db_session, company_id=COMPANY_A, part=part, location=loc.code, qty=0.0)
+
+    resp = client.get("/api/v1/inventory/", headers=headers_for(user), params={"part_id": part.id})
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    ids = {row["id"] for row in resp.json()}
+    assert negative.id in ids, "a driven-negative lot must be visible"
+    assert len(ids) == 1, "zero rows stay hidden under has_quantity=True"
+
+
+def test_cycle_count_enrolls_negative_lots(client: TestClient, db_session: Session):
+    """A lot the shortage engine drove negative is exactly the row a cycle count
+    exists to reconcile; enrolling only ``> 0`` made it permanently uncountable."""
+    user = make_user(db_session, company_id=COMPANY_A, role=UserRole.MANAGER)
+    part = make_part(db_session, company_id=COMPANY_A)
+    loc = make_location(db_session, company_id=COMPANY_A)
+    negative = make_inventory_item(db_session, company_id=COMPANY_A, part=part, location=loc.code, qty=-5.0)
+    make_inventory_item(db_session, company_id=COMPANY_A, part=part, location=loc.code, qty=0.0)
+
+    resp = client.post(
+        "/api/v1/inventory/cycle-counts",
+        headers=headers_for(user),
+        json={"part_id": part.id, "scheduled_date": str(date.today())},
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    count_id = resp.json()["id"]
+    enrolled = {
+        ci.inventory_item_id
+        for ci in db_session.query(CycleCountItem).filter(CycleCountItem.cycle_count_id == count_id).all()
+    }
+    assert negative.id in enrolled, "a driven-negative lot must be countable"
+
+
+def test_inventory_export_default_filter_includes_negative_lots(client: TestClient, db_session: Session):
+    """B11, export leg: the exported spreadsheet is what a manager reconciles from, so
+    ``/exports/inventory/export`` must apply the same ``!= 0`` predicate as the list
+    view -- a driven-negative lot visible on screen but absent from the export would
+    hide the discrepancy exactly where it gets acted on."""
+    user = make_user(db_session, company_id=COMPANY_A)
+    part = make_part(db_session, company_id=COMPANY_A)
+    loc = make_location(db_session, company_id=COMPANY_A)
+    make_inventory_item(db_session, company_id=COMPANY_A, part=part, location=loc.code, qty=-5.0)
+    make_inventory_item(db_session, company_id=COMPANY_A, part=part, location=loc.code, qty=0.0)
+
+    resp = client.get(
+        "/api/v1/exports/inventory/export",
+        headers=headers_for(user),
+        params={"format": "csv"},
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    rows = [line for line in resp.text.strip().splitlines() if part.part_number in line]
+    assert len(rows) == 1, "the negative lot must export; the zero row stays hidden"
+    assert "-5" in rows[0], "the exported row carries the negative on-hand"
+
+
+# ---------------------------------------------------------------------------
+# Cycle-count completion posts the CURRENT-basis delta (finding B4)
+# ---------------------------------------------------------------------------
+
+
+def test_complete_posts_current_basis_delta_after_mid_window_movement(client: TestClient, db_session: Session):
+    """Enroll at 100, count 98, engine issues 5 mid-window (on-hand 95). Completion
+    must land on-hand at the counted 98 and post a COUNT row of +3 (the CURRENT-basis
+    delta), so SUM(ledger) == on-hand. Posting the enrollment variance (-2) while
+    setting on-hand absolutely silently resurrected the consumed 5 in the ledger."""
+    user = make_user(db_session, company_id=COMPANY_A, role=UserRole.MANAGER)
+    part = make_part(db_session, company_id=COMPANY_A)
+    loc = make_location(db_session, company_id=COMPANY_A)
+    item = make_inventory_item(db_session, company_id=COMPANY_A, part=part, location=loc.code, qty=100.0, unit_cost=2.0)
+    count = _seed_cycle_count(db_session, company_id=COMPANY_A, inventory_items=[item])
+    _mark_counted(db_session, count, {item.id: 98.0})
+
+    # Ledger before the count: the receive that put the 100 on hand...
+    receive = InventoryTransaction(
+        company_id=COMPANY_A,
+        inventory_item_id=item.id,
+        part_id=part.id,
+        transaction_type=TransactionType.RECEIVE,
+        quantity=100.0,
+        created_by=user.id,
+    )
+    # ...and the operation-completion consumption that moved 5 between enrollment
+    # and completion (the ledger row plus the on-hand decrement the engine writes).
+    issue = InventoryTransaction(
+        company_id=COMPANY_A,
+        inventory_item_id=item.id,
+        part_id=part.id,
+        transaction_type=TransactionType.ISSUE,
+        quantity=-5.0,
+        created_by=user.id,
+    )
+    db_session.add_all([receive, issue])
+    item.quantity_on_hand = 95.0
+    item.quantity_available = 95.0
+    db_session.commit()
+
+    resp = client.post(
+        f"/api/v1/inventory/cycle-counts/{count.id}/complete?apply_adjustments=true",
+        headers=headers_for(user),
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    body = resp.json()
+    assert body["items_adjusted"] == 1
+
+    after = _reload(db_session, InventoryItem, item.id)
+    assert float(after.quantity_on_hand) == 98.0
+    assert float(after.quantity_available) == 98.0
+
+    count_txn = db_session.query(InventoryTransaction).filter(InventoryTransaction.transaction_type == "COUNT").one()
+    assert float(count_txn.quantity) == 3.0, "the ledger row carries the CURRENT-basis delta"
+    # Both bases are stated on the row.
+    assert "on-hand at completion: 95.0" in count_txn.notes
+    assert "system at enrollment: 100.0" in count_txn.notes
+
+    ledger_sum = sum(
+        float(t.quantity)
+        for t in db_session.query(InventoryTransaction).filter(InventoryTransaction.inventory_item_id == item.id).all()
+    )
+    assert ledger_sum == float(after.quantity_on_hand), "SUM(ledger) must equal on-hand"
+
+    # The enrollment-basis variance stays as the recorded quality figure.
+    ci = db_session.query(CycleCountItem).filter(CycleCountItem.cycle_count_id == count.id).one()
+    assert float(ci.variance) == -2.0
+    # And the posted figure prices what actually hit the ledger: +3 @ 2.0.
+    assert float(_reload(db_session, CycleCount, count.id).total_variance_value) == 6.0
+
+
+def test_complete_posts_no_ledger_row_when_current_delta_is_zero(client: TestClient, db_session: Session):
+    """Enrollment variance -5, but the engine already moved exactly 5: on-hand equals
+    the counted figure, so there is no stock movement to record -- no COUNT row, no
+    on-hand change, count still completes."""
+    user = make_user(db_session, company_id=COMPANY_A, role=UserRole.MANAGER)
+    part = make_part(db_session, company_id=COMPANY_A)
+    loc = make_location(db_session, company_id=COMPANY_A)
+    item = make_inventory_item(db_session, company_id=COMPANY_A, part=part, location=loc.code, qty=100.0)
+    count = _seed_cycle_count(db_session, company_id=COMPANY_A, inventory_items=[item])
+    _mark_counted(db_session, count, {item.id: 95.0})
+    item.quantity_on_hand = 95.0
+    item.quantity_available = 95.0
+    db_session.commit()
+
+    resp = client.post(
+        f"/api/v1/inventory/cycle-counts/{count.id}/complete?apply_adjustments=true",
+        headers=headers_for(user),
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    body = resp.json()
+    assert body["items_adjusted"] == 0
+    assert float(body["total_variance_value"]) == 0.0
+    assert float(body["measured_variance_value"]) == -10.0, "enrollment-basis quality figure is preserved"
+
+    assert db_session.query(InventoryTransaction).filter(InventoryTransaction.transaction_type == "COUNT").count() == 0
+    assert float(_reload(db_session, InventoryItem, item.id).quantity_on_hand) == 95.0
+    assert _reload(db_session, CycleCount, count.id).status == CycleCountStatus.COMPLETED
+
+
+def test_complete_skips_ledger_row_on_sub_epsilon_float_residue(client: TestClient, db_session: Session):
+    """The zero-delta skip uses the shared ledger epsilon, not exact float equality:
+    after fractional consumption on-hand can sit a ~1e-15 residue away from the counted
+    figure, and posting a COUNT row for that residue would be pure noise. On-hand is
+    still snapped to the counted figure."""
+    user = make_user(db_session, company_id=COMPANY_A, role=UserRole.MANAGER)
+    part = make_part(db_session, company_id=COMPANY_A)
+    loc = make_location(db_session, company_id=COMPANY_A)
+    item = make_inventory_item(db_session, company_id=COMPANY_A, part=part, location=loc.code, qty=10.0)
+    count = _seed_cycle_count(db_session, company_id=COMPANY_A, inventory_items=[item])
+    _mark_counted(db_session, count, {item.id: 9.7})
+    # The classic binary-float residue: 10.0 - 0.1 - 0.2 != 9.7 exactly.
+    item.quantity_on_hand = 10.0 - 0.1 - 0.2
+    item.quantity_available = item.quantity_on_hand
+    db_session.commit()
+    assert item.quantity_on_hand != 9.7, "precondition: the fixture must carry a real float residue"
+
+    resp = client.post(
+        f"/api/v1/inventory/cycle-counts/{count.id}/complete?apply_adjustments=true",
+        headers=headers_for(user),
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    assert resp.json()["items_adjusted"] == 0
+
+    assert db_session.query(InventoryTransaction).filter(InventoryTransaction.transaction_type == "COUNT").count() == 0
+    assert float(_reload(db_session, InventoryItem, item.id).quantity_on_hand) == 9.7, "on-hand snaps to the count"
+
+
+# ---------------------------------------------------------------------------
+# POST /inventory/locations writes a CREATE audit row (finding B9)
+# ---------------------------------------------------------------------------
+
+
+def test_create_location_writes_a_create_audit_row(client: TestClient, db_session: Session):
+    """Invariant #2: a location is the scoping anchor for receives, transfers and
+    cycle counts -- its creation is a state change the hash chain must record."""
+    user = make_user(db_session, company_id=COMPANY_A, role=UserRole.MANAGER)
+
+    resp = client.post(
+        "/api/v1/inventory/locations",
+        headers=headers_for(user),
+        json={"code": "AUDIT-LOC-1", "warehouse": "MAIN"},
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    location_id = resp.json()["id"]
+
+    rows = _audit_rows(db_session, resource_type="inventory_location", action="CREATE")
+    assert len(rows) == 1
+    assert rows[0].resource_id == location_id
+    assert rows[0].resource_identifier == "AUDIT-LOC-1"
+    assert rows[0].company_id == COMPANY_A
+    assert rows[0].user_id == user.id
+    _assert_hash_chain_intact(db_session)

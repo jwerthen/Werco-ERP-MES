@@ -1018,6 +1018,11 @@ export default function WorkOrderDetail() {
   // per-nest "Attach PDF" action.
   const handleNestSaved = async (warning?: string) => {
     setNestActionError(warning || '');
+    // The nest modal's edit path can create/update/cancel the tie on the nest's
+    // operation, and a tie write does NOT bump `work_orders.updated_at` — so the
+    // WO refetch below is not enough to refresh MaterialTiesPanel. Bump its own
+    // freshness seam, exactly like the OperationMaterialTieModal wiring.
+    setTieRefreshToken((token) => token + 1);
     await loadWorkOrder();
   };
 

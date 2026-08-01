@@ -2342,8 +2342,9 @@ async def _run_laser_nest_import(
     except MaterialAllocationConsumedError as exc:
         # A rebuild would destroy operations that already consumed tied material,
         # orphaning the ISSUE rows that carry their lot genealogy. Nothing was
-        # deleted (the guard runs before the wipe) -- refuse with 409 and let the
-        # planner reverse the consumption explicitly.
+        # deleted (the guard runs before the wipe) -- refuse with 409. The remedy is
+        # a NEW work order: a material return does not un-write movement history, so
+        # it does not unlock re-import.
         _reap_saved_blobs()
         if os.path.isdir(package_dir):
             shutil.rmtree(package_dir, ignore_errors=True)
@@ -2510,9 +2511,10 @@ def create_manual_laser_nest_endpoint(
 
     An optional ``material_part_id`` ties the created nest's operation to a stock
     material part (``qty_per_run`` defaults to 1.0), so that material is deducted when
-    the laser work order finishes -- the same tie, through the same
-    ``create_nest_material_allocation`` seam, that the package import creates. Omitting
-    it leaves the nest untied and byte-identical to its pre-feature behavior.
+    the nest's operation completes (the work-order completion reconcile is the
+    self-heal) -- the same tie, through the same ``create_nest_material_allocation``
+    seam, that the package import creates. Omitting it leaves the nest untied and
+    byte-identical to its pre-feature behavior.
     """
     target_work_order = _load_parent_work_order(db, work_order_id, company_id)
     # Resolve the material part BEFORE the transaction: it is a read-only,
@@ -2701,7 +2703,9 @@ def update_work_order(
     Refresh and try again.") before any field is written — re-fetch and retry.
     A successful update increments ``version`` server-side. Also returns **409**
     when moving a terminal WO (COMPLETE/CLOSED/CANCELLED) back to a non-terminal
-    status.
+    status, and when setting ``status`` to COMPLETE/CLOSED from any status other
+    than COMPLETE/CLOSED (completion must run its own endpoint's effect chain;
+    a CANCELLED work order can never become complete/closed).
     """
     work_order = db.query(WorkOrder).filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id).first()
     if not work_order:
@@ -2737,6 +2741,43 @@ def update_work_order(
         raise HTTPException(
             status_code=409,
             detail=f"cannot move work order out of terminal status '{current}' to '{target}'",
+        )
+
+    # The other dangerous direction: a blind setattr to COMPLETE/CLOSED would mark the
+    # job finished while PERMANENTLY bypassing every completion inventory effect (FG
+    # receipt, tied-material consumption, backflush, cost rollup) -- every completion
+    # verb and the reconcile refuse terminal WOs afterwards, so nothing ever heals it.
+    # Completion must go through its own endpoint, which runs the full effect chain.
+    # The source-status exemption is deliberately COMPLETE/CLOSED only, NOT all of
+    # TERMINAL_WO_STATUSES: COMPLETE -> CLOSED is an archival move between two states
+    # whose completion chain already ran (and a resend of the current status is
+    # idempotent), but a CANCELLED WO never ran that chain -- so CANCELLED ->
+    # COMPLETE/CLOSED is the exact fabricated completion this guard exists to stop,
+    # and guard 1 above cannot catch it (the target is terminal too).
+    if (
+        new_status is not None
+        and new_status in (WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED)
+        and work_order.status not in (WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED)
+    ):
+        target = new_status.value if hasattr(new_status, "value") else new_status
+        if work_order.status == WorkOrderStatus.CANCELLED:
+            # Pointing at POST /complete would mislead here: the completion endpoint
+            # (correctly) refuses terminal WOs, so a cancelled job can NEVER become
+            # complete/closed -- it stays cancelled.
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"cannot mark a cancelled work order '{target}': its completion effect chain never ran "
+                    "and never will. A cancelled work order stays cancelled."
+                ),
+            )
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"cannot set status '{target}' through this generic update: completing a work order has "
+                "inventory and audit side effects that would be permanently skipped. "
+                f"Use POST /work-orders/{work_order.id}/complete instead."
+            ),
         )
 
     for field, value in update_data.items():
@@ -3793,7 +3834,14 @@ def update_operation(
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Update an operation"""
+    """Update an operation.
+
+    Requires the operation's current ``version`` (stale -> **409**). Also returns
+    **409** when setting ``status`` to COMPLETE on a not-yet-complete operation:
+    completion has finalization and inventory side effects (operation-scoped
+    tied-material consumption included) that this generic update would skip — use
+    ``POST /work-orders/operations/{id}/complete`` instead.
+    """
     operation = (
         db.query(WorkOrderOperation)
         .filter(WorkOrderOperation.id == operation_id, WorkOrderOperation.company_id == company_id)
@@ -3820,6 +3868,22 @@ def update_operation(
         raise HTTPException(
             status_code=409,
             detail="Operation was modified by someone else. Refresh and try again.",
+        )
+
+    # Refuse status=COMPLETE via this generic PUT: it would be a FIFTH completion path
+    # outside the four wired handlers -- no ``finalize_operation_completion``, no
+    # operation-scoped tied-material consumption, no completion audit shape. Completion
+    # goes through the completion endpoints (office/shop-floor complete-operation or the
+    # kiosk clock-out), which run the full effect chain.
+    new_op_status = update_data.get("status")
+    if new_op_status == OperationStatus.COMPLETE and operation.status != OperationStatus.COMPLETE:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "cannot mark an operation complete through this generic update: completion has "
+                "finalization and inventory side effects that would be skipped. "
+                f"Use POST /work-orders/operations/{operation.id}/complete instead."
+            ),
         )
 
     # Work-center reassignment (planner action, e.g. re-dispatching a laser nest to

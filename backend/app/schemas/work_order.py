@@ -11,7 +11,7 @@ from app.core.validation import (
     Money,
     MoneySmall,
 )
-from app.models.work_order import OperationStatus, WorkOrderStatus
+from app.models.work_order import OperationStatus, WorkOrderStatus, WorkOrderType
 from app.schemas.base import UTCModel
 
 
@@ -108,7 +108,8 @@ class LaserNestManualCreate(BaseModel):
         gt=0,
         description="Optional material tie: the stock part (sheet/plate) this nest consumes. Creates an "
         "operation-scoped material allocation on the nest's operation, so the material is deducted when "
-        "the laser work order finishes. Must resolve to a non-deleted part in this company.",
+        "the nest's operation completes; the work-order completion reconcile is the self-heal. Must "
+        "resolve to a non-deleted part in this company.",
     )
     qty_per_run: Optional[float] = Field(
         None,
@@ -258,7 +259,8 @@ class LaserNestImportRow(BaseModel):
         gt=0,
         description="Per-nest material tie: the stock part (sheet/plate) this nest consumes. Creates an "
         "operation-scoped material allocation on the nest's operation, so the material is deducted when "
-        "the laser work order finishes. Must resolve to a non-deleted part in this company.",
+        "the nest's operation completes; the work-order completion reconcile is the self-heal. Must "
+        "resolve to a non-deleted part in this company.",
     )
     qty_per_run: Optional[float] = Field(
         None,
@@ -437,6 +439,35 @@ class WorkOrderCreate(WorkOrderBase):
         description="Serial numbers for a serialized work order — unique, non-empty, exactly one per unit "
         "(count must equal quantity_ordered). Omit for non-serialized work.",
     )
+
+    @field_validator("work_order_type")
+    @classmethod
+    def validate_work_order_type(cls, value: str) -> str:
+        """CREATE-side vocabulary gate (audit follow-up on B3).
+
+        The column is a free string and ``create_work_order`` persists it verbatim, so
+        without this an API client could mint a WO of an arbitrary type -- worst of
+        all ``laser_cutting``: the FG-receipt and BOM-backflush skips key on exactly
+        that value (``is_laser_dispatch_work_order``), so a hand-created
+        'laser_cutting' WO with a real part and routed operations would silently lose
+        its finished-goods receipt and backflush at completion. Nest-dispatch WOs are
+        minted ONLY internally (``_ensure_laser_child_work_order`` and the nest import
+        paths construct the ORM model directly, never this schema), so refusing the
+        value here closes the API surface without touching the internal flow.
+        Deliberately on WorkOrderCreate, not WorkOrderBase: WorkOrderResponse inherits
+        the base and must keep serializing existing laser WOs.
+        """
+        try:
+            wo_type = WorkOrderType(value)
+        except ValueError:
+            allowed = ", ".join(sorted(t.value for t in WorkOrderType))
+            raise ValueError(f"work_order_type must be one of: {allowed}") from None
+        if wo_type is WorkOrderType.LASER_CUTTING:
+            raise ValueError(
+                "work_order_type 'laser_cutting' cannot be set on create: laser nest-dispatch work orders "
+                "are created only by the nest package import (POST /work-orders/laser-nest-packages/...)"
+            )
+        return value
 
     @model_validator(mode="after")
     def validate_dates(self) -> "WorkOrderCreate":

@@ -1182,11 +1182,14 @@ export type RunOrderUpdateResponse =
  * `DispatchMaterialTie` (types/index.ts), with the part NAME the operator reads
  * and without the pinned inventory id the office uses.
  *
- * Consumption fires at WORK-ORDER completion, never per run: an operator
- * finishing nest 1 of 3 deducts NOTHING. Copy must say "deducts N when WO-####
- * finishes" — never "this will deduct now". `qty_remaining`, `on_hand` and
- * `short_by` are server-derived (the queue is a READ path; it must not compute
- * stock, and it must not write).
+ * Consumption posts when THIS OPERATION completes — a laser child WO carries
+ * one operation per nest, so finishing nest 1 of 3 deducts nest 1's sheets
+ * right then. It is still never per individual run WITHIN an operation:
+ * reporting runs on a still-open operation posts nothing. `utils/materialTie.ts`
+ * owns the operator-facing copy and the timing rules behind it — write and
+ * change wording there, not here. `qty_remaining`, `on_hand` and `short_by` are
+ * server-derived (the queue is a READ path; it must not compute stock, and it
+ * must not write).
  */
 export interface KioskMaterialTie {
   allocation_id: number;

@@ -1708,7 +1708,7 @@ def add_bom_item(
             raise HTTPException(status_code=400, detail="BOM cannot contain itself")
 
         # Check for deeper circular references
-        if would_create_circular_reference(db, bom.part_id, item_in.component_part_id):
+        if would_create_circular_reference(db, bom.part_id, item_in.component_part_id, company_id):
             raise HTTPException(
                 status_code=400, detail="Adding this component would create a circular reference in the BOM structure"
             )
@@ -1824,7 +1824,18 @@ def update_bom_item(
 
     update_data = item_in.model_dump(exclude_unset=True)
     if "unit_of_measure" in update_data:
-        update_data["unit_of_measure"] = _resolve_line_uom(update_data["unit_of_measure"], item.component_part)
+        # Defense-in-depth (invariant #1): resolve a cleared UoM through the same
+        # TENANT-SCOPED Part lookup the other three UoM-resolution sites use — never
+        # the unscoped ``component_part`` relationship, which on a mis-parented line
+        # would read (and store) a FOREIGN part's stocking unit.
+        component = db.query(Part).filter(Part.id == item.component_part_id, Part.company_id == company_id).first()
+        stated = update_data["unit_of_measure"]
+        if component is None and not (stated is not None and str(stated).strip()):
+            # Cleared value + unresolvable (foreign/missing) component: NO inheritance.
+            # Keep the line's existing value rather than manufacturing one from nothing.
+            update_data.pop("unit_of_measure")
+        else:
+            update_data["unit_of_measure"] = _resolve_line_uom(stated, component)
     for field, value in update_data.items():
         setattr(item, field, value)
 
@@ -1852,9 +1863,13 @@ def delete_bom_item(
 
 # Multi-level BOM operations
 def would_create_circular_reference(
-    db: Session, parent_part_id: int, component_part_id: int, visited: Set[int] = None
+    db: Session, parent_part_id: int, component_part_id: int, company_id: int, visited: Optional[Set[int]] = None
 ) -> bool:
-    """Check if adding component would create a circular reference"""
+    """Check if adding component would create a circular reference.
+
+    Tenant-scoped (invariant #1): every BOM lookup in the walk carries ``company_id`` so the
+    recursion can never traverse into — or leak the structure of — another company's BOMs.
+    """
     if visited is None:
         visited = set()
 
@@ -1866,24 +1881,39 @@ def would_create_circular_reference(
 
     visited.add(component_part_id)
 
-    # Get the component's BOM
-    component_bom = db.query(BOM).filter(BOM.part_id == component_part_id, BOM.is_active == True).first()
+    # Get the component's BOM (scoped to the active company)
+    component_bom = (
+        db.query(BOM)
+        .filter(BOM.part_id == component_part_id, BOM.company_id == company_id, BOM.is_active == True)
+        .first()
+    )
 
     if not component_bom:
         return False
 
     # Check each child
     for item in component_bom.items:
-        if would_create_circular_reference(db, parent_part_id, item.component_part_id, visited.copy()):
+        if would_create_circular_reference(db, parent_part_id, item.component_part_id, company_id, visited.copy()):
             return True
 
     return False
 
 
 def explode_bom_recursive(
-    db: Session, bom_id: int, parent_qty: float = 1.0, level: int = 0, max_levels: int = 20, visited: Set[int] = None
+    db: Session,
+    bom_id: int,
+    company_id: int,
+    parent_qty: float = 1.0,
+    level: int = 0,
+    max_levels: int = 20,
+    visited: Optional[Set[int]] = None,
 ) -> List[BOMItemWithChildren]:
-    """Recursively explode a BOM to get all levels"""
+    """Recursively explode a BOM to get all levels.
+
+    Tenant-scoped (invariant #1): the top-level and every sub-BOM lookup filter on
+    ``company_id`` so the recursive walk cannot cross a tenant boundary even through a
+    corrupt/mis-parented row.
+    """
     if visited is None:
         visited = set()
 
@@ -1891,7 +1921,10 @@ def explode_bom_recursive(
         return []
 
     bom = (
-        db.query(BOM).options(joinedload(BOM.items).joinedload(BOMItem.component_part)).filter(BOM.id == bom_id).first()
+        db.query(BOM)
+        .options(joinedload(BOM.items).joinedload(BOMItem.component_part))
+        .filter(BOM.id == bom_id, BOM.company_id == company_id)
+        .first()
     )
 
     if not bom:
@@ -1907,15 +1940,21 @@ def explode_bom_recursive(
         scrap = item.scrap_factor if item.scrap_factor is not None else 0.0
         extended_qty = qty * parent_qty * (1 + scrap)
 
-        # Check if component has its own BOM
-        component_bom = db.query(BOM).filter(BOM.part_id == item.component_part_id, BOM.is_active == True).first()
+        # Check if component has its own BOM (scoped to the active company)
+        component_bom = (
+            db.query(BOM)
+            .filter(BOM.part_id == item.component_part_id, BOM.company_id == company_id, BOM.is_active == True)
+            .first()
+        )
 
         children = []
         item_type = item.item_type or BOMItemType.MAKE
         if component_bom and item_type != BOMItemType.BUY:
             new_visited = visited.copy()
             new_visited.add(item.component_part_id)
-            children = explode_bom_recursive(db, component_bom.id, extended_qty, level + 1, max_levels, new_visited)
+            children = explode_bom_recursive(
+                db, component_bom.id, company_id, extended_qty, level + 1, max_levels, new_visited
+            )
 
         item_response = BOMItemWithChildren(
             id=item.id,
@@ -1965,13 +2004,15 @@ def explode_bom(
     max_levels: int = Query(default=10, le=20, description="Maximum levels to explode"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Explode a BOM to show all levels (multi-level BOM)"""
-    bom = db.query(BOM).options(joinedload(BOM.part)).filter(BOM.id == bom_id).first()
+    # Tenant-scoped (invariant #1): a foreign id gets a flat 404 — never confirm existence.
+    bom = db.query(BOM).options(joinedload(BOM.part)).filter(BOM.id == bom_id, BOM.company_id == company_id).first()
     if not bom:
         raise HTTPException(status_code=404, detail="BOM not found")
 
-    items = explode_bom_recursive(db, bom_id, 1.0, 0, max_levels)
+    items = explode_bom_recursive(db, bom_id, company_id, 1.0, 0, max_levels)
     total_levels = get_max_level(items) + 1 if items else 0
 
     return BOMExploded(
@@ -1995,7 +2036,12 @@ def flatten_bom_items(items: List[BOMItemWithChildren], flat_list: List[BOMFlatI
             part_id=item.component_part_id,
             part_number=item.component_part.part_number if item.component_part else "",
             part_name=item.component_part.name if item.component_part else "",
-            part_type=item.component_part.part_type.value if item.component_part else "",
+            # component_part here is ComponentPartInfo (part_type: str) — enum-or-string safe
+            part_type=(
+                item.component_part.part_type.value
+                if item.component_part and hasattr(item.component_part.part_type, "value")
+                else (item.component_part.part_type if item.component_part else "")
+            ),
             item_type=item.item_type,
             line_type=item.line_type if item.line_type else BOMLineType.COMPONENT,
             quantity_per=item.quantity,
@@ -2021,13 +2067,15 @@ def flatten_bom(
     max_levels: int = Query(default=10, le=20),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get a flattened view of a multi-level BOM (for reports/MRP)"""
-    bom = db.query(BOM).options(joinedload(BOM.part)).filter(BOM.id == bom_id).first()
+    # Tenant-scoped (invariant #1): a foreign id gets a flat 404 — never confirm existence.
+    bom = db.query(BOM).options(joinedload(BOM.part)).filter(BOM.id == bom_id, BOM.company_id == company_id).first()
     if not bom:
         raise HTTPException(status_code=404, detail="BOM not found")
 
-    exploded = explode_bom_recursive(db, bom_id, 1.0, 0, max_levels)
+    exploded = explode_bom_recursive(db, bom_id, company_id, 1.0, 0, max_levels)
 
     flat_items: List[BOMFlatItem] = []
     flatten_bom_items(exploded, flat_items)
@@ -2046,17 +2094,24 @@ def flatten_bom(
 
 
 @router.get("/{bom_id}/where-used")
-def where_used(bom_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def where_used(
+    bom_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
     """Find all parent assemblies that use this BOM's part"""
-    bom = db.query(BOM).options(joinedload(BOM.part)).filter(BOM.id == bom_id).first()
+    # Tenant-scoped (invariant #1): a foreign id gets a flat 404 — never confirm existence.
+    bom = db.query(BOM).options(joinedload(BOM.part)).filter(BOM.id == bom_id, BOM.company_id == company_id).first()
     if not bom:
         raise HTTPException(status_code=404, detail="BOM not found")
 
-    # Find all BOM items that reference this part
+    # Find all BOM items that reference this part — scoped to the active company's BOMs
     usages = (
         db.query(BOMItem)
+        .join(BOM, BOMItem.bom_id == BOM.id)
         .options(joinedload(BOMItem.bom).joinedload(BOM.part))
-        .filter(BOMItem.component_part_id == bom.part_id)
+        .filter(BOMItem.component_part_id == bom.part_id, BOM.company_id == company_id)
         .all()
     )
 
@@ -2070,7 +2125,8 @@ def where_used(bom_id: int, db: Session = Depends(get_db), current_user: User = 
                     "parent_part_name": usage.bom.part.name,
                     "bom_id": usage.bom_id,
                     "quantity_used": usage.quantity,
-                    "item_type": usage.item_type.value,
+                    # item_type is a String(20) column — handle enum-or-string like get_bom does
+                    "item_type": usage.item_type.value if hasattr(usage.item_type, "value") else usage.item_type,
                 }
             )
 

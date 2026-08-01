@@ -1147,8 +1147,10 @@ class ApiService {
   /**
    * Untie: sets `status = 'cancelled'`. The row is NEVER physically deleted, so
    * this resolves with the UPDATED allocation (status `cancelled`) — not a 204.
-   * Refused 409 once any material has been consumed; reversal is a separate,
-   * reasoned verb that does not exist yet.
+   * Refused 409 once any material has been consumed; the reversal is
+   * `returnMaterialAllocation` below (a separate, reasoned verb — its
+   * `return_and_untie` intent does the return and the untie in one
+   * transaction).
    */
   async deleteMaterialAllocation(workOrderId: number, allocationId: number): Promise<MaterialAllocation> {
     const response = await this.api.delete<MaterialAllocation>(

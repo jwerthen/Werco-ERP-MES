@@ -3239,6 +3239,10 @@ def report_operation_production(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
+    # Request-scoped (like clock_out): a locally constructed AuditService carries no
+    # request, so its chain rows land with NULL ip/user_agent (finding B8). ONE audit
+    # identity per handler -- the clock_out shadow lesson.
+    audit_service: AuditService = Depends(get_audit_service),
 ):
     """
     Add produced/scrapped quantity while keeping the operator clocked in.
@@ -3396,7 +3400,6 @@ def report_operation_production(
     sync_work_order_quantity_complete(work_order, operation, all_operations_complete=False)
     work_order.updated_at = datetime.utcnow()
 
-    audit_service = AuditService(db, current_user)
     audit_service.log(
         action="REPORT_OPERATION_PRODUCTION",
         resource_type="work_order_operation",
@@ -4328,6 +4331,8 @@ def put_operation_on_hold(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
+    # Request-scoped (B8): the chain row must carry the caller's ip/user_agent.
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Put an operation on hold.
 
@@ -4384,8 +4389,8 @@ def put_operation_on_hold(
         if hold_source and entry.source is None:
             entry.source = hold_source
 
-    # Create audit log
-    AuditService(db, current_user).log(
+    # Create audit log (request-scoped service -- carries ip/user_agent)
+    audit.log(
         action="HOLD_OPERATION",
         resource_type="work_order_operation",
         resource_id=operation_id,
@@ -4469,6 +4474,8 @@ def resume_operation(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
+    # Request-scoped (B8): the chain row must carry the caller's ip/user_agent.
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Resume an operation that was on hold"""
     operation = (
@@ -4502,9 +4509,10 @@ def resume_operation(
     operation.status = OperationStatus.IN_PROGRESS if operation.actual_start else OperationStatus.READY
     operation.updated_at = datetime.utcnow()
 
-    # Create audit log. BLK-4: note any still-open blocker so the audit row records
-    # that the op was resumed while its blocker(s) remained open.
-    AuditService(db, current_user).log(
+    # Create audit log (request-scoped service -- carries ip/user_agent). BLK-4: note
+    # any still-open blocker so the audit row records that the op was resumed while
+    # its blocker(s) remained open.
+    audit.log(
         action="RESUME_OPERATION",
         resource_type="work_order_operation",
         resource_id=operation_id,
@@ -4589,6 +4597,8 @@ def mark_operation_inspected(
         require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR, UserRole.QUALITY])
     ),
     company_id: int = Depends(get_current_company_id),
+    # Request-scoped (B8): the chain row must carry the caller's ip/user_agent.
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Record an operation's inspection as complete (QG-2 writer).
 
@@ -4628,7 +4638,7 @@ def mark_operation_inspected(
     # (not committed) by AuditService.log so it commits atomically with the flag below.
     note_suffix = f". Notes: {inspection_data.notes}" if inspection_data.notes else ""
     type_suffix = f" ({inspection_data.inspection_type})" if inspection_data.inspection_type else ""
-    AuditService(db, current_user).log(
+    audit.log(
         action="MARK_OPERATION_INSPECTED",
         resource_type="work_order_operation",
         resource_id=operation.id,

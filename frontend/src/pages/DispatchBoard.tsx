@@ -18,11 +18,13 @@
  * Material ties: a card whose operation is tied to stock material carries one
  * more chip — how much is ESTIMATED to leave stock, and whether stock covers it.
  * Two things it deliberately does not do. It never says material is being
- * deducted now: consumption fires at WORK-ORDER completion, so finishing nest 1
- * of 3 deducts nothing and all three flush when the last operation closes the
- * WO. And it never gates anything: a shortage drives the lot negative and is
- * flagged for purchasing, because refusing would train planners to untie
- * material. An UNTIED operation renders no chip at all.
+ * deducted now: consumption fires when EACH OPERATION completes — a laser child
+ * WO carries one operation per nest, so finishing nest 1 of 3 deducts nest 1's
+ * sheets right then — and never per reported run. `utils/materialTie.ts` owns
+ * that copy and the timing rules behind it; change wording there, not here. And
+ * it never gates anything: a shortage drives the lot negative and is flagged
+ * for purchasing, because refusing would train planners to untie material. An
+ * UNTIED operation renders no chip at all.
  *
  * Optimistic vs server-gated (CLAUDE.md convention):
  *  - Reordering WITHIN a column is rarely rejected -> optimistic via
@@ -740,11 +742,11 @@ export default function DispatchBoard() {
               </p>
             )}
             {/* Advisory rollup: how many queued jobs on this machine estimate a
-                material shortage at work-order completion. Never a gate. */}
+                material shortage as their operations complete. Never a gate. */}
             {shortTies > 0 && (
               <p
                 data-testid={`dispatch-tie-short-${column.id}`}
-                title="Estimated material shortage at work-order completion. Advisory — a shortage never blocks production."
+                title="Estimated material shortage as these operations complete. Advisory — a shortage never blocks production."
                 className="truncate font-mono text-[11px] text-red-300"
               >
                 {shortTies} short on material

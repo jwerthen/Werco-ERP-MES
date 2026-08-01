@@ -206,7 +206,7 @@ def export_parts(
 def export_inventory(
     format: ExportFormat = Query(ExportFormat.CSV, description="Export format (csv or xlsx)"),
     warehouse: Optional[str] = Query(None, description="Filter by warehouse"),
-    has_quantity: bool = Query(True, description="Only items with quantity > 0"),
+    has_quantity: bool = Query(True, description="Only items with nonzero quantity (negatives included)"),
     columns: Optional[List[str]] = Query(None, description="Columns to include"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -221,7 +221,11 @@ def export_inventory(
     if warehouse:
         query = query.filter(InventoryItem.warehouse == warehouse)
     if has_quantity:
-        query = query.filter(InventoryItem.quantity_on_hand > 0)
+        # != 0, not > 0 -- matches the inventory LIST view (inventory.py, B11): the
+        # shortage posture deliberately drives a lot NEGATIVE rather than fail a
+        # completion, and the exported spreadsheet is what a manager reconciles from,
+        # so a driven-negative lot must be visible here too, not just on screen.
+        query = query.filter(InventoryItem.quantity_on_hand != 0)
 
     items = query.order_by(InventoryItem.part_id, InventoryItem.location).all()
 

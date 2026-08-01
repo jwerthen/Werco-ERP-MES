@@ -103,6 +103,7 @@ from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation
 from app.models.work_order_material import WorkOrderMaterialAllocation
 from app.services.audit_service import AuditService
 from app.services.operational_event_service import OperationalEventService
+from app.services.work_order_state_service import is_laser_dispatch_work_order
 
 logger = logging.getLogger(__name__)
 
@@ -390,8 +391,24 @@ def receive_finished_goods_for_work_order(
     transaction so the receipt is atomic with the completion.
 
     Returns the created transaction, or ``None`` when it was a no-op (already
-    received, or nothing to receive).
+    received, laser nest-dispatch WO, or nothing to receive).
     """
+    if is_laser_dispatch_work_order(work_order):
+        # A laser nest-dispatch WO is a DISPATCH POOL, not a unit of product: its
+        # ``quantity_complete`` counts pooled nest RUNS, and on a PARENTED child its
+        # ``part_id`` is the PARENT assembly's part (work_orders.py,
+        # ``_ensure_laser_child_work_order``). Receiving here would mint phantom
+        # FINISHED_GOODS of the parent part (5 nests x 8 runs = 40 phantom units) that
+        # the parent's own completion later books for real. Part-less STANDALONE nest
+        # WOs are the same shape with no part at all. Expected behavior -> debug, not
+        # a warning.
+        logger.debug(
+            "FG receipt skipped for laser nest-dispatch WO %s (company %s): nest runs are not finished goods",
+            work_order.id,
+            company_id,
+        )
+        return None
+
     if _existing_work_order_receipt(db, work_order.id, company_id):
         return None
 
@@ -402,7 +419,10 @@ def receive_finished_goods_for_work_order(
 
     part = db.query(Part).filter(Part.id == work_order.part_id, Part.company_id == company_id).first()
     if part is None:
-        logger.warning(
+        # With the laser-dispatch skip above, a part-less WO no longer reaches here;
+        # a non-null part_id that resolves to nothing is still an anomaly worth a log
+        # line, but not an alarm -- info, per the laser-nest-flow/info finding.
+        logger.info(
             "FG receipt skipped: part %s not found for WO %s (company %s)",
             work_order.part_id,
             work_order.id,
@@ -2602,12 +2622,16 @@ def _issue_one_component(
     held_item: Optional[InventoryItem] = None
     pinned: Optional[InventoryItem] = None
     if pinned_inventory_item_id is not None:
+        # FOR UPDATE: the on-hand read-modify-write below must hold the row lock --
+        # two completions of DIFFERENT work orders drawing this lot are otherwise
+        # unserialized (the WO optimistic lock only covers same-WO). No-op on SQLite.
         pinned = (
             db.query(InventoryItem)
             .filter(
                 InventoryItem.id == pinned_inventory_item_id,
                 InventoryItem.company_id == company_id,
             )
+            .with_for_update()
             .first()
         )
         source_items = [pinned] if pinned is not None else []
@@ -2617,7 +2641,7 @@ def _issue_one_component(
             # unattributable -- but never silently.
             held_item = pinned
     else:
-        source_items = consumable_source_items(db, component_part_id, company_id)
+        source_items = consumable_source_items(db, component_part_id, company_id, for_update=True)
 
     available_total = sum(float(i.quantity_on_hand or 0) for i in source_items)
     draws, shortfall = plan_stock_draw(source_items, required_qty)
@@ -3438,6 +3462,20 @@ def backflush_components_for_work_order(
         if a.work_order_operation_id is None and float(a.qty_planned or 0) > _EPSILON
     ]
     backflush_enabled = part is not None and bool(getattr(part, "backflush_components", False))
+    if backflush_enabled and is_laser_dispatch_work_order(work_order):
+        # Same predicate as the FG-receipt skip: a laser nest-dispatch WO is a dispatch
+        # pool whose ``part_id`` is the PARENT part (on a parented child) and whose
+        # ``quantity_complete`` counts nest RUNS -- exploding the parent's BOM against
+        # those numbers would consume the parent's components on the wrong demand basis
+        # while the parent's own completion runs the real backflush. Only LEG 1 is
+        # gated: material TIES (both legs' explicit ones) are the nest flow's actual
+        # consumption mechanism and stay untouched.
+        logger.debug(
+            "BOM backflush skipped for laser nest-dispatch WO %s (company %s): nest runs are not parent demand",
+            work_order.id,
+            company_id,
+        )
+        backflush_enabled = False
     if not backflush_enabled and not open_wo_ties:
         return result
 

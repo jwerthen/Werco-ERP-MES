@@ -334,8 +334,8 @@ export default function LaserNestManualModal({
       return;
     }
 
-    // The swap is two verbs and there is no server-side swap (nor a RETURN verb
-    // until PR 3), so the window between them is real. If the untie lands and
+    // The swap is two verbs and there is no server-side swap, so the window
+    // between them is real. If the untie lands and
     // the re-tie is refused, the nest ends GENUINELY UNTIED and its material
     // will silently never deplete — the exact outcome this feature exists to
     // prevent. Say so explicitly rather than surfacing the bare server detail,
