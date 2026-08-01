@@ -545,6 +545,21 @@ export default function KioskStepsPanel({
   // (re)fetch bumps the generation; a response minted under an older one is
   // discarded so it can never overwrite fresher post-record state.
   const generationRef = useRef(0);
+  // Evidence-upload dedupe: every uploadAttachment mints a new QUALITY_RECORD
+  // Document on the WO's AS9100 evidence trail, so a failed createRecord /
+  // supersedeRecord retry must NOT upload the same File again — that orphans
+  // duplicate Documents. Cache the uploaded document per slot (step + serial,
+  // plus the corrected record id on the supersede path) + File object identity;
+  // cleared after a successful record (finishWrite) and on step/serial change,
+  // so a new slot or a re-picked file always uploads fresh.
+  const uploadedEvidenceRef = useRef<{
+    stepId: number;
+    serial: string | null;
+    /** Corrected record id on the supersede path; null on first records. */
+    recordId: number | null;
+    file: File;
+    documentId: number;
+  } | null>(null);
 
   // undefined = no explicit choice yet (fall back to the derived default);
   // null = deliberately collapsed / no serial.
@@ -657,6 +672,10 @@ export default function KioskStepsPanel({
     setOot(null);
     setGaugeAlert(null);
     setHold({ open: false, notes: '', error: null });
+    // The draft just reset (step/serial slot change, or a lastGauge update
+    // re-seeding the gauge) — drop any cached evidence upload so the next
+    // pick uploads fresh instead of reusing the previous slot's document.
+    uploadedEvidenceRef.current = null;
   }, [effectiveExpandedId, effectiveSerial, lastGauge]);
 
   const recordsForSlot = useCallback(
@@ -698,6 +717,8 @@ export default function KioskStepsPanel({
     setDraft(EMPTY_DRAFT);
     setOot(null);
     setGaugeAlert(null);
+    // The record now owns the uploaded document — the next one uploads fresh.
+    uploadedEvidenceRef.current = null;
     await load();
     if (onRecorded) await onRecorded();
   };
@@ -730,6 +751,36 @@ export default function KioskStepsPanel({
     if (gauge && gauge.equipment_code) setLastGauge({ stepId, ref: gauge });
   };
 
+  /**
+   * Upload the evidence file at most once per slot + File identity: a retry
+   * after a failed createRecord/supersedeRecord reuses the already-minted
+   * document instead of orphaning a duplicate on the evidence trail.
+   */
+  const uploadEvidenceOnce = async (
+    stepId: number,
+    serial: string | null,
+    recordId: number | null,
+    file: File
+  ): Promise<number> => {
+    const cached = uploadedEvidenceRef.current;
+    if (
+      cached &&
+      cached.stepId === stepId &&
+      cached.serial === serial &&
+      cached.recordId === recordId &&
+      cached.file === file
+    ) {
+      return cached.documentId;
+    }
+    const uploaded = await transportRef.current.uploadAttachment(operationId, stepId, file);
+    // Contract guard: only cache a response that actually carried a document
+    // id — a violating response must never be re-served on later retries.
+    if (uploaded.document_id != null) {
+      uploadedEvidenceRef.current = { stepId, serial, recordId, file, documentId: uploaded.document_id };
+    }
+    return uploaded.document_id;
+  };
+
   const submitRecord = async (step: OperationStepWithState) => {
     const payload = draftPayload(step, draft);
     if (!payload || inputsDisabled || !recordable) return;
@@ -741,8 +792,12 @@ export default function KioskStepsPanel({
       if (serialized && effectiveSerial) body.serial_number = effectiveSerial;
       if (step.step_type === 'photo' || step.step_type === 'file') {
         if (!draft.file) return;
-        const uploaded = await transportRef.current.uploadAttachment(operationId, step.id, draft.file);
-        body.attachment_document_id = uploaded.document_id;
+        body.attachment_document_id = await uploadEvidenceOnce(
+          step.id,
+          serialized ? effectiveSerial : null,
+          null,
+          draft.file
+        );
       }
       const created = await transportRef.current.createRecord(operationId, step.id, body);
       captureGaugeEcho(step.id, created);
@@ -824,8 +879,14 @@ export default function KioskStepsPanel({
       const body: OperationStepSupersedeInput = { reason, ...values };
       if (step.step_type === 'photo' || step.step_type === 'file') {
         if (!file) return;
-        const uploaded = await transportRef.current.uploadAttachment(operationId, step.id, file);
-        body.attachment_document_id = uploaded.document_id;
+        // Keyed by the corrected record id: the modal stays open on refusal
+        // with the same picked File, so its retry reuses the upload too.
+        body.attachment_document_id = await uploadEvidenceOnce(
+          step.id,
+          record.serial_number ?? null,
+          record.id,
+          file
+        );
       }
       const replacement = await transportRef.current.supersedeRecord(operationId, step.id, record.id, body);
       captureGaugeEcho(step.id, replacement);
