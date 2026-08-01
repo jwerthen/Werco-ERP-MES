@@ -8,12 +8,18 @@
  *    list — the badge only clears when the server's reload says so.
  * 3. A stale/past `locked_until` (the 30-minute timer already lapsed) renders
  *    NO badge and NO unlock action — the account is not locked anymore.
+ * 4. A MANAGER (read-only list) sees the Locked badge but never the Unlock
+ *    action — the write affordance lives inside the canManageUsers-gated
+ *    actions, and this pins it there.
+ * 5. A failed unlock surfaces the server's detail as an error toast, does NOT
+ *    reload the list, and leaves the locked affordances in place.
  */
 
 import React from 'react';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import api from '../services/api';
+import { ToastProvider } from '../components/ui';
 import Users from './Users';
 
 jest.mock('../services/api', () => ({
@@ -118,5 +124,52 @@ describe('Users failed-login lockout', () => {
 
     expect(screen.queryAllByText('locked')).toHaveLength(0);
     expect(screen.queryAllByLabelText('Unlock user')).toHaveLength(0);
+  });
+
+  it('manager sees the Locked badge but never the Unlock action (read-only list)', async () => {
+    // The other unlock tests all run as admin; this pins that the button lives
+    // INSIDE the canManageUsers-gated actions — moved outside that gate, this
+    // test fails instead of shipping the write affordance to managers green.
+    mockAuthUser = { id: 99, role: 'manager', is_superuser: false };
+    mockedApi.getUsers.mockResolvedValue([LOCKED_USER, UNLOCKED_USER]);
+
+    renderUsers();
+    await waitFor(() => expect(screen.getAllByText('Rosa Vega').length).toBeGreaterThan(0));
+
+    // The lock STATE is part of the manager's read-only list...
+    expect(screen.getAllByText('locked').length).toBeGreaterThan(0);
+    // ...but the unlock WRITE affordance is admin-only, on both the desktop
+    // actions column and the mobile-card actions.
+    expect(screen.queryAllByLabelText('Unlock user')).toHaveLength(0);
+  });
+
+  it('failed unlock shows the server detail as an error toast and does not reload', async () => {
+    mockedApi.getUsers.mockResolvedValue([LOCKED_USER]);
+    mockedApi.unlockUser.mockRejectedValue({
+      response: { data: { detail: 'Account cannot be unlocked' } },
+    });
+
+    // ToastProvider is required here: the context's default showToast is a
+    // no-op, so without the provider this assertion could never see the toast.
+    render(
+      <MemoryRouter initialEntries={['/users']}>
+        <ToastProvider>
+          <Users />
+        </ToastProvider>
+      </MemoryRouter>
+    );
+    await waitFor(() => expect(screen.getAllByText('Rosa Vega').length).toBeGreaterThan(0));
+    expect(mockedApi.getUsers).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getAllByLabelText('Unlock user')[0]);
+
+    // The server's verbatim detail surfaces as an error toast (role="alert")...
+    const toast = await screen.findByRole('alert');
+    expect(toast).toHaveTextContent('Account cannot be unlocked');
+    expect(mockedApi.unlockUser).toHaveBeenCalledWith(1);
+    // ...the list is NOT reloaded, and the locked affordances persist.
+    expect(mockedApi.getUsers).toHaveBeenCalledTimes(1);
+    expect(screen.getAllByText('locked').length).toBeGreaterThan(0);
+    expect(screen.getAllByLabelText('Unlock user').length).toBeGreaterThan(0);
   });
 });

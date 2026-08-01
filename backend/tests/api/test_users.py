@@ -1103,6 +1103,9 @@ class TestUserUnlock:
 
         response = client.post(f"/api/v1/users/{locked.id}/unlock", headers=admin_headers)
         assert response.status_code == status.HTTP_404_NOT_FOUND
+        # The endpoint's own 404, not a missing route's default "Not Found" —
+        # this discriminates the tenant-scope refusal from a routing typo.
+        assert response.json()["detail"] == "User not found"
 
         db_session.refresh(locked)
         assert locked.failed_login_attempts == 5
@@ -1111,6 +1114,8 @@ class TestUserUnlock:
     def test_unlock_missing_user_is_404(self, client: TestClient, admin_headers):
         response = client.post("/api/v1/users/99999/unlock", headers=admin_headers)
         assert response.status_code == status.HTTP_404_NOT_FOUND
+        # The endpoint's own 404 body, not the router default "Not Found".
+        assert response.json()["detail"] == "User not found"
 
     def test_unlock_clears_lock_audits_and_login_succeeds(self, client: TestClient, admin_headers, db_session):
         """The full remediation path: locked login refused -> admin unlock (200,
