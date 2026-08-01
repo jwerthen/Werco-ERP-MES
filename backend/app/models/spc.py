@@ -3,7 +3,7 @@ from datetime import datetime
 
 from sqlalchemy import Boolean, Column, DateTime
 from sqlalchemy import Enum as SQLEnum
-from sqlalchemy import Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import relationship
 
 from app.db.database import Base
@@ -81,6 +81,14 @@ class SPCMeasurement(Base, TenantMixin):
     """Individual measurement data point for SPC"""
 
     __tablename__ = "spc_measurements"
+    # Lock-step with migration 078_golive_perf_indexes: backs the SPC read endpoints
+    # (WHERE characteristic_id = ? ORDER BY subgroup_number, sample_number -- the full
+    # key covers filter + ORDER BY, no sort) and the kiosk capture path's
+    # MAX(subgroup_number) index-tip read in process_sheet_service.py
+    # (ORDER BY subgroup_number DESC LIMIT 1, served by a backward scan).
+    __table_args__ = (
+        Index("ix_spc_measurements_char_subgroup", "characteristic_id", "subgroup_number", "sample_number"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     characteristic_id = Column(Integer, ForeignKey("spc_characteristics.id"), nullable=False)

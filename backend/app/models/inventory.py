@@ -241,8 +241,9 @@ class InventoryTransaction(Base, TenantMixin):
     # constrained exactly as before, on both dialects.
     #
     # Defined here so the ``create_all`` bootstrap path produces the same indexes a
-    # stamped+migrated DB gets (migrations 041 + 076). All three are mirrored; keep
-    # them in lock-step.
+    # stamped+migrated DB gets (migrations 041 + 076, plus 075's reference index and
+    # 078's lot/serial trace indexes below). All five are mirrored; keep them in
+    # lock-step.
     __table_args__ = (
         # At most one finished-goods RECEIPT per (company, work_order).
         Index(
@@ -280,6 +281,28 @@ class InventoryTransaction(Base, TenantMixin):
             "company_id",
             "reference_type",
             "reference_id",
+        ),
+        # NON-unique PARTIAL indexes for the lot/serial traceability reads
+        # (traceability.py lot/serial trace, the inventory ledger lot filter).
+        # Partial because most ledger rows carry no lot/serial, and every serving
+        # query filters on lot_number/serial_number equality (which implies IS NOT
+        # NULL), so the predicate shrinks the index without excluding any serveable
+        # row. Both declare postgresql_where AND sqlite_where from the same literal,
+        # per the 076 dialect-parity convention above. Added by migration
+        # 078_golive_perf_indexes; keep in lock-step with it.
+        Index(
+            "ix_inv_txn_company_lot",
+            "company_id",
+            "lot_number",
+            postgresql_where=text("lot_number IS NOT NULL"),
+            sqlite_where=text("lot_number IS NOT NULL"),
+        ),
+        Index(
+            "ix_inv_txn_company_serial",
+            "company_id",
+            "serial_number",
+            postgresql_where=text("serial_number IS NOT NULL"),
+            sqlite_where=text("serial_number IS NOT NULL"),
         ),
     )
 
