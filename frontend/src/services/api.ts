@@ -3027,6 +3027,11 @@ class ApiService {
     return response.data;
   }
 
+  async unlockUser(userId: number) {
+    const response = await this.api.post(`/users/${userId}/unlock`);
+    return response.data;
+  }
+
   // Customers
   async getCustomers(activeOnly = true, search?: string) {
     const response = await this.api.get('/customers/', { params: { active_only: activeOnly, search } });

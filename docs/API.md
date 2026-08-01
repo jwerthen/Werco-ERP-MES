@@ -3881,6 +3881,7 @@ records, targets) require **Admin / Manager / Supervisor**.
 | POST | `/users/` | Create user | Admin |
 | PUT | `/users/{id}` | Update user | Admin |
 | DELETE | `/users/{id}` | Deactivate user (sets `is_active=false`; cannot deactivate yourself) | Admin |
+| POST | `/users/{id}/unlock` | Clear failed-login lockout | Admin |
 
 > **User writes are Admin-only; the list read is Admin / Manager.** `GET /users/` (and
 > `GET /users/{id}`) are `require_role([ADMIN, MANAGER])`; `POST` / `PUT` / `DELETE` are
@@ -3890,11 +3891,26 @@ records, targets) require **Admin / Manager / Supervisor**.
 > from a tenant path (matching the import and `POST /users/{id}/approve` guards) — and on
 > `PUT /users/{id}` an Admin cannot change **their own** role (**400**, `"You cannot change your own
 > role"`; editing one's own other fields stays allowed). Every user mutation (create, update,
-> approve, password-reset, deactivate, activate) is recorded in the tamper-evident audit log; the
-> self-service `POST /users/change-password` likewise records a `PASSWORD_CHANGE` audit event
-> (`extra_data.source = "self_service"`, mirroring the admin `reset-password` path — the
+> approve, password-reset, deactivate, activate, unlock) is recorded in the tamper-evident audit
+> log; the self-service `POST /users/change-password` likewise records a `PASSWORD_CHANGE` audit
+> event (`extra_data.source = "self_service"`, mirroring the admin `reset-password` path — the
 > password/hash is never included). See
 > [docs/RBAC_PERMISSIONS.md](RBAC_PERMISSIONS.md) → Users.
+>
+> **`POST /users/{id}/unlock` — the admin remedy for the failed-login lockout.** After 5 failed
+> logins the auth endpoints set `locked_until` 30 minutes out and refuse further attempts with
+> `"Account is locked. Please contact administrator."`; unlock resets `failed_login_attempts` to 0
+> and clears `locked_until` so the user can log in immediately. Tenant-scoped (an id in another
+> company is **404**) and **idempotent**: unlocking a user with no lock state returns **200** and
+> writes **no** audit row. The audit row is truthful about the prior state: clearing a lock still
+> **in force** (`locked_until` in the future) records a `STATUS_CHANGE` (`locked` → `unlocked`)
+> with the prior `failed_login_attempts` / `locked_until` in `extra_data`; clearing only
+> **residual** state (an expired lock, or failed attempts that never reached 5) records an
+> `UPDATE` of the two fields instead — no lockout status actually changed.
+> To let the admin UI surface the lock, `locked_until` is exposed on the **inline user-management
+> `UserResponse`** (`app/api/endpoints/users.py`) only — every route serializing it is self-scoped
+> (`GET /users/me`) or Admin/Manager-gated; general user serialization
+> (`app.schemas.user.UserResponse`, the per-domain summaries) still omits lockout state.
 
 > **Password-strength policy — enforced server-side on every password-set path.** A password set
 > through `POST /users/` (create), `POST /users/{id}/reset-password`, or the self-service

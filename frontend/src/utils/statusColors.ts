@@ -110,6 +110,9 @@ const statusVariantMap: Record<string, StatusVariant> = {
   cancelled: 'red',
   canceled: 'red',
   blocked: 'red',
+  // A failed-login lockout (users.locked_until in the future) needs an admin's
+  // attention — the operator is stuck until unlocked or the 30-min timer lapses.
+  locked: 'red',
   non_compliant: 'red',
   needs_repair: 'red',
   lost: 'red',
