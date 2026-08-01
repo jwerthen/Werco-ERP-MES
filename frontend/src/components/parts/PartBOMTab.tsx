@@ -85,7 +85,10 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
   const [showImport, setShowImport] = useState(false);
 
   // Confirm state
-  const [confirmAction, setConfirmAction] = useState<{ title: string; message: string; action: () => void } | null>(null);
+  const [confirmAction, setConfirmAction] = useState<{ title: string; message: string; action: () => void | Promise<void> } | null>(null);
+  // In-flight guard for the confirm dialog: the dialog stays open and pending
+  // while the action awaits the server, and can't be re-fired or dismissed.
+  const [confirmPending, setConfirmPending] = useState(false);
 
   // Create BOM state
   const [creating, setCreating] = useState(false);
@@ -969,11 +972,20 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
         title={confirmAction?.title || ''}
         message={confirmAction?.message || ''}
         confirmLabel="Delete"
-        onConfirm={() => {
-          confirmAction?.action();
-          setConfirmAction(null);
+        pending={confirmPending}
+        onConfirm={async () => {
+          if (!confirmAction || confirmPending) return;
+          setConfirmPending(true);
+          try {
+            await confirmAction.action();
+          } finally {
+            setConfirmPending(false);
+            setConfirmAction(null);
+          }
         }}
-        onCancel={() => setConfirmAction(null)}
+        onCancel={() => {
+          if (!confirmPending) setConfirmAction(null);
+        }}
       />
     </div>
   );

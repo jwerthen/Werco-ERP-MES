@@ -25,7 +25,7 @@ import { Breadcrumbs } from '../components/ui/Breadcrumbs';
 import { getBreadcrumbParent } from '../utils/routeMeta';
 import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
 import { ContextualAIStrip } from '../components/ai';
-import { EmptyState, ErrorState, useToast, statusColor, Button, Modal } from '../components/ui';
+import { EmptyState, ErrorState, useToast, statusColor, Button, InputDialog, Modal } from '../components/ui';
 import { formatCentralDate, formatCentralDateTime, getCentralDateStamp } from '../utils/centralTime';
 import { sortWorkCentersForLaserDispatch } from '../utils/laserWorkCenters';
 import {
@@ -330,6 +330,7 @@ export default function WorkOrderDetail() {
   });
   const [submittingBlocker, setSubmittingBlocker] = useState(false);
   const [resolvingBlockerId, setResolvingBlockerId] = useState<number | null>(null);
+  const [resolveBlockerTarget, setResolveBlockerTarget] = useState<WorkOrderBlocker | null>(null);
   const [userNameById, setUserNameById] = useState<Record<number, string>>({});
   const [activeUsersOnWorkOrder, setActiveUsersOnWorkOrder] = useState<ActiveShopUser[]>([]);
   // Batch ZIP import runs through the LaserNestImportWizard modal.
@@ -981,13 +982,18 @@ export default function WorkOrderDetail() {
     }
   };
 
-  const handleResolveBlocker = async (blocker: WorkOrderBlocker) => {
-    const note = prompt(`Resolve blocker "${blocker.title}"?`, 'Resolved');
-    if (note === null) return;
+  // Replaced the native prompt() note capture with the shared InputDialog. The
+  // Resolve button opens the dialog; submit resolves with the entered (trimmed,
+  // non-empty) note, non-optimistically — the dialog stays open and pending
+  // until the server answers, and closes only on success.
+  const handleResolveBlocker = async (note: string) => {
+    const blocker = resolveBlockerTarget;
+    if (!blocker || resolvingBlockerId !== null) return;
     setResolvingBlockerId(blocker.id);
     try {
-      await api.resolveWorkOrderBlocker(blocker.id, note.trim() || undefined);
+      await api.resolveWorkOrderBlocker(blocker.id, note);
       await loadWorkOrder();
+      setResolveBlockerTarget(null);
       showToast('success', `Resolved blocker "${blocker.title}"`);
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to resolve blocker');
@@ -1850,7 +1856,7 @@ export default function WorkOrderDetail() {
                     </div>
                     {(blocker.status === 'open' || blocker.status === 'acknowledged') && (
                       <button
-                        onClick={() => handleResolveBlocker(blocker)}
+                        onClick={() => setResolveBlockerTarget(blocker)}
                         disabled={resolvingBlockerId === blocker.id}
                         className="btn-success btn-sm"
                       >
@@ -2456,6 +2462,21 @@ export default function WorkOrderDetail() {
             ? Number(completeTarget.operation.component_quantity || workOrder.quantity_ordered || 0)
             : workOrder.quantity_ordered
         }
+      />
+
+      {/* Resolve-blocker note (replaces the native prompt) */}
+      <InputDialog
+        open={resolveBlockerTarget !== null}
+        title="Resolve Blocker"
+        message={resolveBlockerTarget ? `Resolve blocker "${resolveBlockerTarget.title}"?` : undefined}
+        label="Resolution note"
+        defaultValue="Resolved"
+        submitLabel="Resolve"
+        pending={resolveBlockerTarget !== null && resolvingBlockerId === resolveBlockerTarget.id}
+        onSubmit={handleResolveBlocker}
+        onCancel={() => {
+          if (resolvingBlockerId === null) setResolveBlockerTarget(null);
+        }}
       />
     </div>
   );

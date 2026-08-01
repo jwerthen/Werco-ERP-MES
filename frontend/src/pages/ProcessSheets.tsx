@@ -393,9 +393,11 @@ export default function ProcessSheetsPage() {
     await refreshAll();
   };
 
+  // The three ConfirmDialog-backed actions keep their dialog OPEN and pending
+  // while the request is in flight (the dialog blocks dismissal), closing only
+  // once the server has answered — non-optimistic, per the app convention.
   const handleObsolete = async () => {
-    if (!selected) return;
-    setConfirmObsolete(false);
+    if (!selected || actionPending) return;
     setActionPending(true);
     try {
       await api.obsoleteProcessSheet(selected.id);
@@ -405,6 +407,7 @@ export default function ProcessSheetsPage() {
       showToast('error', err?.response?.data?.detail || 'Failed to obsolete process sheet');
     } finally {
       setActionPending(false);
+      setConfirmObsolete(false);
     }
   };
 
@@ -424,8 +427,7 @@ export default function ProcessSheetsPage() {
   };
 
   const handleDeleteSheet = async () => {
-    if (!selected) return;
-    setConfirmDeleteSheet(false);
+    if (!selected || actionPending) return;
     setActionPending(true);
     try {
       await api.deleteProcessSheet(selected.id);
@@ -436,13 +438,13 @@ export default function ProcessSheetsPage() {
       showToast('error', err?.response?.data?.detail || 'Failed to delete process sheet');
     } finally {
       setActionPending(false);
+      setConfirmDeleteSheet(false);
     }
   };
 
   const handleDeleteStep = async () => {
-    if (!selected || !stepToDelete) return;
+    if (!selected || !stepToDelete || actionPending) return;
     const step = stepToDelete;
-    setStepToDelete(null);
     setActionPending(true);
     try {
       await api.deleteProcessSheetStep(selected.id, step.id);
@@ -452,6 +454,7 @@ export default function ProcessSheetsPage() {
       showToast('error', err?.response?.data?.detail || 'Failed to delete step');
     } finally {
       setActionPending(false);
+      setStepToDelete(null);
     }
   };
 
@@ -772,6 +775,7 @@ export default function ProcessSheetsPage() {
               message="The sheet can no longer be attached to routing operations. Existing work-order snapshots are unaffected."
               confirmLabel="Obsolete"
               variant="warning"
+              pending={actionPending}
               onConfirm={handleObsolete}
               onCancel={() => setConfirmObsolete(false)}
             />
@@ -781,6 +785,7 @@ export default function ProcessSheetsPage() {
               message="Deletes this draft sheet (kept for audit/restore). Released sheets are obsoleted instead of deleted."
               confirmLabel="Delete"
               variant="danger"
+              pending={actionPending}
               onConfirm={handleDeleteSheet}
               onCancel={() => setConfirmDeleteSheet(false)}
             />
@@ -790,6 +795,7 @@ export default function ProcessSheetsPage() {
               message={`Removes "${stepToDelete?.label ?? ''}" from this draft sheet.`}
               confirmLabel="Delete"
               variant="danger"
+              pending={actionPending}
               onConfirm={handleDeleteStep}
               onCancel={() => setStepToDelete(null)}
             />

@@ -1554,7 +1554,8 @@ export default function Purchasing() {
             ? `Delete purchase order ${deletePOTarget.po_number}? This removes it from active lists while preserving the record for audit/restore.`
             : ''
         }
-        confirmLabel={deletePOPending ? 'Deleting…' : 'Delete'}
+        confirmLabel="Delete"
+        pending={deletePOPending}
         variant="danger"
         onConfirm={handleConfirmDeletePO}
         onCancel={() => {
@@ -1571,7 +1572,8 @@ export default function Purchasing() {
             ? `Delete vendor ${deleteVendorTarget.name}? This removes it from active lists while preserving the record for audit/restore.`
             : ''
         }
-        confirmLabel={deleteVendorPending ? 'Deleting…' : 'Delete'}
+        confirmLabel="Delete"
+        pending={deleteVendorPending}
         variant="danger"
         onConfirm={handleConfirmDeleteVendor}
         onCancel={() => {

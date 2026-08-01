@@ -8,7 +8,7 @@ import { ENGINEERING_PART_TYPE_OPTIONS } from '../utils/catalogGroups';
 import { escapeCsvField, neutralizeCsvFormula } from '../utils/csv';
 import { StatusBadge } from '../components/ui/StatusBadge';
 import { Modal } from '../components/ui/Modal';
-import { FormField } from '../components/ui';
+import { FormField, InputDialog } from '../components/ui';
 import { useToast } from '../components/ui/Toast';
 import useUnsavedChanges from '../hooks/useUnsavedChanges';
 import { BOMImportWizard } from '../components/parts/BOMImportWizard';
@@ -95,6 +95,7 @@ export default function PartsPage() {
   const [bomData, setBomData] = useState<Record<number, BOMItemSummary[]>>({});
   const [componentPartIds, setComponentPartIds] = useState<Set<number>>(new Set());
   const [savedFilters, setSavedFilters] = useState<SavedPartFilter[]>([]);
+  const [saveFilterDialogOpen, setSaveFilterDialogOpen] = useState(false);
   const [selectedPartIds, setSelectedPartIds] = useState<Set<number>>(new Set());
   const [customerOptions, setCustomerOptions] = useState<CustomerNameOption[]>([]);
   const [showCustomerDropdown, setShowCustomerDropdown] = useState(false);
@@ -274,13 +275,15 @@ export default function PartsPage() {
     window.localStorage.setItem(SAVED_FILTERS_KEY, JSON.stringify(filters));
   };
 
-  const saveCurrentFilter = () => {
-    const name = window.prompt('Name this parts filter', search || typeFilter || statusFilter || 'Parts filter');
-    if (!name?.trim()) return;
+  // Replaced the native window.prompt() name capture with the shared
+  // InputDialog: the button opens the dialog, submit persists the filter under
+  // the entered (trimmed, non-empty) name.
+  const saveCurrentFilter = () => setSaveFilterDialogOpen(true);
 
+  const handleSaveFilter = (name: string) => {
     const nextFilter: SavedPartFilter = {
       id: `${Date.now()}`,
-      name: name.trim(),
+      name,
       search,
       typeFilter,
       statusFilter,
@@ -289,6 +292,7 @@ export default function PartsPage() {
       createdAt: new Date().toISOString(),
     };
     persistSavedFilters([nextFilter, ...savedFilters].slice(0, 12));
+    setSaveFilterDialogOpen(false);
     showToast('success', `Saved filter "${nextFilter.name}"`);
   };
 
@@ -1188,6 +1192,18 @@ export default function PartsPage() {
           onClose={() => setShowImport(false)}
         />
       )}
+
+      {/* Save-filter name (replaces the native window.prompt) */}
+      <InputDialog
+        open={saveFilterDialogOpen}
+        title="Save Parts Filter"
+        message="Saves the current search, type, status, and view settings as a reusable filter."
+        label="Filter name"
+        defaultValue={search || typeFilter || statusFilter || 'Parts filter'}
+        submitLabel="Save"
+        onSubmit={handleSaveFilter}
+        onCancel={() => setSaveFilterDialogOpen(false)}
+      />
     </div>
   );
 }
