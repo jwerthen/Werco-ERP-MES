@@ -26,7 +26,7 @@ import {
 } from '@heroicons/react/24/solid';
 import { FunnelIcon, QrCodeIcon } from '@heroicons/react/24/outline';
 import LaserNestOperatorPanel from '../components/laser/LaserNestOperatorPanel';
-import { Button, ConfirmDialog, Modal, SelectField, statusColor, statusVariant } from '../components/ui';
+import { Button, ConfirmDialog, EmptyState, ErrorState, Modal, SelectField, statusColor, statusVariant } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { HOLD_REASONS } from '../components/kiosk/kioskConstants';
 import { KioskRunOrderChip } from '../components/kiosk/KioskQueueCard';
@@ -89,6 +89,10 @@ interface Toast {
   message: string;
 }
 
+// The loaders the 30-second auto-refresh (and manual Refresh) re-run — keys
+// for the per-loader toast-spam guard.
+type PolledLoader = 'operations' | 'activeJobs' | 'workCenters' | 'dashboardCounts';
+
 // Status pill colors come from the central statusColors source of truth via
 // statusColor(); the leading status dot derives from the same canonical variant
 // so it can never drift from the pill.
@@ -129,6 +133,13 @@ export default function ShopFloorSimple() {
   const [activeJobs, setActiveJobs] = useState<ActiveJob[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  // Poll-failure surfacing — a failed refresh must never fail silently.
+  // operationsError swaps the grid for an inline ErrorState; activeJobsStale
+  // keeps the last-known clocked-in job on screen (never "not clocked in"
+  // just because a poll blipped — that invited a double clock-in) and flags
+  // it with an inline ErrorState until a refresh succeeds.
+  const [operationsError, setOperationsError] = useState(false);
+  const [activeJobsStale, setActiveJobsStale] = useState(false);
 
   // Filters
   const [workCenterId, _setWorkCenterId] = useState<number | ''>('');
@@ -199,6 +210,40 @@ export default function ShopFloorSimple() {
     workCenterIdRef.current = workCenterId;
   }, [workCenterId]);
 
+  // Monotonic toast id — NOT Date.now(): the failure toasts below can fire for
+  // several loaders in the same event-loop turn (one Promise.all refresh with
+  // the network down), and same-ms ids duplicated React keys and made the first
+  // 4s timeout dismiss every colliding toast at once.
+  const toastIdRef = useRef(0);
+  const showToast = useCallback((type: 'success' | 'error' | 'info', message: string) => {
+    const id = ++toastIdRef.current;
+    setToasts(prev => [...prev, { id, type, message }]);
+    setTimeout(() => {
+      setToasts(prev => prev.filter(t => t.id !== id));
+    }, 4000);
+  }, []);
+
+  // Toast-spam guard for the polled loaders: one entry per loader, true while
+  // the LAST attempt failed. A failure toasts only on the ok→failed
+  // TRANSITION, so a network outage during 30s polling produces one toast
+  // plus the persistent inline state — not a new toast every poll.
+  const lastLoadFailedRef = useRef<Record<PolledLoader, boolean>>({
+    operations: false,
+    activeJobs: false,
+    workCenters: false,
+    dashboardCounts: false,
+  });
+
+  const notifyLoadFailure = useCallback(
+    (loader: PolledLoader, message: string) => {
+      if (!lastLoadFailedRef.current[loader]) {
+        showToast('error', message);
+      }
+      lastLoadFailedRef.current[loader] = true;
+    },
+    [showToast]
+  );
+
   // Load data
   const loadOperations = useCallback(async () => {
     try {
@@ -246,11 +291,16 @@ export default function ShopFloorSimple() {
       }
 
       setOperations(nextOperations);
+      setOperationsError(false);
+      lastLoadFailedRef.current.operations = false;
     } catch (err) {
       console.error('Failed to load operations:', err);
-      showToast('error', 'Failed to load operations');
+      // Swap the grid for an inline ErrorState instead of silently showing a
+      // stale list; toast only on the ok→failed transition.
+      setOperationsError(true);
+      notifyLoadFailure('operations', 'Failed to load operations');
     }
-  }, [workCenterId, statusFilter, debouncedSearch, dueTodayOnly, workCenters]);
+  }, [workCenterId, statusFilter, debouncedSearch, dueTodayOnly, workCenters, notifyLoadFailure]);
 
   const loadDashboardCounts = useCallback(async () => {
     try {
@@ -264,19 +314,29 @@ export default function ShopFloorSimple() {
         };
       });
       setDashboardCounts(nextCounts);
+      lastLoadFailedRef.current.dashboardCounts = false;
     } catch (err) {
       console.error('Failed to load dashboard counts:', err);
+      notifyLoadFailure('dashboardCounts', 'Failed to refresh work center counts');
     }
-  }, []);
+  }, [notifyLoadFailure]);
 
   const loadActiveJobs = useCallback(async () => {
     try {
       const response = await api.getMyActiveJob();
       setActiveJobs(response.active_jobs || (response.active_job ? [response.active_job] : []));
+      setActiveJobsStale(false);
+      lastLoadFailedRef.current.activeJobs = false;
     } catch (err) {
+      // Safety-critical: a failed poll must NOT clear the operator's
+      // clocked-in job. Wiping activeJobs here made the strip vanish — the
+      // page read "not clocked in" and invited a double clock-in. Keep the
+      // last-known jobs and mark them stale instead.
       console.error('Failed to load active jobs:', err);
+      setActiveJobsStale(true);
+      notifyLoadFailure('activeJobs', "Couldn't refresh your clocked-in job");
     }
-  }, []);
+  }, [notifyLoadFailure]);
 
   const loadWorkCenters = useCallback(async () => {
     try {
@@ -308,10 +368,12 @@ export default function ShopFloorSimple() {
           }
         }
       }
+      lastLoadFailedRef.current.workCenters = false;
     } catch (err) {
       console.error('Failed to load work centers:', err);
+      notifyLoadFailure('workCenters', 'Failed to load work centers');
     }
-  }, [kioskParams.dept, kioskParams.workCenterCode, kioskParams.workCenterId, setWorkCenterId]);
+  }, [kioskParams.dept, kioskParams.workCenterCode, kioskParams.workCenterId, setWorkCenterId, notifyLoadFailure]);
 
   useEffect(() => {
     let cancelled = false;
@@ -368,14 +430,6 @@ export default function ShopFloorSimple() {
     ]);
     setRefreshing(false);
   };
-
-  const showToast = useCallback((type: 'success' | 'error' | 'info', message: string) => {
-    const id = Date.now();
-    setToasts(prev => [...prev, { id, type, message }]);
-    setTimeout(() => {
-      setToasts(prev => prev.filter(t => t.id !== id));
-    }, 4000);
-  }, []);
 
   const isOverdue = (dueDate: string | null) => {
     if (!dueDate) return false;
@@ -1224,6 +1278,16 @@ export default function ShopFloorSimple() {
         </div>
       )}
 
+      {/* Stale active-job poll: keep the last-known strip above and say so —
+          never let a failed refresh silently pretend "not clocked in". */}
+      {activeJobsStale && (
+        <ErrorState
+          title="Couldn't refresh your clocked-in job"
+          message="Showing your last known clock-in status until a refresh succeeds."
+          onRetry={loadActiveJobs}
+        />
+      )}
+
       {/* Filters (desktop) */}
       <div className="card hidden md:block" data-tour="sf-clock">
         <div className="flex flex-wrap gap-4 items-center">
@@ -1530,27 +1594,25 @@ export default function ShopFloorSimple() {
       */}
 
       {/* Operations Grid */}
-      {visibleOperations.length === 0 ? (
-        <div className="card text-center py-16">
-          <CubeIcon className="h-12 w-12 text-slate-400 mx-auto mb-4" />
-          <p className="text-slate-300 font-medium">
-            {selectedWorkCenter ? `No operations found for ${selectedWorkCenter.name}` : 'No operations found'}
-          </p>
-          <p className="text-sm text-slate-400 mt-1">
-            {selectedWorkCenter && queuedOperationsAcrossCenters > 0
+      {operationsError ? (
+        <ErrorState message="Could not load operations" onRetry={loadOperations} />
+      ) : visibleOperations.length === 0 ? (
+        <EmptyState
+          icon={CubeIcon}
+          title={selectedWorkCenter ? `No operations found for ${selectedWorkCenter.name}` : 'No operations found'}
+          description={
+            selectedWorkCenter && queuedOperationsAcrossCenters > 0
               ? 'Other work centers have queued work. View all operations or choose a different station.'
-              : 'Try adjusting your filters'}
-          </p>
-          {selectedWorkCenter && (
-            <Button
-              variant="secondary"
-              onClick={() => focusOperations('')}
-              className="mt-4"
-            >
-              View All Operations
-            </Button>
-          )}
-        </div>
+              : 'Try adjusting your filters'
+          }
+          action={
+            selectedWorkCenter ? (
+              <Button variant="secondary" onClick={() => focusOperations('')}>
+                View All Operations
+              </Button>
+            ) : undefined
+          }
+        />
       ) : (
         <div ref={operationsRef} className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4" data-tour="sf-operations">
           {/* Cards render in server order — the same canonical run-order sort
