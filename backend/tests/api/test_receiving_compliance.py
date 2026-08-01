@@ -527,3 +527,57 @@ def test_inspect_cross_company_receipt_is_404(client: TestClient, db_session: Se
 
     assert resp.status_code == status.HTTP_404_NOT_FOUND
     assert resp.json()["detail"] == "Receipt not found"
+
+
+# ---------------------------------------------------------------------------
+# 8. NCR numbering on rejection goes through the locked canonical generator
+# ---------------------------------------------------------------------------
+
+
+def test_rejection_ncr_uses_locked_generator(client: TestClient, db_session: Session, monkeypatch):
+    """The auto-NCR on a rejection inspection numbers through quality.py's
+    generate_ncr_number, which serializes via acquire_generator_lock("ncr_number",
+    company_id) — receiving.py's old unlocked local copy is gone (ncr_number is
+    GLOBALLY unique, so a concurrent duplicate would 500)."""
+    import app.api.endpoints.quality as quality_endpoint
+    import app.api.endpoints.receiving as receiving_endpoint
+
+    # The receiving module must not define its own generator anymore.
+    assert not hasattr(receiving_endpoint, "generate_ncr_number")
+
+    admin1 = make_user(db_session, role=UserRole.ADMIN, company_id=1)
+    quality1 = make_user(db_session, role=UserRole.QUALITY, company_id=1)
+    line = make_po_line(db_session, company_id=1, quantity_ordered=10)
+
+    recv = client.post(
+        "/api/v1/receiving/receive",
+        headers=headers_for(admin1),
+        json=receive_payload(line.id, quantity_received=6, requires_inspection=True),
+    )
+    assert recv.status_code in (status.HTTP_200_OK, status.HTTP_201_CREATED), recv.text
+    receipt_id = recv.json()["id"]
+
+    calls = []
+    real_lock = quality_endpoint.acquire_generator_lock
+
+    def _spy(db, namespace, company=None):
+        calls.append((namespace, company))
+        return real_lock(db, namespace, company)
+
+    monkeypatch.setattr(quality_endpoint, "acquire_generator_lock", _spy)
+
+    resp = client.post(
+        f"/api/v1/receiving/inspect/{receipt_id}",
+        headers=headers_for(quality1),
+        json={
+            "quantity_accepted": 4,
+            "quantity_rejected": 2,
+            "inspection_method": "dimensional",
+            "defect_type": "dimensional",
+            "inspection_notes": "2 parts out of tolerance.",
+        },
+    )
+    assert resp.status_code in (status.HTTP_200_OK, status.HTTP_201_CREATED), resp.text
+    assert resp.json()["ncr_created"] is True
+
+    assert ("ncr_number", admin1.company_id) in calls, f"expected an ncr_number lock acquisition, got {calls}"

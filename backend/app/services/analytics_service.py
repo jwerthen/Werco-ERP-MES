@@ -14,7 +14,7 @@ from app.db.ledger_filter import work_order_ledger_filter
 from app.models.downtime import DowntimeEvent, DowntimePlannedType
 from app.models.inventory import InventoryItem, InventoryTransaction, TransactionType
 from app.models.part import Part
-from app.models.purchasing import InspectionStatus, POReceipt, Vendor
+from app.models.purchasing import InspectionStatus, POReceipt, PurchaseOrder, PurchaseOrderLine, Vendor
 from app.models.quality import NCRStatus, NonConformanceReport
 from app.models.quote import Quote, QuoteStatus
 from app.models.shipping import Shipment, ShipmentStatus
@@ -1674,11 +1674,6 @@ class AnalyticsService:
                 # than PASSED, so count both — otherwise the acceptance rate for a
                 # vendor received dock-to-stock (the receiving default since PR #127)
                 # would collapse toward 0% even with zero rejections.
-                # NOTE: get_quality_metrics is currently unreachable — the vendor
-                # join below (POReceipt.po_line.has(...)) is a pre-existing malformed
-                # predicate that raises at query build (tracked separately). This
-                # predicate is kept correct-by-construction so that when that join is
-                # fixed, NOT_REQUIRED already counts as accepted (no 0%-rate regression).
                 func.sum(
                     case(
                         (POReceipt.inspection_status.in_([InspectionStatus.PASSED, InspectionStatus.NOT_REQUIRED]), 1),
@@ -1687,10 +1682,20 @@ class AnalyticsService:
                 ).label('accepted'),
                 func.sum(case((POReceipt.inspection_status == InspectionStatus.FAILED, 1), else_=0)).label('rejected'),
             )
-            .join(POReceipt, POReceipt.po_line.has(purchase_order=Vendor.purchase_orders))
+            .select_from(Vendor)
+            .join(PurchaseOrder, PurchaseOrder.vendor_id == Vendor.id)
+            .join(PurchaseOrderLine, PurchaseOrderLine.purchase_order_id == PurchaseOrder.id)
+            .join(POReceipt, POReceipt.po_line_id == PurchaseOrderLine.id)
             .filter(
                 Vendor.company_id == self.company_id,
                 POReceipt.company_id == self.company_id,
+                # All three joined tables are soft-deletable (migration 071). The
+                # load-bearing one is the receipt: the receiving void path
+                # soft-deletes the row, and a voided FAILED receipt must not keep
+                # dinging the vendor's acceptance rate.
+                Vendor.is_deleted == False,  # noqa: E712
+                PurchaseOrder.is_deleted == False,  # noqa: E712
+                POReceipt.is_deleted == False,  # noqa: E712
                 POReceipt.received_at >= datetime.combine(start_date, datetime.min.time()),
                 POReceipt.received_at <= datetime.combine(end_date, datetime.max.time()),
             )

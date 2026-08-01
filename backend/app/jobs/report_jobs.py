@@ -65,11 +65,11 @@ async def generate_report_task(report_type: str, filters: dict = None):
             "report_type": report_type,
             "report_name": REPORT_TYPES.get(report_type, report_type),
             "filters": filters or {},
-            "status": "completed",
-            "message": "Report generation placeholder - full implementation pending",
+            "status": "not_implemented",
+            "message": "Report generation is not implemented yet - no report was produced",
         }
 
-        logger.info(f"Report {report_type} generated successfully")
+        logger.info(f"Report {report_type} not generated: report generation is not implemented yet")
         return result
 
     except Exception as e:

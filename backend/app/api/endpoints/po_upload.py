@@ -521,7 +521,13 @@ def create_po_from_upload(
     )
     po.company_id = company_id
     db.add(po)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        # TOCTOU backstop (part-flush precedent above): a concurrent create can slip
+        # past check_po_number_exists; the unique po_number catches it at this flush.
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"PO number '{data.po_number}' already exists") from exc
 
     # Create line items
     subtotal = 0.0

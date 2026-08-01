@@ -92,29 +92,6 @@ def generate_receipt_number(db: Session, company_id: int) -> str:
     return f"{prefix}{new_num:03d}"
 
 
-def generate_ncr_number(db: Session, company_id: int) -> str:
-    today = datetime.now().strftime("%Y%m%d")
-    prefix = f"NCR-{today}-"
-
-    last = (
-        db.query(NonConformanceReport)
-        .filter(
-            NonConformanceReport.company_id == company_id,
-            NonConformanceReport.ncr_number.like(f"{prefix}%"),
-        )
-        .order_by(NonConformanceReport.ncr_number.desc())
-        .first()
-    )
-
-    if last:
-        last_num = int(last.ncr_number.split("-")[-1])
-        new_num = last_num + 1
-    else:
-        new_num = 1
-
-    return f"{prefix}{new_num:03d}"
-
-
 @router.get("/open-pos")
 def get_open_purchase_orders(
     vendor_id: Optional[int] = None,
@@ -935,6 +912,12 @@ def _create_ncr_for_rejection(
     audit: AuditService,
 ) -> NonConformanceReport:
     """Create NCR in draft status for rejected material"""
+    # Endpoint->endpoint edge kept function-local on purpose (shop_floor.py
+    # precedent): quality.py owns the canonical company-scoped NCR number
+    # generator (with acquire_generator_lock — ncr_number is GLOBALLY unique),
+    # and importing it beats a second unlocked copy drifting.
+    from app.api.endpoints.quality import generate_ncr_number
+
     ncr_number = generate_ncr_number(db, company_id)
 
     defect_descriptions = {

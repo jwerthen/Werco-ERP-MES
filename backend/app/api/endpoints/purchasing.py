@@ -536,7 +536,14 @@ def create_purchase_order(
     )
     po.company_id = company_id
     db.add(po)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        # Backstop for a duplicate po_number surfacing at the header flush. The
+        # advisory lock in generate_po_number already serializes same-company
+        # creates on Postgres — this is the SQLite/edge backstop (400, not 500).
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"PO number '{po_number}' already exists") from exc
 
     # Add lines
     subtotal = 0.0

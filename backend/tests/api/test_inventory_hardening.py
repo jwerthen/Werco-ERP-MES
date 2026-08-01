@@ -959,24 +959,13 @@ def test_record_count_own_company_succeeds(client: TestClient, db_session: Sessi
     assert float(item_after.counted_quantity) == 7.0
     assert float(item_after.variance_value) == -9.0
     assert item_after.counted_by == a_user.id
-    # NOTE: ``CycleCount.items_counted`` is NOT asserted here -- it is off by one.
-    # See test_record_count_progress_counter_is_stale below.
+    count_after = _reload(db_session, CycleCount, a_count.id)
+    assert count_after.items_counted == 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "PRE-EXISTING DEFECT (not introduced by the tenant-scoping fix, and deliberately "
-        "not fixed here): record_count recomputes CycleCount.items_counted with a "
-        "db.query(...).count() while `item.is_counted = True` is still pending in the "
-        "session. Both app.db.database.SessionLocal and the test sessionmaker are "
-        "autoflush=False, so the just-counted row is invisible to that COUNT and the "
-        "progress counter lags by exactly one -- it can never reach total_items. The "
-        "same query shape exists on main; only the company_id predicate was added."
-    ),
-)
 def test_record_count_progress_counter_is_stale(client: TestClient, db_session: Session):
-    """Counting N items should leave ``items_counted == N``; it lands on N-1."""
+    """Counting N items must leave ``items_counted == N`` (record_count flushes the
+    item mutation before the recount, so the just-counted row is visible)."""
     a_user = make_user(db_session, company_id=COMPANY_A, role=UserRole.OPERATOR)
     a_part = make_part(db_session, company_id=COMPANY_A)
     a_loc = make_location(db_session, company_id=COMPANY_A)
@@ -2293,6 +2282,44 @@ def test_inventory_export_default_filter_includes_negative_lots(client: TestClie
     rows = [line for line in resp.text.strip().splitlines() if part.part_number in line]
     assert len(rows) == 1, "the negative lot must export; the zero row stays hidden"
     assert "-5" in rows[0], "the exported row carries the negative on-hand"
+
+
+def test_inventory_summary_includes_negative_lots(client: TestClient, db_session: Session):
+    """B11, summary leg: ``/inventory/summary`` must apply the same ``!= 0``
+    predicate as the list view (PR #175) -- a driven-negative lot absent from the
+    per-part rollup understates the shortage exactly where totals get read."""
+    user = make_user(db_session, company_id=COMPANY_A)
+    part = make_part(db_session, company_id=COMPANY_A)
+    loc = make_location(db_session, company_id=COMPANY_A)
+    negative = make_inventory_item(db_session, company_id=COMPANY_A, part=part, location=loc.code, qty=-5.0)
+    make_inventory_item(db_session, company_id=COMPANY_A, part=part, location=loc.code, qty=0.0)
+
+    resp = client.get("/api/v1/inventory/summary", headers=headers_for(user))
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    row = next((r for r in resp.json() if r["part_id"] == part.id), None)
+    assert row is not None, "a part whose only stock is a driven-negative lot must appear in the summary"
+    assert float(row["total_on_hand"]) == -5.0, "the negative lot nets into total_on_hand"
+    lots = {loc_row["lot_number"] for loc_row in row["locations"]}
+    assert negative.lot_number in lots, "the negative lot appears in the summary locations"
+    assert len(row["locations"]) == 1, "the zero row stays hidden"
+
+
+def test_inventory_summary_nets_mixed_sign_lots(client: TestClient, db_session: Session):
+    """A part holding both a positive and a driven-negative lot nets them in
+    ``total_on_hand`` and lists both location rows -- the shortage stays visible
+    inside the rollup instead of vanishing behind the positive stock."""
+    user = make_user(db_session, company_id=COMPANY_A)
+    part = make_part(db_session, company_id=COMPANY_A)
+    loc = make_location(db_session, company_id=COMPANY_A)
+    make_inventory_item(db_session, company_id=COMPANY_A, part=part, location=loc.code, qty=10.0)
+    make_inventory_item(db_session, company_id=COMPANY_A, part=part, location=loc.code, qty=-5.0)
+
+    resp = client.get("/api/v1/inventory/summary", headers=headers_for(user))
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    row = next((r for r in resp.json() if r["part_id"] == part.id), None)
+    assert row is not None
+    assert float(row["total_on_hand"]) == 5.0, "the negative lot nets against the positive one"
+    assert len(row["locations"]) == 2, "both lots stay individually visible"
 
 
 # ---------------------------------------------------------------------------
