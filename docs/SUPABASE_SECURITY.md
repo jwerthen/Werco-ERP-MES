@@ -33,6 +33,11 @@ not you use it.
   `008`, which silently skipped its raw DDL (functions/triggers aren't in SQLAlchemy metadata, so
   `create_all` never creates them). `audit_logs` had **no DB-level UPDATE/DELETE protection** in
   prod. See `docs/DEVELOPMENT.md` → Bootstrap order for the general gotcha.
+  The same drift class resurfaced on **2026-07-31**: a read-only prod `pg_indexes` audit found
+  ~42 read-path indexes from migrations `001`/`003`/`020`/`026`/`027` missing for the identical
+  reason (index DDL only in stamped-over migrations, never in the models). Not a security
+  exposure — performance only — restored, and mirrored into the models so `create_all`
+  reproduces them, by `079_restore_stamped_over_idx`.
 
 ## The fix — migrations 059 and 060
 

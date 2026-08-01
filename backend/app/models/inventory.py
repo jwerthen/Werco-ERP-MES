@@ -78,7 +78,13 @@ class CycleCount(Base, TenantMixin):
     """Cycle count session"""
 
     __tablename__ = "cycle_counts"
-    __table_args__ = (UniqueConstraint('company_id', 'count_number', name='uq_cycle_counts_company_count_number'),)
+    __table_args__ = (
+        UniqueConstraint('company_id', 'count_number', name='uq_cycle_counts_company_count_number'),
+        # Lock-step with migration 079_restore_stamped_over_idx (originally
+        # migration 001; skipped by the create_all+stamp bootstrap): the count
+        # schedule queue (status + scheduled_date).
+        Index("ix_cycle_counts_status_scheduled", "status", "scheduled_date"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     count_number = Column(String(50), index=True, nullable=False)
@@ -148,6 +154,14 @@ class InventoryItem(Base, TenantMixin):
     """Inventory on hand - tracks quantity at location"""
 
     __tablename__ = "inventory_items"
+    # Lock-step with migration 079_restore_stamped_over_idx (originally migration
+    # 001; skipped by the create_all+stamp bootstrap): per-part on-hand rollups,
+    # quarantine/hold status filters, and per-warehouse views.
+    __table_args__ = (
+        Index("ix_inventory_items_part_active", "part_id", "is_active"),
+        Index("ix_inventory_items_status", "status"),
+        Index("ix_inventory_items_warehouse", "warehouse"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     part_id = Column(Integer, ForeignKey("parts.id"), nullable=False, index=True)
@@ -304,6 +318,18 @@ class InventoryTransaction(Base, TenantMixin):
             postgresql_where=text("serial_number IS NOT NULL"),
             sqlite_where=text("serial_number IS NOT NULL"),
         ),
+        # Lock-step with migration 079_restore_stamped_over_idx (originally
+        # migrations 001/003; skipped by the create_all+stamp bootstrap). Two
+        # deliberately distinct shapes: the 3-col serves per-part per-movement-type
+        # history; the 2-col serves the hot part-ledger reads (exports / inventory
+        # ledger / prediction cutoff window: part_id equality + created_at
+        # range/ORDER BY, no transaction_type) that the 3-col cannot cover once
+        # transaction_type sits between part_id and created_at. NOTE: 001's
+        # single-column ix_inv_txn_created_at is deliberately NOT restored --
+        # created_at below is Column(index=True), which already builds
+        # ix_inventory_transactions_created_at on the same column.
+        Index("ix_inv_txn_part_type_created", "part_id", "transaction_type", "created_at"),
+        Index("ix_inventory_transactions_part_created", "part_id", "created_at"),
     )
 
     id = Column(Integer, primary_key=True, index=True)

@@ -3,7 +3,7 @@ from datetime import datetime
 
 from sqlalchemy import Boolean, Column, Date, DateTime
 from sqlalchemy import Enum as SQLEnum
-from sqlalchemy import Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import relationship
 
 from app.db.database import Base
@@ -22,6 +22,13 @@ class Equipment(Base, TenantMixin):
     """Measurement equipment/gauges for calibration tracking"""
 
     __tablename__ = "equipment"
+    # Lock-step with migration 079_restore_stamped_over_idx (originally migration
+    # 001; skipped by the create_all+stamp bootstrap): the calibration-due queue
+    # and active-gauge filters.
+    __table_args__ = (
+        Index("ix_equipment_next_cal_date", "next_calibration_date"),
+        Index("ix_equipment_status_active", "status", "is_active"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     equipment_id = Column(String(50), unique=True, index=True, nullable=False)

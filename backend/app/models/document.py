@@ -58,6 +58,10 @@ class Document(Base, TenantMixin):
             postgresql_where=text("work_order_id IS NOT NULL"),
             sqlite_where=text("work_order_id IS NOT NULL"),
         ),
+        # Lock-step with migration 079_restore_stamped_over_idx (originally
+        # migration 020; skipped by the create_all+stamp bootstrap): the
+        # vendor<->documents association lookups (vendor document lists).
+        Index("ix_documents_vendor_id", "vendor_id"),
     )
 
     id = Column(Integer, primary_key=True, index=True)

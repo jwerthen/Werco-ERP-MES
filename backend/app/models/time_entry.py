@@ -65,6 +65,14 @@ class TimeEntry(Base, TenantMixin):
         # duration SUM loop in app/api/endpoints/reports.py. work_order_id had no
         # index at all before this.
         Index("ix_time_entries_work_order_clock_out", "work_order_id", "clock_out"),
+        # Lock-step with migration 079_restore_stamped_over_idx (originally
+        # migrations 001/003; skipped by the create_all+stamp bootstrap):
+        # open-entry / labor-by-user reads, labor-by-work-center, downtime/setup
+        # analytics by entry type, and per-user timeline reads.
+        Index("ix_time_entries_user_clock_out", "user_id", "clock_out"),
+        Index("ix_time_entries_wc_clock_in", "work_center_id", "clock_in"),
+        Index("ix_time_entries_type_clock_in", "entry_type", "clock_in"),
+        Index("ix_time_entries_user_clock_in", "user_id", "clock_in"),
     )
 
     id = Column(Integer, primary_key=True, index=True)

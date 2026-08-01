@@ -86,4 +86,10 @@ class AuditLog(Base):
         Index('ix_audit_logs_integrity', 'sequence_number', 'integrity_hash'),
         Index('ix_audit_logs_company_timestamp', 'company_id', 'timestamp'),
         Index('ix_audit_logs_company_user_timestamp', 'company_id', 'user_id', 'timestamp'),
+        # Lock-step with migration 079_restore_stamped_over_idx (originally
+        # migration 003; skipped by the create_all+stamp bootstrap): per-record
+        # audit-history reads ("everything that happened to this resource, in
+        # order"). Index DDL only -- reads/writes no rows; the 008/060 triggers
+        # and the hash-chain columns are untouched.
+        Index('ix_audit_logs_resource_timestamp', 'resource_type', 'resource_id', 'timestamp'),
     )
