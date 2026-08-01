@@ -3,7 +3,7 @@ from datetime import datetime
 
 from sqlalchemy import Boolean, Column, DateTime
 from sqlalchemy import Enum as SQLEnum
-from sqlalchemy import Float, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Float, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from app.db.database import Base
@@ -96,7 +96,13 @@ def uom_disagrees(line_value, part_value) -> bool:
 
 class Part(Base, SoftDeleteMixin, TenantMixin):
     __tablename__ = "parts"
-    __table_args__ = (UniqueConstraint('company_id', 'part_number', name='uq_parts_company_part_number'),)
+    __table_args__ = (
+        UniqueConstraint('company_id', 'part_number', name='uq_parts_company_part_number'),
+        # Lock-step with migration 079_restore_stamped_over_idx (originally
+        # migration 026's tenancy composite; skipped by the create_all+stamp
+        # bootstrap): tenant-scoped active-part lists.
+        Index("ix_parts_company_active", "company_id", "is_active"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     part_number = Column(String(100), index=True, nullable=False)

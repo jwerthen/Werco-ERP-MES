@@ -3,7 +3,7 @@ from datetime import datetime
 
 from sqlalchemy import Boolean, Column, Date, DateTime
 from sqlalchemy import Enum as SQLEnum
-from sqlalchemy import Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import relationship
 
 from app.db.database import Base
@@ -62,6 +62,17 @@ class NonConformanceReport(Base, SoftDeleteMixin, TenantMixin):
     """NCR - Non-Conformance Report for AS9100D compliance"""
 
     __tablename__ = "ncrs"
+    # Lock-step with migration 079_restore_stamped_over_idx (originally migration
+    # 001; skipped by the create_all+stamp bootstrap): open-NCR lists/gates,
+    # newest-first status lists, and source/disposition rollups. 003's
+    # ix_ncrs_status_source is deliberately NOT restored -- no query filters
+    # status AND source together, and each column is covered below.
+    __table_args__ = (
+        Index("ix_ncrs_status", "status"),
+        Index("ix_ncrs_status_created", "status", "created_at"),
+        Index("ix_ncrs_source", "source"),
+        Index("ix_ncrs_disposition", "disposition"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     ncr_number = Column(String(50), unique=True, index=True, nullable=False)
@@ -130,6 +141,13 @@ class CorrectiveActionRequest(Base, TenantMixin):
     """CAR - Corrective Action Request for AS9100D compliance"""
 
     __tablename__ = "cars"
+    # Lock-step with migration 079_restore_stamped_over_idx (originally migration
+    # 001; skipped by the create_all+stamp bootstrap): open-CAR lists and
+    # overdue-CAR reads.
+    __table_args__ = (
+        Index("ix_cars_status", "status"),
+        Index("ix_cars_due_date", "due_date"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     car_number = Column(String(50), unique=True, index=True, nullable=False)
@@ -182,6 +200,9 @@ class FirstArticleInspection(Base, TenantMixin):
     """FAI - First Article Inspection for AS9100D compliance (AS9102)"""
 
     __tablename__ = "fais"
+    # Lock-step with migration 079_restore_stamped_over_idx (originally migration
+    # 001; skipped by the create_all+stamp bootstrap): open-FAI lists.
+    __table_args__ = (Index("ix_fais_status", "status"),)
 
     id = Column(Integer, primary_key=True, index=True)
     fai_number = Column(String(50), unique=True, index=True, nullable=False)

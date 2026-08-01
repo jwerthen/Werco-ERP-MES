@@ -48,6 +48,18 @@ class WorkOrder(Base, SoftDeleteMixin, TenantMixin):
             "part_id IS NOT NULL OR work_order_type = 'laser_cutting'",
             name="ck_work_orders_part_required_unless_laser",
         ),
+        # Lock-step with migration 079_restore_stamped_over_idx (originally
+        # migrations 001/026/027, which prod's create_all+stamp bootstrap skipped
+        # because they were never mirrored here). Declared on the model so
+        # create_all reproduces them and a future stamp can't skip them again.
+        # ix_work_orders_status / ix_work_orders_due_date are NOT here -- those
+        # two come from Column(index=True) below and already exist in prod.
+        Index("ix_work_orders_status_due_date", "status", "due_date"),
+        Index("ix_work_orders_created_at", "created_at"),
+        Index("ix_work_orders_customer_name", "customer_name"),
+        Index("ix_work_orders_actual_end", "actual_end"),
+        Index("ix_work_orders_company_status", "company_id", "status"),
+        Index("ix_work_orders_company_due_date", "company_id", "due_date"),
     )
 
     id = Column(Integer, primary_key=True, index=True)
@@ -140,7 +152,16 @@ class WorkOrderOperation(Base, TenantMixin):
     # has_incomplete_predecessors (WHERE work_order_id=? AND sequence<?) and
     # release_next_ready_operation (WHERE work_order_id=? ORDER BY sequence) in
     # app/services/work_order_state_service.py.
-    __table_args__ = (Index("ix_woo_work_order_sequence", "work_order_id", "sequence"),)
+    __table_args__ = (
+        Index("ix_woo_work_order_sequence", "work_order_id", "sequence"),
+        # Lock-step with migration 079_restore_stamped_over_idx (originally
+        # migration 001; skipped by the create_all+stamp bootstrap): the
+        # kiosk/dispatch per-work-center queue, cross-WC status scans, and
+        # schedule-ordered reads.
+        Index("ix_woo_work_center_status", "work_center_id", "status"),
+        Index("ix_woo_status", "status"),
+        Index("ix_woo_scheduled_start", "scheduled_start"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
 

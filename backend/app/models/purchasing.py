@@ -3,7 +3,7 @@ from datetime import datetime
 
 from sqlalchemy import Boolean, Column, Date, DateTime
 from sqlalchemy import Enum as SQLEnum
-from sqlalchemy import Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from app.db.database import Base
@@ -107,7 +107,15 @@ class PurchaseOrder(Base, SoftDeleteMixin, TenantMixin):
     """Purchase Order header"""
 
     __tablename__ = "purchase_orders"
-    __table_args__ = (UniqueConstraint('company_id', 'po_number', name='uq_purchase_orders_company_po_number'),)
+    __table_args__ = (
+        UniqueConstraint('company_id', 'po_number', name='uq_purchase_orders_company_po_number'),
+        # Lock-step with migration 079_restore_stamped_over_idx (originally
+        # migration 001; skipped by the create_all+stamp bootstrap): open-PO
+        # lists, per-vendor open POs, arrivals / due-in reads.
+        Index("ix_purchase_orders_status", "status"),
+        Index("ix_purchase_orders_vendor_status", "vendor_id", "status"),
+        Index("ix_purchase_orders_required_date", "required_date"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     po_number = Column(String(50), index=True, nullable=False)
@@ -190,7 +198,19 @@ class POReceipt(Base, SoftDeleteMixin, TenantMixin):
     """Receipt against a PO line - tracks each delivery"""
 
     __tablename__ = "po_receipts"
-    __table_args__ = (UniqueConstraint('company_id', 'receipt_number', name='uq_po_receipts_company_receipt_number'),)
+    __table_args__ = (
+        UniqueConstraint('company_id', 'receipt_number', name='uq_po_receipts_company_receipt_number'),
+        # Lock-step with migration 079_restore_stamped_over_idx (originally
+        # migrations 001/003; skipped by the create_all+stamp bootstrap):
+        # receipt status filters, inspection rollups, receiving history windows,
+        # and (status, received_at) -- the exact shape of the inspection queue
+        # (receiving.py: WHERE status = PENDING_INSPECTION [AND received_at >=
+        # cutoff] ORDER BY received_at) and the status-filtered history view.
+        Index("ix_po_receipts_status", "status"),
+        Index("ix_po_receipts_inspection_status", "inspection_status"),
+        Index("ix_po_receipts_received_at", "received_at"),
+        Index("ix_po_receipts_status_received", "status", "received_at"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     receipt_number = Column(String(50), index=True, nullable=False)

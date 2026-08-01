@@ -3,7 +3,7 @@ from datetime import datetime
 
 from sqlalchemy import Column, Date, DateTime
 from sqlalchemy import Enum as SQLEnum
-from sqlalchemy import Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import relationship
 
 from app.db.database import Base
@@ -24,6 +24,13 @@ class Quote(Base, TenantMixin):
     """Quote/Estimate for customer jobs"""
 
     __tablename__ = "quotes"
+    # Lock-step with migration 079_restore_stamped_over_idx (originally migration
+    # 001; skipped by the create_all+stamp bootstrap): quote pipeline lists and
+    # recently-touched quotes.
+    __table_args__ = (
+        Index("ix_quotes_status", "status"),
+        Index("ix_quotes_updated_at", "updated_at"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     quote_number = Column(String(50), unique=True, index=True, nullable=False)

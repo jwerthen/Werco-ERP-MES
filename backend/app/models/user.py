@@ -4,7 +4,7 @@ from typing import Optional
 
 from sqlalchemy import Boolean, Column, DateTime
 from sqlalchemy import Enum as SQLEnum
-from sqlalchemy import ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import ForeignKey, Index, Integer, String, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from app.db.database import Base
@@ -26,6 +26,10 @@ class User(Base):
     __table_args__ = (
         UniqueConstraint('company_id', 'email', name='uq_users_company_email'),
         UniqueConstraint('company_id', 'employee_id', name='uq_users_company_employee_id'),
+        # Lock-step with migration 079_restore_stamped_over_idx (originally
+        # migration 026's tenancy composite; skipped by the create_all+stamp
+        # bootstrap): tenant-scoped active-user lists.
+        Index("ix_users_company_active", "company_id", "is_active"),
     )
 
     id = Column(Integer, primary_key=True, index=True)
