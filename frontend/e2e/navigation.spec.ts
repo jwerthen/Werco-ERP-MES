@@ -222,11 +222,51 @@ test.describe('Responsive Design', () => {
   test('works on mobile viewport', async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 667 });
     await page.goto('/');
-    
+
     // Dashboard should load
     await expect(page.locator('h1, h2').first()).toBeVisible({ timeout: 10000 });
-    
+
     // Content should be visible (might need scrolling)
     await expect(page.locator('main, [role="main"]').first()).toBeVisible();
+  });
+});
+
+test.describe('Browser Tab Titles', () => {
+  test.beforeEach(async ({ page }) => {
+    await loginAs(page, TEST_USERS.admin);
+  });
+
+  test('each routed page titles the browser tab from the shared route source', async ({ page }) => {
+    // Layout sets `document.title` to "{page} · Werco ERP" via usePageTitle,
+    // driven by the same getRouteTitle source as the top bar and breadcrumbs.
+    await page.goto('/work-orders');
+    await expect(page).toHaveTitle('Work Orders · Werco ERP');
+
+    await page.goto('/parts');
+    await expect(page).toHaveTitle('Parts · Werco ERP');
+
+    await page.goto('/quotes');
+    await expect(page).toHaveTitle('Quotes · Werco ERP');
+  });
+
+  test('the dashboard root titles the tab as Dashboard', async ({ page }) => {
+    await page.goto('/');
+    await expect(page).toHaveTitle('Dashboard · Werco ERP');
+  });
+
+  test('a detail route resolves a real title, not the bare app name', async ({ page }) => {
+    await page.goto('/work-orders');
+    await page.waitForSelector('table tbody tr', { timeout: 10000 }).catch(() => null);
+
+    // Skip explicitly rather than pass vacuously when the seed has no rows.
+    const firstRow = page.locator('table tbody tr').first();
+    test.skip(
+      !(await firstRow.isVisible().catch(() => false)),
+      'no seeded work orders to open a detail route from'
+    );
+
+    await firstRow.click();
+    await page.waitForURL(/\/work-orders\/\d+/, { timeout: 5000 });
+    await expect(page).toHaveTitle('Work Order · Werco ERP');
   });
 });

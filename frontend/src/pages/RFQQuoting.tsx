@@ -2,7 +2,13 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import { ArrowDownTrayIcon, CheckCircleIcon, DocumentArrowUpIcon, SparklesIcon, CalculatorIcon } from '@heroicons/react/24/outline';
-import { ErrorState, FormField, useToast } from '../components/ui';
+import { Breadcrumbs, ErrorState, FormField, useToast } from '../components/ui';
+import { getBreadcrumbParent } from '../utils/routeMeta';
+
+// Breadcrumb parent from the shared routeMeta source — no literal fallback:
+// if the entry is ever removed there, the crumb visibly disappears rather
+// than silently keeping a duplicate.
+const rfqNewParent = getBreadcrumbParent('/rfq-packages/new');
 
 interface CustomerOption {
   id: number;
@@ -240,6 +246,8 @@ export default function RFQQuoting() {
 
   return (
     <div className="space-y-6">
+      {/* Breadcrumbs — Quotes › AI RFQ Quote (no /rfq-packages list; Quotes is the hub) */}
+      {rfqNewParent && <Breadcrumbs crumbs={[rfqNewParent, { label: 'AI RFQ Quote' }]} />}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-white">AI Quoting Agent (Sheet Metal)</h1>

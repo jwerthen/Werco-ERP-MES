@@ -32,6 +32,8 @@ import * as kioskClient from '../services/kioskStationClient';
 import { KioskApiError } from '../services/kioskStationClient';
 import { getKioskStationId } from '../utils/kiosk';
 import { useKioskIdleLogout } from '../hooks/useKioskIdleLogout';
+import { usePageTitle } from '../hooks/usePageTitle';
+import { useWakeLock } from '../hooks/useWakeLock';
 import KioskKeypad from '../components/kiosk/KioskKeypad';
 import KioskCrewJobCard from '../components/kiosk/KioskCrewJobCard';
 import KioskQuantityScreen from '../components/kiosk/KioskQuantityScreen';
@@ -164,6 +166,10 @@ function crewDocTransport(operatorToken: string): KioskDocTransport {
 }
 
 export default function CrewStationKiosk() {
+  // Renders outside Layout, so the tab title is set here; keep the screen awake.
+  usePageTitle('Crew Station · Werco ERP');
+  useWakeLock();
+
   const location = useLocation();
   const stationId = getKioskStationId(location.search);
 

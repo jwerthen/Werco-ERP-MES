@@ -12,7 +12,7 @@
  * mapping for detail vs. list routes.
  */
 
-import { getRouteTitle, getBreadcrumbParent } from './routeMeta';
+import { getRouteTitle, getBreadcrumbParent, formatTabTitle } from './routeMeta';
 
 // Small helper: getRouteTitle takes a location-like `{ pathname, search }`.
 function loc(pathname: string, search = '') {
@@ -112,7 +112,69 @@ describe('getBreadcrumbParent', () => {
     });
   });
 
+  it('crumbs the work-order create form back to the Work Orders list', () => {
+    // Previously null; the :id detail pattern still excludes `new` via its
+    // lookahead, so this entry cannot shadow the detail crumb.
+    expect(getBreadcrumbParent('/work-orders/new')).toEqual({
+      label: 'Work Orders',
+      href: '/work-orders',
+    });
+  });
+
+  it('crumbs every analytics sub-view back to the Analytics hub', () => {
+    const subViews = ['production', 'quality', 'inventory', 'forecasting', 'costs', 'flow', 'reports'];
+    for (const sub of subViews) {
+      expect(getBreadcrumbParent(`/analytics/${sub}`)).toEqual({
+        label: 'Analytics',
+        href: '/analytics',
+      });
+    }
+    // The bare hub is a top-level page — no parent crumb.
+    expect(getBreadcrumbParent('/analytics')).toBeNull();
+    // Unknown sub-path stays unmatched rather than inventing a crumb.
+    expect(getBreadcrumbParent('/analytics/nope')).toBeNull();
+  });
+
+  it('crumbs the inventory sub-views back to Inventory', () => {
+    expect(getBreadcrumbParent('/inventory/parts')).toEqual({
+      label: 'Inventory',
+      href: '/inventory',
+    });
+    expect(getBreadcrumbParent('/inventory/materials')).toEqual({
+      label: 'Inventory',
+      href: '/inventory',
+    });
+    expect(getBreadcrumbParent('/inventory')).toBeNull();
+  });
+
+  it('crumbs the PO upload flow back to Purchase Orders', () => {
+    expect(getBreadcrumbParent('/po-upload')).toEqual({
+      label: 'Purchase Orders',
+      href: '/purchasing',
+    });
+  });
+
+  it('crumbs the AI RFQ package form back to Quotes (its publishing hub)', () => {
+    // There is no /rfq-packages list page; Quotes is where a package lands.
+    expect(getBreadcrumbParent('/rfq-packages/new')).toEqual({
+      label: 'Quotes',
+      href: '/quotes',
+    });
+  });
+
   it('returns null for an unknown route', () => {
     expect(getBreadcrumbParent('/totally-unknown')).toBeNull();
+  });
+});
+
+describe('formatTabTitle', () => {
+  it('suffixes a real page title with the app name', () => {
+    expect(formatTabTitle('Work Orders')).toBe('Work Orders · Werco ERP');
+    expect(formatTabTitle('Dashboard')).toBe('Dashboard · Werco ERP');
+  });
+
+  it('keeps the generic fallback as the bare app name — never doubled', () => {
+    expect(formatTabTitle('Werco ERP')).toBe('Werco ERP');
+    expect(formatTabTitle('Werco ERP')).not.toBe('Werco ERP · Werco ERP');
   });
 });

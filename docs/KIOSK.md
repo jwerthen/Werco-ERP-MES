@@ -34,7 +34,8 @@ unauthenticated nest-PDF preview bounced the terminal to the office login form).
 
 Frontend: `frontend/src/pages/OperatorKiosk.tsx` and `frontend/src/pages/CrewStationKiosk.tsx`
 (+ `frontend/src/components/kiosk/`, `frontend/src/utils/kiosk.ts`,
-`frontend/src/hooks/useKioskIdleLogout.ts`, `frontend/src/services/kioskStationClient.ts`).
+`frontend/src/hooks/useKioskIdleLogout.ts`, `frontend/src/hooks/useWakeLock.ts`,
+`frontend/src/services/kioskStationClient.ts`).
 
 ## Station URL and parameters
 
@@ -509,6 +510,17 @@ Either way, kiosk step records count as `kiosk` on the adoption dashboard.
 - The [drawing / nest viewer](#drawing--nest-viewer) is a pure read surface and follows the
   same posture: a failed document load renders an **inline** error with a retry (never a
   navigation, never a toastless blank), and nothing is queued.
+
+## Screen wake lock
+
+The kiosk (single-operator and crew-station mode), the wallboard, and the visitor sign-in
+tablet request a browser **Screen Wake Lock** on mount (`frontend/src/hooks/useWakeLock.ts`),
+so an unattended station's display does not sleep between touches. The browser auto-releases the lock when
+the tab is hidden; the hook re-acquires it when the tab becomes visible again, and the
+browser may decline the request outright (e.g. low battery) — both are tolerated silently.
+The Wake Lock API only exists in **secure contexts** (HTTPS or localhost), so on a
+plain-HTTP LAN deployment the hook is a deliberate no-op and the screen staying awake
+depends on the device's own display/power settings — that is by design, not a bug.
 
 ## Crew station mode (`/kiosk?kiosk=1&station=<id>`)
 

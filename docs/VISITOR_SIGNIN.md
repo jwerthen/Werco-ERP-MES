@@ -84,6 +84,8 @@ opens the station-management modal:
 2. **Point the tablet at its URL.** The modal shows `/<your-host>/visitor-signin?station=<id>` for
    each station with a copy button. Open that URL on the tablet's browser (kiosk/full-screen mode
    recommended, sleep disabled). On first use, reception enters the PIN once to start the session.
+   The page also requests a Screen Wake Lock on load (see `docs/KIOSK.md` → Screen wake lock),
+   but treat it as best-effort — the device's own sleep setting stays authoritative.
 3. **Reset PIN** re-hashes the shared PIN in place (the station id / URL is unchanged); existing
    tokens keep working until they expire or the station is revoked.
 4. **Revoke** kills the station: it can mint no new token, and the tablet loses access on its next

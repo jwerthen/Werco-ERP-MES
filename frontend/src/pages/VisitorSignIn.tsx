@@ -29,6 +29,8 @@ import {
 } from '@heroicons/react/24/solid';
 import KioskKeypad from '../components/kiosk/KioskKeypad';
 import { useKioskIdleLogout } from '../hooks/useKioskIdleLogout';
+import { usePageTitle } from '../hooks/usePageTitle';
+import { useWakeLock } from '../hooks/useWakeLock';
 import { useToast } from '../components/ui/Toast';
 import {
   SigninApiError,
@@ -93,6 +95,11 @@ function as409(err: unknown): VisitorSignOut409 | null {
 }
 
 export default function VisitorSignIn() {
+  // Renders outside Layout, so the tab title is set here; keep the lobby
+  // tablet's screen awake (best-effort — no-op outside a secure context).
+  usePageTitle('Visitor Sign-In · Werco ERP');
+  useWakeLock();
+
   const [searchParams] = useSearchParams();
   const stationParam = searchParams.get('station');
   const stationId = stationParam != null && /^\d+$/.test(stationParam) ? Number(stationParam) : null;

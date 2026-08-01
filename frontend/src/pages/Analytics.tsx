@@ -25,6 +25,8 @@ import { formatCentralDate } from '../utils/centralTime';
 import { MiniStatStrip, CockpitPanel } from '../components/cockpit';
 import FlowAnalytics from '../components/analytics/FlowAnalytics';
 import { usePermissions } from '../hooks/usePermissions';
+import { Breadcrumbs } from '../components/ui';
+import { getBreadcrumbParent, getRouteTitle } from '../utils/routeMeta';
 
 interface KPIValue {
   // null when the KPI is genuinely uncomputable (Batch 8 / OEE-4/OEE-6: no staffed time
@@ -552,6 +554,10 @@ export default function Analytics() {
 
   const showPeriodSelector = view !== 'reports';
 
+  // Breadcrumb parent — non-null only on the /analytics/* sub-views, so the
+  // bare hub renders no crumb. One mount covers all seven sub-routes.
+  const crumbParent = getBreadcrumbParent(location.pathname);
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -562,6 +568,9 @@ export default function Analytics() {
 
   return (
     <div className="space-y-4">
+      {/* Breadcrumbs — Analytics › {sub-view}; nothing on the bare hub */}
+      {crumbParent && <Breadcrumbs crumbs={[crumbParent, { label: getRouteTitle(location) }]} />}
+
       {/* Header */}
       <div className="flex justify-between items-center">
         <div>
