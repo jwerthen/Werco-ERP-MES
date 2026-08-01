@@ -73,5 +73,17 @@ class AuditLog(Base):
     # Additional context data
     extra_data = Column(JSON)  # Flexible additional context
 
-    # Composite index for integrity verification queries
-    __table_args__ = (Index('ix_audit_logs_integrity', 'sequence_number', 'integrity_hash'),)
+    # Composite index for integrity verification queries, plus the audit-list-view
+    # indexes added by migration 078_golive_perf_indexes (lock-step): the tenant list
+    # (WHERE company_id = ? ORDER BY timestamp DESC OFFSET/LIMIT) + /summary cutoff
+    # counts (WHERE company_id = ? AND timestamp >= ?), and the user-filtered view
+    # (company_id + user_id equality, same ORDER BY). Ascending columns on purpose:
+    # Postgres serves ORDER BY timestamp DESC from an ascending btree via a backward
+    # index scan, and ASC keeps the declaration dialect-clean for SQLite create_all.
+    # Index DDL reads/writes no rows -- the 008/060 UPDATE/DELETE-refusing triggers
+    # and the hash-chain columns are untouched.
+    __table_args__ = (
+        Index('ix_audit_logs_integrity', 'sequence_number', 'integrity_hash'),
+        Index('ix_audit_logs_company_timestamp', 'company_id', 'timestamp'),
+        Index('ix_audit_logs_company_user_timestamp', 'company_id', 'user_id', 'timestamp'),
+    )

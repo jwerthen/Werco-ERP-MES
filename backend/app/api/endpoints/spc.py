@@ -354,13 +354,23 @@ def get_chart_data(
     if not char:
         raise HTTPException(status_code=404, detail="Characteristic not found")
 
-    # Get measurements grouped by subgroup
-    measurements = (
-        db.query(SPCMeasurement)
-        .filter(SPCMeasurement.characteristic_id == characteristic_id)
-        .order_by(SPCMeasurement.subgroup_number, SPCMeasurement.sample_number)
-        .all()
-    )
+    # Get measurements grouped by subgroup. Bound the read to the rendered window:
+    # resolve the last-N distinct subgroup numbers first (a query shaped for
+    # ix_spc_measurements_char_subgroup), then fetch only those subgroups' rows —
+    # fetch cost stays O(window), not O(full history). last_n_subgroups <= 0
+    # keeps the pre-existing unbounded behavior (0 = full history).
+    measurements_query = db.query(SPCMeasurement).filter(SPCMeasurement.characteristic_id == characteristic_id)
+    if last_n_subgroups > 0:
+        recent_subgroup_numbers = (
+            db.query(SPCMeasurement.subgroup_number)
+            .filter(SPCMeasurement.characteristic_id == characteristic_id)
+            .distinct()
+            .order_by(SPCMeasurement.subgroup_number.desc())
+            .limit(last_n_subgroups)
+            .scalar_subquery()
+        )
+        measurements_query = measurements_query.filter(SPCMeasurement.subgroup_number.in_(recent_subgroup_numbers))
+    measurements = measurements_query.order_by(SPCMeasurement.subgroup_number, SPCMeasurement.sample_number).all()
 
     # Group by subgroup_number
     subgroups = {}
@@ -371,6 +381,9 @@ def get_chart_data(
 
     # Calculate subgroup stats
     sorted_sg_numbers = sorted(subgroups.keys())
+    # With a positive window the bounded fetch above already returns <= N subgroups,
+    # so this trim can only fire on the legacy last_n_subgroups < 0 path — its
+    # negative-slice behavior is test-pinned; don't "clean it up".
     if last_n_subgroups and len(sorted_sg_numbers) > last_n_subgroups:
         sorted_sg_numbers = sorted_sg_numbers[-last_n_subgroups:]
 

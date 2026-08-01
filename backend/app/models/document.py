@@ -3,7 +3,7 @@ from datetime import datetime
 
 from sqlalchemy import Boolean, Column, DateTime
 from sqlalchemy import Enum as SQLEnum
-from sqlalchemy import ForeignKey, Integer, String, Text
+from sqlalchemy import ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.orm import relationship
 
 from app.db.database import Base
@@ -35,6 +35,30 @@ class Document(Base, TenantMixin):
     """
 
     __tablename__ = "documents"
+    # Lock-step with migration 078_golive_perf_indexes: NON-unique PARTIAL indexes
+    # backing the document list filters (documents.py: WHERE company_id = ? AND
+    # part_id/work_order_id = ?) and the kiosk operation-open per-part
+    # controlled-drawing lookup (shop_floor.py). Partial because the association FKs
+    # are sparse and every serving query filters on their equality (which implies IS
+    # NOT NULL). Both declare postgresql_where AND sqlite_where from the same literal
+    # so the SQLite create_all path builds the same partial shape (the 076
+    # dialect-parity convention, see inventory.py).
+    __table_args__ = (
+        Index(
+            "ix_documents_company_part",
+            "company_id",
+            "part_id",
+            postgresql_where=text("part_id IS NOT NULL"),
+            sqlite_where=text("part_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_documents_company_work_order",
+            "company_id",
+            "work_order_id",
+            postgresql_where=text("work_order_id IS NOT NULL"),
+            sqlite_where=text("work_order_id IS NOT NULL"),
+        ),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
 

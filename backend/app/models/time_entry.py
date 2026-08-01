@@ -57,7 +57,15 @@ class TimeEntry(Base, TenantMixin):
     # (WHERE operation_id IN (...) [AND clock_out IS NOT NULL] GROUP BY operation_id)
     # and its ORDER BY operation_id, clock_out DESC latest-entry scan in
     # app/services/work_order_state_service.py.
-    __table_args__ = (Index("ix_time_entries_operation_clock_out", "operation_id", "clock_out"),)
+    __table_args__ = (
+        Index("ix_time_entries_operation_clock_out", "operation_id", "clock_out"),
+        # Lock-step with migration 078_golive_perf_indexes: backs the job-costing
+        # closed-labor rollup (WHERE work_order_id = ? AND company_id = ? AND
+        # clock_out IS NOT NULL, app/services/job_costing_service.py) and the per-WO
+        # duration SUM loop in app/api/endpoints/reports.py. work_order_id had no
+        # index at all before this.
+        Index("ix_time_entries_work_order_clock_out", "work_order_id", "clock_out"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
 
