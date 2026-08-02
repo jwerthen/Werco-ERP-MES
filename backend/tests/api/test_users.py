@@ -4,6 +4,7 @@ Tests user CRUD operations and role-based access.
 """
 
 import json
+from datetime import datetime, timedelta
 
 import pytest
 from fastapi import status
@@ -12,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.core.security import get_password_hash
 from app.models.audit_log import AuditLog
+from app.models.company import Company
 from app.models.user import User, UserRole
 from app.schemas.user import validate_password_strength
 
@@ -1026,3 +1028,206 @@ class TestPasswordPolicyEnforcement:
         assert len(data["errors"]) == 1
         assert "Weak password" in data["errors"][0]["reason"]
         assert db_session.query(User).filter_by(employee_id="EMP-WEAK-Q2").count() == 0
+
+
+@pytest.mark.api
+class TestUserUnlock:
+    """POST /users/{id}/unlock — Admin-only clear of the failed-login lockout.
+
+    The auth endpoints lock an account for 30 minutes after 5 failed logins and
+    tell the user to "contact administrator"; this endpoint is what that
+    administrator actually uses. It must be Admin-only, tenant-scoped, audited
+    when it changes state, and idempotent (no fabricated audit rows).
+    """
+
+    @staticmethod
+    def _make_locked_user(
+        db_session: Session,
+        *,
+        email: str,
+        employee_id: str,
+        company_id: int = 1,
+        failed_login_attempts: int = 5,
+        lock_minutes_from_now: "int | None" = 30,
+    ) -> User:
+        """A user with failed-login state (default: 5 attempts, 30-min lock in force).
+
+        ``lock_minutes_from_now`` may be negative (an EXPIRED lock) or None (no lock —
+        residual failed attempts only)."""
+        locked_until = (
+            None if lock_minutes_from_now is None else datetime.utcnow() + timedelta(minutes=lock_minutes_from_now)
+        )
+        user = User(
+            email=email,
+            employee_id=employee_id,
+            first_name="Locked",
+            last_name="Out",
+            hashed_password=get_password_hash(STRONG_PASSWORD),
+            role=UserRole.OPERATOR,
+            is_active=True,
+            company_id=company_id,
+            failed_login_attempts=failed_login_attempts,
+            locked_until=locked_until,
+        )
+        db_session.add(user)
+        db_session.commit()
+        db_session.refresh(user)
+        return user
+
+    def test_unlock_forbidden_for_manager(self, client: TestClient, manager_headers, db_session):
+        """A manager (users:view, no writes) cannot unlock — 403, lock untouched."""
+        locked = self._make_locked_user(db_session, email="mgr-unlock@werco.com", employee_id="EMP-LOCK-MGR")
+
+        response = client.post(f"/api/v1/users/{locked.id}/unlock", headers=manager_headers)
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+
+        db_session.refresh(locked)
+        assert locked.failed_login_attempts == 5
+        assert locked.locked_until is not None
+
+    def test_unlock_forbidden_for_supervisor(self, client: TestClient, supervisor_headers, db_session):
+        """A supervisor has no users:* access at all — 403."""
+        locked = self._make_locked_user(db_session, email="sup-unlock@werco.com", employee_id="EMP-LOCK-SUP")
+
+        response = client.post(f"/api/v1/users/{locked.id}/unlock", headers=supervisor_headers)
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+
+    def test_unlock_cross_tenant_user_is_404(self, client: TestClient, admin_headers, db_session):
+        """An admin in company 1 cannot unlock (or even see) a company-2 user."""
+        other_company = Company(id=2, name="Other Manufacturing", slug="other-mfg", is_active=True)
+        db_session.add(other_company)
+        db_session.commit()
+        locked = self._make_locked_user(
+            db_session, email="other-tenant@other.com", employee_id="EMP-LOCK-OTHER", company_id=2
+        )
+
+        response = client.post(f"/api/v1/users/{locked.id}/unlock", headers=admin_headers)
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+        # The endpoint's own 404, not a missing route's default "Not Found" —
+        # this discriminates the tenant-scope refusal from a routing typo.
+        assert response.json()["detail"] == "User not found"
+
+        db_session.refresh(locked)
+        assert locked.failed_login_attempts == 5
+        assert locked.locked_until is not None
+
+    def test_unlock_missing_user_is_404(self, client: TestClient, admin_headers):
+        response = client.post("/api/v1/users/99999/unlock", headers=admin_headers)
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+        # The endpoint's own 404 body, not the router default "Not Found".
+        assert response.json()["detail"] == "User not found"
+
+    def test_unlock_clears_lock_audits_and_login_succeeds(self, client: TestClient, admin_headers, db_session):
+        """The full remediation path: locked login refused -> admin unlock (200,
+        both fields cleared, committed STATUS_CHANGE audit row) -> login works."""
+        locked = self._make_locked_user(db_session, email="locked-op@werco.com", employee_id="EMP-LOCK-001")
+
+        # The lock is real: even the CORRECT password is refused while locked.
+        blocked_login = client.post(
+            "/api/v1/auth/login",
+            data={"username": "locked-op@werco.com", "password": STRONG_PASSWORD},
+        )
+        assert blocked_login.status_code == status.HTTP_403_FORBIDDEN
+
+        # The admin user-management read exposes the lock state for the UI to key off.
+        detail = client.get(f"/api/v1/users/{locked.id}", headers=admin_headers)
+        assert detail.status_code == status.HTTP_200_OK
+        assert detail.json()["locked_until"] is not None
+
+        response = client.post(f"/api/v1/users/{locked.id}/unlock", headers=admin_headers)
+        assert response.status_code == status.HTTP_200_OK, response.text
+
+        db_session.rollback()  # only COMMITTED state may satisfy the assertions below
+        db_session.refresh(locked)
+        assert locked.failed_login_attempts == 0
+        assert locked.locked_until is None
+
+        rows = _committed_user_audit_rows(db_session, resource_id=locked.id, action="STATUS_CHANGE")
+        assert len(rows) == 1, "expected exactly one committed STATUS_CHANGE audit row for the unlock"
+        row = rows[0]
+        assert row.resource_type == "user"
+        assert row.company_id == 1
+        assert row.old_values == {"status": "locked"}
+        assert row.new_values == {"status": "unlocked"}
+        # The prior lock state rides along for the investigation trail.
+        assert (row.extra_data or {}).get("failed_login_attempts") == 5
+        assert (row.extra_data or {}).get("locked_until") is not None
+
+        # And the operator can log in again with the correct password.
+        login = client.post(
+            "/api/v1/auth/login",
+            data={"username": "locked-op@werco.com", "password": STRONG_PASSWORD},
+        )
+        assert login.status_code == status.HTTP_200_OK, login.text
+        assert login.json()["access_token"]
+
+    def test_unlock_not_locked_user_is_idempotent_and_writes_no_audit(
+        self, client: TestClient, admin_headers, created_user, db_session
+    ):
+        """Unlocking a user with no lock state is 200 and fabricates NO audit
+        row at all — an audit trail of unlocks that never happened would be
+        noise in a tamper-evident log."""
+        response = client.post(f"/api/v1/users/{created_user['id']}/unlock", headers=admin_headers)
+        assert response.status_code == status.HTTP_200_OK, response.text
+
+        rows = _committed_user_audit_rows(db_session, resource_id=created_user["id"], action="STATUS_CHANGE")
+        assert rows == []
+        assert _committed_user_audit_rows(db_session, resource_id=created_user["id"], action="UPDATE") == []
+
+    def test_unlock_residual_attempts_only_audits_update_not_status_change(
+        self, client: TestClient, admin_headers, db_session
+    ):
+        """A user with failed attempts but NO lock (never reached 5) still gets
+        cleared, but the audit row is an UPDATE of the fields — not a fabricated
+        'locked' -> 'unlocked' status change for a user who was never locked out."""
+        residual = self._make_locked_user(
+            db_session,
+            email="residual-op@werco.com",
+            employee_id="EMP-LOCK-RES",
+            failed_login_attempts=3,
+            lock_minutes_from_now=None,
+        )
+
+        response = client.post(f"/api/v1/users/{residual.id}/unlock", headers=admin_headers)
+        assert response.status_code == status.HTTP_200_OK, response.text
+
+        db_session.rollback()
+        db_session.refresh(residual)
+        assert residual.failed_login_attempts == 0
+        assert residual.locked_until is None
+
+        assert _committed_user_audit_rows(db_session, resource_id=residual.id, action="STATUS_CHANGE") == []
+        rows = _committed_user_audit_rows(db_session, resource_id=residual.id, action="UPDATE")
+        assert len(rows) == 1, "expected exactly one committed UPDATE audit row for the residual clear"
+        row = rows[0]
+        assert row.company_id == 1
+        assert row.old_values["failed_login_attempts"] == 3
+        assert row.old_values["locked_until"] is None
+        assert row.new_values["failed_login_attempts"] == 0
+
+    def test_unlock_expired_lock_clears_state_and_audits_update(self, client: TestClient, admin_headers, db_session):
+        """A lock that expired between page load and click: unlock still 200s and
+        clears the residual attempts (one more failure would re-lock instantly),
+        but records an UPDATE — the account was no longer locked, so a
+        'locked' -> 'unlocked' STATUS_CHANGE would be untruthful."""
+        expired = self._make_locked_user(
+            db_session,
+            email="expired-op@werco.com",
+            employee_id="EMP-LOCK-EXP",
+            failed_login_attempts=5,
+            lock_minutes_from_now=-5,
+        )
+
+        response = client.post(f"/api/v1/users/{expired.id}/unlock", headers=admin_headers)
+        assert response.status_code == status.HTTP_200_OK, response.text
+
+        db_session.rollback()
+        db_session.refresh(expired)
+        assert expired.failed_login_attempts == 0
+        assert expired.locked_until is None
+
+        assert _committed_user_audit_rows(db_session, resource_id=expired.id, action="STATUS_CHANGE") == []
+        rows = _committed_user_audit_rows(db_session, resource_id=expired.id, action="UPDATE")
+        assert len(rows) == 1
+        assert rows[0].old_values["failed_login_attempts"] == 5
+        assert rows[0].old_values["locked_until"] is not None

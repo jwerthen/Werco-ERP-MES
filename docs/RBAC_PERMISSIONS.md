@@ -796,7 +796,9 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 >   event can never be fully muted.
 
 > **User writes are Admin-only, and both `require_role([ADMIN])`** — `POST /users/` (create),
-> `PUT /users/{id}` (edit, incl. role assignment), and `DELETE /users/{id}` (deactivate) all gate to
+> `PUT /users/{id}` (edit, incl. role assignment), `DELETE /users/{id}` (deactivate), and
+> `POST /users/{id}/unlock` (clear the 5-failed-logins/30-minute lockout: resets
+> `failed_login_attempts`, clears `locked_until`) all gate to
 > **Admin** (`app/api/endpoints/users.py`). The **View** rows are the governance-read exception noted
 > above: `GET /users/` (list) and `GET /users/{id}` are `require_role([ADMIN, MANAGER])`, so a
 > **Supervisor** gets a **failed load** (403), not a read — user records are *not* on the read-broad
@@ -816,7 +818,10 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 >   be made by a different Admin.
 >
 > Every user mutation — create, update (including any role change), approve, password-reset,
-> deactivate, and activate — is recorded in the tamper-evident audit log; the self-service
+> deactivate, activate, and unlock — is recorded in the tamper-evident audit log (unlock as a
+> `STATUS_CHANGE` `locked` → `unlocked` when the lock was still in force, as an `UPDATE` of the two
+> fields when it only cleared residual state — an expired lock or attempts short of 5 — and the
+> endpoint is idempotent: a no-op unlock writes no row); the self-service
 > `POST /users/change-password` likewise records a `PASSWORD_CHANGE` audit event (mirroring
 > `reset-password`; the password/hash is never included).
 >

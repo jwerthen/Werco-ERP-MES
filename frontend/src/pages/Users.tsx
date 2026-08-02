@@ -4,11 +4,12 @@ import { UserRole } from '../types';
 import { useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { usePermissions } from '../hooks/usePermissions';
-import { formatCentralDate } from '../utils/centralTime';
+import { formatCentralDate, toDate } from '../utils/centralTime';
 import {
   PlusIcon,
   PencilIcon,
   KeyIcon,
+  LockOpenIcon,
   UserMinusIcon,
   UserPlusIcon,
   ArrowUpTrayIcon,
@@ -24,6 +25,7 @@ import {
   DataTableColumn,
   MobileDataCard,
   FormField,
+  StatusBadge,
 } from '../components/ui';
 import useUnsavedChanges from '../hooks/useUnsavedChanges';
 import { importTimeoutMessage } from '../utils/apiError';
@@ -41,7 +43,17 @@ interface UserData {
   is_active: boolean;
   created_at: string;
   last_login?: string;
+  locked_until?: string | null;
 }
+
+// A user is locked out of login while locked_until sits in the future (5 failed
+// attempts -> 30-min lock). toDate parses the UTC ISO string (and treats any
+// zone-less legacy value as UTC).
+const isLockedOut = (user: UserData): boolean => {
+  if (!user.locked_until) return false;
+  const lockedUntil = toDate(user.locked_until);
+  return !!lockedUntil && lockedUntil.getTime() > Date.now();
+};
 
 interface UserCsvImportError {
   row: number;
@@ -210,11 +222,14 @@ export default function Users() {
         sortable: true,
         accessor: (u) => (u.is_active ? 'Active' : 'Inactive'),
         render: (u) => (
-          <span className={`inline-flex px-2 py-1 rounded text-xs font-medium ${
-            u.is_active ? 'bg-green-500/20 text-emerald-300' : 'bg-slate-800/50 text-slate-400'
-          }`}>
-            {u.is_active ? 'Active' : 'Inactive'}
-          </span>
+          <div className="flex items-center gap-1.5">
+            <span className={`inline-flex px-2 py-1 rounded text-xs font-medium ${
+              u.is_active ? 'bg-green-500/20 text-emerald-300' : 'bg-slate-800/50 text-slate-400'
+            }`}>
+              {u.is_active ? 'Active' : 'Inactive'}
+            </span>
+            {isLockedOut(u) && <StatusBadge status="locked" />}
+          </div>
         ),
       },
     ];
@@ -250,6 +265,16 @@ export default function Users() {
             >
               <KeyIcon className="h-5 w-5" aria-hidden="true" />
             </button>
+            {isLockedOut(u) && (
+              <button
+                onClick={() => handleUnlock(u)}
+                className="text-slate-400 hover:text-amber-400"
+                title="Unlock"
+                aria-label="Unlock user"
+              >
+                <LockOpenIcon className="h-5 w-5" aria-hidden="true" />
+              </button>
+            )}
             <button
               onClick={() => handleToggleActive(u)}
               className={u.is_active ? 'text-slate-400 hover:text-red-600' : 'text-slate-400 hover:text-green-600'}
@@ -358,6 +383,18 @@ export default function Users() {
       loadUsers();
     } catch (err: any) {
       showToast('error', getApiErrorMessage(err, 'Failed to update user status'));
+    }
+  };
+
+  // Non-optimistic on purpose: the lock state only clears when the server says
+  // so — reflect the reload, never a presumed success.
+  const handleUnlock = async (user: UserData) => {
+    try {
+      await api.unlockUser(user.id);
+      showToast('success', `Unlocked ${user.first_name} ${user.last_name}`);
+      await loadUsers();
+    } catch (err: any) {
+      showToast('error', getApiErrorMessage(err, 'Failed to unlock user'));
     }
   };
 
@@ -666,10 +703,13 @@ export default function Users() {
               {
                 label: 'Status',
                 value: (
-                  <span className={`inline-flex px-2 py-0.5 rounded text-xs font-medium ${
-                    user.is_active ? 'bg-green-500/20 text-emerald-300' : 'bg-slate-800/50 text-slate-400'
-                  }`}>
-                    {user.is_active ? 'Active' : 'Inactive'}
+                  <span className="inline-flex items-center gap-1.5">
+                    <span className={`inline-flex px-2 py-0.5 rounded text-xs font-medium ${
+                      user.is_active ? 'bg-green-500/20 text-emerald-300' : 'bg-slate-800/50 text-slate-400'
+                    }`}>
+                      {user.is_active ? 'Active' : 'Inactive'}
+                    </span>
+                    {isLockedOut(user) && <StatusBadge status="locked" />}
                   </span>
                 ),
               },
@@ -706,6 +746,16 @@ export default function Users() {
                     >
                       <KeyIcon className="h-5 w-5" aria-hidden="true" />
                     </button>
+                    {isLockedOut(user) && (
+                      <button
+                        onClick={() => handleUnlock(user)}
+                        className="text-slate-400 hover:text-amber-400"
+                        title="Unlock"
+                        aria-label="Unlock user"
+                      >
+                        <LockOpenIcon className="h-5 w-5" aria-hidden="true" />
+                      </button>
+                    )}
                     <button
                       onClick={() => handleToggleActive(user)}
                       className={user.is_active ? 'text-slate-400 hover:text-red-600' : 'text-slate-400 hover:text-green-600'}

@@ -14,6 +14,7 @@ from app.db.database import get_db
 from app.models.company import Company
 from app.models.notification import NotificationLog, NotificationPreference
 from app.models.user import User, UserRole
+from app.schemas.base import UTCModel
 from app.schemas.notification import (
     NotificationPreferencesResponse,
     NotificationPreferencesUpdate,
@@ -109,14 +110,22 @@ class UserPhoneUpdate(BaseModel):
     phone: Optional[str] = Field(None, max_length=32, description="Phone number; stored normalized to E.164")
 
 
-class UserResponse(BaseModel):
+class UserResponse(UTCModel):
     """User payload for the SELF profile and ADMIN/MANAGER user-management routes.
 
-    FIELD MINIMIZATION (§8.12): this is the ONLY user schema that carries ``phone``,
-    and every route using it is either self-scoped (``GET /users/me``, the self-service
-    routes below) or gated to ADMIN/MANAGER user management. General user serialization
-    goes through ``app.schemas.user.UserResponse`` (auth/token/platform browse) and the
-    per-domain ``UserSummary``-style schemas, none of which expose a phone number.
+    FIELD MINIMIZATION (§8.12): this is the ONLY user schema that carries ``phone``
+    and ``locked_until``, and every route using it is either self-scoped
+    (``GET /users/me``, the self-service routes below) or gated to ADMIN/MANAGER user
+    management. General user serialization goes through ``app.schemas.user.UserResponse``
+    (auth/token/platform browse) and the per-domain ``UserSummary``-style schemas, none
+    of which expose a phone number or lockout state. ``locked_until`` is exposed here so
+    the admin Users page can surface a failed-login lockout and offer the
+    ``POST /users/{id}/unlock`` action; on the self routes a user only ever sees their
+    own lock state, which the login error already discloses.
+
+    Inherits ``UTCModel`` so the datetime fields (``created_at`` / ``updated_at`` /
+    ``last_login`` / ``locked_until``) serialize as UTC ISO-8601 with a trailing ``Z``
+    — ``locked_until`` in particular is compared against wall-clock "now" client-side.
     """
 
     id: int
@@ -135,9 +144,7 @@ class UserResponse(BaseModel):
     created_at: datetime
     updated_at: Optional[datetime] = None
     last_login: Optional[datetime] = None
-
-    class Config:
-        from_attributes = True
+    locked_until: Optional[datetime] = None
 
 
 class UserCsvImportError(BaseModel):
@@ -1056,3 +1063,69 @@ def activate_user(
     db.commit()
 
     return {"message": "User activated"}
+
+
+@router.post("/{user_id}/unlock")
+def unlock_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Clear a failed-login lockout (Admin only).
+
+    After 5 failed logins the auth endpoints set ``locked_until`` 30 minutes out and
+    refuse further attempts with "contact administrator" — but the clear sites in
+    auth.py sit AFTER the lock check, so without this endpoint the only remedy is
+    waiting out the timer. Unlock resets ``failed_login_attempts`` and clears
+    ``locked_until``. The audit row is truthful about the prior state: a lock still
+    in force (``locked_until`` in the future, the auth.py predicate) is logged as a
+    STATUS_CHANGE (locked -> unlocked); clearing only RESIDUAL state — an expired
+    lock, or failed attempts that never reached one — is logged as an UPDATE of the
+    two fields, because no lockout status actually changed. Idempotent: unlocking a
+    user with no lock state at all returns 200 and writes NO audit row (no
+    fabricated status changes).
+    """
+    user = db.query(User).filter(User.id == user_id, User.company_id == company_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    had_lock_state = bool(user.failed_login_attempts) or user.locked_until is not None
+    if not had_lock_state:
+        return {"message": "User is not locked"}
+
+    prior_locked_until = user.locked_until
+    prior_failed_attempts = user.failed_login_attempts
+    user.failed_login_attempts = 0
+    user.locked_until = None
+    identifier = user.employee_id or user.email
+    was_locked_out = prior_locked_until is not None and prior_locked_until > datetime.utcnow()
+    if was_locked_out:
+        audit.log_status_change(
+            "user",
+            user.id,
+            identifier,
+            "locked",
+            "unlocked",
+            description=f"Cleared failed-login lockout for user {identifier}",
+            extra_data={
+                "failed_login_attempts": prior_failed_attempts,
+                "locked_until": prior_locked_until.isoformat() if prior_locked_until else None,
+            },
+        )
+    else:
+        audit.log_update(
+            "user",
+            user.id,
+            identifier,
+            old_values={
+                "failed_login_attempts": prior_failed_attempts,
+                "locked_until": prior_locked_until.isoformat() if prior_locked_until else None,
+            },
+            new_values={"failed_login_attempts": 0, "locked_until": None},
+            description=f"Cleared residual failed-login state for user {identifier} (no lock in force)",
+        )
+    db.commit()
+
+    return {"message": "User unlocked"}

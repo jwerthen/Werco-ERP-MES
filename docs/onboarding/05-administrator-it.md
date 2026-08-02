@@ -205,7 +205,7 @@ Use this for internal audits, customer audits, and incident response. Because op
 
 The system is built for **AS9100D, ISO 9001, and CMMC Level 2**. Here are the controls you can point to:
 
-- **Account lockout.** After 5 failed password sign-in attempts (the Email path), the account locks for 30 minutes.
+- **Account lockout.** After 5 failed password sign-in attempts (the Email path), the account locks for 30 minutes. An Administrator can clear a lockout immediately from the **Users** screen (the **Unlock** action on the locked row); the unlock is written to the audit log.
 - **Strong passwords.** Minimum 12 characters, screened against a blocklist of common words and patterns (keyboard walks, top-100 passwords, digit runs, and "werco"/"wercomfg"). Following NIST SP 800-63B, there are no character-class ("complexity") requirements — length plus the blocklist is the control.
 - **Session limits.** Sign-ins refresh silently in the background. Two limits apply: the browser signs a user out after **15 minutes of inactivity**, and a session that goes unused for longer than the absolute session limit (**7 days**, `SESSION_ABSOLUTE_TIMEOUT_HOURS`) can no longer be refreshed and requires a fresh sign-in. Note the absolute limit is **re-armed on every background refresh**, so it bounds how long a session may sit *idle* — it is not a fixed ceiling on total session age, and someone using the app regularly is not forced onto a re-login schedule.
 - **Tenant isolation.** Every company's data is completely separated; users only ever see their own company's records.
@@ -237,7 +237,7 @@ If you're a Platform Admin overseeing more than one company, a **company selecto
 | Symptom | What to do |
 |---------|------------|
 | New user can't sign in | Confirm the account is **Active** (not deactivated) and, for self-registered users, that you **Approved** it. Check they're using the right email/password. |
-| Account is locked out | After 5 failed password attempts (the Email sign-in) it locks for 30 minutes. Wait it out, or reset the password and have them try again. Badge sign-in has no password and can't cause a lockout. |
+| Account is locked out | After 5 failed password attempts (the Email sign-in) it locks for 30 minutes. A locked account shows a red **Locked** badge on the **Users** screen — an Administrator clicks **Unlock** on that row to clear it immediately. Resetting the password does **not** clear the lock (the lock check runs before the password is even looked at). Otherwise, wait out the 30 minutes. Badge sign-in has no password and can't cause a lockout. |
 | Password won't save | It must meet both listed rules: at least 12 characters, and no common word or pattern like "password", "admin", "welcome", or "werco". Note the blocklist matches **anywhere inside** the password, so "Password1234!" is refused even though it is long and mixed-case. |
 | Can't change an Employee ID or work center Code | These are fixed after creation. Deactivate the record and create a new one if it's truly wrong. |
 | Can't remove a Work Center Type | The type is **in use** by an existing work center. Reassign or remove those work centers first. |
