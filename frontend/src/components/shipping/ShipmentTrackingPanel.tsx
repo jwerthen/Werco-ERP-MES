@@ -12,22 +12,13 @@ import { ArrowPathIcon, MapPinIcon } from '@heroicons/react/24/outline';
 import api from '../../services/api';
 import { useToast } from '../ui/Toast';
 import { formatCentralDateTime } from '../../utils/centralTime';
+import { statusColor } from '../../utils/statusColors';
 import type { ShipmentTracking } from '../../types/shipping';
 
-const STATUS_STYLES: Record<string, string> = {
-  delivered: 'bg-emerald-500/20 text-emerald-300',
-  out_for_delivery: 'bg-blue-500/20 text-blue-300',
-  in_transit: 'bg-blue-500/20 text-blue-300',
-  pre_transit: 'bg-yellow-500/20 text-yellow-300',
-  available_for_pickup: 'bg-yellow-500/20 text-yellow-300',
-  return_to_sender: 'bg-red-500/20 text-red-300',
-  failure: 'bg-red-500/20 text-red-300',
-  cancelled: 'bg-red-500/20 text-red-300',
-  unknown: 'bg-slate-500/20 text-slate-300',
-};
-
-const statusClass = (status?: string | null): string =>
-  STATUS_STYLES[(status || 'unknown').toLowerCase()] || STATUS_STYLES.unknown;
+// Coloring comes from the central statusColors map (which carries every carrier
+// tracking status) so tracking badges match the rest of the app — statusColor
+// already falls back to neutral slate for an unknown/missing status.
+const statusClass = (status?: string | null): string => statusColor(status);
 
 const prettyStatus = (status?: string | null): string =>
   (status || 'unknown').replace(/_/g, ' ');

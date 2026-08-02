@@ -74,6 +74,9 @@ const statusVariantMap: Record<string, StatusVariant> = {
   out_for_delivery: 'blue',
   rework: 'blue',
   not_applicable: 'blue',
+  // Job costing: a reviewed job cost is informational/acknowledged — blue
+  // preserves the du-badge-info look the page previously hand-rolled.
+  reviewed: 'blue',
 
   // --- amber: waiting / not-yet-started / caution ---
   pending: 'amber',
@@ -96,6 +99,9 @@ const statusVariantMap: Record<string, StatusVariant> = {
   verification: 'amber',
   conditional: 'amber',
   pre_transit: 'amber',
+  // Carrier tracking: the parcel is waiting at a pickup point — action needed
+  // but nothing wrong (was locally styled in ShipmentTrackingPanel).
+  available_for_pickup: 'amber',
   maintenance: 'amber',
   warn: 'amber',
   repair: 'amber',
@@ -119,6 +125,9 @@ const statusVariantMap: Record<string, StatusVariant> = {
   damaged: 'red',
   urgent: 'red',
   return_to_vendor: 'red',
+  // Carrier tracking failure legs (was locally styled in ShipmentTrackingPanel).
+  return_to_sender: 'red',
+  failure: 'red',
   // A work center that is `offline` is DOWN (an active problem an operator must
   // see), distinct from `out_of_service` (decommissioned -> slate, below).
   offline: 'red',

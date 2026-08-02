@@ -18,6 +18,7 @@ import {
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { formatCentralDate } from '../utils/centralTime';
 import { usePermissions } from '../hooks/usePermissions';
+import useUnsavedChanges from '../hooks/useUnsavedChanges';
 import type { FAIPrefillResult } from '../types/processSheet';
 import { ScrapReasonCode, SCRAP_CATEGORIES } from '../types/scrapReason';
 import {
@@ -123,6 +124,20 @@ const ncrStatusColors: Record<string, string> = {
   closed: statusVariantClass.green,
 };
 
+// Blank form states for the NCR / CAR / FAI create modals. Module-level
+// constants so the unsaved-changes dirty checks can compare against the
+// pristine shape.
+const BLANK_NCR_FORM = {
+  part_id: 0, title: '', description: '', source: 'in_process',
+  quantity_affected: 1, specification: '', actual_value: '', required_value: ''
+};
+const BLANK_CAR_FORM = {
+  title: '', problem_description: '', car_type: 'corrective', priority: 3
+};
+const BLANK_FAI_FORM = {
+  part_id: 0, fai_type: 'full', reason: 'new_part', customer_approval_required: false
+};
+
 export default function QualityPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [activeTab, setActiveTab] = useState<TabType>('ncr');
@@ -151,16 +166,39 @@ export default function QualityPage() {
   const [prefillResult, setPrefillResult] = useState<FAIPrefillResult | null>(null);
 
   // Form states
-  const [ncrForm, setNcrForm] = useState({
-    part_id: 0, title: '', description: '', source: 'in_process',
-    quantity_affected: 1, specification: '', actual_value: '', required_value: ''
-  });
-  const [carForm, setCarForm] = useState({
-    title: '', problem_description: '', car_type: 'corrective', priority: 3
-  });
-  const [faiForm, setFaiForm] = useState({
-    part_id: 0, fai_type: 'full', reason: 'new_part', customer_approval_required: false
-  });
+  const [ncrForm, setNcrForm] = useState(BLANK_NCR_FORM);
+  const [carForm, setCarForm] = useState(BLANK_CAR_FORM);
+  const [faiForm, setFaiForm] = useState(BLANK_FAI_FORM);
+
+  // Unsaved-changes guards: every Cancel/Close/backdrop path of the three
+  // create modals is gated with confirmDiscard() so in-progress entries aren't
+  // silently dropped; beforeunload is covered while dirty. The forms reset to
+  // their blank shape on every (confirmed) close, so the dirty check compares
+  // against the blank constants.
+  const isNcrDirty = showNCRModal && JSON.stringify(ncrForm) !== JSON.stringify(BLANK_NCR_FORM);
+  const isCarDirty = showCARModal && JSON.stringify(carForm) !== JSON.stringify(BLANK_CAR_FORM);
+  const isFaiDirty = showFAIModal && JSON.stringify(faiForm) !== JSON.stringify(BLANK_FAI_FORM);
+  const { confirmDiscard: confirmDiscardNcr } = useUnsavedChanges(isNcrDirty);
+  const { confirmDiscard: confirmDiscardCar } = useUnsavedChanges(isCarDirty);
+  const { confirmDiscard: confirmDiscardFai } = useUnsavedChanges(isFaiDirty);
+
+  // Cancel/Close gates. The successful create paths close directly (never
+  // through these), so saving never prompts.
+  const requestCloseNCRModal = () => {
+    if (!confirmDiscardNcr()) return;
+    setShowNCRModal(false);
+    setNcrForm(BLANK_NCR_FORM);
+  };
+  const requestCloseCARModal = () => {
+    if (!confirmDiscardCar()) return;
+    setShowCARModal(false);
+    setCarForm(BLANK_CAR_FORM);
+  };
+  const requestCloseFAIModal = () => {
+    if (!confirmDiscardFai()) return;
+    setShowFAIModal(false);
+    setFaiForm(BLANK_FAI_FORM);
+  };
 
   // Scrap reason codes (Lean Phase 1) — the company vocabulary behind every
   // scrap picker. Loaded lazily when the tab first opens, isolated from the
@@ -223,7 +261,7 @@ export default function QualityPage() {
       };
       await api.createNCR(payload);
       setShowNCRModal(false);
-      setNcrForm({ part_id: 0, title: '', description: '', source: 'in_process', quantity_affected: 1, specification: '', actual_value: '', required_value: '' });
+      setNcrForm(BLANK_NCR_FORM);
       loadData();
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to create NCR');
@@ -258,7 +296,7 @@ export default function QualityPage() {
     try {
       await api.createCAR(carForm);
       setShowCARModal(false);
-      setCarForm({ title: '', problem_description: '', car_type: 'corrective', priority: 3 });
+      setCarForm(BLANK_CAR_FORM);
       loadData();
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to create CAR');
@@ -270,7 +308,7 @@ export default function QualityPage() {
     try {
       await api.createFAI(faiForm);
       setShowFAIModal(false);
-      setFaiForm({ part_id: 0, fai_type: 'full', reason: 'new_part', customer_approval_required: false });
+      setFaiForm(BLANK_FAI_FORM);
       loadData();
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to create FAI');
@@ -1290,10 +1328,10 @@ export default function QualityPage() {
       </Modal>
 
       {/* NCR Modal */}
-      <Modal open={showNCRModal} onClose={() => setShowNCRModal(false)} size="lg" closeOnBackdrop={false}>
+      <Modal open={showNCRModal} onClose={requestCloseNCRModal} size="lg" closeOnBackdrop={false}>
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-semibold">New Non-Conformance Report</h3>
-              <button onClick={() => setShowNCRModal(false)} aria-label="Close dialog"><XMarkIcon className="h-6 w-6" aria-hidden="true" /></button>
+              <button onClick={requestCloseNCRModal} aria-label="Close dialog"><XMarkIcon className="h-6 w-6" aria-hidden="true" /></button>
             </div>
             <form onSubmit={handleCreateNCR} className="space-y-4">
               <FormField label="Title" required>
@@ -1349,17 +1387,17 @@ export default function QualityPage() {
                 </FormField>
               </div>
               <div className="flex justify-end gap-3">
-                <Button type="button" variant="secondary" onClick={() => setShowNCRModal(false)}>Cancel</Button>
+                <Button type="button" variant="secondary" onClick={requestCloseNCRModal}>Cancel</Button>
                 <Button type="submit">Create NCR</Button>
               </div>
             </form>
       </Modal>
 
       {/* CAR Modal */}
-      <Modal open={showCARModal} onClose={() => setShowCARModal(false)} size="lg" closeOnBackdrop={false}>
+      <Modal open={showCARModal} onClose={requestCloseCARModal} size="lg" closeOnBackdrop={false}>
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-semibold">New Corrective Action Request</h3>
-              <button onClick={() => setShowCARModal(false)} aria-label="Close dialog"><XMarkIcon className="h-6 w-6" aria-hidden="true" /></button>
+              <button onClick={requestCloseCARModal} aria-label="Close dialog"><XMarkIcon className="h-6 w-6" aria-hidden="true" /></button>
             </div>
             <form onSubmit={handleCreateCAR} className="space-y-4">
               <FormField label="Title" required>
@@ -1393,17 +1431,17 @@ export default function QualityPage() {
                 )}
               </FormField>
               <div className="flex justify-end gap-3">
-                <Button type="button" variant="secondary" onClick={() => setShowCARModal(false)}>Cancel</Button>
+                <Button type="button" variant="secondary" onClick={requestCloseCARModal}>Cancel</Button>
                 <Button type="submit">Create CAR</Button>
               </div>
             </form>
       </Modal>
 
       {/* FAI Modal */}
-      <Modal open={showFAIModal} onClose={() => setShowFAIModal(false)} size="lg" closeOnBackdrop={false}>
+      <Modal open={showFAIModal} onClose={requestCloseFAIModal} size="lg" closeOnBackdrop={false}>
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-semibold">New First Article Inspection</h3>
-              <button onClick={() => setShowFAIModal(false)} aria-label="Close dialog"><XMarkIcon className="h-6 w-6" aria-hidden="true" /></button>
+              <button onClick={requestCloseFAIModal} aria-label="Close dialog"><XMarkIcon className="h-6 w-6" aria-hidden="true" /></button>
             </div>
             <form onSubmit={handleCreateFAI} className="space-y-4">
               <FormField label="Part" required>
@@ -1440,7 +1478,7 @@ export default function QualityPage() {
                 <span className="text-sm">Customer Approval Required</span>
               </label>
               <div className="flex justify-end gap-3">
-                <Button type="button" variant="secondary" onClick={() => setShowFAIModal(false)}>Cancel</Button>
+                <Button type="button" variant="secondary" onClick={requestCloseFAIModal}>Cancel</Button>
                 <Button type="submit">Create FAI</Button>
               </div>
             </form>
