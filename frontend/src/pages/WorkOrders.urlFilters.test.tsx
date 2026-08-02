@@ -17,8 +17,9 @@
  *   3. GROUPED CSV EXPORT. The grouped view renders one DataTable per group,
  *      each with its own Export CSV control whose filename is
  *      `work-orders-<group>` with the group name sanitized (lowercase,
- *      non-alphanumeric runs → single dashes) — the flat view previously had
- *      csvExport while groups had none.
+ *      non-alphanumeric runs → single dashes) and whose file contains ONLY
+ *      that group's rows — the flat view previously had csvExport while
+ *      groups had none.
  *
  * Desktop table + mobile cards BOTH mount in jsdom (CSS visibility classes
  * don't prune the DOM); queries scope accordingly.
@@ -26,7 +27,7 @@
 
 import React from 'react';
 import { render, screen, fireEvent, act, waitFor } from '@testing-library/react';
-import { MemoryRouter, useLocation } from 'react-router-dom';
+import { MemoryRouter, useLocation, useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import WorkOrders from './WorkOrders';
 
@@ -96,16 +97,36 @@ function LocationProbe() {
   return <div data-testid="location-search">{location.search}</div>;
 }
 
+/** History probe: a real Back control, since jsdom has no browser chrome. */
+function BackButton() {
+  const navigate = useNavigate();
+  return (
+    <button type="button" onClick={() => navigate(-1)}>
+      test-back
+    </button>
+  );
+}
+
 function renderAt(url: string) {
   return render(
     <MemoryRouter initialEntries={[url]}>
       <WorkOrders />
       <LocationProbe />
+      <BackButton />
     </MemoryRouter>
   );
 }
 
 const locationSearch = () => screen.getByTestId('location-search').textContent;
+
+/** jsdom's Blob has no .text(); read exported CSV content via FileReader. */
+const readBlobText = (blob: Blob) =>
+  new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsText(blob);
+  });
 
 /** Wait for the loaded list (the WO link renders in table + mobile card). */
 async function waitForLoadedList() {
@@ -197,6 +218,58 @@ describe('WorkOrders — filters round-trip through URL params', () => {
     expect(screen.getByRole('heading', { name: 'draft' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'in progress' })).toBeInTheDocument();
   });
+
+  it('applies a combined bookmark — status + customer + group in one URL', async () => {
+    const qs = new URLSearchParams({
+      status: 'in_progress',
+      customer: 'Beta & Defense, Inc.',
+      group: 'part',
+    }).toString();
+    renderAt(`/work-orders?${qs}`);
+
+    // All three controls reflect the URL...
+    expect(await screen.findByLabelText('Status filter')).toHaveValue('in_progress');
+    expect(screen.getByLabelText('Customer filter')).toHaveValue('Beta & Defense, Inc.');
+    expect(screen.getByLabelText('Group work orders')).toHaveValue('part');
+    // ...the fetch carried the status...
+    expect(mockedApi.getWorkOrders).toHaveBeenCalledWith({ status: 'in_progress' });
+    // ...and only the matching row renders, grouped under its part.
+    expect(await screen.findByRole('heading', { name: 'PN-BBB' })).toBeInTheDocument();
+    expect(screen.getAllByRole('link', { name: 'WO-1002' }).length).toBeGreaterThan(0);
+    expect(screen.queryByRole('heading', { name: 'PN-AAA' })).not.toBeInTheDocument();
+    expect(screen.queryAllByRole('link', { name: 'WO-1001' })).toHaveLength(0);
+  });
+
+  it('browser Back reverts both the controls and the visible rows', async () => {
+    renderAt('/work-orders');
+    await waitForLoadedList();
+
+    // Two filter steps → two history entries.
+    fireEvent.change(screen.getByLabelText('Status filter'), { target: { value: 'in_progress' } });
+    expect(locationSearch()).toBe('?status=in_progress');
+    fireEvent.change(screen.getByLabelText('Customer filter'), { target: { value: 'Acme Aero' } });
+    expect(locationSearch()).toBe('?status=in_progress&customer=Acme+Aero');
+
+    // The client-side customer filter hides the other customer's rows.
+    await waitFor(() => expect(screen.queryAllByRole('link', { name: 'WO-1002' })).toHaveLength(0));
+    expect(screen.getAllByRole('link', { name: 'WO-1001' }).length).toBeGreaterThan(0);
+
+    // Back: the URL is the single source of truth, so BOTH the select and the
+    // rows revert — a mount-read useState copy of the params would keep
+    // filtering by customer while the URL said otherwise.
+    fireEvent.click(screen.getByRole('button', { name: 'test-back' }));
+    expect(locationSearch()).toBe('?status=in_progress');
+    expect(screen.getByLabelText('Customer filter')).toHaveValue('');
+    expect(screen.getByLabelText('Status filter')).toHaveValue('in_progress');
+    await waitFor(() =>
+      expect(screen.getAllByRole('link', { name: 'WO-1002' }).length).toBeGreaterThan(0)
+    );
+
+    // A second Back lands on the pristine entry: clean URL, default controls.
+    fireEvent.click(screen.getByRole('button', { name: 'test-back' }));
+    expect(locationSearch()).toBe('');
+    expect(screen.getByLabelText('Status filter')).toHaveValue('');
+  });
 });
 
 describe('WorkOrders — search debounced through the shared hook', () => {
@@ -247,9 +320,15 @@ describe('WorkOrders — grouped view exports CSV per group', () => {
     mockedApi.getWorkOrders.mockResolvedValue(workOrders);
   });
 
-  it('renders an Export CSV control per group with the sanitized group filename', async () => {
+  it('renders an Export CSV control per group with the sanitized filename and ONLY that group\'s rows', async () => {
     const downloads: string[] = [];
-    const createSpy = jest.spyOn(URL, 'createObjectURL').mockReturnValue('blob:mock');
+    const blobs: Blob[] = [];
+    const createSpy = jest
+      .spyOn(URL, 'createObjectURL')
+      .mockImplementation((obj: Blob | MediaSource) => {
+        blobs.push(obj as Blob);
+        return 'blob:mock';
+      });
     const revokeSpy = jest.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
     const clickSpy = jest
       .spyOn(HTMLAnchorElement.prototype, 'click')
@@ -271,6 +350,16 @@ describe('WorkOrders — grouped view exports CSV per group', () => {
     fireEvent.click(exportButtons[0]);
     fireEvent.click(exportButtons[1]);
     expect(downloads).toEqual(['work-orders-acme-aero.csv', 'work-orders-beta-defense-inc.csv']);
+
+    // And each file carries ONLY its own group's rows — matching filenames
+    // alone would tolerate every group exporting the full flat list.
+    expect(blobs).toHaveLength(2);
+    const acmeCsv = await readBlobText(blobs[0]);
+    const betaCsv = await readBlobText(blobs[1]);
+    expect(acmeCsv).toContain('WO-1001');
+    expect(acmeCsv).not.toContain('WO-1002');
+    expect(betaCsv).toContain('WO-1002');
+    expect(betaCsv).not.toContain('WO-1001');
 
     createSpy.mockRestore();
     revokeSpy.mockRestore();

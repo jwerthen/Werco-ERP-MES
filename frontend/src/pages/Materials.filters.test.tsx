@@ -16,7 +16,9 @@
  *      params (`type`, `status`); defaults keep the URL clean, and Clear drops
  *      both params in one update.
  *
- * Materials uses the default no-op Toast context, so no ToastProvider is needed.
+ * Plus the stale-response guard suite at the bottom (that one wraps in a real
+ * ToastProvider so a wrongly-fired failure toast would be observable; the rest
+ * rely on the default no-op Toast context).
  */
 
 import React from 'react';
@@ -24,6 +26,7 @@ import { render, screen, fireEvent, act, waitFor } from '@testing-library/react'
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import api from '../services/api';
 import Materials from './Materials';
+import { ToastProvider } from '../components/ui/Toast';
 
 jest.mock('../services/api', () => ({
   __esModule: true,
@@ -166,5 +169,131 @@ describe('Materials — filters round-trip through URL params', () => {
     expect(screen.getByLabelText('Filter by status')).toHaveValue('');
     // The cleared type filter refetches without the param.
     await waitFor(() => expect(mockedApi.getMaterials).toHaveBeenLastCalledWith({}));
+  });
+});
+
+/**
+ * Stale-response guard (loadRequestRef). Debouncing only the search VALUE means
+ * a debounced-search request and an immediate type-filter request can be in
+ * flight AT ONCE — so out-of-order settles became possible and only the LATEST
+ * request may commit. These tests pin all three requestId checks with an
+ * observable failure mode each (delete a check and a test here goes red):
+ *
+ *   - setMaterials check → a slow stale success must not overwrite fresh rows;
+ *   - finally check      → a stale settle must not end the NEWER request's
+ *                          loading state early;
+ *   - catch check        → a stale rejection must raise neither the error
+ *                          state nor the failure toast.
+ */
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+const staleRow = { ...materials[0], id: 91, part_number: 'STALE-ROW', name: 'From the superseded request' };
+const freshRow = { ...materials[1], id: 92, part_number: 'FRESH-ROW', name: 'From the latest request' };
+
+describe('Materials — stale-response guard on out-of-order loads', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  /** Wrap in ToastProvider so a (wrongly) fired failure toast is observable. */
+  function renderWithToasts() {
+    return render(
+      <MemoryRouter initialEntries={['/materials']}>
+        <ToastProvider>
+          <Materials />
+        </ToastProvider>
+      </MemoryRouter>
+    );
+  }
+
+  /**
+   * Mount (initial load resolves), then dispatch A = slow debounced-search
+   * request, then B = immediate type-filter request superseding it.
+   */
+  async function dispatchRacingLoads() {
+    const a = deferred<unknown>();
+    const b = deferred<unknown>();
+    mockedApi.getMaterials
+      .mockResolvedValueOnce(materials as any)
+      .mockReturnValueOnce(a.promise as any)
+      .mockReturnValueOnce(b.promise as any);
+
+    renderWithToasts();
+    await screen.findAllByText('RM-0001');
+    expect(mockedApi.getMaterials).toHaveBeenCalledTimes(1);
+
+    jest.useFakeTimers();
+    // A: debounced search — dispatches when the 250ms window closes.
+    fireEvent.change(screen.getByLabelText('Search materials'), { target: { value: 'rivet' } });
+    await act(async () => {
+      jest.advanceTimersByTime(250);
+    });
+    expect(mockedApi.getMaterials).toHaveBeenCalledTimes(2);
+    expect(mockedApi.getMaterials).toHaveBeenLastCalledWith({ search: 'rivet' });
+
+    // B: type filter — dispatches immediately, superseding A.
+    fireEvent.change(screen.getByLabelText('Filter by type'), { target: { value: 'hardware' } });
+    expect(mockedApi.getMaterials).toHaveBeenCalledTimes(3);
+    expect(mockedApi.getMaterials).toHaveBeenLastCalledWith({ search: 'rivet', part_type: 'hardware' });
+
+    // Both in flight → the table body is the loading skeleton.
+    expect(screen.getAllByTestId('skeleton').length).toBeGreaterThan(0);
+    return { a, b };
+  }
+
+  it('a late stale SUCCESS neither overwrites the fresh rows nor re-enters loading', async () => {
+    const { a, b } = await dispatchRacingLoads();
+
+    // The newer request settles first: its rows commit, loading ends.
+    await act(async () => {
+      b.resolve([freshRow]);
+    });
+    expect(screen.getAllByText('FRESH-ROW').length).toBeGreaterThan(0);
+    expect(screen.queryAllByTestId('skeleton')).toHaveLength(0);
+
+    // The superseded request settles late: its rows must NOT replace B's, and
+    // its finally must not disturb the settled loading state.
+    await act(async () => {
+      a.resolve([staleRow]);
+    });
+    expect(screen.getAllByText('FRESH-ROW').length).toBeGreaterThan(0);
+    expect(screen.queryByText('STALE-ROW')).not.toBeInTheDocument();
+    expect(screen.queryAllByTestId('skeleton')).toHaveLength(0);
+    expect(mockedApi.getMaterials).toHaveBeenCalledTimes(3);
+  });
+
+  it('a stale settle cannot end the newer load early, and a stale REJECTION raises no error/toast', async () => {
+    const { a, b } = await dispatchRacingLoads();
+
+    // The superseded request REJECTS while the newer one is still in flight:
+    // no error state, no failure toast — and crucially loading must STAY on
+    // (a stale finally that ended it would present a half-loaded page as done).
+    await act(async () => {
+      a.reject(new Error('network down'));
+    });
+    expect(screen.getAllByTestId('skeleton').length).toBeGreaterThan(0);
+    expect(screen.queryByTestId('error-state')).not.toBeInTheDocument();
+    expect(screen.queryByText('Failed to load materials and supplies')).not.toBeInTheDocument();
+
+    // The newer request then lands normally.
+    await act(async () => {
+      b.resolve([freshRow]);
+    });
+    expect(screen.getAllByText('FRESH-ROW').length).toBeGreaterThan(0);
+    expect(screen.queryAllByTestId('skeleton')).toHaveLength(0);
+    expect(screen.queryByTestId('error-state')).not.toBeInTheDocument();
+    expect(screen.queryByText('Failed to load materials and supplies')).not.toBeInTheDocument();
   });
 });
