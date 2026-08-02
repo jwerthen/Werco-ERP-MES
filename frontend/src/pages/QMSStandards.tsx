@@ -8,7 +8,7 @@ import {
   QuestionMarkCircleIcon,
 } from '@heroicons/react/24/outline';
 import api from '../services/api';
-import { Button, statusColor } from '../components/ui';
+import { Button, ConfirmDialog, statusColor } from '../components/ui';
 import { FormField } from '../components/ui/FormField';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { formatCentralDate } from '../utils/centralTime';
@@ -70,6 +70,8 @@ export default function QMSStandards() {
 
   // Auto-link state
   const [autoLinking, setAutoLinking] = useState(false);
+  const [deleteEvidenceTarget, setDeleteEvidenceTarget] = useState<number | null>(null);
+  const [deleteEvidencePending, setDeleteEvidencePending] = useState(false);
   const [autoLinkResult, setAutoLinkResult] = useState<AutoLinkSummary | null>(null);
   const [showAutoLinkResult, setShowAutoLinkResult] = useState(false);
 
@@ -241,13 +243,21 @@ export default function QMSStandards() {
     }
   };
 
-  const handleDeleteEvidence = async (evidenceId: number) => {
-    if (!window.confirm('Remove this evidence link?')) return;
+  const handleDeleteEvidence = (evidenceId: number) => {
+    setDeleteEvidenceTarget(evidenceId);
+  };
+
+  const handleConfirmDeleteEvidence = async () => {
+    if (deleteEvidenceTarget === null || deleteEvidencePending) return;
+    setDeleteEvidencePending(true);
     try {
-      await api.deleteQMSEvidence(evidenceId);
+      await api.deleteQMSEvidence(deleteEvidenceTarget);
       if (selectedStandard) loadStandardDetail(selectedStandard.id);
     } catch (err: any) {
       setError(err?.response?.data?.detail || 'Failed to delete evidence');
+    } finally {
+      setDeleteEvidencePending(false);
+      setDeleteEvidenceTarget(null);
     }
   };
 
@@ -805,6 +815,20 @@ export default function QMSStandards() {
           </div>
         </Modal>
       )}
+
+      {/* Remove evidence link confirm */}
+      <ConfirmDialog
+        open={deleteEvidenceTarget !== null}
+        title="Remove Evidence Link"
+        message="Remove this evidence link?"
+        confirmLabel="Remove"
+        pending={deleteEvidencePending}
+        variant="danger"
+        onConfirm={handleConfirmDeleteEvidence}
+        onCancel={() => {
+          if (!deleteEvidencePending) setDeleteEvidenceTarget(null);
+        }}
+      />
     </div>
   );
 }

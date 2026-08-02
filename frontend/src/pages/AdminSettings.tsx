@@ -33,7 +33,7 @@ import AIUsageTab from '../components/admin/AIUsageTab';
 import AIEgressTab from '../components/admin/AIEgressTab';
 import SmsEgressTab from '../components/admin/SmsEgressTab';
 import DisplayTokensTab from '../components/admin/DisplayTokensTab';
-import { EmptyState, ErrorState, FormField, useToast } from '../components/ui';
+import { ConfirmDialog, EmptyState, ErrorState, FormField, useToast } from '../components/ui';
 
 type TabKey = 'materials' | 'machines' | 'finishes' | 'labor' | 'workcenters' | 'workcentertypes' | 'services' | 'overhead' | 'employees' | 'roles' | 'carriers' | 'printing' | 'aiusage' | 'aiprivacy' | 'smsprivacy' | 'displays' | 'audit';
 
@@ -1154,6 +1154,7 @@ function RolePermissionsManager({ data, onUpdate }: { data: RolePermissionsData;
   const [permissions, setPermissions] = useState<string[]>(data.role_permissions[selectedRole] || []);
   const [saving, setSaving] = useState(false);
   const [hasChanges, setHasChanges] = useState(false);
+  const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
 
   useEffect(() => {
     setPermissions(data.role_permissions[selectedRole] || []);
@@ -1196,8 +1197,13 @@ function RolePermissionsManager({ data, onUpdate }: { data: RolePermissionsData;
     }
   };
 
-  const handleReset = async () => {
-    if (!window.confirm(`Reset ${selectedRole} permissions to defaults?`)) return;
+  const handleReset = () => {
+    if (saving) return;
+    setResetConfirmOpen(true);
+  };
+
+  const handleConfirmReset = async () => {
+    if (saving) return;
     setSaving(true);
     try {
       await api.resetRolePermissions(selectedRole);
@@ -1206,6 +1212,7 @@ function RolePermissionsManager({ data, onUpdate }: { data: RolePermissionsData;
       showToast('error', err.response?.data?.detail || 'Failed to reset permissions');
     } finally {
       setSaving(false);
+      setResetConfirmOpen(false);
     }
   };
 
@@ -1324,6 +1331,20 @@ function RolePermissionsManager({ data, onUpdate }: { data: RolePermissionsData;
           ))}
         </div>
       </div>
+
+      {/* Reset-to-defaults confirm (discards any customized permission set) */}
+      <ConfirmDialog
+        open={resetConfirmOpen}
+        title="Reset Permissions"
+        message={`Reset ${selectedRole} permissions to defaults?`}
+        confirmLabel="Reset"
+        pending={saving}
+        variant="warning"
+        onConfirm={handleConfirmReset}
+        onCancel={() => {
+          if (!saving) setResetConfirmOpen(false);
+        }}
+      />
     </div>
   );
 }

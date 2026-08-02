@@ -9,7 +9,7 @@
  */
 
 import React from 'react';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import DisplayTokensTab from './DisplayTokensTab';
 import api from '../../services/api';
 import { ToastProvider } from '../ui/Toast';
@@ -263,17 +263,17 @@ describe('DisplayTokensTab', () => {
     expect(screen.getByText('Active')).toBeInTheDocument();
   });
 
-  it('revokes a token after confirmation', async () => {
+  it('revokes a token after confirmation via the shared ConfirmDialog', async () => {
     mockApi.revokeDisplayToken.mockResolvedValue({ ...activeToken, revoked: true });
-    const confirmSpy = jest.spyOn(window, 'confirm').mockReturnValue(true);
-    try {
-      renderTab();
-      fireEvent.click(await screen.findByTestId('revoke-1'));
+    renderTab();
+    fireEvent.click(await screen.findByTestId('revoke-1'));
 
-      await waitFor(() => expect(mockApi.revokeDisplayToken).toHaveBeenCalledWith(1));
-      expect(mockApi.listDisplayTokens).toHaveBeenCalledTimes(2); // initial + after revoke
-    } finally {
-      confirmSpy.mockRestore();
-    }
+    // The row control only opens the dialog; the API fires from its confirm.
+    expect(mockApi.revokeDisplayToken).not.toHaveBeenCalled();
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Revoke' }));
+
+    await waitFor(() => expect(mockApi.revokeDisplayToken).toHaveBeenCalledWith(1));
+    expect(mockApi.listDisplayTokens).toHaveBeenCalledTimes(2); // initial + after revoke
   });
 });

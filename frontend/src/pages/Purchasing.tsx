@@ -127,6 +127,10 @@ export default function Purchasing() {
   const [deletePOPending, setDeletePOPending] = useState(false);
   const [deleteVendorTarget, setDeleteVendorTarget] = useState<Vendor | null>(null);
   const [deleteVendorPending, setDeleteVendorPending] = useState(false);
+  const [deleteVendorDocTarget, setDeleteVendorDocTarget] = useState<VendorDocument | null>(null);
+  const [deleteVendorDocPending, setDeleteVendorDocPending] = useState(false);
+  const [sendPOTarget, setSendPOTarget] = useState<PurchaseOrder | null>(null);
+  const [sendPOPending, setSendPOPending] = useState(false);
 
   const [newPO, setNewPO] = useState({
     vendor_id: 0,
@@ -354,16 +358,24 @@ export default function Purchasing() {
     }
   };
 
-  const handleVendorDocDelete = async (docId: number) => {
-    if (!window.confirm('Delete this document?')) return;
+  const handleVendorDocDelete = (doc: VendorDocument) => {
+    setDeleteVendorDocTarget(doc);
+  };
+
+  const handleConfirmDeleteVendorDoc = async () => {
+    if (!deleteVendorDocTarget || deleteVendorDocPending) return;
+    setDeleteVendorDocPending(true);
     try {
-      await api.deleteDocument(docId);
+      await api.deleteDocument(deleteVendorDocTarget.id);
       showToast('success', 'Document deleted');
       if (selectedVendor) {
         loadVendorDocuments(selectedVendor.id);
       }
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to delete document');
+    } finally {
+      setDeleteVendorDocPending(false);
+      setDeleteVendorDocTarget(null);
     }
   };
 
@@ -414,14 +426,22 @@ export default function Purchasing() {
     }
   };
 
-  const handleSendPO = async (poId: number) => {
-    if (!window.confirm('Send this PO to vendor?')) return;
+  const handleSendPO = (po: PurchaseOrder) => {
+    setSendPOTarget(po);
+  };
+
+  const handleConfirmSendPO = async () => {
+    if (!sendPOTarget || sendPOPending) return;
+    setSendPOPending(true);
     try {
-      await api.sendPurchaseOrder(poId);
+      await api.sendPurchaseOrder(sendPOTarget.id);
       showToast('success', 'Purchase order sent');
       loadData();
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to send PO');
+    } finally {
+      setSendPOPending(false);
+      setSendPOTarget(null);
     }
   };
 
@@ -605,7 +625,7 @@ export default function Purchasing() {
           </button>
           {canSendPO && po.status === 'draft' && (
             <button
-              onClick={() => handleSendPO(po.id)}
+              onClick={() => handleSendPO(po)}
               className="text-werco-primary hover:underline text-sm"
             >
               Send
@@ -649,7 +669,7 @@ export default function Purchasing() {
           </button>
           {canSendPO && po.status === 'draft' && (
             <button
-              onClick={() => handleSendPO(po.id)}
+              onClick={() => handleSendPO(po)}
               className="text-werco-primary hover:underline text-sm"
             >
               Send
@@ -1422,7 +1442,7 @@ export default function Purchasing() {
                               </button>
                               <button
                                 type="button"
-                                onClick={() => handleVendorDocDelete(doc.id)}
+                                onClick={() => handleVendorDocDelete(doc)}
                                 className="text-red-600 hover:text-red-300 text-sm"
                               >
                                 Delete
@@ -1578,6 +1598,38 @@ export default function Purchasing() {
         onConfirm={handleConfirmDeleteVendor}
         onCancel={() => {
           if (!deleteVendorPending) setDeleteVendorTarget(null);
+        }}
+      />
+
+      {/* Delete vendor document confirm */}
+      <ConfirmDialog
+        open={!!deleteVendorDocTarget}
+        title="Delete Document"
+        message={
+          deleteVendorDocTarget?.file_name
+            ? `Delete "${deleteVendorDocTarget.file_name}"?`
+            : 'Delete this document?'
+        }
+        confirmLabel="Delete"
+        pending={deleteVendorDocPending}
+        variant="danger"
+        onConfirm={handleConfirmDeleteVendorDoc}
+        onCancel={() => {
+          if (!deleteVendorDocPending) setDeleteVendorDocTarget(null);
+        }}
+      />
+
+      {/* Send PO confirm (non-destructive) */}
+      <ConfirmDialog
+        open={!!sendPOTarget}
+        title="Send Purchase Order"
+        message={sendPOTarget ? `Send ${sendPOTarget.po_number} to the vendor?` : 'Send this PO to vendor?'}
+        confirmLabel="Send"
+        pending={sendPOPending}
+        variant="info"
+        onConfirm={handleConfirmSendPO}
+        onCancel={() => {
+          if (!sendPOPending) setSendPOTarget(null);
         }}
       />
     </div>

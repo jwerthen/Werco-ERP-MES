@@ -8,7 +8,7 @@ import { ENGINEERING_PART_TYPE_OPTIONS } from '../utils/catalogGroups';
 import { escapeCsvField, neutralizeCsvFormula } from '../utils/csv';
 import { StatusBadge } from '../components/ui/StatusBadge';
 import { Modal } from '../components/ui/Modal';
-import { FormField, InputDialog } from '../components/ui';
+import { ConfirmDialog, FormField, InputDialog } from '../components/ui';
 import { useToast } from '../components/ui/Toast';
 import useUnsavedChanges from '../hooks/useUnsavedChanges';
 import { BOMImportWizard } from '../components/parts/BOMImportWizard';
@@ -96,6 +96,11 @@ export default function PartsPage() {
   const [componentPartIds, setComponentPartIds] = useState<Set<number>>(new Set());
   const [savedFilters, setSavedFilters] = useState<SavedPartFilter[]>([]);
   const [saveFilterDialogOpen, setSaveFilterDialogOpen] = useState(false);
+  // Delete confirm targets + in-flight guards (server-gated, non-optimistic).
+  const [deletePartTarget, setDeletePartTarget] = useState<Part | null>(null);
+  const [deletePartPending, setDeletePartPending] = useState(false);
+  const [bulkDeleteConfirmOpen, setBulkDeleteConfirmOpen] = useState(false);
+  const [bulkDeletePending, setBulkDeletePending] = useState(false);
   const [selectedPartIds, setSelectedPartIds] = useState<Set<number>>(new Set());
   const [customerOptions, setCustomerOptions] = useState<CustomerNameOption[]>([]);
   const [showCustomerDropdown, setShowCustomerDropdown] = useState(false);
@@ -525,35 +530,51 @@ export default function PartsPage() {
     });
   };
 
-  const handleDeletePart = async (part: Part, event: React.MouseEvent) => {
+  const handleDeletePart = (part: Part, event: React.MouseEvent) => {
     event.stopPropagation();
-    if (!window.confirm(`Delete part ${part.part_number}? This will remove it from the active parts list.`)) return;
+    setDeletePartTarget(part);
+  };
 
+  const handleConfirmDeletePart = async () => {
+    if (!deletePartTarget || deletePartPending) return;
+    setDeletePartPending(true);
     try {
-      await api.deletePart(part.id);
-      removeDeletedParts([part.id]);
-      showToast('success', `Deleted ${part.part_number}`);
+      await api.deletePart(deletePartTarget.id);
+      removeDeletedParts([deletePartTarget.id]);
+      showToast('success', `Deleted ${deletePartTarget.part_number}`);
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to delete part');
+    } finally {
+      setDeletePartPending(false);
+      setDeletePartTarget(null);
     }
   };
 
-  const handleDeleteSelectedParts = async () => {
+  const handleDeleteSelectedParts = () => {
     if (selectedParts.length === 0) return;
-    if (!window.confirm(`Delete ${selectedParts.length} selected part${selectedParts.length !== 1 ? 's' : ''}? This will remove them from the active parts list.`)) return;
+    setBulkDeleteConfirmOpen(true);
+  };
 
-    const results = await Promise.allSettled(selectedParts.map(part => api.deletePart(part.id)));
-    const deletedIds = selectedParts
-      .filter((_, index) => results[index].status === 'fulfilled')
-      .map(part => part.id);
-    if (deletedIds.length > 0) removeDeletedParts(deletedIds);
+  const handleConfirmDeleteSelectedParts = async () => {
+    if (selectedParts.length === 0 || bulkDeletePending) return;
+    setBulkDeletePending(true);
+    try {
+      const results = await Promise.allSettled(selectedParts.map(part => api.deletePart(part.id)));
+      const deletedIds = selectedParts
+        .filter((_, index) => results[index].status === 'fulfilled')
+        .map(part => part.id);
+      if (deletedIds.length > 0) removeDeletedParts(deletedIds);
 
-    const failed = results.length - deletedIds.length;
-    if (failed > 0) {
-      const firstFailure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
-      showToast('error', firstFailure?.reason?.response?.data?.detail || `Failed to delete ${failed} part${failed !== 1 ? 's' : ''}`);
-    } else {
-      showToast('success', `Deleted ${deletedIds.length} part${deletedIds.length !== 1 ? 's' : ''}`);
+      const failed = results.length - deletedIds.length;
+      if (failed > 0) {
+        const firstFailure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+        showToast('error', firstFailure?.reason?.response?.data?.detail || `Failed to delete ${failed} part${failed !== 1 ? 's' : ''}`);
+      } else {
+        showToast('success', `Deleted ${deletedIds.length} part${deletedIds.length !== 1 ? 's' : ''}`);
+      }
+    } finally {
+      setBulkDeletePending(false);
+      setBulkDeleteConfirmOpen(false);
     }
   };
 
@@ -1203,6 +1224,38 @@ export default function PartsPage() {
         submitLabel="Save"
         onSubmit={handleSaveFilter}
         onCancel={() => setSaveFilterDialogOpen(false)}
+      />
+
+      {/* Delete part confirm */}
+      <ConfirmDialog
+        open={deletePartTarget !== null}
+        title="Delete Part"
+        message={
+          deletePartTarget
+            ? `Delete part ${deletePartTarget.part_number}? This will remove it from the active parts list.`
+            : ''
+        }
+        confirmLabel="Delete"
+        pending={deletePartPending}
+        variant="danger"
+        onConfirm={handleConfirmDeletePart}
+        onCancel={() => {
+          if (!deletePartPending) setDeletePartTarget(null);
+        }}
+      />
+
+      {/* Bulk delete confirm */}
+      <ConfirmDialog
+        open={bulkDeleteConfirmOpen}
+        title="Delete Selected Parts"
+        message={`Delete ${selectedParts.length} selected part${selectedParts.length !== 1 ? 's' : ''}? This will remove them from the active parts list.`}
+        confirmLabel="Delete"
+        pending={bulkDeletePending}
+        variant="danger"
+        onConfirm={handleConfirmDeleteSelectedParts}
+        onCancel={() => {
+          if (!bulkDeletePending) setBulkDeleteConfirmOpen(false);
+        }}
       />
     </div>
   );

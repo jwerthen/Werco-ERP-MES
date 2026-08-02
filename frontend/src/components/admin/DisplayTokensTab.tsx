@@ -31,6 +31,7 @@ import {
 } from '@heroicons/react/24/outline';
 import api from '../../services/api';
 import type { DisplayToken, SetupCodeResponse } from '../../types/wallboard';
+import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { FormField } from '../ui/FormField';
 import { LoadingButton } from '../ui/LoadingButton';
 import { useToast } from '../ui/Toast';
@@ -66,6 +67,8 @@ export default function DisplayTokensTab() {
   const [showCustomerNames, setShowCustomerNames] = useState(false);
   const [reveal, setReveal] = useState<OneTimeReveal | null>(null);
   const [reissuingId, setReissuingId] = useState<number | null>(null);
+  const [revokeTarget, setRevokeTarget] = useState<DisplayToken | null>(null);
+  const [revokePending, setRevokePending] = useState(false);
   const [copied, setCopied] = useState<'token' | 'url' | 'code' | null>(null);
 
   const load = useCallback(async () => {
@@ -130,13 +133,21 @@ export default function DisplayTokensTab() {
     }
   };
 
-  const handleRevoke = async (token: DisplayToken) => {
-    if (!window.confirm(`Revoke "${token.label}"? The TV loses access within ~30 seconds.`)) return;
+  const handleRevoke = (token: DisplayToken) => {
+    setRevokeTarget(token);
+  };
+
+  const handleConfirmRevoke = async () => {
+    if (!revokeTarget || revokePending) return;
+    setRevokePending(true);
     try {
-      await api.revokeDisplayToken(token.id);
+      await api.revokeDisplayToken(revokeTarget.id);
       await load();
     } catch (err: any) {
       setError(err?.response?.data?.detail || err?.message || 'Failed to revoke display token');
+    } finally {
+      setRevokePending(false);
+      setRevokeTarget(null);
     }
   };
 
@@ -421,6 +432,20 @@ export default function DisplayTokensTab() {
           </table>
         </div>
       )}
+
+      {/* Revoke display token confirm */}
+      <ConfirmDialog
+        open={revokeTarget !== null}
+        title="Revoke Display Token"
+        message={revokeTarget ? `Revoke "${revokeTarget.label}"? The TV loses access within ~30 seconds.` : ''}
+        confirmLabel="Revoke"
+        pending={revokePending}
+        variant="danger"
+        onConfirm={handleConfirmRevoke}
+        onCancel={() => {
+          if (!revokePending) setRevokeTarget(null);
+        }}
+      />
     </div>
   );
 }

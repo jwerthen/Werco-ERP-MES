@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import api from '../services/api';
 import { Modal } from '../components/ui/Modal';
 import { FormField } from '../components/ui/FormField';
-import { EmptyState, ErrorState, useToast } from '../components/ui';
+import { ConfirmDialog, EmptyState, ErrorState, useToast } from '../components/ui';
 import {
   PlusIcon,
   PencilIcon,
@@ -66,6 +66,8 @@ export default function CustomFieldsPage() {
   const [selectedEntityType, setSelectedEntityType] = useState<EntityType | ''>('');
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [editingField, setEditingField] = useState<FieldDefinition | null>(null);
+  const [deactivateTarget, setDeactivateTarget] = useState<FieldDefinition | null>(null);
+  const [deactivatePending, setDeactivatePending] = useState(false);
 
   // Form state
   const [formData, setFormData] = useState({
@@ -169,15 +171,22 @@ export default function CustomFieldsPage() {
     }
   };
 
-  const handleDelete = async (field: FieldDefinition) => {
-    if (!window.confirm(`Deactivate field "${field.display_name}"?`)) return;
-    
+  const handleDelete = (field: FieldDefinition) => {
+    setDeactivateTarget(field);
+  };
+
+  const handleConfirmDeactivate = async () => {
+    if (!deactivateTarget || deactivatePending) return;
+    setDeactivatePending(true);
     try {
-      await api.deleteCustomFieldDefinition(field.id);
+      await api.deleteCustomFieldDefinition(deactivateTarget.id);
       showToast('success', 'Field deactivated');
       loadFields();
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to delete field');
+    } finally {
+      setDeactivatePending(false);
+      setDeactivateTarget(null);
     }
   };
 
@@ -529,6 +538,20 @@ export default function CustomFieldsPage() {
               </form>
             </div>
       </Modal>
+
+      {/* Deactivate field confirm (reversible status change, not a hard delete) */}
+      <ConfirmDialog
+        open={deactivateTarget !== null}
+        title="Deactivate Field"
+        message={deactivateTarget ? `Deactivate field "${deactivateTarget.display_name}"?` : ''}
+        confirmLabel="Deactivate"
+        pending={deactivatePending}
+        variant="warning"
+        onConfirm={handleConfirmDeactivate}
+        onCancel={() => {
+          if (!deactivatePending) setDeactivateTarget(null);
+        }}
+      />
     </div>
   );
 }

@@ -236,22 +236,27 @@ test.describe('Browser Tab Titles', () => {
     await loginAs(page, TEST_USERS.admin);
   });
 
+  // The title is set by usePageTitle after the SPA route mounts, which on a
+  // cold CI load can exceed the 5s expect default — give the title assertions
+  // a generous explicit timeout (same assertion, longer patience).
+  const TITLE_TIMEOUT = 15000;
+
   test('each routed page titles the browser tab from the shared route source', async ({ page }) => {
     // Layout sets `document.title` to "{page} · Werco ERP" via usePageTitle,
     // driven by the same getRouteTitle source as the top bar and breadcrumbs.
     await page.goto('/work-orders');
-    await expect(page).toHaveTitle('Work Orders · Werco ERP');
+    await expect(page).toHaveTitle('Work Orders · Werco ERP', { timeout: TITLE_TIMEOUT });
 
     await page.goto('/parts');
-    await expect(page).toHaveTitle('Parts · Werco ERP');
+    await expect(page).toHaveTitle('Parts · Werco ERP', { timeout: TITLE_TIMEOUT });
 
     await page.goto('/quotes');
-    await expect(page).toHaveTitle('Quotes · Werco ERP');
+    await expect(page).toHaveTitle('Quotes · Werco ERP', { timeout: TITLE_TIMEOUT });
   });
 
   test('the dashboard root titles the tab as Dashboard', async ({ page }) => {
     await page.goto('/');
-    await expect(page).toHaveTitle('Dashboard · Werco ERP');
+    await expect(page).toHaveTitle('Dashboard · Werco ERP', { timeout: TITLE_TIMEOUT });
   });
 
   test('a detail route resolves a real title, not the bare app name', async ({ page }) => {
@@ -266,7 +271,10 @@ test.describe('Browser Tab Titles', () => {
     );
 
     await firstRow.click();
-    await page.waitForURL(/\/work-orders\/\d+/, { timeout: 5000 });
-    await expect(page).toHaveTitle('Work Order · Werco ERP');
+    // No explicit timeout: a cold work-order detail load under CI exceeded the
+    // old hard 5000ms (flaked 3/3 retries on CI) — ride the suite's default
+    // navigation timeout instead.
+    await page.waitForURL(/\/work-orders\/\d+/);
+    await expect(page).toHaveTitle('Work Order · Werco ERP', { timeout: TITLE_TIMEOUT });
   });
 });

@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import api from '../services/api';
 import { Modal } from '../components/ui/Modal';
 import { LoadingButton } from '../components/ui/LoadingButton';
-import { EmptyState, ErrorState, FormField, useToast } from '../components/ui';
+import { ConfirmDialog, EmptyState, ErrorState, FormField, useToast } from '../components/ui';
 import useUnsavedChanges from '../hooks/useUnsavedChanges';
 import { Part, PartType } from '../types';
 import { isMaterialSupplyPartType } from '../utils/catalogGroups';
@@ -158,6 +158,13 @@ export default function BOMPage() {
   const [showAddItemModal, setShowAddItemModal] = useState(false);
   const [showNewPartModal, setShowNewPartModal] = useState(false);
   const [viewMode, setViewMode] = useState<'single' | 'exploded'>('single');
+  // Confirm targets + in-flight guards for the destructive/regression actions.
+  const [deleteItemTarget, setDeleteItemTarget] = useState<number | null>(null);
+  const [deleteItemPending, setDeleteItemPending] = useState(false);
+  const [deleteBOMTarget, setDeleteBOMTarget] = useState<number | null>(null);
+  const [deleteBOMPending, setDeleteBOMPending] = useState(false);
+  const [unreleaseConfirmOpen, setUnreleaseConfirmOpen] = useState(false);
+  const [unreleasePending, setUnreleasePending] = useState(false);
   const [partSearch, setPartSearch] = useState('');
   const [partTypeFilter, setPartTypeFilter] = useState('all');
 
@@ -544,11 +551,15 @@ export default function BOMPage() {
     }
   };
 
-  const handleDeleteItem = async (itemId: number) => {
-    if (!window.confirm('Delete this BOM item?')) return;
-    
+  const handleDeleteItem = (itemId: number) => {
+    setDeleteItemTarget(itemId);
+  };
+
+  const handleConfirmDeleteItem = async () => {
+    if (deleteItemTarget === null || deleteItemPending) return;
+    setDeleteItemPending(true);
     try {
-      await api.deleteBOMItem(itemId);
+      await api.deleteBOMItem(deleteItemTarget);
       if (selectedBOM) {
         const updated = await api.getBOM(selectedBOM.id);
         setSelectedBOM(updated);
@@ -556,20 +567,30 @@ export default function BOMPage() {
       }
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to delete item');
+    } finally {
+      setDeleteItemPending(false);
+      setDeleteItemTarget(null);
     }
   };
 
-  const handleDeleteBOM = async (bomId: number) => {
-    if (!window.confirm('Delete this BOM? This action cannot be undone.')) return;
-    
+  const handleDeleteBOM = (bomId: number) => {
+    setDeleteBOMTarget(bomId);
+  };
+
+  const handleConfirmDeleteBOM = async () => {
+    if (deleteBOMTarget === null || deleteBOMPending) return;
+    setDeleteBOMPending(true);
     try {
-      await api.deleteBOM(bomId);
-      setBoms(boms.filter(b => b.id !== bomId));
-      if (selectedBOM?.id === bomId) {
+      await api.deleteBOM(deleteBOMTarget);
+      setBoms(boms.filter(b => b.id !== deleteBOMTarget));
+      if (selectedBOM?.id === deleteBOMTarget) {
         setSelectedBOM(null);
       }
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to delete BOM');
+    } finally {
+      setDeleteBOMPending(false);
+      setDeleteBOMTarget(null);
     }
   };
 
@@ -585,9 +606,14 @@ export default function BOMPage() {
     }
   };
 
-  const handleUnreleaseBOM = async () => {
+  const handleUnreleaseBOM = () => {
     if (!selectedBOM) return;
-    if (!window.confirm('Unrelease this BOM? It will return to draft status and can be edited.')) return;
+    setUnreleaseConfirmOpen(true);
+  };
+
+  const handleConfirmUnreleaseBOM = async () => {
+    if (!selectedBOM || unreleasePending) return;
+    setUnreleasePending(true);
     try {
       await api.unreleaseBOM(selectedBOM.id);
       const updated = await api.getBOM(selectedBOM.id);
@@ -595,6 +621,9 @@ export default function BOMPage() {
       setBoms(boms.map(b => b.id === updated.id ? updated : b));
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to unrelease BOM');
+    } finally {
+      setUnreleasePending(false);
+      setUnreleaseConfirmOpen(false);
     }
   };
 
@@ -1700,6 +1729,48 @@ export default function BOMPage() {
               </div>
             </form>
       </Modal>
+
+      {/* Delete BOM item confirm */}
+      <ConfirmDialog
+        open={deleteItemTarget !== null}
+        title="Delete BOM Item"
+        message="Delete this BOM item?"
+        confirmLabel="Delete"
+        pending={deleteItemPending}
+        variant="danger"
+        onConfirm={handleConfirmDeleteItem}
+        onCancel={() => {
+          if (!deleteItemPending) setDeleteItemTarget(null);
+        }}
+      />
+
+      {/* Delete BOM confirm */}
+      <ConfirmDialog
+        open={deleteBOMTarget !== null}
+        title="Delete BOM"
+        message="Delete this BOM? This action cannot be undone."
+        confirmLabel="Delete"
+        pending={deleteBOMPending}
+        variant="danger"
+        onConfirm={handleConfirmDeleteBOM}
+        onCancel={() => {
+          if (!deleteBOMPending) setDeleteBOMTarget(null);
+        }}
+      />
+
+      {/* Unrelease BOM confirm (returns a released BOM to draft) */}
+      <ConfirmDialog
+        open={unreleaseConfirmOpen}
+        title="Unrelease BOM"
+        message="Unrelease this BOM? It will return to draft status and can be edited."
+        confirmLabel="Unrelease"
+        pending={unreleasePending}
+        variant="danger"
+        onConfirm={handleConfirmUnreleaseBOM}
+        onCancel={() => {
+          if (!unreleasePending) setUnreleaseConfirmOpen(false);
+        }}
+      />
     </div>
   );
 }

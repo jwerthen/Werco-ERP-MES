@@ -23,7 +23,7 @@ import {
   ResponsiveContainer,
 } from 'recharts';
 import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
-import { EmptyState, ErrorState, FormField, useToast } from '../components/ui';
+import { ConfirmDialog, EmptyState, ErrorState, FormField, useToast } from '../components/ui';
 import { getCentralTodayISODate } from '../utils/centralTime';
 
 // ── Types ────────────────────────────────────────────────────────
@@ -161,6 +161,8 @@ export default function JobCosting() {
   // Add entry modal
   const [showEntryModal, setShowEntryModal] = useState(false);
   const [entryJobCostId, setEntryJobCostId] = useState<number | null>(null);
+  const [deleteEntryTarget, setDeleteEntryTarget] = useState<{ jobCostId: number; entryId: number } | null>(null);
+  const [deleteEntryPending, setDeleteEntryPending] = useState(false);
   const [entryForm, setEntryForm] = useState({
     entry_type: 'material',
     description: '',
@@ -347,8 +349,14 @@ export default function JobCosting() {
 
   // ── Delete entry ───────────────────────────────────────────────
 
-  const handleDeleteEntry = async (jobCostId: number, entryId: number) => {
-    if (!window.confirm('Are you sure you want to delete this cost entry?')) return;
+  const handleDeleteEntry = (jobCostId: number, entryId: number) => {
+    setDeleteEntryTarget({ jobCostId, entryId });
+  };
+
+  const handleConfirmDeleteEntry = async () => {
+    if (!deleteEntryTarget || deleteEntryPending) return;
+    const { jobCostId, entryId } = deleteEntryTarget;
+    setDeleteEntryPending(true);
     try {
       await api.delete(`/job-costs/${jobCostId}/entries/${entryId}`);
       showToast('success', 'Cost entry deleted');
@@ -357,6 +365,9 @@ export default function JobCosting() {
       loadSummary();
     } catch (err: any) {
       showToast('error', err.message || 'Failed to delete entry');
+    } finally {
+      setDeleteEntryPending(false);
+      setDeleteEntryTarget(null);
     }
   };
 
@@ -1107,6 +1118,20 @@ export default function JobCosting() {
           />
         </div>
       )}
+
+      {/* Delete cost entry confirm */}
+      <ConfirmDialog
+        open={deleteEntryTarget !== null}
+        title="Delete Cost Entry"
+        message="Are you sure you want to delete this cost entry?"
+        confirmLabel="Delete"
+        pending={deleteEntryPending}
+        variant="danger"
+        onConfirm={handleConfirmDeleteEntry}
+        onCancel={() => {
+          if (!deleteEntryPending) setDeleteEntryTarget(null);
+        }}
+      />
     </div>
   );
 }
