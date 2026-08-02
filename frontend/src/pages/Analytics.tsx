@@ -25,7 +25,7 @@ import { formatCentralDate } from '../utils/centralTime';
 import { MiniStatStrip, CockpitPanel } from '../components/cockpit';
 import FlowAnalytics from '../components/analytics/FlowAnalytics';
 import { usePermissions } from '../hooks/usePermissions';
-import { Breadcrumbs } from '../components/ui';
+import { Breadcrumbs, ErrorState } from '../components/ui';
 import { getBreadcrumbParent, getRouteTitle } from '../utils/routeMeta';
 
 interface KPIValue {
@@ -626,12 +626,10 @@ export default function Analytics() {
         </nav>
       </div>
 
-      {error && (
-        <div className="bg-red-500/10 border border-red-500/30 rounded-sm p-2.5 flex items-center gap-2">
-          <ExclamationTriangleIcon className="h-4 w-4 text-red-600 flex-shrink-0" />
-          <span className="text-red-300 text-sm">{error}</span>
-        </div>
-      )}
+      {/* Load failure: shared ErrorState with a Retry that re-runs the fetch.
+          Kept in the banner slot (not a full-page swap) because the data below
+          may be stale-but-present — same degradation posture as Reports.tsx. */}
+      {error && <ErrorState message={error} onRetry={() => loadData(true)} />}
 
       {view === 'overview' && kpis && (
         <>

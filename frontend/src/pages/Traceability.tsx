@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import api from '../services/api';
+import { ErrorState } from '../components/ui';
 import { formatCentralDate, formatCentralDateTime } from '../utils/centralTime';
 import {
   MagnifyingGlassIcon,
@@ -152,12 +153,8 @@ export default function Traceability() {
         </div>
       </div>
 
-      {/* Error */}
-      {error && (
-        <div className="bg-fd-red/10 border border-fd-red/30 text-fd-red px-3 py-2 rounded-sm text-sm">
-          {error}
-        </div>
-      )}
+      {/* Error: shared ErrorState with a Retry that re-runs the search. */}
+      {error && <ErrorState message={error} onRetry={handleSearch} />}
 
       {/* Search Results */}
       {searchResults.length > 1 && !lotTrace && (

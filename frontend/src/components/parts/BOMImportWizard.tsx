@@ -1,10 +1,11 @@
 import React, { useState } from 'react';
-import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import api from '../../services/api';
 import { ImportPreview, ImportItem, ImportAssembly } from '../../types/engineering';
+import { Modal } from '../ui/Modal';
 import { useToast } from '../ui/Toast';
 import { FormField } from '../ui/FormField';
+import useUnsavedChanges from '../../hooks/useUnsavedChanges';
 import { ArrowUturnLeftIcon, TrashIcon, XMarkIcon } from '@heroicons/react/24/outline';
 
 interface Props {
@@ -174,27 +175,23 @@ export function BOMImportWizard({ onComplete, onClose }: Props) {
 
   const displayItems = derivedItems;
 
+  // Unsaved-progress guard: a chosen file or a parsed/edited preview (column
+  // remapping, line edits/removals) is real work — every close path (Cancel,
+  // header X, Escape, backdrop) prompts before discarding it, and beforeunload
+  // is covered while dirty. A successful commit closes through the host's
+  // onComplete, never through requestClose, so finishing never prompts.
+  const isDirty = file !== null || step === 'preview';
+  const { confirmDiscard } = useUnsavedChanges(isDirty);
+  const requestClose = () => {
+    if (!confirmDiscard()) return;
+    onClose();
+  };
+
   // ── Render ───────────────────────────────────────────────────────────
 
-  // Portal to <body> so the overlay is a sibling of the app layout root rather
-  // than nested under <main>. Inline-rendered modals tie the sidebar's z-50
-  // (both fixed), letting the opaque sidebar paint over the backdrop and clip
-  // the modal's left edge. z-[60] matches the other BOM/parts modals that sit
-  // above the sidebar.
-  const overlay = (
-    // The backdrop is purely presentational — keyboard users dismiss via the
-    // in-panel close button (the X / Cancel controls). Restricting the close to
-    // clicks that land directly on the backdrop (target === currentTarget)
-    // replaces the panel-level stopPropagation handler.
-    <div
-      className="fixed inset-0 bg-black/50 flex items-center justify-center z-[60]"
-      role="presentation"
-      onClick={e => { if (e.target === e.currentTarget) onClose(); }}
-    >
-      <div
-        className="bg-fd-panel rounded-xl shadow-xl mx-4 animate-scale-in flex flex-col"
-        style={{ maxWidth: step === 'preview' ? '72rem' : '32rem', maxHeight: '90vh', width: '100%' }}
-      >
+  return (
+    <Modal open onClose={requestClose} size={step === 'preview' ? '6xl' : 'lg'} padded={false} scroll={false}>
+      <div className="flex flex-col max-h-[90vh]">
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b">
           <div>
@@ -208,7 +205,7 @@ export function BOMImportWizard({ onComplete, onClose }: Props) {
               </p>
             )}
           </div>
-          <button onClick={onClose} className="text-slate-400 hover:text-slate-200">
+          <button onClick={requestClose} className="text-slate-400 hover:text-slate-200" aria-label="Close">
             <XMarkIcon className="h-5 w-5" />
           </button>
         </div>
@@ -442,7 +439,7 @@ export function BOMImportWizard({ onComplete, onClose }: Props) {
         <div className="flex justify-end gap-3 px-6 py-4 border-t bg-slate-800 rounded-b-xl">
           {step === 'upload' && (
             <>
-              <button type="button" onClick={onClose} className="btn-secondary">Cancel</button>
+              <button type="button" onClick={requestClose} className="btn-secondary">Cancel</button>
               <button type="submit" form="upload-form" className="btn-primary" disabled={loading || !file}>
                 {loading ? 'Analyzing...' : 'Preview'}
               </button>
@@ -458,8 +455,6 @@ export function BOMImportWizard({ onComplete, onClose }: Props) {
           )}
         </div>
       </div>
-    </div>
+    </Modal>
   );
-
-  return typeof document !== 'undefined' && document.body ? createPortal(overlay, document.body) : overlay;
 }

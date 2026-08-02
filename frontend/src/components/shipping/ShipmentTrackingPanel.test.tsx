@@ -60,4 +60,45 @@ describe('ShipmentTrackingPanel', () => {
 
     await waitFor(() => expect(screen.getByText(/no tracking events yet/i)).toBeInTheDocument());
   });
+
+  // The panel colors through the CENTRAL statusColors map (utils/statusColors),
+  // not a local style table — this also fixed the delivered-fill drift
+  // (bg-emerald-500/20 locally vs the canonical bg-green-500/20).
+  describe('status badge uses the central statusColors classes', () => {
+    const cases: Array<[string, string[]]> = [
+      ['delivered', ['bg-green-500/20', 'text-emerald-300']],
+      ['in_transit', ['bg-blue-500/20', 'text-blue-300']],
+      ['available_for_pickup', ['bg-amber-500/20', 'text-amber-300']],
+      ['return_to_sender', ['bg-red-500/20', 'text-red-300']],
+      ['failure', ['bg-red-500/20', 'text-red-300']],
+    ];
+
+    it.each(cases)('%s renders the canonical classes', async (status, classes) => {
+      mockApi.getTracking.mockResolvedValueOnce({
+        shipment_id: 42,
+        shipment_number: 'SHP-1',
+        tracking_status: status,
+        events: [],
+      });
+
+      renderPanel();
+
+      const badge = await screen.findByText(status.replace(/_/g, ' '));
+      expect(badge).toHaveClass(...classes);
+    });
+
+    it('falls back to neutral slate for an unknown status', async () => {
+      mockApi.getTracking.mockResolvedValueOnce({
+        shipment_id: 42,
+        shipment_number: 'SHP-1',
+        tracking_status: 'some_new_carrier_state',
+        events: [],
+      });
+
+      renderPanel();
+
+      const badge = await screen.findByText('some new carrier state');
+      expect(badge).toHaveClass('bg-slate-800/50', 'text-slate-400');
+    });
+  });
 });

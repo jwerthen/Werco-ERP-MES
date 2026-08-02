@@ -4,6 +4,7 @@ import { useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { hasPermission } from '../utils/permissions';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
+import useUnsavedChanges from '../hooks/useUnsavedChanges';
 import { formatCentralDate } from '../utils/centralTime';
 import { Modal } from '../components/ui/Modal';
 import {
@@ -86,6 +87,45 @@ interface DocumentType {
 
 type TabType = 'orders' | 'vendors';
 
+// Blank form states for the create modals. Module-level constants so the
+// unsaved-changes dirty checks can compare against the pristine shape.
+const BLANK_PO = {
+  vendor_id: 0,
+  required_date: '',
+  notes: '',
+  lines: [] as Array<{ part_id: number; quantity_ordered: number; unit_price: number }>,
+};
+
+const BLANK_VENDOR = {
+  code: '',
+  name: '',
+  contact_name: '',
+  email: '',
+  phone: '',
+  is_approved: false,
+  payment_terms: '',
+};
+
+const BLANK_EDIT_VENDOR = {
+  code: '',
+  name: '',
+  contact_name: '',
+  email: '',
+  phone: '',
+  address_line1: '',
+  address_line2: '',
+  city: '',
+  state: '',
+  postal_code: '',
+  country: 'US',
+  payment_terms: '',
+  is_approved: false,
+  is_as9100_certified: false,
+  is_iso9001_certified: false,
+  is_active: true,
+  notes: '',
+};
+
 export default function Purchasing() {
   const { showToast } = useToast();
   const { user } = useAuth();
@@ -132,42 +172,46 @@ export default function Purchasing() {
   const [sendPOTarget, setSendPOTarget] = useState<PurchaseOrder | null>(null);
   const [sendPOPending, setSendPOPending] = useState(false);
 
-  const [newPO, setNewPO] = useState({
-    vendor_id: 0,
-    required_date: '',
-    notes: '',
-    lines: [] as Array<{ part_id: number; quantity_ordered: number; unit_price: number }>
-  });
+  const [newPO, setNewPO] = useState(BLANK_PO);
 
-  const [newVendor, setNewVendor] = useState({
-    code: '',
-    name: '',
-    contact_name: '',
-    email: '',
-    phone: '',
-    is_approved: false,
-    payment_terms: ''
-  });
+  const [newVendor, setNewVendor] = useState(BLANK_VENDOR);
 
-  const [editVendorForm, setEditVendorForm] = useState({
-    code: '',
-    name: '',
-    contact_name: '',
-    email: '',
-    phone: '',
-    address_line1: '',
-    address_line2: '',
-    city: '',
-    state: '',
-    postal_code: '',
-    country: 'US',
-    payment_terms: '',
-    is_approved: false,
-    is_as9100_certified: false,
-    is_iso9001_certified: false,
-    is_active: true,
-    notes: ''
-  });
+  const [editVendorForm, setEditVendorForm] = useState(BLANK_EDIT_VENDOR);
+  // Snapshot captured when the edit-vendor modal opens; the dirty check
+  // compares against it (Materials.tsx idiom).
+  const [initialEditVendorForm, setInitialEditVendorForm] = useState(BLANK_EDIT_VENDOR);
+
+  // Unsaved-changes guards: every Cancel/Close/backdrop path of the three form
+  // modals is gated with confirmDiscard() so in-progress edits aren't silently
+  // dropped; beforeunload is covered while dirty. The create modals reset to
+  // their blank shape on every (confirmed) close, so their snapshot is the
+  // blank constant itself.
+  const isPODirty = showPOModal && JSON.stringify(newPO) !== JSON.stringify(BLANK_PO);
+  const isVendorDirty = showVendorModal && JSON.stringify(newVendor) !== JSON.stringify(BLANK_VENDOR);
+  const isEditVendorDirty =
+    showEditVendorModal && JSON.stringify(editVendorForm) !== JSON.stringify(initialEditVendorForm);
+  const { confirmDiscard: confirmDiscardPO } = useUnsavedChanges(isPODirty);
+  const { confirmDiscard: confirmDiscardVendor } = useUnsavedChanges(isVendorDirty);
+  const { confirmDiscard: confirmDiscardEditVendor } = useUnsavedChanges(isEditVendorDirty);
+
+  // Cancel/Close gates. The successful submit paths close their modal directly
+  // (never through these), so saving never prompts.
+  const requestClosePOModal = () => {
+    if (!confirmDiscardPO()) return;
+    setShowPOModal(false);
+    setNewPO(BLANK_PO);
+  };
+
+  const requestCloseVendorModal = () => {
+    if (!confirmDiscardVendor()) return;
+    setShowVendorModal(false);
+    setNewVendor(BLANK_VENDOR);
+  };
+
+  const requestCloseEditVendorModal = () => {
+    if (!confirmDiscardEditVendor()) return;
+    setShowEditVendorModal(false);
+  };
 
   const [newPart, setNewPart] = useState({
     part_number: '',
@@ -251,7 +295,7 @@ export default function Purchasing() {
 
   const openEditVendorModal = (vendor: Vendor) => {
     setSelectedVendor(vendor);
-    setEditVendorForm({
+    const nextForm = {
       code: vendor.code || '',
       name: vendor.name || '',
       contact_name: vendor.contact_name || '',
@@ -269,7 +313,9 @@ export default function Purchasing() {
       is_iso9001_certified: vendor.is_iso9001_certified,
       is_active: vendor.is_active ?? true,
       notes: vendor.notes || ''
-    });
+    };
+    setEditVendorForm(nextForm);
+    setInitialEditVendorForm(nextForm);
     setVendorDocForm({
       title: '',
       document_type: 'certificate',
@@ -418,7 +464,7 @@ export default function Purchasing() {
         required_date: newPO.required_date || undefined,
       });
       setShowPOModal(false);
-      setNewPO({ vendor_id: 0, required_date: '', notes: '', lines: [] });
+      setNewPO(BLANK_PO);
       showToast('success', 'Purchase order created');
       loadData();
     } catch (err: any) {
@@ -487,7 +533,7 @@ export default function Purchasing() {
     try {
       await api.createVendor(newVendor);
       setShowVendorModal(false);
-      setNewVendor({ code: '', name: '', contact_name: '', email: '', phone: '', is_approved: false, payment_terms: '' });
+      setNewVendor(BLANK_VENDOR);
       showToast('success', 'Vendor created');
       loadData();
     } catch (err: any) {
@@ -892,7 +938,7 @@ export default function Purchasing() {
       )}
 
       {/* Create PO Modal */}
-      <Modal open={showPOModal} onClose={() => setShowPOModal(false)} size="2xl" closeOnBackdrop={false}>
+      <Modal open={showPOModal} onClose={requestClosePOModal} size="2xl" closeOnBackdrop={false}>
             <h3 className="text-lg font-semibold mb-4">Create Purchase Order</h3>
             <form onSubmit={handleCreatePO} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
@@ -1008,14 +1054,14 @@ export default function Purchasing() {
               </FormField>
 
               <div className="flex justify-end gap-3 pt-4 border-t">
-                <Button variant="secondary" onClick={() => setShowPOModal(false)}>Cancel</Button>
+                <Button variant="secondary" onClick={requestClosePOModal}>Cancel</Button>
                 <Button type="submit">Create PO</Button>
               </div>
             </form>
       </Modal>
 
       {/* Create Vendor Modal */}
-      <Modal open={showVendorModal} onClose={() => setShowVendorModal(false)} size="md" closeOnBackdrop={false}>
+      <Modal open={showVendorModal} onClose={requestCloseVendorModal} size="md" closeOnBackdrop={false}>
             <h3 className="text-lg font-semibold mb-4">Create Vendor</h3>
             <form onSubmit={handleCreateVendor} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
@@ -1105,7 +1151,7 @@ export default function Purchasing() {
                 </label>
               </div>
               <div className="flex justify-end gap-3 pt-4 border-t">
-                <Button variant="secondary" onClick={() => setShowVendorModal(false)}>Cancel</Button>
+                <Button variant="secondary" onClick={requestCloseVendorModal}>Cancel</Button>
                 <Button type="submit">Create Vendor</Button>
               </div>
             </form>
@@ -1114,7 +1160,7 @@ export default function Purchasing() {
       {/* Edit Vendor Modal */}
       <Modal
         open={showEditVendorModal && !!selectedVendor}
-        onClose={() => setShowEditVendorModal(false)}
+        onClose={requestCloseEditVendorModal}
         size="5xl"
         closeOnBackdrop={false}
       >
@@ -1125,7 +1171,11 @@ export default function Purchasing() {
                 <h3 className="text-lg font-semibold">Edit Vendor</h3>
                 <p className="text-sm text-slate-400">{selectedVendor.code}</p>
               </div>
-              <button onClick={() => setShowEditVendorModal(false)} className="text-slate-400 hover:text-slate-300">
+              <button
+                onClick={requestCloseEditVendorModal}
+                className="text-slate-400 hover:text-slate-300"
+                aria-label="Close"
+              >
                 <span className="text-xl">×</span>
               </button>
             </div>
@@ -1340,7 +1390,7 @@ export default function Purchasing() {
               </FormField>
 
               <div className="flex justify-end gap-3 pt-4 border-t">
-                <Button variant="secondary" onClick={() => setShowEditVendorModal(false)}>
+                <Button variant="secondary" onClick={requestCloseEditVendorModal}>
                   Cancel
                 </Button>
                 <Button type="submit">Save Vendor</Button>

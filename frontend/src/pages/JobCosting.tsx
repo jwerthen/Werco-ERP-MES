@@ -23,7 +23,15 @@ import {
   ResponsiveContainer,
 } from 'recharts';
 import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
-import { ConfirmDialog, EmptyState, ErrorState, FormField, useToast } from '../components/ui';
+import {
+  ConfirmDialog,
+  EmptyState,
+  ErrorState,
+  FormField,
+  SkeletonTableRow,
+  StatusBadge,
+  useToast,
+} from '../components/ui';
 import { getCentralTodayISODate } from '../utils/centralTime';
 
 // ── Types ────────────────────────────────────────────────────────
@@ -100,18 +108,6 @@ const varianceColor = (v: number) =>
 
 const varianceBg = (v: number) =>
   v > 0 ? 'bg-red-500/10' : v < 0 ? 'bg-green-500/10' : 'bg-slate-800';
-
-const statusBadge: Record<string, string> = {
-  in_progress: 'du-badge du-badge-warning du-badge-sm',
-  completed: 'du-badge du-badge-success du-badge-sm',
-  reviewed: 'du-badge du-badge-info du-badge-sm',
-};
-
-const statusLabel: Record<string, string> = {
-  in_progress: 'In Progress',
-  completed: 'Completed',
-  reviewed: 'Reviewed',
-};
 
 const entryTypeLabel: Record<string, string> = {
   material: 'Material',
@@ -532,11 +528,10 @@ export default function JobCosting() {
           </thead>
           <tbody>
             {loading ? (
-              <tr>
-                <td colSpan={10} className="text-center py-8 text-slate-400">
-                  Loading...
-                </td>
-              </tr>
+              // Skeleton rows spanning every column instead of a bare "Loading..." cell.
+              Array.from({ length: 5 }).map((_, i) => (
+                <SkeletonTableRow key={i} columns={10} />
+              ))
             ) : loadError ? (
               <tr>
                 <td colSpan={10} className="p-0">
@@ -600,9 +595,9 @@ export default function JobCosting() {
                       {jc.revenue > 0 ? `${jc.margin_percent.toFixed(1)}%` : '-'}
                     </td>
                     <td>
-                      <span className={statusBadge[jc.status] || 'du-badge du-badge-ghost du-badge-sm'}>
-                        {statusLabel[jc.status] || jc.status}
-                      </span>
+                      {/* Central statusColors map: in_progress→blue, completed→green,
+                          reviewed→blue (the du-badge-info look it had before). */}
+                      <StatusBadge status={jc.status} />
                     </td>
                     <td aria-label="Job cost actions" onClick={(e) => e.stopPropagation()}>
                       <div className="flex gap-1">

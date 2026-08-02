@@ -13,6 +13,7 @@ import {
 } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { formatCentralDate, getCentralTodayISODate } from '../utils/centralTime';
+import useUnsavedChanges from '../hooks/useUnsavedChanges';
 import {
   PlusIcon,
   WrenchIcon,
@@ -56,6 +57,27 @@ const equipmentTypes = [
   'Other'
 ];
 
+// Blank equipment form. Module-level constant so resetForm and the
+// unsaved-changes dirty check share one pristine shape.
+const BLANK_EQUIPMENT_FORM = {
+  equipment_id: '',
+  name: '',
+  description: '',
+  equipment_type: '',
+  manufacturer: '',
+  model: '',
+  serial_number: '',
+  location: '',
+  assigned_to: '',
+  calibration_interval_days: 365,
+  calibration_provider: '',
+  range_min: '',
+  range_max: '',
+  accuracy: '',
+  resolution: '',
+  notes: ''
+};
+
 export default function Calibration() {
   const { showToast } = useToast();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -73,24 +95,10 @@ export default function Calibration() {
     return '';
   });
 
-  const [formData, setFormData] = useState({
-    equipment_id: '',
-    name: '',
-    description: '',
-    equipment_type: '',
-    manufacturer: '',
-    model: '',
-    serial_number: '',
-    location: '',
-    assigned_to: '',
-    calibration_interval_days: 365,
-    calibration_provider: '',
-    range_min: '',
-    range_max: '',
-    accuracy: '',
-    resolution: '',
-    notes: ''
-  });
+  const [formData, setFormData] = useState(BLANK_EQUIPMENT_FORM);
+  // Snapshot captured when the equipment modal opens (blank for create, the
+  // row's values for edit); the dirty check compares against it.
+  const [initialFormData, setInitialFormData] = useState(BLANK_EQUIPMENT_FORM);
 
   const [calibrationData, setCalibrationData] = useState({
     calibration_date: getCentralTodayISODate(),
@@ -103,6 +111,19 @@ export default function Calibration() {
     cost: 0,
     notes: ''
   });
+  // Snapshot of calibrationData as populated when the record modal opened.
+  const [initialCalibrationData, setInitialCalibrationData] = useState<typeof calibrationData | null>(null);
+
+  // Unsaved-changes guards: every Cancel/Close/backdrop path of the two form
+  // modals is gated with confirmDiscard() so in-progress entries aren't
+  // silently dropped; beforeunload is covered while dirty.
+  const isEquipmentDirty = showModal && JSON.stringify(formData) !== JSON.stringify(initialFormData);
+  const isCalibrationDirty =
+    showCalibrationModal &&
+    initialCalibrationData !== null &&
+    JSON.stringify(calibrationData) !== JSON.stringify(initialCalibrationData);
+  const { confirmDiscard: confirmDiscardEquipment } = useUnsavedChanges(isEquipmentDirty);
+  const { confirmDiscard: confirmDiscardCalibration } = useUnsavedChanges(isCalibrationDirty);
 
   const loadEquipment = useCallback(async () => {
     setLoading(true);
@@ -156,7 +177,7 @@ export default function Calibration() {
 
   const openCalibrationModal = (eq: Equipment) => {
     setSelectedEquipmentId(eq.id);
-    setCalibrationData({
+    const nextData = {
       calibration_date: getCentralTodayISODate(),
       performed_by: '',
       calibration_provider: eq.calibration_provider || '',
@@ -166,13 +187,15 @@ export default function Calibration() {
       as_left: '',
       cost: 0,
       notes: ''
-    });
+    };
+    setCalibrationData(nextData);
+    setInitialCalibrationData(nextData);
     setShowCalibrationModal(true);
   };
 
   const handleEdit = (eq: Equipment) => {
     setEditingEquipment(eq);
-    setFormData({
+    const nextForm = {
       equipment_id: eq.equipment_id,
       name: eq.name,
       description: eq.description || '',
@@ -189,30 +212,29 @@ export default function Calibration() {
       accuracy: '',
       resolution: '',
       notes: ''
-    });
+    };
+    setFormData(nextForm);
+    setInitialFormData(nextForm);
     setShowModal(true);
   };
 
   const resetForm = () => {
     setEditingEquipment(null);
-    setFormData({
-      equipment_id: '',
-      name: '',
-      description: '',
-      equipment_type: '',
-      manufacturer: '',
-      model: '',
-      serial_number: '',
-      location: '',
-      assigned_to: '',
-      calibration_interval_days: 365,
-      calibration_provider: '',
-      range_min: '',
-      range_max: '',
-      accuracy: '',
-      resolution: '',
-      notes: ''
-    });
+    setFormData(BLANK_EQUIPMENT_FORM);
+    setInitialFormData(BLANK_EQUIPMENT_FORM);
+  };
+
+  // Cancel/Close gates: prompt before discarding unsaved edits. The successful
+  // submit paths close their modal directly (never these), so saving never prompts.
+  const requestCloseEquipmentModal = () => {
+    if (!confirmDiscardEquipment()) return;
+    setShowModal(false);
+    resetForm();
+  };
+
+  const requestCloseCalibrationModal = () => {
+    if (!confirmDiscardCalibration()) return;
+    setShowCalibrationModal(false);
   };
 
   // Summary stats
@@ -513,7 +535,7 @@ export default function Calibration() {
       />
 
       {/* Add/Edit Equipment Modal */}
-      <Modal open={showModal} onClose={() => { setShowModal(false); resetForm(); }} size="2xl" closeOnBackdrop={false}>
+      <Modal open={showModal} onClose={requestCloseEquipmentModal} size="2xl" closeOnBackdrop={false}>
             <h3 className="text-lg font-semibold mb-4">
               {editingEquipment ? 'Edit Equipment' : 'Add Equipment'}
             </h3>
@@ -642,7 +664,7 @@ export default function Calibration() {
               </div>
 
               <div className="flex justify-end gap-3 mt-6 pt-4 border-t">
-                <Button type="button" variant="secondary" onClick={() => { setShowModal(false); resetForm(); }}>
+                <Button type="button" variant="secondary" onClick={requestCloseEquipmentModal}>
                   Cancel
                 </Button>
                 <Button type="submit">
@@ -653,7 +675,7 @@ export default function Calibration() {
       </Modal>
 
       {/* Record Calibration Modal */}
-      <Modal open={showCalibrationModal} onClose={() => setShowCalibrationModal(false)} size="lg" closeOnBackdrop={false}>
+      <Modal open={showCalibrationModal} onClose={requestCloseCalibrationModal} size="lg" closeOnBackdrop={false}>
             <h3 className="text-lg font-semibold mb-4">Record Calibration</h3>
             <form onSubmit={handleCalibration} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
@@ -777,7 +799,7 @@ export default function Calibration() {
               </FormField>
 
               <div className="flex justify-end gap-3 mt-6 pt-4 border-t">
-                <Button type="button" variant="secondary" onClick={() => setShowCalibrationModal(false)}>
+                <Button type="button" variant="secondary" onClick={requestCloseCalibrationModal}>
                   Cancel
                 </Button>
                 <Button type="submit">Record Calibration</Button>
