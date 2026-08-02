@@ -77,7 +77,9 @@ export function ConfirmDialog({
         </div>
         <div className="flex-1">
           <h3 className="text-lg font-semibold text-white">{title}</h3>
-          <p className="text-sm text-slate-300 mt-1">{message}</p>
+          {/* pre-line: messages migrated from window.confirm carry intentional
+              paragraph breaks (\n\n) that a plain <p> would collapse. */}
+          <p className="text-sm text-slate-300 mt-1 whitespace-pre-line">{message}</p>
         </div>
       </div>
       <div className="flex justify-end gap-3 mt-6">
