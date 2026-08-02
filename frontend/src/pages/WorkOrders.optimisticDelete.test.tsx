@@ -231,4 +231,45 @@ describe('WorkOrders optimistic delete (Batch 10)', () => {
     // The row was never confirmed-removed by a refetch either.
     expect(mockedApi.getWorkOrders).toHaveBeenCalledTimes(1);
   });
+
+  it('stale-target guard: confirming after a background refresh removed the row skips the API and never inserts a phantom row', async () => {
+    // Unlike window.confirm, the dialog doesn't block the event loop — the
+    // 30s poll / websocket / focus refetch keep running underneath it. If
+    // another session deletes the WO while our dialog is open, confirm must
+    // NOT fire the API: the refusal would make the optimistic rollback
+    // re-insert a phantom row.
+    mockedApi.getWorkOrders
+      .mockResolvedValueOnce([firstWorkOrder, secondWorkOrder]) // mount load
+      .mockResolvedValue([secondWorkOrder]); // background refresh: WO-1001 gone
+
+    renderWorkOrders();
+    const table = await getDesktopTable();
+    expect(tableRowOrder(table)).toEqual(['WO-1001', 'WO-1002']);
+
+    // Open the delete dialog for WO-1001…
+    const confirmButton = await openDeleteDialog(table, 0);
+
+    // …then a background refresh (focus refetch) replaces the list WITHOUT
+    // the target while the dialog is still open.
+    await act(async () => {
+      fireEvent(window, new Event('focus'));
+    });
+    await waitFor(() =>
+      expect(within(table).queryByRole('link', { name: 'WO-1001' })).not.toBeInTheDocument()
+    );
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+
+    // Confirming the now-stale dialog: no API call, no optimistic run.
+    fireEvent.click(confirmButton);
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(mockedApi.deleteWorkOrder).not.toHaveBeenCalled();
+
+    // A neutral info toast explains the no-op (role="status", not an alert).
+    const infoToast = await screen.findByText('Work order was already removed');
+    expect(infoToast.closest('[role="status"]')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+
+    // And no phantom row was appended — the list reflects the server, only.
+    expect(tableRowOrder(table)).toEqual(['WO-1002']);
+  });
 });

@@ -437,12 +437,22 @@ export default function WorkOrders() {
     // Capture the row's current position; run(ctx) closes over it so the rollback
     // (on the rare server refusal) restores THIS row at its original index.
     const index = workOrdersRef.current.findIndex((w) => w.id === wo.id);
+    // Stale-target guard: unlike window.confirm, the dialog doesn't block the
+    // event loop, and the list background-refreshes (30s poll / WS / focus)
+    // while it is open. If the target row is already gone — deleted by another
+    // session — confirming must NOT fire the API: the server would refuse and
+    // the optimistic rollback would re-insert a phantom row.
+    if (index === -1) {
+      setDeleteTarget(null);
+      showToast('info', 'Work order was already removed');
+      return;
+    }
     try {
-      await runDelete({ wo, index: index === -1 ? workOrdersRef.current.length : index });
+      await runDelete({ wo, index });
     } finally {
       setDeleteTarget(null);
     }
-  }, [deleteTarget, deletePending, runDelete]);
+  }, [deleteTarget, deletePending, runDelete, showToast]);
 
   // Standalone nest import: the wizard created a fresh released laser WO (no
   // parent, no part) — route to it, mirroring WorkOrderDetail's handler.

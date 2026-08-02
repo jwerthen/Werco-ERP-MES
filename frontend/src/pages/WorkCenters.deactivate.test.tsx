@@ -101,9 +101,11 @@ describe('WorkCenters deactivate / reactivate controls', () => {
   });
 
   it('surfaces a 409 refusal verbatim in an error toast and leaves the row active (no reload, no local flip)', async () => {
+    // The exact production template from work_centers.py::_live_work_refusal,
+    // so the verbatim pass-through this test asserts reads true.
     const refusal =
-      'Cannot deactivate LASER-01: 3 queued and 1 running operation are assigned to it. ' +
-      'Reassign or complete the live work, then deactivate.';
+      'Cannot deactivate LASER-01: 4 operations still have live work here (3 ready, 1 in progress). ' +
+      'Move them to another machine (Dispatch Board -> Move to machine) or complete them first.';
     mockedApi.updateWorkCenter.mockRejectedValue({
       response: { status: 409, data: { detail: refusal } },
     });
