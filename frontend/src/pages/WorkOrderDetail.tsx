@@ -25,7 +25,7 @@ import { Breadcrumbs } from '../components/ui/Breadcrumbs';
 import { getBreadcrumbParent } from '../utils/routeMeta';
 import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
 import { ContextualAIStrip } from '../components/ai';
-import { EmptyState, ErrorState, useToast, statusColor, Button, InputDialog, Modal } from '../components/ui';
+import { ConfirmDialog, EmptyState, ErrorState, useToast, statusColor, Button, InputDialog, Modal } from '../components/ui';
 import { formatCentralDate, formatCentralDateTime, getCentralDateStamp } from '../utils/centralTime';
 import { sortWorkCentersForLaserDispatch } from '../utils/laserWorkCenters';
 import {
@@ -286,6 +286,8 @@ export default function WorkOrderDetail() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [deleting, setDeleting] = useState(false);
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [deleteNestTarget, setDeleteNestTarget] = useState<LaserNestInfo | null>(null);
   const [completing, setCompleting] = useState(false);
   const [completingOpId, setCompletingOpId] = useState<number | null>(null);
   // Which operation's read-only "Process steps" evidence panel is expanded
@@ -680,14 +682,13 @@ export default function WorkOrderDetail() {
     }
   };
 
-  const handleDelete = async () => {
-    if (!workOrder) return;
-    const isCurrent = CURRENT_WORK_ORDER_STATUSES.includes(workOrder.status);
-    const message = isCurrent
-      ? `Delete current work order ${workOrder.work_order_number}?\n\nThis removes it from active lists, scheduling, and shop floor queues while preserving the record for audit/restore.`
-      : `Delete work order ${workOrder.work_order_number}?\n\nThis removes it from active lists while preserving the record for audit/restore.`;
-    if (!window.confirm(message)) return;
+  const handleDelete = () => {
+    if (!workOrder || deleting) return;
+    setDeleteConfirmOpen(true);
+  };
 
+  const handleConfirmDelete = async () => {
+    if (!workOrder || deleting) return;
     setDeleting(true);
     try {
       await api.deleteWorkOrder(workOrder.id);
@@ -695,6 +696,7 @@ export default function WorkOrderDetail() {
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to delete work order');
       setDeleting(false);
+      setDeleteConfirmOpen(false);
     }
   };
 
@@ -1033,10 +1035,14 @@ export default function WorkOrderDetail() {
     await loadWorkOrder();
   };
 
-  const handleDeleteNest = async (nest: LaserNestInfo) => {
-    if (!window.confirm(`Delete laser nest ${nest.cnc_number || nest.nest_name}? This puts its operation on hold.`)) {
-      return;
-    }
+  const handleDeleteNest = (nest: LaserNestInfo) => {
+    if (nestActionId !== null) return;
+    setDeleteNestTarget(nest);
+  };
+
+  const handleConfirmDeleteNest = async () => {
+    const nest = deleteNestTarget;
+    if (!nest || nestActionId !== null) return;
     setNestActionId(nest.id);
     setNestActionError('');
     try {
@@ -1047,6 +1053,7 @@ export default function WorkOrderDetail() {
       setNestActionError(err?.response?.data?.detail || 'Failed to delete laser nest');
     } finally {
       setNestActionId(null);
+      setDeleteNestTarget(null);
     }
   };
 
@@ -2476,6 +2483,42 @@ export default function WorkOrderDetail() {
         onSubmit={handleResolveBlocker}
         onCancel={() => {
           if (resolvingBlockerId === null) setResolveBlockerTarget(null);
+        }}
+      />
+
+      {/* Delete work order confirm (soft delete — server may refuse) */}
+      <ConfirmDialog
+        open={deleteConfirmOpen}
+        title="Delete Work Order"
+        message={
+          CURRENT_WORK_ORDER_STATUSES.includes(workOrder.status)
+            ? `Delete current work order ${workOrder.work_order_number}?\n\nThis removes it from active lists, scheduling, and shop floor queues while preserving the record for audit/restore.`
+            : `Delete work order ${workOrder.work_order_number}?\n\nThis removes it from active lists while preserving the record for audit/restore.`
+        }
+        confirmLabel="Delete"
+        pending={deleting}
+        variant="danger"
+        onConfirm={handleConfirmDelete}
+        onCancel={() => {
+          if (!deleting) setDeleteConfirmOpen(false);
+        }}
+      />
+
+      {/* Delete laser nest confirm */}
+      <ConfirmDialog
+        open={deleteNestTarget !== null}
+        title="Delete Laser Nest"
+        message={
+          deleteNestTarget
+            ? `Delete laser nest ${deleteNestTarget.cnc_number || deleteNestTarget.nest_name}? This puts its operation on hold.`
+            : ''
+        }
+        confirmLabel="Delete"
+        pending={deleteNestTarget !== null && nestActionId === deleteNestTarget.id}
+        variant="danger"
+        onConfirm={handleConfirmDeleteNest}
+        onCancel={() => {
+          if (nestActionId === null) setDeleteNestTarget(null);
         }}
       />
     </div>

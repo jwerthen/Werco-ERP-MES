@@ -154,15 +154,17 @@ describe('WorkOrders async-state (Batch 3)', () => {
     mockedApi.deleteWorkOrder.mockRejectedValueOnce({
       response: { data: { detail: 'Cannot delete a released work order' } },
     });
-    jest.spyOn(window, 'confirm').mockReturnValue(true);
 
     renderWorkOrdersWithToasts();
 
-    // Wait for the row, then click its desktop-table Delete control.
+    // Wait for the row, then click its desktop-table Delete control and
+    // confirm through the shared ConfirmDialog.
     const woLinks = await screen.findAllByRole('link', { name: 'WO-1001' });
     const table = woLinks.find((el) => el.closest('table'))?.closest('table') as HTMLElement;
     const deleteButton = within(table).getByTitle('Delete');
     fireEvent.click(deleteButton);
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
 
     await waitFor(() => {
       expect(mockedApi.deleteWorkOrder).toHaveBeenCalledWith(1);

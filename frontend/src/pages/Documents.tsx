@@ -4,6 +4,7 @@ import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import { Modal } from '../components/ui/Modal';
 import { FormField } from '../components/ui/FormField';
 import {
+  ConfirmDialog,
   useToast,
   DataTable,
   DataTableColumn,
@@ -79,6 +80,8 @@ export default function Documents() {
   const debouncedSearch = useDebouncedValue(search, 250);
   const [filterType, setFilterType] = useState('');
   const [showUploadModal, setShowUploadModal] = useState(false);
+  const [deleteDocTarget, setDeleteDocTarget] = useState<number | null>(null);
+  const [deleteDocPending, setDeleteDocPending] = useState(false);
 
   const [uploadForm, setUploadForm] = useState({
     title: '',
@@ -157,16 +160,24 @@ export default function Documents() {
     }
   }, [showToast]);
 
-  const handleDelete = useCallback(async (docId: number) => {
-    if (!window.confirm('Delete this document?')) return;
+  const handleDelete = useCallback((docId: number) => {
+    setDeleteDocTarget(docId);
+  }, []);
+
+  const handleConfirmDelete = useCallback(async () => {
+    if (deleteDocTarget === null || deleteDocPending) return;
+    setDeleteDocPending(true);
     try {
-      await api.deleteDocument(docId);
+      await api.deleteDocument(deleteDocTarget);
       showToast('success', 'Document deleted');
       loadData();
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to delete');
+    } finally {
+      setDeleteDocPending(false);
+      setDeleteDocTarget(null);
     }
-  }, [showToast, loadData]);
+  }, [deleteDocTarget, deleteDocPending, showToast, loadData]);
 
   const filteredDocs = useMemo(() => {
     if (!debouncedSearch) return documents;
@@ -452,6 +463,20 @@ export default function Documents() {
               </div>
             </form>
       </Modal>
+
+      {/* Delete document confirm */}
+      <ConfirmDialog
+        open={deleteDocTarget !== null}
+        title="Delete Document"
+        message="Delete this document?"
+        confirmLabel="Delete"
+        pending={deleteDocPending}
+        variant="danger"
+        onConfirm={handleConfirmDelete}
+        onCancel={() => {
+          if (!deleteDocPending) setDeleteDocTarget(null);
+        }}
+      />
     </div>
   );
 }

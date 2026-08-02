@@ -127,15 +127,23 @@ describe('WorkOrders optimistic delete (Batch 10)', () => {
     jest.clearAllMocks();
     mockedApi.getWorkOrders.mockResolvedValue([firstWorkOrder, secondWorkOrder]);
     mockedApi.releaseWorkOrder.mockResolvedValue({});
-    // Confirm the destructive action so handleDelete proceeds to run().
-    jest.spyOn(window, 'confirm').mockReturnValue(true);
   });
 
   afterEach(() => {
     jest.restoreAllMocks();
   });
 
-  it('drops the row immediately on a successful delete and never refetches to confirm', async () => {
+  /**
+   * Open the row's Delete control, assert the shared ConfirmDialog appears
+   * (no native window.confirm anymore), and return its Delete button.
+   */
+  async function openDeleteDialog(table: HTMLElement, rowIndex = 0): Promise<HTMLElement> {
+    fireEvent.click(within(table).getAllByTitle('Delete')[rowIndex]);
+    const dialog = await screen.findByRole('dialog');
+    return within(dialog).getByRole('button', { name: 'Delete' });
+  }
+
+  it('confirm dialog: drops the row immediately on confirm, blocks re-click while pending, closes on settle, never refetches', async () => {
     // A delete that stays in flight through the first assertion window: the row
     // must vanish from the OPTIMISTIC update alone, before the API resolves.
     let resolveDelete: (value: unknown) => void = () => {};
@@ -149,9 +157,12 @@ describe('WorkOrders optimistic delete (Batch 10)', () => {
     const table = await getDesktopTable();
     expect(mockedApi.getWorkOrders).toHaveBeenCalledTimes(1); // mount load only
 
-    // Delete the first row.
-    const deleteFirst = within(table).getAllByTitle('Delete')[0];
-    fireEvent.click(deleteFirst);
+    // Delete the first row — the row control only OPENS the dialog.
+    const confirmButton = await openDeleteDialog(table, 0);
+    expect(mockedApi.deleteWorkOrder).not.toHaveBeenCalled();
+
+    // Confirm fires the optimistic mutation.
+    fireEvent.click(confirmButton);
 
     // Gone immediately, while the delete is still pending — the sibling stays.
     await waitFor(() =>
@@ -160,10 +171,20 @@ describe('WorkOrders optimistic delete (Batch 10)', () => {
     expect(mockedApi.deleteWorkOrder).toHaveBeenCalledWith(1);
     expect(within(table).getByRole('link', { name: 'WO-1002' })).toBeInTheDocument();
 
+    // Mid-flight the dialog stays open in the pending state: the confirm button
+    // is disabled (LoadingButton double-fire guard), so a second click is inert.
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    expect(confirmButton).toBeDisabled();
+    fireEvent.click(confirmButton);
+    expect(mockedApi.deleteWorkOrder).toHaveBeenCalledTimes(1);
+
     // Resolve the server call; flush the trailing pending-state update.
     await act(async () => {
       resolveDelete({});
     });
+
+    // The dialog closes on settle.
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
 
     // Stays gone — the optimistic removal is kept, and the page does NOT refetch
     // the list to confirm the delete (no second api.getWorkOrders call).
@@ -184,8 +205,8 @@ describe('WorkOrders optimistic delete (Batch 10)', () => {
     expect(tableRowOrder(table)).toEqual(['WO-1001', 'WO-1002']);
 
     // Delete the FIRST row (the harder restoration case — it must come back
-    // ahead of WO-1002, not appended at the end).
-    fireEvent.click(within(table).getAllByTitle('Delete')[0]);
+    // ahead of WO-1002, not appended at the end), confirming via the dialog.
+    fireEvent.click(await openDeleteDialog(table, 0));
 
     // Optimistically removed first…
     await waitFor(() =>

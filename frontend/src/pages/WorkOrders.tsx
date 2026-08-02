@@ -20,7 +20,7 @@ import {
   ArrowUpTrayIcon,
 } from '@heroicons/react/24/outline';
 import { SkeletonTable, SkeletonCard } from '../components/ui/Skeleton';
-import { EmptyState, ErrorState, useToast, DataTable, DataTableColumn, StatusBadge, Button } from '../components/ui';
+import { ConfirmDialog, EmptyState, ErrorState, useToast, DataTable, DataTableColumn, StatusBadge, Button } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { useOptimisticMutation } from '../hooks/useOptimisticMutation';
 import LaserNestImportWizard from '../components/laser/LaserNestImportWizard';
@@ -423,17 +423,26 @@ export default function WorkOrders() {
     errorFallback: 'Failed to delete work order',
   });
 
+  // The row Delete action opens the shared confirm dialog; the optimistic
+  // mutation itself only fires from the dialog's confirm.
+  const [deleteTarget, setDeleteTarget] = useState<WorkOrderSummary | null>(null);
+
   const handleDelete = useCallback((wo: WorkOrderSummary) => {
-    const isCurrent = CURRENT_WORK_ORDER_STATUSES.includes(wo.status);
-    const message = isCurrent
-      ? `Delete current work order ${wo.work_order_number}?\n\nThis removes it from active lists, scheduling, and shop floor queues while preserving the record for audit/restore.`
-      : `Delete work order ${wo.work_order_number}?\n\nThis removes it from active lists while preserving the record for audit/restore.`;
-    if (!window.confirm(message)) return;
+    setDeleteTarget(wo);
+  }, []);
+
+  const handleConfirmDelete = useCallback(async () => {
+    const wo = deleteTarget;
+    if (!wo || deletePending) return;
     // Capture the row's current position; run(ctx) closes over it so the rollback
     // (on the rare server refusal) restores THIS row at its original index.
     const index = workOrdersRef.current.findIndex((w) => w.id === wo.id);
-    runDelete({ wo, index: index === -1 ? workOrdersRef.current.length : index });
-  }, [runDelete]);
+    try {
+      await runDelete({ wo, index: index === -1 ? workOrdersRef.current.length : index });
+    } finally {
+      setDeleteTarget(null);
+    }
+  }, [deleteTarget, deletePending, runDelete]);
 
   // Standalone nest import: the wizard created a fresh released laser WO (no
   // parent, no part) — route to it, mirroring WorkOrderDetail's handler.
@@ -776,6 +785,26 @@ export default function WorkOrders() {
           onImported={handleNestPackageImported}
         />
       )}
+
+      {/* Delete work order confirm (soft delete; optimistic removal fires on confirm) */}
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        title="Delete Work Order"
+        message={
+          deleteTarget
+            ? CURRENT_WORK_ORDER_STATUSES.includes(deleteTarget.status)
+              ? `Delete current work order ${deleteTarget.work_order_number}?\n\nThis removes it from active lists, scheduling, and shop floor queues while preserving the record for audit/restore.`
+              : `Delete work order ${deleteTarget.work_order_number}?\n\nThis removes it from active lists while preserving the record for audit/restore.`
+            : ''
+        }
+        confirmLabel="Delete"
+        pending={deletePending}
+        variant="danger"
+        onConfirm={handleConfirmDelete}
+        onCancel={() => {
+          if (!deletePending) setDeleteTarget(null);
+        }}
+      />
     </div>
   );
 }

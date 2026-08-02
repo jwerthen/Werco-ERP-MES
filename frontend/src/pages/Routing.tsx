@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState, useRef } from 'react';
 import api from '../services/api';
 import { Modal } from '../components/ui/Modal';
-import { EmptyState, ErrorState, SelectField, SelectOption, useToast } from '../components/ui';
+import { ConfirmDialog, EmptyState, ErrorState, SelectField, SelectOption, useToast } from '../components/ui';
 import { FormField } from '../components/ui/FormField';
 import { RoutingImportWizard } from '../components/routing/RoutingImportWizard';
 import { useAuth } from '../context/AuthContext';
@@ -154,6 +154,11 @@ export default function RoutingPage() {
   const [selectedRouting, setSelectedRouting] = useState<Routing | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
+  // Confirm targets + in-flight guards for the destructive actions.
+  const [deleteOperationTarget, setDeleteOperationTarget] = useState<number | null>(null);
+  const [deleteOperationPending, setDeleteOperationPending] = useState(false);
+  const [deleteRoutingTarget, setDeleteRoutingTarget] = useState<Routing | null>(null);
+  const [deleteRoutingPending, setDeleteRoutingPending] = useState(false);
   const [showAddOperationModal, setShowAddOperationModal] = useState(false);
   const [editingOperation, setEditingOperation] = useState<RoutingOperation | null>(null);
 
@@ -363,14 +368,22 @@ export default function RoutingPage() {
     }
   };
 
-  const handleDeleteOperation = async (operationId: number) => {
-    if (!selectedRouting || !window.confirm('Delete this operation?')) return;
+  const handleDeleteOperation = (operationId: number) => {
+    if (!selectedRouting) return;
+    setDeleteOperationTarget(operationId);
+  };
 
+  const handleConfirmDeleteOperation = async () => {
+    if (!selectedRouting || deleteOperationTarget === null || deleteOperationPending) return;
+    setDeleteOperationPending(true);
     try {
-      await api.deleteRoutingOperation(selectedRouting.id, operationId);
+      await api.deleteRoutingOperation(selectedRouting.id, deleteOperationTarget);
       await loadRouting(selectedRouting.id);
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to delete operation');
+    } finally {
+      setDeleteOperationPending(false);
+      setDeleteOperationTarget(null);
     }
   };
 
@@ -386,21 +399,24 @@ export default function RoutingPage() {
     }
   };
 
-  const handleDeleteRouting = async (routing: Routing) => {
-    const message = routing.status === 'draft' 
-      ? `Delete routing for ${routing.part?.part_number}? This will permanently delete it.`
-      : `Deactivate routing for ${routing.part?.part_number}? It will be marked as obsolete.`;
-    
-    if (!window.confirm(message)) return;
+  const handleDeleteRouting = (routing: Routing) => {
+    setDeleteRoutingTarget(routing);
+  };
 
+  const handleConfirmDeleteRouting = async () => {
+    if (!deleteRoutingTarget || deleteRoutingPending) return;
+    setDeleteRoutingPending(true);
     try {
-      await api.deleteRouting(routing.id);
-      if (selectedRouting?.id === routing.id) {
+      await api.deleteRouting(deleteRoutingTarget.id);
+      if (selectedRouting?.id === deleteRoutingTarget.id) {
         setSelectedRouting(null);
       }
       loadData();
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to delete routing');
+    } finally {
+      setDeleteRoutingPending(false);
+      setDeleteRoutingTarget(null);
     }
   };
 
@@ -1819,6 +1835,40 @@ export default function RoutingPage() {
           onClose={() => setShowImportModal(false)}
         />
       )}
+
+      {/* Delete operation confirm */}
+      <ConfirmDialog
+        open={deleteOperationTarget !== null}
+        title="Delete Operation"
+        message="Delete this operation?"
+        confirmLabel="Delete"
+        pending={deleteOperationPending}
+        variant="danger"
+        onConfirm={handleConfirmDeleteOperation}
+        onCancel={() => {
+          if (!deleteOperationPending) setDeleteOperationTarget(null);
+        }}
+      />
+
+      {/* Delete/deactivate routing confirm (draft deletes; released is marked obsolete) */}
+      <ConfirmDialog
+        open={deleteRoutingTarget !== null}
+        title={deleteRoutingTarget?.status === 'draft' ? 'Delete Routing' : 'Deactivate Routing'}
+        message={
+          deleteRoutingTarget
+            ? deleteRoutingTarget.status === 'draft'
+              ? `Delete routing for ${deleteRoutingTarget.part?.part_number}? This will permanently delete it.`
+              : `Deactivate routing for ${deleteRoutingTarget.part?.part_number}? It will be marked as obsolete.`
+            : ''
+        }
+        confirmLabel={deleteRoutingTarget?.status === 'draft' ? 'Delete' : 'Deactivate'}
+        pending={deleteRoutingPending}
+        variant="danger"
+        onConfirm={handleConfirmDeleteRouting}
+        onCancel={() => {
+          if (!deleteRoutingPending) setDeleteRoutingTarget(null);
+        }}
+      />
     </div>
   );
 }

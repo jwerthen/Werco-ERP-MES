@@ -109,7 +109,6 @@ describe('FEPERF-5: WorkOrders list renders rows correctly after memo refactor',
     mockedApi.getWorkOrders.mockResolvedValue([draftWorkOrder, inProgressWorkOrder]);
     mockedApi.releaseWorkOrder.mockResolvedValue({});
     mockedApi.deleteWorkOrder.mockResolvedValue({});
-    jest.spyOn(window, 'confirm').mockReturnValue(true);
   });
 
   afterEach(() => {
@@ -157,14 +156,20 @@ describe('FEPERF-5: WorkOrders list renders rows correctly after memo refactor',
     });
   });
 
-  it('shows a Delete control on each row and wires it to deleteWorkOrder', async () => {
+  it('shows a Delete control on each row and wires it to deleteWorkOrder via the confirm dialog', async () => {
     renderWorkOrders();
     const table = await getDesktopTable();
 
     const deleteButtons = within(table).getAllByTitle('Delete');
     expect(deleteButtons).toHaveLength(2);
 
+    // The row control opens the shared ConfirmDialog (no native window.confirm);
+    // the API fires only from the dialog's Delete button.
     fireEvent.click(deleteButtons[1]);
+    expect(mockedApi.deleteWorkOrder).not.toHaveBeenCalled();
+
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
     await waitFor(() => {
       expect(mockedApi.deleteWorkOrder).toHaveBeenCalledWith(2);
     });

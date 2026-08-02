@@ -12,6 +12,7 @@ import {
 import { Modal } from '../components/ui/Modal';
 import { FormField } from '../components/ui/FormField';
 import {
+  ConfirmDialog,
   useToast,
   DataTable,
   DataTableColumn,
@@ -65,6 +66,8 @@ export default function Quotes() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [convertTarget, setConvertTarget] = useState<number | null>(null);
+  const [convertPending, setConvertPending] = useState(false);
   const [selectedQuote, setSelectedQuote] = useState<Quote | null>(null);
 
   const [newQuote, setNewQuote] = useState({
@@ -141,14 +144,22 @@ export default function Quotes() {
     }
   };
 
-  const handleConvert = async (quoteId: number) => {
-    if (!window.confirm('Convert this quote to a work order?')) return;
+  const handleConvert = (quoteId: number) => {
+    setConvertTarget(quoteId);
+  };
+
+  const handleConfirmConvert = async () => {
+    if (convertTarget === null || convertPending) return;
+    setConvertPending(true);
     try {
-      const result = await api.convertQuote(quoteId);
+      const result = await api.convertQuote(convertTarget);
       showToast('success', `Work Order ${result.work_order_number} created!`);
       loadData();
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to convert quote');
+    } finally {
+      setConvertPending(false);
+      setConvertTarget(null);
     }
   };
 
@@ -566,6 +577,20 @@ export default function Quotes() {
               </div>
             </form>
       </Modal>
+
+      {/* Convert quote to work order confirm (non-destructive) */}
+      <ConfirmDialog
+        open={convertTarget !== null}
+        title="Convert to Work Order"
+        message="Convert this quote to a work order?"
+        confirmLabel="Convert"
+        pending={convertPending}
+        variant="info"
+        onConfirm={handleConfirmConvert}
+        onCancel={() => {
+          if (!convertPending) setConvertTarget(null);
+        }}
+      />
     </div>
   );
 }

@@ -7,6 +7,7 @@ import { StatusBadge } from '../components/ui/StatusBadge';
 import { useToast } from '../components/ui/Toast';
 import { Modal } from '../components/ui/Modal';
 import {
+  ConfirmDialog,
   DataTable,
   DataTableColumn,
   FormField,
@@ -72,6 +73,8 @@ export default function MaterialsPage() {
   const [showModal, setShowModal] = useState(false);
   const [editingMaterial, setEditingMaterial] = useState<Part | null>(null);
   const [saving, setSaving] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<Part | null>(null);
+  const [deletePending, setDeletePending] = useState(false);
   const [form, setForm] = useState<MaterialForm>(BLANK_FORM);
   const [initialForm, setInitialForm] = useState<MaterialForm>(BLANK_FORM);
 
@@ -181,14 +184,22 @@ export default function MaterialsPage() {
     }
   };
 
-  const handleDelete = async (material: Part) => {
-    if (!window.confirm(`Delete ${material.part_number}? This will remove it from the active materials list.`)) return;
+  const handleDelete = (material: Part) => {
+    setDeleteTarget(material);
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!deleteTarget || deletePending) return;
+    setDeletePending(true);
     try {
-      await api.deleteMaterial(material.id);
-      setMaterials(prev => prev.filter(item => item.id !== material.id));
-      showToast('success', `Deleted ${material.part_number}`);
+      await api.deleteMaterial(deleteTarget.id);
+      setMaterials(prev => prev.filter(item => item.id !== deleteTarget.id));
+      showToast('success', `Deleted ${deleteTarget.part_number}`);
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to delete material');
+    } finally {
+      setDeletePending(false);
+      setDeleteTarget(null);
     }
   };
 
@@ -549,6 +560,24 @@ export default function MaterialsPage() {
               </div>
             </form>
       </Modal>
+
+      {/* Delete material confirm */}
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        title="Delete Material"
+        message={
+          deleteTarget
+            ? `Delete ${deleteTarget.part_number}? This will remove it from the active materials list.`
+            : ''
+        }
+        confirmLabel="Delete"
+        pending={deletePending}
+        variant="danger"
+        onConfirm={handleConfirmDelete}
+        onCancel={() => {
+          if (!deletePending) setDeleteTarget(null);
+        }}
+      />
     </div>
   );
 }

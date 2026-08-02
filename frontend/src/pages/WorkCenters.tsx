@@ -3,6 +3,7 @@ import api from '../services/api';
 import { Modal } from '../components/ui/Modal';
 import {
   Button,
+  ConfirmDialog,
   DataTable,
   DataTableColumn,
   FormField,
@@ -23,6 +24,7 @@ import {
   WrenchScrewdriverIcon,
   NoSymbolIcon,
   ComputerDesktopIcon,
+  ArrowPathIcon,
 } from '@heroicons/react/24/outline';
 
 // Solid status-dot color per canonical semantic variant (resolved from the
@@ -44,6 +46,12 @@ export default function WorkCenters() {
   const [showKioskStations, setShowKioskStations] = useState(false);
   const [editingWc, setEditingWc] = useState<WorkCenter | null>(null);
   const [workCenterTypes, setWorkCenterTypes] = useState<string[]>([]);
+  // Deactivate is server-GATED (PR #143: refused with 409 + live-work counts
+  // while queued/running work exists), so the flow is non-optimistic: confirm,
+  // await the server, reload on success, and surface a refusal verbatim.
+  const [deactivateTarget, setDeactivateTarget] = useState<WorkCenter | null>(null);
+  const [deactivatePending, setDeactivatePending] = useState(false);
+  const [reactivatingId, setReactivatingId] = useState<number | null>(null);
   const [formData, setFormData] = useState({
     code: '',
     name: '',
@@ -161,6 +169,39 @@ export default function WorkCenters() {
       area: '',
       version: 0
     });
+  };
+
+  const handleConfirmDeactivate = async () => {
+    if (!deactivateTarget || deactivatePending) return;
+    setDeactivatePending(true);
+    try {
+      await api.updateWorkCenter(deactivateTarget.id, { is_active: false });
+      showToast('success', `Deactivated ${deactivateTarget.code}`);
+      await loadWorkCenters();
+    } catch (err: any) {
+      // The server composes the full refusal (live-work counts + remedy) —
+      // surface it verbatim, never rewritten.
+      showToast('error', err.response?.data?.detail || 'Failed to deactivate work center');
+    } finally {
+      setDeactivatePending(false);
+      setDeactivateTarget(null);
+    }
+  };
+
+  // Reactivation is allowed unconditionally server-side, so it needs no
+  // confirm — a direct action with an in-flight guard + reload.
+  const handleReactivate = async (wc: WorkCenter) => {
+    if (reactivatingId !== null) return;
+    setReactivatingId(wc.id);
+    try {
+      await api.updateWorkCenter(wc.id, { is_active: true });
+      showToast('success', `Reactivated ${wc.code}`);
+      await loadWorkCenters();
+    } catch (err: any) {
+      showToast('error', err.response?.data?.detail || 'Failed to reactivate work center');
+    } finally {
+      setReactivatingId(null);
+    }
   };
 
   const handleStatusChange = async (id: number, status: string) => {
@@ -307,17 +348,47 @@ export default function WorkCenters() {
       header: '',
       align: 'right',
       render: (wc) => (
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            handleEdit(wc);
-          }}
-          aria-label={`Edit ${wc.code}`}
-          className="text-slate-400 hover:text-white"
-        >
-          <PencilIcon className="h-4 w-4" />
-        </button>
+        <div className="inline-flex items-center gap-3">
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              handleEdit(wc);
+            }}
+            aria-label={`Edit ${wc.code}`}
+            className="text-slate-400 hover:text-white"
+          >
+            <PencilIcon className="h-4 w-4" />
+          </button>
+          {wc.is_active === false ? (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                handleReactivate(wc);
+              }}
+              disabled={reactivatingId !== null}
+              aria-label={`Reactivate ${wc.code}`}
+              title="Reactivate"
+              className="text-slate-400 hover:text-fd-green disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <ArrowPathIcon className={`h-4 w-4 ${reactivatingId === wc.id ? 'animate-spin' : ''}`} />
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setDeactivateTarget(wc);
+              }}
+              aria-label={`Deactivate ${wc.code}`}
+              title="Deactivate"
+              className="text-slate-400 hover:text-fd-amber"
+            >
+              <NoSymbolIcon className="h-4 w-4" />
+            </button>
+          )}
+        </div>
       ),
     },
   ];
@@ -335,10 +406,28 @@ export default function WorkCenters() {
         { label: 'Status', fullWidth: true, value: renderStatusCell(wc) },
       ]}
       actions={
-        <Button variant="secondary" size="sm" onClick={() => handleEdit(wc)}>
-          <PencilIcon className="h-4 w-4 mr-1.5" />
-          Edit
-        </Button>
+        <>
+          <Button variant="secondary" size="sm" onClick={() => handleEdit(wc)}>
+            <PencilIcon className="h-4 w-4 mr-1.5" />
+            Edit
+          </Button>
+          {wc.is_active === false ? (
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={reactivatingId !== null}
+              onClick={() => handleReactivate(wc)}
+            >
+              <ArrowPathIcon className={`h-4 w-4 mr-1.5 ${reactivatingId === wc.id ? 'animate-spin' : ''}`} />
+              Reactivate
+            </Button>
+          ) : (
+            <Button variant="secondary" size="sm" onClick={() => setDeactivateTarget(wc)}>
+              <NoSymbolIcon className="h-4 w-4 mr-1.5" />
+              Deactivate
+            </Button>
+          )}
+        </>
       }
     />
   );
@@ -591,6 +680,25 @@ export default function WorkCenters() {
       {showKioskStations && (
         <KioskStationsAdminModal workCenters={workCenters} onClose={() => setShowKioskStations(false)} />
       )}
+
+      {/* Deactivate confirm — server-gated: the API refuses (409 + live-work
+          counts) while the work center still has queued or running work. */}
+      <ConfirmDialog
+        open={deactivateTarget !== null}
+        title="Deactivate Work Center"
+        message={
+          deactivateTarget
+            ? `Deactivate ${deactivateTarget.code} — ${deactivateTarget.name}? It stops taking new work; the server will refuse while live work is still assigned to it.`
+            : ''
+        }
+        confirmLabel="Deactivate"
+        pending={deactivatePending}
+        variant="warning"
+        onConfirm={handleConfirmDeactivate}
+        onCancel={() => {
+          if (!deactivatePending) setDeactivateTarget(null);
+        }}
+      />
     </div>
   );
 }
