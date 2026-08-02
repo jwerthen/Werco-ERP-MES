@@ -11,8 +11,14 @@ import {
   MagnifyingGlassIcon,
   XMarkIcon,
 } from '@heroicons/react/24/outline';
-import { SelectField, SelectOption, ErrorState, useToast, FormField } from '../components/ui';
+import { Breadcrumbs, SelectField, SelectOption, ErrorState, useToast, FormField } from '../components/ui';
+import { getBreadcrumbParent } from '../utils/routeMeta';
 import useUnsavedChanges from '../hooks/useUnsavedChanges';
+
+// Breadcrumb parent from the shared routeMeta source — no literal fallback:
+// if the entry is ever removed there, the crumb visibly disappears rather
+// than silently keeping a duplicate.
+const woNewParent = getBreadcrumbParent('/work-orders/new');
 
 interface Part {
   id: number;
@@ -809,6 +815,8 @@ export default function WorkOrderNew() {
   if (loadError) {
     return (
       <div className="max-w-4xl mx-auto">
+        {/* Breadcrumbs — Work Orders › New Work Order */}
+        {woNewParent && <Breadcrumbs crumbs={[woNewParent, { label: 'New Work Order' }]} />}
         <h1 className="text-2xl font-bold text-white mb-6">New Work Order</h1>
         <ErrorState
           message="Could not load parts, BOMs, and work centers needed to create a work order."
@@ -820,6 +828,8 @@ export default function WorkOrderNew() {
 
   return (
     <div className="max-w-4xl mx-auto">
+      {/* Breadcrumbs — Work Orders › New Work Order */}
+      {woNewParent && <Breadcrumbs crumbs={[woNewParent, { label: 'New Work Order' }]} />}
       <h1 className="text-2xl font-bold text-white mb-6">New Work Order</h1>
 
       <form onSubmit={handleSubmit} className="space-y-6">

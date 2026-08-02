@@ -136,6 +136,37 @@ const detailRoutes: DetailRoute[] = [
     parent: { label: 'Bill of Materials', href: '/bom' },
   },
   {
+    // The WO-detail pattern below deliberately excludes `new` via its
+    // lookahead; the create form crumbs back to the list it was opened from.
+    pattern: /^\/work-orders\/new$/,
+    title: 'New Work Order',
+    parent: { label: 'Work Orders', href: '/work-orders' },
+  },
+  {
+    // All seven analytics sub-views crumb back up to the Analytics hub.
+    pattern: /^\/analytics\/(production|quality|inventory|forecasting|costs|flow|reports)$/,
+    title: 'Analytics',
+    parent: { label: 'Analytics', href: '/analytics' },
+  },
+  {
+    pattern: /^\/inventory\/(parts|materials)$/,
+    title: 'Inventory',
+    parent: { label: 'Inventory', href: '/inventory' },
+  },
+  {
+    // The upload flow creates purchase orders; Purchasing is its hub.
+    pattern: /^\/po-upload$/,
+    title: 'Upload PO',
+    parent: { label: 'Purchase Orders', href: '/purchasing' },
+  },
+  {
+    // There is no /rfq-packages list page; Quotes is the hub an AI RFQ
+    // package publishes into, so that's where "back" goes.
+    pattern: /^\/rfq-packages\/new$/,
+    title: 'AI RFQ Quote',
+    parent: { label: 'Quotes', href: '/quotes' },
+  },
+  {
     pattern: /^\/estimate-workbench\/(?!new$)[^/]+$/,
     title: 'Estimate Workbench',
     parent: { label: 'Estimate Workbench', href: '/estimate-workbench' },
@@ -184,6 +215,16 @@ export function getRouteTitle(location: { pathname: string; search: string }): s
   }
 
   return 'Werco ERP';
+}
+
+/**
+ * Format a resolved route title as the browser-tab title ("{title} · Werco
+ * ERP"). The generic unknown-route fallback stays the bare app name — never
+ * "Werco ERP · Werco ERP". Layout feeds this to `usePageTitle`; station
+ * surfaces outside Layout set their literal titles directly.
+ */
+export function formatTabTitle(title: string): string {
+  return title === 'Werco ERP' ? 'Werco ERP' : `${title} · Werco ERP`;
 }
 
 /**

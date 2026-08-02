@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useLocation, useSearchParams } from 'react-router-dom';
 import api from '../services/api';
 import {
   ArrowsRightLeftIcon,
@@ -12,6 +12,7 @@ import {
 } from '@heroicons/react/24/outline';
 import { Modal } from '../components/ui/Modal';
 import {
+  Breadcrumbs,
   ErrorState,
   useToast,
   DataTable,
@@ -19,6 +20,7 @@ import {
   MobileDataCard,
   FormField,
 } from '../components/ui';
+import { getBreadcrumbParent, getRouteTitle } from '../utils/routeMeta';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import { useAuth } from '../context/AuthContext';
@@ -58,6 +60,10 @@ const PART_TYPES = new Set(['manufactured', 'assembly']);
 export default function InventoryPage({ embedded }: { embedded?: boolean }) {
   const { showToast } = useToast();
   const { user } = useAuth();
+  const location = useLocation();
+  // Breadcrumb parent — non-null only on /inventory/parts | /inventory/materials
+  // (never when embedded in the Warehouse tabs, where the URL isn't ours).
+  const crumbParent = embedded ? null : getBreadcrumbParent(location.pathname);
   // Stock-moving verbs are Admin / Manager / Supervisor per docs/RBAC_PERMISSIONS.md
   // → Inventory. There is no `inventory:receive` permission key, so Receive mirrors
   // `POST /inventory/receive` — require_role([ADMIN, MANAGER, SUPERVISOR]), which also
@@ -535,6 +541,8 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
 
   return (
     <div className="space-y-4">
+      {/* Breadcrumbs — Inventory › Part|Material Inventory; nothing on bare /inventory */}
+      {crumbParent && <Breadcrumbs crumbs={[crumbParent, { label: getRouteTitle(location) }]} />}
       {!embedded && (
         <div className="flex justify-between items-center">
           <div>

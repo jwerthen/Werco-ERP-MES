@@ -19,10 +19,11 @@ import type { Permission } from '../utils/permissions';
 import { useKeyboardShortcutsContext } from '../context/KeyboardShortcutsContext';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useScrollRestoration } from '../hooks/useScrollRestoration';
+import { usePageTitle } from '../hooks/usePageTitle';
 import { buildWsUrl, getAccessToken } from '../services/realtime';
 import { isKioskMode } from '../utils/kiosk';
 import { getCurrentShift } from '../utils/shifts';
-import { getRouteTitle } from '../utils/routeMeta';
+import { formatTabTitle, getRouteTitle } from '../utils/routeMeta';
 import { formatCentralTime } from '../utils/centralTime';
 import {
   HomeIcon,
@@ -535,6 +536,10 @@ export default function Layout({ children }: LayoutProps) {
     () => getRouteTitle(location),
     [location.pathname, location.search]
   );
+
+  // Browser-tab title follows the routed page (formatTabTitle keeps the
+  // unknown-route fallback as the bare app name — never "X · X").
+  usePageTitle(formatTabTitle(pageTitle));
 
   const isShopFloorKiosk = useMemo(
     () =>

@@ -45,7 +45,9 @@ it authenticates with a **scoped display token** instead of a user session.
    `rem` off the viewport-scaled root `calc(100vh / 67.5)` (1rem = 16px at 1080p, 32px at 4K —
    identical angular size; the design is authored at 1920×1080 with a 22×24px page margin);
    verify legibility on the actual hardware at viewing distance, especially the orange (BLOCKED)
-   vs amber (LATE) discrimination.
+   vs amber (LATE) discrimination. The board also requests a Screen Wake Lock on load (see
+   `docs/KIOSK.md` → Screen wake lock) but treat it as best-effort: smart-TV browsers often
+   lack the API, so keep device sleep off regardless.
 
 ### Per-display settings (URL params)
 

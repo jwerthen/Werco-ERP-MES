@@ -15,6 +15,8 @@ import {
 } from '../utils/kiosk';
 import { formatCentralTime } from '../utils/centralTime';
 import { useKioskIdleLogout } from '../hooks/useKioskIdleLogout';
+import { usePageTitle } from '../hooks/usePageTitle';
+import { useWakeLock } from '../hooks/useWakeLock';
 import KioskBadgeLogin from '../components/kiosk/KioskBadgeLogin';
 import KioskNcrFiledScreen from '../components/kiosk/KioskNcrFiledScreen';
 import KioskQueueCard from '../components/kiosk/KioskQueueCard';
@@ -143,6 +145,10 @@ const TIME_HM_OPTIONS: Intl.DateTimeFormatOptions = { hour: '2-digit', minute: '
  * verbs live here.
  */
 export default function OperatorKiosk() {
+  // Renders outside Layout, so the tab title is set here; keep the screen awake.
+  usePageTitle('Operator Kiosk · Werco ERP');
+  useWakeLock();
+
   const location = useLocation();
   const { user, isAuthenticated, isLoading, loginWithEmployeeId, logout } = useAuth();
 

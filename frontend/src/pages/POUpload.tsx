@@ -1,7 +1,8 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../services/api';
-import { FormField, LoadingButton } from '../components/ui';
+import { Breadcrumbs, FormField, LoadingButton } from '../components/ui';
+import { getBreadcrumbParent } from '../utils/routeMeta';
 import {
   CloudArrowUpIcon,
   DocumentIcon,
@@ -21,6 +22,11 @@ import {
   buildLineItemsPayload,
 } from '../utils/poUploadReview';
 import { formatCurrency, formatPercent } from '../utils/numberFormat';
+
+// Breadcrumb parent from the shared routeMeta source — no literal fallback:
+// if the entry is ever removed there, the crumb visibly disappears rather
+// than silently keeping a duplicate.
+const poUploadParent = getBreadcrumbParent('/po-upload');
 
 interface VendorMatch {
   matched: boolean;
@@ -678,6 +684,9 @@ export default function POUpload() {
   if (step === 'upload') {
     return (
       <div className="space-y-6">
+        {/* Breadcrumbs — Purchase Orders › Upload PO (the flow's entry screen;
+            the processing/review/summary steps are transient full-frame states) */}
+        {poUploadParent && <Breadcrumbs crumbs={[poUploadParent, { label: 'Upload PO' }]} />}
         <div>
           <h1 className="text-3xl font-bold text-white">Upload Purchasing Document(s)</h1>
           <p className="text-slate-400 mt-1">Upload one or more POs or Quotes (PDF/DOCX) to extract line items</p>

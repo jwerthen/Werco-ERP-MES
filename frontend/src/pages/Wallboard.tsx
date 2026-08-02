@@ -35,6 +35,8 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import { usePageTitle } from '../hooks/usePageTitle';
+import { useWakeLock } from '../hooks/useWakeLock';
 import BlockedDownPanel from '../components/wallboard/BlockedDownPanel';
 import HudBar from '../components/wallboard/HudBar';
 import LatePanel from '../components/wallboard/LatePanel';
@@ -106,6 +108,10 @@ function resolveDisplaySettings(params: URLSearchParams): DisplaySettings {
 }
 
 export default function Wallboard() {
+  // Renders outside Layout, so the tab title is set here; keep the TV awake.
+  usePageTitle('Wallboard · Werco ERP');
+  useWakeLock();
+
   const [searchParams] = useSearchParams();
   const dept = searchParams.get('dept');
 
