@@ -19,6 +19,12 @@ interface FormErrorBoundaryState {
   hasError: boolean;
   error: Error | null;
   preservedData: Record<string, unknown> | null;
+  /**
+   * Honest clipboard feedback for the Copy Data action — 'copied' only when a
+   * copy PROVABLY succeeded (the async API resolved, or execCommand returned
+   * true). Rendered inline inside the role="alert" panel; never an alert().
+   */
+  copyStatus: 'idle' | 'copied' | 'failed';
 }
 
 export class FormErrorBoundary extends Component<FormErrorBoundaryProps, FormErrorBoundaryState> {
@@ -31,6 +37,7 @@ export class FormErrorBoundary extends Component<FormErrorBoundaryProps, FormErr
       hasError: false,
       error: null,
       preservedData: null,
+      copyStatus: 'idle',
     };
   }
 
@@ -77,30 +84,42 @@ export class FormErrorBoundary extends Component<FormErrorBoundaryProps, FormErr
       hasError: false,
       error: null,
       preservedData: null,
+      copyStatus: 'idle',
     });
   };
 
   copyDataToClipboard = async (): Promise<void> => {
     const { preservedData } = this.state;
-    if (preservedData) {
+    if (!preservedData) return;
+    const payload = JSON.stringify(preservedData, null, 2);
+    try {
+      await navigator.clipboard.writeText(payload);
+      this.setState({ copyStatus: 'copied' });
+    } catch {
+      // Fallback for older browsers. execCommand('copy') reports success as a
+      // boolean — only claim "copied" when it actually returns true.
       try {
-        await navigator.clipboard.writeText(JSON.stringify(preservedData, null, 2));
-        alert('Form data copied to clipboard!');
-      } catch {
-        // Fallback for older browsers
         const textArea = document.createElement('textarea');
-        textArea.value = JSON.stringify(preservedData, null, 2);
+        textArea.value = payload;
         document.body.appendChild(textArea);
-        textArea.select();
-        document.execCommand('copy');
-        document.body.removeChild(textArea);
-        alert('Form data copied to clipboard!');
+        let ok = false;
+        try {
+          textArea.select();
+          ok = document.execCommand('copy');
+        } finally {
+          // Even a throwing select/execCommand must not leak the textarea
+          // into the visible DOM.
+          document.body.removeChild(textArea);
+        }
+        this.setState({ copyStatus: ok ? 'copied' : 'failed' });
+      } catch {
+        this.setState({ copyStatus: 'failed' });
       }
     }
   };
 
   render(): ReactNode {
-    const { hasError, error, preservedData } = this.state;
+    const { hasError, error, preservedData, copyStatus } = this.state;
     const { children, formName } = this.props;
 
     if (hasError && error) {
@@ -167,6 +186,18 @@ export class FormErrorBoundary extends Component<FormErrorBoundaryProps, FormErr
                     </svg>
                     Copy Data
                   </button>
+                )}
+
+                {/* Inline copy status — inside the role="alert" panel, so the
+                    text change is announced without any alert(). */}
+                {preservedData && copyStatus !== 'idle' && (
+                  <span
+                    className={`self-center text-sm font-medium ${
+                      copyStatus === 'copied' ? 'text-emerald-400' : 'text-red-400'
+                    }`}
+                  >
+                    {copyStatus === 'copied' ? 'Copied to clipboard' : 'Copy failed'}
+                  </span>
                 )}
               </div>
 

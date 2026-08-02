@@ -988,6 +988,7 @@ export default function WorkOrderDetail() {
     try {
       await api.resolveWorkOrderBlocker(blocker.id, note.trim() || undefined);
       await loadWorkOrder();
+      showToast('success', `Resolved blocker "${blocker.title}"`);
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to resolve blocker');
     } finally {
