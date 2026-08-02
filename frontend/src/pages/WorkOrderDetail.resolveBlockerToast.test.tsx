@@ -16,7 +16,7 @@
  */
 
 import React from 'react';
-import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import api from '../services/api';
 import WorkOrderDetail from './WorkOrderDetail';
@@ -110,7 +110,11 @@ async function resolveViaDialog() {
   fireEvent.click(await screen.findByRole('button', { name: /^resolve$/i }));
   const dialog = await screen.findByRole('dialog');
   expect(within(dialog).getByLabelText(/resolution note/i)).toHaveValue('Resolved');
-  fireEvent.click(within(dialog).getByRole('button', { name: /^resolve$/i }));
+  // Async act so the submit's whole microtask chain (api settle -> toast ->
+  // pending-cleared) flushes inside act — no unwrapped-update warnings.
+  await act(async () => {
+    fireEvent.click(within(dialog).getByRole('button', { name: /^resolve$/i }));
+  });
   return dialog;
 }
 
@@ -149,10 +153,15 @@ describe('WorkOrderDetail resolve-blocker toast', () => {
     });
     renderDetail();
 
-    await resolveViaDialog();
+    const dialog = await resolveViaDialog();
 
     expect(await screen.findByText(refusal)).toBeInTheDocument();
     // No false success.
     expect(screen.queryByText(/resolved blocker/i)).not.toBeInTheDocument();
+    // Wait for the rejection's `finally` to clear the pending state (the
+    // dialog's Resolve re-enables) so the update lands inside act().
+    await waitFor(() =>
+      expect(within(dialog).getByRole('button', { name: /^resolve$/i })).toBeEnabled()
+    );
   });
 });

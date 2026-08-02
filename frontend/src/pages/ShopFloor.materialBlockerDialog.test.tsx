@@ -4,12 +4,16 @@
  *
  * Covers: the queue-row button opens the dialog pre-filled with the standard
  * operator note, submit posts the blocker (entered note, material_missing /
- * high / hold) and refreshes the queue, and cancel posts nothing. Harness
- * mirrors ShopFloor.runOrder.test.tsx.
+ * high / hold) and refreshes the queue, cancel posts nothing, a refusal keeps
+ * the dialog open with the verbatim error and a working retry, the re-entry
+ * guard makes rapid Enter+click submit exactly once, and consecutive opens
+ * across rows never leak the previous row's context. Harness mirrors
+ * ShopFloor.runOrder.test.tsx.
  */
 
 import React from 'react';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import api from '../services/api';
 import ShopFloor from './ShopFloor';
@@ -144,5 +148,87 @@ describe('ShopFloor material-blocker InputDialog', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     expect(mockedApi.createWorkOrderBlocker).not.toHaveBeenCalled();
     expect(mockedApi.getWorkCenterQueue).toHaveBeenCalledTimes(1);
+  });
+
+  it('a refused report keeps the dialog open with the verbatim error and clears the guard so retry works', async () => {
+    const refusal = 'Operation already has an open material blocker';
+    mockedApi.createWorkOrderBlocker.mockRejectedValueOnce({
+      response: { data: { detail: refusal } },
+    });
+    await openBlockerDialog();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Report' }));
+
+    // Verbatim server detail surfaces; the dialog STAYS OPEN (InputDialog
+    // callers keep the typed note up for retry — unlike ConfirmDialogs, which
+    // close on settle either way).
+    expect(await screen.findByText(refusal)).toBeInTheDocument();
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    expect(screen.getByLabelText(/note/i)).toHaveValue(DEFAULT_NOTE);
+
+    // The in-flight guard is cleared after the rejection settles: the submit
+    // re-enables and a retry posts again (second call), then closes.
+    const report = screen.getByRole('button', { name: 'Report' });
+    await waitFor(() => expect(report).toBeEnabled());
+    fireEvent.click(report);
+
+    await waitFor(() => expect(mockedApi.createWorkOrderBlocker).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  });
+
+  it('rapid Enter + click submits exactly once while the request hangs (re-entry guard)', async () => {
+    let resolveCreate!: (value: unknown) => void;
+    mockedApi.createWorkOrderBlocker.mockImplementation(
+      () => new Promise((resolve) => { resolveCreate = resolve; })
+    );
+    const user = userEvent.setup();
+    const dialog = await openBlockerDialog();
+
+    const input = screen.getByLabelText(/note/i);
+    // Enter submits...
+    await user.type(input, '{Enter}');
+    await waitFor(() => expect(mockedApi.createWorkOrderBlocker).toHaveBeenCalledTimes(1));
+
+    // ...and while the request hangs, neither a click on the (now disabled)
+    // submit button nor a direct form re-submit fires a second call. Scoped to
+    // the dialog (the queue row's own button reads "Reporting..." mid-flight);
+    // regex because the spinner's aria-label makes the name "Loading Report".
+    fireEvent.click(within(dialog).getByRole('button', { name: /report/i }));
+    fireEvent.submit(input.closest('form')!);
+    expect(mockedApi.createWorkOrderBlocker).toHaveBeenCalledTimes(1);
+
+    // Settle to close cleanly.
+    resolveCreate({ id: 55 });
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(mockedApi.createWorkOrderBlocker).toHaveBeenCalledTimes(1);
+  });
+
+  it("consecutive opens carry each row's own context — no stale text from the previous dialog", async () => {
+    const queueItemB = {
+      ...queueItem,
+      operation_id: 102,
+      work_order_id: 1002,
+      work_order_number: 'WO-9002',
+      run_order: 2,
+    };
+    mockedApi.getWorkCenterQueue.mockResolvedValue({ queue: [queueItem, queueItemB] });
+    renderShopFloor();
+
+    // Open row A's dialog and dirty the note.
+    const buttons = await screen.findAllByRole('button', { name: /no material/i });
+    fireEvent.click(buttons[0]);
+    await screen.findByRole('dialog');
+    expect(screen.getByText(/Report missing material for WO-9001\?/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText(/note/i), { target: { value: 'Row A custom note' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+
+    // Open row B's dialog: B's message, and the note re-seeded to the default.
+    fireEvent.click(screen.getAllByRole('button', { name: /no material/i })[1]);
+    const dialogB = await screen.findByRole('dialog');
+    expect(screen.getByText(/Report missing material for WO-9002\?/)).toBeInTheDocument();
+    expect(dialogB.textContent).not.toContain('WO-9001');
+    expect(screen.getByLabelText(/note/i)).toHaveValue(DEFAULT_NOTE);
+    expect(mockedApi.createWorkOrderBlocker).not.toHaveBeenCalled();
   });
 });

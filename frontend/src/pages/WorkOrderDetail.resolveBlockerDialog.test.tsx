@@ -165,5 +165,11 @@ describe('WorkOrderDetail resolve-blocker InputDialog', () => {
 
     expect(await screen.findByText(refusal)).toBeInTheDocument();
     expect(screen.getByRole('dialog')).toBeInTheDocument();
+    // Wait for the rejection's `finally` to clear the pending state (the
+    // dialog's Resolve re-enables) so the update lands inside act() and a
+    // retry is possible.
+    await waitFor(() =>
+      expect(within(dialog).getByRole('button', { name: /^resolve$/i })).toBeEnabled()
+    );
   });
 });
