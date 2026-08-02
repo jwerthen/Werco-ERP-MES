@@ -95,10 +95,10 @@ describe('BOMImportWizard', () => {
     jest.clearAllMocks();
   });
 
-  describe('overlay portal', () => {
-    // Regression coverage: the modal must render into document.body via a portal
-    // (not inline in the page tree) and sit above the fixed sidebar at z-[60].
-    // Inline-at-z-50 rendering let the opaque sidebar paint over and clip the modal.
+  describe('shared Modal adoption', () => {
+    // The wizard renders through the shared <Modal> primitive (no hand-rolled
+    // overlay): a role=dialog panel, portaled into document.body via Modal's
+    // own portal, which also keeps it above the fixed z-50 sidebar at z-[60].
     const renderUpload = () =>
       renderWithRouter(<BOMImportWizard onComplete={jest.fn()} onClose={jest.fn()} />);
 
@@ -110,6 +110,14 @@ describe('BOMImportWizard', () => {
       expect(screen.getByText('Import BOM / Drawing')).toBeInTheDocument();
       expect(document.getElementById('upload-form')).toBeInTheDocument();
       expect(document.querySelector('input[type="file"]')).toBeInTheDocument();
+    });
+
+    it('renders through the shared Modal as a role=dialog panel', () => {
+      renderUpload();
+      const dialog = screen.getByRole('dialog');
+      expect(dialog).toHaveAttribute('aria-modal', 'true');
+      // The wizard content lives inside the Modal panel.
+      expect(dialog).toContainElement(screen.getByText('Import BOM / Drawing'));
     });
 
     it('renders the overlay into document.body, outside the component container', () => {
@@ -153,6 +161,61 @@ describe('BOMImportWizard', () => {
 
       // The header X and the footer Cancel both close; click the first close affordance.
       fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('unsaved-progress close guard', () => {
+    // A chosen file or a parsed/edited preview is real work: every close path
+    // (Cancel, header X, Escape, backdrop) routes through confirmDiscard(). A
+    // pristine just-opened wizard still closes silently (covered above by the
+    // backdrop / Cancel tests, which never see a confirm prompt).
+    let confirmSpy: jest.SpyInstance;
+
+    afterEach(() => {
+      confirmSpy?.mockRestore();
+    });
+
+    it('closes a pristine wizard without prompting', () => {
+      confirmSpy = jest.spyOn(window, 'confirm').mockReturnValue(false);
+      const onClose = jest.fn();
+      renderWithRouter(<BOMImportWizard onComplete={jest.fn()} onClose={onClose} />);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+      expect(confirmSpy).not.toHaveBeenCalled();
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('prompts once a file is chosen and stays open when the user declines', () => {
+      confirmSpy = jest.spyOn(window, 'confirm').mockReturnValue(false);
+      const onClose = jest.fn();
+      renderWithRouter(<BOMImportWizard onComplete={jest.fn()} onClose={onClose} />);
+
+      const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+      fireEvent.change(fileInput, {
+        target: { files: [new File(['bom'], 'bom.pdf', { type: 'application/pdf' })] },
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+      expect(confirmSpy).toHaveBeenCalledTimes(1);
+      expect(onClose).not.toHaveBeenCalled();
+    });
+
+    it('guards Escape on the preview step and closes when the user confirms', async () => {
+      confirmSpy = jest.spyOn(window, 'confirm').mockReturnValue(true);
+      const onClose = jest.fn();
+      mockedApi.previewBOMImport.mockResolvedValue(previewResponse);
+      renderWithRouter(<BOMImportWizard onComplete={jest.fn()} onClose={onClose} />);
+
+      const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+      fireEvent.change(fileInput, {
+        target: { files: [new File(['bom'], 'bom.pdf', { type: 'application/pdf' })] },
+      });
+      fireEvent.submit(document.getElementById('upload-form') as HTMLFormElement);
+      await screen.findByText('Review Import');
+
+      fireEvent.keyDown(window, { key: 'Escape' });
+      expect(confirmSpy).toHaveBeenCalledTimes(1);
       expect(onClose).toHaveBeenCalledTimes(1);
     });
   });

@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import api from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import { hasPermission } from '../utils/permissions';
+import useUnsavedChanges from '../hooks/useUnsavedChanges';
 import { formatCentralDate, formatCentralDateTime, getCentralTodayISODate } from '../utils/centralTime';
 import {
   TruckIcon,
@@ -230,6 +231,9 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
     notes: '',
     over_receive_approved: false,
   });
+  // Snapshot of formData as populated when the receive modal opened; the
+  // unsaved-changes dirty check compares against it (Materials.tsx idiom).
+  const [initialFormData, setInitialFormData] = useState<ReceiveFormData | null>(null);
 
   const [inspectionData, setInspectionData] = useState({
     quantity_accepted: 0,
@@ -238,6 +242,34 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
     defect_type: '',
     inspection_notes: '',
   });
+  // Snapshot of inspectionData as populated when the inspect modal opened.
+  const [initialInspectionData, setInitialInspectionData] = useState<typeof inspectionData | null>(null);
+
+  // Unsaved-changes guards: every Cancel/Close/backdrop path of the receive and
+  // inspect modals is gated with confirmDiscard() so in-progress entries aren't
+  // silently dropped; beforeunload is covered while dirty.
+  const isReceiveDirty =
+    showReceiveModal &&
+    initialFormData !== null &&
+    JSON.stringify(formData) !== JSON.stringify(initialFormData);
+  const isInspectDirty =
+    showInspectModal &&
+    initialInspectionData !== null &&
+    JSON.stringify(inspectionData) !== JSON.stringify(initialInspectionData);
+  const { confirmDiscard: confirmDiscardReceive } = useUnsavedChanges(isReceiveDirty);
+  const { confirmDiscard: confirmDiscardInspect } = useUnsavedChanges(isInspectDirty);
+
+  // Cancel/Close gates. The successful receive/inspect paths close directly
+  // (never through these), so a completed save never prompts.
+  const requestCloseReceiveModal = () => {
+    if (!confirmDiscardReceive()) return;
+    setShowReceiveModal(false);
+  };
+
+  const requestCloseInspectModal = () => {
+    if (!confirmDiscardInspect()) return;
+    setShowInspectModal(false);
+  };
 
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
@@ -415,7 +447,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
 
   const handleSelectLine = (line: POLine) => {
     setSelectedLine(line);
-    setFormData({
+    const nextForm: ReceiveFormData = {
       ...formData,
       po_line_id: line.line_id,
       quantity_received: line.quantity_remaining,
@@ -424,7 +456,9 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
       // this field). A part flagged in the part master shows an advisory hint
       // next to the checkbox instead, so the receiver opts in deliberately.
       requires_inspection: false,
-    });
+    };
+    setFormData(nextForm);
+    setInitialFormData(nextForm);
     setShowReceiveModal(true);
   };
 
@@ -515,13 +549,15 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
       const detail = await api.getReceiptDetail(receipt.receipt_id);
       setReceiptDetail(detail);
       setSelectedReceipt(receipt);
-      setInspectionData({
+      const nextInspection = {
         quantity_accepted: receipt.quantity_received,
         quantity_rejected: 0,
         inspection_method: 'visual',
         defect_type: '',
         inspection_notes: '',
-      });
+      };
+      setInspectionData(nextInspection);
+      setInitialInspectionData(nextInspection);
       setShowInspectModal(true);
     } catch (err) {
       console.error('Failed to load receipt details:', err);
@@ -1550,7 +1586,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
       {/* RECEIVE MODAL */}
       <Modal
         open={showReceiveModal && !!selectedLine}
-        onClose={() => setShowReceiveModal(false)}
+        onClose={requestCloseReceiveModal}
         size="2xl"
         closeOnBackdrop={false}
       >
@@ -1558,7 +1594,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
           <>
             <div className="flex justify-between items-center mb-6">
               <h2 className="text-xl font-bold">Receive Material</h2>
-              <button onClick={() => setShowReceiveModal(false)}>
+              <button onClick={requestCloseReceiveModal} aria-label="Close">
                 <XMarkIcon className="h-6 w-6 text-slate-400 hover:text-slate-400" />
               </button>
             </div>
@@ -1770,7 +1806,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
             </div>
 
             <div className="flex justify-end gap-3 mt-6 pt-4 border-t">
-              <Button variant="secondary" className="px-6" onClick={() => setShowReceiveModal(false)}>
+              <Button variant="secondary" className="px-6" onClick={requestCloseReceiveModal}>
                 Cancel
               </Button>
               <Button className="px-6" onClick={handleReceive}>
@@ -1784,7 +1820,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
       {/* INSPECT MODAL */}
       <Modal
         open={showInspectModal && !!selectedReceipt && !!receiptDetail}
-        onClose={() => setShowInspectModal(false)}
+        onClose={requestCloseInspectModal}
         size="2xl"
         closeOnBackdrop={false}
       >
@@ -1792,7 +1828,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
           <>
             <div className="flex justify-between items-center mb-6">
               <h2 className="text-xl font-bold">Inspect Receipt</h2>
-              <button onClick={() => setShowInspectModal(false)}>
+              <button onClick={requestCloseInspectModal} aria-label="Close">
                 <XMarkIcon className="h-6 w-6 text-slate-400 hover:text-slate-400" />
               </button>
             </div>
@@ -1991,7 +2027,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
             </div>
 
             <div className="flex justify-end gap-3 mt-6 pt-4 border-t">
-              <Button variant="secondary" className="px-6" onClick={() => setShowInspectModal(false)}>
+              <Button variant="secondary" className="px-6" onClick={requestCloseInspectModal}>
                 Cancel
               </Button>
               <Button className="px-6" onClick={handleInspect}>

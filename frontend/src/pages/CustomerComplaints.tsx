@@ -25,6 +25,7 @@ import {
   FormField,
 } from '../components/ui';
 import { formatCentralDate, getCentralTodayISODate } from '../utils/centralTime';
+import useUnsavedChanges from '../hooks/useUnsavedChanges';
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -226,6 +227,9 @@ export default function CustomerComplaints() {
     estimated_cost: 0,
   });
   const [createLoading, setCreateLoading] = useState(false);
+  // Snapshot of createForm as populated when the modal opened; the
+  // unsaved-changes dirty check compares against it (Materials.tsx idiom).
+  const [initialCreateForm, setInitialCreateForm] = useState<ComplaintCreateForm | null>(null);
 
   // RMA modal
   const [showRMAModal, setShowRMAModal] = useState(false);
@@ -238,6 +242,34 @@ export default function CustomerComplaints() {
     notes: '',
   });
   const [rmaLoading, setRmaLoading] = useState(false);
+  // Snapshot of rmaForm as pre-filled from the complaint when the modal opened.
+  const [initialRmaForm, setInitialRmaForm] = useState<RMACreateForm | null>(null);
+
+  // Unsaved-changes guards: every Cancel/Close/backdrop path of the two form
+  // modals is gated with confirmDiscard() so in-progress entries aren't
+  // silently dropped; beforeunload is covered while dirty.
+  const isCreateDirty =
+    showCreateModal &&
+    initialCreateForm !== null &&
+    JSON.stringify(createForm) !== JSON.stringify(initialCreateForm);
+  const isRmaDirty =
+    showRMAModal &&
+    initialRmaForm !== null &&
+    JSON.stringify(rmaForm) !== JSON.stringify(initialRmaForm);
+  const { confirmDiscard: confirmDiscardCreate } = useUnsavedChanges(isCreateDirty);
+  const { confirmDiscard: confirmDiscardRma } = useUnsavedChanges(isRmaDirty);
+
+  // Cancel/Close gates. The successful create paths close directly (never
+  // through these), so saving never prompts. Both open handlers repopulate the
+  // form, so no reset is needed here.
+  const requestCloseCreateModal = () => {
+    if (!confirmDiscardCreate()) return;
+    setShowCreateModal(false);
+  };
+  const requestCloseRMAModal = () => {
+    if (!confirmDiscardRma()) return;
+    setShowRMAModal(false);
+  };
 
   // ── Data fetching ──────────────────────────────────────────────
 
@@ -301,7 +333,7 @@ export default function CustomerComplaints() {
   // ── Create complaint ──────────────────────────────────────────
 
   const openCreateModal = useCallback(() => {
-    setCreateForm({
+    const nextForm: ComplaintCreateForm = {
       customer_name: '',
       customer_po_number: '',
       customer_contact: '',
@@ -314,7 +346,9 @@ export default function CustomerComplaints() {
       date_received: todayISO(),
       date_of_occurrence: '',
       estimated_cost: 0,
-    });
+    };
+    setCreateForm(nextForm);
+    setInitialCreateForm(nextForm);
     setShowCreateModal(true);
   }, []);
 
@@ -368,13 +402,15 @@ export default function CustomerComplaints() {
 
   const openRMAModal = useCallback((complaint: Complaint) => {
     setRmaComplaint(complaint);
-    setRmaForm({
+    const nextForm: RMACreateForm = {
       customer_name: complaint.customer_name,
       quantity: complaint.quantity_affected,
       lot_number: complaint.lot_number || '',
       reason: complaint.description,
       notes: '',
-    });
+    };
+    setRmaForm(nextForm);
+    setInitialRmaForm(nextForm);
     setShowRMAModal(true);
   }, []);
 
@@ -885,12 +921,13 @@ export default function CustomerComplaints() {
       )}
 
       {/* ── Create Complaint Modal ────────────────────────────────── */}
-      <Modal open={showCreateModal} onClose={() => setShowCreateModal(false)} size="2xl">
+      <Modal open={showCreateModal} onClose={requestCloseCreateModal} size="2xl">
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-lg font-bold">New Customer Complaint</h3>
           <button
-            onClick={() => setShowCreateModal(false)}
+            onClick={requestCloseCreateModal}
             className="du-btn du-btn-sm du-btn-circle du-btn-ghost"
+            aria-label="Close"
           >
             <XMarkIcon className="h-5 w-5" />
           </button>
@@ -1120,7 +1157,7 @@ export default function CustomerComplaints() {
               <div className="du-modal-action">
                 <button
                   type="button"
-                  onClick={() => setShowCreateModal(false)}
+                  onClick={requestCloseCreateModal}
                   className="du-btn du-btn-ghost"
                 >
                   Cancel
@@ -1142,14 +1179,15 @@ export default function CustomerComplaints() {
 
       {/* ── Create RMA Modal ──────────────────────────────────────── */}
       {rmaComplaint && (
-        <Modal open={showRMAModal} onClose={() => setShowRMAModal(false)} size="lg">
+        <Modal open={showRMAModal} onClose={requestCloseRMAModal} size="lg">
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-lg font-bold">
               Create RMA from {rmaComplaint.complaint_number}
             </h3>
             <button
-              onClick={() => setShowRMAModal(false)}
+              onClick={requestCloseRMAModal}
               className="du-btn du-btn-sm du-btn-circle du-btn-ghost"
+              aria-label="Close"
             >
               <XMarkIcon className="h-5 w-5" />
             </button>
@@ -1253,7 +1291,7 @@ export default function CustomerComplaints() {
               <div className="du-modal-action">
                 <button
                   type="button"
-                  onClick={() => setShowRMAModal(false)}
+                  onClick={requestCloseRMAModal}
                   className="du-btn du-btn-ghost"
                 >
                   Cancel
