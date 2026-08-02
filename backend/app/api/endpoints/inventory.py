@@ -420,12 +420,17 @@ def get_inventory_summary(
     company_id: int = Depends(get_current_company_id),
 ):
     """Get inventory summary by part with locations"""
-    # Get all inventory items with quantity
+    # Get all inventory items with nonzero quantity.
+    # != 0, not > 0: the shortage posture deliberately drives a lot NEGATIVE rather
+    # than fail a completion, and a driven-negative lot is a discrepancy someone has
+    # to see and fix — filtering it out made it invisible to the summary.
     items = (
         db.query(InventoryItem)
         .options(joinedload(InventoryItem.part))
         .filter(
-            InventoryItem.company_id == company_id, InventoryItem.is_active == True, InventoryItem.quantity_on_hand > 0
+            InventoryItem.company_id == company_id,
+            InventoryItem.is_active == True,  # noqa: E712
+            InventoryItem.quantity_on_hand != 0,
         )
         .all()
     )
@@ -1218,6 +1223,10 @@ def record_count(
     item.counted_at = datetime.utcnow()
     item.counted_by = current_user.id
     item.notes = count_in.notes
+
+    # SessionLocal runs autoflush=False (app/db/database.py:25), so flush the item
+    # mutation explicitly or the recount below reads the pre-update rows (stale).
+    db.flush()
 
     # Update count progress (``count`` was already resolved tenant-scoped above)
     count.items_counted = (

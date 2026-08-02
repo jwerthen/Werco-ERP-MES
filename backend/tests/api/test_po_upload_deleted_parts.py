@@ -451,3 +451,112 @@ def test_commit_backstop_rolls_back_audit_row_and_po(
     po = db_session.query(PurchaseOrder).filter(PurchaseOrder.po_number == po_number).one()
     audit_rows = db_session.query(AuditLog).filter(AuditLog.action == "PO_CREATE_FROM_UPLOAD").all()
     assert [row.resource_id for row in audit_rows] == [po.id]
+
+
+# ---------------------------------------------------------------------------
+# 6. Header-flush backstop: a racing duplicate po_number is 400, not 500
+# ---------------------------------------------------------------------------
+
+
+def _po_number_integrity_error() -> IntegrityError:
+    return IntegrityError(
+        "(sqlite3.IntegrityError) UNIQUE constraint failed: purchase_orders.company_id, purchase_orders.po_number",
+        None,
+        Exception("simulated concurrent insert"),
+    )
+
+
+def test_po_header_flush_backstop_maps_race_to_400_and_commits_nothing(
+    client: TestClient, db_session: Session, monkeypatch: pytest.MonkeyPatch
+):
+    """The PO-header flush backstop on create-from-upload: a duplicate po_number
+    slipping past check_po_number_exists (concurrent create) surfaces as
+    IntegrityError at the header flush and becomes 400 with the same detail as
+    the pre-check -- not a 500. Nothing commits, and an identical retry succeeds.
+
+    Seam (same as the part-flush tests above): existing part ids on every line
+    and no create_parts/create_vendor, so the FIRST Session.flush() of the
+    request is the PO-header flush."""
+    manager = make_user(db_session)
+    vendor = make_vendor(db_session)
+    part = make_part(db_session, part_number=f"HDR-PN-{_next():05d}")
+    po_number = f"PO-HDR-{_next():05d}"
+    payload = _create_payload(po_number, vendor.id, line_items=[_line(part.part_number, part_id=part.id)])
+
+    real_flush = db_session.flush
+    calls = {"n": 0}
+
+    def exploding_first_flush(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _po_number_integrity_error()
+        return real_flush(*args, **kwargs)
+
+    monkeypatch.setattr(db_session, "flush", exploding_first_flush)
+
+    resp = client.post("/api/v1/po-upload/create-from-upload", headers=headers_for(manager), json=payload)
+    assert resp.status_code == status.HTTP_400_BAD_REQUEST, resp.text
+    assert resp.json()["detail"] == f"PO number '{po_number}' already exists"
+    assert calls["n"] == 1  # the backstop aborted at the header flush
+
+    _assert_nothing_committed(db_session, po_number)
+
+    # Identical retry succeeds: the one-shot patch now delegates to the real flush.
+    resp_retry = client.post("/api/v1/po-upload/create-from-upload", headers=headers_for(manager), json=payload)
+    assert resp_retry.status_code == status.HTTP_200_OK, resp_retry.text
+    assert db_session.query(PurchaseOrder).filter(PurchaseOrder.po_number == po_number).count() == 1
+
+
+def test_purchasing_create_po_header_flush_backstop_is_400_not_500(
+    client: TestClient, db_session: Session, monkeypatch: pytest.MonkeyPatch
+):
+    """Same backstop on POST /purchasing/purchase-orders: the advisory lock in
+    generate_po_number already serializes same-company creates on Postgres, so
+    this is the SQLite/edge backstop -- an IntegrityError at the header flush
+    maps to 400 (duplicate po_number), never a 500."""
+    manager = make_user(db_session)
+    vendor = make_vendor(db_session)
+    part = make_part(db_session, part_number=f"PHDR-PN-{_next():05d}")
+    payload = {
+        "vendor_id": vendor.id,
+        "lines": [{"part_id": part.id, "quantity_ordered": 2, "unit_price": 3.5}],
+    }
+
+    real_flush = db_session.flush
+    calls = {"n": 0}
+
+    def exploding_first_flush(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _po_number_integrity_error()
+        return real_flush(*args, **kwargs)
+
+    monkeypatch.setattr(db_session, "flush", exploding_first_flush)
+
+    resp = client.post("/api/v1/purchasing/purchase-orders", headers=headers_for(manager), json=payload)
+    assert resp.status_code == status.HTTP_400_BAD_REQUEST, resp.text
+    detail = resp.json()["detail"]
+    assert detail.startswith("PO number '") and detail.endswith("' already exists")
+    assert calls["n"] == 1  # the backstop fired at the header flush
+
+    # Nothing committed (the retry below cannot prove this -- po_number is
+    # server-generated, so the failed attempt can't be re-queried by number):
+    # rollback the request leftovers, then assert no PO exists for this vendor
+    # and no purchase_order CREATE audit row by this (per-test-unique) user.
+    db_session.rollback()
+    assert db_session.query(PurchaseOrder).filter(PurchaseOrder.vendor_id == vendor.id).count() == 0
+    assert (
+        db_session.query(AuditLog)
+        .filter(
+            AuditLog.resource_type == "purchase_order",
+            AuditLog.action == "CREATE",
+            AuditLog.user_id == manager.id,
+        )
+        .count()
+        == 0
+    )
+
+    # Retry succeeds once the one-shot patch delegates to the real flush.
+    resp_retry = client.post("/api/v1/purchasing/purchase-orders", headers=headers_for(manager), json=payload)
+    assert resp_retry.status_code == status.HTTP_200_OK, resp_retry.text
+    assert db_session.query(PurchaseOrder).filter(PurchaseOrder.vendor_id == vendor.id).count() == 1

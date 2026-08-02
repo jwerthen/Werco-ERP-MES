@@ -3231,7 +3231,7 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
 | GET | `/inventory/` | List inventory items (`part_id`, `warehouse`, `location_code`, `has_quantity` — `has_quantity` filters **nonzero**, not positive, so driven-negative lots stay visible; see note below) | Yes |
-| GET | `/inventory/summary` | On-hand summary by part, with per-location breakdown | Yes |
+| GET | `/inventory/summary` | On-hand summary by part, with per-location breakdown (every active row with **nonzero** on-hand, negatives included) | Yes |
 | GET | `/inventory/low-stock` | Parts at/below reorder point (on-hand summed per part) | Yes |
 | GET | `/inventory/locations` | List warehouse locations / bins | Yes |
 | POST | `/inventory/locations` | Create a location | Admin / Manager |
@@ -3266,7 +3266,8 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 > a negative row is a discrepancy someone has to see and fix. `GET /inventory/?has_quantity=true`
 > and `GET /exports/inventory?has_quantity=true` therefore filter `quantity_on_hand != 0` (not
 > `> 0` — the old predicate made driven-negative lots invisible to the one list view and to the
-> spreadsheet a manager reconciles from), and `POST /inventory/cycle-counts` enrolls every active
+> spreadsheet a manager reconciles from), `GET /inventory/summary` likewise rolls up every active
+> row with nonzero on-hand, and `POST /inventory/cycle-counts` enrolls every active
 > row with **nonzero** on-hand — a driven-negative lot is exactly the row a cycle count exists to
 > reconcile, and enrolling only positive rows made it permanently uncountable.
 
