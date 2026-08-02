@@ -106,3 +106,27 @@ test('a failed load renders ErrorState and Retry re-runs the fetch to success', 
   // The banner clears once the reload succeeds.
   expect(screen.queryByTestId('error-state')).not.toBeInTheDocument();
 });
+
+test('a failed REFRESH co-renders the banner with the stale-but-present content', async () => {
+  // Degradation lock (the Reports.tsx posture): the ErrorState stays a banner
+  // in its slot — it must never become a full-page swap that hides the
+  // previously loaded (stale-but-present) data below it.
+  mockedApi.getKPIDashboard
+    .mockResolvedValueOnce(kpiDashboard as any)
+    .mockRejectedValueOnce(http(500, 'KPI backend unavailable'));
+
+  renderAnalytics();
+
+  // First load succeeds and the KPI content renders, no banner.
+  expect(await screen.findByText('OEE')).toBeInTheDocument();
+  expect(screen.getByText('82.4%')).toBeInTheDocument();
+  expect(screen.queryByTestId('error-state')).not.toBeInTheDocument();
+
+  // Refresh fails: the banner appears AND the stale KPI content is still there.
+  fireEvent.click(screen.getByRole('button', { name: /refresh/i }));
+
+  const errorState = await screen.findByTestId('error-state');
+  expect(errorState).toHaveTextContent('KPI backend unavailable');
+  expect(screen.getByText('OEE')).toBeInTheDocument();
+  expect(screen.getByText('82.4%')).toBeInTheDocument();
+});

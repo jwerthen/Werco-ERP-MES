@@ -1,18 +1,21 @@
 /**
- * CustomerComplaints — useUnsavedChanges discard guard on the create-complaint
- * (and RMA) modals.
+ * CustomerComplaints — useUnsavedChanges discard guard on BOTH form modals:
+ * create-complaint AND Create RMA (each has its own covered trio below).
  *
  * Clones the Customers/Materials formA11yUnsavedGuard template:
  *   - clean (as-opened) form -> Cancel closes with NO confirm prompt (the
- *     snapshot is captured on open, so the defaulted date_received does not
- *     count as dirty),
+ *     snapshot is captured on open, so prefilled values don't count as dirty —
+ *     the create modal's defaulted date_received, and the RMA modal's
+ *     ENTIRELY server-prefilled body: customer/quantity/lot/reason all copied
+ *     from the complaint; that prefilled-clean case is the load-bearing one,
+ *     since a naive blank-comparison dirty check would flag it immediately),
  *   - dirty + declined       -> modal stays open, the entry is preserved,
  *   - dirty + confirmed      -> modal closes, nothing created,
  *   - successful SAVE        -> closes directly, NO prompt,
  *   - a beforeunload listener is registered only while the form is dirty.
  *
- * The guard is wired into the Modal onClose (backdrop clicks included — this
- * modal allows closeOnBackdrop), not just the Cancel button.
+ * The guard is wired into the Modal onClose (backdrop clicks included — these
+ * modals allow closeOnBackdrop), not just the Cancel button.
  */
 
 import React from 'react';
@@ -137,5 +140,92 @@ describe('CustomerComplaints — create form unsaved-changes guard', () => {
     fireEvent.change(nameInput, { target: { value: 'Acme Aerospace' } });
     await waitFor(() => expect(beforeUnloadCalls().length).toBeGreaterThan(0));
     addSpy.mockRestore();
+  });
+});
+
+describe('CustomerComplaints — Create RMA unsaved-changes guard', () => {
+  let confirmSpy: jest.SpyInstance;
+
+  // A complaint row to expand; the RMA form is prefilled ENTIRELY from it.
+  const complaint = {
+    id: 7,
+    complaint_number: 'CC-2026-007',
+    customer_name: 'Acme Aerospace',
+    customer_contact: 'Pat Lee',
+    customer_po_number: 'PO-88',
+    lot_number: 'LOT-42',
+    serial_number: '',
+    quantity_affected: 3,
+    severity: 'minor',
+    status: 'received',
+    title: 'Dented brackets',
+    description: 'Three brackets arrived dented on one flange.',
+    date_received: '2026-07-30',
+    estimated_cost: 250,
+    rmas: [],
+  };
+
+  beforeEach(() => {
+    mockedApi.getComplaints.mockResolvedValue([complaint] as any);
+  });
+
+  afterEach(() => {
+    confirmSpy?.mockRestore();
+  });
+
+  /** Expand the complaint row and open the Create RMA modal. The number
+   *  renders in both the desktop table and the mobile card — click the table
+   *  cell occurrence to expand. */
+  async function openRMAModal() {
+    renderPage();
+    const cell = (await screen.findAllByText('CC-2026-007')).find(
+      (el) => el.closest('td') !== null
+    ) as HTMLElement;
+    fireEvent.click(cell);
+    fireEvent.click(await screen.findByRole('button', { name: /create rma/i }));
+    await screen.findByRole('heading', { name: /Create RMA from CC-2026-007/ });
+  }
+
+  it('treats the fully server-prefilled form as CLEAN and closes silently', async () => {
+    // The load-bearing case: every field (customer, quantity, lot, reason) is
+    // copied from the complaint on open. The snapshot is captured from that
+    // same prefill, so an untouched close must NOT prompt — a blank-shape
+    // comparison would false-flag this form as dirty immediately.
+    confirmSpy = jest.spyOn(window, 'confirm').mockReturnValue(true);
+    await openRMAModal();
+
+    // Reason is a required FormField, so its accessible label carries the required marker.
+    expect(screen.getByLabelText(/Reason/)).toHaveValue(complaint.description);
+    fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }));
+
+    expect(confirmSpy).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(screen.queryByRole('heading', { name: /Create RMA from/ })).not.toBeInTheDocument()
+    );
+  });
+
+  it('prompts and keeps the modal open when the user declines the discard', async () => {
+    confirmSpy = jest.spyOn(window, 'confirm').mockReturnValue(false);
+    await openRMAModal();
+
+    fireEvent.change(screen.getByLabelText('Notes'), { target: { value: 'ship replacement first' } });
+    fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }));
+
+    expect(confirmSpy).toHaveBeenCalledTimes(1);
+    expect(screen.getByLabelText('Notes')).toHaveValue('ship replacement first');
+  });
+
+  it('prompts and closes (discarding the entry) when the user confirms', async () => {
+    confirmSpy = jest.spyOn(window, 'confirm').mockReturnValue(true);
+    await openRMAModal();
+
+    fireEvent.change(screen.getByLabelText('Notes'), { target: { value: 'ship replacement first' } });
+    fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }));
+
+    expect(confirmSpy).toHaveBeenCalledTimes(1);
+    await waitFor(() =>
+      expect(screen.queryByRole('heading', { name: /Create RMA from/ })).not.toBeInTheDocument()
+    );
+    expect(mockedApi.createRMA).not.toHaveBeenCalled();
   });
 });

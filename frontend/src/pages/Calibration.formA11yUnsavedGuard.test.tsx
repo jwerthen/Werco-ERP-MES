@@ -185,3 +185,48 @@ describe('Calibration — record-calibration form unsaved-changes guard', () => 
     expect(mockedApi.recordCalibration).not.toHaveBeenCalled();
   });
 });
+
+describe('Calibration — Edit Equipment unsaved-changes guard', () => {
+  let confirmSpy: jest.SpyInstance;
+
+  afterEach(() => {
+    confirmSpy?.mockRestore();
+  });
+
+  /** "CAL-001" renders in both the desktop table and the mobile card list —
+   *  pick the table row occurrence. */
+  async function findEquipmentRow() {
+    const matches = await screen.findAllByText('CAL-001');
+    return matches.map((el) => el.closest('tr')).find(Boolean) as HTMLElement;
+  }
+
+  it('treats the row-prefilled edit form as clean and only prompts after an edit', async () => {
+    // Edit mode snapshots the row's values in handleEdit, so opening and
+    // immediately closing must NOT prompt (a blank-shape comparison would
+    // false-flag every edit open as dirty).
+    confirmSpy = jest.spyOn(window, 'confirm').mockReturnValue(false);
+    renderPage();
+
+    let row = await findEquipmentRow();
+    fireEvent.click(within(row).getByRole('button', { name: 'Edit' }));
+    await screen.findByRole('heading', { name: 'Edit Equipment' });
+    expect(screen.getByLabelText(/Equipment ID/)).toHaveValue('CAL-001');
+
+    fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }));
+    expect(confirmSpy).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(screen.queryByRole('heading', { name: 'Edit Equipment' })).not.toBeInTheDocument()
+    );
+
+    // Reopen, edit the name — now Cancel prompts and a decline preserves it.
+    row = await findEquipmentRow();
+    fireEvent.click(within(row).getByRole('button', { name: 'Edit' }));
+    await screen.findByRole('heading', { name: 'Edit Equipment' });
+    fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Digital Caliper 2' } });
+
+    fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }));
+    expect(confirmSpy).toHaveBeenCalledTimes(1);
+    expect(screen.getByLabelText(/^Name/)).toHaveValue('Digital Caliper 2');
+    expect(mockedApi.updateEquipment).not.toHaveBeenCalled();
+  });
+});
