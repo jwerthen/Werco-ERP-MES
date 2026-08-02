@@ -576,4 +576,59 @@ describe('ProcessSheets page', () => {
 
     expect(await screen.findByText(detail)).toBeInTheDocument();
   });
+
+  // ---- ConfirmDialog pending wiring (delete-step, representative of all 3) ---
+
+  it('delete-step confirm stays open and pending mid-flight, blocks a second fire, and closes only on settle', async () => {
+    // Hanging promise: the delete is in flight until we resolve it explicitly.
+    let resolveDelete!: (value: unknown) => void;
+    mockedApi.deleteProcessSheetStep.mockImplementation(
+      () => new Promise((resolve) => { resolveDelete = resolve; })
+    );
+
+    renderPage('/process-sheets?sheet=2');
+    await screen.findByText('Bore diameter');
+    fireEvent.click(screen.getByLabelText('Delete step 10'));
+
+    const dialog = await screen.findByRole('dialog');
+    const confirmButton = within(dialog).getByRole('button', { name: 'Delete' });
+    fireEvent.click(confirmButton);
+    await waitFor(() => expect(mockedApi.deleteProcessSheetStep).toHaveBeenCalledWith(2, 10));
+
+    // Mid-flight: the dialog is open and pending — spinner up, both buttons
+    // disabled, dismissal blocked at the ConfirmDialog level.
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    expect(within(dialog).getByRole('status', { name: 'Loading' })).toBeInTheDocument();
+    expect(confirmButton).toBeDisabled();
+    expect(within(dialog).getByRole('button', { name: 'Cancel' })).toBeDisabled();
+
+    // A second confirm click posts nothing extra.
+    fireEvent.click(confirmButton);
+    expect(mockedApi.deleteProcessSheetStep).toHaveBeenCalledTimes(1);
+
+    // Only once the promise settles does the dialog close (after the
+    // non-optimistic refresh).
+    resolveDelete(undefined);
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(mockedApi.deleteProcessSheetStep).toHaveBeenCalledTimes(1);
+  });
+
+  it('a refused delete-step closes the dialog on settle with the verbatim error toast', async () => {
+    // Deliberately pinned: ConfirmDialogs close on settle EITHER way. Unlike
+    // the InputDialog callers — which keep the dialog open on a refusal so the
+    // user's typed input isn't lost — a confirm dialog holds no typed state,
+    // so closing with the error toast is the settled behavior here.
+    const detail = 'Process sheet PS-000001 Rev B is no longer a draft — steps cannot be deleted.';
+    mockedApi.deleteProcessSheetStep.mockRejectedValue({ response: { status: 409, data: { detail } } });
+
+    renderPage('/process-sheets?sheet=2');
+    await screen.findByText('Bore diameter');
+    fireEvent.click(screen.getByLabelText('Delete step 10'));
+
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
+
+    expect(await screen.findByText(detail)).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  });
 });

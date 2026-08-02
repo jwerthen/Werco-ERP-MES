@@ -12,7 +12,7 @@ import {
 } from '../utils/centralTime';
 import { KioskRunOrderChip } from '../components/kiosk/KioskQueueCard';
 import { useToast } from '../components/ui/Toast';
-import { Button, EmptyState, ErrorState, FormField, StatusBadge, statusColor, statusVariant } from '../components/ui';
+import { Button, EmptyState, ErrorState, FormField, InputDialog, StatusBadge, statusColor, statusVariant } from '../components/ui';
 import {
   PlayIcon,
   StopIcon,
@@ -62,6 +62,10 @@ const STATUS_DOT_CLASS: Record<ReturnType<typeof statusVariant>, string> = {
 };
 const dotClass = (status: string) => STATUS_DOT_CLASS[statusVariant(status)];
 
+// Default note pre-filled in the missing-material report dialog (formerly the
+// window.prompt default).
+const DEFAULT_MATERIAL_BLOCKER_NOTE = 'Operator reported material is not available at the work center.';
+
 export default function ShopFloor() {
   const { can } = usePermissions();
   const { showToast } = useToast();
@@ -91,6 +95,10 @@ export default function ShopFloor() {
   const [workOrderDetails, setWorkOrderDetails] = useState<Record<number, WorkOrderDetails>>({});
   const [updatingPriorityWorkOrderId, setUpdatingPriorityWorkOrderId] = useState<number | null>(null);
   const [reportingBlockerOperationId, setReportingBlockerOperationId] = useState<number | null>(null);
+  const [materialBlockerDialog, setMaterialBlockerDialog] = useState<{ open: boolean; item: QueueItem | null }>({
+    open: false,
+    item: null,
+  });
   const [clockingInOperationId, setClockingInOperationId] = useState<number | null>(null);
   const [clockingOut, setClockingOut] = useState(false);
   // Back-entry (offline paper catch-up) mode. When on, clock-in/clock-out send
@@ -400,12 +408,17 @@ export default function ShopFloor() {
     }
   };
 
-  const handleReportMaterialBlocker = async (item: QueueItem) => {
-    const note = window.prompt(
-      `Report missing material for ${item.work_order_number}?`,
-      'Operator reported material is not available at the work center.'
-    );
-    if (note === null) return;
+  // Replaced the native window.prompt() note capture with the shared
+  // InputDialog. The button opens the dialog; submit runs the report with the
+  // entered (trimmed, non-empty) note, non-optimistically — the dialog stays
+  // open and pending until the server answers, and closes only on success.
+  const openMaterialBlockerDialog = (item: QueueItem) => {
+    setMaterialBlockerDialog({ open: true, item });
+  };
+
+  const handleReportMaterialBlocker = async (note: string) => {
+    const item = materialBlockerDialog.item;
+    if (!item || reportingBlockerOperationId !== null) return;
 
     setReportingBlockerOperationId(item.operation_id);
     try {
@@ -413,10 +426,11 @@ export default function ShopFloor() {
         operation_id: item.operation_id,
         category: 'material_missing',
         severity: 'high',
-        note: note.trim() || 'Operator reported material is not available at the work center.',
+        note,
         put_operation_on_hold: true,
       });
       notify('success', `Reported missing material for ${item.work_order_number}`);
+      setMaterialBlockerDialog({ open: false, item: null });
       if (selectedWorkCenter) {
         await loadQueue(selectedWorkCenter);
       }
@@ -816,7 +830,7 @@ export default function ShopFloor() {
                               </button>
                             )}
                             <button
-                              onClick={() => handleReportMaterialBlocker(item)}
+                              onClick={() => openMaterialBlockerDialog(item)}
                               disabled={reportingBlockerOperationId !== null || item.status === 'on_hold'}
                               className="btn-secondary btn-sm w-full text-amber-700"
                               title="Report missing material"
@@ -1056,6 +1070,28 @@ export default function ShopFloor() {
           </Button>
         </div>
       </Modal>
+
+      {/* Missing-material blocker note (replaces the native window.prompt) */}
+      <InputDialog
+        open={materialBlockerDialog.open}
+        title="Report Missing Material"
+        message={
+          materialBlockerDialog.item
+            ? `Report missing material for ${materialBlockerDialog.item.work_order_number}? This puts the operation on hold.`
+            : undefined
+        }
+        label="Note"
+        defaultValue={DEFAULT_MATERIAL_BLOCKER_NOTE}
+        submitLabel="Report"
+        pending={
+          materialBlockerDialog.item !== null &&
+          reportingBlockerOperationId === materialBlockerDialog.item.operation_id
+        }
+        onSubmit={handleReportMaterialBlocker}
+        onCancel={() => {
+          if (reportingBlockerOperationId === null) setMaterialBlockerDialog({ open: false, item: null });
+        }}
+      />
     </div>
   );
 }

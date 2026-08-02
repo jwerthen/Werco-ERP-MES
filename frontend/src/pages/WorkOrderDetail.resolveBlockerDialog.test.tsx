@@ -1,22 +1,17 @@
 /**
- * WorkOrderDetail — resolve-blocker feedback.
+ * WorkOrderDetail — resolving a blocker now captures its note through the
+ * shared InputDialog instead of the native prompt().
  *
- * Resolving a blocker used to succeed silently (the list simply refreshed);
- * now success shows a toast naming the blocker, mirroring the page's other
- * mutation toasts. The error path (verbatim server detail in an error toast)
- * is pinned as existing behavior. The note capture goes through the shared
- * InputDialog (the native prompt() is gone), so the tests drive the dialog:
- * open via the page's Resolve button, then submit via the DIALOG's Resolve
- * button (scoped `within(dialog)` — the two buttons share a name). Dialog
- * mechanics themselves are covered in WorkOrderDetail.resolveBlockerDialog
- * .test.tsx; this file owns the toast feedback.
- *
- * Harness mirrors WorkOrderDetail.correctCount.test.tsx (side-channels
- * mocked), plus ToastProvider so the global toast text actually renders.
+ * Covers: the Resolve button opens the dialog (default note "Resolved",
+ * message naming the blocker), submit resolves with the entered trimmed note
+ * and refetches the work order non-optimistically, cancel resolves nothing,
+ * and a server refusal surfaces the verbatim detail while the dialog stays
+ * open for retry. Harness mirrors WorkOrderDetail.correctCount.test.tsx
+ * (side-channels mocked) plus ToastProvider so toast text actually renders.
  */
 
 import React from 'react';
-import { act, render, screen, fireEvent, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import api from '../services/api';
 import WorkOrderDetail from './WorkOrderDetail';
@@ -104,23 +99,14 @@ function renderDetail() {
   );
 }
 
-// Opens the InputDialog via the page's Resolve button and submits it with the
-// pre-filled default note ("Resolved") via the dialog's own Resolve button.
-async function resolveViaDialog() {
+async function openResolveDialog() {
+  renderDetail();
   fireEvent.click(await screen.findByRole('button', { name: /^resolve$/i }));
-  const dialog = await screen.findByRole('dialog');
-  expect(within(dialog).getByLabelText(/resolution note/i)).toHaveValue('Resolved');
-  // Async act so the submit's whole microtask chain (api settle -> toast ->
-  // pending-cleared) flushes inside act — no unwrapped-update warnings.
-  await act(async () => {
-    fireEvent.click(within(dialog).getByRole('button', { name: /^resolve$/i }));
-  });
-  return dialog;
+  return await screen.findByRole('dialog');
 }
 
 beforeEach(() => {
   jest.clearAllMocks();
-
   mockedApi.getWorkOrder.mockResolvedValue({ ...workOrderFixture });
   mockedApi.getOperationDetails.mockResolvedValue({ all_operations: [] });
   mockedApi.getMaterialRequirements.mockResolvedValue(null);
@@ -132,34 +118,56 @@ beforeEach(() => {
   mockedApi.getMaterialAllocations.mockResolvedValue([]);
 });
 
-describe('WorkOrderDetail resolve-blocker toast', () => {
-  it('shows a success toast naming the blocker after resolve + refetch', async () => {
-    renderDetail();
+describe('WorkOrderDetail resolve-blocker InputDialog', () => {
+  it('opens the dialog naming the blocker with the default "Resolved" note', async () => {
+    await openResolveDialog();
 
-    await resolveViaDialog();
+    expect(screen.getByText('Resolve Blocker')).toBeInTheDocument();
+    expect(screen.getByText('Resolve blocker "Material missing"?')).toBeInTheDocument();
+    expect(screen.getByLabelText(/resolution note/i)).toHaveValue('Resolved');
+    expect(mockedApi.resolveWorkOrderBlocker).not.toHaveBeenCalled();
+  });
+
+  it('submit resolves with the entered trimmed note, refetches, and closes', async () => {
+    const dialog = await openResolveDialog();
+
+    fireEvent.change(screen.getByLabelText(/resolution note/i), {
+      target: { value: '  Vendor delivered this morning  ' },
+    });
+    // Scoped to the dialog — the page's own Resolve button shares the name.
+    fireEvent.click(within(dialog).getByRole('button', { name: /^resolve$/i }));
 
     await waitFor(() =>
-      expect(mockedApi.resolveWorkOrderBlocker).toHaveBeenCalledWith(7, 'Resolved')
+      expect(mockedApi.resolveWorkOrderBlocker).toHaveBeenCalledWith(7, 'Vendor delivered this morning')
     );
-    // Toast fires after the non-optimistic refetch completes (and the dialog closes).
-    expect(await screen.findByText('Resolved blocker "Material missing"')).toBeInTheDocument();
+    // Non-optimistic: the work order is refetched (initial load + post-resolve).
+    await waitFor(() => expect(mockedApi.getWorkOrder).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
   });
 
-  it('shows the server detail in an error toast when the resolve is refused (existing behavior)', async () => {
+  it('cancel closes the dialog and resolves nothing', async () => {
+    await openResolveDialog();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(mockedApi.resolveWorkOrderBlocker).not.toHaveBeenCalled();
+  });
+
+  it('a server refusal surfaces the verbatim detail and keeps the dialog open for retry', async () => {
     const refusal = 'Blocker already resolved by someone else';
     mockedApi.resolveWorkOrderBlocker.mockRejectedValue({
       response: { data: { detail: refusal } },
     });
-    renderDetail();
+    const dialog = await openResolveDialog();
 
-    const dialog = await resolveViaDialog();
+    fireEvent.click(within(dialog).getByRole('button', { name: /^resolve$/i }));
 
     expect(await screen.findByText(refusal)).toBeInTheDocument();
-    // No false success.
-    expect(screen.queryByText(/resolved blocker/i)).not.toBeInTheDocument();
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
     // Wait for the rejection's `finally` to clear the pending state (the
-    // dialog's Resolve re-enables) so the update lands inside act().
+    // dialog's Resolve re-enables) so the update lands inside act() and a
+    // retry is possible.
     await waitFor(() =>
       expect(within(dialog).getByRole('button', { name: /^resolve$/i })).toBeEnabled()
     );

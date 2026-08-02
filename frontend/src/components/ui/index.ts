@@ -24,6 +24,8 @@ export type { StatusVariant } from '../../utils/statusColors';
 export { Tabs } from './Tabs';
 export type { Tab } from './Tabs';
 export { ConfirmDialog } from './ConfirmDialog';
+export { InputDialog } from './InputDialog';
+export type { InputDialogProps } from './InputDialog';
 export { Breadcrumbs } from './Breadcrumbs';
 export type { Crumb } from './Breadcrumbs';
 
