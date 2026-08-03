@@ -1,7 +1,7 @@
 from datetime import date, datetime, timedelta
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session, joinedload
 
@@ -421,8 +421,8 @@ def list_scorecards(
     vendor_id: Optional[int] = None,
     period_type: Optional[str] = None,
     rating: Optional[str] = None,
-    skip: int = 0,
-    limit: int = 100,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=5000),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
@@ -697,7 +697,11 @@ def auto_calculate_scorecard(
 
 
 @router.get("/supplier-audits/due-soon")
-def audits_due_soon(days: int = 30, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def audits_due_soon(
+    days: int = Query(30, ge=1, le=365),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Get audits due within N days."""
     cutoff = date.today() + timedelta(days=days)
     audits = (
@@ -714,8 +718,8 @@ def audits_due_soon(days: int = 30, db: Session = Depends(get_db), current_user:
 def list_audits(
     vendor_id: Optional[int] = None,
     result: Optional[str] = None,
-    skip: int = 0,
-    limit: int = 100,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=5000),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -774,8 +778,8 @@ def update_audit(
 @router.get("/approved-suppliers/", response_model=List[ASLResponse])
 def list_approved_suppliers(
     status: Optional[str] = None,
-    skip: int = 0,
-    limit: int = 100,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=5000),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):

@@ -6,7 +6,7 @@ from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session, joinedload, selectinload
+from sqlalchemy.orm import Session, joinedload
 
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
@@ -37,6 +37,12 @@ from app.services.migration_import_service import import_open_purchase_orders
 from app.services.operational_event_service import OperationalEventService
 
 router = APIRouter()
+
+# Ceiling on the rows ``GET /purchasing/purchase-orders`` will materialize. A
+# generous bound, not a page size: the default filter already excludes
+# closed/cancelled POs, so the live set is the shop's OPEN book -- far below this
+# for every tenant. It exists so a pathological caller cannot read the table.
+MAX_PO_ROWS = 5_000
 
 
 class VendorCsvImportError(BaseModel):
@@ -454,17 +460,47 @@ def generate_po_number(db: Session, company_id: int = None) -> str:
 def list_purchase_orders(
     status: Optional[str] = None,
     vendor_id: Optional[int] = None,
+    limit: int = Query(MAX_PO_ROWS, ge=1, le=MAX_PO_ROWS),
+    offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
+    """List purchase orders, newest first.
+
+    Open POs only (closed and cancelled are excluded) unless ``status`` is
+    given. Returns at most ``limit`` POs starting at ``offset``, each with a
+    ``line_count``; rows past the limit are not returned, so page through them
+    with ``offset``.
+    """
+    # The default IS the ceiling (MAX_PO_ROWS): a zero-argument caller receives
+    # the whole set exactly as it did before the cap existed.
+    #
+    # `ge=1` so a negative value cannot reach `.limit()` -- PostgreSQL rejects a
+    # negative LIMIT and SQLite silently treats it as "unbounded"; `ge=0` on the
+    # offset because PostgreSQL likewise rejects a negative OFFSET.
+    # ``line_count`` is the only thing this response needs from the lines, so it
+    # comes back as a correlated COUNT rather than a ``selectinload``. The eager
+    # load hydrated every line ORM object of every PO purely to call ``len()`` on
+    # them -- 5k open POs x 8 lines is 40k objects to emit 5k integers.
+    # PurchaseOrderLine carries TenantMixin but NOT SoftDeleteMixin (see
+    # app/models/purchasing.py), so COUNT(*) and len(po.lines) are exactly equal;
+    # there is no soft-deleted line for the count to disagree about.
+    line_count_sq = (
+        db.query(func.count(PurchaseOrderLine.id))
+        .filter(PurchaseOrderLine.purchase_order_id == PurchaseOrder.id)
+        .correlate(PurchaseOrder)
+        .scalar_subquery()
+        .label("line_count")
+    )
+
     query = (
-        db.query(PurchaseOrder)
+        db.query(PurchaseOrder, line_count_sq)
         .filter(
             PurchaseOrder.company_id == company_id,
             PurchaseOrder.is_deleted == False,  # noqa: E712
         )
-        .options(joinedload(PurchaseOrder.vendor), selectinload(PurchaseOrder.lines))
+        .options(joinedload(PurchaseOrder.vendor))
     )
 
     if status:
@@ -476,10 +512,10 @@ def list_purchase_orders(
     if vendor_id:
         query = query.filter(PurchaseOrder.vendor_id == vendor_id)
 
-    pos = query.order_by(PurchaseOrder.created_at.desc()).all()
+    rows = query.order_by(PurchaseOrder.created_at.desc()).offset(offset).limit(limit).all()
 
     result = []
-    for po in pos:
+    for po, line_count in rows:
         result.append(
             POListResponse(
                 id=po.id,
@@ -490,7 +526,7 @@ def list_purchase_orders(
                 order_date=po.order_date,
                 required_date=po.required_date,
                 total=po.total,
-                line_count=len(po.lines),
+                line_count=line_count,
                 created_at=po.created_at,
             )
         )

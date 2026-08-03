@@ -2,7 +2,7 @@ from datetime import date, datetime, timedelta
 from io import BytesIO
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session, joinedload
@@ -217,10 +217,24 @@ def _load_ai_estimate(db: Session, quote_id: int) -> Optional[AIEstimateResponse
 def list_quotes(
     status: Optional[str] = None,
     customer: Optional[str] = None,
+    limit: int = Query(100, ge=1, le=5000),
+    offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
+    """List quotes, newest first. Open quotes only unless ``status`` is given.
+
+    Returns at most ``limit`` quotes starting at ``offset``. Rows past the limit
+    are not returned; page through them with ``offset``.
+    """
+    # The row cap used to be a hardcoded ``.limit(100)`` with no offset, so the
+    # 101st quote was unreachable through the API. The default stays 100 -- the
+    # response is byte-identical for today's callers -- but the truncation is now
+    # escapable and the ceiling is explicit.
+    #
+    # ``ge=1``/``ge=0``: a negative value would reach ``.limit()``/``.offset()``,
+    # which PostgreSQL rejects outright and SQLite silently reads as "unbounded".
     query = db.query(Quote).options(joinedload(Quote.lines)).filter(Quote.company_id == company_id)
 
     if status:
@@ -231,7 +245,7 @@ def list_quotes(
     if customer:
         query = query.filter(Quote.customer_name.ilike(f"%{customer}%"))
 
-    quotes = query.order_by(Quote.created_at.desc()).limit(100).all()
+    quotes = query.order_by(Quote.created_at.desc()).offset(offset).limit(limit).all()
 
     result = []
     for q in quotes:

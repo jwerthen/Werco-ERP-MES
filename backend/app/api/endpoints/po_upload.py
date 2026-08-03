@@ -665,7 +665,7 @@ def get_uploaded_pdf(
 @router.get("/search-parts")
 def search_parts(
     q: str = Query(..., min_length=1),
-    limit: int = Query(10, le=50),
+    limit: int = Query(10, ge=1, le=50),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
@@ -684,7 +684,7 @@ def search_parts(
 @router.get("/search-vendors")
 def search_vendors(
     q: str = Query(..., min_length=1),
-    limit: int = Query(10, le=50),
+    limit: int = Query(10, ge=1, le=50),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),

@@ -23,7 +23,7 @@ from __future__ import annotations
 from io import BytesIO
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -284,7 +284,7 @@ def get_shop_data(
 @router.get("/shop-data/history", response_model=List[ShopDataHistoryItemOut])
 def get_shop_data_history(
     kind: Optional[str] = None,
-    limit: int = 50,
+    limit: int = Query(50, ge=1, le=500),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(_ROLES)),
     company_id: int = Depends(get_current_company_id),
@@ -350,7 +350,7 @@ def post_shop_data_row(
 
 @router.get("/job-actuals", response_model=List[JobActualOut])
 def get_job_actuals(
-    limit: int = 50,
+    limit: int = Query(50, ge=1, le=500),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(_ROLES)),
     company_id: int = Depends(get_current_company_id),

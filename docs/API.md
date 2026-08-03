@@ -139,7 +139,7 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| GET | `/work-orders/` | List all work orders | Yes |
+| GET | `/work-orders/` | List all work orders (`skip` ≥ 0, `limit` 1–5000 default 100 — the standard list tier, see [Pagination](#pagination)) | Yes |
 | POST | `/work-orders/` | Create work order. `work_order_type` is validated against the `WorkOrderType` vocabulary (**422** on an unknown value), and `'laser_cutting'` is **refused on create** (422) — nest-dispatch WOs are minted only by the laser nest import paths (see note below) | Yes |
 | GET | `/work-orders/{id}` | Get work order by ID | Yes |
 | PUT | `/work-orders/{id}` | Update work order (body requires the WO's current `version` — stale → 409; also 409 if it moves a terminal WO back to a non-terminal status, **or sets `status` to COMPLETE/CLOSED from any status other than COMPLETE/CLOSED** — see "Terminal-state lock" below) | Yes |
@@ -1481,12 +1481,12 @@ mixed**:
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| GET | `/bom/` | List all BOMs | Yes |
+| GET | `/bom/` | List all BOMs (`skip` ≥ 0, `limit` default 100, **1–10000** — the one list endpoint above the standard 5000 ceiling; see [Pagination](#pagination)) | Yes |
 | POST | `/bom/` | Create BOM | Yes |
 | GET | `/bom/uom-mismatches` | **PR 4.5** — BOM lines whose stated unit of measure disagrees with the component part's. Pure read (writes nothing). **Has a UI:** `/bom/uom-mismatches`, sidebar **Engineering → BOM Unit Mismatches** — see [below](#where-this-is-worked--the-bom-unit-mismatches-screen) | Admin / Manager / Supervisor |
 | GET | `/bom/{id}` | Get BOM by ID | Yes |
-| GET | `/bom/{id}/explode` | Multi-level explosion (`max_levels`, default 10, ≤ 20) — see tenant-scoping note below | Yes |
-| GET | `/bom/{id}/flatten` | Flattened multi-level view for reports/MRP (`max_levels`) — same scoping | Yes |
+| GET | `/bom/{id}/explode` | Multi-level explosion (`max_levels` **1–20**, default 10) — see tenant-scoping note below | Yes |
+| GET | `/bom/{id}/flatten` | Flattened multi-level view for reports/MRP (`max_levels` **1–20**, default 10) — same scoping | Yes |
 | GET | `/bom/{id}/where-used` | Parent assemblies using this BOM's part — same scoping | Yes |
 | PUT | `/bom/{id}` | Update BOM | Yes |
 | DELETE | `/bom/{id}` | Delete BOM | Admin |
@@ -3129,7 +3129,7 @@ the public paths are `/eco/eco/…`.
 | PUT | `/purchasing/vendors/{vendor_id}` | Update vendor — `code` is editable (see note) | Admin / Manager |
 | DELETE | `/purchasing/vendors/{vendor_id}` | Soft-delete a vendor (also sets `is_active=false`) — guarded, see note below | Admin / Manager |
 | POST | `/purchasing/vendors/{vendor_id}/restore` | Restore a soft-deleted vendor (re-activates it) | Admin / Manager |
-| GET | `/purchasing/purchase-orders` | List purchase orders (filters: `status`, `vendor_id`) | Yes |
+| GET | `/purchasing/purchase-orders` | List purchase orders (filters: `status`, `vendor_id`). Bounded: `limit` **1–5000, default 5000**, `offset` ≥ 0 | Yes |
 | POST | `/purchasing/purchase-orders` | Create purchase order with its lines | Admin / Manager / Supervisor |
 | GET | `/purchasing/purchase-orders/{po_id}` | Get PO by ID | Yes |
 | PUT | `/purchasing/purchase-orders/{po_id}` | Update purchase order | Admin / Manager / Supervisor |
@@ -3209,8 +3209,8 @@ call per file (at most 2 concurrent) and one `create-from-upload` call per revie
 | POST | `/po-upload/upload-invoice` | Legacy alias of `upload-quote` (same extraction behavior) | Yes |
 | POST | `/po-upload/create-from-upload` | Create the PO from the reviewed extraction — can create the vendor and missing parts. Part-number matching is **case-insensitive** and ignores surrounding whitespace: the same number repeated across lines / `create_parts` creates the part **once** (stored as the first occurrence's stripped form) and attaches every matching line to it; an active part already holding the number is reused, and a line with no `part_id` resolves by part number to an existing active part even when it isn't in `create_parts`. **400** if `line_items` is empty, the PO number already exists, a supplied `vendor_id` / line `part_id` doesn't exist in the active company **or is soft-deleted**, a line's part number matches no active part and isn't in `create_parts`, or a new part's number belongs to a **soft-deleted** part (restore it via `POST /parts/{id}/restore` or use a different number) | Admin / Manager / Supervisor |
 | GET | `/po-upload/pdf/{path}` | Serve the uploaded source document for preview (`s3://` refs and local paths) | Yes |
-| GET | `/po-upload/search-parts` | Part typeahead for extraction-review matching (`q`, `limit` ≤ 50) | Yes |
-| GET | `/po-upload/search-vendors` | Vendor typeahead for extraction-review matching (`q`, `limit` ≤ 50) | Yes |
+| GET | `/po-upload/search-parts` | Part typeahead for extraction-review matching (`q`, `limit` **1–50**, default 10) | Yes |
+| GET | `/po-upload/search-vendors` | Vendor typeahead for extraction-review matching (`q`, `limit` **1–50**, default 10) | Yes |
 
 ### Receiving & Inspection
 
@@ -3226,8 +3226,8 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 | PATCH | `/receiving/receipt/{receipt_id}` | Correct a mis-keyed receipt in place (new total `quantity_received` + optional traceability fields; required `reason`) — reconciles PO line / PO status / inventory. Guarded, see note | Admin / Manager / Supervisor |
 | POST | `/receiving/receipt/{receipt_id}/void` | Void (soft-delete) a receipt with full reversal of PO line / status / inventory; required `reason`. Terminal — no restore. Guarded, see note | Admin / Manager |
 | POST | `/receiving/inspect/{receipt_id}` | Complete inspection (accept/reject, auto-NCR on rejection) | Admin / Manager / Quality / Supervisor |
-| GET | `/receiving/history` | Receiving history with inspection results | Yes |
-| GET | `/receiving/stats` | Receiving statistics for dashboard | Yes |
+| GET | `/receiving/history` | Receiving history with inspection results (`days` **1–365**, default 30) | Yes |
+| GET | `/receiving/stats` | Receiving statistics for dashboard (`days` **1–365**, default 30) | Yes |
 | GET | `/receiving/locations` | Receivable inventory locations | Yes |
 | POST | `/receiving/receipt/{receipt_id}/print-label` | Manually (re)print the 4×6 thermal receiving label | Admin / Manager / Supervisor |
 | GET | `/receiving/print-profile` | Get the company ProxyBox print profile (key masked; **404** until created) | Admin |
@@ -3331,8 +3331,8 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| GET | `/inventory/` | List inventory items (`part_id`, `warehouse`, `location_code`, `has_quantity` — `has_quantity` filters **nonzero**, not positive, so driven-negative lots stay visible; see note below) | Yes |
-| GET | `/inventory/summary` | On-hand summary by part, with per-location breakdown (every active row with **nonzero** on-hand, negatives included) | Yes |
+| GET | `/inventory/` | List inventory items (`part_id`, `warehouse`, `location_code`, `has_quantity` — `has_quantity` filters **nonzero**, not positive, so driven-negative lots stay visible; see note below). Bounded: `limit` **1–10000, default 10000**, `offset` ≥ 0 | Yes |
+| GET | `/inventory/summary` | On-hand summary by part, with per-location breakdown (every active row with **nonzero** on-hand, negatives included). Bounded with the identical `limit`/`offset` as `/inventory/` — see note below | Yes |
 | GET | `/inventory/low-stock` | Parts at/below reorder point (on-hand summed per part) | Yes |
 | GET | `/inventory/locations` | List warehouse locations / bins | Yes |
 | POST | `/inventory/locations` | Create a location | Admin / Manager |
@@ -4582,8 +4582,10 @@ tenants, so the aggregate chain-verification endpoints are **platform-admin only
 | GET | `/audit/integrity/record/{sequence_number}` | Verify a single record | Admin (own company only) |
 
 > **List query params (`GET /audit/`):** `action`, `resource_type`, `user_id`, and `search`
-> (matches description / resource identifier / user name) filter the rows; `limit` (default 100,
-> **max 500**) and `offset` (default 0) page them. Results are ordered `desc(timestamp)` (newest
+> (matches description / resource identifier / user name) filter the rows; `limit`
+> (**`ge=1, le=500`**, default 100) and `offset` (**`ge=0`**, default 0) page them — an out-of-range
+> value is rejected **422** before the query runs. `GET /audit/summary` takes `days`
+> (**`ge=1, le=365`**, default 30). Results are ordered `desc(timestamp)` (newest
 > first), so paging with increasing `offset` walks back into older history. The list response
 > carries no total count — clients infer "has next page" by over-fetching one row past the page
 > size. The Audit Log UI uses this offset/limit paging (Prev/Next), so the **full audit history is
@@ -4853,27 +4855,87 @@ display; the web UI renders them in shop-local Central time.
 
 ## Pagination
 
-List endpoints support pagination via query parameters:
+List endpoints page in one of three shapes. There is no `sort` / `order` query parameter anywhere in
+the API — each list endpoint has a fixed server-side ordering, stated with the endpoint.
+
+| Shape | Parameters | Response envelope | Examples |
+|---|---|---|---|
+| **`skip` / `limit`** (most list endpoints) | `skip` (default 0), `limit` (default 100) | Bare JSON array — no wrapper, no total count | `GET /work-orders/`, `GET /parts/`, `GET /bom/`, `GET /routing/`, `GET /quality/ncr` |
+| **`offset` / `limit`** | `offset` (default 0), `limit` | Bare JSON array; clients over-fetch one row past the page size to infer "has next page" | `GET /audit/`, `GET /inventory/transactions`, `GET /inventory/`, `GET /purchasing/purchase-orders` |
+| **`page` / `page_size`** | `page` (default 1), `page_size` | `{ "items": [...], "pagination": { "page", "page_size", "total_count", "total_pages", "has_next", "has_previous" } }` | `GET /notifications/`, `GET /shop-floor/operations` |
 
 ```
-GET /work-orders/?page=1&limit=50&sort=created_at&order=desc
+GET /work-orders/?skip=100&limit=50
+GET /audit/?offset=100&limit=50
+GET /notifications/?page=3&page_size=25
 ```
 
-Parameters:
-- `page`: Page number (default: 1)
-- `limit`: Items per page (default: 50, max: 100)
-- `sort`: Field to sort by
-- `order`: Sort direction (`asc` or `desc`)
+### Bounds on paging and window parameters
 
-Response:
-```json
-{
-  "items": [...],
-  "total": 234,
-  "page": 1,
-  "limit": 50,
-  "pages": 5
-}
+**Every `skip` / `offset` / `limit` / `days` parameter in the API is range-validated by FastAPI
+before the query runs.** An out-of-range value is rejected **422** (a validation error naming the
+parameter); it is never clamped, and it never reaches the database. `limit=0` is refused rather than
+read as "no rows", and `ge=1` also stops a negative value reaching `.limit()` — PostgreSQL rejects a
+negative `LIMIT`/`OFFSET`, while SQLite silently reads a negative limit as "unbounded".
+
+| Parameter | Range | Applies to |
+|---|---|---|
+| `skip` / `offset` | `≥ 0` | Every list endpoint that takes one |
+| `limit` — standard list tier | `1 … 5000`, default `100` | `/work-orders/`, `/routing/`, `/work-centers/`, `/documents/`, `/downtime/`, `/oee/records`, `/eco/eco/`, `/quality/{ncr,car,fai}`, `/complaints/{complaints,rma}/`, `/supplier-scorecards/{supplier-scorecards,supplier-audits,approved-suppliers}/`, `/maintenance/history/{work_center_id}`, `/admin/settings/audit-log`, `/quotes/` |
+| `limit` — `GET /bom/` | `1 … 10000`, default `100` | Higher ceiling than its neighbours because the Parts screen requests 5000 BOM rows in one call |
+| `limit` — small analytic lists | `1 … 500` | `/estimate-workbench/shop-data/history` and `/estimate-workbench/job-actuals` (default `50`), `/mrp/runs` (default `20`) |
+| `limit` — ledger / audit reads | `1 … 500`, default `100` | `GET /audit/`, `GET /inventory/transactions` |
+| `limit` — typeahead & search | `1 … 50`, default `20` (`GET /search/`); `1 … 20`, default `10` (`GET /search/recent`); `1 … 50`, default `10` (`/po-upload/search-parts`, `/po-upload/search-vendors`) | |
+| `days` — rolling window | `1 … 365`, default `30` | `/audit/summary`, `/admin/settings/audit-log`, `/receiving/history`, `/receiving/stats`, `/calibration/equipment/due-soon`, `/certifications/certifications/expiring`, `/supplier-scorecards/supplier-audits/due-soon` |
+| `max_levels` | `1 … 20`, default `10` | `GET /bom/{id}/explode`, `GET /bom/{id}/flatten` |
+
+Some endpoints carry their own **tighter** ceiling than the tier above — `GET /parts/`,
+`GET /materials/`, `GET /process-sheets/` and `GET /bom/uom-mismatches` cap at `500`,
+`GET /visitor-logs/` at `200` — and those are stated with the endpoint. **No default changed**: a
+caller sending no paging parameters gets the same rows it got before (on the five previously
+unbounded endpoints below, up to their ceiling).
+
+`POST /search/nl` (natural-language search) takes its `limit` in the **request body**, not the query
+string (`ge=1, le=50`, default 20 — the same ceiling as `GET /search/`, and the same one the handler
+itself clamps to), so an out-of-range value surfaces as a body validation error with
+`"loc": ["body", "limit"]`.
+
+### List endpoints that were previously unbounded
+
+Five list endpoints returned their entire matched set with no `limit` at all. They now accept
+`limit` / `offset`, **with the default equal to the ceiling** — a caller that sends neither receives
+exactly what it received before, and only a pathological request (`?limit=99999999`, or a table that
+has grown past what fits in a worker's memory) is refused:
+
+| Endpoint | `limit` default = max | Why that ceiling |
+|---|---|---|
+| `GET /inventory/` | `10000` | `inventory_items` is the highest-cardinality table in the app (one row per part × location × lot × serial) |
+| `GET /inventory/summary` | `10000` | Identical cap on purpose — the Inventory page fetches both in one `Promise.all`, so capping one and not the other would let the stat tiles disagree with the table |
+| `GET /purchasing/purchase-orders` | `5000` | The default filter already excludes closed/cancelled POs, so the live set is the shop's open book |
+| `GET /customers/` | `5000` | |
+| `GET /customers/names` | `5000` | Shares the cap because it feeds every customer picker |
+
+> **Two `/customers` behaviour changes shipped alongside those parameters.**
+> - **`GET /customers/names` now excludes soft-deleted customers.** It filtered `is_active` only, and
+>   soft-delete does not imply `is_active = false`, so a deleted customer stayed selectable in every
+>   quote / RFQ / order picker fed by this endpoint. The sibling `GET /customers/` has always applied
+>   the `is_deleted == false` predicate.
+> - **`GET /customers/?search=` now matches `name`, `code`, `contact_name` and `city`** (previously
+>   name only). Searching by account code, buyer name or city — how a buyer actually finds an
+>   account — returned nothing from the server before.
+
+### `GET /quotes/` — a hard-coded cap became a real page
+
+`GET /quotes/` was never *unbounded*; it applied a hard-coded `.limit(100)` with **no `offset`
+beside it**, so the 101st quote was unreachable through the API at all and the truncation was
+silent. It now takes `limit` / `offset` on the standard list tier above.
+
+**The default is still `100`**, so a caller that sends no paging parameters receives exactly the rows
+it received before — but the rows past the first page are now reachable via `offset`. This makes it
+the one endpoint in the standard tier whose default is deliberately *not* its ceiling.
+
+```
+GET /quotes/?offset=100          # the page that was previously unreachable
 ```
 
 ## Webhooks
@@ -5092,6 +5154,36 @@ rather than a fixed allowlist:
 cell read back in keeps whatever text it holds — as are the static XLSX import templates
 (`GET /import/templates/{entity}`), which contain no tenant data.
 
+### Row cap on `/exports/*` — refuses at 10,000 (400)
+
+All seven `/exports/*` endpoints refuse rather than truncate above **10,000 matched rows**
+(`MAX_EXPORT_ROWS` in `app/api/endpoints/exports.py` — a module constant, not env-configurable).
+The query over-fetches one row past the cap, so the condition is exact rather than estimated, and
+the refusal happens before any bytes are written:
+
+```json
+{ "detail": "This export matches more than 10,000 rows. Narrow the date range or add a filter, then export again." }
+```
+
+Returned as **HTTP 400**. Refusal is deliberate rather than truncation: these endpoints return a
+`StreamingResponse` of a file, which has no channel to signal "this is partial", so a truncated
+spreadsheet is indistinguishable from a complete one — and these are documents a manager reconciles
+from. The cap deliberately mirrors the 10,000-row **import** cap (`MAX_IMPORT_ROWS`; see
+[docs/EXCEL_MIGRATION_RUNBOOK.md](EXCEL_MIGRATION_RUNBOOK.md) → *File basics*): an export a human
+opens in Excel and an import a human uploads are the same size problem. `generate_excel` builds the
+whole workbook in memory before streaming, so the cap also bounds peak memory.
+
+> **`GET /exports/inventory/transactions/export` changed behaviour — this one is user-visible.** It
+> previously applied a hard `.limit(10000)` and returned the newest 10,000 rows **silently**: a
+> ledger export that looked complete and was not. The same request now returns **400**, and the
+> caller narrows `start_date` / `end_date`, `part_id` or `transaction_type` and exports again. The
+> other six endpoints had no limit at all and returned everything, so for them the 400 replaces an
+> unbounded read, not a silent truncation.
+
+**Not covered by this cap:** `GET /analytics/custom-report/export`, `GET /visitor-logs/export.csv`
+and `GET /estimate-workbench/{estimate_id}/export/audit.xlsx` live on their own routers and keep
+their existing behaviour — `MAX_EXPORT_ROWS` applies to the `/exports/*` router only.
+
 ## CORS
 
 Cross-Origin Resource Sharing is configured to allow requests from:
@@ -5128,13 +5220,13 @@ Response:
 | 200 | Success |
 | 201 | Created |
 | 204 | No Content |
-| 400 | Bad Request (also returned for a `Host` header not on the `ALLOWED_HOSTS` allowlist) |
+| 400 | Bad Request (also returned for a `Host` header not on the `ALLOWED_HOSTS` allowlist, and for an `/exports/*` request matching more than `MAX_EXPORT_ROWS` — see [Row cap on `/exports/*`](#row-cap-on-exports--refuses-at-10000-400)) |
 | 401 | Unauthorized |
 | 403 | Forbidden |
 | 404 | Not Found |
 | 409 | Conflict — concurrent modification of an operation / work order / time entry on a completion or clock endpoint (the row was updated by another writer between read and commit; refresh and retry) |
 | 413 | Content Too Large — a JSON body over `MAX_JSON_BODY_BYTES` (default 256 KB, rejected by middleware before the route runs), or a file upload over its endpoint's own cap (e.g. 50 MB `LASER_UPLOAD_MAX_BYTES`). See [Request Size Limits](#request-size-limits) |
-| 422 | Validation Error |
+| 422 | Validation Error — including a paging or window parameter outside its range (`limit`, `skip`/`offset`, `days`, `max_levels`); see [Bounds on paging and window parameters](#bounds-on-paging-and-window-parameters) |
 | 429 | Too Many Requests |
 | 500 | Internal Server Error |
 | 502 | Bad Gateway — upstream AI-service failure on an AI endpoint (e.g. `/copilot/chat?stream=false`) |

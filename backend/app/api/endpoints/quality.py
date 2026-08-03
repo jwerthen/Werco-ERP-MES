@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
@@ -77,8 +77,8 @@ def generate_ncr_number(db: Session, company_id: int = None) -> str:
 
 @router.get("/ncr", response_model=List[NCRResponse])
 def list_ncrs(
-    skip: int = 0,
-    limit: int = 100,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=5000),
     status: Optional[NCRStatus] = None,
     part_id: Optional[int] = None,
     db: Session = Depends(get_db),
@@ -412,8 +412,8 @@ def generate_car_number(db: Session, company_id: int = None) -> str:
 
 @router.get("/car", response_model=List[CARResponse])
 def list_cars(
-    skip: int = 0,
-    limit: int = 100,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=5000),
     status: Optional[CARStatus] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -554,8 +554,8 @@ def generate_fai_number(db: Session, company_id: int = None) -> str:
 
 @router.get("/fai", response_model=List[FAIResponse])
 def list_fais(
-    skip: int = 0,
-    limit: int = 100,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=5000),
     status: Optional[FAIStatus] = None,
     part_id: Optional[int] = None,
     db: Session = Depends(get_db),

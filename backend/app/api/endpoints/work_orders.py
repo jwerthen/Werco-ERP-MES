@@ -1268,8 +1268,8 @@ def _build_confirmed_pdf_nests(package_dir: str, rows: list[LaserNestImportRow])
 @router.get("/", response_model=List[WorkOrderSummary])
 def list_work_orders(
     response: Response,
-    skip: int = 0,
-    limit: int = 100,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=5000),
     status: Optional[WorkOrderStatus] = None,
     search: Optional[str] = None,
     include_deleted: bool = Query(False, description="Include soft-deleted work orders (admin only)"),

@@ -16,6 +16,8 @@ Grouped by record type:
 - **Soft-deleted PO** — excluded from the PO list, global search, the PO export,
   and the PO *lines* export (the child rows carry no soft-delete flag of their
   own, so only the parent's predicate on the join can drop them).
+- **Soft-deleted customer** — excluded from ``GET /customers/names``, the
+  dropdown feed behind every quote / RFQ / order customer picker.
 - **Cross-tenant** — reports quality-metrics for company A never counts company
   B's receipts or NCRs (the ``company_id`` filter blocker fix).
 """
@@ -240,6 +242,53 @@ def test_soft_deleted_po_excluded_from_list_search_and_export(client: TestClient
     assert doomed_part not in line_export.text
     assert live_number in line_export.text
     assert live_part in line_export.text
+
+
+# ===========================================================================
+# Soft-deleted customer
+# ===========================================================================
+
+
+def test_customer_names_dropdown_excludes_soft_deleted_customers(client: TestClient, db_session: Session):
+    """``GET /customers/names`` filtered on ``is_active`` only, never ``is_deleted``.
+
+    Soft-delete does not imply ``is_active=False`` at the model level --
+    ``SoftDeleteMixin.soft_delete()`` touches neither flag -- so the two can
+    diverge, and this endpoint is the feed behind every quote / RFQ / order
+    customer picker. The sibling ``list_customers`` has always applied the
+    predicate; this one did not.
+
+    The divergent state is reachable through the API, which is why this is a
+    real leak rather than a defence-in-depth nicety: ``DELETE /customers/{id}``
+    happens to set ``is_active=False`` alongside the soft delete, but
+    ``PUT /customers/{id}`` accepts ``is_active`` and carries **no**
+    ``is_deleted`` guard, so a deleted customer can be flipped back to active
+    while staying deleted -- and reappear in every dropdown. This test walks
+    exactly that path.
+    """
+    headers = headers_for(make_user(db_session, role=UserRole.ADMIN, company_id=1))
+
+    def _create(name: str) -> int:
+        resp = client.post("/api/v1/customers/", headers=headers, json={"name": name})
+        assert resp.status_code in (status.HTTP_200_OK, status.HTTP_201_CREATED), resp.text
+        return resp.json()["id"]
+
+    live_id = _create("Read-Sweep Live Customer")
+    doomed_id = _create("Read-Sweep Doomed Customer")
+
+    assert client.delete(f"/api/v1/customers/{doomed_id}", headers=headers).status_code == status.HTTP_200_OK
+
+    # Re-activate the soft-deleted row: is_deleted stays True, is_active goes
+    # back to True. This is the state the missing predicate leaked.
+    reactivate = client.put(f"/api/v1/customers/{doomed_id}", headers=headers, json={"is_active": True})
+    assert reactivate.status_code == status.HTTP_200_OK, reactivate.text
+
+    names = client.get("/api/v1/customers/names", headers=headers)
+    assert names.status_code == status.HTTP_200_OK, names.text
+    ids = {row["id"] for row in names.json()}
+
+    assert doomed_id not in ids, "a soft-deleted customer must not be selectable in any picker"
+    assert live_id in ids, "control: a live customer is still offered"
 
 
 # ===========================================================================

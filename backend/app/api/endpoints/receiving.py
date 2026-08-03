@@ -1397,7 +1397,7 @@ def void_receipt(
 
 @router.get("/history")
 def get_receiving_history(
-    days: int = 30,
+    days: int = Query(30, ge=1, le=365),
     status: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -1464,7 +1464,7 @@ def get_receiving_history(
 
 @router.get("/stats")
 def get_receiving_stats(
-    days: int = 30,
+    days: int = Query(30, ge=1, le=365),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
