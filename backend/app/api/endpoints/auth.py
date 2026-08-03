@@ -1,3 +1,4 @@
+import hmac
 import re
 from datetime import datetime, timedelta
 from typing import Optional
@@ -376,18 +377,45 @@ def employee_login(request: Request, payload: EmployeeLoginRequest, db: Session 
 
 
 @router.post("/employee-logout", summary="Employee ID logout")
-def employee_logout(request: Request, payload: EmployeeLoginRequest, db: Session = Depends(get_db)):
+def employee_logout(
+    request: Request,
+    payload: EmployeeLoginRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """
-    Log a logout event for the given employee ID.
-    Note: JWT invalidation is handled client-side.
-    """
-    user = _find_user_by_employee_id(db, payload.employee_id)
-    if not user:
-        raise HTTPException(status_code=404, detail="Employee ID not found")
+    Record a logout audit event for the CALLING user.
 
+    Identity comes from the bearer token, never from the request body. This
+    endpoint used to take no auth at all and resolve ``payload.employee_id``
+    through the GLOBALLY UNSCOPED ``_find_user_by_employee_id``, then write a
+    chain-linked, tenant-tagged ``EMPLOYEE_LOGOUT`` row and commit. That made it
+    two things at once: an unauthenticated audit-forgery surface (anyone could
+    produce ``EMPLOYEE_LOGOUT / admin@werco.com / company_id=1 / success=true``,
+    visible to any Admin at ``GET /api/v1/audit/?resource_type=authentication``),
+    and — because badges normalize to 4 digits and a miss returned 404 while a
+    hit returned 200 — an unauthenticated CROSS-TENANT badge-enumeration oracle
+    at the global default rate (no per-path limit, and ``employee_login_throttle``
+    is wired only to /employee-login).
+
+    Deleting the route was the preferred fix but is not available: the office
+    "confirm your badge to sign out" flow calls it
+    (``frontend/src/context/AuthContext.tsx`` -> ``api.logoutWithEmployeeId``),
+    and it is one of the two paths the kiosk scope fence allows
+    (``KIOSK_TOKEN_EXACT_PATHS`` in ``app/api/deps.py``). So it is authenticated
+    instead, via ``get_current_user`` rather than a hand-rolled optional bearer —
+    that is what keeps the kiosk path fence and the read-only-context write guard
+    in force, since both are enforced INSIDE ``get_current_user``.
+
+    The body is retained for wire compatibility (the client still sends it) but
+    is NOT consulted for identity, and there is no 404/200 distinction left to
+    probe: an authenticated caller always gets 200. The frontend already verifies
+    the typed badge against the active user before calling, and the token is
+    cleared only after this returns.
+    """
     # AuditService only flushes; commit so the audit row persists before the
     # request session closes.
-    log_auth_event(db, "EMPLOYEE_LOGOUT", user=user, success=True, request=request)
+    log_auth_event(db, "EMPLOYEE_LOGOUT", user=current_user, success=True, request=request)
     db.commit()
     return {"message": "Logged out successfully"}
 
@@ -963,28 +991,63 @@ def claim_display_token_endpoint(
     )
 
 
-@router.post("/reset-database")
+def db_reset_route_enabled(environment: str) -> bool:
+    """Whether the destructive /reset-database route should be MOUNTED at all.
+
+    Never in production. Gating route *registration* (rather than checking the
+    environment inside the handler) means the route is not even enumerable on a
+    production host: it 404s like any unknown path, and it cannot appear in the
+    OpenAPI schema. Pure function so the decision is testable without booting the
+    app — same pattern as ``_host_validation_log_record`` in app/main.py.
+
+    ENVIRONMENT is a free-form string typed into a deploy dashboard, so a bare
+    ``!= "production"`` FAILS OPEN on "Production", "PRODUCTION", or a
+    pasted-in trailing space — each of which would mount a no-auth
+    TRUNCATE-every-table route on a production host. Normalize first, matching
+    the existing idiom in ``app/services/carriers/crypto.py``.
+    """
+    return (environment or "").strip().lower() != "production"
+
+
 def reset_database(
     request: Request,
     db: Session = Depends(get_db),
 ):
     """
     Reset all data in the database. Protected by SECRET_KEY header.
-    Once used, remove this endpoint or set ALLOW_DB_RESET=false.
+
+    DANGEROUS: TRUNCATEs every table in the public schema with FK triggers
+    disabled. Registered only outside production (see ``db_reset_route_enabled``)
+    and additionally gated on ALLOW_DB_RESET=true.
+
+    The header is compared with ``hmac.compare_digest``: the credential is the
+    SECRET_KEY, which is ALSO the JWT signing key, so a byte-by-byte ``!=`` made
+    this endpoint a timing oracle for total token forgery as well as for total
+    data destruction. Deleting this endpoint outright remains the recommended
+    end state — that is an owner decision, not one this hardening makes.
     """
     import os
 
     from sqlalchemy import text
 
-    # Must provide the SECRET_KEY as authorization
-    provided_key = request.headers.get("X-Reset-Key", "")
-    actual_key = os.environ.get("SECRET_KEY", "")
-    if not provided_key or provided_key != actual_key:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid reset key")
-
-    # Safety check — can be disabled via env var after go-live
+    # Arm check FIRST, deliberately. If this ran after the key comparison, a
+    # disarmed host would answer "Invalid reset key" for a wrong key but
+    # "Database reset is disabled" for a right one — confirming a candidate
+    # SECRET_KEY (which is also the JWT signing key) without needing the reset to
+    # be armed. Checking the arm state first makes every request to a disarmed
+    # host indistinguishable.
     if os.environ.get("ALLOW_DB_RESET", "false").lower() != "true":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Database reset is disabled")
+
+    # Must provide the SECRET_KEY as authorization. Compared in constant time,
+    # on bytes (compare_digest rejects non-ASCII str, and header values are not
+    # guaranteed ASCII).
+    provided_key = request.headers.get("X-Reset-Key", "")
+    actual_key = os.environ.get("SECRET_KEY", "")
+    if not provided_key or not actual_key:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid reset key")
+    if not hmac.compare_digest(provided_key.encode("utf-8"), actual_key.encode("utf-8")):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid reset key")
 
     tables_result = db.execute(
         text("SELECT tablename FROM pg_tables WHERE schemaname = 'public' " "AND tablename != 'alembic_version'")
@@ -998,3 +1061,9 @@ def reset_database(
     db.commit()
 
     return {"message": f"All {len(tables)} tables cleared. Visit /register to create admin account."}
+
+
+# Mount the reset route only outside production. Keep this immediately after the
+# handler so the two are read together.
+if db_reset_route_enabled(settings.ENVIRONMENT):
+    router.post("/reset-database")(reset_database)

@@ -2,16 +2,21 @@ from datetime import datetime
 from math import sqrt
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import and_, func
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_company_id, get_current_user
+from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.core.time_utils import to_utc_iso
 from app.db.database import get_db
+from app.db.tenant_filter import tenant_query
+from app.models.part import Part
 from app.models.spc import ChartType, SPCCharacteristic, SPCControlLimit, SPCMeasurement, SPCProcessCapability
-from app.models.user import User
+from app.models.user import User, UserRole
+from app.models.work_center import WorkCenter
+from app.models.work_order import WorkOrder
+from app.services.audit_service import AuditService
 
 router = APIRouter()
 
@@ -209,13 +214,61 @@ def check_western_electric_rules(values: List[float], center_line: float, ucl: f
     return violations
 
 
+# ============== Tenant scoping helpers ==============
+# EVERY handler below is keyed on a characteristic, and the characteristic is the
+# ownership anchor for its measurements, control limits and capability studies
+# (invariant #1). Resolving it tenant-scoped is therefore the check -- filtering the
+# leaf rows alone would still let a foreign id steer a window or a max-date subquery.
+
+
+def _get_owned_characteristic(db: Session, characteristic_id: int, company_id: int) -> SPCCharacteristic:
+    """Resolve a characteristic inside the caller's company, or 404.
+
+    404 rather than 403 so a foreign id is indistinguishable from an absent one and the
+    status code cannot be used as an existence oracle -- the same rule as the component
+    lookup in ``api/endpoints/bom.py``. The message is flat and echoes no identifier.
+    """
+    char = tenant_query(db, SPCCharacteristic, company_id).filter(SPCCharacteristic.id == characteristic_id).first()
+    if not char:
+        raise HTTPException(status_code=404, detail="Characteristic not found")
+    return char
+
+
+def _assert_owned_part(db: Session, part_id: int, company_id: int) -> None:
+    """A characteristic may only ever point at a part of the caller's own company.
+
+    An unvalidated FK is a cross-tenant reference that later leaks the foreign part's
+    identity through joins and reports -- the same class the BOM component lookup closed.
+    """
+    if not tenant_query(db, Part, company_id).filter(Part.id == part_id).first():
+        raise HTTPException(status_code=404, detail="Part not found")
+
+
+def _assert_owned_work_center(db: Session, work_center_id: int, company_id: int) -> None:
+    """Same rule for the optional work-center reference."""
+    if not tenant_query(db, WorkCenter, company_id).filter(WorkCenter.id == work_center_id).first():
+        raise HTTPException(status_code=404, detail="Work center not found")
+
+
+def _assert_owned_work_order(db: Session, work_order_id: int, company_id: int) -> None:
+    """A measurement may only be attributed to the caller's own work order.
+
+    Nothing joins ``spc_measurements.work_order_id`` today, so an unchecked foreign id is
+    not a live read leak -- it is a FALSE TRACEABILITY POINTER written onto an AS9100D
+    quality record, which is the worse failure mode: the row looks authoritative and its
+    provenance is wrong. Same check the characteristic FKs get, for the same reason.
+    """
+    if not tenant_query(db, WorkOrder, company_id).filter(WorkOrder.id == work_order_id).first():
+        raise HTTPException(status_code=404, detail="Work order not found")
+
+
 # ============== Characteristics CRUD ==============
 
 
 @router.get("/characteristics", response_model=List[CharacteristicResponse])
 def list_characteristics(
-    skip: int = 0,
-    limit: int = 100,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
     part_id: Optional[int] = None,
     is_active: Optional[bool] = None,
     db: Session = Depends(get_db),
@@ -239,6 +292,11 @@ def create_characteristic(
     company_id: int = Depends(get_current_company_id),
 ):
     """Create a new SPC characteristic"""
+    # Both FKs must resolve inside the caller's company before anything is constructed.
+    _assert_owned_part(db, data.part_id, company_id)
+    if data.work_center_id is not None:
+        _assert_owned_work_center(db, data.work_center_id, company_id)
+
     char = SPCCharacteristic(**data.model_dump())
     char.company_id = company_id
     db.add(char)
@@ -283,6 +341,12 @@ def update_characteristic(
         raise HTTPException(status_code=404, detail="Characteristic not found")
 
     update_data = data.model_dump(exclude_unset=True)
+    # ``work_center_id`` is the only FK this payload can repoint -- validate it BEFORE the
+    # setattr loop so a refusal leaves the row untouched. (``part_id`` is not on the update
+    # schema, so a characteristic can never be moved onto another part at all.)
+    if update_data.get("work_center_id") is not None:
+        _assert_owned_work_center(db, update_data["work_center_id"], company_id)
+
     for key, value in update_data.items():
         setattr(char, key, value)
     char.updated_at = datetime.utcnow()
@@ -296,12 +360,27 @@ def update_characteristic(
 
 @router.post("/measurements", response_model=List[MeasurementResponse])
 def add_measurements(
-    batch: MeasurementBatchCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+    batch: MeasurementBatchCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Add one or more measurements (batch entry for subgroups)"""
+    # A batch may name several characteristics, so every DISTINCT id is validated before
+    # the first ``db.add`` -- a mixed batch fails whole rather than half-writing. The
+    # optional work_order_id is validated the same way and in the same pass.
+    for cid in {m.characteristic_id for m in batch.measurements}:
+        _get_owned_characteristic(db, cid, company_id)
+    for wo_id in {m.work_order_id for m in batch.measurements if m.work_order_id is not None}:
+        _assert_owned_work_order(db, wo_id, company_id)
+
     created = []
     for m in batch.measurements:
         measurement = SPCMeasurement(
+            # ``spc_measurements.company_id`` is NOT NULL with no server default (migration
+            # 026 drops the interim one), so omitting it raised NotNullViolation on every
+            # call to this endpoint -- it is the tenant scope AND the reason it 500'd.
+            company_id=company_id,
             characteristic_id=m.characteristic_id,
             subgroup_number=m.subgroup_number,
             measurement_value=m.measurement_value,
@@ -325,12 +404,15 @@ def get_measurements(
     characteristic_id: int,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    limit: int = 500,
+    limit: int = Query(500, ge=1, le=5000),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get measurements for a characteristic, with optional date filters"""
-    query = db.query(SPCMeasurement).filter(SPCMeasurement.characteristic_id == characteristic_id)
+    _get_owned_characteristic(db, characteristic_id, company_id)
+
+    query = tenant_query(db, SPCMeasurement, company_id).filter(SPCMeasurement.characteristic_id == characteristic_id)
     if start_date:
         query = query.filter(SPCMeasurement.measured_at >= datetime.fromisoformat(start_date))
     if end_date:
@@ -348,22 +430,28 @@ def get_chart_data(
     last_n_subgroups: int = 50,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get formatted chart data: subgroup averages, ranges, and control/spec limits"""
-    char = db.query(SPCCharacteristic).filter(SPCCharacteristic.id == characteristic_id).first()
-    if not char:
-        raise HTTPException(status_code=404, detail="Characteristic not found")
+    char = _get_owned_characteristic(db, characteristic_id, company_id)
 
     # Get measurements grouped by subgroup. Bound the read to the rendered window:
     # resolve the last-N distinct subgroup numbers first (a query shaped for
     # ix_spc_measurements_char_subgroup), then fetch only those subgroups' rows —
     # fetch cost stays O(window), not O(full history). last_n_subgroups <= 0
     # keeps the pre-existing unbounded behavior (0 = full history).
-    measurements_query = db.query(SPCMeasurement).filter(SPCMeasurement.characteristic_id == characteristic_id)
+    # The tenant predicate goes on the INNER subquery as well as the outer fetch: scoping
+    # only the outer query would still let foreign rows choose which window is rendered.
+    measurements_query = tenant_query(db, SPCMeasurement, company_id).filter(
+        SPCMeasurement.characteristic_id == characteristic_id
+    )
     if last_n_subgroups > 0:
         recent_subgroup_numbers = (
             db.query(SPCMeasurement.subgroup_number)
-            .filter(SPCMeasurement.characteristic_id == characteristic_id)
+            .filter(
+                SPCMeasurement.company_id == company_id,
+                SPCMeasurement.characteristic_id == characteristic_id,
+            )
             .distinct()
             .order_by(SPCMeasurement.subgroup_number.desc())
             .limit(last_n_subgroups)
@@ -414,7 +502,7 @@ def get_chart_data(
 
     # Get current control limits
     control_limit = (
-        db.query(SPCControlLimit)
+        tenant_query(db, SPCControlLimit, company_id)
         .filter(SPCControlLimit.characteristic_id == characteristic_id, SPCControlLimit.is_current == True)
         .first()
     )
@@ -454,27 +542,34 @@ def calculate_control_limits(
     characteristic_id: int,
     last_n_subgroups: Optional[int] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    # This handler REWRITES quality evidence in place (see the flag-change audit below), so
+    # it is gated to the roles that own the quality system -- matching the NCR void/restore
+    # gate in ``api/endpoints/quality.py``. Before this, any authenticated role could fire it.
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Calculate control limits from measurement data and apply Western Electric rules"""
-    char = db.query(SPCCharacteristic).filter(SPCCharacteristic.id == characteristic_id).first()
-    if not char:
-        raise HTTPException(status_code=404, detail="Characteristic not found")
+    char = _get_owned_characteristic(db, characteristic_id, company_id)
 
     # Get measurements
     measurements = (
-        db.query(SPCMeasurement)
+        tenant_query(db, SPCMeasurement, company_id)
         .filter(SPCMeasurement.characteristic_id == characteristic_id)
         .order_by(SPCMeasurement.subgroup_number, SPCMeasurement.sample_number)
         .all()
     )
 
-    # Group by subgroup
+    # Group by subgroup. The PRIOR out-of-control state is captured in the same pass,
+    # before the bulk UPDATEs below overwrite it, so the audit row can report old -> new.
     subgroups = {}
+    prior_flags: dict = {}
     for m in measurements:
         if m.subgroup_number not in subgroups:
             subgroups[m.subgroup_number] = []
         subgroups[m.subgroup_number].append(m.measurement_value)
+        was_ooc, was_rules = prior_flags.get(m.subgroup_number, (False, None))
+        prior_flags[m.subgroup_number] = (was_ooc or bool(m.is_out_of_control), was_rules or m.violation_rules)
 
     sorted_sg_numbers = sorted(subgroups.keys())
     if last_n_subgroups and len(sorted_sg_numbers) > last_n_subgroups:
@@ -510,13 +605,25 @@ def calculate_control_limits(
     ucl_range = d4 * r_bar
     lcl_range = d3 * r_bar
 
-    # Mark previous control limits as not current
+    # Mark previous control limits as not current. The tenant predicate belongs on the
+    # bulk UPDATE itself -- without it this statement rewrites another company's rows.
+    # The ids are read first so the audit row names what this recalculation superseded.
+    superseded_query = db.query(SPCControlLimit.id).filter(
+        SPCControlLimit.company_id == company_id,
+        SPCControlLimit.characteristic_id == characteristic_id,
+        SPCControlLimit.is_current == True,
+    )
+    superseded_ids = [row_id for (row_id,) in superseded_query.all()]
     db.query(SPCControlLimit).filter(
-        SPCControlLimit.characteristic_id == characteristic_id, SPCControlLimit.is_current == True
+        SPCControlLimit.company_id == company_id,
+        SPCControlLimit.characteristic_id == characteristic_id,
+        SPCControlLimit.is_current == True,
     ).update({"is_current": False})
 
     # Save new control limits
     new_cl = SPCControlLimit(
+        # NOT NULL, no server default -- omitting it 500'd this endpoint in production.
+        company_id=company_id,
         characteristic_id=characteristic_id,
         ucl=round(ucl, 6),
         lcl=round(lcl, 6),
@@ -529,6 +636,7 @@ def calculate_control_limits(
         calculated_by=current_user.id,
     )
     db.add(new_cl)
+    db.flush()  # so the audit row below can name the control-limit row it describes
 
     # Apply Western Electric rules to subgroup means
     violations = check_western_electric_rules(sg_means, x_double_bar, ucl, lcl)
@@ -536,19 +644,78 @@ def calculate_control_limits(
     for v in violations:
         violation_map[v["index"]] = v["rules"]
 
-    # Update measurements with out-of-control flags
+    # Update measurements with out-of-control flags. This REWRITES HISTORICAL ROWS IN
+    # PLACE: every subgroup in the window that no longer violates is reset to
+    # False/None, so a re-run with a narrower ``last_n_subgroups`` recomputes the limits
+    # from a subset and can CLEAR a Western Electric violation previously recorded
+    # against shipped material. The before-values are collected here and audited below --
+    # without that row the erasure has no actor, no timestamp and no prior value.
+    flag_changes = []
     for idx, sg_num in enumerate(sorted_sg_numbers):
         rules = violation_map.get(idx, [])
         is_ooc = len(rules) > 0
         rule_str = ",".join(rules) if rules else None
+        was_ooc, was_rules = prior_flags.get(sg_num, (False, None))
+        if (bool(was_ooc), was_rules) != (is_ooc, rule_str):
+            flag_changes.append(
+                {
+                    "subgroup_number": sg_num,
+                    "old": {"is_out_of_control": bool(was_ooc), "violation_rules": was_rules},
+                    "new": {"is_out_of_control": is_ooc, "violation_rules": rule_str},
+                }
+            )
+        # Same rule as the is_current flip above: an unscoped bulk UPDATE would stamp
+        # out-of-control flags onto another company's measurements.
         db.query(SPCMeasurement).filter(
-            SPCMeasurement.characteristic_id == characteristic_id, SPCMeasurement.subgroup_number == sg_num
+            SPCMeasurement.company_id == company_id,
+            SPCMeasurement.characteristic_id == characteristic_id,
+            SPCMeasurement.subgroup_number == sg_num,
         ).update(
             {
                 "is_out_of_control": is_ooc,
                 "violation_rules": rule_str,
             }
         )
+
+    # The violations this run ERASED are the AS9100D-relevant number, so they get their
+    # own count rather than being left for a reader to derive from the change list.
+    violations_cleared = [c["subgroup_number"] for c in flag_changes if c["old"]["is_out_of_control"]]
+
+    # Audited BEFORE db.commit(): a row added after the commit is discarded by the
+    # get_db teardown and the recalculation would go unrecorded.
+    audit.log_create(
+        "spc_control_limit",
+        new_cl.id,
+        f"{char.name} control limits",
+        new_values=new_cl,
+        description=(
+            f"Recalculated control limits for SPC characteristic '{char.name}' "
+            f"from {len(sorted_sg_numbers)} subgroups"
+        ),
+        extra_data={
+            "characteristic_id": characteristic_id,
+            "characteristic_name": char.name,
+            "part_id": char.part_id,
+            # The caller-supplied window is what makes the rewrite steerable, so it is
+            # recorded verbatim alongside the subgroups it actually resolved to.
+            "last_n_subgroups": last_n_subgroups,
+            "subgroups_used": len(sorted_sg_numbers),
+            "subgroup_numbers": sorted_sg_numbers,
+            "subgroup_size": n,
+            "control_limits": {
+                "ucl": new_cl.ucl,
+                "lcl": new_cl.lcl,
+                "center_line": new_cl.center_line,
+                "ucl_range": new_cl.ucl_range,
+                "lcl_range": new_cl.lcl_range,
+                "center_line_range": new_cl.center_line_range,
+            },
+            "superseded_control_limit_ids": superseded_ids,
+            "measurement_flag_changes": flag_changes,
+            "violations_cleared_subgroups": violations_cleared,
+            "violations_cleared_count": len(violations_cleared),
+        },
+    )
 
     db.commit()
     db.refresh(new_cl)
@@ -557,11 +724,18 @@ def calculate_control_limits(
 
 @router.get("/control-limits/{characteristic_id}", response_model=Optional[ControlLimitResponse])
 def get_control_limits(
-    characteristic_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+    characteristic_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get current control limits for a characteristic"""
+    # Ownership is checked on the characteristic so a FOREIGN id 404s, while an owned
+    # characteristic with no limits yet keeps its established 200/null response.
+    _get_owned_characteristic(db, characteristic_id, company_id)
+
     cl = (
-        db.query(SPCControlLimit)
+        tenant_query(db, SPCControlLimit, company_id)
         .filter(SPCControlLimit.characteristic_id == characteristic_id, SPCControlLimit.is_current == True)
         .first()
     )
@@ -577,18 +751,17 @@ def run_capability_study(
     last_n_subgroups: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Run a Cp/Cpk process capability study"""
-    char = db.query(SPCCharacteristic).filter(SPCCharacteristic.id == characteristic_id).first()
-    if not char:
-        raise HTTPException(status_code=404, detail="Characteristic not found")
+    char = _get_owned_characteristic(db, characteristic_id, company_id)
 
     if char.specification_usl is None or char.specification_lsl is None:
         raise HTTPException(status_code=400, detail="USL and LSL must be defined to run capability study")
 
     # Get all measurements
     query = (
-        db.query(SPCMeasurement)
+        tenant_query(db, SPCMeasurement, company_id)
         .filter(SPCMeasurement.characteristic_id == characteristic_id)
         .order_by(SPCMeasurement.subgroup_number, SPCMeasurement.sample_number)
     )
@@ -638,6 +811,8 @@ def run_capability_study(
     is_capable = cpk >= 1.33
 
     capability = SPCProcessCapability(
+        # NOT NULL, no server default -- omitting it 500'd this endpoint in production.
+        company_id=company_id,
         characteristic_id=characteristic_id,
         sample_count=n,
         mean=round(mean_val, 6),
@@ -658,11 +833,16 @@ def run_capability_study(
 
 @router.get("/capability/{characteristic_id}", response_model=Optional[CapabilityResponse])
 def get_capability(
-    characteristic_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+    characteristic_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get the latest capability study results for a characteristic"""
+    _get_owned_characteristic(db, characteristic_id, company_id)
+
     return (
-        db.query(SPCProcessCapability)
+        tenant_query(db, SPCProcessCapability, company_id)
         .filter(SPCProcessCapability.characteristic_id == characteristic_id)
         .order_by(SPCProcessCapability.study_date.desc())
         .first()
@@ -673,24 +853,40 @@ def get_capability(
 
 
 @router.get("/out-of-control")
-def get_out_of_control(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def get_out_of_control(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
     """Get all characteristics that have recent out-of-control points"""
-    # Find characteristics with OOC points in recent measurements
+    # Find characteristics with OOC points in recent measurements. Unscoped, this aggregate
+    # spanned every company and handed any authenticated caller a platform-wide list of
+    # other tenants' out-of-control characteristics.
     ooc_chars = (
         db.query(
             SPCMeasurement.characteristic_id,
             func.count(SPCMeasurement.id).label("ooc_count"),
             func.max(SPCMeasurement.measured_at).label("last_ooc"),
         )
-        .filter(SPCMeasurement.is_out_of_control == True)
+        .filter(SPCMeasurement.company_id == company_id, SPCMeasurement.is_out_of_control == True)
         .group_by(SPCMeasurement.characteristic_id)
         .all()
     )
 
+    # One scoped lookup for the whole page instead of a query per row: the tenant fix and
+    # the N+1 removal are the same edit.
+    char_ids = [row.characteristic_id for row in ooc_chars]
+    chars_by_id = {
+        char.id: char
+        for char in tenant_query(db, SPCCharacteristic, company_id)
+        .filter(SPCCharacteristic.id.in_(char_ids), SPCCharacteristic.is_active == True)
+        .all()
+    }
+
     results = []
     for row in ooc_chars:
-        char = db.query(SPCCharacteristic).filter(SPCCharacteristic.id == row.characteristic_id).first()
-        if char and char.is_active:
+        char = chars_by_id.get(row.characteristic_id)
+        if char:
             results.append(
                 {
                     "characteristic_id": row.characteristic_id,
@@ -707,16 +903,17 @@ def get_out_of_control(db: Session = Depends(get_db), current_user: User = Depen
 
 @router.get("/violations/{characteristic_id}")
 def check_violations(
-    characteristic_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+    characteristic_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Check Western Electric rules for a characteristic and return violations"""
-    char = db.query(SPCCharacteristic).filter(SPCCharacteristic.id == characteristic_id).first()
-    if not char:
-        raise HTTPException(status_code=404, detail="Characteristic not found")
+    char = _get_owned_characteristic(db, characteristic_id, company_id)
 
     # Get current control limits
     cl = (
-        db.query(SPCControlLimit)
+        tenant_query(db, SPCControlLimit, company_id)
         .filter(SPCControlLimit.characteristic_id == characteristic_id, SPCControlLimit.is_current == True)
         .first()
     )
@@ -726,7 +923,7 @@ def check_violations(
 
     # Get measurements grouped by subgroup
     measurements = (
-        db.query(SPCMeasurement)
+        tenant_query(db, SPCMeasurement, company_id)
         .filter(SPCMeasurement.characteristic_id == characteristic_id)
         .order_by(SPCMeasurement.subgroup_number, SPCMeasurement.sample_number)
         .all()
@@ -776,26 +973,43 @@ def check_violations(
 
 
 @router.get("/dashboard")
-def get_dashboard(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def get_dashboard(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
     """SPC Dashboard summary: total characteristics, OOC count, avg Cpk, attention needed"""
-    total_chars = db.query(func.count(SPCCharacteristic.id)).filter(SPCCharacteristic.is_active == True).scalar() or 0
+    # Every aggregate on this page used to span all tenants: the count, the OOC set, and
+    # the Cp/Cpk average were computed over every company's quality data.
+    total_chars = (
+        db.query(func.count(SPCCharacteristic.id))
+        .filter(SPCCharacteristic.company_id == company_id, SPCCharacteristic.is_active == True)
+        .scalar()
+        or 0
+    )
 
     # Count characteristics with OOC points
     ooc_char_ids = (
-        db.query(SPCMeasurement.characteristic_id).filter(SPCMeasurement.is_out_of_control == True).distinct().all()
+        db.query(SPCMeasurement.characteristic_id)
+        .filter(SPCMeasurement.company_id == company_id, SPCMeasurement.is_out_of_control == True)
+        .distinct()
+        .all()
     )
     ooc_count = len(ooc_char_ids)
 
     # Get latest Cpk for each characteristic
-    # Subquery: latest capability study per characteristic
+    # Subquery: latest capability study per characteristic. The predicate is on the INNER
+    # subquery as well as the outer join -- scoping only the outer query would leave a
+    # foreign study able to set max_date and silently drop this tenant's latest row.
     latest_caps = (
         db.query(SPCProcessCapability.characteristic_id, func.max(SPCProcessCapability.study_date).label("max_date"))
+        .filter(SPCProcessCapability.company_id == company_id)
         .group_by(SPCProcessCapability.characteristic_id)
         .subquery()
     )
 
     capabilities = (
-        db.query(SPCProcessCapability)
+        tenant_query(db, SPCProcessCapability, company_id)
         .join(
             latest_caps,
             and_(
@@ -816,10 +1030,18 @@ def get_dashboard(db: Session = Depends(get_db), current_user: User = Depends(ge
     for c in below_threshold:
         attention_char_ids.add(c.characteristic_id)
 
+    # One scoped lookup for the whole attention list rather than a query per id.
+    attention_chars_by_id = {
+        char.id: char
+        for char in tenant_query(db, SPCCharacteristic, company_id)
+        .filter(SPCCharacteristic.id.in_(list(attention_char_ids)), SPCCharacteristic.is_active == True)
+        .all()
+    }
+
     attention_chars = []
     for cid in attention_char_ids:
-        char = db.query(SPCCharacteristic).filter(SPCCharacteristic.id == cid).first()
-        if char and char.is_active:
+        char = attention_chars_by_id.get(cid)
+        if char:
             cap = next((c for c in capabilities if c.characteristic_id == cid), None)
             attention_chars.append(
                 {

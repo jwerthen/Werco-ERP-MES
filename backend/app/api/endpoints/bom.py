@@ -1555,10 +1555,13 @@ def get_bom(
         )
     except HTTPException:
         raise
-    except Exception as e:
-        import traceback
-
-        raise HTTPException(status_code=500, detail=f"Error getting BOM: {str(e)}\n{traceback.format_exc()}")
+    except Exception:
+        # The traceback goes to the log (and Sentry, via main.py), never to the client:
+        # a 500 body is readable by every authenticated caller and a formatted traceback
+        # discloses absolute paths, ORM internals and library versions. See the guard at
+        # tests/test_no_traceback_in_error_response_guard.py.
+        logger.exception("Error getting BOM %s", bom_id)
+        raise HTTPException(status_code=500, detail="Error getting BOM")
 
 
 @router.get("/by-part/{part_id}", response_model=BOMResponse)
@@ -1652,11 +1655,10 @@ def unrelease_bom(
         return {"message": "BOM unreleased", "bom_id": bom.id}
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         db.rollback()
-        import traceback
-
-        raise HTTPException(status_code=500, detail=f"Error unreleasing BOM: {str(e)}\n{traceback.format_exc()}")
+        logger.exception("Error unreleasing BOM %s", bom_id)
+        raise HTTPException(status_code=500, detail="Error unreleasing BOM")
 
 
 @router.delete("/{bom_id}")
@@ -1789,11 +1791,9 @@ def add_bom_item(
         )
     except HTTPException:
         raise
-    except Exception as e:
-        import traceback
-
-        error_detail = f"Error adding BOM item: {str(e)}\n{traceback.format_exc()}"
-        raise HTTPException(status_code=500, detail=error_detail)
+    except Exception:
+        logger.exception("Error adding BOM item to BOM %s", bom_id)
+        raise HTTPException(status_code=500, detail="Error adding BOM item")
 
 
 @router.put("/items/{item_id}", response_model=BOMItemResponse)

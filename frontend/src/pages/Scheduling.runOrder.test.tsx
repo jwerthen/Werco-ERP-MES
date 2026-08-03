@@ -16,7 +16,8 @@
  */
 
 import React from 'react';
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, within, fireEvent } from '@testing-library/react';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 import api from '../services/api';
 import Scheduling from './Scheduling';
 import { ToastProvider } from '../components/ui/Toast';
@@ -96,11 +97,21 @@ const serverOrderedJobs = [
   job({ id: 4, work_order_id: 4, current_operation_id: 104, work_order_number: 'WO-7004', priority: 5, due_date: '2020-01-01', run_order: null, work_center_code: 'LAS-1', remaining_hours: 2 }),
 ];
 
-function renderScheduling() {
+/** Exposes the live URL search string so param round-trips are assertable. */
+function LocationProbe() {
+  const location = useLocation();
+  return <div data-testid="location-search">{location.search}</div>;
+}
+
+function renderScheduling(url = '/scheduling') {
   return render(
-    <ToastProvider>
-      <Scheduling />
-    </ToastProvider>
+    // MemoryRouter: the work-center filter now lives in a URL search param.
+    <MemoryRouter initialEntries={[url]}>
+      <ToastProvider>
+        <Scheduling />
+      </ToastProvider>
+      <LocationProbe />
+    </MemoryRouter>
   );
 }
 
@@ -178,5 +189,40 @@ describe('Scheduling renders the server run order verbatim', () => {
     // ...and a null payload code still resolves through the lookup.
     const fallbackCell = within(getWoRow(table, 'WO-7003')).getAllByRole('cell')[WORK_CENTER_CELL];
     expect(fallbackCell).toHaveTextContent('LAS-1');
+  });
+});
+
+describe('Scheduling — work-center filter round-trips through ?work_center=', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockedApi.getWorkCenters.mockResolvedValue(workCenters as never);
+    mockedApi.getSchedulableWorkOrders.mockResolvedValue(serverOrderedJobs as never);
+    mockedApi.getCapacityHeatmap.mockResolvedValue(emptyHeatmap as never);
+  });
+
+  it('applies an incoming numeric param, writes changes back, and defaults clean', async () => {
+    renderScheduling('/scheduling?work_center=7');
+    await getQueueTable();
+
+    const select = screen.getByLabelText('Filter by work center') as HTMLSelectElement;
+    expect(select.value).toBe('7');
+
+    // Clearing the filter removes the param — default state keeps a clean URL.
+    fireEvent.change(select, { target: { value: '' } });
+    expect(screen.getByTestId('location-search').textContent).toBe('');
+
+    // Re-selecting writes it back.
+    fireEvent.change(select, { target: { value: '7' } });
+    expect(screen.getByTestId('location-search').textContent).toBe('?work_center=7');
+  });
+
+  it('falls back to All Work Centers on a non-numeric param', async () => {
+    renderScheduling('/scheduling?work_center=bogus');
+    await getQueueTable();
+
+    const select = screen.getByLabelText('Filter by work center') as HTMLSelectElement;
+    expect(select.value).toBe('');
+    // All four rows render — the junk param filtered nothing out.
+    expect(screen.getByText('WO-7004')).toBeInTheDocument();
   });
 });
