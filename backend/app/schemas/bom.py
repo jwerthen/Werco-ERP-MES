@@ -92,6 +92,14 @@ class BOMItemResponse(BOMItemBase):
     # produce.
     unit_of_measure: str = "each"
     component_part: Optional[ComponentPartInfo] = None
+    # Set only on the three BOM-LINE WRITE responses (add / update / delete), and only when
+    # the edited BOM helps state demand for a part armed via ``Part.backflush_components``.
+    # It is a WARNING, never a refusal: the opt-in gate is a one-time check at the instant
+    # of the flip and the plan deliberately declined a second gate on the engineering-edit
+    # path (docs/MATERIAL_CONSUMPTION_PLAN.md -> "Exposing the flag"), so the write
+    # SUCCEEDS and says so. Absent (None) on every read path -- a GET is not an edit and
+    # has nothing to warn about.
+    backflush_armed_warning: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 

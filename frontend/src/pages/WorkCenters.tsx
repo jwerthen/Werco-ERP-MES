@@ -13,6 +13,7 @@ import {
   useToast,
 } from '../components/ui';
 import { WorkCenter, WorkCenterType } from '../types';
+import { useAuth } from '../context/AuthContext';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import KioskStationsAdminModal from '../components/kiosk/KioskStationsAdminModal';
 import {
@@ -39,6 +40,21 @@ const statusDotColor: Record<ReturnType<typeof statusVariant>, string> = {
 
 export default function WorkCenters() {
   const { showToast } = useToast();
+  const { user } = useAuth();
+  // POST /work-centers/{id}/status is Admin/Manager (platform_admin + superuser escalate,
+  // matching require_role). Render a plain badge for anyone the server would refuse, rather
+  // than a control that renders, accepts a change, fires the request and only then toasts
+  // a 403.
+  //
+  // DEFENSE IN DEPTH, not the primary gate. `/work-centers` IS route-guarded — on
+  // `admin:settings` (App.tsx `routeAccessRequirements`), which resolves to platform_admin
+  // + admin only, a NARROWER set than these endpoints allow. So nobody who can currently
+  // reach this page is refused by the check below. It earns its keep the moment that route
+  // tier is widened to Manager to match the endpoints (that route/nav/endpoint
+  // misalignment is tracked separately), and it keeps the control's visibility tied to the
+  // verb's own role set instead of to whatever the page-level gate happens to be.
+  const canChangeStatus =
+    (!!user && ['platform_admin', 'admin', 'manager'].includes(user.role)) || !!user?.is_superuser;
   const [workCenters, setWorkCenters] = useState<WorkCenter[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
@@ -242,31 +258,44 @@ export default function WorkCenters() {
     {} as Record<string, number>
   );
 
-  // Inline status-change control — preserved from the cockpit layout. The wrapper
-  // is purely presentational: its only job is to stop row click-through so changing
-  // status never navigates / triggers an edit. Keyboard users operate the <select>
-  // inside it directly, so role="presentation" (no focus/keyboard handler of its own)
-  // is the accurate a11y shape here.
-  const renderStatusCell = (wc: WorkCenter) => (
-    <div className="flex items-center gap-2" role="presentation" onClick={(e) => e.stopPropagation()}>
-      <span
-        className={`h-2 w-2 flex-shrink-0 rounded-full ${statusDotColor[statusVariant(wc.current_status)]}`}
-        aria-hidden="true"
-      />
-      <StatusBadge status={wc.current_status} className="hidden xl:inline-flex" />
-      <select
-        value={wc.current_status}
-        onChange={(e) => handleStatusChange(wc.id, e.target.value)}
-        aria-label={`Status for ${wc.code}`}
-        className="input !py-0.5 !px-1.5 !text-xs !min-h-0 h-7"
-      >
-        <option value="available">Available</option>
-        <option value="in_use">In Use</option>
-        <option value="maintenance">Maintenance</option>
-        <option value="offline">Offline</option>
-      </select>
-    </div>
-  );
+  // Inline status-change control — preserved from the cockpit layout, and role-gated
+  // (see `canChangeStatus`). In the INTERACTIVE variant the wrapper is purely
+  // presentational: its only job is to stop row click-through so changing status never
+  // navigates / triggers an edit. Keyboard users operate the <select> inside it directly,
+  // so role="presentation" (no focus/keyboard handler of its own) is the accurate a11y
+  // shape there. The READ-ONLY variant drops both the role and the click guard — with no
+  // interactive control inside, row click-through is the behaviour we want back.
+  const renderStatusCell = (wc: WorkCenter) =>
+    canChangeStatus ? (
+      <div className="flex items-center gap-2" role="presentation" onClick={(e) => e.stopPropagation()}>
+        <span
+          className={`h-2 w-2 flex-shrink-0 rounded-full ${statusDotColor[statusVariant(wc.current_status)]}`}
+          aria-hidden="true"
+        />
+        <StatusBadge status={wc.current_status} className="hidden xl:inline-flex" />
+        <select
+          value={wc.current_status}
+          onChange={(e) => handleStatusChange(wc.id, e.target.value)}
+          aria-label={`Status for ${wc.code}`}
+          className="input !py-0.5 !px-1.5 !text-xs !min-h-0 h-7"
+        >
+          <option value="available">Available</option>
+          <option value="in_use">In Use</option>
+          <option value="maintenance">Maintenance</option>
+          <option value="offline">Offline</option>
+        </select>
+      </div>
+    ) : (
+      // Read-only for roles the server refuses. No wrapper click handler is needed: with
+      // no interactive control inside, row click-through is the correct behaviour again.
+      <div className="flex items-center gap-2">
+        <span
+          className={`h-2 w-2 flex-shrink-0 rounded-full ${statusDotColor[statusVariant(wc.current_status)]}`}
+          aria-hidden="true"
+        />
+        <StatusBadge status={wc.current_status} />
+      </div>
+    );
 
   const columns: Array<DataTableColumn<WorkCenter>> = [
     {

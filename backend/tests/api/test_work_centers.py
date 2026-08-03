@@ -201,3 +201,109 @@ class TestDeactivateWorkCenter:
         assert refreshed.is_active is True
         # Dropped before the diff, so nothing changed and nothing was audited.
         assert self._committed_audit_rows(db_session, wc.id) == []
+
+
+@pytest.mark.api
+@pytest.mark.requires_db
+class TestWorkCenterCreateAndStatusAudit:
+    """POST / and POST /{id}/status: the two handlers that changed state with no trace.
+
+    ``create_work_center`` wrote no CREATE row while the CSV importer -- which builds the
+    identical row -- always did, so the machine roster's audit trail depended on which door
+    was used. ``update_work_center_status`` had bare ``get_current_user`` RBAC *and* no
+    audit row: any authenticated user in the tenant could flip a machine to
+    ``offline``/``maintenance``, changing what the dispatch board and the kiosk show, with
+    nothing recording who.
+    """
+
+    @staticmethod
+    def _committed_audit_rows(db: Session, work_center_id: int) -> list:
+        """See ``TestDeactivateWorkCenter._committed_audit_rows`` -- the rollback before the
+        query is what distinguishes a COMMITTED row from a merely flushed one."""
+        db.rollback()
+        db.expire_all()
+        return (
+            db.query(AuditLog)
+            .filter(AuditLog.resource_type == "work_center", AuditLog.resource_id == work_center_id)
+            .order_by(AuditLog.sequence_number.desc())
+            .all()
+        )
+
+    def test_create_writes_a_committed_create_row(self, client: TestClient, admin_headers: dict, db_session: Session):
+        resp = client.post(
+            "/api/v1/work-centers/",
+            headers=admin_headers,
+            json={"code": "AUD-CREATE-1", "name": "Audited Bay", "work_center_type": "welding"},
+        )
+
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        wc_id = resp.json()["id"]
+
+        rows = self._committed_audit_rows(db_session, wc_id)
+        assert len(rows) == 1, "exactly one committed CREATE row"
+        row = rows[0]
+        assert row.action == "CREATE"
+        assert row.resource_identifier == "AUD-CREATE-1"
+        assert row.company_id == COMPANY_A
+        # ``source: import`` is what distinguishes the CSV importer's row from this one.
+        assert "source" not in (row.extra_data or {})
+
+    def test_status_change_writes_a_committed_status_change_row(
+        self, client: TestClient, admin_headers: dict, db_session: Session
+    ):
+        wc = make_work_center(db_session)
+        wc_id, wc_code = wc.id, wc.code
+
+        resp = client.post(f"/api/v1/work-centers/{wc_id}/status?status=maintenance", headers=admin_headers)
+
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        db_session.expire_all()
+        assert db_session.get(WorkCenter, wc_id).current_status == "maintenance"
+
+        rows = self._committed_audit_rows(db_session, wc_id)
+        assert len(rows) == 1, "exactly one committed STATUS_CHANGE row"
+        row = rows[0]
+        assert row.action == "STATUS_CHANGE"
+        assert row.resource_identifier == wc_code
+        assert row.old_values == {"status": "available"}
+        assert row.new_values == {"status": "maintenance"}
+
+    def test_restating_the_same_status_writes_nothing(
+        self, client: TestClient, admin_headers: dict, db_session: Session
+    ):
+        """``log_status_change`` does NOT self-suppress the way ``log_update`` does, so a
+        no-op re-statement would otherwise put a meaningless 'available -> available' row on
+        the tamper-evident chain. Mirrors ``test_put_explicit_null_is_active_is_no_change``."""
+        wc = make_work_center(db_session)
+
+        resp = client.post(f"/api/v1/work-centers/{wc.id}/status?status=available", headers=admin_headers)
+
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        assert self._committed_audit_rows(db_session, wc.id) == []
+
+    def test_status_change_is_refused_for_an_operator(
+        self, client: TestClient, operator_headers: dict, db_session: Session
+    ):
+        """RBAC tightening: this endpoint accepted ANY authenticated user. It now matches
+        PUT's Admin/Manager tier (not DELETE's Admin-only -- a status flip is reversible,
+        and PUT already lets a Manager flip ``is_active``)."""
+        wc = make_work_center(db_session)
+
+        resp = client.post(f"/api/v1/work-centers/{wc.id}/status?status=offline", headers=operator_headers)
+
+        assert resp.status_code == status.HTTP_403_FORBIDDEN, resp.text
+        db_session.expire_all()
+        assert db_session.get(WorkCenter, wc.id).current_status == "available", "a refusal leaves the row untouched"
+        assert self._committed_audit_rows(db_session, wc.id) == []
+
+    def test_status_change_is_allowed_for_a_manager(
+        self, client: TestClient, manager_headers: dict, db_session: Session
+    ):
+        """The negative control on the tightening: a manager is exactly who runs the board."""
+        wc = make_work_center(db_session)
+
+        resp = client.post(f"/api/v1/work-centers/{wc.id}/status?status=offline", headers=manager_headers)
+
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        db_session.expire_all()
+        assert db_session.get(WorkCenter, wc.id).current_status == "offline"

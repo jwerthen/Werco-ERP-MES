@@ -31,6 +31,17 @@ export interface BOMItem {
   is_optional: boolean;
   is_alternate: boolean;
   component_part?: BOMItemPart;
+  /**
+   * Present only on the three BOM-LINE WRITE responses (add / update / delete), and only
+   * when the edited BOM helps state demand for a part armed via `backflush_components`
+   * — i.e. a part whose BOM components leave stock automatically at completion.
+   *
+   * It is a WARNING, never a refusal: the arming gate is a one-time check at the instant
+   * of the flip, and the backend deliberately does NOT re-gate the engineering-edit path
+   * (docs/MATERIAL_CONSUMPTION_PLAN.md → "Exposing the flag"). The write succeeded; the
+   * sentence says which armed part to re-check.
+   */
+  backflush_armed_warning?: string | null;
   // Exploded view fields
   children?: BOMItem[];
   level?: number;
