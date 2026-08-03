@@ -13,7 +13,9 @@ Grouped by record type:
   ``test_ncr_void_restore.py`` and is not duplicated here.)
 - **Voided receipt** — excluded from the receiving history, inspection queue,
   stats, and the reports quality-metrics receipt aggregate.
-- **Soft-deleted PO** — excluded from the PO list, global search, and PO export.
+- **Soft-deleted PO** — excluded from the PO list, global search, the PO export,
+  and the PO *lines* export (the child rows carry no soft-delete flag of their
+  own, so only the parent's predicate on the join can drop them).
 - **Cross-tenant** — reports quality-metrics for company A never counts company
   B's receipts or NCRs (the ``company_id`` filter blocker fix).
 """
@@ -194,9 +196,11 @@ def test_soft_deleted_po_excluded_from_list_search_and_export(client: TestClient
     admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
     headers = headers_for(admin)
 
-    live = make_po_line(db_session, company_id=1, quantity_ordered=10).purchase_order
-    doomed = make_po_line(db_session, company_id=1, quantity_ordered=10).purchase_order
+    live_line = make_po_line(db_session, company_id=1, quantity_ordered=10)
+    doomed_line = make_po_line(db_session, company_id=1, quantity_ordered=10)
+    live, doomed = live_line.purchase_order, doomed_line.purchase_order
     live_number, doomed_number = live.po_number, doomed.po_number
+    live_part, doomed_part = live_line.part.part_number, doomed_line.part.part_number
     doomed_id = doomed.id
 
     assert (
@@ -220,6 +224,22 @@ def test_soft_deleted_po_excluded_from_list_search_and_export(client: TestClient
     assert export.status_code == status.HTTP_200_OK, export.text
     assert doomed_number not in export.text
     assert live_number in export.text
+
+    # 4. The PO *lines* export drops the deleted PO's lines too. This one needs its
+    #    own assertion rather than riding on (3): `PurchaseOrderLine` has no
+    #    SoftDeleteMixin and `delete_purchase_order` does not touch the child rows,
+    #    so the lines survive the parent's deletion and only the parent's
+    #    `is_deleted` predicate on the join can exclude them. Without it the two
+    #    exports disagree by construction -- and because the delete guard refuses
+    #    once any line has been received, the surviving lines are exactly the open
+    #    commitments (ordered qty, unit price, required date) a manager reconciles
+    #    from, so the divergence lands on the reconciliation itself.
+    line_export = client.get("/api/v1/exports/purchase-orders/lines/export", headers=headers, params={"format": "csv"})
+    assert line_export.status_code == status.HTTP_200_OK, line_export.text
+    assert doomed_number not in line_export.text
+    assert doomed_part not in line_export.text
+    assert live_number in line_export.text
+    assert live_part in line_export.text
 
 
 # ===========================================================================

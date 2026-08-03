@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import api from '../services/api';
 import { Part, PartType } from '../types';
 import { MATERIAL_SUPPLY_PART_TYPE_OPTIONS } from '../utils/catalogGroups';
@@ -14,6 +15,7 @@ import {
   MobileDataCard,
 } from '../components/ui';
 import useUnsavedChanges from '../hooks/useUnsavedChanges';
+import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import {
   ArrowUpTrayIcon,
   CubeIcon,
@@ -67,9 +69,38 @@ export default function MaterialsPage() {
   const [materials, setMaterials] = useState<Part[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
+  // Free-text search stays local state; only the debounced VALUE gates the fetch
+  // (debouncing the whole load callback made type-filter changes eat the delay).
   const [search, setSearch] = useState('');
-  const [typeFilter, setTypeFilter] = useState('');
-  const [statusFilter, setStatusFilter] = useState('');
+  const debouncedSearch = useDebouncedValue(search.trim(), 250);
+
+  // Structured filters live in the URL (the ProcessSheets idiom) so a filtered
+  // view survives reload and can be shared. Absent params = defaults (clean URL).
+  const [searchParams, setSearchParams] = useSearchParams();
+  const typeFilter = searchParams.get('type') ?? '';
+  const statusFilter = searchParams.get('status') ?? '';
+
+  const setFilterParam = (key: string, value: string) => {
+    const next = new URLSearchParams(searchParams);
+    if (value) {
+      next.set(key, value);
+    } else {
+      next.delete(key);
+    }
+    setSearchParams(next);
+  };
+  const setTypeFilter = (value: string) => setFilterParam('type', value);
+  const setStatusFilter = (value: string) => setFilterParam('status', value);
+  // Clear must drop both params in ONE update — two sequential setFilterParam
+  // calls would each copy the same stale searchParams and lose one deletion.
+  const clearFilters = () => {
+    setSearch('');
+    const next = new URLSearchParams(searchParams);
+    next.delete('type');
+    next.delete('status');
+    setSearchParams(next);
+  };
+
   const [showModal, setShowModal] = useState(false);
   const [editingMaterial, setEditingMaterial] = useState<Part | null>(null);
   const [saving, setSaving] = useState(false);
@@ -84,27 +115,38 @@ export default function MaterialsPage() {
   );
   const { confirmDiscard } = useUnsavedChanges(isFormDirty);
 
+  // Stale-response guard: typeFilter changes fire immediately while a debounced
+  // search load may still be in flight, so only the LATEST request may commit.
+  const loadRequestRef = useRef(0);
+
   const loadMaterials = useCallback(async () => {
+    const requestId = loadRequestRef.current + 1;
+    loadRequestRef.current = requestId;
     try {
       setLoading(true);
       setLoadError(false);
       const params: any = {};
       if (typeFilter) params.part_type = typeFilter;
-      if (search.trim()) params.search = search.trim();
+      if (debouncedSearch) params.search = debouncedSearch;
       const data = await api.getMaterials(params);
+      if (requestId !== loadRequestRef.current) return;
       setMaterials(data);
     } catch {
+      if (requestId !== loadRequestRef.current) return;
       setLoadError(true);
       showToast('error', 'Failed to load materials and supplies');
     } finally {
+      if (requestId !== loadRequestRef.current) return;
       setLoading(false);
     }
-  }, [search, showToast, typeFilter]);
+  }, [debouncedSearch, showToast, typeFilter]);
 
+  // Keyed on the filter INPUTS, not the callback identity: a type-filter change
+  // reloads immediately (no debounce), and nothing else — e.g. a showToast
+  // identity change — can re-fire the load.
   useEffect(() => {
-    const timer = window.setTimeout(loadMaterials, 200);
-    return () => window.clearTimeout(timer);
-  }, [loadMaterials]);
+    loadMaterials();
+  }, [debouncedSearch, typeFilter]);
 
   const visibleMaterials = useMemo(() => {
     if (!statusFilter) return materials;
@@ -392,13 +434,13 @@ export default function MaterialsPage() {
           />
         </div>
         <div className="flex flex-wrap gap-2">
-          <select value={typeFilter} onChange={event => setTypeFilter(event.target.value)} className="input py-2 text-sm w-44">
+          <select value={typeFilter} onChange={event => setTypeFilter(event.target.value)} className="input py-2 text-sm w-44" aria-label="Filter by type">
             <option value="">All Supply Types</option>
             {MATERIAL_SUPPLY_PART_TYPE_OPTIONS.map(option => (
               <option key={option.value} value={option.value}>{option.label}</option>
             ))}
           </select>
-          <select value={statusFilter} onChange={event => setStatusFilter(event.target.value)} className="input py-2 text-sm w-32">
+          <select value={statusFilter} onChange={event => setStatusFilter(event.target.value)} className="input py-2 text-sm w-32" aria-label="Filter by status">
             <option value="">All Status</option>
             <option value="active">Active</option>
             <option value="obsolete">Obsolete</option>
@@ -407,11 +449,7 @@ export default function MaterialsPage() {
           {(search || typeFilter || statusFilter) && (
             <button
               type="button"
-              onClick={() => {
-                setSearch('');
-                setTypeFilter('');
-                setStatusFilter('');
-              }}
+              onClick={clearFilters}
               className="btn-secondary flex items-center gap-2 text-sm"
             >
               <XMarkIcon className="h-4 w-4" />
@@ -440,7 +478,7 @@ export default function MaterialsPage() {
             ? 'No materials or supplies match your current filters.'
             : 'Add your first item or import a CSV to get started.',
           action: hasFilters
-            ? { label: 'Clear filters', onClick: () => { setSearch(''); setTypeFilter(''); setStatusFilter(''); } }
+            ? { label: 'Clear filters', onClick: clearFilters }
             : { label: 'New Item', onClick: openCreate },
         }}
       />
