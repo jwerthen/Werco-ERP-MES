@@ -168,8 +168,10 @@ log "Deployment completed successfully"
 echo ""
 echo "Post-deployment checks:"
 echo "  - Application: http://localhost:3000"
-echo "  - Documentation: http://localhost:8000/api/docs"
 echo "  - Health check: http://localhost:8000/health"
+# /api/docs, /api/redoc and /api/openapi.json are disabled (404) when
+# ENVIRONMENT=production -- see docs/PRODUCTION_CHECKLIST.md. Use docs/API.md,
+# or a non-production deployment, for the endpoint reference.
 echo ""
 echo "Logs: $LOG_FILE"
 echo "Backup: $BACKUP_FILE"

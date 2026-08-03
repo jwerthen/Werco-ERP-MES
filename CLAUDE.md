@@ -42,7 +42,11 @@ Invoke these two after the implementing agent finishes, as a matter of course �
 
 ### Backend (run from `backend/`)
 ```bash
-# Tests (pytest, async mode auto, runs in parallel via -n auto, 50% coverage floor)
+# Tests (pytest, async mode auto, runs in parallel via -n auto, 78% coverage floor).
+# The floor lives in pytest.ini's addopts — that is the source of truth, and it governs
+# CI's required "Backend Tests" job. A CLI --cov-fail-under OVERRIDES addopts, so never
+# pass a laxer one. Subset runs (a single file, or -m evals) measure only what they
+# import and will fail the floor rather than the tests — use --no-cov for those.
 pytest                                  # full suite
 pytest tests/test_work_orders.py        # single file
 pytest tests/test_work_orders.py::test_create_work_order   # single test

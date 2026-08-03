@@ -81,7 +81,10 @@ jobs:
           DATABASE_URL: postgresql://werco_user:test_password@localhost:5432/werco_erp_test
           SECRET_KEY: test-secret-key-for-ci-only
           ENVIRONMENT: test
-        run: pytest tests/ -v --cov=app --cov-report=term --cov-fail-under=50
+        # A CLI --cov-fail-under overrides backend/pytest.ini's addopts, so this
+        # number must track pytest.ini's or pr-check silently keeps an older,
+        # laxer floor. test_ci_workflow_gates.py asserts the two agree.
+        run: pytest tests/ -v --cov=app --cov-report=term --cov-fail-under=78
 
       - name: Upload Coverage
         uses: codecov/codecov-action@v7
@@ -110,11 +113,21 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Both of these must FAIL the job. They previously ran as
+      # `... 2>/dev/null || echo "completed with warnings"`: the `|| echo`
+      # forced exit 0, so a real TypeScript error rendered as a green step
+      # captioned "completed with warnings". The diagnostics themselves were in
+      # the log the whole time -- eslint and tsc both report on stdout, which
+      # was never redirected -- and counted for nothing; `2>/dev/null` hid only
+      # the tools' own failure output on stderr. These are the same invocations
+      # ci-cd.yml's required jobs already run; the `--` passthrough is required
+      # because frontend/package.json's "lint" is a bare
+      # `eslint src --ext .ts,.tsx` with no warning cap of its own.
       - name: Run ESLint
-        run: npm run lint 2>/dev/null || echo "Linting completed with warnings"
+        run: npm run lint -- --max-warnings=0
 
       - name: TypeScript Check
-        run: npx tsc --noEmit 2>/dev/null || echo "TypeScript check completed with warnings"
+        run: npx tsc --noEmit
 
       - name: Run Tests
         run: npm test -- --coverage --watchAll=false --passWithNoTests

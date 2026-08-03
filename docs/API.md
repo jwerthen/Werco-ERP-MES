@@ -1,6 +1,6 @@
 # Werco ERP API Documentation
 
-This is a high-level overview of the Werco ERP API. For interactive documentation, visit `/api/docs` when the backend is running.
+This is a high-level overview of the Werco ERP API. For interactive documentation, visit `/api/docs` when the backend is running — outside production, where it is deliberately disabled (see [Interactive Documentation](#interactive-documentation)).
 
 ## Base URL
 
@@ -5049,9 +5049,15 @@ Response:
 
 ## Interactive Documentation
 
-When the backend is running, visit:
+When the backend is running **outside production**, visit:
 - **Swagger UI**: `/api/docs` - Interactive API explorer
 - **ReDoc**: `/api/redoc` - Alternative documentation view
 - **OpenAPI JSON**: `/api/openapi.json` - Raw specification
+
+All three are disabled when `ENVIRONMENT=production` and return **404** there —
+including the raw OpenAPI schema, which would otherwise enumerate every
+endpoint, payload shape and auth requirement to an unauthenticated caller. Use a
+development or staging deployment to browse the API interactively; this file is
+the reference for production. See `docs/PRODUCTION_CHECKLIST.md`.
 
 For more details on specific endpoints, use the interactive documentation above.

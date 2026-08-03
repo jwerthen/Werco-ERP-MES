@@ -521,6 +521,22 @@ tags_metadata = [
     {"name": "Error Logging", "description": "Client-side error logging"},
 ]
 
+# Interactive API docs are served in every environment EXCEPT production. In
+# production all three are None, so FastAPI registers no route for them and the
+# paths 404 like any other unknown path -- the schema is not merely hidden from
+# a UI, it is not generated or served at all. Nothing outside backend/ consumes
+# /api/openapi.json (no nginx location block, no uptime probe, no client-SDK
+# generation step), and tests run with ENVIRONMENT=test, so the docs stay
+# available to them. Tracked in docs/PRODUCTION_CHECKLIST.md.
+_DOCS_ENABLED = settings.ENVIRONMENT != "production"
+_DOCS_URL = "/api/docs" if _DOCS_ENABLED else None
+_REDOC_URL = "/api/redoc" if _DOCS_ENABLED else None
+_OPENAPI_URL = "/api/openapi.json" if _DOCS_ENABLED else None
+# Paths the CSP header skips (Swagger/ReDoc need inline styles + a CDN bundle).
+# Empty in production, so the exemption disappears together with the routes and
+# production applies CSP to every response, including those paths' 404s.
+_DOCS_PATHS = tuple(path for path in (_DOCS_URL, _REDOC_URL, _OPENAPI_URL) if path)
+
 app = FastAPI(
     title=settings.APP_NAME,
     description="""
@@ -565,9 +581,9 @@ For API support, contact the system administrator.
     """,
     version="1.0.0",
     lifespan=lifespan,
-    docs_url="/api/docs",
-    redoc_url="/api/redoc",
-    openapi_url="/api/openapi.json",
+    docs_url=_DOCS_URL,
+    redoc_url=_REDOC_URL,
+    openapi_url=_OPENAPI_URL,
     openapi_tags=tags_metadata,
     contact={
         "name": "Werco ERP Support",
@@ -749,7 +765,7 @@ async def add_security_headers(request: Request, call_next):
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains; preload"
     # Content Security Policy - restrict resource loading (skip for API docs)
-    if request.url.path not in ("/api/docs", "/api/redoc", "/api/openapi.json"):
+    if request.url.path not in _DOCS_PATHS:
         response.headers["Content-Security-Policy"] = "default-src 'self'; frame-ancestors 'none'"
     return response
 
