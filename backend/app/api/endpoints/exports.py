@@ -386,19 +386,41 @@ def export_purchase_order_lines(
     company_id: int = Depends(get_current_company_id),
 ):
     """Export purchase order lines (detailed) to CSV or Excel."""
-    query = db.query(PurchaseOrderLine).options(
-        joinedload(PurchaseOrderLine.purchase_order).joinedload(PurchaseOrder.vendor),
-        joinedload(PurchaseOrderLine.part),
+    # Tenant scope, on BOTH sides of the join. ``PurchaseOrderLine.company_id``
+    # (TenantMixin) is the authoritative scope; the parent predicate additionally
+    # stops a line from being read through a foreign PO. The join is
+    # UNCONDITIONAL on purpose: it used to live inside the optional-filter block
+    # below, so a request with no query parameters had no join for a parent
+    # predicate to apply to -- and the child column was never filtered at all,
+    # which is how this endpoint returned every company's PO lines.
+    #
+    # The parent's soft-delete predicate is on the same filter for the same
+    # reason, and matches export_purchase_orders above: `PurchaseOrderLine` has
+    # no SoftDeleteMixin and `delete_purchase_order` does not touch the child
+    # rows, so without it a retracted PO's number and vendor keep rendering onto
+    # every surviving line. The delete guard refuses once any line has been
+    # received, so those survivors are precisely the OPEN COMMITMENTS -- the
+    # rows a manager reconciles open purchase commitments from.
+    query = (
+        db.query(PurchaseOrderLine)
+        .join(PurchaseOrder)
+        .filter(
+            PurchaseOrderLine.company_id == company_id,
+            PurchaseOrder.company_id == company_id,
+            PurchaseOrder.is_deleted == False,  # noqa: E712
+        )
+        .options(
+            joinedload(PurchaseOrderLine.purchase_order).joinedload(PurchaseOrder.vendor),
+            joinedload(PurchaseOrderLine.part),
+        )
     )
 
-    if start_date or end_date or status:
-        query = query.join(PurchaseOrder)
-        if start_date:
-            query = query.filter(PurchaseOrder.order_date >= start_date)
-        if end_date:
-            query = query.filter(PurchaseOrder.order_date <= end_date)
-        if status:
-            query = query.filter(PurchaseOrder.status == status)
+    if start_date:
+        query = query.filter(PurchaseOrder.order_date >= start_date)
+    if end_date:
+        query = query.filter(PurchaseOrder.order_date <= end_date)
+    if status:
+        query = query.filter(PurchaseOrder.status == status)
 
     lines = query.all()
 
