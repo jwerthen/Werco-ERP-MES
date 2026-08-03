@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useMemo, useCallback, useRef } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import api from '../services/api';
 import { WorkOrderSummary, WorkOrderStatus } from '../types';
 import { useWebSocket } from '../hooks/useWebSocket';
@@ -23,6 +23,7 @@ import { SkeletonTable, SkeletonCard } from '../components/ui/Skeleton';
 import { ConfirmDialog, EmptyState, ErrorState, useToast, DataTable, DataTableColumn, StatusBadge, Button } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { useOptimisticMutation } from '../hooks/useOptimisticMutation';
+import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import LaserNestImportWizard from '../components/laser/LaserNestImportWizard';
 
 const priorityConfig: Record<number, { bg: string; text: string; label: string }> = {
@@ -56,6 +57,11 @@ const groupOptions: { value: GroupBy; label: string }[] = [
 ];
 
 const formatStatusLabel = (status: string) => status.replace('_', ' ');
+
+// Sanitize a group name into a per-group CSV filename slug: lowercase, runs of
+// non-alphanumerics collapse to a single dash, edge dashes trimmed.
+const groupCsvSlug = (name: string) =>
+  name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'group';
 
 const getWorkOrderProgress = (wo: WorkOrderSummary) => {
   const operationCount = Number(wo.operation_count || 0);
@@ -295,12 +301,39 @@ export default function WorkOrders() {
   const [workOrders, setWorkOrders] = useState<WorkOrderSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
+  // Free-text search stays local state; only the debounced value drives the fetch.
   const [search, setSearch] = useState('');
-  const [debouncedSearch, setDebouncedSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState<string>('');
-  const [customerFilter, setCustomerFilter] = useState<string>('');
-  const [hideCOTS, setHideCOTS] = useState(true);
-  const [groupBy, setGroupBy] = useState<GroupBy>('none');
+  const debouncedSearch = useDebouncedValue(search.trim(), 250);
+
+  // Structured filters live in the URL (the ProcessSheets idiom) so a filtered
+  // view survives reload and can be shared/bookmarked. An ABSENT param means the
+  // default (hideCOTS defaults ON — `cots=1` appears only when showing COTS;
+  // groupBy defaults none — `group` appears only when grouping), so the default
+  // state keeps a clean URL and existing bookmarks are unaffected. Rapid param
+  // changes are handled by the loadRequestRef race guard below.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const statusFilter = searchParams.get('status') ?? '';
+  const customerFilter = searchParams.get('customer') ?? '';
+  const hideCOTS = searchParams.get('cots') !== '1';
+  const groupParam = searchParams.get('group');
+  const groupBy: GroupBy =
+    groupParam === 'customer' || groupParam === 'part' || groupParam === 'status' ? groupParam : 'none';
+
+  // Copy-and-set setter: an empty value deletes the param (default = clean URL).
+  const setFilterParam = (key: string, value: string) => {
+    const next = new URLSearchParams(searchParams);
+    if (value) {
+      next.set(key, value);
+    } else {
+      next.delete(key);
+    }
+    setSearchParams(next);
+  };
+  const setStatusFilter = (value: string) => setFilterParam('status', value);
+  const setCustomerFilter = (value: string) => setFilterParam('customer', value);
+  const setHideCOTS = (hide: boolean) => setFilterParam('cots', hide ? '' : '1');
+  const setGroupBy = (value: GroupBy) => setFilterParam('group', value === 'none' ? '' : value);
+
   const [releasingIds, setReleasingIds] = useState<Set<number>>(new Set());
   const realtimeRefreshRef = useRef<NodeJS.Timeout | null>(null);
   const loadRequestRef = useRef(0);
@@ -308,11 +341,6 @@ export default function WorkOrders() {
     const token = getAccessToken();
     return buildWsUrl('/ws/updates', token ? { token } : undefined);
   }, [user?.id]);
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => setDebouncedSearch(search.trim()), 250);
-    return () => window.clearTimeout(timer);
-  }, [search]);
 
   const loadWorkOrders = useCallback(async () => {
     const requestId = loadRequestRef.current + 1;
@@ -665,6 +693,12 @@ export default function WorkOrders() {
             aria-label="Customer filter"
           >
             <option value="">All Customers</option>
+            {/* A URL-borne customer no loaded row carries must still render as the
+                selected option — otherwise the select shows blank while the filter
+                quietly hides every row. */}
+            {customerFilter && !customers.includes(customerFilter) && (
+              <option value={customerFilter}>{customerFilter}</option>
+            )}
             {customers.map(c => (
               <option key={c} value={c}>{c}</option>
             ))}
@@ -742,6 +776,7 @@ export default function WorkOrders() {
                   rowKey={(wo) => wo.id}
                   onRowClick={(wo) => navigate(`/work-orders/${wo.id}`)}
                   className="border-0"
+                  csvExport={{ filename: `work-orders-${groupCsvSlug(groupName)}` }}
                 />
               </div>
               <WorkOrderMobileList
