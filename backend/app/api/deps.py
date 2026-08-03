@@ -23,9 +23,11 @@ SAFE_READ_ONLY_METHODS = {"GET", "HEAD", "OPTIONS"}
 # write); everywhere else the token is 403. Tokens without a scope claim are
 # unaffected.
 KIOSK_TOKEN_PATH_PREFIXES = ("/api/v1/shop-floor",)
-# employee-logout takes its identity from the request body today (no bearer
-# auth), so this entry is defensive: it keeps kiosk tokens working if that
-# endpoint ever moves onto get_current_user.
+# employee-logout is authenticated and derives the actor from the TOKEN. It
+# previously took no bearer at all and trusted the request body, which made it an
+# unauthenticated audit-forgery and cross-tenant badge-enumeration surface; this
+# entry is therefore now load-bearing rather than defensive — it is what lets a
+# badge-minted crew-station token record its own logout.
 KIOSK_TOKEN_EXACT_PATHS = ("/api/v1/auth/employee-logout",)
 # Deny-list carved out of the shop-floor prefix: the crew station never needs
 # these, and a badge-minted 5-minute token for a MANAGER/ADMIN must not be able
