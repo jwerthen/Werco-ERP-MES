@@ -32,21 +32,56 @@ from app.services import notification_outbox  # noqa: F401
 configure_logging()
 logger = get_logger(__name__)
 
-# Initialize Sentry if DSN is provided
-if settings.SENTRY_DSN:
+
+def init_sentry() -> None:
+    """Initialize Sentry error tracking when a DSN is configured.
+
+    Extracted from module scope so the wiring is directly testable; it is still called
+    at import time below. Never raises: with no DSN, a missing SDK, or a DSN the SDK
+    refuses, the app boots without error tracking rather than not at all.
+    """
+    if not settings.SENTRY_DSN:
+        return
     try:
         import sentry_sdk
         from sentry_sdk.integrations.fastapi import FastApiIntegration
+    except ImportError:
+        logger.warning("Sentry DSN provided but sentry-sdk not installed")
+        return
 
+    try:
         sentry_sdk.init(
             dsn=settings.SENTRY_DSN,
             integrations=[FastApiIntegration()],
-            traces_sample_rate=1.0,
+            # PERFORMANCE TRANSACTIONS ONLY -- this is not an error-capture switch. Errors
+            # are governed by `sample_rate` (left at its 1.0 default), so every exception is
+            # still reported at any value of this. Defaults to 0.1; see the comment on
+            # SENTRY_TRACES_SAMPLE_RATE in core/config.py for why 1.0 was actively harmful
+            # here (two 30-second pollers ingesting ~5,800 useless transactions/day, burning
+            # the quota that real errors are billed against).
+            traces_sample_rate=settings.SENTRY_TRACES_SAMPLE_RATE,
+            # Ties every event to the deployed commit. None when unset (local dev), which
+            # Sentry accepts -- events are simply recorded without a release.
+            release=settings.APP_RELEASE,
             environment=settings.ENVIRONMENT,
         )
-        logger.info("Sentry initialized successfully")
-    except ImportError:
-        logger.warning("Sentry DSN provided but sentry-sdk not installed")
+    except Exception:
+        # Monitoring must never be able to stop the API from serving. sentry_sdk.init()
+        # validates the DSN synchronously and raises BadDsn on a malformed one (a typo or
+        # a trailing space in the Railway variable is enough) -- and this runs at import,
+        # so an uncaught raise here means uvicorn never binds and the deploy is dead in
+        # the water rather than merely un-instrumented. Log it and serve without Sentry.
+        logger.exception("Sentry initialization failed; continuing without error tracking")
+        return
+
+    logger.info(
+        "Sentry initialized successfully (traces_sample_rate=%s, release=%s)",
+        settings.SENTRY_TRACES_SAMPLE_RATE,
+        settings.APP_RELEASE or "unset",
+    )
+
+
+init_sentry()
 
 
 def seed_quote_config_if_needed():
@@ -1200,11 +1235,16 @@ async def detailed_health_check():
         "platform_release": platform.release(),
     }
 
-    # Application info
+    # Application info.
+    # "version" is a hardcoded constant kept for backward compatibility with existing
+    # monitors -- it has never distinguished one deploy from another. "release" is the
+    # field that actually answers "is commit X running?": the git SHA CI baked into this
+    # artifact (null when unset, e.g. local dev). See core/config.py::APP_RELEASE.
     checks["application"] = {
         "name": settings.APP_NAME,
         "environment": settings.ENVIRONMENT,
         "version": "1.0.0",
+        "release": settings.APP_RELEASE,
         "debug": settings.DEBUG,
     }
 

@@ -75,6 +75,35 @@ class TestHealthEndpoints:
         assert "features" in data["checks"]
         assert "rate_limiting" in data["checks"]["features"]
 
+    def test_detailed_health_reports_the_deployed_release(self, client: TestClient):
+        """The application block must expose the deployed commit, not just a constant.
+
+        ``version`` is hardcoded "1.0.0" and has never distinguished one deploy from
+        another, which made "is commit X actually running?" an archaeology exercise
+        across GitHub Actions and the Railway API. ``release`` carries the SHA CI
+        stamped into the artifact (see APP_RELEASE in app/core/config.py); it is null
+        locally, where nothing stamped it. Keep both: monitors depend on ``version``.
+        """
+        from app.core.config import settings
+
+        response = client.get("/health/detailed")
+        assert response.status_code == status.HTTP_200_OK
+        application = response.json()["checks"]["application"]
+
+        assert application["version"] == "1.0.0"
+        assert "release" in application
+        assert application["release"] == settings.APP_RELEASE
+
+    def test_detailed_health_release_reflects_configured_value(self, client: TestClient, monkeypatch):
+        """A deployed instance surfaces its stamp verbatim -- one curl answers the question."""
+        from app.core.config import settings
+
+        monkeypatch.setattr(settings, "APP_RELEASE", "0123456789abcdef0123456789abcdef01234567")
+
+        response = client.get("/health/detailed")
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json()["checks"]["application"]["release"] == "0123456789abcdef0123456789abcdef01234567"
+
     def test_health_no_auth_required(self, client: TestClient):
         """Test health endpoints don't require authentication."""
         endpoints = ["/health", "/health/live", "/health/ready", "/health/detailed"]

@@ -238,6 +238,7 @@ ALLOWED_HOSTS=api.werco.com,erp.werco.com,*.up.railway.app,healthcheck.railway.a
 | `ENVIRONMENT` | No | `development` | Environment name: development, staging, production. Setting it to `production` is load-bearing, not cosmetic — see below. |
 | `API_V1_PREFIX` | No | `/api/v1` | API route prefix |
 | `PORT` | No | `8000` | Server port (Railway sets this automatically) |
+| `APP_RELEASE` | No | (stamped by CI) | Commit SHA of the running build. **Set automatically by CI — do not set it by hand on Railway.** Reported to Sentry as the event `release` and by `GET /health/detailed` as `checks.application.release`. See [Monitoring](#monitoring--error-tracking) |
 | `LOG_LEVEL` | No | `INFO` | Logging level: DEBUG, INFO, WARNING, ERROR |
 
 > **`ENVIRONMENT=production` turns off the interactive API docs.** `app/main.py` derives
@@ -506,6 +507,59 @@ AWS_SECRET_ACCESS_KEY=<secret key from `railway bucket credentials`>
 AWS_REGION=us-east-1
 ```
 
+### Monitoring & Error Tracking
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `SENTRY_DSN` | No | - | Sentry DSN for error tracking. Unset = Sentry is off entirely (no init, no events) |
+| `SENTRY_TRACES_SAMPLE_RATE` | No | `0.1` | Fraction (0.0–1.0) of requests captured as Sentry **performance transactions**. **This is not an error-capture setting** — see below |
+| `APP_RELEASE` | No | (stamped by CI) | Commit SHA of the running build, reported as the Sentry event `release` and as `checks.application.release` on `GET /health/detailed`. **Set automatically by CI** — see below |
+
+> **`SENTRY_TRACES_SAMPLE_RATE` governs performance transactions only — never error
+> capture.** Errors are governed by a *different* Sentry setting (`sample_rate`), which
+> this app leaves at the SDK default of `1.0`, so **100% of exceptions are reported at
+> any value of `SENTRY_TRACES_SAMPLE_RATE`, including `0.0`.** Lowering it loses latency
+> traces, nothing else.
+>
+> The default is `0.1` rather than `1.0` because the API is polled continuously by two
+> 30-second clients that produce no useful trace data — Railway's platform health check
+> (`/health`) and the shop-floor wallboard — which is ~5,800 transactions/day before a
+> single human touches the app. Transaction volume consumes the same Sentry
+> quota/on-demand budget that errors are billed against, and once that is exhausted
+> Sentry rate-limits *incoming events*: over-sampling traces is how you end up silently
+> losing the error reports Sentry was turned on for. Raise it temporarily (e.g. `1.0`)
+> while chasing a specific latency regression, then put it back.
+>
+> A value outside `0.0`–`1.0` is **rejected at startup**. Sentry reads anything `>= 1.0`
+> as "sample everything", so `SENTRY_TRACES_SAMPLE_RATE=10` written meaning "10 percent"
+> would otherwise do the exact opposite of what was intended.
+
+> **`APP_RELEASE` is set by CI, not by hand.** The production deploy job in
+> `.github/workflows/ci-cd.yml` writes the commit SHA to `backend/RELEASE` immediately
+> before `railway up` uploads the backend, and the Dockerfile's `COPY . .` carries that
+> file into the image; `app/core/config.py` reads it into `APP_RELEASE` at startup. The
+> stamp therefore travels **inside the artifact** and cannot drift from the code running
+> around it — deliberately *not* a Railway service variable, which is set independently
+> of the build and would keep advertising the SHA CI last attempted even after a failed
+> deploy or a rollback to an older image. Setting the environment variable explicitly
+> overrides the file (useful for non-Railway deployments); unset and unstamped — local
+> dev, Docker Compose, tests — it is simply `null` everywhere it is reported.
+>
+> **Do not add `backend/RELEASE` to `.gitignore` — and do not commit it either.**
+> `railway up` honors `.gitignore` when choosing what to upload, so ignoring the file
+> silently stops shipping it; committing it (easy to do by accident, since a manual
+> deploy leaves the untracked file behind) pins one SHA that then goes stale and
+> misreports every build that does not overwrite it. Guard tests in
+> `backend/tests/test_sentry_observability_config.py` fail on either.
+>
+> **Verifying a deploy** is now one call:
+> ```bash
+> curl -s https://<api-host>/health/detailed | jq -r '.checks.application.release'
+> ```
+> Compare it to the SHA on `main`. (The neighboring `version` field is a hardcoded
+> `1.0.0` kept for backward compatibility with existing monitors; it has never
+> distinguished one deploy from another.)
+
 ### External Services
 
 | Variable | Required | Default | Description |
@@ -519,7 +573,6 @@ AWS_REGION=us-east-1
 | `AI_AUTO_EXECUTE_FALLBACK_MIN_CONFIDENCE` | No | `0.75` | When Claude is unavailable (egress off / no API key), auto-execute candidates at or above this confidence |
 | `AI_AUTO_EXECUTE_MAX_BATCH` | No | `25` | Max recommendations considered per company per auto-execute run |
 | `ANTHROPIC_LASER_NEST_MODEL` | No | (router auto) | Per-task model override for laser-nest PDF field extraction (task `laser_nest_extraction`, see [docs/API.md](API.md) → Laser Nests). Covers both extraction passes — the verification pass (`feature="laser_nest_verification"`) runs under the same task — but **not** the multi-page segmentation pass (task `laser_nest_segmentation`, no per-task override; tier-level overrides apply). Unset: the native-PDF (vision) path routes to the Default tier (Sonnet); the flattened-text fallback (>20 MB or unreadable PDFs) picks by complexity, escalating for OCR'd or large sheets. Pin a different tier here to override |
-| `SENTRY_DSN` | No | - | Sentry DSN for error tracking |
 | `WEBHOOK_ENCRYPTION_KEY` | Conditional¹ | - | Fernet key for encrypting outbound-webhook secrets at rest. Also the **fallback** for `INTEGRATION_ENCRYPTION_KEY` when that is unset. |
 | `INTEGRATION_ENCRYPTION_KEY` | Conditional¹ | (falls back to `WEBHOOK_ENCRYPTION_KEY`) | Fernet key that encrypts **integration secrets at rest** — carrier-account API keys and inbound-webhook signing secrets (see [docs/SHIPPING_CARRIER_INTEGRATION.md](SHIPPING_CARRIER_INTEGRATION.md)) **and the ProxyBox thermal-printer API key** (see [docs/THERMAL_LABEL_PRINTING.md](THERMAL_LABEL_PRINTING.md)). **Reused, not new** for thermal printing. Resolution order: `INTEGRATION_ENCRYPTION_KEY` → `WEBHOOK_ENCRYPTION_KEY` → (dev/test only) an ephemeral generated key. |
 

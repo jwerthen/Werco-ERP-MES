@@ -1,8 +1,43 @@
+from pathlib import Path
 from typing import List, Optional
 from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
+
+# Release stamp shipped INSIDE the deployed artifact. CI writes the commit SHA here
+# immediately before `railway up` uploads backend/ (see .github/workflows/ci-cd.yml), and
+# the Dockerfile's `COPY . .` carries it into the image at /app/RELEASE. Absent in local
+# dev and in the test suite, which is fine — APP_RELEASE simply stays None.
+RELEASE_FILE = Path(__file__).resolve().parents[2] / "RELEASE"
+
+# Upper bound on the stamp we will echo from the unauthenticated /health/detailed
+# endpoint. A git SHA is 40 chars; anything longer is a stray file, not a release.
+MAX_RELEASE_LENGTH = 200
+
+
+def read_release_file() -> Optional[str]:
+    """Return the trimmed contents of :data:`RELEASE_FILE`, or ``None`` if unusable.
+
+    Never raises: a missing, unreadable, empty, multi-line or oversized file degrades to
+    "no release" rather than failing app boot or leaking a payload into a health check.
+    """
+    try:
+        value = RELEASE_FILE.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
+    if not value or len(value) > MAX_RELEASE_LENGTH:
+        return None
+    # Printable ASCII only. Rejects a multi-line file, and the UTF-16 mush Windows
+    # PowerShell 5.1's `>` writes -- which decodes to NULs and U+FFFD replacement chars,
+    # neither of which `.strip()` removes (the runbook says `Out-File -Encoding ascii`
+    # for exactly this reason). /health/detailed is unauthenticated, so whatever
+    # survives here is public: an unusable stamp must read as "no release", not as
+    # garbage attributed to a build.
+    if not value.isascii() or not value.isprintable():
+        return None
+    return value
+
 
 # List of known insecure default secret key values that should be rejected
 INSECURE_SECRET_KEYS = {
@@ -429,7 +464,68 @@ class Settings(BaseSettings):
 
     # Monitoring
     SENTRY_DSN: Optional[str] = None
+
+    # Fraction of requests sampled as Sentry PERFORMANCE TRANSACTIONS (0.0-1.0).
+    #
+    # This does NOT affect error capture. Errors are governed by a different Sentry
+    # setting (``sample_rate``, left at its 1.0 default), so every exception is still
+    # sent no matter how low this goes. Lowering it loses performance traces only.
+    #
+    # Default 0.1 (10%) rather than 1.0 because this API is polled continuously by two
+    # 30-second clients that generate no useful trace data: Railway's platform health
+    # check (``/health``) and the shop-floor wallboard. Those two alone are ~5,800
+    # transactions/day before a single human touches the app, and transaction volume
+    # burns the same Sentry quota/on-demand budget that real errors are billed against
+    # — once it is exhausted Sentry rate-limits *incoming events*, which is how a noisy
+    # trace stream ends up costing you the error reports you actually turned Sentry on
+    # for. 10% keeps a representative latency sample at ~1/10th the ingest.
+    #
+    # Raise it temporarily (e.g. 1.0) while chasing a specific latency regression.
+    SENTRY_TRACES_SAMPLE_RATE: float = 0.1
+
+    # Version/commit identifier reported to Sentry (``release``) and by
+    # ``/health/detailed`` (``checks.application.release``) so an error or a running
+    # container can be tied to the exact deployed commit.
+    #
+    # Normally NOT set by hand: CI writes the commit SHA to a ``RELEASE`` file that
+    # ships inside the deployed artifact, and the validator below picks it up. Setting
+    # the environment variable overrides the file. Unset (local dev, tests) it stays
+    # None and both consumers simply report no release.
+    APP_RELEASE: Optional[str] = None
+
     LOG_LEVEL: str = "INFO"
+
+    @field_validator("SENTRY_TRACES_SAMPLE_RATE")
+    @classmethod
+    def validate_sentry_traces_sample_rate(cls, v: float) -> float:
+        """Reject an out-of-range rate instead of silently sampling everything.
+
+        Sentry treats any value >= 1.0 as "sample everything", so a config of ``10``
+        written meaning "10 percent" would quietly do the opposite of what was intended
+        — the exact quota-exhaustion failure this setting exists to prevent.
+        """
+        if not 0.0 <= v <= 1.0:
+            raise ValueError(f"SENTRY_TRACES_SAMPLE_RATE must be between 0.0 and 1.0 (got {v!r}).")
+        return v
+
+    @model_validator(mode="after")
+    def resolve_app_release(self) -> "Settings":
+        """Fall back to the ``RELEASE`` file that CI ships inside the deployed artifact.
+
+        The SHA is bound to the *artifact*, not to a platform-level environment
+        variable, on purpose: a service variable is set independently of the build, so
+        it keeps reporting the last SHA CI attempted even when that deploy failed or an
+        older image was rolled back — reporting the wrong commit is worse than
+        reporting none, since the whole point is answering "what is actually running?".
+        A file that travels inside the image cannot drift from the code around it.
+
+        NOTE: ``backend/RELEASE`` must stay OUT of ``.gitignore`` — ``railway up``
+        honors it when choosing what to upload, so ignoring the file would silently
+        stop shipping it.
+        """
+        if not self.APP_RELEASE:
+            self.APP_RELEASE = read_release_file()
+        return self
 
     # Redis / Job Queue
     REDIS_URL: Optional[str] = None

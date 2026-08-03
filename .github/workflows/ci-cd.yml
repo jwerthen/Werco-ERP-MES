@@ -393,6 +393,26 @@ jobs:
       - name: Install Railway CLI
         run: npm install -g @railway/cli
 
+      # Stamp the commit SHA into the artifact BEFORE it is uploaded. app/core/config.py
+      # reads backend/RELEASE into APP_RELEASE, which is reported to Sentry (`release`)
+      # and by /health/detailed (checks.application.release) -- so "is commit X actually
+      # deployed?" is one curl instead of cross-referencing Actions and the Railway API.
+      #
+      # Deliberately NOT `railway variables --set APP_RELEASE=...`: a service variable is
+      # set independently of the build, so it would keep advertising the SHA this job
+      # *attempted* even when `railway up` failed or an older image was rolled back --
+      # reporting the wrong commit is worse than reporting none. (It would also cost a
+      # second deploy per push unless `--skip-deploys` is passed, and the CLI here is
+      # installed unpinned, so its flag set can change under us.) A file inside the
+      # uploaded source cannot drift from the code it ships with.
+      #
+      # `railway up` honors .gitignore when selecting files to upload: keep backend/RELEASE
+      # OUT of .gitignore or this silently stops shipping.
+      - name: Stamp release SHA into the backend artifact
+        run: |
+          printf '%s' "$GITHUB_SHA" > backend/RELEASE
+          echo "Stamped backend/RELEASE = $(cat backend/RELEASE)"
+
       - name: Deploy Backend to Production
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}

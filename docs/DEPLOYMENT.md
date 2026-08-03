@@ -380,9 +380,14 @@ Create `/etc/logrotate.d/werco-erp`:
 
 ### Monitoring Setup
 
-- **Sentry** for error tracking (configured via SENTRY_DSN)
+- **Sentry** for error tracking (configured via `SENTRY_DSN`). Performance transactions
+  are sampled at `SENTRY_TRACES_SAMPLE_RATE` (default `0.1`) — that knob governs traces
+  **only**, never error capture; every exception is reported at any value. Events are
+  tagged with `APP_RELEASE`, the commit SHA CI stamps into the artifact. See
+  [ENVIRONMENT_VARIABLES.md → Monitoring & Error Tracking](ENVIRONMENT_VARIABLES.md#monitoring--error-tracking)
 - **Prometheus + Grafana** for metrics monitoring
-- **Health checks**: `GET /health`
+- **Health checks**: `GET /health`; `GET /health/detailed` additionally reports the
+  running commit at `checks.application.release`
 - **Application logs**: Check `/var/log/werco-erp/`
 
 ## Backup Strategy
