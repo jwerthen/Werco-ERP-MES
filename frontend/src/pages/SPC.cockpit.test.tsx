@@ -41,6 +41,20 @@ jest.mock('../services/api', () => ({
   },
 }));
 
+// SPC now calls `useAuth()` to gate the Recalculate control (the endpoint is
+// ADMIN/MANAGER/QUALITY-only because it rewrites out-of-control flags on historical
+// measurements). `useAuth` THROWS outside an AuthProvider rather than returning a null
+// user, so a page test either provides the context or mocks the hook — mocked here, the
+// same way PartDetail's suites do. `mockRole` is reassigned per-test to drive the gate.
+let mockRole = 'admin';
+jest.mock('../context/AuthContext', () => ({
+  useAuth: () => ({
+    user: { id: 1, role: mockRole, is_superuser: false },
+    isAuthenticated: true,
+    isLoading: false,
+  }),
+}));
+
 const mockedApi = api as jest.Mocked<typeof api>;
 
 const characteristic = {
@@ -64,6 +78,7 @@ function renderSPC() {
 describe('SPC cockpit overhaul', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockRole = 'admin';
     mockedApi.getSPCDashboard.mockResolvedValue({
       data: {
         characteristics_monitored: 3,
@@ -134,5 +149,38 @@ describe('SPC cockpit overhaul', () => {
     // The recent-measurements panel mounts with its loaded row.
     expect(screen.getByText('Recent Measurements')).toBeInTheDocument();
     expect(screen.getByText('Operator A')).toBeInTheDocument();
+  });
+
+  // --------------------------------------------------------------------------
+  // Recalculate gating
+  //
+  // POST /spc/control-limits/{id}/calculate rewrites is_out_of_control and
+  // violation_rules IN PLACE on historical measurements, so the server gates it to
+  // ADMIN/MANAGER/QUALITY. /spc itself is only `quality:view`, which operator and viewer
+  // both hold — so without this control-level gate those roles see a button whose only
+  // outcome is a 403 toast. The server gate is still the enforcement; this is discovery.
+  // --------------------------------------------------------------------------
+
+  async function selectCharacteristic() {
+    renderSPC();
+    fireEvent.click(await screen.findByRole('button', { name: /Bore Diameter/ }));
+    await waitFor(() => {
+      expect(mockedApi.getSPCControlLimits).toHaveBeenCalledWith(7);
+    });
+    await screen.findByText('Control Chart: Bore Diameter');
+  }
+
+  it.each(['admin', 'manager', 'quality'])('shows Recalculate for %s', async (role) => {
+    mockRole = role;
+    await selectCharacteristic();
+    expect(screen.getByRole('button', { name: /Recalculate/ })).toBeInTheDocument();
+  });
+
+  it.each(['operator', 'viewer', 'shipping', 'supervisor'])('hides Recalculate for %s', async (role) => {
+    mockRole = role;
+    await selectCharacteristic();
+    // The panel still renders — only the control that would 403 is withheld.
+    expect(screen.getByText('Control Chart: Bore Diameter')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Recalculate/ })).not.toBeInTheDocument();
   });
 });
