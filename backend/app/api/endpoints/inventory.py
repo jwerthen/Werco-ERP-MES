@@ -1,3 +1,4 @@
+import logging
 from datetime import date, datetime
 from typing import Dict, List, Optional, Sequence
 
@@ -25,6 +26,8 @@ from app.schemas.inventory import InventoryTransactionResponse
 from app.services.audit_service import AuditService
 from app.services.operational_event_service import OperationalEventService
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
 
 # Ceiling on the lot rows ``GET /inventory/`` and ``GET /inventory/summary`` will
@@ -35,6 +38,30 @@ router = APIRouter()
 # request into a full-table read. Both endpoints share it because the Inventory page
 # fetches them in a single ``Promise.all``.
 MAX_INVENTORY_ROWS = 10_000
+
+
+def _warn_if_capped(returned: int, limit: int, *, endpoint: str, company_id: int) -> None:
+    """Log when a read came back exactly at its cap, i.e. was probably truncated.
+
+    Truncation here is SILENT by design — both endpoints return a bare JSON array
+    with no total and no "partial" flag, so there is no channel to tell the caller.
+    That is tolerable for a list (rows are merely missing) but not for
+    ``/inventory/summary``, which SUMS the rows it got: a part straddling the cut
+    reports a partial ``total_on_hand``, which reads as a plausible wrong number
+    rather than an obvious gap. A log line is the cheapest signal that the ceiling
+    needs raising or the page needs real paging, and it costs nothing until the
+    cap is actually reached.
+    """
+    if returned >= limit:
+        logger.warning(
+            "%s returned %d rows at its limit of %d for company %s — the response is probably "
+            "truncated; raise MAX_INVENTORY_ROWS or page this endpoint.",
+            endpoint,
+            returned,
+            limit,
+            company_id,
+        )
+
 
 # A cycle count in either of these states is closed for good. COMPLETED has already
 # posted its variance to the ledger; CANCELLED was deliberately abandoned. Re-opening
@@ -405,21 +432,25 @@ def list_inventory(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """List inventory lots.
+    """List inventory lots -- one row per part / location / lot / serial.
 
-    ``inventory_items`` is the highest-cardinality table in the app (one row per
-    part x location x lot x serial), so the response is bounded. The default IS
-    the ceiling: a zero-argument caller keeps receiving the whole set exactly as
-    before, and only a tenant an order of magnitude larger than any today can
-    reach the cap. ``ge=1`` so a negative value cannot reach ``.limit()`` --
-    PostgreSQL rejects a negative LIMIT and SQLite silently treats it as
-    "unbounded"; ``ge=0`` on the offset for the same reason (PostgreSQL rejects
-    a negative OFFSET).
-
-    ``/inventory/summary`` carries the identical cap on purpose -- the two are
-    fetched in one ``Promise.all`` by the Inventory page, so capping one and not
-    the other would let the stat tiles disagree with the table.
+    Returns at most ``limit`` rows starting at ``offset``, ordered by part then
+    location. Rows past the limit are not returned; page through them with
+    ``offset``. ``GET /inventory/summary`` applies the same cap over the same
+    rows, so the two agree with each other.
     """
+    # `inventory_items` is the highest-cardinality table in the app, so this read
+    # is bounded. The default IS the ceiling (MAX_INVENTORY_ROWS): a zero-argument
+    # caller receives the whole set exactly as it did before the cap existed, and
+    # only a tenant an order of magnitude larger than any today can reach it.
+    #
+    # `ge=1` so a negative value cannot reach `.limit()` -- PostgreSQL rejects a
+    # negative LIMIT and SQLite silently treats it as "unbounded"; `ge=0` on the
+    # offset for the same reason (PostgreSQL also rejects a negative OFFSET).
+    #
+    # /summary carries the identical cap deliberately: the Inventory page fetches
+    # both in one Promise.all, so capping one and not the other would let the stat
+    # tiles disagree with the table on the same screen.
     query = (
         db.query(InventoryItem).filter(InventoryItem.company_id == company_id).options(joinedload(InventoryItem.part))
     )
@@ -436,7 +467,9 @@ def list_inventory(
         # to see and fix — filtering it out made it invisible to the one list view.
         query = query.filter(InventoryItem.quantity_on_hand != 0)
 
-    return query.order_by(InventoryItem.part_id, InventoryItem.location).offset(offset).limit(limit).all()
+    items = query.order_by(InventoryItem.part_id, InventoryItem.location).offset(offset).limit(limit).all()
+    _warn_if_capped(len(items), limit, endpoint="GET /inventory/", company_id=company_id)
+    return items
 
 
 @router.get("/summary")
@@ -447,12 +480,17 @@ def get_inventory_summary(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Get inventory summary by part with locations.
+    """Summarize on-hand inventory by part, with each part's locations.
 
-    Bounded with the same cap as ``GET /inventory/`` -- see that docstring. The
-    Inventory page fetches both in one ``Promise.all``, so they must truncate at
-    the same point or the stat tiles will disagree with the table.
+    Aggregates at most ``limit`` lot rows starting at ``offset`` -- the same cap
+    ``GET /inventory/`` applies over the same rows, so the two agree. Note the
+    cap bounds the LOTS read, not the parts returned: past the limit a part's
+    totals reflect only the lots that were read.
     """
+    # The shared cap is deliberate: the Inventory page fetches this and
+    # /inventory/ in one Promise.all, so capping one and not the other would let
+    # the stat tiles disagree with the table on the same screen.
+    #
     # Get all inventory items with nonzero quantity.
     # != 0, not > 0: the shortage posture deliberately drives a lot NEGATIVE rather
     # than fail a completion, and a driven-negative lot is a discrepancy someone has
@@ -470,6 +508,7 @@ def get_inventory_summary(
         .limit(limit)
         .all()
     )
+    _warn_if_capped(len(items), limit, endpoint="GET /inventory/summary", company_id=company_id)
 
     # Group by part
     by_part = {}

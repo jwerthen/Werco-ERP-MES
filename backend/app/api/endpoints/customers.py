@@ -149,15 +149,19 @@ def list_customers(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """List all customers.
+    """List customers, ordered by name.
 
-    Bounded. The default IS the ceiling, so a zero-argument caller keeps
-    receiving the whole customer master exactly as before; the cap only stops a
-    pathological caller. ``ge=1`` so a negative value cannot reach ``.limit()``
-    -- PostgreSQL rejects a negative LIMIT and SQLite silently treats it as
-    "unbounded"; ``ge=0`` on the offset because PostgreSQL likewise rejects a
-    negative OFFSET.
+    Returns at most ``limit`` customers starting at ``offset``. ``search``
+    matches name, code, contact name or city, case-insensitively. Rows past the
+    limit are not returned; page through them with ``offset``.
     """
+    # The default IS the ceiling (MAX_CUSTOMER_ROWS): a zero-argument caller
+    # receives the whole customer master exactly as it did before the cap
+    # existed, and only a pathological request reaches it.
+    #
+    # `ge=1` so a negative value cannot reach `.limit()` -- PostgreSQL rejects a
+    # negative LIMIT and SQLite silently treats it as "unbounded"; `ge=0` on the
+    # offset because PostgreSQL likewise rejects a negative OFFSET.
     query = db.query(Customer).filter(Customer.company_id == company_id)
 
     # Filter out soft-deleted unless explicitly requested by admin
@@ -195,13 +199,15 @@ def list_customer_names(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Get simple list of customer names for dropdowns.
+    """Get an id/name list of selectable customers, for dropdowns.
 
-    ``is_deleted == False`` is load-bearing: soft-delete does NOT imply
-    ``is_active = False``, so without it a deleted customer stayed selectable in
-    every quote / RFQ / order picker fed by this endpoint. The sibling
-    ``list_customers`` has always applied the predicate; this one did not.
+    Only active, non-deleted customers are returned, ordered by name -- at most
+    ``limit`` of them starting at ``offset``.
     """
+    # `is_deleted == False` is load-bearing: soft-delete does NOT imply
+    # `is_active = False`, so without it a deleted customer stayed selectable in
+    # every quote / RFQ / order picker fed by this endpoint. The sibling
+    # list_customers has always applied the predicate; this one did not.
     customers = (
         db.query(Customer.id, Customer.name)
         .filter(

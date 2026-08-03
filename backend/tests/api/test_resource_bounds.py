@@ -28,6 +28,13 @@ truncate, because a StreamingResponse of a spreadsheet has no channel to signal
 ``export_inventory_transactions`` previously truncated silently at a magic
 ``10000``; that is now the same named constant and the same refusal.
 
+``GET /quotes/`` is the one list endpoint that was neither unbounded nor
+parameterized: it applied a hardcoded ``.limit(100)`` with no ``offset``, so the
+101st quote was unreachable through the API at all. Its default stays 100 -- the
+response is byte-identical for today's callers -- but the truncation is now
+escapable and the ceiling explicit, which is why it is the only entry in
+``BOUNDED_LIMIT_ENDPOINTS`` whose default is not its ceiling.
+
 Also covered here, found while capping the customer endpoints:
 
 - ``GET /customers/names`` returned **soft-deleted** customers into every
@@ -45,6 +52,8 @@ Also covered here, found while capping the customer endpoints:
   did not move.
 """
 
+import csv
+import io
 from datetime import date
 
 import pytest
@@ -56,6 +65,7 @@ from app.models.customer import Customer
 from app.models.inventory import InventoryTransaction, TransactionType
 from app.models.part import Part
 from app.models.purchasing import POStatus, PurchaseOrder, PurchaseOrderLine, Vendor
+from app.models.quote import Quote, QuoteStatus
 from app.models.user import UserRole
 from tests.api.test_inventory_hardening import (
     COMPANY_A,
@@ -90,6 +100,12 @@ BOUNDED_LIMIT_ENDPOINTS = [
     ("/api/v1/customers/", 5000),  # newly capped list endpoint
     ("/api/v1/customers/names", 5000),  # newly capped dropdown feed
     ("/api/v1/purchasing/purchase-orders", 5000),  # newly capped list endpoint
+    # /quotes/ is the odd one out: it was never UNbounded -- it had a hardcoded
+    # `.limit(100)` and no offset, so the 101st quote was simply unreachable
+    # through the API. Its default stays 100 (byte-identical response for today's
+    # callers) while the truncation becomes escapable, so unlike its neighbours
+    # above its default is NOT its ceiling.
+    ("/api/v1/quotes/", 5000),
 ]
 
 # (path, param name) -- OFFSET has the same negative-value defect as LIMIT.
@@ -101,6 +117,7 @@ BOUNDED_OFFSET_ENDPOINTS = [
     ("/api/v1/inventory/", "offset"),
     ("/api/v1/customers/", "offset"),
     ("/api/v1/purchasing/purchase-orders", "offset"),
+    ("/api/v1/quotes/", "offset"),  # had no offset param at all
 ]
 
 # `days` widens a WHERE window; a zero/negative value inverts it and a huge one
@@ -168,6 +185,67 @@ def test_global_search_limit_is_bounded(client: TestClient, db_session: Session)
         assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
 
     ok = client.get("/api/v1/search/", headers=headers, params={"q": "x", "limit": 50})
+    assert ok.status_code == status.HTTP_200_OK, ok.text
+
+
+def test_quotes_default_page_is_unchanged_and_now_escapable(client: TestClient, db_session: Session):
+    """``GET /quotes/`` truncated at a hardcoded 100 with no way to page past it.
+
+    Two properties at once. The default must still be 100, so the response is
+    byte-identical for today's callers (``api.ts``'s ``getQuotes`` forwards only
+    ``status`` and ``customer`` -- it sends no paging at all). And the 101st
+    quote must now be reachable, which it was not before: the old
+    ``.limit(100)`` was applied unconditionally with no ``offset`` beside it.
+    """
+    _ensure_company(db_session, COMPANY_A)
+    user = make_user(db_session, company_id=COMPANY_A, role=UserRole.ADMIN)
+    headers = headers_for(user)
+
+    n = _next()
+    for i in range(101):
+        db_session.add(
+            Quote(
+                quote_number=f"BQ-{n:05d}-{i:03d}",
+                customer_name=f"Bounds Quote Customer {n}",
+                status=QuoteStatus.DRAFT,
+                company_id=COMPANY_A,
+                created_by=user.id,
+            )
+        )
+    db_session.commit()
+
+    params = {"customer": f"Bounds Quote Customer {n}"}
+
+    first = client.get("/api/v1/quotes/", headers=headers, params=params)
+    assert first.status_code == status.HTTP_200_OK, first.text
+    assert len(first.json()) == 100, "the default page size must stay 100"
+
+    # The row the old hardcoded cap made unreachable.
+    second = client.get("/api/v1/quotes/", headers=headers, params={**params, "offset": 100})
+    assert second.status_code == status.HTTP_200_OK, second.text
+    assert len(second.json()) == 1, "offset must reach past the old hardcoded .limit(100)"
+
+    first_ids = {q["id"] for q in first.json()}
+    assert second.json()[0]["id"] not in first_ids, "offset must not re-serve a row from page 1"
+
+
+def test_nl_search_body_limit_is_bounded(client: TestClient, db_session: Session):
+    """``POST /search/nl`` takes its ``limit`` in the BODY, not the query string.
+
+    Worth its own test because the validation lives on a Pydantic ``Field`` rather
+    than a ``Query``, so it fires during body parsing and the 422 is reported at
+    ``["body", "limit"]``. The ceiling is 50 -- the same as ``GET /search/`` and
+    the same value the handler itself clamps to, so the declared bound and the
+    effective bound cannot drift apart.
+    """
+    headers = headers_for(make_user(db_session, company_id=COMPANY_A, role=UserRole.ADMIN))
+
+    for bad in (0, -1, 51):
+        resp = client.post("/api/v1/search/nl", headers=headers, json={"query": "late jobs", "limit": bad})
+        assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, f"limit={bad} -> {resp.text}"
+        assert any(err["loc"][-1] == "limit" for err in resp.json()["detail"]), resp.text
+
+    ok = client.post("/api/v1/search/nl", headers=headers, json={"query": "late jobs", "limit": 50})
     assert ok.status_code == status.HTTP_200_OK, ok.text
 
 
@@ -305,6 +383,13 @@ def test_export_cap_counts_entities_not_joined_rows(
     monkeypatch.setattr("app.api.endpoints.exports.MAX_EXPORT_ROWS", 3)
     resp = client.get("/api/v1/exports/purchase-orders/export", headers=headers_for(user))
     assert resp.status_code == status.HTTP_200_OK, resp.text
+
+    # Not just the COUNT: the file must carry all three POs, each with all three
+    # of its lines. Truncating mid-collection is the failure this guards -- it
+    # would show up as a short row count or a low line_count, not as an error.
+    rows = list(csv.DictReader(io.StringIO(resp.text)))
+    assert len(rows) == 3, rows
+    assert [r["line_count"] for r in rows] == ["3", "3", "3"], rows
 
     # A fourth PO puts it over the cap -- proving the cap is live, not inert.
     n = _next()
@@ -456,6 +541,11 @@ def test_po_list_line_count_matches_actual_lines(client: TestClient, db_session:
     ORM object; it is now a correlated ``COUNT``. ``PurchaseOrderLine`` carries
     ``TenantMixin`` but NOT ``SoftDeleteMixin``, so there is no soft-deleted line
     for the two to disagree about -- this pins that.
+
+    TWO POs with DIFFERENT line counts, asserted in the same response: a subquery
+    that lost its correlation would still return an integer, and against a single
+    PO that integer would look right. Only differing counts in one response prove
+    the COUNT is per-PO rather than a table-wide total.
     """
     n = _next()
     _ensure_company(db_session, COMPANY_A)
@@ -465,37 +555,41 @@ def test_po_list_line_count_matches_actual_lines(client: TestClient, db_session:
     db_session.add(vendor)
     db_session.flush()
 
-    po = PurchaseOrder(
-        po_number=f"BPO-{n:05d}",
-        vendor_id=vendor.id,
-        status=POStatus.SENT,
-        order_date=date.today(),
-        company_id=COMPANY_A,
-    )
-    db_session.add(po)
-    db_session.flush()
-
-    parts = _make_parts(db_session, company_id=COMPANY_A, count=3)
-    for i, part in enumerate(parts, start=1):
-        db_session.add(
-            PurchaseOrderLine(
-                purchase_order_id=po.id,
-                line_number=i,
-                part_id=part.id,
-                quantity_ordered=5.0,
-                quantity_received=0.0,
-                unit_price=2.5,
-                is_closed=False,
-                company_id=COMPANY_A,
-            )
+    expected = {}
+    for line_count in (3, 1):
+        m = _next()
+        po = PurchaseOrder(
+            po_number=f"BPO-{m:05d}",
+            vendor_id=vendor.id,
+            status=POStatus.SENT,
+            order_date=date.today(),
+            company_id=COMPANY_A,
         )
+        db_session.add(po)
+        db_session.flush()
+        expected[po.po_number] = line_count
+
+        for i, part in enumerate(_make_parts(db_session, company_id=COMPANY_A, count=line_count), start=1):
+            db_session.add(
+                PurchaseOrderLine(
+                    purchase_order_id=po.id,
+                    line_number=i,
+                    part_id=part.id,
+                    quantity_ordered=5.0,
+                    quantity_received=0.0,
+                    unit_price=2.5,
+                    is_closed=False,
+                    company_id=COMPANY_A,
+                )
+            )
     db_session.commit()
 
     resp = client.get("/api/v1/purchasing/purchase-orders", headers=headers_for(user))
     assert resp.status_code == status.HTTP_200_OK, resp.text
 
-    row = next(r for r in resp.json() if r["po_number"] == po.po_number)
-    assert row["line_count"] == 3, row
+    for po_number, want in expected.items():
+        row = next(r for r in resp.json() if r["po_number"] == po_number)
+        assert row["line_count"] == want, row
 
 
 def test_po_with_no_lines_reports_zero_not_null(client: TestClient, db_session: Session):

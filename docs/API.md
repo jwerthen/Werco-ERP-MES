@@ -4788,7 +4788,7 @@ negative `LIMIT`/`OFFSET`, while SQLite silently reads a negative limit as "unbo
 | Parameter | Range | Applies to |
 |---|---|---|
 | `skip` / `offset` | `≥ 0` | Every list endpoint that takes one |
-| `limit` — standard list tier | `1 … 5000`, default `100` | `/work-orders/`, `/routing/`, `/work-centers/`, `/documents/`, `/downtime/`, `/oee/records`, `/eco/eco/`, `/quality/{ncr,car,fai}`, `/complaints/{complaints,rma}/`, `/supplier-scorecards/{supplier-scorecards,supplier-audits,approved-suppliers}/`, `/maintenance/history/{work_center_id}`, `/admin/settings/audit-log` |
+| `limit` — standard list tier | `1 … 5000`, default `100` | `/work-orders/`, `/routing/`, `/work-centers/`, `/documents/`, `/downtime/`, `/oee/records`, `/eco/eco/`, `/quality/{ncr,car,fai}`, `/complaints/{complaints,rma}/`, `/supplier-scorecards/{supplier-scorecards,supplier-audits,approved-suppliers}/`, `/maintenance/history/{work_center_id}`, `/admin/settings/audit-log`, `/quotes/` |
 | `limit` — `GET /bom/` | `1 … 10000`, default `100` | Higher ceiling than its neighbours because the Parts screen requests 5000 BOM rows in one call |
 | `limit` — small analytic lists | `1 … 500` | `/estimate-workbench/shop-data/history` and `/estimate-workbench/job-actuals` (default `50`), `/mrp/runs` (default `20`) |
 | `limit` — ledger / audit reads | `1 … 500`, default `100` | `GET /audit/`, `GET /inventory/transactions` |
@@ -4803,8 +4803,9 @@ caller sending no paging parameters gets the same rows it got before (on the fiv
 unbounded endpoints below, up to their ceiling).
 
 `POST /search/nl` (natural-language search) takes its `limit` in the **request body**, not the query
-string (`ge=1, le=100`, default 20), so an out-of-range value surfaces as a body validation error
-with `"loc": ["body", "limit"]`.
+string (`ge=1, le=50`, default 20 — the same ceiling as `GET /search/`, and the same one the handler
+itself clamps to), so an out-of-range value surfaces as a body validation error with
+`"loc": ["body", "limit"]`.
 
 ### List endpoints that were previously unbounded
 
@@ -4829,6 +4830,20 @@ has grown past what fits in a worker's memory) is refused:
 > - **`GET /customers/?search=` now matches `name`, `code`, `contact_name` and `city`** (previously
 >   name only). Searching by account code, buyer name or city — how a buyer actually finds an
 >   account — returned nothing from the server before.
+
+### `GET /quotes/` — a hard-coded cap became a real page
+
+`GET /quotes/` was never *unbounded*; it applied a hard-coded `.limit(100)` with **no `offset`
+beside it**, so the 101st quote was unreachable through the API at all and the truncation was
+silent. It now takes `limit` / `offset` on the standard list tier above.
+
+**The default is still `100`**, so a caller that sends no paging parameters receives exactly the rows
+it received before — but the rows past the first page are now reachable via `offset`. This makes it
+the one endpoint in the standard tier whose default is deliberately *not* its ceiling.
+
+```
+GET /quotes/?offset=100          # the page that was previously unreachable
+```
 
 ## Webhooks
 

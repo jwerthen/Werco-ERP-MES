@@ -46,7 +46,11 @@ __all__ = ["router", "SearchResult", "SearchResponse"]
 
 class NaturalLanguageSearchRequest(BaseModel):
     query: str
-    limit: int = Field(20, ge=1, le=100)
+    # ``le=50`` matches BOTH the sibling ``GET /search/`` ceiling and this
+    # endpoint's own clamp (``min(request.limit or 20, 50)`` below). A higher
+    # bound here would document a ceiling the handler does not honour: a caller
+    # asking for 100 would be accepted and then silently served 50.
+    limit: int = Field(20, ge=1, le=50)
 
 
 class NaturalLanguageSearchResult(SearchResult):

@@ -466,14 +466,19 @@ def list_purchase_orders(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """List purchase orders (open ones by default).
+    """List purchase orders, newest first.
 
-    Bounded. The default IS the ceiling, so a zero-argument caller keeps
-    receiving the whole set exactly as before. ``ge=1`` so a negative value
-    cannot reach ``.limit()`` -- PostgreSQL rejects a negative LIMIT and SQLite
-    silently treats it as "unbounded"; ``ge=0`` on the offset because PostgreSQL
-    likewise rejects a negative OFFSET.
+    Open POs only (closed and cancelled are excluded) unless ``status`` is
+    given. Returns at most ``limit`` POs starting at ``offset``, each with a
+    ``line_count``; rows past the limit are not returned, so page through them
+    with ``offset``.
     """
+    # The default IS the ceiling (MAX_PO_ROWS): a zero-argument caller receives
+    # the whole set exactly as it did before the cap existed.
+    #
+    # `ge=1` so a negative value cannot reach `.limit()` -- PostgreSQL rejects a
+    # negative LIMIT and SQLite silently treats it as "unbounded"; `ge=0` on the
+    # offset because PostgreSQL likewise rejects a negative OFFSET.
     # ``line_count`` is the only thing this response needs from the lines, so it
     # comes back as a correlated COUNT rather than a ``selectinload``. The eager
     # load hydrated every line ORM object of every PO purely to call ``len()`` on
