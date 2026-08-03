@@ -22,6 +22,7 @@ import {
 } from 'recharts';
 import { Modal } from '../components/ui/Modal';
 import { EmptyState, ErrorState, FormField, useToast } from '../components/ui';
+import { useAuth } from '../context/AuthContext';
 import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
 import { formatCentralDateTime } from '../utils/centralTime';
 
@@ -91,6 +92,14 @@ const capabilityBg = (val: number): string => {
 
 const SPC = () => {
   const { showToast } = useToast();
+  const { user } = useAuth();
+  // Recalculating control limits rewrites out-of-control flags on historical measurements,
+  // so the server gates it to ADMIN/MANAGER/QUALITY (require_role also admits
+  // platform_admin and superusers). The control is hidden for everyone else so the refusal
+  // is not discovered through an error toast -- /spc itself is only `quality:view`, which
+  // operator and viewer both hold. The server gate remains the enforcement.
+  const canRecalculate =
+    (!!user && ['platform_admin', 'admin', 'manager', 'quality'].includes(user.role)) || !!user?.is_superuser;
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [characteristics, setCharacteristics] = useState<Characteristic[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -330,13 +339,15 @@ const SPC = () => {
                   className="xl:col-span-8"
                   bodyClassName="lg:max-h-none"
                   headerExtra={
-                    <button
-                      onClick={handleRecalculate}
-                      className="inline-flex items-center px-3 py-1.5 text-sm text-fd-blue border border-fd-blue/40 rounded-sm hover:bg-fd-blue/20"
-                    >
-                      <ArrowPathIcon className="h-4 w-4 mr-1" />
-                      Recalculate
-                    </button>
+                    canRecalculate ? (
+                      <button
+                        onClick={handleRecalculate}
+                        className="inline-flex items-center px-3 py-1.5 text-sm text-fd-blue border border-fd-blue/40 rounded-sm hover:bg-fd-blue/20"
+                      >
+                        <ArrowPathIcon className="h-4 w-4 mr-1" />
+                        Recalculate
+                      </button>
+                    ) : undefined
                   }
                 >
                   <div className="h-80">
