@@ -3,10 +3,11 @@
 import io
 from datetime import date, datetime
 from enum import Enum
-from typing import List, Optional
+from typing import Any, List, Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
+from sqlalchemy.orm import Query as SAQuery
 from sqlalchemy.orm import Session, joinedload
 
 from app.api.deps import get_current_company_id, get_current_user
@@ -22,9 +23,37 @@ from app.services.export_service import generate_csv, generate_excel
 router = APIRouter()
 
 
+# Caps the row set an export materializes. ``generate_excel`` builds the whole
+# workbook in memory via io.BytesIO before streaming, so the peak is ~2x this.
+# Mirrors MAX_IMPORT_ROWS (app/services/import_service.py) -- an export a human
+# opens in Excel and an import a human uploads are the same size problem.
+MAX_EXPORT_ROWS = 10_000
+
+
 class ExportFormat(str, Enum):
     CSV = "csv"
     XLSX = "xlsx"
+
+
+def fetch_export_rows(query: SAQuery) -> List[Any]:
+    """Materialize an export query, refusing rather than silently truncating.
+
+    Over-fetches by one so the over-limit condition is detected exactly instead
+    of guessed. Refusal (400) is the right posture here, not truncation: these
+    endpoints return a StreamingResponse of a file, which has no channel to
+    signal "this is partial", so a truncated spreadsheet is indistinguishable
+    from a complete one -- and these are documents a manager reconciles from.
+    """
+    rows = query.limit(MAX_EXPORT_ROWS + 1).all()
+    if len(rows) > MAX_EXPORT_ROWS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"This export matches more than {MAX_EXPORT_ROWS:,} rows. "
+                "Narrow the date range or add a filter, then export again."
+            ),
+        )
+    return rows
 
 
 def get_content_type(format: ExportFormat) -> str:
@@ -60,7 +89,7 @@ def export_work_orders(
     if status:
         query = query.filter(WorkOrder.status == status)
 
-    work_orders = query.order_by(WorkOrder.created_at.desc()).all()
+    work_orders = fetch_export_rows(query.order_by(WorkOrder.created_at.desc()))
 
     default_columns = [
         "work_order_number",
@@ -140,7 +169,7 @@ def export_parts(
     if active_only:
         query = query.filter(Part.is_active == True)
 
-    parts = query.order_by(Part.part_number).all()
+    parts = fetch_export_rows(query.order_by(Part.part_number))
 
     default_columns = [
         "part_number",
@@ -227,7 +256,7 @@ def export_inventory(
         # so a driven-negative lot must be visible here too, not just on screen.
         query = query.filter(InventoryItem.quantity_on_hand != 0)
 
-    items = query.order_by(InventoryItem.part_id, InventoryItem.location).all()
+    items = fetch_export_rows(query.order_by(InventoryItem.part_id, InventoryItem.location))
 
     default_columns = [
         "part_number",
@@ -316,7 +345,7 @@ def export_purchase_orders(
     if vendor_id:
         query = query.filter(PurchaseOrder.vendor_id == vendor_id)
 
-    pos = query.order_by(PurchaseOrder.created_at.desc()).all()
+    pos = fetch_export_rows(query.order_by(PurchaseOrder.created_at.desc()))
 
     default_columns = [
         "po_number",
@@ -422,7 +451,7 @@ def export_purchase_order_lines(
     if status:
         query = query.filter(PurchaseOrder.status == status)
 
-    lines = query.all()
+    lines = fetch_export_rows(query)
 
     default_columns = [
         "po_number",
@@ -502,7 +531,7 @@ def export_quotes(
     if customer:
         query = query.filter(Quote.customer_name.ilike(f"%{customer}%"))
 
-    quotes = query.order_by(Quote.created_at.desc()).all()
+    quotes = fetch_export_rows(query.order_by(Quote.created_at.desc()))
 
     default_columns = [
         "quote_number",
@@ -588,7 +617,7 @@ def export_inventory_transactions(
     if transaction_type:
         query = query.filter(InventoryTransaction.transaction_type == transaction_type)
 
-    transactions = query.order_by(InventoryTransaction.created_at.desc()).limit(10000).all()
+    transactions = fetch_export_rows(query.order_by(InventoryTransaction.created_at.desc()))
 
     default_columns = [
         "part_number",

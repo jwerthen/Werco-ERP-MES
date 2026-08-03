@@ -1,7 +1,7 @@
 from datetime import date, datetime, timedelta
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import extract, func
 from sqlalchemy.orm import Session, joinedload
@@ -401,8 +401,8 @@ def get_8d_report(complaint_id: int, db: Session = Depends(get_db), current_user
 
 @router.get("/complaints/", response_model=List[ComplaintResponse])
 def list_complaints(
-    skip: int = 0,
-    limit: int = 100,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=5000),
     status: Optional[ComplaintStatus] = None,
     severity: Optional[ComplaintSeverity] = None,
     customer_id: Optional[int] = None,
@@ -667,8 +667,8 @@ def create_car_from_complaint(
 
 @router.get("/rma/", response_model=List[RMAResponse])
 def list_rmas(
-    skip: int = 0,
-    limit: int = 100,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=5000),
     status: Optional[RMAStatus] = None,
     customer_id: Optional[int] = None,
     complaint_id: Optional[int] = None,

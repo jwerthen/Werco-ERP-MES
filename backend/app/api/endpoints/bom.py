@@ -1155,8 +1155,8 @@ async def import_bom_or_part(
 
 @router.get("/", response_model=List[BOMResponse])
 def list_boms(
-    skip: int = 0,
-    limit: int = 100,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=10000),
     status: Optional[str] = None,
     active_only: bool = True,
     db: Session = Depends(get_db),
@@ -2001,7 +2001,7 @@ def get_max_level(items: List[BOMItemWithChildren], current_max: int = 0) -> int
 @router.get("/{bom_id}/explode", response_model=BOMExploded)
 def explode_bom(
     bom_id: int,
-    max_levels: int = Query(default=10, le=20, description="Maximum levels to explode"),
+    max_levels: int = Query(default=10, ge=1, le=20, description="Maximum levels to explode"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
@@ -2064,7 +2064,7 @@ def flatten_bom_items(items: List[BOMItemWithChildren], flat_list: List[BOMFlatI
 @router.get("/{bom_id}/flatten", response_model=BOMFlattened)
 def flatten_bom(
     bom_id: int,
-    max_levels: int = Query(default=10, le=20),
+    max_levels: int = Query(default=10, ge=1, le=20),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),

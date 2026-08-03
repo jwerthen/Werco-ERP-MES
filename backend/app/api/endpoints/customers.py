@@ -19,6 +19,13 @@ from app.services.import_service import ImportFileError, parse_import_file
 
 router = APIRouter()
 
+# Ceiling on the customer rows ``GET /customers/`` and ``GET /customers/names``
+# will materialize. A generous bound, not a page size -- the customer master is
+# two orders of magnitude smaller than this for every tenant today, so nothing a
+# caller sees changes; it exists so a pathological request cannot read the whole
+# table. ``/customers/names`` shares it because it feeds every picker.
+MAX_CUSTOMER_ROWS = 5_000
+
 
 class CustomerCreate(BaseModel):
     name: str
@@ -136,11 +143,21 @@ def list_customers(
     active_only: bool = True,
     search: Optional[str] = None,
     include_deleted: bool = Query(False, description="Include soft-deleted customers (admin only)"),
+    limit: int = Query(MAX_CUSTOMER_ROWS, ge=1, le=MAX_CUSTOMER_ROWS),
+    offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """List all customers"""
+    """List all customers.
+
+    Bounded. The default IS the ceiling, so a zero-argument caller keeps
+    receiving the whole customer master exactly as before; the cap only stops a
+    pathological caller. ``ge=1`` so a negative value cannot reach ``.limit()``
+    -- PostgreSQL rejects a negative LIMIT and SQLite silently treats it as
+    "unbounded"; ``ge=0`` on the offset because PostgreSQL likewise rejects a
+    negative OFFSET.
+    """
     query = db.query(Customer).filter(Customer.company_id == company_id)
 
     # Filter out soft-deleted unless explicitly requested by admin
@@ -151,24 +168,50 @@ def list_customers(
         query = query.filter(Customer.is_active == True)
 
     if search:
+        # Matches every field the Customers page's client-side filter matches.
+        # It used to be name-only, which meant searching by account code, buyer
+        # name or city -- how a buyer actually finds an account -- returned
+        # nothing from the server. Widened here AHEAD of the frontend dropping
+        # its own filter, so the two can never disagree.
         search_filter = f"%{search}%"
-        query = query.filter(Customer.name.ilike(search_filter))
+        query = query.filter(
+            or_(
+                Customer.name.ilike(search_filter),
+                Customer.code.ilike(search_filter),
+                Customer.contact_name.ilike(search_filter),
+                Customer.city.ilike(search_filter),
+            )
+        )
 
-    customers = query.order_by(Customer.name).all()
+    customers = query.order_by(Customer.name).offset(offset).limit(limit).all()
     return customers
 
 
 @router.get("/names")
 def list_customer_names(
+    limit: int = Query(MAX_CUSTOMER_ROWS, ge=1, le=MAX_CUSTOMER_ROWS),
+    offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Get simple list of customer names for dropdowns"""
+    """Get simple list of customer names for dropdowns.
+
+    ``is_deleted == False`` is load-bearing: soft-delete does NOT imply
+    ``is_active = False``, so without it a deleted customer stayed selectable in
+    every quote / RFQ / order picker fed by this endpoint. The sibling
+    ``list_customers`` has always applied the predicate; this one did not.
+    """
     customers = (
         db.query(Customer.id, Customer.name)
-        .filter(Customer.is_active == True, Customer.company_id == company_id)
+        .filter(
+            Customer.is_active == True,
+            Customer.is_deleted == False,
+            Customer.company_id == company_id,
+        )
         .order_by(Customer.name)
+        .offset(offset)
+        .limit(limit)
         .all()
     )
     return [{"id": c.id, "name": c.name} for c in customers]

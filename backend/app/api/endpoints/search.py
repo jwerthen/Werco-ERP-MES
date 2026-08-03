@@ -24,7 +24,7 @@ from datetime import date
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session, joinedload
 
@@ -46,7 +46,7 @@ __all__ = ["router", "SearchResult", "SearchResponse"]
 
 class NaturalLanguageSearchRequest(BaseModel):
     query: str
-    limit: int = 20
+    limit: int = Field(20, ge=1, le=100)
 
 
 class NaturalLanguageSearchResult(SearchResult):
@@ -65,7 +65,7 @@ class NaturalLanguageSearchResponse(BaseModel):
 @router.get("/", response_model=SearchResponse)
 def global_search(
     q: str = Query(..., min_length=1, max_length=100, description="Search query"),
-    limit: int = Query(default=20, le=50, description="Maximum results"),
+    limit: int = Query(default=20, ge=1, le=50, description="Maximum results"),
     types: Optional[str] = Query(default=None, description="Comma-separated types to search"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -376,7 +376,7 @@ def natural_language_search(
 
 @router.get("/recent")
 def get_recent_items(
-    limit: int = Query(default=10, le=20),
+    limit: int = Query(default=10, ge=1, le=20),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),

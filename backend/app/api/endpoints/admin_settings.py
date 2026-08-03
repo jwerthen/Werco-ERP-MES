@@ -3,7 +3,7 @@ import secrets
 from datetime import datetime, timedelta
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_company_id, require_role
@@ -789,8 +789,8 @@ def update_overhead_setting(
 @router.get("/audit-log", response_model=List[AuditLogWithUser])
 def get_audit_log(
     entity_type: Optional[str] = None,
-    days: int = 30,
-    limit: int = 100,
+    days: int = Query(30, ge=1, le=365),
+    limit: int = Query(100, ge=1, le=5000),
     db: Session = Depends(get_db),
     current_user: User = Depends(admin_only),
     company_id: int = Depends(get_current_company_id),

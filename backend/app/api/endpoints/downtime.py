@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
@@ -347,8 +347,8 @@ def update_reason_code(
 
 @router.get("/", response_model=List[DowntimeEventResponse])
 def list_downtime_events(
-    skip: int = 0,
-    limit: int = 100,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=5000),
     work_center_id: Optional[int] = None,
     category: Optional[DowntimeCategory] = None,
     planned_type: Optional[DowntimePlannedType] = None,

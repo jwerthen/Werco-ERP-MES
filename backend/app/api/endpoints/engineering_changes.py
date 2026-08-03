@@ -2,7 +2,7 @@ import json
 from datetime import date, datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, func
 from sqlalchemy.orm import Session, joinedload
@@ -381,8 +381,8 @@ def get_eco_dashboard(
 
 @router.get("/eco/", response_model=List[ECOResponse])
 def list_ecos(
-    skip: int = 0,
-    limit: int = 100,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=5000),
     status: Optional[ECOStatus] = None,
     eco_type: Optional[ECOType] = None,
     priority: Optional[ECOPriority] = None,

@@ -27,6 +27,15 @@ from app.services.operational_event_service import OperationalEventService
 
 router = APIRouter()
 
+# Ceiling on the lot rows ``GET /inventory/`` and ``GET /inventory/summary`` will
+# materialize. Deliberately a GENEROUS bound rather than a page size: it is set an
+# order of magnitude above any tenant's current lot count, so it changes nothing a
+# caller sees today and exists only to stop a pathological ``?limit=99999999`` (or a
+# table that has silently grown past what fits in a worker's memory) from turning one
+# request into a full-table read. Both endpoints share it because the Inventory page
+# fetches them in a single ``Promise.all``.
+MAX_INVENTORY_ROWS = 10_000
+
 # A cycle count in either of these states is closed for good. COMPLETED has already
 # posted its variance to the ledger; CANCELLED was deliberately abandoned. Re-opening
 # or re-completing one would append a SECOND COUNT transaction for the same physical
@@ -390,10 +399,27 @@ def list_inventory(
     warehouse: Optional[str] = None,
     location_code: Optional[str] = None,
     has_quantity: bool = True,
+    limit: int = Query(MAX_INVENTORY_ROWS, ge=1, le=MAX_INVENTORY_ROWS),
+    offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
+    """List inventory lots.
+
+    ``inventory_items`` is the highest-cardinality table in the app (one row per
+    part x location x lot x serial), so the response is bounded. The default IS
+    the ceiling: a zero-argument caller keeps receiving the whole set exactly as
+    before, and only a tenant an order of magnitude larger than any today can
+    reach the cap. ``ge=1`` so a negative value cannot reach ``.limit()`` --
+    PostgreSQL rejects a negative LIMIT and SQLite silently treats it as
+    "unbounded"; ``ge=0`` on the offset for the same reason (PostgreSQL rejects
+    a negative OFFSET).
+
+    ``/inventory/summary`` carries the identical cap on purpose -- the two are
+    fetched in one ``Promise.all`` by the Inventory page, so capping one and not
+    the other would let the stat tiles disagree with the table.
+    """
     query = (
         db.query(InventoryItem).filter(InventoryItem.company_id == company_id).options(joinedload(InventoryItem.part))
     )
@@ -410,16 +436,23 @@ def list_inventory(
         # to see and fix — filtering it out made it invisible to the one list view.
         query = query.filter(InventoryItem.quantity_on_hand != 0)
 
-    return query.order_by(InventoryItem.part_id, InventoryItem.location).all()
+    return query.order_by(InventoryItem.part_id, InventoryItem.location).offset(offset).limit(limit).all()
 
 
 @router.get("/summary")
 def get_inventory_summary(
+    limit: int = Query(MAX_INVENTORY_ROWS, ge=1, le=MAX_INVENTORY_ROWS),
+    offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Get inventory summary by part with locations"""
+    """Get inventory summary by part with locations.
+
+    Bounded with the same cap as ``GET /inventory/`` -- see that docstring. The
+    Inventory page fetches both in one ``Promise.all``, so they must truncate at
+    the same point or the stat tiles will disagree with the table.
+    """
     # Get all inventory items with nonzero quantity.
     # != 0, not > 0: the shortage posture deliberately drives a lot NEGATIVE rather
     # than fail a completion, and a driven-negative lot is a discrepancy someone has
@@ -432,6 +465,9 @@ def get_inventory_summary(
             InventoryItem.is_active == True,  # noqa: E712
             InventoryItem.quantity_on_hand != 0,
         )
+        .order_by(InventoryItem.part_id, InventoryItem.location)
+        .offset(offset)
+        .limit(limit)
         .all()
     )
 

@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session, joinedload
 
@@ -684,8 +684,8 @@ async def import_routings_commit(
 
 @router.get("/", response_model=List[RoutingListResponse])
 def list_routings(
-    skip: int = 0,
-    limit: int = 100,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=5000),
     part_id: Optional[int] = None,
     status: Optional[str] = None,
     active_only: bool = True,
