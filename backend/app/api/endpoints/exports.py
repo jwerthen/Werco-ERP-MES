@@ -393,12 +393,21 @@ def export_purchase_order_lines(
     # below, so a request with no query parameters had no join for a parent
     # predicate to apply to -- and the child column was never filtered at all,
     # which is how this endpoint returned every company's PO lines.
+    #
+    # The parent's soft-delete predicate is on the same filter for the same
+    # reason, and matches export_purchase_orders above: `PurchaseOrderLine` has
+    # no SoftDeleteMixin and `delete_purchase_order` does not touch the child
+    # rows, so without it a retracted PO's number and vendor keep rendering onto
+    # every surviving line. The delete guard refuses once any line has been
+    # received, so those survivors are precisely the OPEN COMMITMENTS -- the
+    # rows a manager reconciles open purchase commitments from.
     query = (
         db.query(PurchaseOrderLine)
         .join(PurchaseOrder)
         .filter(
             PurchaseOrderLine.company_id == company_id,
             PurchaseOrder.company_id == company_id,
+            PurchaseOrder.is_deleted == False,  # noqa: E712
         )
         .options(
             joinedload(PurchaseOrderLine.purchase_order).joinedload(PurchaseOrder.vendor),
