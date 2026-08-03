@@ -30,8 +30,12 @@
 
 ### Commands Cheat Sheet
 ```powershell
-# Deploy backend
-cd backend; railway up --service werco-api . --path-as-root
+# Deploy backend (stamp the commit first so /health/detailed can name the build,
+# then delete the stamp — it is untracked on purpose and must not get committed)
+cd backend; git rev-parse HEAD | Out-File -Encoding ascii RELEASE; railway up --service werco-api . --path-as-root; Remove-Item RELEASE
+
+# What commit is production actually running?
+(Invoke-RestMethod "https://werco-api-production.up.railway.app/health/detailed").checks.application.release
 
 # Deploy frontend
 cd frontend; railway up --service werco-frontend . --path-as-root
@@ -84,10 +88,21 @@ The change-control path is:
 3. **Rollback:** redeploy a known-good commit (see [Rollback
    Procedures](#rollback-procedures)); to reinstate a manual gate, re-add the required
    reviewer on the `production` environment.
+4. **The deployed commit is stamped into the artifact.** The `Stamp release SHA into the
+   backend artifact` step writes `$GITHUB_SHA` to `backend/RELEASE` immediately **before**
+   `railway up` uploads the backend; the Dockerfile copies it into the image, and the app
+   reads it into `APP_RELEASE` at startup. That value is reported to Sentry as the event
+   `release` and by `/health/detailed` as `checks.application.release`, so a running
+   container can always name the commit it was built from — see [Health Check
+   Endpoints](#health-check-endpoints). It is deliberately **not** a Railway service
+   variable: a variable is set independently of the build and would keep advertising the
+   SHA CI last attempted even after a failed deploy or a rollback to an older image.
 
 The manual `railway up` commands below remain valid for **break-glass / out-of-band**
 deploys (e.g. when a CI deploy job itself is broken). They are not the routine path —
-merging a green PR to `main` is.
+merging a green PR to `main` is. A manual deploy skips CI's release stamp, so write the
+SHA to `backend/RELEASE` yourself before `railway up` (the commands below do) or accept a
+`null` release on that build.
 
 ---
 
@@ -142,8 +157,19 @@ git status
 ```powershell
 cd backend
 
+# Stamp the commit into the artifact so /health/detailed and Sentry can name it.
+# CI does this automatically; a manual deploy must do it explicitly or the build
+# reports release=null. Must run BEFORE `railway up` uploads the directory.
+# (Out-File -Encoding ascii, not `>` -- Windows PowerShell 5.1 redirects as UTF-16.)
+git rev-parse HEAD | Out-File -Encoding ascii RELEASE
+
 # Deploy to Railway
 railway up --service werco-api . --path-as-root
+
+# Remove the stamp once it is uploaded. RELEASE is deliberately NOT gitignored (see
+# Change Control), so leaving it behind lets a stray `git add -A` commit a SHA that
+# then goes stale and misreports every later unstamped build.
+Remove-Item RELEASE
 
 # Verify launch readiness (config sanity checks)
 railway run --service werco-api python -m scripts.verify_launch
@@ -263,7 +289,14 @@ git checkout <commit-hash>
 
 # Deploy
 cd backend
+# Stamp the rolled-back commit, so /health/detailed reports what is ACTUALLY running
+# rather than the SHA of the bad deploy this is replacing.
+git rev-parse HEAD | Out-File -Encoding ascii RELEASE
 railway up --service werco-api . --path-as-root
+
+# Remove the stamp once uploaded — it is untracked and survives the checkout below,
+# where a stray `git add -A` would commit a SHA that then goes stale.
+Remove-Item RELEASE
 
 # Return to main
 git checkout main
@@ -275,6 +308,12 @@ git checkout main
 3. Go to "Deployments" tab
 4. Click on previous successful deployment
 5. Click "Redeploy"
+
+> **Option 2 cannot restamp — and does not need to.** Redeploying a previous image from
+> the dashboard replays the artifact as built, so `/health/detailed` reports the release
+> that image was stamped with: the commit actually running. That is exactly the property
+> that made the file-based stamp preferable to a service variable, which would still be
+> advertising the SHA of the bad deploy you just rolled back.
 
 ### Rollback Frontend (Railway)
 
@@ -370,7 +409,19 @@ psql "postgresql://..."
 | `/health` | Basic liveness | 200, `{"status": "healthy"}` |
 | `/health/live` | Container alive | 200, `{"status": "alive"}` |
 | `/health/ready` | Ready for traffic | 200 (or 503 if unhealthy) |
-| `/health/detailed` | Full system info | 200, includes versions |
+| `/health/detailed` | Full system info | 200, includes versions and the deployed commit (`checks.application.release`) |
+
+> **"Is commit X actually deployed?" — one call.** The CI deploy job stamps the commit
+> SHA into the artifact (see [Change Control](#change-control--production-deploy-model)),
+> and the API reports it back:
+> ```bash
+> curl -s https://werco-api-production.up.railway.app/health/detailed \
+>   | jq -r '.checks.application.release'
+> ```
+> Compare with `git rev-parse origin/main`. `null` means the running build carries no
+> stamp — expected for a break-glass manual `railway up` that skipped the stamping step
+> below, and for any image built before this was introduced. The sibling `version` field
+> is a hardcoded `1.0.0` kept for existing monitors; it never distinguished deploys.
 
 ### Automated Health Check Script
 ```powershell
