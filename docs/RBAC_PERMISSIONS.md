@@ -400,6 +400,36 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > routing id) — see `docs/API.md` → Routing and the
 > [CMMC change log](CMMC_LEVEL_2_COMPLIANCE.md) entry dated 2026-07-06.
 
+### Work Centers
+
+| Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
+|------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
+| View (`GET /work-centers/`, `/{id}`, `/types`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Create (`POST /work-centers/`) | ✓ | ✓ | | | | | |
+| Edit (`PUT /work-centers/{id}`) | ✓ | ✓ | | | | | |
+| Set current status (`POST /work-centers/{id}/status`) | ✓ | ✓ | | | | | |
+| Deactivate (`DELETE /work-centers/{id}`) | ✓ | | | | | | |
+| Import CSV (`POST /work-centers/import-csv`) | ✓ | ✓ | | | | | |
+
+> **Status is Admin / Manager, and that is a tightening.** `POST /work-centers/{id}/status`
+> previously carried a bare `get_current_user` — **any** authenticated user in the tenant could
+> flip a machine to `offline`/`maintenance`, and no audit row named who. It is the only writer
+> of `WorkCenter.current_status` outside the CSV importer, and the flag drives what the dispatch
+> board and the operator kiosk show. The tier matches **Edit**, not **Deactivate**: a status flip
+> is reversible, and Edit already lets a Manager flip `is_active`. Superuser / Platform Admin
+> bypass, as elsewhere.
+>
+> **The frontend gate is paired with it, in the same change.** The `/work-centers` route carries
+> **no route-level permission guard** (`App.tsx`), so a non-Manager who deep-links still reaches
+> the page. The inline status `<select>` on each row is therefore gated to the same role set and
+> renders as a read-only `StatusBadge` for everyone else — otherwise the control would render,
+> accept a change, fire the request, and surface the refusal only as a 403 toast afterwards.
+>
+> **Deactivate stays Admin-only and is server-GATED**: refused **409** while any live operation
+> still references the machine (see `docs/API.md` → Work Centers). Every state-changing endpoint
+> in this table writes a tamper-evident `audit_log` row (`resource_type = "work_center"`);
+> create/status were the last two that did not.
+
 ### Process Sheets
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |

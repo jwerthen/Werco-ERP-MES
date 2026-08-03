@@ -12,6 +12,7 @@ from app.db.database import get_db
 from app.models.bom import BOM, BOMItem, BOMItemType, BOMLineType
 from app.models.part import Part, PartType, UnitOfMeasure, uom_disagrees, uom_label
 from app.models.user import User, UserRole
+from app.models.work_center import WorkCenter
 from app.schemas.bom import (
     BOMCreate,
     BOMExploded,
@@ -36,7 +37,11 @@ from app.schemas.bom_import import (
     BOMImportResponse,
 )
 from app.services.audit_service import AuditService
-from app.services.completion_inventory_service import bom_line_is_backflush_consumed
+from app.services.completion_inventory_service import (
+    armed_parts_affected_by_bom,
+    backflush_armed_edit_warning,
+    bom_line_is_backflush_consumed,
+)
 from app.services.import_service import (
     MAX_CONSECUTIVE_BLANK_ROWS,
     MAX_IMPORT_COLUMNS,
@@ -53,9 +58,38 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def parts_with_active_bom(db: Session, part_ids: Iterable[int], company_id: int) -> Set[int]:
+    """Which of ``part_ids`` have an active, NON-DELETED BOM in this company.
+
+    THE single ``has_bom`` probe for this module. It drives the expand/drill-down
+    affordance in the BOM tree, so it was quietly wrong in two ways at all four sites that
+    open-coded it: no ``company_id`` predicate (the residual-foreign-key shape invariant #1
+    exists to close), and no ``is_deleted`` predicate on a model that carries
+    ``SoftDeleteMixin`` -- so a soft-deleted BOM made the response claim the component is
+    an assembly and offered a drill-down into a structure the shop had deleted.
+    """
+    ids = {pid for pid in part_ids if pid}
+    if not ids:
+        return set()
+    rows = (
+        db.query(BOM.part_id)
+        .filter(
+            BOM.part_id.in_(ids),
+            BOM.company_id == company_id,
+            BOM.is_active == True,  # noqa: E712
+            BOM.is_deleted == False,  # noqa: E712
+        )
+        .all()
+    )
+    return {row.part_id for row in rows}
+
+
 def get_component_part_info(part: Part, db: Session) -> ComponentPartInfo:
     """Build component part info with has_bom flag - handles NULL values defensively"""
-    has_bom = db.query(BOM).filter(BOM.part_id == part.id, BOM.is_active == True).first() is not None
+    # Scoped to the COMPONENT PART's own company: a BOM for a part in company X belongs to
+    # company X, so this needs no extra parameter and no caller change. See
+    # ``parts_with_active_bom`` for what the unscoped, is_deleted-blind version got wrong.
+    has_bom = bool(parts_with_active_bom(db, [part.id], part.company_id))
     return ComponentPartInfo(
         id=part.id,
         part_number=part.part_number or "",
@@ -66,7 +100,51 @@ def get_component_part_info(part: Part, db: Session) -> ComponentPartInfo:
     )
 
 
-def build_bom_item_response(item: BOMItem, db: Session, has_bom_by_part_id: Optional[dict] = None) -> BOMItemResponse:
+def bom_line_identifier(
+    parent_part_number: Optional[str], item_number: Optional[int], component_part_number: Optional[str]
+) -> str:
+    """The human handle for a BOM line, used as the audit row's ``resource_identifier``.
+
+    An auditor reads the trail by part number, not by row id, so the identifier names the
+    assembly, the line and the component. Both part numbers are resolved TENANT-SCOPED by
+    the callers -- never off ``BOMItem.component_part`` / ``BOM.part``, which carry no
+    ``company_id`` predicate and on a mis-parented row would write a foreign part number
+    into this tenant's audit chain.
+    """
+    parent = parent_part_number or "?"
+    component = f" ({component_part_number})" if component_part_number else ""
+    return f"{parent} line {item_number if item_number is not None else '?'}{component}"
+
+
+def _tenant_part_number(db: Session, part_id: Optional[int], company_id: int) -> Optional[str]:
+    """A part number resolved TENANT-SCOPED, or None. Display/audit text only."""
+    if part_id is None:
+        return None
+    return db.query(Part.part_number).filter(Part.id == part_id, Part.company_id == company_id).scalar()
+
+
+def _armed_extra_data(armed_parts: Sequence[Part]) -> Optional[Dict[str, Any]]:
+    """``extra_data`` naming the backflush-armed parts this BOM edit affects, or None.
+
+    Only when the list is NON-EMPTY -- an empty key on every BOM-line row would be noise on
+    a chain that is read by hand. This is what makes the arming verdict and the later edit
+    correlatable on ONE chain: the flip is queried as ``resource_type='part' AND
+    action='UPDATE' AND extra_data->>'backflush_readiness' IS NOT NULL`` (see
+    ``parts.assert_backflush_change_allowed``), and this is its counterpart on the edit
+    side. The list is "at least these" -- see ``armed_parts_affected_by_bom`` for the bound.
+    """
+    if not armed_parts:
+        return None
+    return {"backflush_armed_parts": [p.part_number or f"part {p.id}" for p in armed_parts]}
+
+
+def build_bom_item_response(
+    item: BOMItem,
+    db: Session,
+    has_bom_by_part_id: Optional[dict] = None,
+    *,
+    backflush_armed_warning: Optional[str] = None,
+) -> BOMItemResponse:
     """Build BOM item response with part info - handles NULL values defensively"""
     # Handle component_part safely - it might be None if the part was deleted
     component_info = None
@@ -108,6 +186,7 @@ def build_bom_item_response(item: BOMItem, db: Session, has_bom_by_part_id: Opti
         is_alternate=item.is_alternate if item.is_alternate is not None else False,
         alternate_group=item.alternate_group,
         component_part=component_info,
+        backflush_armed_warning=backflush_armed_warning,
         created_at=item.created_at,
         updated_at=item.updated_at,
     )
@@ -1184,10 +1263,7 @@ def list_boms(
 
     # Preload BOM existence for component parts to avoid per-item queries
     component_ids = {item.component_part_id for bom in boms for item in (bom.items or []) if item.component_part_id}
-    has_bom_by_part_id = {}
-    if component_ids:
-        existing_boms = db.query(BOM.part_id).filter(BOM.part_id.in_(component_ids), BOM.is_active == True).all()
-        has_bom_by_part_id = {row.part_id: True for row in existing_boms}
+    has_bom_by_part_id = {pid: True for pid in parts_with_active_bom(db, component_ids, company_id)}
 
     result = []
     for bom in boms:
@@ -1520,14 +1596,7 @@ def get_bom(
                 part_type_val = str(bom.part.part_type)
 
         component_ids = {item.component_part_id for item in bom.items if item.component_part_id}
-        has_bom_by_part_id = {}
-        if component_ids:
-            existing_boms = (
-                db.query(BOM.part_id)
-                .filter(BOM.part_id.in_(component_ids), BOM.company_id == company_id, BOM.is_active == True)
-                .all()
-            )
-            has_bom_by_part_id = {row.part_id: True for row in existing_boms}
+        has_bom_by_part_id = {pid: True for pid in parts_with_active_bom(db, component_ids, company_id)}
 
         return BOMResponse(
             id=bom.id,
@@ -1692,8 +1761,14 @@ def add_bom_item(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Add an item to a BOM"""
+    """Add an item to a BOM.
+
+    Audited as ``bom_line`` (CREATE). BOM-line writes carried NO audit row of any kind
+    before this -- an AS9100D records gap on the controlled document the shop builds parts
+    from, and the stated reason the UoM-mismatch worklist shipped read-only.
+    """
     try:
         bom = db.query(BOM).filter(BOM.id == bom_id, BOM.company_id == company_id).first()
         if not bom:
@@ -1704,6 +1779,20 @@ def add_bom_item(
         component = db.query(Part).filter(Part.id == item_in.component_part_id, Part.company_id == company_id).first()
         if not component:
             raise HTTPException(status_code=404, detail="Component part not found")
+
+        # Same rule for the OPTIONAL work center (invariant #1): the component and the
+        # parent part were already scoped above, but ``work_center_id`` rode in unchecked,
+        # so a caller in company B could point a BOM line at company A's machine and leak
+        # that machine's identity back through routing / explosion reports. 404 rather
+        # than 403, for the same non-probeable reason as the component check.
+        if item_in.work_center_id is not None:
+            work_center = (
+                db.query(WorkCenter)
+                .filter(WorkCenter.id == item_in.work_center_id, WorkCenter.company_id == company_id)
+                .first()
+            )
+            if not work_center:
+                raise HTTPException(status_code=404, detail="Work center not found")
 
         # Check for circular reference
         if item_in.component_part_id == bom.part_id:
@@ -1748,13 +1837,33 @@ def add_bom_item(
 
         item = BOMItem(bom_id=bom_id, company_id=company_id, **item_data)
         db.add(item)
+        db.flush()  # assigns item.id for the audit row below
+
+        armed = armed_parts_affected_by_bom(db, bom, company_id=company_id)
+        warning = backflush_armed_edit_warning(armed, item_number=item.item_number)
+
+        # Logged BEFORE the terminal commit so the CREATE row commits atomically with the
+        # line. AuditService.log() only FLUSHES, and the request session never commits on
+        # teardown -- an audit call placed after db.commit() opens a fresh transaction that
+        # get_db teardown rolls back, silently discarding the row. Same rule and same
+        # comment as routing.py's add_operation.
+        audit.log_create(
+            "bom_line",
+            item.id,
+            bom_line_identifier(
+                parent_part.part_number if parent_part else None, item.item_number, component.part_number
+            ),
+            new_values=item,
+            extra_data=_armed_extra_data(armed),
+        )
+
         db.commit()
         db.refresh(item)
 
         # Build response manually to avoid joinedload issues
         component_info = None
         if component:
-            has_bom = db.query(BOM).filter(BOM.part_id == component.id, BOM.is_active == True).first() is not None
+            has_bom = bool(parts_with_active_bom(db, [component.id], company_id))
             component_info = ComponentPartInfo(
                 id=component.id,
                 part_number=component.part_number or "",
@@ -1786,6 +1895,7 @@ def add_bom_item(
             is_alternate=item.is_alternate or False,
             alternate_group=item.alternate_group,
             component_part=component_info,
+            backflush_armed_warning=warning,
             created_at=item.created_at,
             updated_at=item.updated_at,
         )
@@ -1803,6 +1913,7 @@ def update_bom_item(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Update a BOM item.
 
@@ -1811,6 +1922,10 @@ def update_bom_item(
     that CLEARS it (explicit ``null`` / blank) is treated as "no stated unit" and resolves
     to the component part's, the same rule the four create paths use, rather than writing a
     NULL nobody asked for.
+
+    Audited as ``bom_line`` (UPDATE). ``log_update`` self-suppresses on an empty diff, so an
+    idempotent PUT that restates the current values writes no row -- the same behaviour
+    ``update_work_center`` relies on.
     """
     item = (
         db.query(BOMItem)
@@ -1822,13 +1937,34 @@ def update_bom_item(
     if not item:
         raise HTTPException(status_code=404, detail="BOM item not found")
 
+    bom = db.query(BOM).filter(BOM.id == item.bom_id, BOM.company_id == company_id).first()
+    if not bom:  # pragma: no cover - the join above already proved it
+        raise HTTPException(status_code=404, detail="BOM item not found")
+
+    # Hoisted out of the UoM branch below: the identifier, the UoM resolution and the
+    # cross-tenant guard all need the TENANT-SCOPED component, and one indexed read serves
+    # all three. Never ``item.component_part`` -- that relationship carries no company_id.
+    component = db.query(Part).filter(Part.id == item.component_part_id, Part.company_id == company_id).first()
+
     update_data = item_in.model_dump(exclude_unset=True)
+
+    # Same ownership check the create path now makes: ``work_center_id`` is settable here
+    # too, so without this the update path reopens the exact hole the create path closes.
+    # An explicit null CLEARS the reference and needs no check.
+    if update_data.get("work_center_id") is not None:
+        work_center = (
+            db.query(WorkCenter)
+            .filter(WorkCenter.id == update_data["work_center_id"], WorkCenter.company_id == company_id)
+            .first()
+        )
+        if not work_center:
+            raise HTTPException(status_code=404, detail="Work center not found")
+
     if "unit_of_measure" in update_data:
         # Defense-in-depth (invariant #1): resolve a cleared UoM through the same
         # TENANT-SCOPED Part lookup the other three UoM-resolution sites use — never
         # the unscoped ``component_part`` relationship, which on a mis-parented line
         # would read (and store) a FOREIGN part's stocking unit.
-        component = db.query(Part).filter(Part.id == item.component_part_id, Part.company_id == company_id).first()
         stated = update_data["unit_of_measure"]
         if component is None and not (stated is not None and str(stated).strip()):
             # Cleared value + unresolvable (foreign/missing) component: NO inheritance.
@@ -1836,12 +1972,35 @@ def update_bom_item(
             update_data.pop("unit_of_measure")
         else:
             update_data["unit_of_measure"] = _resolve_line_uom(stated, component)
+
+    # Full-row snapshot BEFORE the setattr loop, so the diff is column-true rather than
+    # whatever the request happened to name (mirrors ``update_work_center``).
+    old_values = {c.key: getattr(item, c.key) for c in item.__table__.columns}
+
     for field, value in update_data.items():
         setattr(item, field, value)
 
+    armed = armed_parts_affected_by_bom(db, bom, company_id=company_id)
+    warning = backflush_armed_edit_warning(armed, item_number=item.item_number)
+
+    # BEFORE the terminal commit -- see add_bom_item for why that ordering is load-bearing.
+    db.flush()
+    audit.log_update(
+        "bom_line",
+        item.id,
+        bom_line_identifier(
+            _tenant_part_number(db, bom.part_id, company_id),
+            item.item_number,
+            component.part_number if component else None,
+        ),
+        old_values=old_values,
+        new_values=item,
+        extra_data=_armed_extra_data(armed),
+    )
+
     db.commit()
     db.refresh(item)
-    return build_bom_item_response(item, db)
+    return build_bom_item_response(item, db, backflush_armed_warning=warning)
 
 
 @router.delete("/items/{item_id}")
@@ -1850,15 +2009,49 @@ def delete_bom_item(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Delete a BOM item"""
+    """Delete a BOM item. The delete is PHYSICAL, and audited.
+
+    ``BOMItem`` has no ``SoftDeleteMixin`` (only ``TenantMixin``), so there is no tombstone
+    to write and the row really goes. Adding the mixin is a schema change -- an Alembic
+    revision plus an ``is_deleted == False`` predicate at all eleven ``query(BOMItem)``
+    sites across eight modules, any one of which, if missed, silently changes what the
+    backflush explodes. That is deliberately NOT bundled into a compliance/security fix;
+    the record is instead made complete the way ``routing.py``'s ``delete_operation``
+    (same shape: a child line row of a controlled document, no mixin) already does it --
+    ``log_delete(..., soft_delete=False)`` with the full pre-image, logged while the
+    instance is still attached and BEFORE the delete.
+    """
     item = db.query(BOMItem).join(BOM).filter(BOMItem.id == item_id, BOM.company_id == company_id).first()
     if not item:
         raise HTTPException(status_code=404, detail="BOM item not found")
 
+    bom = db.query(BOM).filter(BOM.id == item.bom_id, BOM.company_id == company_id).first()
+    if not bom:  # pragma: no cover - the join above already proved it
+        raise HTTPException(status_code=404, detail="BOM item not found")
+
+    armed = armed_parts_affected_by_bom(db, bom, company_id=company_id)
+    warning = backflush_armed_edit_warning(armed, item_number=item.item_number)
+
+    # log_delete serializes the model synchronously, so passing the live attached instance
+    # captures its full old state. After db.delete() it is unusable.
+    audit.log_delete(
+        "bom_line",
+        item.id,
+        bom_line_identifier(
+            _tenant_part_number(db, bom.part_id, company_id),
+            item.item_number,
+            _tenant_part_number(db, item.component_part_id, company_id),
+        ),
+        old_values=item,
+        soft_delete=False,
+        extra_data=_armed_extra_data(armed),
+    )
+
     db.delete(item)
     db.commit()
-    return {"message": "BOM item deleted"}
+    return {"message": "BOM item deleted", "backflush_armed_warning": warning}
 
 
 # Multi-level BOM operations

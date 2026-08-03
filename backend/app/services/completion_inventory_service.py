@@ -80,7 +80,7 @@ widening cannot hide legacy stock the way a bare ``status = 'available'`` would 
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Container, Iterable, Optional, TypeVar, cast
+from typing import Any, Container, Iterable, Optional, Sequence, TypeVar, cast
 
 from sqlalchemy import and_, case, func, select
 from sqlalchemy.exc import IntegrityError
@@ -4225,6 +4225,109 @@ def backflush_readiness_for_part(db: Session, part: Part, *, company_id: int) ->
             )
         )
     return explosion.diagnostics
+
+
+def armed_parts_affected_by_bom(db: Session, bom: BOM, *, company_id: int) -> list[Part]:
+    """Parts armed for automatic backflush whose demand this BOM helps state. **PURE READ.**
+
+    Takes **no** ``AuditService`` and writes nothing, for the same structural reason
+    ``backflush_readiness_for_part`` and the two preview reads take none: the resolution
+    layer is not allowed to become a writer (invariant 6 / plan "Exposing the flag").
+    Callers on the BOM edit path use this to WARN, never to refuse -- see
+    ``backflush_armed_edit_warning``.
+
+    Two ways an armed part's demand depends on this BOM:
+
+    * the BOM's **own** part is armed; or
+    * an ancestor is armed and reaches this BOM's part through ``phantom`` lines **only**.
+
+    ``make`` lines are deliberately NOT followed. ``_explode_backflush_bom`` issues a
+    ``make`` sub-assembly as a stocked unit and walks its subtree exclude-only, so an armed
+    grandparent above a ``make`` line is genuinely unaffected by an edit down here. Naming
+    it would make the warning claim a part the leg would never explode into -- an
+    over-broad warning on a compliance surface is worse than none.
+
+    COST -- this runs on every BOM-line write, including inside the BOM tab's Batch Add
+    (one request per line, ~40 for a real assembly). It is **two indexed queries** in the
+    ordinary case: one PK read of the BOM's own part, then one probe for phantom parents
+    which returns nothing for almost every part (a phantom line is rare) and ends the walk.
+    The ascent only costs more when phantom parents actually exist, and it stops at the
+    first level that yields an armed part.
+
+    BOUNDS, and they are deliberate. The ascent stops at the first level containing an
+    armed part, so the result is "**at least** these are affected", not a complete
+    ancestor census -- enough for a signal that says *go re-check*, which is all this is.
+    ``_MAX_BOM_LEVELS`` caps the depth (the visited set bounds repetition of a part, not
+    depth -- see that constant) and every query is tenant-scoped.
+    """
+    armed: list[Part] = []
+
+    own_part = (
+        db.query(Part)
+        .filter(
+            Part.id == bom.part_id,
+            Part.company_id == company_id,
+            Part.backflush_components.is_(True),
+        )
+        .first()
+    )
+    if own_part is not None:
+        armed.append(own_part)
+
+    frontier = {bom.part_id}
+    visited = {bom.part_id}
+    for _ in range(_MAX_BOM_LEVELS):
+        if not frontier:
+            break
+        parents = (
+            db.query(Part)
+            .join(BOM, BOM.part_id == Part.id)
+            .join(BOMItem, BOMItem.bom_id == BOM.id)
+            .filter(
+                BOMItem.component_part_id.in_(frontier),
+                func.lower(BOMItem.item_type) == BOMItemType.PHANTOM.value,
+                BOMItem.company_id == company_id,
+                BOM.company_id == company_id,
+                BOM.is_active.is_(True),
+                BOM.is_deleted.is_(False),
+                Part.company_id == company_id,
+            )
+            .all()
+        )
+        armed_here = [p for p in parents if bool(p.backflush_components)]
+        if armed_here:
+            seen = {p.id for p in armed}
+            for parent in armed_here:
+                if parent.id not in seen:
+                    seen.add(parent.id)
+                    armed.append(parent)
+            break
+        frontier = {p.id for p in parents if p.id not in visited}
+        visited |= frontier
+
+    return armed
+
+
+def backflush_armed_edit_warning(armed_parts: Sequence[Part], *, item_number: Optional[int]) -> Optional[str]:
+    """The BOM-edit warning sentence, or ``None`` when no armed part is affected.
+
+    One template, mirroring ``backflush_refusal_sentence``. It states the fact and the
+    remedy and stops there: the opt-in gate is a ONE-TIME check that ran at the flip and
+    is not re-run by this edit (plan, "Exposing the flag"), and this warning does not
+    re-run it either -- ``backflush_readiness_for_part`` runs a full BOM explosion, and
+    putting that on every line write would both cost real time in the Batch Add loop and
+    make the WRITE path depend on the resolution layer's verdict.
+    """
+    if not armed_parts:
+        return None
+    numbers = ", ".join(p.part_number or f"part {p.id}" for p in armed_parts)
+    readiness = ", ".join(f"GET /parts/{p.id}/backflush-readiness" for p in armed_parts)
+    line = f"BOM line {item_number}" if item_number is not None else "This BOM line"
+    return (
+        f"{line} changed on a part armed for automatic backflush ({numbers}). "
+        f"Re-check its readiness ({readiness}) — the opt-in check ran once, at arming, and is "
+        "not re-run by this edit."
+    )
 
 
 def apply_completion_inventory_effects(
