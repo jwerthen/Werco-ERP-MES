@@ -1444,9 +1444,12 @@ mixed**:
 >   demand on a specific job.
 > * **It is a one-time check.** It is evaluated at the flip and never again — not on a BOM edit, not on a
 >   routing change, not at release, not at completion.
-> * **Nothing on the BOM or routing edit path knows a part is armed.** Anyone with `boms:edit` /
->   `routings:edit` — the same ADMIN/MANAGER/SUPERVISOR tier — can change any input afterwards with no
->   warning, no re-check and no notification on the editing side.
+> * **The ROUTING edit path still does not know a part is armed**, and the BOM edit path only warns.
+>   Anyone with `boms:edit` / `routings:edit` — the same ADMIN/MANAGER/SUPERVISOR tier — can change any
+>   input afterwards. A **BOM**-line write now returns a `backflush_armed_warning` and stamps
+>   `extra_data.backflush_armed_parts` on its `bom_line` audit row (see
+>   [BOM line writes](#bom-line-writes)), so the edit is at least visible on the chain — but there is
+>   still **no re-check, no refusal, and no notification**, and a routing change is still silent.
 >
 > What stands behind the flip is the **completion-time refusal** described under
 > [Work Orders](#work-orders) → completion inventory effects: a blocking diagnostic drops the demand it
@@ -1493,6 +1496,62 @@ mixed**:
 
 `POST /bom/` also accepts its lines inline, so it is a BOM-line write path too and carries the
 same `unit_of_measure` change.
+
+<a id="bom-line-writes"></a>
+> **BOM line writes: audited, tenant-checked, and armed-part aware.** All three verbs above
+> previously took no `AuditService` at all — creating, editing or deleting a line on a
+> controlled document left no record of any kind, while the import paths in the same router
+> always logged.
+>
+> - **Audit.** Each writes a tamper-evident `audit_log` row under `resource_type="bom_line"`
+>   (CREATE / UPDATE / DELETE), logged **before** the terminal commit so the row commits
+>   atomically with the change. `resource_identifier` is the human handle
+>   `"{assembly} line {n} ({component})"`, with both part numbers resolved tenant-scoped.
+>   `log_update` self-suppresses on an empty diff, so an idempotent `PUT` writes no row.
+> - **The DELETE is physical, and that is recorded.** `BOMItem` carries no `SoftDeleteMixin`
+>   (only `TenantMixin`), so there is no tombstone; the row really goes and the audit row —
+>   `soft_delete: false`, carrying the full pre-image in `old_values` — is the only surviving
+>   record of the line. Same shape and same handling as `routing.py`'s `delete_operation`.
+>   Converting `BOMItem` to soft delete is a schema change and is deliberately **not** bundled
+>   here; it is filed as a follow-up.
+> - **`work_center_id` is tenant-checked on both write paths** (invariant #1). It is optional
+>   on `BOMItemCreate`/`BOMItemUpdate` and previously rode in unvalidated, so a caller in one
+>   company could point a BOM line at another company's machine and leak that machine's
+>   identity through routing/explosion reports. A foreign or unknown id is a flat **404**
+>   ("Work center not found"); an explicit `null` still clears the reference.
+> - **`component_part.has_bom` now respects soft delete.** The probe ignored `BOM.is_deleted`
+>   (and, at two of four sites, `company_id`), so a soft-deleted BOM made a component report
+>   as an assembly — which is what drives the expand/drill-down affordance in the BOM tree.
+> - **`backflush_armed_warning`** — a new optional response field on `BOMItemResponse`
+>   (and a key on the DELETE response body), set **only** on these three writes and **only**
+>   when the edited BOM helps state demand for a part armed via `Part.backflush_components`:
+>   the BOM's own part, or an ancestor that reaches it through any line the explosion
+>   descends into — that is, anything **except `buy`**. The same part numbers are hung on the
+>   audit row as `extra_data.backflush_armed_parts`, which makes the arming verdict and the
+>   later edit correlatable on one chain.
+>
+>   **`make` lines are followed, and `buy` is the only wall.** The tempting reading — a `make`
+>   sub-assembly is issued as a stocked unit and its children never are, so an armed
+>   grandparent is unaffected — is true of the BOM *demand* leg and **false** of the leg
+>   beside it. `_explode_backflush_bom` still walks a `make` subtree in exclude-only mode, and
+>   every line it passes there lands in `excluded_part_ids`; a routing operation naming a part
+>   in that set raises `routing_component_excluded_by_bom` at **blocking** severity. So adding
+>   a line under a `make` sub-assembly can newly *block* an armed ancestor's routing demand,
+>   and deleting one can newly *un-block* it and let material issue that was being refused.
+>   (`bom_depth_exceeded` is a second such path: it fires before the `consumed` check, so
+>   deepening a `make` subtree past the level cap refuses the ancestor's whole leg.) A `buy`
+>   line genuinely is a wall — the explosion never looks up a child BOM under one, so nothing
+>   below it is read at all.
+>
+>   **It WARNS; it does not refuse.** The write succeeds. The opt-in gate
+>   (`assert_backflush_change_allowed`) is a one-time check at the instant of the flip, and
+>   `docs/MATERIAL_CONSUMPTION_PLAN.md` → "Exposing the flag" is explicit that the
+>   completion-time `BACKFLUSH_DEMAND_REFUSED` is the **net** behind it, *not* a second gate.
+>   A 409 here would also block its own remedy: correcting a blocking unit mismatch is
+>   documented as `PUT /bom/items/{id}`, which refusing on an armed part would make impossible
+>   without first disarming. The warning states that a re-check is needed; it does not perform
+>   one (re-running the readiness explosion on every line write would put the resolution
+>   layer's verdict on the write path, which is exactly the coupling that layer avoids).
 
 > **The three multi-level reads are tenant-scoped (invariant #1).** `GET /bom/{id}/explode`,
 > `GET /bom/{id}/flatten`, and `GET /bom/{id}/where-used` resolve the top-level BOM against the
@@ -1606,10 +1665,12 @@ What the screen is, and what it deliberately is not:
 
 - **Read-only — it finds rows and hands off.** There is no inline BOM-line editor. Every row
   deep-links to `/bom?id={bom_id}` for the correction and to `/parts/{part_id}` for that
-  assembly's own readiness. That is deliberate: BOM-line create/update/delete currently write
-  **no audit rows at all** (a known, separately-filed gap), and making this screen the primary
-  remediation flow would put a compliance-critical correction on an un-audited endpoint.
-  Corrections stay on the BOM screen, where they already were.
+  assembly's own readiness. The original reason was that BOM-line create/update/delete wrote
+  **no audit rows at all**, so making this screen the primary remediation flow would have put a
+  compliance-critical correction on an un-audited endpoint. **That blocker is now closed** —
+  all three verbs audit as `bom_line` (see [BOM line writes](#bom-line-writes)) — so an inline editor
+  is no longer refused on compliance grounds; it is simply not built. Corrections stay on the
+  BOM screen, where they already were.
 - **Server-paged** (50 rows/page over `skip`/`limit`), so column sort is deliberately
   unavailable — sorting one page of a server-paged set reorders a window, not the worklist.
 - **Filters live in URL params** (`part_id`, `bom_id`, `component_part_id`, `active_only`,
@@ -1673,8 +1734,10 @@ What the screen is, and what it deliberately is not:
    control working, not a bug to route around.
 
 Clearing this list is not a lock. Every line stays editable afterwards by the same
-Admin / Manager / Supervisor tier, with nothing on the BOM edit path aware that a part is
-armed, so an empty report is evidence about the minute it was run. What backs the part after
+Admin / Manager / Supervisor tier, so an empty report is evidence about the minute it was run.
+The BOM edit path is no longer *blind* — a line write warns and annotates its audit row when
+the edited BOM feeds an armed part (see [BOM line writes](#bom-line-writes)) — but a warning
+is not a lock either. What backs the part after
 the flip is the completion-time refusal (`BACKFLUSH_DEMAND_REFUSED`), not this list.
 
 #### BOM Import (document upload)
@@ -1750,12 +1813,42 @@ uploads go through text extraction + LLM. See
 > surfaces on the dispatch board as a flagged read-only column — see Shop Floor →
 > `GET /shop-floor/dispatch-board`.
 >
-> **Both endpoints now write tamper-evident `audit_log` rows** (previously neither did): `PUT`
+> ⚠️ **`GET /work-centers/` caches per company, and the key used to be install-wide.** The
+> default-parameter response is cached for 15 minutes. The query was always scoped to the
+> caller's company; the cache key was the bare `work_centers:list`, so the first tenant to
+> warm it had its machine roster served verbatim to **every other tenant** for the duration —
+> a cross-tenant disclosure with no query defect anywhere near it. The key now carries the
+> company id. Invalidation is unchanged and still a blanket wipe (`work_centers:list*`, which
+> still matches the scoped keys): over-invalidation costs one recomputation, under-invalidation
+> serves a stale roster. Note the cache no-ops entirely when Redis is not configured, which is
+> why the regression tests drive the cache layer directly rather than relying on the endpoint.
+>
+> **Every state-changing work-center endpoint writes tamper-evident `audit_log` rows.** `PUT`
 > logs a `work_center` `log_update` with a full before/after column diff; `DELETE` logs the
 > `is_active` flip. Both self-suppress when nothing actually changed (a no-op update, or a
-> `DELETE` of an already-inactive row — no fabricated diff on the hash chain). Still unaudited:
-> interactive `POST /work-centers/` (create) and `POST /work-centers/{id}/status` (the status
-> dropdown); CSV import was already audited.
+> `DELETE` of an already-inactive row — no fabricated diff on the hash chain). `POST
+> /work-centers/` logs a `log_create` matching the CSV importer's row minus its
+> `extra_data.source = "import"` marker, which is what distinguishes the two doors. `POST
+> /work-centers/{id}/status` logs a `log_status_change` carrying old and new status; because
+> `log_status_change` does **not** self-suppress the way `log_update` does, a request that
+> restates the current status short-circuits — no write, no audit row, no broadcast.
+>
+> **RBAC on `POST /work-centers/{id}/status` was tightened to Admin / Manager** (it previously
+> accepted any authenticated user in the tenant). It is the only writer of `current_status`
+> outside the CSV importer, and flipping a machine to `offline`/`maintenance` changes what the
+> dispatch board and the operator kiosk show. The tier matches `PUT`, not `DELETE`: the flip is
+> reversible, and `PUT` already lets a Manager flip `is_active`. The page's inline status
+> `<select>` is gated to the same role set client-side and renders as a read-only badge for
+> everyone else, so a control the server will refuse is not offered. That client gate is
+> **defense in depth, not the primary gate**: `/work-centers` is already route-guarded on
+> `admin:settings` (`App.tsx` → `routeAccessRequirements`), which resolves to platform_admin
+> + admin — a *narrower* set than these endpoints allow, so a **Manager can call the endpoint
+> but cannot reach the page**. That route/nav/endpoint tier misalignment is tracked
+> separately; the client gate is what keeps the control tied to its own verb's role set when
+> it is resolved. ⚠️ Inside `update_work_center_status` the `status`
+> query parameter **shadows the fastapi `status` module**, so `status.HTTP_*` there raises
+> `AttributeError` at request time while type-checking and importing clean; use literal int
+> status codes. The parameter name is part of the API contract and is not renamed.
 
 #### Work Center Schema
 

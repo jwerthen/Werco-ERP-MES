@@ -133,10 +133,13 @@ def list_work_centers(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """List all work centers (cached for 15 minutes)"""
-    # Try cache first (only for default parameters)
+    """List all work centers (cached for 15 minutes, PER COMPANY)"""
+    # Try cache first (only for default parameters). Keyed by the ACTIVE company
+    # (invariant #1): the query below is company-scoped, but this cache was keyed
+    # install-wide, so whichever tenant warmed it served its machine roster verbatim to
+    # every other tenant for the next 15 minutes.
     if skip == 0 and limit == 100 and active_only:
-        cached = get_cached_work_centers_list()
+        cached = get_cached_work_centers_list(company_id)
         if cached is not None:
             return cached
 
@@ -169,7 +172,7 @@ def list_work_centers(
             }
             for wc in result
         ]
-        cache_work_centers_list(cache_data)
+        cache_work_centers_list(cache_data, company_id)
 
     return result
 
@@ -180,8 +183,16 @@ def create_work_center(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Create a new work center"""
+    """Create a new work center.
+
+    The CSV importer creates the identical row and has always audited it; this endpoint
+    did not -- so a machine added through the UI had no CREATE row while one added by
+    spreadsheet did, and an auditor reconstructing the machine roster saw an inconsistent
+    trail. The importer's ``extra_data={"source": "import"}`` is what distinguishes the
+    two paths, so it is deliberately absent here.
+    """
     # Check if code already exists
     if db.query(WorkCenter).filter(WorkCenter.code == work_center_in.code, WorkCenter.company_id == company_id).first():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Work center code already exists")
@@ -189,6 +200,11 @@ def create_work_center(
     work_center = WorkCenter(**work_center_in.model_dump())
     work_center.company_id = company_id
     db.add(work_center)
+    # Logged BEFORE the terminal commit so the CREATE row commits atomically with the work
+    # center (AuditService.log() only flushes; a call after db.commit() lands in a fresh
+    # transaction that get_db teardown rolls back). The flush assigns the PK.
+    db.flush()
+    audit.log_create("work_center", work_center.id, work_center.code, new_values=work_center)
     db.commit()
     db.refresh(work_center)
 
@@ -448,10 +464,25 @@ def update_work_center_status(
     work_center_id: int,
     status: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Update work center status (available, in_use, maintenance, offline)"""
+    """Update work center status (available, in_use, maintenance, offline).
+
+    RBAC TIGHTENED (was bare ``get_current_user``). Flipping a machine to
+    ``offline``/``maintenance`` changes what the dispatch board and the operator kiosk
+    show, and this is the only writer of ``current_status`` outside the CSV importer -- any
+    authenticated user in the tenant could do it, with no audit row naming who. The tier
+    matches PUT, not DELETE: a status flip is reversible and PUT already lets a Manager
+    flip ``is_active``. The frontend status select is gated to the same set so the control
+    is not offered to someone the server will refuse.
+
+    ⚠️ The ``status`` PARAMETER SHADOWS the fastapi ``status`` module inside this function,
+    so ``status.HTTP_*`` here raises AttributeError on a str AT REQUEST TIME (it type-checks
+    and imports clean). Literal int codes only. The param name is part of the API contract
+    (the client sends ``?status=``), so it is not renamed.
+    """
     valid_statuses = ["available", "in_use", "maintenance", "offline"]
     if status not in valid_statuses:
         raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {valid_statuses}")
@@ -462,8 +493,23 @@ def update_work_center_status(
     if not work_center:
         raise HTTPException(status_code=404, detail="Work center not found")
 
+    old_status = work_center.current_status
+    if old_status == status:
+        # Nothing changed: no write, no audit row, no broadcast. ``log_status_change`` does
+        # NOT self-suppress the way ``log_update`` does, so a re-statement would otherwise
+        # put a meaningless "from available to available" row on the tamper-evident chain.
+        return {"message": f"Work center status updated to {status}"}
+
     work_center.current_status = status
+    # BEFORE the terminal commit, for the reason spelled out in create_work_center.
+    db.flush()
+    audit.log_status_change("work_center", work_center.id, work_center.code, old_status, status)
     db.commit()
+
+    # ``current_status`` is part of the cached list payload, so the 15-minute cache has to
+    # be dropped or the board keeps serving the old status.
+    invalidate_work_centers_cache(work_center_id)
+
     safe_broadcast(
         broadcast_shop_floor_update,
         work_center_id,

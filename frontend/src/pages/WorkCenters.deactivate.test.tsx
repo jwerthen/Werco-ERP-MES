@@ -33,6 +33,16 @@ jest.mock('../services/api', () => ({
   },
 }));
 
+// Deactivate/reactivate are Admin-tier actions; mount as an admin. (The inline status
+// select is separately role-gated — see WorkCenters.rbac.test.tsx.)
+jest.mock('../context/AuthContext', () => ({
+  useAuth: () => ({
+    user: { id: 1, role: 'admin', is_superuser: false },
+    isAuthenticated: true,
+    isLoading: false,
+  }),
+}));
+
 const mockedApi = api as jest.Mocked<typeof api>;
 
 const baseWc = {

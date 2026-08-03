@@ -34,6 +34,17 @@ jest.mock('../services/api', () => ({
   },
 }));
 
+// The inline status select is now role-gated (POST /work-centers/{id}/status is
+// Admin/Manager). These render locks assume the interactive variant, so they mount as an
+// admin. The gating itself is covered in WorkCenters.rbac.test.tsx.
+jest.mock('../context/AuthContext', () => ({
+  useAuth: () => ({
+    user: { id: 1, role: 'admin', is_superuser: false },
+    isAuthenticated: true,
+    isLoading: false,
+  }),
+}));
+
 const mockedApi = api as jest.Mocked<typeof api>;
 
 const baseWc = {
