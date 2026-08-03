@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import api from '../services/api';
 import { addDays, startOfWeek, isBefore, isAfter, isSameDay } from 'date-fns';
 import { useWebSocket } from '../hooks/useWebSocket';
@@ -211,7 +212,21 @@ export default function Scheduling() {
 
   // Search and filter
   const [searchQuery, setSearchQuery] = useState('');
-  const [filterWorkCenter, setFilterWorkCenter] = useState<number | ''>('');
+  // The work-center filter lives in the URL (`?work_center=<id>`, ProcessSheets
+  // idiom) so a filtered queue survives reload and can be shared; an absent or
+  // non-numeric param falls back to '' (all work centers, clean URL).
+  const [searchParams, setSearchParams] = useSearchParams();
+  const workCenterParam = parseInt(searchParams.get('work_center') ?? '', 10);
+  const filterWorkCenter: number | '' = Number.isNaN(workCenterParam) ? '' : workCenterParam;
+  const setFilterWorkCenter = (value: number | '') => {
+    const next = new URLSearchParams(searchParams);
+    if (value === '') {
+      next.delete('work_center');
+    } else {
+      next.set('work_center', String(value));
+    }
+    setSearchParams(next);
+  };
   const [showBulkActions, setShowBulkActions] = useState(false);
 
   // Collapsible Machine Capacity section
@@ -1230,6 +1245,7 @@ export default function Scheduling() {
               value={filterWorkCenter}
               onChange={(e) => setFilterWorkCenter(e.target.value ? parseInt(e.target.value, 10) : '')}
               className="input text-sm w-40"
+              aria-label="Filter by work center"
             >
               <option value="">All Work Centers</option>
               {workCenters.map((wc) => (

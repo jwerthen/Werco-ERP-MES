@@ -11,6 +11,7 @@ import { Modal } from '../components/ui/Modal';
 import { ConfirmDialog, FormField, InputDialog } from '../components/ui';
 import { useToast } from '../components/ui/Toast';
 import useUnsavedChanges from '../hooks/useUnsavedChanges';
+import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import { BOMImportWizard } from '../components/parts/BOMImportWizard';
 import { SkeletonTable } from '../components/ui/Skeleton';
 import {
@@ -84,7 +85,7 @@ export default function PartsPage() {
   const [parts, setParts] = useState<Part[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
-  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const debouncedSearch = useDebouncedValue(search.trim(), 250);
   const [typeFilter, setTypeFilter] = useState<string>('');
   const [statusFilter, setStatusFilter] = useState<string>('');
   const [viewMode, setViewMode] = useState<ViewMode>('table');
@@ -159,11 +160,6 @@ export default function PartsPage() {
       setLoading(false);
     }
   }, [typeFilter, showBOMComponents, debouncedSearch, showToast]);
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => setDebouncedSearch(search.trim()), 250);
-    return () => window.clearTimeout(timer);
-  }, [search]);
 
   useEffect(() => {
     loadParts();
