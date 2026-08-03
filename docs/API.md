@@ -109,6 +109,14 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 |--------|----------|-------------|---------------|
 | POST | `/auth/kiosk-badge-token` | Exchange a badge scan for a 5-min kiosk-scoped operator token. Body `{"employee_id"}` → `{"access_token", "token_type", "expires_in": 300, "user": {"id", "full_name", "employee_id"}}`. Unknown / inactive / locked / foreign-tenant badge → uniform **401** "Invalid badge"; ambiguous badge within the company → **409**. Issuance and failures are audited (`KIOSK_BADGE_TOKEN_ISSUED` / `KIOSK_BADGE_TOKEN_FAILED`). Rate-limited **30/minute** per IP | Kiosk station token |
 
+> **`POST /auth/employee-logout` requires authentication** and takes the actor from the **bearer
+> token**, never from the request body. The body (`{"employee_id"}`) is still accepted for wire
+> compatibility but is ignored for identity, and an authenticated caller always gets **200** — there
+> is no 404/200 distinction to probe. It previously took no auth at all and resolved any
+> `employee_id` through a globally unscoped lookup, which made it both an audit-forgery surface
+> (anyone could write a tenant-tagged `EMPLOYEE_LOGOUT` row naming a real employee, visible at
+> `GET /audit/?resource_type=authentication`) and a cross-tenant badge-enumeration oracle.
+
 > **Path fence.** A `scope="kiosk"` operator token is honored only on `/api/v1/shop-floor/*` and
 > `POST /api/v1/auth/employee-logout`; `get_current_user` rejects it with **403** everywhere else
 > (the token is valid — it just cannot reach the resource). Three shop-floor carve-outs are also
@@ -4859,18 +4867,42 @@ the global default applied):
 | `POST /auth/login` | 5/minute |
 | `POST /auth/register` | 3/minute |
 | `POST /auth/register-public` | 3/minute |
+| `POST /companies/register` | 3/minute |
 | `POST /auth/refresh` | 30/minute |
 | `POST /auth/employee-login` | 10/minute |
+| `POST /auth/employee-logout` | 30/minute |
 | `POST /auth/kiosk-badge-token` | 30/minute |
 | `POST /auth/display-token/claim` | 10/minute |
 | `POST /visitor-logs/station-login` | 5/minute |
 | `POST /shop-floor/kiosk-stations/station-login` | 5/minute |
 | `POST /scanner/resolve-action` | 60/minute |
 | `POST /users/me/test-sms` | 3/minute |
+| `POST /errors/log` | 60/minute |
 
 (`POST /users/me/test-sms` is authenticated and self-targeted, but it is the one route that spends
 real carrier money per call, so it is capped well below anything a human would click. The two
 standalone laser-nest routes carry their own **10/minute** caps — see Laser Nests.)
+
+`POST /companies/register` is **unauthenticated**, and one successful call mints a whole tenant
+plus an **active admin** user with live access/refresh tokens — so it is capped like the sibling
+register routes. It previously had no per-path entry and ran at only the global 100/minute default.
+
+> **These caps assume a correctly configured edge proxy.** Every per-IP limit on this page is keyed
+> on the forwarded client IP, so it is only as trustworthy as the proxy configuration in front of
+> the app. **Operators: verify `--forwarded-allow-ips` is pinned to the platform's real edge CIDR**
+> in the deploy entrypoints (`start.sh`, `nixpacks.toml`) rather than left permissive. Do not
+> instead reach into the forwarded-for chain from application code — that is only correct at exactly
+> one proxy hop, and with two it keys every client to the same value, collapsing the whole app into
+> a single rate-limit bucket.
+
+`POST /errors/log` (the SPA error beacon) is unauthenticated and CSRF-exempt because
+`navigator.sendBeacon` cannot set headers. Its cap is deliberately generous — a whole shop shares
+one NAT IP and a single tab flushes at most every 5 s — since a tight cap silently drops error
+reports during exactly the mass-failure incident you want them for. The endpoint **writes nothing
+to the database**: it logs to the application logger and, for global-boundary errors, to Sentry. It
+used to resolve the client-supplied `userId` to a user row and write an audit row, which let anyone
+forge tamper-evident audit-chain entries attributed to a named employee in a named company. The
+body is additionally capped at **50 entries** with per-field length limits (**422** over either).
 
 An over-limit request returns **HTTP 429** with a `Retry-After` header (seconds until the window
 resets) and body:

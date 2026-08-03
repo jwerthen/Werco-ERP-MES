@@ -1,8 +1,41 @@
 """
 Frontend Error Logging Endpoint
 
-Receives error logs from the frontend for monitoring and debugging.
-Stores errors in audit log and can trigger alerts for critical errors.
+Receives error logs from the frontend for monitoring and debugging, and routes
+them to the application logger (and Sentry, for global-boundary errors).
+
+THIS ENDPOINT DELIBERATELY WRITES NOTHING TO THE DATABASE. It is unauthenticated
+by necessity — ``navigator.sendBeacon`` on page unload cannot attach an
+Authorization header — and its ``userId`` is client-supplied, unverified data
+read out of sessionStorage. It previously resolved that string to a ``User`` row
+(unscoped, no tenant filter) and handed it to ``AuditService``, which let any
+internet caller inject arbitrary rows into the tamper-evident audit chain
+attributed to a named employee in a named company, permanently (audit rows are
+immutable by DB trigger, migrations 008/060). Worse, each entry in the batch
+became one audit INSERT taking the single install-wide
+``pg_advisory_xact_lock`` that serializes the hash chain, so one oversized
+request could stall EVERY audited write in the system while it drained.
+
+Both problems are removed at the root: no audit row is written here at all.
+Nothing ever consumed those rows — ``FRONTEND_ERROR`` had exactly one occurrence
+repo-wide (the write itself) — and they were not merely useless, they were
+actively misleading. ``AuditService._resolve_company_id`` returns
+``user.company_id`` whenever a user resolves, and the real client DOES send a
+resolvable id (``frontend/src/services/errorLogging.ts`` fills ``userId`` from
+``sessionStorage['user'].id``), so a logged-in user's error row carried their
+real ``company_id`` and WAS visible to any Admin/Manager at
+``GET /api/v1/audit/``. Only anonymous, pre-login errors landed with
+``company_id IS NULL``. So an Admin reading the audit log saw
+"FRONTEND_ERROR — Admin User, company 1", with an attacker-chosen
+``ip_address``, for rows any internet caller could fabricate at will. Do not
+reintroduce a DB write on this path; if frontend errors ever need durable
+storage, give them their own non-audit table behind an authenticated route.
+
+The request caps below (list length + per-field lengths) bound what a single
+unauthenticated call can make the app parse and log; ``MAX_JSON_BODY_BYTES``
+(413) is the outer bound on the body itself, and main.py's ENDPOINT_RATE_LIMITS
+entry bounds call frequency. ``MAX_GLOBAL_ALERTS_PER_REQUEST`` bounds the one
+remaining outbound side-effect (Sentry).
 """
 
 import logging
@@ -10,32 +43,56 @@ from datetime import datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Request
-from fastapi.concurrency import run_in_threadpool
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.core.time_utils import to_utc_iso
 
 router = APIRouter(prefix="/errors", tags=["errors"])
 logger = logging.getLogger(__name__)
 
+# Matches ``maxQueueSize`` in frontend/src/services/errorLogging.ts — the client
+# never batches more than this, so a larger batch is not a real SPA tab.
+MAX_ERRORS_PER_REQUEST = 50
+
+# ``boundaryLevel`` is attacker-supplied, and the value "global" is what drives
+# send_error_alert -> sentry_sdk.capture_message. Uncapped, one request could
+# spend 50 Sentry events and the rate limit allows 60 requests/minute — 3,000
+# events/minute from a spoofable field, burning the quota that buys real error
+# visibility. A genuine page only ever reports one global-boundary crash per
+# flush, so a small per-request ceiling costs nothing real.
+MAX_GLOBAL_ALERTS_PER_REQUEST = 3
+
 
 class ErrorLogEntry(BaseModel):
-    id: str
-    message: str
-    stack: Optional[str] = None
-    componentStack: Optional[str] = None
-    boundaryName: Optional[str] = None
-    boundaryLevel: Optional[str] = None
-    url: str
-    timestamp: str
-    userAgent: str
-    userId: Optional[str] = None
-    sessionId: Optional[str] = None
-    metadata: Optional[dict] = None
+    """One client-reported error. Every field is untrusted, client-supplied text.
+
+    The ``max_length`` caps are generous relative to real browser payloads (React
+    component stacks run well under 10 KB) but bound abuse; they reject rather
+    than truncate, so an over-cap batch is a loud 422 instead of silent data loss.
+    """
+
+    id: str = Field(..., max_length=128)
+    message: str = Field(..., max_length=4000)
+    stack: Optional[str] = Field(default=None, max_length=20000)
+    componentStack: Optional[str] = Field(default=None, max_length=20000)
+    boundaryName: Optional[str] = Field(default=None, max_length=200)
+    boundaryLevel: Optional[str] = Field(default=None, max_length=50)
+    url: str = Field(..., max_length=2000)
+    timestamp: str = Field(..., max_length=64)
+    userAgent: str = Field(..., max_length=1000)
+    # Client-claimed only. NEVER resolved to a User row or used for attribution.
+    userId: Optional[str] = Field(default=None, max_length=64)
+    sessionId: Optional[str] = Field(default=None, max_length=128)
+    # NOTE: the client also sends a free-form ``metadata`` object (screen size,
+    # language, and `preservedData` — arbitrary in-progress form contents). It is
+    # deliberately NOT declared here: it was the one field with no length bound,
+    # it is never logged or emitted anywhere, and dropping it keeps unbounded
+    # client data (potentially a user's half-typed record) out of the process
+    # entirely. Pydantic ignores undeclared fields, so the client is unaffected.
 
 
 class ErrorLogRequest(BaseModel):
-    errors: List[ErrorLogEntry]
+    errors: List[ErrorLogEntry] = Field(..., max_length=MAX_ERRORS_PER_REQUEST)
 
 
 class ErrorLogResponse(BaseModel):
@@ -50,6 +107,9 @@ async def log_errors(request: ErrorLogRequest, background_tasks: BackgroundTasks
 
     Errors are processed in the background to avoid blocking the client.
     Critical errors (global boundary level) trigger immediate alerts.
+
+    Unauthenticated and CSRF-exempt by necessity (sendBeacon). Nothing is
+    persisted — see the module docstring for why the audit write was removed.
     """
     # Get client IP for additional context
     client_ip = http_request.client.host if http_request.client else "unknown"
@@ -61,7 +121,15 @@ async def log_errors(request: ErrorLogRequest, background_tasks: BackgroundTasks
 
 
 async def process_error_logs(errors: List[ErrorLogEntry], client_ip: str):
-    """Process and store error logs."""
+    """Emit client-reported errors to the application logger (and Sentry).
+
+    Log-only by design: this path has no database access. See the module
+    docstring — do not add one. Global-boundary alerts are capped per request
+    (``MAX_GLOBAL_ALERTS_PER_REQUEST``) because ``boundaryLevel`` is
+    attacker-supplied and each "global" entry costs a Sentry event.
+    """
+    global_alerts_sent = 0
+
     for error in errors:
         try:
             # Log to application logger
@@ -75,7 +143,9 @@ async def process_error_logs(errors: List[ErrorLogEntry], client_ip: str):
                     "boundary_name": error.boundaryName,
                     "boundary_level": error.boundaryLevel,
                     "url": error.url,
-                    "user_id": error.userId,
+                    # Client-claimed, unverified — named so no log consumer
+                    # mistakes it for an authenticated actor.
+                    "claimed_user_id": error.userId,
                     "session_id": error.sessionId,
                     "client_ip": client_ip,
                     "user_agent": error.userAgent,
@@ -84,59 +154,23 @@ async def process_error_logs(errors: List[ErrorLogEntry], client_ip: str):
                 },
             )
 
-            # Store in database (audit log)
-            await run_in_threadpool(store_error_log_sync, error, client_ip)
-
-            # Alert on critical errors
+            # Alert on critical errors, bounded per request.
             if error.boundaryLevel == "global":
-                await send_error_alert(error)
+                if global_alerts_sent < MAX_GLOBAL_ALERTS_PER_REQUEST:
+                    global_alerts_sent += 1
+                    await send_error_alert(error)
+                elif global_alerts_sent == MAX_GLOBAL_ALERTS_PER_REQUEST:
+                    global_alerts_sent += 1  # log the suppression notice exactly once
+                    logger.warning(
+                        "Suppressing further global-boundary alerts for this batch " "(cap=%s, batch=%s, client_ip=%s)",
+                        MAX_GLOBAL_ALERTS_PER_REQUEST,
+                        len(errors),
+                        client_ip,
+                    )
 
         except Exception as e:
             # Don't let error logging errors crash the system
             logger.exception(f"Failed to process error log: {e}")
-
-
-def store_error_log_sync(error: ErrorLogEntry, client_ip: str):
-    """
-    Store error in database for analysis.
-
-    Uses the existing AuditLog model to store frontend errors.
-    """
-    from app.db.database import SessionLocal
-    from app.models.user import User
-    from app.services.audit_service import AuditService
-
-    try:
-        db = SessionLocal()
-
-        user = None
-        if error.userId and error.userId.isdigit():
-            user = db.query(User).filter(User.id == int(error.userId)).first()
-
-        AuditService(db, user).log(
-            action="FRONTEND_ERROR",
-            resource_type="frontend",
-            resource_identifier=error.id,
-            description=f"{error.boundaryName or 'Unknown'}: {error.message[:500]}",
-            success=False,
-            error_message=error.message[:1000],
-            extra_data={
-                "error_id": error.id,
-                "boundary_level": error.boundaryLevel,
-                "url": error.url,
-                "client_ip": client_ip,
-                "user_agent": error.userAgent[:500] if error.userAgent else None,
-                "session_id": error.sessionId,
-                "stack": error.stack[:2000] if error.stack else None,
-                "component_stack": error.componentStack[:1000] if error.componentStack else None,
-                "metadata": error.metadata,
-            },
-        )
-        db.commit()
-        db.close()
-
-    except Exception as e:
-        logger.exception(f"Failed to store error log in database: {e}")
 
 
 async def send_error_alert(error: ErrorLogEntry):
@@ -161,7 +195,7 @@ async def send_error_alert(error: ErrorLogEntry):
     logger.critical(
         f"CRITICAL FRONTEND ERROR [{error.id}]: {error.message}\n"
         f"URL: {error.url}\n"
-        f"User: {error.userId or 'anonymous'}\n"
+        f"Claimed user (unverified): {error.userId or 'anonymous'}\n"
         f"Boundary: {error.boundaryName}"
     )
 
@@ -178,7 +212,7 @@ async def send_error_alert(error: ErrorLogEntry):
                 extras={
                     "error_id": error.id,
                     "url": error.url,
-                    "user_id": error.userId,
+                    "claimed_user_id": error.userId,
                     "boundary_name": error.boundaryName,
                     "boundary_level": error.boundaryLevel,
                     "stack": error.stack,
