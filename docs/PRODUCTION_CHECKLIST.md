@@ -198,14 +198,24 @@ Complete all items below before launching to production.
   DATABASE_URL=postgresql://postgres.meatfdvteugbeksckgqg:<password>@aws-1-us-west-2.pooler.supabase.com:5432/postgres
   ```
 
-- [ ] **Disable API docs in production**
+- [x] **Disable API docs in production** — done in code, no per-deploy action needed.
+  `app/main.py` derives all three URLs from `settings.ENVIRONMENT`, so setting
+  `ENVIRONMENT=production` (above) is what turns them off:
   ```python
   # In main.py
+  _DOCS_ENABLED = settings.ENVIRONMENT != "production"
   app = FastAPI(
-    docs_url=None,  # Disable
-    redoc_url=None,  # Disable
+    docs_url="/api/docs" if _DOCS_ENABLED else None,
+    redoc_url="/api/redoc" if _DOCS_ENABLED else None,
+    openapi_url="/api/openapi.json" if _DOCS_ENABLED else None,
   )
   ```
+  `openapi_url` is gated too, so the schema itself is never served in
+  production — disabling only the two UIs would leave `/api/openapi.json`
+  handing out the full endpoint inventory. The security-headers middleware's
+  CSP exemption for those paths is derived from the same flag and is empty in
+  production. Verify after deploy: `curl -sS -o /dev/null -w '%{http_code}'
+  https://<api-host>/api/openapi.json` returns `404`.
 
 - [ ] **Configure session management**
   - Set session timeout
@@ -235,16 +245,18 @@ Complete all items below before launching to production.
 ## 🧪 TESTING & QUALITY ASSURANCE
 
 - [ ] **Complete test suite**
-  - [ ] Backend unit tests (70%+ coverage)
+  - [ ] Backend unit tests (floor enforced at 78%, ~81% actual)
   - [ ] Integration tests
   - [ ] Frontend component tests
   - [ ] E2E tests (Cypress/Playwright)
 
 - [ ] **Run all tests in production-like environment**
   ```bash
-  # Backend
+  # Backend — pytest.ini already applies --cov=app and the enforced floor.
+  # Do NOT pass --cov-fail-under here: a CLI value overrides addopts and would
+  # quietly run this check at a laxer bar than CI does.
   cd backend
-  pytest tests/ --cov=app --cov-fail-under=70
+  pytest tests/
 
   # Frontend
   cd frontend

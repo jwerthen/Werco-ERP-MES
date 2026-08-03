@@ -52,10 +52,29 @@ _rate_lock = threading.Lock()
 def _check_rate_limit(user_id: int) -> None:
     now = time.monotonic()
     with _rate_lock:
+        # Drop every bucket whose entries have all aged out, not just this
+        # caller's. `_rate_buckets` is a defaultdict that used to keep one
+        # entry per user id for the life of the process, so a long-running
+        # worker leaked a deque per user who ever opened copilot. Pruning only
+        # the caller would release nothing -- their bucket is re-appended
+        # below; it is the users who never come back that accumulate. A
+        # bucket's newest timestamp is its youngest, so if that one is outside
+        # the window the whole bucket is dead. The scan is O(users active in
+        # the last minute), against a request that runs a multi-call LLM loop.
+        stale = [uid for uid, seen in _rate_buckets.items() if not seen or now - seen[-1] > _RATE_WINDOW_SECONDS]
+        for uid in stale:
+            del _rate_buckets[uid]
+
         bucket = _rate_buckets[user_id]
         while bucket and now - bucket[0] > _RATE_WINDOW_SECONDS:
             bucket.popleft()
         if len(bucket) >= COPILOT_RATE_LIMIT_PER_MINUTE:
+            # Nothing is appended on this path, so an emptied bucket would
+            # linger until the next caller's sweep. Reachable when the limit is
+            # configured to 0 (copilot disabled), where every rejected user id
+            # would otherwise leave an empty deque behind.
+            if not bucket:
+                del _rate_buckets[user_id]
             raise HTTPException(status_code=429, detail="Copilot rate limit exceeded; try again in a minute.")
         bucket.append(now)
 

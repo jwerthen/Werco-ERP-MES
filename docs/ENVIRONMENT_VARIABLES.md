@@ -220,10 +220,21 @@ ALLOWED_HOSTS=api.werco.com,erp.werco.com,*.up.railway.app,healthcheck.railway.a
 |----------|----------|---------|-------------|
 | `APP_NAME` | No | `Werco ERP` | Application name (shown in logs, emails) |
 | `DEBUG` | No | `false` | Enable debug mode (never in production!) |
-| `ENVIRONMENT` | No | `development` | Environment name: development, staging, production |
+| `ENVIRONMENT` | No | `development` | Environment name: development, staging, production. Setting it to `production` is load-bearing, not cosmetic — see below. |
 | `API_V1_PREFIX` | No | `/api/v1` | API route prefix |
 | `PORT` | No | `8000` | Server port (Railway sets this automatically) |
 | `LOG_LEVEL` | No | `INFO` | Logging level: DEBUG, INFO, WARNING, ERROR |
+
+> **`ENVIRONMENT=production` turns off the interactive API docs.** `app/main.py` derives
+> `docs_url` / `redoc_url` / `openapi_url` from it, so `/api/docs`, `/api/redoc` **and**
+> `/api/openapi.json` return **404** in production — no route is registered and the schema is
+> never generated. `staging` and `development` keep all three. This is the only switch: there is
+> no separate docs flag, so a production deployment that leaves `ENVIRONMENT` at its
+> `development` default silently keeps the full endpoint inventory public. Verify after deploy
+> with `curl -sS -o /dev/null -w '%{http_code}' https://<api-host>/api/openapi.json` → `404`.
+> `ENVIRONMENT=production` additionally hard-fails startup unless `DEBUG` is false,
+> `CORS_ORIGINS` is set without `localhost`, and the database is Supabase
+> (`validate_production_settings` in `app/core/config.py`).
 
 > **Not environment-configurable (intentional).** The work-order-completion finished-goods receipt
 > location is **not** an env var — the warehouse (`MAIN`) and location (`FINISHED-GOODS`) are module

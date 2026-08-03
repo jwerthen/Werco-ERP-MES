@@ -7,10 +7,12 @@ the search endpoint). No live API calls.
 """
 
 import json
+import time
 from types import SimpleNamespace
 from typing import Any, Dict, List
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 import app.api.endpoints.copilot as copilot_endpoint
@@ -62,6 +64,77 @@ def _reset_rate_limit():
 
 def _sse_frames(body: str) -> List[dict]:
     return [json.loads(chunk[len("data: ") :]) for chunk in body.split("\n\n") if chunk.startswith("data: ")]
+
+
+# ---------------------------------------------------------------------------
+# Rate-limit bookkeeping
+# ---------------------------------------------------------------------------
+class TestRateBucketHousekeeping:
+    """`_rate_buckets` must not accumulate an entry per user id forever.
+
+    It is a defaultdict of deques living for the life of the process. Every
+    distinct caller used to add a key that was never removed, so a long-running
+    worker leaked one deque per user who ever opened copilot.
+    """
+
+    STALE_AGE = copilot_endpoint._RATE_WINDOW_SECONDS + 5
+
+    def test_fully_aged_out_bucket_is_dropped(self):
+        stale_user, active_user = 90001, 90002
+        copilot_endpoint._rate_buckets[stale_user].append(time.monotonic() - self.STALE_AGE)
+
+        copilot_endpoint._check_rate_limit(active_user)
+
+        assert stale_user not in copilot_endpoint._rate_buckets, (
+            "A bucket whose entries have all aged out must be removed, not left empty. "
+            "Pruning only the caller releases nothing -- the caller's bucket is re-appended."
+        )
+        assert active_user in copilot_endpoint._rate_buckets
+
+    def test_recent_entries_survive_the_sweep(self):
+        # The sweep must not double as a rate-limit reset: another user's
+        # in-window timestamps still have to count against their budget.
+        other_user = 90003
+        copilot_endpoint._rate_buckets[other_user].append(time.monotonic())
+
+        copilot_endpoint._check_rate_limit(90004)
+
+        assert other_user in copilot_endpoint._rate_buckets
+        assert len(copilot_endpoint._rate_buckets[other_user]) == 1
+
+    def test_partially_aged_bucket_keeps_only_its_recent_entries(self):
+        user_id = 90005
+        bucket = copilot_endpoint._rate_buckets[user_id]
+        bucket.append(time.monotonic() - self.STALE_AGE)  # expired
+        bucket.append(time.monotonic())  # still counts
+
+        copilot_endpoint._check_rate_limit(user_id)
+
+        # One surviving timestamp plus the one this call just recorded.
+        assert len(copilot_endpoint._rate_buckets[user_id]) == 2
+
+    def test_rejected_caller_leaves_no_empty_bucket(self, monkeypatch):
+        # Reachable when the limit is configured to 0 (copilot effectively off):
+        # nothing is appended on the 429 path, so every rejected user id would
+        # otherwise leave an empty deque behind.
+        monkeypatch.setattr(copilot_endpoint, "COPILOT_RATE_LIMIT_PER_MINUTE", 0)
+        user_id = 90006
+
+        with pytest.raises(HTTPException) as excinfo:
+            copilot_endpoint._check_rate_limit(user_id)
+
+        assert excinfo.value.status_code == 429
+        assert user_id not in copilot_endpoint._rate_buckets
+
+    def test_limit_is_still_enforced_within_the_window(self):
+        user_id = 90007
+        for _ in range(copilot_endpoint.COPILOT_RATE_LIMIT_PER_MINUTE):
+            copilot_endpoint._check_rate_limit(user_id)
+
+        with pytest.raises(HTTPException) as excinfo:
+            copilot_endpoint._check_rate_limit(user_id)
+
+        assert excinfo.value.status_code == 429
 
 
 # ---------------------------------------------------------------------------
