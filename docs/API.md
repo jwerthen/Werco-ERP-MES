@@ -1436,9 +1436,12 @@ mixed**:
 >   demand on a specific job.
 > * **It is a one-time check.** It is evaluated at the flip and never again — not on a BOM edit, not on a
 >   routing change, not at release, not at completion.
-> * **Nothing on the BOM or routing edit path knows a part is armed.** Anyone with `boms:edit` /
->   `routings:edit` — the same ADMIN/MANAGER/SUPERVISOR tier — can change any input afterwards with no
->   warning, no re-check and no notification on the editing side.
+> * **The ROUTING edit path still does not know a part is armed**, and the BOM edit path only warns.
+>   Anyone with `boms:edit` / `routings:edit` — the same ADMIN/MANAGER/SUPERVISOR tier — can change any
+>   input afterwards. A **BOM**-line write now returns a `backflush_armed_warning` and stamps
+>   `extra_data.backflush_armed_parts` on its `bom_line` audit row (see
+>   [BOM line writes](#bom-line-writes)), so the edit is at least visible on the chain — but there is
+>   still **no re-check, no refusal, and no notification**, and a routing change is still silent.
 >
 > What stands behind the flip is the **completion-time refusal** described under
 > [Work Orders](#work-orders) → completion inventory effects: a blocking diagnostic drops the demand it
@@ -1514,11 +1517,23 @@ same `unit_of_measure` change.
 > - **`backflush_armed_warning`** — a new optional response field on `BOMItemResponse`
 >   (and a key on the DELETE response body), set **only** on these three writes and **only**
 >   when the edited BOM helps state demand for a part armed via `Part.backflush_components`:
->   the BOM's own part, or an ancestor reachable through `phantom` lines only (`make` lines
->   are a wall — the backflush issues a `make` sub-assembly as a stocked unit and never
->   explodes into its children, so an armed grandparent above one is genuinely unaffected).
->   The same part numbers are hung on the audit row as `extra_data.backflush_armed_parts`,
->   which makes the arming verdict and the later edit correlatable on one chain.
+>   the BOM's own part, or an ancestor that reaches it through any line the explosion
+>   descends into — that is, anything **except `buy`**. The same part numbers are hung on the
+>   audit row as `extra_data.backflush_armed_parts`, which makes the arming verdict and the
+>   later edit correlatable on one chain.
+>
+>   **`make` lines are followed, and `buy` is the only wall.** The tempting reading — a `make`
+>   sub-assembly is issued as a stocked unit and its children never are, so an armed
+>   grandparent is unaffected — is true of the BOM *demand* leg and **false** of the leg
+>   beside it. `_explode_backflush_bom` still walks a `make` subtree in exclude-only mode, and
+>   every line it passes there lands in `excluded_part_ids`; a routing operation naming a part
+>   in that set raises `routing_component_excluded_by_bom` at **blocking** severity. So adding
+>   a line under a `make` sub-assembly can newly *block* an armed ancestor's routing demand,
+>   and deleting one can newly *un-block* it and let material issue that was being refused.
+>   (`bom_depth_exceeded` is a second such path: it fires before the `consumed` check, so
+>   deepening a `make` subtree past the level cap refuses the ancestor's whole leg.) A `buy`
+>   line genuinely is a wall — the explosion never looks up a child BOM under one, so nothing
+>   below it is read at all.
 >
 >   **It WARNS; it does not refuse.** The write succeeds. The opt-in gate
 >   (`assert_backflush_change_allowed`) is a one-time check at the instant of the flip, and
@@ -1711,8 +1726,10 @@ What the screen is, and what it deliberately is not:
    control working, not a bug to route around.
 
 Clearing this list is not a lock. Every line stays editable afterwards by the same
-Admin / Manager / Supervisor tier, with nothing on the BOM edit path aware that a part is
-armed, so an empty report is evidence about the minute it was run. What backs the part after
+Admin / Manager / Supervisor tier, so an empty report is evidence about the minute it was run.
+The BOM edit path is no longer *blind* — a line write warns and annotates its audit row when
+the edited BOM feeds an armed part (see [BOM line writes](#bom-line-writes)) — but a warning
+is not a lock either. What backs the part after
 the flip is the completion-time refusal (`BACKFLUSH_DEMAND_REFUSED`), not this list.
 
 #### BOM Import (document upload)
@@ -1788,6 +1805,16 @@ uploads go through text extraction + LLM. See
 > surfaces on the dispatch board as a flagged read-only column — see Shop Floor →
 > `GET /shop-floor/dispatch-board`.
 >
+> ⚠️ **`GET /work-centers/` caches per company, and the key used to be install-wide.** The
+> default-parameter response is cached for 15 minutes. The query was always scoped to the
+> caller's company; the cache key was the bare `work_centers:list`, so the first tenant to
+> warm it had its machine roster served verbatim to **every other tenant** for the duration —
+> a cross-tenant disclosure with no query defect anywhere near it. The key now carries the
+> company id. Invalidation is unchanged and still a blanket wipe (`work_centers:list*`, which
+> still matches the scoped keys): over-invalidation costs one recomputation, under-invalidation
+> serves a stale roster. Note the cache no-ops entirely when Redis is not configured, which is
+> why the regression tests drive the cache layer directly rather than relying on the endpoint.
+>
 > **Every state-changing work-center endpoint writes tamper-evident `audit_log` rows.** `PUT`
 > logs a `work_center` `log_update` with a full before/after column diff; `DELETE` logs the
 > `is_active` flip. Both self-suppress when nothing actually changed (a no-op update, or a
@@ -1802,10 +1829,15 @@ uploads go through text extraction + LLM. See
 > accepted any authenticated user in the tenant). It is the only writer of `current_status`
 > outside the CSV importer, and flipping a machine to `offline`/`maintenance` changes what the
 > dispatch board and the operator kiosk show. The tier matches `PUT`, not `DELETE`: the flip is
-> reversible, and `PUT` already lets a Manager flip `is_active`. The `/work-centers` route
-> carries no route-level permission guard, so the page's inline status `<select>` is gated to
-> the same role set client-side and renders as a read-only badge for everyone else — a control
-> the server will refuse is not offered. ⚠️ Inside `update_work_center_status` the `status`
+> reversible, and `PUT` already lets a Manager flip `is_active`. The page's inline status
+> `<select>` is gated to the same role set client-side and renders as a read-only badge for
+> everyone else, so a control the server will refuse is not offered. That client gate is
+> **defense in depth, not the primary gate**: `/work-centers` is already route-guarded on
+> `admin:settings` (`App.tsx` → `routeAccessRequirements`), which resolves to platform_admin
+> + admin — a *narrower* set than these endpoints allow, so a **Manager can call the endpoint
+> but cannot reach the page**. That route/nav/endpoint tier misalignment is tracked
+> separately; the client gate is what keeps the control tied to its own verb's role set when
+> it is resolved. ⚠️ Inside `update_work_center_status` the `status`
 > query parameter **shadows the fastapi `status` module**, so `status.HTTP_*` there raises
 > `AttributeError` at request time while type-checking and importing clean; use literal int
 > status codes. The parameter name is part of the API contract and is not renamed.

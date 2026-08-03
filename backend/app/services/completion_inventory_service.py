@@ -4239,20 +4239,38 @@ def armed_parts_affected_by_bom(db: Session, bom: BOM, *, company_id: int) -> li
     Two ways an armed part's demand depends on this BOM:
 
     * the BOM's **own** part is armed; or
-    * an ancestor is armed and reaches this BOM's part through ``phantom`` lines **only**.
+    * an ancestor is armed and reaches this BOM's part through any line the explosion
+      DESCENDS INTO -- that is, anything that is not ``buy``.
 
-    ``make`` lines are deliberately NOT followed. ``_explode_backflush_bom`` issues a
-    ``make`` sub-assembly as a stocked unit and walks its subtree exclude-only, so an armed
-    grandparent above a ``make`` line is genuinely unaffected by an edit down here. Naming
-    it would make the warning claim a part the leg would never explode into -- an
-    over-broad warning on a compliance surface is worse than none.
+    **The ascent follows ``make`` lines as well as ``phantom`` ones, and getting this wrong
+    was a real false negative.** An earlier version stopped at ``make`` on the reasoning
+    that a ``make`` sub-assembly is issued as a stocked unit and its children never are, so
+    an armed grandparent above one could not be affected. That is true of the **BOM demand**
+    leg and false of the leg beside it. ``_explode_backflush_bom`` still walks a ``make``
+    subtree in exclude-only mode, and every line it passes there lands in
+    ``excluded_part_ids`` -- which is load-bearing: a routing operation naming a part in
+    that set raises ``routing_component_excluded_by_bom`` at **BACKFLUSH_BLOCKING**. So
+    adding a line under a ``make`` sub-assembly can newly BLOCK an armed ancestor's routing
+    demand, and deleting one can newly UN-block it and let material issue that was being
+    refused. The structural ``bom_depth_exceeded`` diagnostic is a second such path: it is
+    raised before the ``consumed`` check, so deepening a ``make`` subtree past
+    ``_MAX_BOM_LEVELS`` refuses the armed ancestor's **whole** leg.
+
+    ``buy`` lines really are a wall: the explosion never looks up a child BOM under one
+    (``if item_type != BOMItemType.BUY.value``), so nothing below a ``buy`` line is read at
+    all -- no demand, no exclusion, no diagnostic. The predicate below therefore mirrors
+    that exact test, ``COALESCE(item_type,'') != 'buy'``, rather than naming line types:
+    an empty or unrecognised ``item_type`` is descended into by the explosion, so it is
+    ascended through here too.
 
     COST -- this runs on every BOM-line write, including inside the BOM tab's Batch Add
-    (one request per line, ~40 for a real assembly). It is **two indexed queries** in the
-    ordinary case: one PK read of the BOM's own part, then one probe for phantom parents
-    which returns nothing for almost every part (a phantom line is rare) and ends the walk.
-    The ascent only costs more when phantom parents actually exist, and it stops at the
-    first level that yields an armed part.
+    (one request per line, ~40 for a real assembly), so the walk is shaped to be cheap
+    rather than merely bounded. It is **two indexed queries** whenever the BOM's part is not
+    a non-``buy`` component of anything -- the ordinary case for a top-level assembly, and
+    the case Batch Add is actually in: one PK read of the BOM's own part, then one
+    parent probe that returns no rows and ends the walk. Each further ancestor LEVEL (not
+    each ancestor) costs one more indexed query, so a part three levels down a ``make``
+    chain costs four. See ``test_the_walk_costs_two_queries_on_an_ordinary_batch_add_line``.
 
     BOUNDS, and they are deliberate. The ascent stops at the first level containing an
     armed part, so the result is "**at least** these are affected", not a complete
@@ -4285,7 +4303,11 @@ def armed_parts_affected_by_bom(db: Session, bom: BOM, *, company_id: int) -> li
             .join(BOMItem, BOMItem.bom_id == BOM.id)
             .filter(
                 BOMItem.component_part_id.in_(frontier),
-                func.lower(BOMItem.item_type) == BOMItemType.PHANTOM.value,
+                # Mirrors ``_explode_backflush_bom``'s own descend test exactly -- see the
+                # docstring. NOT a phantom-only filter: a ``make`` subtree still feeds
+                # ``excluded_part_ids`` and the depth cap, both of which reach an armed
+                # ancestor. ``COALESCE`` matches the explosion's ``(item.item_type or "")``.
+                func.lower(func.coalesce(BOMItem.item_type, "")) != BOMItemType.BUY.value,
                 BOMItem.company_id == company_id,
                 BOM.company_id == company_id,
                 BOM.is_active.is_(True),

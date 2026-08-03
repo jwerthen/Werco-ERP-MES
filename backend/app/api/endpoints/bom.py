@@ -123,6 +123,30 @@ def _tenant_part_number(db: Session, part_id: Optional[int], company_id: int) ->
     return db.query(Part.part_number).filter(Part.id == part_id, Part.company_id == company_id).scalar()
 
 
+def _assert_work_center_owned(db: Session, work_center_id: Optional[int], company_id: int) -> None:
+    """A BOM line's optional ``work_center_id`` must name a machine in THIS company.
+
+    THE guard for every BOM-line write path that accepts the field (invariant #1). The
+    component part and the parent part were always scoped; ``work_center_id`` rode in
+    unchecked, so a caller in company B could point a line at company A's machine and leak
+    that machine's identity back through routing / explosion reports.
+
+    There are FOUR BOM-line write paths (``grep "BOMItem("``). Two accept a caller-supplied
+    ``work_center_id`` -- ``add_bom_item`` and ``create_bom``'s inline ``items`` -- and both
+    call this. ``update_bom_item`` is the third door onto an existing row and calls it too.
+    The two IMPORT paths never set the field at all, so they have nothing to check.
+
+    404 rather than 403, matching the component check, so a foreign id cannot be probed.
+    ``None`` is always allowed: it means "no work center", and on the update path it CLEARS
+    the reference, which needs no ownership to do.
+    """
+    if work_center_id is None:
+        return
+    owned = db.query(WorkCenter.id).filter(WorkCenter.id == work_center_id, WorkCenter.company_id == company_id).first()
+    if not owned:
+        raise HTTPException(status_code=404, detail="Work center not found")
+
+
 def _armed_extra_data(armed_parts: Sequence[Part]) -> Optional[Dict[str, Any]]:
     """``extra_data`` naming the backflush-armed parts this BOM edit affects, or None.
 
@@ -1396,6 +1420,11 @@ def create_bom(
         if not component:
             raise HTTPException(status_code=400, detail=f"Component part ID {item_data.component_part_id} not found")
 
+        # Same ownership rule as the single-add path: this is BOM-line write path 3 of 4
+        # and it splats ``model_dump()`` straight into ``BOMItem``, so an unchecked
+        # ``work_center_id`` here reopens the hole the other paths close.
+        _assert_work_center_owned(db, item_data.work_center_id, company_id)
+
         # Check for circular reference
         if item_data.component_part_id == bom_in.part_id:
             raise HTTPException(status_code=400, detail="BOM cannot contain itself as a component")
@@ -1780,19 +1809,8 @@ def add_bom_item(
         if not component:
             raise HTTPException(status_code=404, detail="Component part not found")
 
-        # Same rule for the OPTIONAL work center (invariant #1): the component and the
-        # parent part were already scoped above, but ``work_center_id`` rode in unchecked,
-        # so a caller in company B could point a BOM line at company A's machine and leak
-        # that machine's identity back through routing / explosion reports. 404 rather
-        # than 403, for the same non-probeable reason as the component check.
-        if item_in.work_center_id is not None:
-            work_center = (
-                db.query(WorkCenter)
-                .filter(WorkCenter.id == item_in.work_center_id, WorkCenter.company_id == company_id)
-                .first()
-            )
-            if not work_center:
-                raise HTTPException(status_code=404, detail="Work center not found")
+        # Same rule for the OPTIONAL work center (invariant #1) -- BOM-line write path 4 of 4.
+        _assert_work_center_owned(db, item_in.work_center_id, company_id)
 
         # Check for circular reference
         if item_in.component_part_id == bom.part_id:
@@ -1948,17 +1966,9 @@ def update_bom_item(
 
     update_data = item_in.model_dump(exclude_unset=True)
 
-    # Same ownership check the create path now makes: ``work_center_id`` is settable here
-    # too, so without this the update path reopens the exact hole the create path closes.
-    # An explicit null CLEARS the reference and needs no check.
-    if update_data.get("work_center_id") is not None:
-        work_center = (
-            db.query(WorkCenter)
-            .filter(WorkCenter.id == update_data["work_center_id"], WorkCenter.company_id == company_id)
-            .first()
-        )
-        if not work_center:
-            raise HTTPException(status_code=404, detail="Work center not found")
+    # Same ownership check the two create paths make: ``work_center_id`` is settable here
+    # too, so without this the update path reopens the hole they close.
+    _assert_work_center_owned(db, update_data.get("work_center_id"), company_id)
 
     if "unit_of_measure" in update_data:
         # Defense-in-depth (invariant #1): resolve a cleared UoM through the same

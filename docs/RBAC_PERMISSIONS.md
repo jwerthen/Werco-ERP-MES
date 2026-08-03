@@ -295,8 +295,10 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > permission should be read.** The readiness check runs the part's **BOM** explosion only — the routing
 > half is not evaluated at part scope at all — it is evaluated **once**, and it is never re-run on a BOM
 > edit, a routing change, a release or a completion. Every input it read stays editable afterwards by the
-> **same ADMIN/MANAGER/SUPERVISOR tier** through `boms:edit` / `routings:edit`, and **nothing on those
-> edit paths knows the part is armed**. So the recorded verdict `backflush_readiness: "clean"` asserts
+> **same ADMIN/MANAGER/SUPERVISOR tier** through `boms:edit` / `routings:edit`. A **BOM**-line write now
+> at least *says so* — it returns a `backflush_armed_warning` and stamps `extra_data.backflush_armed_parts`
+> on its own `bom_line` audit row — but it does not re-check and does not refuse, and the **routing** edit
+> path is still entirely unaware. So the recorded verdict `backflush_readiness: "clean"` asserts
 > less than a reader assumes: not "this part's demand resolves correctly", only "no blocking diagnostic
 > in its BOM at that instant". What backs it afterwards is a completion-time refusal
 > (`BACKFLUSH_DEMAND_REFUSED`), which is a net, not a second gate. **Practically: granting `boms:edit` or
@@ -353,8 +355,10 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 >
 > **What the page can and cannot do is part of the gate's rationale.** It is **read-only**: rows
 > deep-link to `/bom?id={bom_id}` and to the assembly part, and there is no inline BOM-line editor,
-> because BOM-line create/update/delete write **no audit rows at all** today — making this screen the
-> primary remediation flow would put a compliance-critical correction on an un-audited endpoint. The
+> because BOM-line create/update/delete wrote **no audit rows at all** when it was built — making this
+> screen the primary remediation flow would have put a compliance-critical correction on an un-audited
+> endpoint. **That blocker is now closed** (all three verbs audit as `bom_line`), so an inline editor is
+> no longer refused on compliance grounds; it is simply not built. The
 > corrections themselves therefore run through the ordinary, already-gated BOM edit path. See
 > `docs/API.md` → BOM → *Where this is worked — the BOM Unit Mismatches screen*, and
 > [docs/MATERIAL_CONSUMPTION_PLAN.md](MATERIAL_CONSUMPTION_PLAN.md) → "Exposing the flag (PR 4.5)" for
@@ -419,11 +423,19 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > is reversible, and Edit already lets a Manager flip `is_active`. Superuser / Platform Admin
 > bypass, as elsewhere.
 >
-> **The frontend gate is paired with it, in the same change.** The `/work-centers` route carries
-> **no route-level permission guard** (`App.tsx`), so a non-Manager who deep-links still reaches
-> the page. The inline status `<select>` on each row is therefore gated to the same role set and
-> renders as a read-only `StatusBadge` for everyone else — otherwise the control would render,
-> accept a change, fire the request, and surface the refusal only as a 403 toast afterwards.
+> **The frontend gate is paired with it, in the same change.** The inline status `<select>` on
+> each row is gated to the same role set and renders as a read-only `StatusBadge` for everyone
+> else — otherwise the control would render, accept a change, fire the request, and surface the
+> refusal only as a 403 toast afterwards.
+>
+> ⚠️ **The page and the endpoints disagree about who Manager is, and the page is the narrower
+> one.** `/work-centers` *is* route-guarded — `App.tsx` → `routeAccessRequirements` maps the
+> prefix to **`admin:settings`**, which only **Admin** and **Platform Admin** hold. So a
+> **Manager holds every endpoint permission in this table except Deactivate, yet is routed to
+> `/unauthorized` when opening the page**, and the nav entry is shown to them by a different
+> rule. Nobody who can currently reach the page is refused by the client gate above; it is
+> defense in depth today and becomes load-bearing when the route tier is aligned. Tracked
+> separately — do not "fix" it by widening the status endpoint instead.
 >
 > **Deactivate stays Admin-only and is server-GATED**: refused **409** while any live operation
 > still references the machine (see `docs/API.md` → Work Centers). Every state-changing endpoint

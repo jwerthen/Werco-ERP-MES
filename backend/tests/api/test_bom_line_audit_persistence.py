@@ -9,9 +9,13 @@ What is proved, and why each one needs its own test
 --------------------------------------------------
 
 1. **The audit rows COMMIT** (§1). Not "are written" -- committed. See the guard below.
-2. **``work_center_id`` is tenant-checked on BOTH write paths** (§2). The component part
-   and the parent part were already scoped; ``work_center_id`` rode in unchecked, so a
-   caller in company B could point a BOM line at company A's machine.
+2. **``work_center_id`` is tenant-checked on EVERY write path that accepts it** (§2). The
+   component part and the parent part were already scoped; ``work_center_id`` rode in
+   unchecked, so a caller in company B could point a BOM line at company A's machine.
+   There are FOUR BOM-line write paths (``grep "BOMItem("``): ``add_bom_item``,
+   ``update_bom_item``, ``create_bom``'s inline ``items``, and the two importers -- which
+   never set the field, so they have nothing to check. A first pass here covered only the
+   first two and left ``create_bom`` open, which is why each door gets its own test.
 3. **``has_bom`` respects soft delete** (§3). ``BOM`` carries ``SoftDeleteMixin`` and the
    probe ignored it, so a deleted BOM made the response claim a component is an assembly
    -- which is what drives the expand affordance in the BOM tree.
@@ -364,6 +368,73 @@ def test_add_bom_item_accepts_an_own_work_center(client: TestClient, db_session:
     assert response.json()["work_center_id"] == own_wc.id
 
 
+def test_create_bom_with_inline_items_refuses_a_foreign_work_center(client: TestClient, db_session: Session):
+    """The THIRD door, and the one a first pass at this missed.
+
+    ``POST /bom/`` accepts its lines inline and splats ``BOMItemCreate.model_dump()``
+    straight into ``BOMItem(...)``, so guarding only the two ``/bom/items`` endpoints left
+    this one wide open -- same field, same harm, different URL.
+    """
+    user = make_user(db_session)
+    assembly = make_part(db_session)
+    component = make_part(db_session, part_type="raw_material")
+    foreign_wc = make_work_center(db_session, company_id=COMPANY_B)
+
+    response = client.post(
+        "/api/v1/bom/",
+        headers=headers_for(user),
+        json={
+            "part_id": assembly.id,
+            "revision": "A",
+            "items": [
+                {
+                    "component_part_id": component.id,
+                    "item_number": 10,
+                    "quantity": 1,
+                    "item_type": "buy",
+                    "work_center_id": foreign_wc.id,
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == status.HTTP_404_NOT_FOUND, response.text
+    assert "Work center not found" in response.json()["detail"]
+    db_session.rollback()
+    assert (
+        db_session.query(BOMItem).filter(BOMItem.work_center_id == foreign_wc.id).count() == 0
+    ), "a refusal must not store the foreign work-center id"
+
+
+def test_create_bom_with_inline_items_accepts_an_own_work_center(client: TestClient, db_session: Session):
+    """Negative control for the guard above."""
+    user = make_user(db_session)
+    assembly = make_part(db_session)
+    component = make_part(db_session, part_type="raw_material")
+    own_wc = make_work_center(db_session)
+
+    response = client.post(
+        "/api/v1/bom/",
+        headers=headers_for(user),
+        json={
+            "part_id": assembly.id,
+            "revision": "A",
+            "items": [
+                {
+                    "component_part_id": component.id,
+                    "item_number": 10,
+                    "quantity": 1,
+                    "item_type": "buy",
+                    "work_center_id": own_wc.id,
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == status.HTTP_200_OK, response.text
+    assert response.json()["items"][0]["work_center_id"] == own_wc.id
+
+
 def test_update_bom_item_refuses_a_foreign_work_center(client: TestClient, db_session: Session):
     """The update path is settable too, so guarding only the create path would leave the
     hole wide open through a second door."""
@@ -557,15 +628,24 @@ def test_an_armed_ancestor_reached_through_a_phantom_line_is_named(client: TestC
     assert warning and top.part_number in warning, f"the phantom ancestor must be named, got {warning!r}"
 
 
-def test_an_armed_ancestor_above_a_make_line_is_NOT_named(client: TestClient, db_session: Session):
-    """THE test that catches an over-broad walk.
+def test_an_armed_ancestor_above_a_make_line_IS_named(client: TestClient, db_session: Session):
+    """A ``make`` line is NOT a wall, and an earlier version of this walk got it backwards.
 
-    ``_explode_backflush_bom`` issues a ``make`` sub-assembly as a STOCKED UNIT and walks
-    its subtree exclude-only -- its children are never issued, because they were consumed
-    when it was built. So an armed grandparent above a ``make`` line is genuinely
-    unaffected by an edit down here, and naming it would make the warning claim a part the
-    leg would never explode into. An over-broad warning on a compliance surface is worse
-    than none.
+    The tempting rationale -- ``_explode_backflush_bom`` issues a ``make`` sub-assembly as a
+    stocked unit and never issues its children, so an armed grandparent cannot be affected
+    -- holds for the BOM DEMAND leg and is false for the leg beside it. The explosion still
+    walks a ``make`` subtree in exclude-only mode, and every line it passes there lands in
+    ``excluded_part_ids``; a routing operation naming a part in that set raises
+    ``routing_component_excluded_by_bom`` at **BACKFLUSH_BLOCKING**.
+
+    So an edit down here can newly BLOCK the armed ancestor's routing demand -- or, on a
+    delete, newly UN-block it and let material issue that was being refused. Either way the
+    armed part's behaviour changed and the editor must be told. (The structural
+    ``bom_depth_exceeded`` diagnostic is a second such path: it fires before the
+    ``consumed`` check, so deepening a ``make`` subtree past the level cap refuses the
+    ancestor's whole leg.)
+
+    This test replaced one that asserted the opposite and locked the false negative in.
     """
     user = make_user(db_session)
     top = make_part(db_session, part_type="manufactured")
@@ -584,7 +664,41 @@ def test_an_armed_ancestor_above_a_make_line_is_NOT_named(client: TestClient, db
     response = add_item(client, user, sub_bom.id, another, item_number=20)
 
     assert response.status_code == status.HTTP_200_OK, response.text
-    assert response.json()["backflush_armed_warning"] is None, "a make line is a wall, not a window"
+    warning = response.json()["backflush_armed_warning"]
+    assert warning and top.part_number in warning, (
+        f"an armed ancestor above a make line MUST be named -- its routing leg can flip "
+        f"between blocked and unblocked on this edit. Got {warning!r}"
+    )
+
+
+def test_nothing_below_a_buy_line_reaches_an_armed_ancestor(client: TestClient, db_session: Session):
+    """``buy`` IS the wall, and it is the only one -- so this is the test that keeps the
+    widened walk from becoming unbounded.
+
+    ``_explode_backflush_bom`` gates its child-BOM lookup on
+    ``if item_type != BOMItemType.BUY.value``, so under a ``buy`` line nothing below is read
+    at all: no demand, no ``excluded_part_ids`` entry, no diagnostic. An edit down there
+    genuinely cannot reach the ancestor, and claiming otherwise would make the warning cry
+    wolf on every raw-material BOM in the shop.
+    """
+    user = make_user(db_session)
+    top = make_part(db_session, part_type="manufactured")
+    sub = make_part(db_session, part_type="manufactured")
+    sheet = make_part(db_session, uom="sheets", part_type="raw_material")
+
+    sub_bom = make_bom(db_session, sub)
+    assert add_item(client, user, sub_bom.id, sheet, item_number=10, quantity=2).status_code == 200
+
+    top_bom = make_bom(db_session, top)
+    assert add_item(client, user, top_bom.id, sub, item_number=10, item_type="buy").status_code == 200
+
+    assert arm(client, user, top.id).status_code == status.HTTP_200_OK
+
+    another = make_part(db_session, uom="pounds", part_type="raw_material")
+    response = add_item(client, user, sub_bom.id, another, item_number=20)
+
+    assert response.status_code == status.HTTP_200_OK, response.text
+    assert response.json()["backflush_armed_warning"] is None, "a buy line is the wall; nothing below it is read"
 
 
 def test_a_foreign_companys_armed_part_never_contributes(client: TestClient, db_session: Session):
@@ -663,3 +777,99 @@ def test_a_cyclic_phantom_chain_terminates(client: TestClient, db_session: Sessi
 
     assert response.status_code == status.HTTP_200_OK, response.text
     assert response.json()["backflush_armed_warning"] is None, "nothing is armed, and the walk terminated"
+
+
+def test_a_cyclic_make_chain_terminates(client: TestClient, db_session: Session):
+    """Same guard, on the newly-followed edge. Widening the ascent to ``make`` widened what
+    can form a cycle in the ancestor graph, so the visited set + ``_MAX_BOM_LEVELS`` cap has
+    to hold there too -- an unbounded walk here raises inside a WRITE handler."""
+    user = make_user(db_session)
+    a = make_part(db_session, part_type="manufactured")
+    b = make_part(db_session, part_type="manufactured")
+    sheet = make_part(db_session, uom="sheets", part_type="raw_material")
+
+    bom_a = make_bom(db_session, a)
+    bom_b = make_bom(db_session, b)
+    raw_line(db_session, bom_a, b, item_type="make", item_number=10)
+    raw_line(db_session, bom_b, a, item_type="make", item_number=10)
+    raw_line(db_session, bom_a, sheet, unit_of_measure="sheets", item_number=20)
+    db_session.commit()
+
+    response = add_item(client, user, bom_a.id, make_part(db_session, uom="pounds"), item_number=30)
+
+    assert response.status_code == status.HTTP_200_OK, response.text
+    assert response.json()["backflush_armed_warning"] is None, "nothing is armed, and the walk terminated"
+
+
+# ===========================================================================
+# §5 -- the cost of the walk, because it runs in the Batch Add loop
+# ===========================================================================
+
+
+def _count_walk_queries(db_session: Session, bom, company_id: int = COMPANY_A) -> int:
+    """SQL statements issued by one ``armed_parts_affected_by_bom`` call."""
+    from sqlalchemy import event
+
+    from app.services.completion_inventory_service import armed_parts_affected_by_bom
+
+    # Warm the BOM's attributes BEFORE the listener goes on. ``db.commit()`` expires every
+    # loaded object, so the walk's first read of ``bom.part_id`` would otherwise emit a
+    # lazy refresh SELECT and be counted as walk cost -- an artifact of the fixture, not of
+    # the walk (the endpoint hands it a freshly-loaded BOM).
+    _ = bom.part_id
+
+    statements: list = []
+    bind = db_session.get_bind()
+
+    def _before(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    event.listen(bind, "before_cursor_execute", _before)
+    try:
+        armed_parts_affected_by_bom(db_session, bom, company_id=company_id)
+    finally:
+        event.remove(bind, "before_cursor_execute", _before)
+    return len(statements)
+
+
+def test_the_walk_costs_two_queries_on_an_ordinary_batch_add_line(client: TestClient, db_session: Session):
+    """THE cost claim in the PR body, measured rather than asserted in prose.
+
+    PartBOMTab's Batch Add issues one request per line (~40 for a real assembly), each of
+    which now runs this walk. On the shape Batch Add is actually in -- lines being added to
+    a top-level assembly's own BOM -- the walk must cost TWO indexed queries: one PK read of
+    the BOM's own part, then one parent probe that comes back empty and ends the ascent. No
+    recursive walk on an ordinary line.
+    """
+    assembly = make_part(db_session, part_type="manufactured")
+    bom = make_bom(db_session, assembly)
+
+    assert _count_walk_queries(db_session, bom) == 2
+
+
+def test_each_further_ancestor_level_costs_exactly_one_more_query(client: TestClient, db_session: Session):
+    """The other half of the claim: cost scales with ancestor LEVELS, not ancestors, and
+    the widened (``make``-following) ascent did not turn into a per-row walk."""
+    user = make_user(db_session)
+    top = make_part(db_session, part_type="manufactured")
+    mid = make_part(db_session, part_type="manufactured")
+    low = make_part(db_session, part_type="manufactured")
+
+    low_bom = make_bom(db_session, low)
+    mid_bom = make_bom(db_session, mid)
+    top_bom = make_bom(db_session, top)
+    raw_line(db_session, mid_bom, low, item_type="make", item_number=10)
+    raw_line(db_session, top_bom, mid, item_type="make", item_number=10)
+    db_session.commit()
+
+    # Nothing is armed, so the ascent runs to the top of the chain and stops on an empty
+    # frontier: own-part read + one probe per level (low->mid, mid->top, top->nothing).
+    assert _count_walk_queries(db_session, low_bom) == 4
+    assert _count_walk_queries(db_session, mid_bom) == 3
+    assert _count_walk_queries(db_session, top_bom) == 2
+
+    # Arming the immediate parent short-circuits the ascent at the first armed level.
+    db_session.get(Part, mid.id).backflush_components = True
+    db_session.commit()
+    assert _count_walk_queries(db_session, low_bom) == 2, "stop at the first armed level"
+    assert user  # fixture used for symmetry with the suite's other tests

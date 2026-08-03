@@ -262,16 +262,38 @@ def init_cache(redis_url: Optional[str] = None):
     cache.init(redis_url)
 
 
-def cache_work_centers_list(wc_data: List[dict]):
-    """Cache work centers list."""
-    cache.set(CacheKeys.WORK_CENTERS_LIST, wc_data, CacheTTL.WORK_CENTERS_LIST)
+def _work_centers_list_key(company_id: int) -> str:
+    """Cache key for one company's work-center list.
+
+    THE COMPANY ID IS NOT OPTIONAL AND MUST NOT BECOME SO (invariant #1). This key used to
+    be the bare, install-wide ``work_centers:list``, while the query that filled it was
+    scoped to the caller's company -- so the first tenant to request the list with default
+    parameters populated it, and for the next 15 minutes EVERY other tenant asking for
+    ``GET /work-centers/`` was served that company's machine roster verbatim. A cross-tenant
+    disclosure with no query defect anywhere near it: the SQL was right and the key was
+    wrong. Live wherever Redis is configured (the cache no-ops when it is not, which is why
+    the tests that cover this drive the cache layer directly).
+    """
+    return f"{CacheKeys.WORK_CENTERS_LIST}:{company_id}"
 
 
-def get_cached_work_centers_list() -> Optional[List[dict]]:
-    """Get cached work centers list."""
-    return cache.get(CacheKeys.WORK_CENTERS_LIST)
+def cache_work_centers_list(wc_data: List[dict], company_id: int):
+    """Cache one company's work centers list."""
+    cache.set(_work_centers_list_key(company_id), wc_data, CacheTTL.WORK_CENTERS_LIST)
+
+
+def get_cached_work_centers_list(company_id: int) -> Optional[List[dict]]:
+    """Get one company's cached work centers list."""
+    return cache.get(_work_centers_list_key(company_id))
 
 
 def invalidate_work_centers_cache(wc_id: Optional[int] = None):
-    """Invalidate work centers cache."""
+    """Invalidate work centers cache, for every company.
+
+    ``invalidate_entity`` deletes by the pattern ``work_centers:list*``, which still matches
+    the per-company keys above -- so this keeps working unchanged after the key was scoped.
+    It is deliberately left as a BLANKET wipe rather than being narrowed to the acting
+    company: over-invalidation costs one recomputation, while under-invalidation serves a
+    stale roster, and this function is called from paths that do not all carry a company id.
+    """
     cache.invalidate_entity(CacheKeys.WORK_CENTERS, wc_id)

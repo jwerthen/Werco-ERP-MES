@@ -133,10 +133,13 @@ def list_work_centers(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """List all work centers (cached for 15 minutes)"""
-    # Try cache first (only for default parameters)
+    """List all work centers (cached for 15 minutes, PER COMPANY)"""
+    # Try cache first (only for default parameters). Keyed by the ACTIVE company
+    # (invariant #1): the query below is company-scoped, but this cache was keyed
+    # install-wide, so whichever tenant warmed it served its machine roster verbatim to
+    # every other tenant for the next 15 minutes.
     if skip == 0 and limit == 100 and active_only:
-        cached = get_cached_work_centers_list()
+        cached = get_cached_work_centers_list(company_id)
         if cached is not None:
             return cached
 
@@ -169,7 +172,7 @@ def list_work_centers(
             }
             for wc in result
         ]
-        cache_work_centers_list(cache_data)
+        cache_work_centers_list(cache_data, company_id)
 
     return result
 

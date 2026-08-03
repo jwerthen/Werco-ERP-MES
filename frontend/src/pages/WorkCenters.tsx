@@ -42,10 +42,17 @@ export default function WorkCenters() {
   const { showToast } = useToast();
   const { user } = useAuth();
   // POST /work-centers/{id}/status is Admin/Manager (platform_admin + superuser escalate,
-  // matching require_role). This route carries NO route-level permission guard, so a
-  // deep-linked operator lands on the page: without this the status <select> would still
-  // render, still accept a change, and only refuse afterwards as a 403 toast. Render a
-  // plain badge for anyone the server would refuse instead of offering the control.
+  // matching require_role). Render a plain badge for anyone the server would refuse, rather
+  // than a control that renders, accepts a change, fires the request and only then toasts
+  // a 403.
+  //
+  // DEFENSE IN DEPTH, not the primary gate. `/work-centers` IS route-guarded — on
+  // `admin:settings` (App.tsx `routeAccessRequirements`), which resolves to platform_admin
+  // + admin only, a NARROWER set than these endpoints allow. So nobody who can currently
+  // reach this page is refused by the check below. It earns its keep the moment that route
+  // tier is widened to Manager to match the endpoints (that route/nav/endpoint
+  // misalignment is tracked separately), and it keeps the control's visibility tied to the
+  // verb's own role set instead of to whatever the page-level gate happens to be.
   const canChangeStatus =
     (!!user && ['platform_admin', 'admin', 'manager'].includes(user.role)) || !!user?.is_superuser;
   const [workCenters, setWorkCenters] = useState<WorkCenter[]>([]);

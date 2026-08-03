@@ -2,11 +2,18 @@
  * WorkCenters — RBAC gating of the inline status select.
  *
  * `POST /work-centers/{id}/status` used to accept ANY authenticated user; it is now
- * Admin / Manager (platform_admin and superuser escalate, matching `require_role`). The
- * `/work-centers` route carries NO route-level permission guard, so an operator who
- * deep-links still lands on this page — and without gating the control the failure mode is
- * the bad one: the `<select>` renders, accepts a change, fires the request, and the user
- * only learns they aren't allowed when a 403 toast appears afterwards.
+ * Admin / Manager (platform_admin and superuser escalate, matching `require_role`). Without
+ * gating the control, the failure mode is the bad one: the `<select>` renders, accepts a
+ * change, fires the request, and the user only learns they aren't allowed when a 403 toast
+ * appears afterwards.
+ *
+ * DEFENSE IN DEPTH, not the primary gate — `/work-centers` IS route-guarded, on
+ * `admin:settings` (App.tsx `routeAccessRequirements`), a NARROWER set (platform_admin +
+ * admin) than these endpoints allow. So no role that can currently reach the page is
+ * refused by this gate. It becomes load-bearing if that route tier is widened to Manager to
+ * match the endpoints, and it keeps the control tied to its own verb's role set meanwhile.
+ * The tests below therefore exercise the component directly, which is the only level at
+ * which the un-guarded case is reachable at all.
  *
  * This locks both halves:
  *   1. An authorized role (manager) gets the interactive select, wired to
