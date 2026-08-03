@@ -19,6 +19,16 @@ from app.services.analytics_service import AnalyticsService, get_date_range
 
 router = APIRouter()
 
+# Upper bound for every ``days`` look-back parameter in this file.
+#
+# Most of these only widen a WHERE window and are cheap, but ``/daily-output``
+# turns ``days`` into a Python loop that issues TWO sequential aggregates per
+# day, so an unbounded value (``?days=1000000``) pins a worker until it times
+# out. One year is comfortably above any real request -- the Reports page
+# offers 7/30/90 and hard-codes 14 for the daily trend -- while capping
+# daily-output at 730 queries instead of unbounded.
+MAX_REPORT_DAYS = 365
+
 
 @router.get("/ship-otd", response_model=ShipOTDReportResponse)
 def get_ship_otd_report(
@@ -42,7 +52,7 @@ def get_ship_otd_report(
 
 @router.get("/production-summary")
 def get_production_summary(
-    days: int = 30,
+    days: int = Query(30, ge=1, le=MAX_REPORT_DAYS),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
@@ -53,7 +63,11 @@ def get_production_summary(
     # Work order counts by status
     wo_stats = (
         db.query(WorkOrder.status, func.count(WorkOrder.id))
-        .filter(WorkOrder.company_id == company_id, WorkOrder.created_at >= cutoff)
+        .filter(
+            WorkOrder.company_id == company_id,
+            WorkOrder.is_deleted == False,  # noqa: E712
+            WorkOrder.created_at >= cutoff,
+        )
         .group_by(WorkOrder.status)
         .all()
     )
@@ -65,6 +79,7 @@ def get_production_summary(
         db.query(WorkOrder)
         .filter(
             WorkOrder.company_id == company_id,
+            WorkOrder.is_deleted == False,  # noqa: E712
             WorkOrder.status == WorkOrderStatus.COMPLETE,
             WorkOrder.actual_end >= cutoff,
         )
@@ -74,10 +89,30 @@ def get_production_summary(
     total_completed = len(completed_wos)
     on_time = sum(1 for wo in completed_wos if wo.due_date and wo.actual_end and wo.actual_end.date() <= wo.due_date)
 
-    # Hours worked
+    # Hours worked.
+    #
+    # The three aggregates below join WorkOrder purely to exclude soft-deleted
+    # parents, so every number in this payload is computed over the SAME
+    # population as total_completed / work_orders_by_status above. Without it the
+    # response contradicts itself -- "1 completed work order, 17 pieces produced"
+    # -- and scrap_rate_pct is again derived from a different population than the
+    # headline count, which is the exact defect this endpoint's tenancy fix set
+    # out to remove.
+    #
+    # OUTER join here, INNER below: TimeEntry.work_order_id is nullable (indirect
+    # labor, non-job time), so an inner join would silently drop those hours from
+    # total_hours_worked. Untied labor is kept; only labor whose parent WO is
+    # deleted is dropped. WorkOrderOperation.work_order_id is NOT NULL, so its
+    # two aggregates can join straight through.
     time_entries = (
         db.query(func.sum(TimeEntry.duration_hours))
-        .filter(TimeEntry.clock_in >= cutoff, TimeEntry.duration_hours != None)
+        .outerjoin(WorkOrder, TimeEntry.work_order_id == WorkOrder.id)
+        .filter(
+            TimeEntry.company_id == company_id,
+            or_(TimeEntry.work_order_id.is_(None), WorkOrder.is_deleted == False),  # noqa: E712
+            TimeEntry.clock_in >= cutoff,
+            TimeEntry.duration_hours != None,
+        )
         .scalar()
         or 0
     )
@@ -85,14 +120,24 @@ def get_production_summary(
     # Scrap quantity
     scrap_qty = (
         db.query(func.sum(WorkOrderOperation.quantity_scrapped))
-        .filter(WorkOrderOperation.updated_at >= cutoff)
+        .join(WorkOrder, WorkOrderOperation.work_order_id == WorkOrder.id)
+        .filter(
+            WorkOrderOperation.company_id == company_id,
+            WorkOrder.is_deleted == False,  # noqa: E712
+            WorkOrderOperation.updated_at >= cutoff,
+        )
         .scalar()
         or 0
     )
 
     produced_qty = (
         db.query(func.sum(WorkOrderOperation.quantity_complete))
-        .filter(WorkOrderOperation.updated_at >= cutoff)
+        .join(WorkOrder, WorkOrderOperation.work_order_id == WorkOrder.id)
+        .filter(
+            WorkOrderOperation.company_id == company_id,
+            WorkOrder.is_deleted == False,  # noqa: E712
+            WorkOrderOperation.updated_at >= cutoff,
+        )
         .scalar()
         or 0
     )
@@ -112,7 +157,7 @@ def get_production_summary(
 
 @router.get("/quality-metrics")
 def get_quality_metrics(
-    days: int = 30,
+    days: int = Query(30, ge=1, le=MAX_REPORT_DAYS),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
@@ -193,9 +238,9 @@ def get_inventory_value(
 
 @router.get("/vendor-performance")
 def get_vendor_performance(
-    days: int = 90,
-    skip: int = 0,
-    limit: int = Query(100, le=500),
+    days: int = Query(90, ge=1, le=MAX_REPORT_DAYS),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
@@ -207,7 +252,11 @@ def get_vendor_performance(
 
     vendors = (
         db.query(Vendor)
-        .filter(Vendor.company_id == company_id, Vendor.is_active == True)
+        .filter(
+            Vendor.company_id == company_id,
+            Vendor.is_deleted == False,  # noqa: E712
+            Vendor.is_active == True,
+        )
         .order_by(Vendor.name)
         .offset(skip)
         .limit(limit)
@@ -216,11 +265,24 @@ def get_vendor_performance(
 
     result = []
     for vendor in vendors:
-        # Get PO lines for vendor
+        # Both aggregates below carry an EXPLICIT PurchaseOrder.company_id
+        # predicate rather than relying on the vendor_id join to bound them to
+        # the caller's tenant. Transitive-only scoping holds exactly as long as
+        # every FK is correctly stamped; the predicate holds regardless, and it
+        # rides the existing company_id index.
+        #
+        # PurchaseOrder is soft-deletable (migration 071), so a deleted PO must
+        # not feed a vendor scorecard. PurchaseOrderLine carries no
+        # SoftDeleteMixin -- its parent PO is the only deletion dimension.
         lines = (
             db.query(PurchaseOrderLine)
             .join(PurchaseOrder)
-            .filter(PurchaseOrder.vendor_id == vendor.id, PurchaseOrder.created_at >= cutoff)
+            .filter(
+                PurchaseOrder.company_id == company_id,
+                PurchaseOrder.is_deleted == False,  # noqa: E712
+                PurchaseOrder.vendor_id == vendor.id,
+                PurchaseOrder.created_at >= cutoff,
+            )
             .all()
         )
 
@@ -236,7 +298,10 @@ def get_vendor_performance(
             .join(PurchaseOrderLine)
             .join(PurchaseOrder)
             .filter(
+                PurchaseOrder.company_id == company_id,
+                PurchaseOrder.is_deleted == False,  # noqa: E712
                 PurchaseOrder.vendor_id == vendor.id,
+                POReceipt.company_id == company_id,
                 POReceipt.is_deleted == False,  # noqa: E712
                 POReceipt.received_at >= cutoff,
             )
@@ -264,9 +329,9 @@ def get_vendor_performance(
 
 @router.get("/work-center-utilization")
 def get_work_center_utilization(
-    days: int = 30,
-    skip: int = 0,
-    limit: int = Query(100, le=500),
+    days: int = Query(30, ge=1, le=MAX_REPORT_DAYS),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
@@ -287,10 +352,21 @@ def get_work_center_utilization(
 
     result = []
     for wc in work_centers:
-        # Get time entries for work center
+        # Scoping the parent WorkCenter is NOT sufficient. TimeEntry.work_center_id
+        # is a plain FK, and until the companion fix in work_orders.py
+        # (_assert_work_center_in_company) the operation-CREATE paths let a caller
+        # point an operation at another tenant's work center -- so a foreign time
+        # entry could carry this work center's id. Rows written before that fix
+        # persist. Without this predicate they report as this shop's hours and
+        # push utilization_pct past 100%: a capacity number a planner acts on.
         hours = (
             db.query(func.sum(TimeEntry.duration_hours))
-            .filter(TimeEntry.work_center_id == wc.id, TimeEntry.clock_in >= cutoff, TimeEntry.duration_hours != None)
+            .filter(
+                TimeEntry.company_id == company_id,
+                TimeEntry.work_center_id == wc.id,
+                TimeEntry.clock_in >= cutoff,
+                TimeEntry.duration_hours != None,
+            )
             .scalar()
             or 0
         )
@@ -314,7 +390,7 @@ def get_work_center_utilization(
 
 @router.get("/daily-output")
 def get_daily_output(
-    days: int = 14,
+    days: int = Query(14, ge=1, le=MAX_REPORT_DAYS),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
@@ -327,17 +403,31 @@ def get_daily_output(
         day_start = datetime.combine(day, datetime.min.time())
         day_end = datetime.combine(day, datetime.max.time())
 
-        # Completed operations for the day
+        # Completed operations for the day. Soft-deleted parents are excluded for
+        # the same reason as in production-summary -- and so the trend and the
+        # summary, which sit on the same dashboard, agree about what was produced.
         completed = (
             db.query(func.sum(WorkOrderOperation.quantity_complete))
-            .filter(WorkOrderOperation.actual_end >= day_start, WorkOrderOperation.actual_end <= day_end)
+            .join(WorkOrder, WorkOrderOperation.work_order_id == WorkOrder.id)
+            .filter(
+                WorkOrderOperation.company_id == company_id,
+                WorkOrder.is_deleted == False,  # noqa: E712
+                WorkOrderOperation.actual_end >= day_start,
+                WorkOrderOperation.actual_end <= day_end,
+            )
             .scalar()
             or 0
         )
 
         scrapped = (
             db.query(func.sum(WorkOrderOperation.quantity_scrapped))
-            .filter(WorkOrderOperation.actual_end >= day_start, WorkOrderOperation.actual_end <= day_end)
+            .join(WorkOrder, WorkOrderOperation.work_order_id == WorkOrder.id)
+            .filter(
+                WorkOrderOperation.company_id == company_id,
+                WorkOrder.is_deleted == False,  # noqa: E712
+                WorkOrderOperation.actual_end >= day_start,
+                WorkOrderOperation.actual_end <= day_end,
+            )
             .scalar()
             or 0
         )
@@ -350,7 +440,7 @@ def get_daily_output(
 @router.get("/work-order-costing")
 def get_work_order_costing(
     work_order_id: Optional[int] = None,
-    days: int = 90,
+    days: int = Query(90, ge=1, le=MAX_REPORT_DAYS),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
@@ -358,8 +448,12 @@ def get_work_order_costing(
     """Get work order costing details"""
     from app.models.part import Part
 
+    # Record-level, not just aggregate: without the is_deleted predicate a deleted
+    # job renders as a full row here, still asserting cost and variance against a
+    # live part and customer. A deleted record must vanish from read surfaces.
     query = db.query(WorkOrder).filter(
         WorkOrder.company_id == company_id,
+        WorkOrder.is_deleted == False,  # noqa: E712
         WorkOrder.status.in_([WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED, WorkOrderStatus.IN_PROGRESS]),
     )
 
@@ -373,14 +467,23 @@ def get_work_order_costing(
 
     result = []
     for wo in work_orders:
-        # Get part info for material cost estimate
-        part = db.query(Part).filter(Part.id == wo.part_id).first()
+        # Get part info for material cost estimate. Scoped explicitly: this lookup
+        # returns part_number / name / material_cost, and relying on part_id having
+        # been create-validated is the same transitive assumption that failed at
+        # work-center-utilization. Deliberately NOT filtered on Part.is_deleted --
+        # a live job referencing a retired part must still render its own material
+        # cost; dropping the part here would silently zero the job's cost instead.
+        part = db.query(Part).filter(Part.id == wo.part_id, Part.company_id == company_id).first()
         material_cost = (part.material_cost or 0) * wo.quantity_ordered if part else 0
 
         # Calculate labor cost from time entries (assume $50/hr standard rate)
         labor_hours = (
             db.query(func.sum(TimeEntry.duration_hours))
-            .filter(TimeEntry.work_order_id == wo.id, TimeEntry.duration_hours != None)
+            .filter(
+                TimeEntry.company_id == company_id,
+                TimeEntry.work_order_id == wo.id,
+                TimeEntry.duration_hours != None,
+            )
             .scalar()
             or 0
         )
