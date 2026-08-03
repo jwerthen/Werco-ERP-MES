@@ -48,9 +48,12 @@ jobs:
       - name: Run Flake8
         run: flake8 app --max-line-length=120
 
+      # Blocking as of 2026-08-02. This step carried `continue-on-error: true`
+      # while mypy was in fact clean over all 326 source files, so the gate was
+      # decoration. "Backend Linting" is a required status check, so a new
+      # annotation error now blocks the merge instead of scrolling past.
       - name: Run MyPy
         run: mypy app --config-file=mypy.ini
-        continue-on-error: true
 
       - name: Run Bandit security check
         run: bandit -r app -s B101 -ll

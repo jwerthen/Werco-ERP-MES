@@ -70,6 +70,7 @@ SUPABASE_DB_PASSWORD=<your-supabase-db-pass>
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | No | `15` | Access token lifetime in minutes |
 | `REFRESH_TOKEN_EXPIRE_DAYS` | No | `7` | Refresh token lifetime in days |
 | `SESSION_ABSOLUTE_TIMEOUT_HOURS` | No | `168` | Session ceiling stamped into each refresh token at mint time. In practice this bounds an **idle** window, not total session life — see the note below |
+| `ALLOW_DB_RESET` | No | `false` | Arms the destructive `POST /auth/reset-database`. **Leave unset in every real environment** — see the note below |
 
 > **What `SESSION_ABSOLUTE_TIMEOUT_HOURS` actually bounds.** `create_refresh_token`
 > (`app/core/security.py`) stamps an `absolute_timeout` claim of `utcnow() + this many hours` into
@@ -87,6 +88,20 @@ SUPABASE_DB_PASSWORD=<your-supabase-db-pass>
 > `SESSION_ABSOLUTE_TIMEOUT_HOURS=24` restores the previous daily idle window) with no code change.
 > A change here only affects **newly minted** tokens — users holding a token keep the value it was
 > minted with until their next refresh or login.
+
+> **`ALLOW_DB_RESET` and the db-reset route.** `POST /auth/reset-database` TRUNCATEs every table in
+> the public schema with FK triggers disabled. It has no auth dependency: the only credential is an
+> `X-Reset-Key` header matched against `SECRET_KEY` — which is *also* the JWT signing key, so this
+> route turns any `SECRET_KEY` disclosure into total data destruction on top of token forgery. Two
+> independent gates now stand in front of it:
+>
+> 1. **The route is only mounted when `ENVIRONMENT != "production"`.** On a production host it is
+>    absent, not merely disabled — it 404s like any unknown path and never appears in the OpenAPI
+>    schema. Setting `ALLOW_DB_RESET=true` in production does **not** bring it back.
+> 2. Everywhere else it stays refused unless `ALLOW_DB_RESET=true`.
+>
+> The header comparison uses `hmac.compare_digest` (constant time). Deleting the endpoint outright
+> is still the recommended end state; until then, keep `ALLOW_DB_RESET` unset.
 
 ### Rate Limiting
 
@@ -220,10 +235,21 @@ ALLOWED_HOSTS=api.werco.com,erp.werco.com,*.up.railway.app,healthcheck.railway.a
 |----------|----------|---------|-------------|
 | `APP_NAME` | No | `Werco ERP` | Application name (shown in logs, emails) |
 | `DEBUG` | No | `false` | Enable debug mode (never in production!) |
-| `ENVIRONMENT` | No | `development` | Environment name: development, staging, production |
+| `ENVIRONMENT` | No | `development` | Environment name: development, staging, production. Setting it to `production` is load-bearing, not cosmetic — see below. |
 | `API_V1_PREFIX` | No | `/api/v1` | API route prefix |
 | `PORT` | No | `8000` | Server port (Railway sets this automatically) |
 | `LOG_LEVEL` | No | `INFO` | Logging level: DEBUG, INFO, WARNING, ERROR |
+
+> **`ENVIRONMENT=production` turns off the interactive API docs.** `app/main.py` derives
+> `docs_url` / `redoc_url` / `openapi_url` from it, so `/api/docs`, `/api/redoc` **and**
+> `/api/openapi.json` return **404** in production — no route is registered and the schema is
+> never generated. `staging` and `development` keep all three. This is the only switch: there is
+> no separate docs flag, so a production deployment that leaves `ENVIRONMENT` at its
+> `development` default silently keeps the full endpoint inventory public. Verify after deploy
+> with `curl -sS -o /dev/null -w '%{http_code}' https://<api-host>/api/openapi.json` → `404`.
+> `ENVIRONMENT=production` additionally hard-fails startup unless `DEBUG` is false,
+> `CORS_ORIGINS` is set without `localhost`, and the database is Supabase
+> (`validate_production_settings` in `app/core/config.py`).
 
 > **Not environment-configurable (intentional).** The work-order-completion finished-goods receipt
 > location is **not** an env var — the warehouse (`MAIN`) and location (`FINISHED-GOODS`) are module

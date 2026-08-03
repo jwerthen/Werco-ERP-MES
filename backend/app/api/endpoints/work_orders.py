@@ -518,6 +518,33 @@ def _emit_work_order_event(
     )
 
 
+def _assert_work_center_in_company(db: Session, work_center_id: int, company_id: int) -> None:
+    """Refuse an operation pointed at another tenant's work center.
+
+    ``update_operation`` has always validated its work-center reassignment
+    target against ``company_id``, but the two operation-CREATE paths
+    (``create_work_order``'s inline operations list and ``add_operation``) built
+    the row straight from ``**model_dump()`` and never checked. That let a
+    caller in company B create an operation on their own work order pointed at
+    company A's work center -- a cross-tenant WRITE whose downstream effect is a
+    ``TimeEntry`` carrying company B's company_id and company A's
+    work_center_id, which then corrupted company A's work-center utilization
+    report. Flat 404 (not 403): a foreign work center must be indistinguishable
+    from a nonexistent one.
+
+    Deliberately does NOT require ``is_active``. ``update_operation`` does,
+    because re-dispatching onto a retired machine is a planner error; creation
+    legitimately happens against work centers that are momentarily inactive
+    (routing-generated ops, imports), so requiring it here would be a behavior
+    change beyond the security fix.
+    """
+    exists = (
+        db.query(WorkCenter.id).filter(WorkCenter.id == work_center_id, WorkCenter.company_id == company_id).first()
+    )
+    if not exists:
+        raise HTTPException(status_code=404, detail="Work center not found")
+
+
 def _get_active_bom(db: Session, part_id: int, company_id: int) -> Optional[BOM]:
     return (
         db.query(BOM)
@@ -1536,6 +1563,9 @@ def create_work_order(
     else:
         # Create operations from input
         for op_data in work_order_in.operations:
+            # Tenancy: the work center is caller-supplied, so it must be proven to
+            # belong to the active company before it is written onto the row.
+            _assert_work_center_in_company(db, op_data.work_center_id, company_id)
             operation = WorkOrderOperation(work_order_id=work_order.id, company_id=company_id, **op_data.model_dump())
             db.add(operation)
 
@@ -3811,6 +3841,10 @@ def add_operation(
             detail="Laser nest work orders manage operations through the nest package import "
             "and manual nest entry; add a nest instead of a free-form operation.",
         )
+
+    # Tenancy: the work center is caller-supplied, so it must be proven to belong
+    # to the active company before it is written onto the row.
+    _assert_work_center_in_company(db, operation_in.work_center_id, company_id)
 
     operation = WorkOrderOperation(
         work_order_id=work_order_id, company_id=work_order.company_id, **operation_in.model_dump()

@@ -521,6 +521,22 @@ tags_metadata = [
     {"name": "Error Logging", "description": "Client-side error logging"},
 ]
 
+# Interactive API docs are served in every environment EXCEPT production. In
+# production all three are None, so FastAPI registers no route for them and the
+# paths 404 like any other unknown path -- the schema is not merely hidden from
+# a UI, it is not generated or served at all. Nothing outside backend/ consumes
+# /api/openapi.json (no nginx location block, no uptime probe, no client-SDK
+# generation step), and tests run with ENVIRONMENT=test, so the docs stay
+# available to them. Tracked in docs/PRODUCTION_CHECKLIST.md.
+_DOCS_ENABLED = settings.ENVIRONMENT != "production"
+_DOCS_URL = "/api/docs" if _DOCS_ENABLED else None
+_REDOC_URL = "/api/redoc" if _DOCS_ENABLED else None
+_OPENAPI_URL = "/api/openapi.json" if _DOCS_ENABLED else None
+# Paths the CSP header skips (Swagger/ReDoc need inline styles + a CDN bundle).
+# Empty in production, so the exemption disappears together with the routes and
+# production applies CSP to every response, including those paths' 404s.
+_DOCS_PATHS = tuple(path for path in (_DOCS_URL, _REDOC_URL, _OPENAPI_URL) if path)
+
 app = FastAPI(
     title=settings.APP_NAME,
     description="""
@@ -565,9 +581,9 @@ For API support, contact the system administrator.
     """,
     version="1.0.0",
     lifespan=lifespan,
-    docs_url="/api/docs",
-    redoc_url="/api/redoc",
-    openapi_url="/api/openapi.json",
+    docs_url=_DOCS_URL,
+    redoc_url=_REDOC_URL,
+    openapi_url=_OPENAPI_URL,
     openapi_tags=tags_metadata,
     contact={
         "name": "Werco ERP Support",
@@ -749,7 +765,7 @@ async def add_security_headers(request: Request, call_next):
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains; preload"
     # Content Security Policy - restrict resource loading (skip for API docs)
-    if request.url.path not in ("/api/docs", "/api/redoc", "/api/openapi.json"):
+    if request.url.path not in _DOCS_PATHS:
         response.headers["Content-Security-Policy"] = "default-src 'self'; frame-ancestors 'none'"
     return response
 
@@ -772,6 +788,14 @@ if settings.RATE_LIMIT_ENABLED:
             "/api/v1/auth/login": "5/minute",  # Prevent brute force
             "/api/v1/auth/register": "3/minute",  # Prevent mass registration
             "/api/v1/auth/register-public": "3/minute",  # Prevent mass self-registration
+            # Company self-registration. Unauthenticated, and a single call mints a
+            # whole TENANT plus an ACTIVE ADMIN user with live access+refresh tokens
+            # (app/services/company_onboarding.py), so it is the sharpest
+            # unauthenticated write surface in the app — it had no entry here at all
+            # and ran at only the global per-IP default. Same 3/minute as the sibling
+            # register routes; whether self-service tenant creation should be
+            # feature-flagged off in production entirely is a separate, open decision.
+            "/api/v1/companies/register": "3/minute",
             "/api/v1/auth/refresh": "30/minute",  # Allow reasonable token refreshes
             # Employee ID kiosk login. 10/min (was 3) so a shift change can cycle
             # several badges through ONE shared station within a minute. On its own
@@ -782,6 +806,15 @@ if settings.RATE_LIMIT_ENABLED:
             # 15-min cooldown; successes never count). This entry stays the hard
             # per-IP request ceiling either way.
             "/api/v1/auth/employee-login": "10/minute",
+            # Badge logout. Now authenticated — identity comes from the token,
+            # not the body. It used to take no auth at all, resolve any
+            # employee_id through a globally unscoped lookup, and write a
+            # tenant-tagged EMPLOYEE_LOGOUT audit row, leaking hit-vs-miss as
+            # 200-vs-404: a cross-tenant badge-enumeration oracle running at only
+            # the global default (employee_login_throttle covers /employee-login
+            # ONLY). 30/min matches kiosk-badge-token — generous for a crew
+            # cycling off one shared station, still a hard ceiling.
+            "/api/v1/auth/employee-logout": "30/minute",
             "/api/v1/visitor-logs/station-login": "5/minute",  # Shared-PIN visitor tablet unlock
             "/api/v1/shop-floor/kiosk-stations/station-login": "5/minute",  # Shared-PIN crew kiosk unlock
             # Badge → 5-min kiosk-scoped operator token. Generous (a whole crew
@@ -809,6 +842,15 @@ if settings.RATE_LIMIT_ENABLED:
             # is the one authenticated route that spends real carrier money per call, so
             # cap it well below anything a human would click.
             "/api/v1/users/me/test-sms": "3/minute",
+            # Frontend error beacon: unauthenticated and CSRF-exempt (sendBeacon
+            # cannot set headers), so this is the only ceiling on it besides the
+            # body-size cap and the 50-entry list cap. It writes nothing to the DB
+            # (see app/api/endpoints/errors.py) — each entry is a log line — so the
+            # limit is set for a whole SHOP behind one NAT IP (kiosks, wallboards
+            # and office tabs share a WAN address here), not one tab: a single tab
+            # flushes at most every 5s (12/min). Too tight a cap silently drops
+            # error reports during exactly the mass-failure incident you want them.
+            "/api/v1/errors/log": "60/minute",
         }
         # Single merged source of truth for the path-specific resolver below.
         PATH_RATE_LIMITS = {**AUTH_RATE_LIMITS, **ENDPOINT_RATE_LIMITS}
@@ -824,6 +866,19 @@ if settings.RATE_LIMIT_ENABLED:
             """
             return PATH_RATE_LIMITS.get(request.url.path)
 
+        # Every limit below is keyed on the FORWARDED client IP, so it is only as
+        # trustworthy as the edge-proxy configuration in front of this app. The
+        # deploy entrypoints (start.sh / nixpacks.toml) currently pass a permissive
+        # `--forwarded-allow-ips`; pinning it to the platform's real edge CIDR is
+        # what makes these per-IP caps dependable, and is tracked as a follow-up.
+        # That single config change covers every consumer of the resolved client
+        # address, so there is nothing to change per call site.
+        #
+        # Do NOT "fix" this by hand-rolling a key_func that reads a different entry
+        # out of the forwarded-for chain. That is only correct at exactly one proxy
+        # hop; with two, every client keys to the same value and the whole app
+        # collapses into ONE rate-limit bucket — an availability regression worse
+        # than the problem it means to solve. Configure the trusted edge instead.
         limiter = Limiter(
             key_func=get_remote_address,
             default_limits=[f"{settings.RATE_LIMIT_TIMES}/{settings.RATE_LIMIT_SECONDS} second"],
@@ -916,10 +971,11 @@ if settings.RATE_LIMIT_ENABLED:
         )
         logger.info(
             "Auth rate limits enforced: login=5/min, register=3/min, register-public=3/min, "
-            "refresh=30/min, employee-login=10/min, station-login=5/min, "
+            "companies-register=3/min, refresh=30/min, employee-login=10/min, employee-logout=30/min, "
+            "station-login=5/min, "
             "kiosk-station-login=5/min, kiosk-badge-token=30/min, display-token-claim=10/min"
         )
-        logger.info("Per-route rate limits enforced: scanner resolve-action=60/min")
+        logger.info("Per-route rate limits enforced: scanner resolve-action=60/min, errors-log=60/min")
     except ImportError:
         logger.warning("Rate limiting requested but slowapi not installed")
 

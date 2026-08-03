@@ -11,9 +11,17 @@ from app.models.laser_nest import LaserNest, LaserNestPackage
 from app.models.part import Part
 from app.models.routing import Routing, RoutingOperation
 from app.models.time_entry import TimeEntry, TimeEntryType
-from app.models.user import User
+from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
+from tests.api.kiosk_test_helpers import (
+    COMPANY_A,
+    COMPANY_B,
+    make_user,
+    make_wo_with_operation,
+    make_work_center,
+    user_headers,
+)
 
 
 @pytest.mark.api
@@ -2003,3 +2011,97 @@ class TestWorkOrderVersionEnforcement:
         monkeypatch.undo()
         db_session.expire_all()
         assert db_session.get(WorkOrder, wo_id).priority == old_priority
+
+
+@pytest.mark.api
+@pytest.mark.requires_db
+class TestOperationCreateWorkCenterTenancy:
+    """Cross-tenant WRITE guard on the two operation-CREATE paths.
+
+    ``update_operation`` has always validated a work-center reassignment target
+    against the active company, but ``create_work_order``'s inline operations
+    list and ``add_operation`` built the row straight from ``**model_dump()``
+    and never checked. A caller in company B could therefore create an operation
+    on their OWN work order pointed at company A's work center; clocking onto it
+    then wrote a TimeEntry carrying company B's company_id and company A's
+    work_center_id, which corrupted company A's work-center utilization report.
+
+    404, not 403: a foreign work center must be indistinguishable from a
+    nonexistent one.
+    """
+
+    def test_add_operation_rejects_another_companys_work_center(self, client: TestClient, db_session):
+        admin_b = make_user(db_session, role=UserRole.ADMIN, company_id=COMPANY_B)
+        work_center_a = make_work_center(db_session, company_id=COMPANY_A)
+        work_center_b = make_work_center(db_session, company_id=COMPANY_B)
+        work_order_b, _ = make_wo_with_operation(db_session, company_id=COMPANY_B, work_center=work_center_b)
+
+        payload = {
+            "work_center_id": work_center_a.id,  # company A's machine
+            "sequence": 20,
+            "name": "Cross-tenant op",
+        }
+        response = client.post(
+            f"/api/v1/work-orders/{work_order_b.id}/operations",
+            headers=user_headers(admin_b),
+            json=payload,
+        )
+
+        assert response.status_code == status.HTTP_404_NOT_FOUND, response.text
+        assert response.json()["detail"] == "Work center not found"
+        # Nothing was written.
+        leaked = (
+            db_session.query(WorkOrderOperation).filter(WorkOrderOperation.work_center_id == work_center_a.id).all()
+        )
+        assert [op for op in leaked if op.company_id == COMPANY_B] == []
+
+    def test_add_operation_still_accepts_an_own_company_work_center(self, client: TestClient, db_session):
+        """The guard must not break the legitimate path."""
+        admin_b = make_user(db_session, role=UserRole.ADMIN, company_id=COMPANY_B)
+        work_center_b = make_work_center(db_session, company_id=COMPANY_B)
+        work_order_b, _ = make_wo_with_operation(db_session, company_id=COMPANY_B, work_center=work_center_b)
+
+        response = client.post(
+            f"/api/v1/work-orders/{work_order_b.id}/operations",
+            headers=user_headers(admin_b),
+            json={"work_center_id": work_center_b.id, "sequence": 20, "name": "Own op"},
+        )
+
+        assert response.status_code == status.HTTP_200_OK, response.text
+        assert response.json()["work_center_id"] == work_center_b.id
+
+    def test_create_work_order_rejects_another_companys_work_center_on_an_inline_operation(
+        self, client: TestClient, db_session
+    ):
+        admin_b = make_user(db_session, role=UserRole.ADMIN, company_id=COMPANY_B)
+        work_center_a = make_work_center(db_session, company_id=COMPANY_A)
+        part_b = Part(
+            part_number="WO-XT-B-001",
+            name="Cross Tenant Part B",
+            part_type="manufactured",
+            unit_of_measure="each",
+            is_active=True,
+            company_id=COMPANY_B,
+        )
+        db_session.add(part_b)
+        db_session.commit()
+
+        response = client.post(
+            "/api/v1/work-orders/",
+            headers=user_headers(admin_b),
+            json={
+                "part_id": part_b.id,
+                "quantity_ordered": 5,
+                "priority": 2,
+                "operations": [
+                    {"work_center_id": work_center_a.id, "sequence": 10, "name": "Cross-tenant inline op"},
+                ],
+            },
+        )
+
+        assert response.status_code == status.HTTP_404_NOT_FOUND, response.text
+        assert response.json()["detail"] == "Work center not found"
+        leaked = (
+            db_session.query(WorkOrderOperation).filter(WorkOrderOperation.work_center_id == work_center_a.id).all()
+        )
+        assert [op for op in leaked if op.company_id == COMPANY_B] == []

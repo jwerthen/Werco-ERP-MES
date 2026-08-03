@@ -266,11 +266,22 @@ written not-applicable justification. See
 
 ### Adjusting Coverage Requirements
 
-In `pr-check.yml`, adjust the `--cov-fail-under` value:
+The backend floor lives in **`backend/pytest.ini`** (`addopts` → `--cov-fail-under`,
+currently **78**, against ~81% actual). That file is the source of truth: `ci-cd.yml`'s
+required `backend-test` job passes no threshold of its own and inherits `addopts`.
+
+`pr-check.yml` also passes the number explicitly, and a CLI `--cov-fail-under`
+**overrides** `addopts` — so change both together, or that job silently keeps the older,
+laxer floor:
 
 ```yaml
-run: pytest tests/ -v --cov=app --cov-fail-under=50  # Require 50% coverage
+run: pytest tests/ -v --cov=app --cov-report=term --cov-fail-under=78
 ```
+
+`backend/tests/test_ci_workflow_gates.py` asserts the two agree and that neither is
+lowered. The frontend equivalent is `frontend/jest.config.js` →
+`coverageThreshold.global` (statements 52 / branches 43 / functions 38 / lines 52),
+pinned by the same test file.
 
 ### Adding Slack Notifications
 

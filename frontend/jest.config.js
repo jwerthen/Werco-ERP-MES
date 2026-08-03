@@ -24,12 +24,18 @@ module.exports = {
     '!src/main.tsx',
     '!src/vite-env.d.ts',
   ],
+  // Ratchet, not an aspiration: these sit a few points under actual coverage
+  // (statements 56.4 / branches 46.7 / functions 41.3 / lines 56.3) so the
+  // numbers cannot silently regress. They were 2/2/2/2 -- roughly 28x below
+  // actual, which gated nothing. Raise them when coverage genuinely climbs;
+  // do not bump them reflexively on every point gained. `functions` is the
+  // tightest and least stable of the four, so it keeps the widest margin.
   coverageThreshold: {
     global: {
-      branches: 2,
-      functions: 2,
-      lines: 2,
-      statements: 2,
+      branches: 43,
+      functions: 38,
+      lines: 52,
+      statements: 52,
     }
   },
   testMatch: [
