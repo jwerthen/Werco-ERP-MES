@@ -9,9 +9,18 @@ on:
       - '.github/workflows/ci-cd.yml'
   workflow_dispatch:
 
+# Shared with ci-cd.yml's deploy-production job on purpose: BOTH workflows run
+# `railway up --service werco-frontend` on a push to main that touches frontend/**, and
+# Railway keeps one active deployment per service. Without a shared group they race, and
+# the loser's exact-SHA verification polls for a SHA that will never be live. A single
+# group serializes every production deploy in this repo, whichever workflow owns it.
+#
+# cancel-in-progress flipped true -> false to match: killing an in-flight production
+# deploy mid-upload is worse than queueing behind it, and GitHub still cancels superseded
+# PENDING runs, so a burst of merges does not queue up a long backlog.
 concurrency:
-  group: deploy-frontend-production
-  cancel-in-progress: true
+  group: production-deploy
+  cancel-in-progress: false
 
 jobs:
   deploy-frontend:

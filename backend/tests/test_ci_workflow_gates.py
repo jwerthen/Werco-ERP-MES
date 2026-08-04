@@ -307,6 +307,10 @@ PRODUCTION_DEPLOY_JOBS = (
     ("deploy-frontend-production.yml", "deploy-frontend"),
 )
 
+# The single concurrency group both production deploy paths must share. They deploy the
+# same Railway services, and Railway keeps one active deployment per service.
+PRODUCTION_DEPLOY_GROUP = "production-deploy"
+
 
 def _git(*args: str) -> "subprocess.CompletedProcess[bytes]":
     return subprocess.run(args, cwd=REPO_ROOT, capture_output=True, timeout=15)
@@ -356,6 +360,11 @@ class TestDeployFailureSignalIsHonest:
         build queued. Grepping the teed log for it is what separates "the flake we mean
         to tolerate" from "the token is wrong and nothing was ever deployed" -- without
         it, a misconfigured token would be discovered only by the release poll timing out.
+
+        The receipt must be bound to THIS step's log file and must itself be blocking.
+        An earlier version of this test accepted any later step mentioning "Build Logs:",
+        which meant the backend's own receipt could be deleted and the frontend's would
+        satisfy it forever.
         """
         workflow = _load_workflow(workflow_name)
         for job_key, job in (workflow.get("jobs") or {}).items():
@@ -364,15 +373,70 @@ class TestDeployFailureSignalIsHonest:
                 script = step.get("run") or ""
                 if "railway up" not in script or not step.get("continue-on-error"):
                     continue
-                assert "tee " in script, (
+                logs = re.findall(r'tee "([^"]+)"', script)
+                assert logs, (
                     f"{workflow_name} job {job_key} step {step.get('name')!r} tolerates its exit "
                     "status but does not tee its output, so the receipt check has nothing to read."
                 )
-                receipts = [s for s in steps[index + 1 :] if "Build Logs:" in (s.get("run") or "")]
+                receipts = [
+                    s
+                    for s in steps[index + 1 :]
+                    if "Build Logs:" in (s.get("run") or "")
+                    and any(log in (s.get("run") or "") for log in logs)
+                    and not s.get("continue-on-error")
+                ]
                 assert receipts, (
                     f"{workflow_name} job {job_key} step {step.get('name')!r} is advisory but no "
-                    "later step checks the log for a 'Build Logs:' upload receipt."
+                    f"later BLOCKING step greps {logs} for a 'Build Logs:' upload receipt. "
+                    "A receipt bound to a different service's log does not gate this one."
                 )
+
+    def test_the_release_gate_itself_cannot_be_made_advisory(self) -> None:
+        """The one property that makes this whole trade safe.
+
+        Everything else here tolerates a failure somewhere on the promise that the release
+        check still blocks. Put `continue-on-error: true` on THAT step and deploy-production
+        becomes a job incapable of going red -- strictly worse than the exit status it
+        replaced, and invisible in the checks list. The sibling `TestGateStepsAreBlocking`
+        does not cover this: its GATE_JOBS list is lint/test jobs only.
+        """
+        for workflow_name, job_key in PRODUCTION_DEPLOY_JOBS:
+            workflow = _load_workflow(workflow_name)
+            job = (workflow.get("jobs") or {}).get(job_key)
+            assert job is not None, f"{workflow_name} lost its {job_key!r} job -- was it renamed?"
+
+            verifiers = [s for s in job.get("steps") or [] if "verify_release.py" in (s.get("run") or "")]
+            assert verifiers, f"{workflow_name} job {job_key} no longer runs the release verifier."
+            advisory = [s.get("name", "?") for s in verifiers if s.get("continue-on-error")]
+            assert not advisory, (
+                f"{workflow_name} job {job_key} made the release check advisory: {advisory}. "
+                "That is the single step the advisory deploy steps are traded against -- "
+                "with it non-blocking, nothing in this job can fail."
+            )
+
+    @pytest.mark.parametrize("workflow_name,job_key", PRODUCTION_DEPLOY_JOBS)
+    def test_production_deploys_cannot_overlap(self, workflow_name: str, job_key: str) -> None:
+        """Two concurrent deploys make the exact-SHA gate unsatisfiable for the loser.
+
+        Railway keeps ONE active deployment per service, so if two runs deploy the same
+        service at once only one run's SHA is ever live. The other polls for a SHA that
+        will never appear, burns its full timeout, exits 1, and skips verify_launch and
+        the release tag -- reproducing the exact false-failure this file exists to prevent.
+        Both workflows must therefore share ONE concurrency group.
+        """
+        workflow = _load_workflow(workflow_name)
+        job = (workflow.get("jobs") or {}).get(job_key) or {}
+        concurrency = job.get("concurrency") or workflow.get("concurrency")
+        assert concurrency, (
+            f"{workflow_name} job {job_key} has no concurrency group, so two production "
+            "deploys can overlap and the release check becomes unsatisfiable for the loser."
+        )
+        group = concurrency.get("group") if isinstance(concurrency, dict) else concurrency
+        assert group == PRODUCTION_DEPLOY_GROUP, (
+            f"{workflow_name} job {job_key} uses concurrency group {group!r}, expected "
+            f"{PRODUCTION_DEPLOY_GROUP!r}. Both workflows deploy werco-frontend; separate "
+            "groups do not serialize them against each other."
+        )
 
     def test_production_deploy_verifies_the_release_sha(self) -> None:
         """The replacement gate must compare against THIS run's commit.
