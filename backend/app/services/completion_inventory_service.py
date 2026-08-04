@@ -921,10 +921,15 @@ def _tenant_components(db: Session, company_id: int, part_ids: Iterable[Optional
     ``component_part_id`` alone (``models/bom.py``) and applies no ``company_id``
     predicate, so it happily materialises ANOTHER COMPANY's ``Part`` -- which was harmless
     only while nothing rendered it. PR 4.5 renders diagnostics: the readiness GET is open
-    to every authenticated tenant user and the refusal 409 echoes the same sentences, and
-    ``bom.py``'s add-line validator resolves ``component_part_id`` unscoped, so a foreign
-    id is reachable through supported verbs. Scoping the LOOKUP means the foreign object
-    is never materialised at all, rather than materialised and then carefully not printed.
+    to every authenticated tenant user and the refusal 409 echoes the same sentences.
+
+    ``bom.py``'s four line-write paths DO scope ``component_part_id`` to the active company
+    (they have since PR #161), and its read paths now resolve components the same way
+    (``bom.py`` -> ``tenant_parts_by_id``), so a foreign id can no longer be STORED or
+    RENDERED through a supported verb -- but this layer must not lean on that. It explodes
+    rows written before that fix and rows a residual foreign key left behind. Scoping the
+    LOOKUP means the foreign object is never materialised at all, rather than materialised
+    and then carefully not printed.
 
     Soft-deleted rows of THIS company are deliberately included: they resolve, get a
     ``foreign_component_part`` diagnostic that names them (an operator can act on that),
@@ -1084,6 +1089,10 @@ def _explode_backflush_bom(
             # definition of "the active BOM for a part" for the whole platform.
             from app.api.endpoints.work_orders import _get_active_bom
 
+            # NO ``include_deleted`` here, deliberately: no header diagnostic runs on a
+            # CHILD bom, so a soft-deleted sub-assembly resolved here would be exploded
+            # for real and would move stock (invariant 3). It simply does not resolve, and
+            # the line is treated as a component that explodes no further.
             child_bom = _get_active_bom(db, component.id, company_id)
 
         if item_type == BOMItemType.PHANTOM.value and child_bom is not None:
@@ -1877,7 +1886,10 @@ def _resolve_backflush_demand(
         # Imported lazily to avoid an import cycle with the endpoints module.
         from app.api.endpoints.work_orders import _get_active_bom
 
-        bom = _get_active_bom(db, work_order.part_id, company_id)
+        # ``include_deleted=True`` -- see ``_get_active_bom``. Resolved ONLY so the
+        # header diagnostic below can name and refuse it; the BLOCKING
+        # ``deleted_active_bom`` it raises stops every unit of this leg from issuing.
+        bom = _get_active_bom(db, work_order.part_id, company_id, include_deleted=True)
         if bom is not None:
             _record_bom_header_diagnostics(bom, explosion)
             _explode_backflush_bom(
@@ -1988,13 +2000,23 @@ def _resolve_backflush_demand(
 def _record_bom_header_diagnostics(bom: BOM, out: _BackflushBomExplosion) -> None:
     """Conditions about the ACTIVE BOM itself rather than any one of its lines.
 
-    ``_get_active_bom`` filters ``is_active`` only -- not ``is_deleted`` -- while ``BOM``
-    carries ``SoftDeleteMixin``. So a soft-deleted BOM that is still flagged active is
-    resolved and exploded exactly as a live one, which is an invariant-3 violation with a
-    material consequence rather than a bookkeeping one: the structure the shop believes it
-    deleted is the structure that moves stock. Not FIXED here (changing which BOM resolves
-    is a change to a live helper with four other callers) -- recorded, so a part sitting
-    on one cannot opt in.
+    ``deleted_active_bom`` is what makes the two ``_get_active_bom(..., include_deleted=True)``
+    call sites SAFE, and they are the only two. ``_get_active_bom`` filters ``is_deleted``
+    by DEFAULT (invariant 3), so a soft-deleted BOM no longer drives release readiness,
+    material requirements, job costing or the sub-assembly descent. The two TOP-LEVEL
+    backflush entry points opt back in so a deleted structure is refused BY NAME instead of
+    vanishing. This diagnostic is BLOCKING and names no component, so it refuses the WHOLE
+    leg: the deleted structure is exploded only to say what it would have consumed, and
+    then not one unit of it issues.
+
+    **Scope, precisely.** ``_get_active_bom`` still requires ``is_active == True``, and
+    ``DELETE /bom/{bom_id}`` clears ``is_active`` alongside the tombstone -- so a BOM
+    deleted through the product's own verb does NOT reach this function. It surfaces as
+    ``no_demand_source``: equally BLOCKING, but generic. What the opt-in actually covers is
+    the ``is_deleted=True, is_active=True`` shape -- rows a script, a fixture or some future
+    partial delete leaves behind. Do not read this as "the API's delete path produces the
+    named diagnostic"; it does not, and the safety of the leg never depended on WHICH of the
+    two blocking codes came back, only that one of them did.
     """
     if bool(getattr(bom, "is_deleted", False)):
         out.diagnostics.append(
@@ -4175,7 +4197,10 @@ def backflush_readiness_for_part(db: Session, part: Part, *, company_id: int) ->
                 # though the subject part were a component of itself.
             )
         )
-    bom = _get_active_bom(db, part.id, company_id)
+    # ``include_deleted=True`` -- see ``_get_active_bom``. Same reason as the resolver:
+    # a part whose only BOM is deleted must be told exactly that, not handed the generic
+    # "no demand source". ``_record_bom_header_diagnostics`` below refuses it.
+    bom = _get_active_bom(db, part.id, company_id, include_deleted=True)
     routing_names_a_component = (
         db.query(WorkOrderOperation.id)
         .join(WorkOrder, WorkOrder.id == WorkOrderOperation.work_order_id)

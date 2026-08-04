@@ -333,6 +333,12 @@ def delete_material(
         from app.models.work_order import WorkOrder
 
         wo_count = db.query(WorkOrder).filter(WorkOrder.part_id == material_id).count()
+        # DELIBERATELY blind to ``BOM.is_deleted`` (and to ``is_active``): this is a
+        # referential-integrity probe for a PHYSICAL delete, not a business read. A
+        # soft-deleted BOM row still exists and still holds a real foreign key to this
+        # part, and ``delete_bom`` retains its lines on purpose, so hard-deleting the
+        # part underneath it would orphan both. Filtering here would make the guard
+        # weaker, not more correct.
         bom_count = db.query(BOM).filter(BOM.part_id == material_id).count()
         bom_item_count = db.query(BOMItem).filter(BOMItem.component_part_id == material_id).count()
 
