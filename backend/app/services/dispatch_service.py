@@ -124,7 +124,11 @@ def queued_operations_query(
     query = db.query(WorkOrderOperation)
     if load_options:
         query = query.options(*load_options)
-    query = query.join(WorkOrder).filter(
+    # Onclause pinned on purpose: work_order_operations and work_orders carry TWO
+    # FK paths since migration 080 restored fk_work_orders_current_operation
+    # (work_orders.current_operation_id), so an implicit ``join(WorkOrder)`` can
+    # no longer infer one and raises AmbiguousForeignKeysError.
+    query = query.join(WorkOrder, WorkOrderOperation.work_order_id == WorkOrder.id).filter(
         and_(
             WorkOrder.company_id == company_id,
             WorkOrder.is_deleted == False,  # noqa: E712
@@ -388,7 +392,8 @@ def inactive_work_centers_with_work(db: Session, company_id: int) -> List[WorkCe
     """
     queued_wc_ids = (
         select(WorkOrderOperation.work_center_id)
-        .join(WorkOrder)
+        # Onclause pinned -- two FK paths to work_orders since migration 080.
+        .join(WorkOrder, WorkOrderOperation.work_order_id == WorkOrder.id)
         .where(
             and_(
                 WorkOrder.company_id == company_id,

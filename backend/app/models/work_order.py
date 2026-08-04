@@ -60,6 +60,13 @@ class WorkOrder(Base, SoftDeleteMixin, TenantMixin):
         Index("ix_work_orders_actual_end", "actual_end"),
         Index("ix_work_orders_company_status", "company_id", "status"),
         Index("ix_work_orders_company_due_date", "company_id", "due_date"),
+        # Lock-step with migration 080_restore_stamped_over_con (originally
+        # migration 003, which the create_all+stamp bootstrap skipped). Names
+        # and predicate text must stay byte-identical to the migration.
+        CheckConstraint("quantity_ordered > 0", name="chk_work_orders_quantity_ordered_positive"),
+        CheckConstraint("quantity_complete >= 0", name="chk_work_orders_quantity_complete_non_negative"),
+        CheckConstraint("quantity_scrapped >= 0", name="chk_work_orders_quantity_scrapped_non_negative"),
+        CheckConstraint("priority >= 1 AND priority <= 10", name="chk_work_orders_priority_range"),
     )
 
     id = Column(Integer, primary_key=True, index=True)
@@ -105,8 +112,21 @@ class WorkOrder(Base, SoftDeleteMixin, TenantMixin):
     notes = Column(Text)
     special_instructions = Column(Text)
 
-    # Current operation tracking
-    current_operation_id = Column(Integer, nullable=True)
+    # Current operation tracking. The FK mirrors migration 080 (originally 003's
+    # fk_work_orders_current_operation, skipped by the create_all+stamp
+    # bootstrap). use_alter=True: this FK closes a cycle with
+    # work_order_operations.work_order_id, so create_all must emit it as a
+    # post-CREATE ALTER on Postgres (SQLite renders it inline; unenforced there).
+    current_operation_id = Column(
+        Integer,
+        ForeignKey(
+            "work_order_operations.id",
+            ondelete="SET NULL",
+            name="fk_work_orders_current_operation",
+            use_alter=True,
+        ),
+        nullable=True,
+    )
 
     # Costing
     estimated_hours = Column(Float, default=0.0)
@@ -117,8 +137,14 @@ class WorkOrder(Base, SoftDeleteMixin, TenantMixin):
     # Audit fields
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    created_by = Column(Integer, nullable=True)
-    released_by = Column(Integer, nullable=True)
+    # Lineage FKs mirror migration 080 (originally 003; skipped by the
+    # create_all+stamp bootstrap).
+    created_by = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL", name="fk_work_orders_created_by"), nullable=True
+    )
+    released_by = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL", name="fk_work_orders_released_by"), nullable=True
+    )
     released_at = Column(DateTime, nullable=True)
 
     # Optimistic locking. The ``version`` column was added at the DB level by
@@ -139,7 +165,15 @@ class WorkOrder(Base, SoftDeleteMixin, TenantMixin):
     # Relationships
     part = relationship("Part")
     parent_work_order = relationship("WorkOrder", remote_side=[id], backref="child_work_orders")
-    operations = relationship("WorkOrderOperation", back_populates="work_order", order_by="WorkOrderOperation.sequence")
+    # foreign_keys is pinned: work_orders and work_order_operations are joined
+    # by TWO FK paths (work_order_id here, current_operation_id above) since the
+    # 080 FK restore, so the join must name which one it follows.
+    operations = relationship(
+        "WorkOrderOperation",
+        back_populates="work_order",
+        order_by="WorkOrderOperation.sequence",
+        foreign_keys="WorkOrderOperation.work_order_id",
+    )
     time_entries = relationship("TimeEntry", back_populates="work_order")
     scrap_reason_code = relationship("ScrapReasonCode", foreign_keys=[scrap_reason_code_id])
 
@@ -161,6 +195,10 @@ class WorkOrderOperation(Base, TenantMixin):
         Index("ix_woo_work_center_status", "work_center_id", "status"),
         Index("ix_woo_status", "status"),
         Index("ix_woo_scheduled_start", "scheduled_start"),
+        # Lock-step with migration 080_restore_stamped_over_con (originally
+        # migration 003, which the create_all+stamp bootstrap skipped).
+        CheckConstraint("setup_time_hours >= 0", name="chk_work_order_ops_setup_time_non_negative"),
+        CheckConstraint("run_time_hours >= 0", name="chk_work_order_ops_run_time_non_negative"),
     )
 
     id = Column(Integer, primary_key=True, index=True)
@@ -254,11 +292,22 @@ class WorkOrderOperation(Base, TenantMixin):
     # Audit fields
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    started_by = Column(Integer, nullable=True)
-    completed_by = Column(Integer, nullable=True)
+    # Lineage FKs mirror migration 080 (originally 003; skipped by the
+    # create_all+stamp bootstrap).
+    started_by = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL", name="fk_work_order_operations_started_by"),
+        nullable=True,
+    )
+    completed_by = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL", name="fk_work_order_operations_completed_by"),
+        nullable=True,
+    )
 
     # Relationships
-    work_order = relationship("WorkOrder", back_populates="operations")
+    # foreign_keys pinned for the same two-FK-path reason as WorkOrder.operations.
+    work_order = relationship("WorkOrder", back_populates="operations", foreign_keys=[work_order_id])
     work_center = relationship("WorkCenter", back_populates="operations")
     time_entries = relationship("TimeEntry", back_populates="operation")
     component_part = relationship("Part", foreign_keys=[component_part_id])

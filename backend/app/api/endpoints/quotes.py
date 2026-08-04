@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session, joinedload
 
 from app.api.deps import get_current_company_id, get_current_user, require_role
@@ -20,10 +20,14 @@ router = APIRouter()
 
 
 class QuoteLineCreate(BaseModel):
+    # quantity/unit_price are bounded to match the DB CHECKs migration 080
+    # restored (chk_quote_lines_quantity_positive / _unit_price_non_negative), so
+    # a typo'd 0 quantity is a 422 at the boundary rather than an IntegrityError
+    # 500 at flush. Same gt/ge precedent as PurchaseOrderLineCreate.
     part_id: Optional[int] = None
     description: str
-    quantity: float
-    unit_price: float
+    quantity: float = Field(..., gt=0)
+    unit_price: float = Field(..., ge=0)
     material_cost: float = 0
     labor_hours: float = 0
     labor_cost: float = 0

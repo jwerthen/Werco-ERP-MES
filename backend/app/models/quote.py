@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime
 
-from sqlalchemy import Column, Date, DateTime
+from sqlalchemy import CheckConstraint, Column, Date, DateTime
 from sqlalchemy import Enum as SQLEnum
 from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import relationship
@@ -80,6 +80,12 @@ class QuoteLine(Base, TenantMixin):
     """Line items for a quote"""
 
     __tablename__ = "quote_lines"
+    # Lock-step with migration 080_restore_stamped_over_con (originally
+    # migration 003, which the create_all+stamp bootstrap skipped).
+    __table_args__ = (
+        CheckConstraint("quantity > 0", name="chk_quote_lines_quantity_positive"),
+        CheckConstraint("unit_price >= 0", name="chk_quote_lines_unit_price_non_negative"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     quote_id = Column(Integer, ForeignKey("quotes.id"), nullable=False)

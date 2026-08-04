@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, Date, DateTime
+from sqlalchemy import Boolean, CheckConstraint, Column, Date, DateTime
 from sqlalchemy import Enum as SQLEnum
 from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
@@ -161,6 +161,13 @@ class PurchaseOrderLine(Base, TenantMixin):
     """Purchase Order line item"""
 
     __tablename__ = "purchase_order_lines"
+    # Lock-step with migration 080_restore_stamped_over_con (originally
+    # migration 003, which the create_all+stamp bootstrap skipped).
+    __table_args__ = (
+        CheckConstraint("quantity_ordered > 0", name="chk_po_lines_quantity_ordered_positive"),
+        CheckConstraint("quantity_received >= 0", name="chk_po_lines_quantity_received_non_negative"),
+        CheckConstraint("unit_price >= 0", name="chk_po_lines_unit_price_non_negative"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     purchase_order_id = Column(Integer, ForeignKey("purchase_orders.id"), nullable=False)
@@ -210,6 +217,14 @@ class POReceipt(Base, SoftDeleteMixin, TenantMixin):
         Index("ix_po_receipts_inspection_status", "inspection_status"),
         Index("ix_po_receipts_received_at", "received_at"),
         Index("ix_po_receipts_status_received", "status", "received_at"),
+        # Lock-step with migration 080_restore_stamped_over_con (originally
+        # migration 003, which the create_all+stamp bootstrap skipped).
+        # 003's chk_po_receipts_quantity_received_positive is DELIBERATELY not
+        # restored: void_receipt (PR #149) legitimately reconciles a voided
+        # receipt down to quantity_received = 0 on the soft-deleted row -- see
+        # migration 080's DELIBERATE EXCLUSIONS.
+        CheckConstraint("quantity_accepted >= 0", name="chk_po_receipts_quantity_accepted_non_negative"),
+        CheckConstraint("quantity_rejected >= 0", name="chk_po_receipts_quantity_rejected_non_negative"),
     )
 
     id = Column(Integer, primary_key=True, index=True)

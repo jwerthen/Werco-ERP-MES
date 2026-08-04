@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, CheckConstraint, Column, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import relationship
 
 from app.db.database import Base
@@ -49,6 +49,12 @@ class RoutingOperation(Base, TenantMixin):
     """Individual operation step in a routing"""
 
     __tablename__ = "routing_operations"
+    # Lock-step with migration 080_restore_stamped_over_con (originally
+    # migration 003, which the create_all+stamp bootstrap skipped).
+    __table_args__ = (
+        CheckConstraint("setup_hours >= 0", name="chk_routing_ops_setup_hours_non_negative"),
+        CheckConstraint("run_hours_per_unit >= 0", name="chk_routing_ops_run_hours_non_negative"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     routing_id = Column(Integer, ForeignKey("routings.id"), nullable=False, index=True)
@@ -94,7 +100,11 @@ class RoutingOperation(Base, TenantMixin):
 
     # Outside processing
     is_outside_operation = Column(Boolean, default=False)
-    vendor_id = Column(Integer, nullable=True)
+    # Lineage FK mirrors migration 080 (originally 003; skipped by the
+    # create_all+stamp bootstrap).
+    vendor_id = Column(
+        Integer, ForeignKey("vendors.id", ondelete="SET NULL", name="fk_routing_operations_vendor"), nullable=True
+    )
     outside_cost = Column(Float, default=0.0)
     outside_lead_days = Column(Integer, default=0)
 

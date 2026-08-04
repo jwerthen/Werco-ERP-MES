@@ -572,7 +572,8 @@ def get_scheduled_jobs(
     query = (
         db.query(WorkOrderOperation)
         .options(joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part))
-        .join(WorkOrder)
+        # Onclause pinned -- two FK paths to work_orders since migration 080.
+        .join(WorkOrder, WorkOrderOperation.work_order_id == WorkOrder.id)
         .filter(
             WorkOrder.company_id == company_id,
             WorkOrder.status.in_([WorkOrderStatus.RELEASED, WorkOrderStatus.IN_PROGRESS, WorkOrderStatus.ON_HOLD]),
@@ -1100,7 +1101,8 @@ def get_capacity_summary(
     if wc_ids:
         operations = (
             db.query(WorkOrderOperation)
-            .join(WorkOrder)
+            # Onclause pinned -- two FK paths to work_orders since migration 080.
+            .join(WorkOrder, WorkOrderOperation.work_order_id == WorkOrder.id)
             .filter(
                 WorkOrder.company_id == company_id,
                 WorkOrderOperation.work_center_id.in_(wc_ids),
