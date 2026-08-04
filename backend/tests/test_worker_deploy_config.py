@@ -23,11 +23,13 @@ is ``arq``, making that outcome impossible rather than merely documented.
 from pathlib import Path
 
 import pytest
+import yaml
 
 pytestmark = [pytest.mark.unit]
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = BACKEND_ROOT.parent
+CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-cd.yml"
 
 
 def _read(path: Path) -> str:
@@ -132,12 +134,44 @@ class TestCiKeepsTheArchiveRootsDistinct:
                 "repo-root railway.toml, which starts an arq worker."
             )
 
-    def test_worker_deploy_steps_are_gated_off_by_default(self):
+    @pytest.mark.parametrize(
+        "service,expected_gate",
+        [
+            ("werco-worker", "vars.DEPLOY_WORKER_PRODUCTION == 'true'"),
+            ("werco-worker-staging", "vars.DEPLOY_WORKER_STAGING == 'true'"),
+        ],
+    )
+    def test_worker_deploy_steps_are_gated_off_by_default(self, service: str, expected_gate: str):
         """PREPARE ONLY: merging this must not deploy anything. The steps stay skipped until
-        the owner sets the repo variables, after the services exist."""
-        text = self.workflow
-        assert "if: vars.DEPLOY_WORKER_PRODUCTION == 'true'" in text
-        assert "if: vars.DEPLOY_WORKER_STAGING == 'true'" in text
+        the owner sets the repo variables, after the services exist.
+
+        BOUND TO THE STEP, not to the file. This assertion used to be a bare substring
+        check over the whole workflow -- ``"if: vars.DEPLOY_WORKER_PRODUCTION == 'true'"
+        in text`` -- which held only while exactly one step carried the gate. PR #204 added
+        a second gated step (the worker upload receipt), so deleting the gate from the
+        DEPLOY step itself would have left the old assertion satisfied by the receipt's
+        copy: the guard against an accidental production worker deploy failed open at the
+        moment a worker deploy became imminent. Parse the YAML and check the step that
+        actually runs ``railway up``.
+        """
+        with open(CI_WORKFLOW, encoding="utf-8") as fh:
+            workflow = yaml.safe_load(fh)
+
+        deploy_steps = [
+            step
+            for job in (workflow.get("jobs") or {}).values()
+            for step in (job.get("steps") or [])
+            if f"railway up --service {service} " in (step.get("run") or "")
+        ]
+        assert deploy_steps, f"No step deploys {service} any more -- was it renamed?"
+
+        for step in deploy_steps:
+            assert step.get("if") == expected_gate, (
+                f"The step that runs `railway up --service {service}` has if={step.get('if')!r}, "
+                f"expected {expected_gate!r}. Without the gate ON THIS STEP, merging deploys "
+                f"{service} to a service that may not exist, or starts background crons "
+                "nobody asked for. A gate on a neighbouring step does not count."
+            )
 
     def test_worker_deploy_step_does_not_cd_into_backend(self):
         lines = self.workflow.splitlines()
