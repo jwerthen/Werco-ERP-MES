@@ -73,6 +73,18 @@ DOWN_REVISION = "079_restore_stamped_over_idx"
 #                   than double-constraining the column (Postgres would keep and maintain
 #                   BOTH). These columns are deliberately left as-is; the bucket is frozen
 #                   so a future edit that renames one has to come through this test.
+
+# The one mirrored FK that carries ``use_alter=True`` (it closes the work_orders <->
+# work_order_operations cycle). ``use_alter`` hands the DDL PLACEMENT to SQLAlchemy: on
+# Postgres the constraint is deferred to a post-CREATE ALTER, which is asserted
+# deterministically by test_the_cyclic_fk_renders_as_a_post_create_alter_on_postgres. On
+# SQLite (supports_alter = False) SQLAlchemy has no ALTER to defer to, so whether the
+# constraint lands INLINE in CREATE TABLE or is dropped entirely falls out of the
+# topological sort -- which depends on the order the model modules were imported. Running
+# this file alone and running it inside the full parallel suite genuinely produce different
+# SQLite DDL, so asserting the inline form is asserting a non-guarantee. It is exempted
+# from the SQLite inline sweep below and asserted there only conditionally.
+USE_ALTER_FOREIGN_KEYS = {"fk_work_orders_current_operation"}
 EXPECTED_FOREIGN_KEYS = [
     ("fk_users_created_by", "users", "created_by", "users", "named"),
     ("fk_parts_created_by", "parts", "created_by", "users", "named"),
@@ -365,6 +377,14 @@ def test_every_restored_foreign_key_is_mirrored_on_its_model():
             ), f"{table_name}.{column} must mirror 003's name {name!r}, got {fk.constraint.name!r}"
             assert fk.ondelete == "SET NULL", f"{name} must be ON DELETE SET NULL (003's safe_create_fk default)"
             assert fk.onupdate is None, f"{name} must set no ON UPDATE action (003 set none)"
+            # use_alter is frozen per-constraint: it is what names WHICH edge breaks the
+            # cycle. Dropping it from the cyclic FK makes SQLAlchemy defer all fourteen
+            # FKs on both tables, unnamed, with no warning (see the postgres test);
+            # adding it anywhere else would silently move that constraint out of its
+            # CREATE TABLE on every dialect that supports ALTER.
+            assert fk.constraint.use_alter is (name in USE_ALTER_FOREIGN_KEYS), (
+                f"{name}: use_alter must be {name in USE_ALTER_FOREIGN_KEYS} " f"(got {fk.constraint.use_alter})"
+            )
         else:
             # Equivalence bucket: create_all owns the name. Asserting it stays UNNAMED is
             # what makes the migration's _equivalent_fk skip the right thing — naming it
@@ -700,9 +720,23 @@ def test_create_all_bootstrap_emits_every_check_and_named_fk(tmp_path):
             if mirror != "named":
                 continue
             table_ddl = " ".join(ddl[table_name].split())
-            assert (
-                f"CONSTRAINT {name} FOREIGN KEY({column}) REFERENCES {ref_table} (id) ON DELETE SET NULL" in table_ddl
-            ), f"create_all did not emit {name} on {table_name}.{column}"
+            inline = f"CONSTRAINT {name} FOREIGN KEY({column}) REFERENCES {ref_table} (id) ON DELETE SET NULL"
+
+            if name in USE_ALTER_FOREIGN_KEYS:
+                # Placement is SQLAlchemy's to choose here (see USE_ALTER_FOREIGN_KEYS).
+                # Assert only what IS guaranteed: the constraint never appears in a WRONG
+                # shape, and never lands unnamed. Its emission is pinned deterministically
+                # on Postgres by test_the_cyclic_fk_renders_as_a_post_create_alter_on_postgres.
+                if name in table_ddl:
+                    assert inline in table_ddl, f"{name} was emitted inline on {table_name} but in the wrong shape"
+                else:
+                    assert f"FOREIGN KEY({column})" not in table_ddl, (
+                        f"{table_name}.{column} carries an UNNAMED foreign key — use_alter must not be "
+                        f"silently dropping {name}'s identity"
+                    )
+                continue
+
+            assert inline in table_ddl, f"create_all did not emit {name} on {table_name}.{column}"
 
         for name, table_name in DELIBERATE_EXCLUSIONS:
             if table_name in ddl:
