@@ -90,9 +90,13 @@ The change-control path is:
    has been **removed**. Two compensating controls remain:
    - a **deployment-branch policy** on the `production` environment that allows **only
      `main`** to deploy; and
-   - **post-deploy health checks that fail the job on a bad deploy** —
-     `Verify Production Deployment` (`ci-cd.yml`) and `Verify deployment serves the Vite
-     frontend bundle` (`deploy-frontend-production.yml`).
+   - **post-deploy checks that fail the job unless the new commit is actually serving**
+     — `Verify production is serving this commit` (`ci-cd.yml`) and `Verify the deployed
+     bundle is this commit` (`deploy-frontend-production.yml`). Both poll the running
+     service for the release SHA this run stamped (see item 4) via
+     `.github/scripts/verify_release.py`, so they cannot pass on a deploy that never
+     landed. They replaced a `curl /health` loop that the **previous** container answered
+     just as happily — it proved the site was up, never that the deploy had landed.
 3. **Rollback:** redeploy a known-good commit (see [Rollback
    Procedures](#rollback-procedures)); to reinstate a manual gate, re-add the required
    reviewer on the `production` environment.
@@ -105,6 +109,40 @@ The change-control path is:
    Endpoints](#health-check-endpoints). It is deliberately **not** a Railway service
    variable: a variable is set independently of the build and would keep advertising the
    SHA CI last attempted even after a failed deploy or a rollback to an older image.
+
+   The frontend carries the same stamp: `Stamp release SHA into the frontend artifact`
+   writes `$GITHUB_SHA` to `frontend/public/release.txt`, Vite copies `public/` into the
+   build output verbatim, and nginx serves it at `/release.txt`. Neither marker may be
+   gitignored (`railway up` honors `.gitignore`) or committed (a committed SHA goes stale
+   and lies); `test_ci_workflow_gates.py` and `test_sentry_observability_config.py` hold
+   both rules.
+
+5. **`railway up`'s exit status is advisory, and that is deliberate.** On **2026-08-04**
+   two consecutive production deploys (PRs #198 and #203) were reported RED while the
+   code shipped fine: the CLI uploaded, Railway built and released the new image, and
+   then the CLI exited 1 with `Failed to stream build logs: Failed to retrieve build log`
+   about 66 s later. Because a failed step skips the rest of the job, that also skipped
+   the frontend deploy, the worker deploy, `verify_launch`, and the GitHub Release —
+   production ran two commits that the release history denied, and `deploy-892` sat
+   mislabelled as "Latest".
+
+   The deploy steps therefore carry `continue-on-error: true`, and the job is gated on
+   evidence instead:
+   - **`Confirm Railway accepted the <service> upload`** — greps the teed CLI output for
+     the `Build Logs:` URL, which is printed only once an upload is accepted and a build
+     queued. This fails **fast** on a bad token or project ID, instead of waiting out the
+     release poll.
+   - **`Verify production is serving this commit`** — the real gate (item 2).
+
+   Diagnosing a red deploy: if the receipt step passed but verification timed out, the
+   upload reached Railway and the **build or container start** failed — open the
+   `Build Logs:` URL from the deploy step. If the receipt step failed, the upload itself
+   was rejected — check `RAILWAY_TOKEN` / `RAILWAY_PROJECT_ID`.
+
+   `ci-cd.yml`'s `deploy-staging` job is **not** covered by any of this. It fires on
+   `develop` (unused — every PR merges to `main`), stamps nothing, and keeps the older
+   `curl /health` check, so it carries the same latent false-failure. Give it the same
+   treatment if `develop` is ever revived.
 
 The manual `railway up` commands below remain valid for **break-glass / out-of-band**
 deploys (e.g. when a CI deploy job itself is broken). They are not the routine path —
@@ -210,11 +248,24 @@ curl https://werco-api-production.up.railway.app/health/ready
 ```powershell
 cd ../frontend
 
+# Stamp the commit so /release.txt can name the build, exactly as CI does. Skipping this
+# is survivable -- /release.txt then falls through nginx's SPA rule and returns
+# index.html, i.e. "unknown release" -- but it means this build cannot be identified
+# later. Must run BEFORE `railway up` uploads the directory.
+git rev-parse HEAD | Out-File -Encoding ascii -NoNewline public/release.txt
+
 # Deploy to Railway
 railway up --service werco-frontend . --path-as-root
 
+# Remove the stamp once uploaded. public/release.txt is deliberately NOT gitignored (so
+# `railway up` ships it) and must never be committed (a committed SHA would go stale).
+Remove-Item public/release.txt
+
 # Monitor deployment
 railway logs --service werco-frontend
+
+# Confirm the running bundle is the commit you just deployed
+(Invoke-WebRequest "https://werco-frontend-production.up.railway.app/release.txt").Content
 ```
 
 ### Step 5: Verify Frontend
