@@ -109,6 +109,48 @@ All six shipped (PR 4 closed the set; "Shipped as" names the as-built mechanism 
 | FAI | measurement records pre-fill `FAICharacteristic.actual_value`/`measuring_device` for AS9102 (label-match heuristic; never overwrites, never sets `is_conforming`; ambiguous/contradicting specs reported `unmatched`) | `FirstArticleInspection` models | ✅ `prefill_fai_from_step_records` (`POST /quality/fai/{fai_id}/prefill-from-steps`) |
 | Audit | every create/status-change/supersede through `AuditService` → hash-chained log | `services/audit_service.py` | ✅ shipped since PR 1/3 |
 
+### The other writer: manual entry on the `/spc` page
+
+The kiosk feed is not the only thing writing `spc_measurements`. The office-side **SPC page**
+(`frontend/src/pages/SPC.tsx`) writes to the same table, and the two interact — read this before
+changing either side. No endpoint contract differs between them; everything below is client
+behavior over the same `POST /spc/measurements`.
+
+- **Manual entry captures one rational subgroup, not one reading.** The modal renders exactly
+  `characteristic.subgroup_size` numeric inputs and posts them as a single atomic batch (the
+  endpoint validates every id before its first insert, so a subgroup is all-or-nothing). **Every
+  sample is required**: the A2/D3/D4 constants the limit calculator uses come from the *declared*
+  subgroup size, so a short subgroup biases R̄ against a constant chosen for a different n.
+  `_feed_spc_measurement` is unaffected — it still writes one sample per conforming step record.
+- **`subgroup_number` is never typed.** There is no free-text subgroup input, because a typed
+  number would silently merge new readings into an existing rational subgroup — retroactively
+  changing that subgroup's X̄ and R, and duplicating `sample_number`, on a quality record. There is
+  no unique constraint on `(characteristic_id, subgroup_number)` and no 409 to catch it.
+- **It is derived the way the kiosk derives it, and re-derived at save.** Both surfaces compute
+  `MAX(subgroup_number) + 1`, deliberately under no lock. The page shows an advisory "next" number
+  when the modal opens, then re-reads `GET /spc/chart-data?last_n_subgroups=1` immediately before
+  posting and writes *that* number, so a kiosk capture landing while the modal sat open is not
+  merged into. If that fresh read fails, the write is refused rather than guessing. This narrows
+  the race to one round trip; it does not eliminate it — a DB-level uniqueness constraint would,
+  and none exists.
+- **`measured_by` is never sent.** The server stamps it from the caller's token on both paths, and
+  no SPC route joins `users`, so the page shows no operator name for a measurement.
+- **Only X-bar/R is offered on create.** `calculate_control_limits` computes X-bar/R limits for
+  *every* `chart_type` and `check_western_electric_rules` evaluates X-bar rules against them, so a
+  characteristic stored as `p_chart` or `individual_mr` would record a model the system never runs.
+  Pre-existing rows of any chart type still display, with an explicit advisory. `subgroup_size` is
+  likewise constrained to 2–10 on create, and Recalculate is withheld outside that range because
+  the calculator refuses it (400, "Subgroup size must be between 2 and 10").
+- **Recalculating is evidence-mutating.** `POST /spc/control-limits/{id}/calculate` rewrites
+  `is_out_of_control` / `violation_rules` **in place** on historical measurements, which is why it
+  is gated to ADMIN/MANAGER/QUALITY and why the page keeps it non-optimistic. When a characteristic
+  is fed one sample per subgroup (the process-sheet capture shape) while declaring
+  `subgroup_size >= 2`, every range is 0 → R̄ = 0 → UCL = CL = LCL, and the rule checker
+  early-returns on UCL == LCL, **clearing every recorded violation**. The page warns before that
+  happens; it does not prevent it.
+- **Capability verdicts are Cpk-based.** Cp/Pp are displayed as spread-only figures with no
+  capable / not-capable label, matching the server's own `is_capable = cpk >= 1.33`.
+
 ## Compliance checklist (for compliance-auditor review)
 
 - Tenant isolation: every query `tenant_query()`/`tenant_filter()`; snapshot copies carry `company_id`
