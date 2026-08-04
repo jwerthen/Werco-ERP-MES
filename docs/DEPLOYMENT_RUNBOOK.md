@@ -4,6 +4,14 @@
 **Last Updated**: 2026-01-09  
 **Environment**: Railway (Primary), Self-hosted (Optional)
 
+> **Scope.** This runbook covers the two long-standing services, `werco-api` and
+> `werco-frontend`. It does **not** cover the ARQ background worker (`werco-worker`), which
+> no workflow in this repo has ever deployed. Its one-time cutover — pre-flight checks, the blast radius of
+> twelve crons that have never fired, the staged rollout, and rollback — is
+> [`WORKER_DEPLOYMENT_RUNBOOK.md`](WORKER_DEPLOYMENT_RUNBOOK.md). Two differences matter if
+> you ever deploy the worker by hand: it is deployed from the **repo root**, not `backend/`,
+> and it has **no healthcheck** (it serves no HTTP).
+
 ---
 
 ## Table of Contents

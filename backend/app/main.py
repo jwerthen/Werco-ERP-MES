@@ -18,6 +18,8 @@ from app.api.router import api_router
 from app.core.cache import cache, init_cache
 from app.core.config import settings
 from app.core.logging import configure_logging, get_logger
+from app.core.observability import init_sentry as _init_sentry
+from app.core.queue import log_redis_target as _log_redis_target
 from app.db.database import Base, engine
 from app.middleware.logging_middleware import (
     CorrelationIdMiddleware,
@@ -34,51 +36,23 @@ logger = get_logger(__name__)
 
 
 def init_sentry() -> None:
-    """Initialize Sentry error tracking when a DSN is configured.
+    """Initialize Sentry error tracking for the API process when a DSN is configured.
 
     Extracted from module scope so the wiring is directly testable; it is still called
     at import time below. Never raises: with no DSN, a missing SDK, or a DSN the SDK
     refuses, the app boots without error tracking rather than not at all.
+
+    The implementation lives in ``app.core.observability`` so the ARQ worker -- which never
+    imports this module -- initializes Sentry through the SAME code path (it previously had
+    none at all). Only the FastAPI integration is API-specific, so only it is passed here.
     """
-    if not settings.SENTRY_DSN:
-        return
-    try:
-        import sentry_sdk
+
+    def _fastapi_integrations():
         from sentry_sdk.integrations.fastapi import FastApiIntegration
-    except ImportError:
-        logger.warning("Sentry DSN provided but sentry-sdk not installed")
-        return
 
-    try:
-        sentry_sdk.init(
-            dsn=settings.SENTRY_DSN,
-            integrations=[FastApiIntegration()],
-            # PERFORMANCE TRANSACTIONS ONLY -- this is not an error-capture switch. Errors
-            # are governed by `sample_rate` (left at its 1.0 default), so every exception is
-            # still reported at any value of this. Defaults to 0.1; see the comment on
-            # SENTRY_TRACES_SAMPLE_RATE in core/config.py for why 1.0 was actively harmful
-            # here (two 30-second pollers ingesting ~5,800 useless transactions/day, burning
-            # the quota that real errors are billed against).
-            traces_sample_rate=settings.SENTRY_TRACES_SAMPLE_RATE,
-            # Ties every event to the deployed commit. None when unset (local dev), which
-            # Sentry accepts -- events are simply recorded without a release.
-            release=settings.APP_RELEASE,
-            environment=settings.ENVIRONMENT,
-        )
-    except Exception:
-        # Monitoring must never be able to stop the API from serving. sentry_sdk.init()
-        # validates the DSN synchronously and raises BadDsn on a malformed one (a typo or
-        # a trailing space in the Railway variable is enough) -- and this runs at import,
-        # so an uncaught raise here means uvicorn never binds and the deploy is dead in
-        # the water rather than merely un-instrumented. Log it and serve without Sentry.
-        logger.exception("Sentry initialization failed; continuing without error tracking")
-        return
+        return [FastApiIntegration()]
 
-    logger.info(
-        "Sentry initialized successfully (traces_sample_rate=%s, release=%s)",
-        settings.SENTRY_TRACES_SAMPLE_RATE,
-        settings.APP_RELEASE or "unset",
-    )
+    _init_sentry(component="api", integrations_factory=_fastapi_integrations)
 
 
 init_sentry()
@@ -424,6 +398,12 @@ async def lifespan(app: FastAPI):
         logger.info("Redis caching enabled")
     else:
         logger.info("Redis caching disabled (REDIS_URL not configured)")
+    # Log where the ENQUEUE side resolves its Redis to. The cache line above says nothing
+    # about the job queue: those were two different resolution paths until 2026-08, and the
+    # divergence meant every enqueue silently targeted localhost while the cache was healthy.
+    # Deliberately a log line and not a hard failure -- the API must still serve without a
+    # queue; only the worker refuses to start (app/core/queue.py::assert_redis_configured).
+    _log_redis_target("API job queue", logger)
     # Seed quote configuration if needed (skip in tests to speed startup)
     if settings.ENVIRONMENT != "test":
         seed_quote_config_if_needed()
@@ -1179,6 +1159,27 @@ async def readiness_check():
             checks["redis"] = {"status": "unhealthy", "error": str(e)[:100]}
             # Redis is optional, don't fail health check
             logger.warning(f"Health check - Redis unhealthy: {e}")
+
+    # Job-queue (ARQ) Redis resolution. The "redis" check above pings REDIS_URL, which is
+    # what made the original defect invisible: it reported healthy while every enqueue went
+    # to localhost. This reports where the QUEUE resolved to, so "is the worker reachable
+    # from the API?" is answerable with one curl. No host and no credential is exposed --
+    # only which setting won and whether it is a real target.
+    try:
+        from app.core.queue import redis_config_warnings, resolve_redis_target
+
+        _queue_target = resolve_redis_target()
+        checks["job_queue_redis"] = {
+            "status": "configured" if _queue_target.is_configured else "unconfigured",
+            "source": _queue_target.source,
+            "tls": _queue_target.ssl,
+            "authenticated": _queue_target.has_password,
+            # A COUNT, not the messages: the warning text names hosts, and this endpoint is
+            # unauthenticated. The full text is in the startup log.
+            "config_warnings": len(redis_config_warnings()),
+        }
+    except Exception as e:  # a malformed REDIS_URL raises here; report, never 500 the probe
+        checks["job_queue_redis"] = {"status": "misconfigured", "error": str(e)[:200]}
 
     status_code = 200 if overall_status == "healthy" else 503
 

@@ -148,8 +148,25 @@ Exit kiosk mode on a device:
 | AWS_ACCESS_KEY_ID | Yes (with s3) | Bucket access key from `railway bucket credentials`. Required at boot when STORAGE_BACKEND=s3 |
 | AWS_SECRET_ACCESS_KEY | Yes (with s3) | Bucket secret key from `railway bucket credentials`. Required at boot when STORAGE_BACKEND=s3 |
 | AWS_REGION | No | S3 client region (default `us-east-1`) |
+| REDIS_URL | **Yes if you want background jobs at all** | Full Redis URL, e.g. `redis://default:xxx@xxx.railway.internal:6379`. This one variable configures the response cache, the rate limiter **and the ARQ job queue**. Without it the queue resolves to `localhost:6379`, every enqueue fails with ConnectionRefused, and nothing is ever queued — while `/health/ready` still reports `redis: healthy`, because that check pings `REDIS_URL` itself. Verify with `/health/ready` → `job_queue_redis.status == "configured"`. See docs/WORKER_SERVICE.md |
 | SENTRY_DSN | No | Sentry error tracking |
 | ANTHROPIC_API_KEY | No | For AI features |
+
+> **This guide provisions no Redis service and, until 2026-08, listed no Redis variable —
+> which is how production ended up with a job queue nothing could reach.** Provision a Redis
+> service in the project and set `REDIS_URL` on `werco-api` before expecting any background
+> work.
+
+### Worker (werco-worker)
+The ARQ background worker is a **separate service** and is not created by this guide. It runs
+`arq app.worker.WorkerSettings`, serves no HTTP (so it must have **no healthcheck path**),
+and is deployed from the **repo root** rather than `backend/` so it reads the repo-root
+`railway.toml` instead of `backend/railway.toml`. Its CI deploy steps exist but are gated off
+behind the `DEPLOY_WORKER_PRODUCTION` / `DEPLOY_WORKER_STAGING` repo variables.
+
+**Every cron fires the moment it runs, including one that creates draft POs and work orders.**
+Do not create this service from this page — follow **`docs/WORKER_SERVICE.md`**, which has the
+variable list, the blast-radius queries, and the staged cron-arming order.
 
 ### Frontend (werco-frontend)
 | Variable | Required | Description |

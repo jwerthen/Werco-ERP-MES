@@ -1,0 +1,37 @@
+# Build-context trimming for the ONE image whose context is the repo root:
+# backend/Dockerfile.worker (see railway.toml for why the worker's archive root is the repo
+# root and not backend/).
+#
+# Docker reads the .dockerignore at the CONTEXT root, so this file does not affect
+# backend/Dockerfile, backend/Dockerfile.prod or the frontend images -- their contexts are
+# backend/ and frontend/, which have their own .dockerignore files.
+#
+# On Railway the upload has already been trimmed by .gitignore and .railwayignore; this
+# matters for a local `docker build -f backend/Dockerfile.worker .`, where without it the
+# daemon is handed node_modules, virtualenvs and the whole git history.
+
+.git
+.github
+.claude
+node_modules
+**/node_modules
+.venv
+**/.venv
+.venv311
+**/.venv311
+frontend/dist
+landing/dist
+__pycache__
+**/__pycache__
+*.pyc
+*.pyo
+*.pyd
+.mypy_cache
+.pytest_cache
+.hypothesis
+.coverage
+.coverage.*
+coverage.xml
+htmlcov
+*.log
+*.db

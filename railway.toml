@@ -1,0 +1,67 @@
+# Railway config-as-code for the ARQ BACKGROUND WORKER service (werco-worker).
+#
+# ============================================================================
+# READ THIS BEFORE MOVING OR COPYING THIS FILE
+# ============================================================================
+#
+# This file lives at the REPO ROOT on purpose, and that is the whole point of it.
+#
+# Railway resolves a service's config-as-code file at the root of the archive it was given.
+# CI deploys the API with `cd backend && railway up . --path-as-root`, so for werco-api the
+# archive root IS backend/ and Railway reads backend/railway.toml -- which sets
+# `healthcheckPath = "/health"`.
+#
+# An ARQ worker serves no HTTP. It has no ASGI app, binds no port, and can NEVER satisfy a
+# /health probe. A worker deployed the same way the API is deployed would therefore inherit
+# `healthcheckPath = "/health"` from backend/railway.toml and fail its healthcheck forever:
+# Railway would restart it up to restartPolicyMaxRetries times, never promote the
+# deployment, and -- worst of all -- the container IS running arq during each of those
+# healthcheck windows, so it can pick up jobs and fire crons in bursts before being killed.
+# A partially-executed cron, repeated on every retry, is worse than no worker at all.
+#
+# Giving the worker a DIFFERENT archive root (the repo root) is what makes that inheritance
+# structurally impossible rather than merely documented. The Railway CLI has no flag to
+# select a config file (`railway up --help`, CLI 4.36.1), so a separate root is the only
+# mechanism available. Consequences, all deliberate:
+#
+#   * CI deploys the worker with `railway up . --path-as-root` from the REPO ROOT.
+#   * dockerfilePath is therefore repo-root-relative: backend/Dockerfile.worker.
+#   * .railwayignore trims the upload to what the image actually needs.
+#
+# DO NOT add `healthcheckPath` here, and do not move this file into backend/.
+# tests/test_worker_deploy_config.py fails the build if either happens.
+#
+# HAZARD, and the guard for it: because this file sits at the repo root, any service that
+# both (a) has an empty Root Directory and (b) is ever deployed from the repo root -- e.g.
+# by enabling Railway's GitHub integration on werco-api -- would read THIS file and start
+# running arq instead of the API. The CI workflow deploys werco-api and werco-frontend from
+# backend/ and frontend/ respectively, and test_worker_deploy_config.py asserts it keeps
+# doing so.
+
+[build]
+builder = "dockerfile"
+dockerfilePath = "backend/Dockerfile.worker"
+# Only backend changes can alter worker behavior; frontend/landing churn should not
+# rebuild it. (Only consulted by Railway's GitHub-integration deploys, not by `railway up`.)
+watchPatterns = ["backend/**"]
+
+[deploy]
+# DELIBERATELY NO healthcheckPath -- see the header. There is no HTTP endpoint to probe.
+#
+# startCommand is stated explicitly even though backend/Dockerfile.worker's CMD is
+# identical: Railway can override a container's start command from the dashboard, and a
+# worker service silently started with the API's command would come up as a second API
+# replica that passes health checks and does no work. Two independent declarations of
+# "this is a worker" is the cheapest insurance against that.
+startCommand = "arq app.worker.WorkerSettings"
+
+# on_failure + a small retry budget: a worker whose Redis is misconfigured raises at import
+# (app/core/queue.py::assert_redis_configured), and we want that to surface as a crash-looped
+# deployment, not an infinite quiet restart.
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 3
+
+# ONE replica, non-negotiable. The cron scheduler is per-process: two replicas run every
+# cron twice. MRP AUTO_DRAFT would create two sets of draft POs and work orders per day, and
+# every daily digest would be sent twice.
+numReplicas = 1

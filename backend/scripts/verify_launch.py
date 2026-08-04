@@ -87,6 +87,28 @@ def main() -> int:
     else:
         ok("REDIS_URL set")
 
+    # The job queue's Redis, which is NOT the same question as REDIS_URL being set. Until
+    # 2026-08 the queue read only REDIS_HOST/PORT/DB, so a deployment with REDIS_URL set and
+    # nothing else had a queue pointed at localhost: every enqueue failed, no background job
+    # or cron ever ran, and /health/detailed still said "redis: healthy" because it pings
+    # REDIS_URL. This check makes that state visible from CI instead of never.
+    try:
+        from app.core.queue import redis_config_warnings, resolve_redis_target
+
+        queue_target = resolve_redis_target()
+        if not queue_target.is_configured:
+            warn(
+                "Job queue has NO Redis configured (resolved "
+                f"{queue_target.describe()}). Background jobs and crons will NOT run: every "
+                "enqueue fails with ConnectionRefused. Set REDIS_URL."
+            )
+        else:
+            ok(f"Job queue Redis resolved from {queue_target.source}")
+        for queue_warning in redis_config_warnings():
+            warn(queue_warning)
+    except Exception as exc:  # a malformed REDIS_URL raises here
+        warn(f"Job queue Redis could not be resolved: {exc}")
+
     if not os.getenv("RAILWAY_PROJECT_ID") and not os.getenv("RAILWAY_SERVICE_ID"):
         warn("Railway env vars not detected (OK locally).")
 

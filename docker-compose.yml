@@ -56,10 +56,15 @@ services:
       ANTHROPIC_PO_MODEL: ${ANTHROPIC_PO_MODEL:-}
       ANTHROPIC_ROUTING_MODEL: ${ANTHROPIC_ROUTING_MODEL:-}
       ANTHROPIC_QMS_MODEL: ${ANTHROPIC_QMS_MODEL:-}
-      REDIS_URL: redis://redis:6379/0
+      # The redis service below runs with --requirepass, so the URL needs the credential --
+      # without it the cache, the rate limiter AND (since the queue now reads REDIS_URL too)
+      # every enqueue fail to authenticate. REDIS_PASSWORD is also passed so the host/port
+      # fallback path can authenticate on its own.
+      REDIS_URL: redis://:${REDIS_PASSWORD:-changeme}@redis:6379/0
       REDIS_HOST: redis
       REDIS_PORT: 6379
       REDIS_DB: 0
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-changeme}
       SENTRY_DSN: ${SENTRY_DSN:-}
       LOG_LEVEL: INFO
       SMTP_HOST: ${SMTP_HOST:-smtp.gmail.com}
@@ -133,9 +138,14 @@ services:
       ANTHROPIC_PO_MODEL: ${ANTHROPIC_PO_MODEL:-}
       ANTHROPIC_ROUTING_MODEL: ${ANTHROPIC_ROUTING_MODEL:-}
       ANTHROPIC_QMS_MODEL: ${ANTHROPIC_QMS_MODEL:-}
+      # Must match the API's Redis exactly: the API enqueues here and this process drains
+      # it. REDIS_PASSWORD supplies the credential the host/port/db trio cannot express
+      # (nothing read it before 2026-08, so this worker could not authenticate at all).
+      REDIS_URL: redis://:${REDIS_PASSWORD:-changeme}@redis:6379/0
       REDIS_HOST: redis
       REDIS_PORT: 6379
       REDIS_DB: 0
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-changeme}
       SMTP_HOST: ${SMTP_HOST:-smtp.gmail.com}
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_USER: ${SMTP_USER:-}
