@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, Date, DateTime
+from sqlalchemy import Boolean, CheckConstraint, Column, Date, DateTime
 from sqlalchemy import Enum as SQLEnum
 from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import relationship
@@ -161,6 +161,15 @@ class InventoryItem(Base, TenantMixin):
         Index("ix_inventory_items_part_active", "part_id", "is_active"),
         Index("ix_inventory_items_status", "status"),
         Index("ix_inventory_items_warehouse", "warehouse"),
+        # Lock-step with migration 080_restore_stamped_over_con (originally
+        # migration 003, which the create_all+stamp bootstrap skipped).
+        # 003's chk_inventory_items_quantity_non_negative (quantity_on_hand >= 0)
+        # is DELIBERATELY not restored: the material-consumption shortage posture
+        # lets a short completion drive a lot negative (record-and-alert, never a
+        # rolled-back write) -- see CLAUDE.md invariant 6 and migration 080's
+        # DELIBERATE EXCLUSIONS. quantity_allocated, by contrast, is only ever
+        # written as 0 at item creation and never decremented.
+        CheckConstraint("quantity_allocated >= 0", name="chk_inventory_items_allocated_non_negative"),
     )
 
     id = Column(Integer, primary_key=True, index=True)
@@ -181,7 +190,11 @@ class InventoryItem(Base, TenantMixin):
 
     # Receiving info
     received_date = Column(DateTime)
-    supplier_id = Column(Integer, nullable=True)
+    # Lineage FK mirrors migration 080 (originally 003; skipped by the
+    # create_all+stamp bootstrap).
+    supplier_id = Column(
+        Integer, ForeignKey("vendors.id", ondelete="SET NULL", name="fk_inventory_items_supplier"), nullable=True
+    )
     po_number = Column(String(100))
 
     # Certificate/Documentation for compliance

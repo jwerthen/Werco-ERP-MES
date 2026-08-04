@@ -264,6 +264,11 @@ but **only entries whose source is wired today actually fire**; the rest are **d
 > material-trail gap, and it is not a corner case: on a database where
 > `chk_inventory_items_quantity_non_negative` is live, **every** shortage arrives here instead, so
 > `material.backflush_shortage` — PR 4.4's headline signal — would be exactly the key that never fires.
+> (That CHECK is **not** live on any `create_all → stamp → upgrade` database, prod included: the
+> 2026-07-31 prod `pg_constraint` audit found it absent, and migration `080_restore_stamped_over_con`
+> deliberately does not restore it — see `docs/DEVELOPMENT.md` → Database Migrations. These two keys
+> still earn their place: they also carry FK / NOT NULL / lock-conflict rollbacks, which no
+> constraint decision removes.)
 > Kept **separately keyed** from the shortage pair so an operator can tell "stock went negative" from
 > "stock never moved" without opening the audit log, and so the settings matrix can gate them
 > independently. Both emit **best-effort** on the post-rollback outer transaction, so a signal failure

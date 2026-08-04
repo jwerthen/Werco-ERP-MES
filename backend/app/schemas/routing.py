@@ -12,8 +12,14 @@ class RoutingOperationBase(UTCModel):
     name: str
     description: Optional[str] = None
     work_center_id: int
-    setup_hours: float = 0.0
-    run_hours_per_unit: float = 0.0
+    # Bounded to match chk_routing_ops_setup_hours_non_negative /
+    # chk_routing_ops_run_hours_non_negative, the DB CHECKs migration 080
+    # restored. The CSV importer already rejects negative hours
+    # (routing_import_service._parse_hours); the interactive and AI-approve paths
+    # did not -- and they chain, since WO operations snapshot these into
+    # setup_time_hours / run_time_hours, which carry their own CHECKs.
+    setup_hours: float = Field(default=0.0, ge=0)
+    run_hours_per_unit: float = Field(default=0.0, ge=0)
     move_hours: float = 0.0
     queue_hours: float = 0.0
     cycle_time_seconds: Optional[float] = None
@@ -45,8 +51,8 @@ class RoutingOperationUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     work_center_id: Optional[int] = None
-    setup_hours: Optional[float] = None
-    run_hours_per_unit: Optional[float] = None
+    setup_hours: Optional[float] = Field(None, ge=0)
+    run_hours_per_unit: Optional[float] = Field(None, ge=0)
     move_hours: Optional[float] = None
     queue_hours: Optional[float] = None
     cycle_time_seconds: Optional[float] = None

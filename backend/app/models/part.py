@@ -1,9 +1,9 @@
 import enum
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, DateTime
+from sqlalchemy import Boolean, CheckConstraint, Column, DateTime
 from sqlalchemy import Enum as SQLEnum
-from sqlalchemy import Float, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from app.db.database import Base
@@ -102,6 +102,9 @@ class Part(Base, SoftDeleteMixin, TenantMixin):
         # migration 026's tenancy composite; skipped by the create_all+stamp
         # bootstrap): tenant-scoped active-part lists.
         Index("ix_parts_company_active", "company_id", "is_active"),
+        # Lock-step with migration 080_restore_stamped_over_con (originally
+        # migration 003, which the create_all+stamp bootstrap skipped).
+        CheckConstraint("standard_cost >= 0", name="chk_parts_standard_cost_non_negative"),
     )
 
     id = Column(Integer, primary_key=True, index=True)
@@ -157,7 +160,11 @@ class Part(Base, SoftDeleteMixin, TenantMixin):
     # Customer/Supplier info
     customer_name = Column(String(255), nullable=True)
     customer_part_number = Column(String(100))
-    primary_supplier_id = Column(Integer, nullable=True)
+    # Lineage FK mirrors migration 080 (originally 003; skipped by the
+    # create_all+stamp bootstrap).
+    primary_supplier_id = Column(
+        Integer, ForeignKey("vendors.id", ondelete="SET NULL", name="fk_parts_primary_supplier"), nullable=True
+    )
 
     # Drawing/Document references
     drawing_number = Column(String(100))
@@ -165,7 +172,7 @@ class Part(Base, SoftDeleteMixin, TenantMixin):
     # Audit fields
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    created_by = Column(Integer, nullable=True)
+    created_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL", name="fk_parts_created_by"), nullable=True)
 
     # Relationships
     bom = relationship("BOM", back_populates="part", uselist=False)

@@ -183,7 +183,8 @@ class SchedulingService:
         query = (
             self.db.query(WorkOrderOperation)
             .options(joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part))
-            .join(WorkOrder)
+            # Onclause pinned -- two FK paths to work_orders since migration 080.
+            .join(WorkOrder, WorkOrderOperation.work_order_id == WorkOrder.id)
             .filter(
                 WorkOrder.status.in_([WorkOrderStatus.RELEASED, WorkOrderStatus.IN_PROGRESS]),
                 WorkOrderOperation.status.in_([OperationStatus.PENDING, OperationStatus.READY]),

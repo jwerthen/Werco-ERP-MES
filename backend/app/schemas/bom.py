@@ -33,7 +33,13 @@ class BOMItemBase(UTCModel):
     installation_notes: Optional[str] = None
     work_center_id: Optional[int] = None
     operation_sequence: int = Field(default=10, gt=0)
-    scrap_factor: float = Field(default=0.0, ge=0)
+    # le=1 matches chk_bom_items_scrap_factor_range, the DB CHECK migration 080
+    # restored (0 <= scrap_factor <= 1). This column is a FRACTION -- 0.05 is a
+    # 5% allowance -- so entering "5" meaning 5% is the natural user mistake; the
+    # ceiling makes it a 422 that names the bound instead of an IntegrityError
+    # 500. (The bulk importer never sets scrap_factor; this is the only inbound
+    # write path.)
+    scrap_factor: float = Field(default=0.0, ge=0, le=1)
     lead_time_offset: int = Field(default=0, ge=0)
     is_optional: bool = False
     is_alternate: bool = False
@@ -60,7 +66,7 @@ class BOMItemUpdate(BaseModel):
     installation_notes: Optional[str] = None
     work_center_id: Optional[int] = None
     operation_sequence: Optional[int] = Field(None, gt=0)
-    scrap_factor: Optional[float] = Field(None, ge=0)
+    scrap_factor: Optional[float] = Field(None, ge=0, le=1)
     lead_time_offset: Optional[int] = Field(None, ge=0)
     is_optional: Optional[bool] = None
     is_alternate: Optional[bool] = None

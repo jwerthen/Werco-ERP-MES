@@ -392,32 +392,44 @@ After bootstrap, normal incremental `alembic upgrade head` is the standard path.
 > Anything a migration creates with no model mirror — raw-DDL trigger functions and RLS
 > statements, but equally ordinary `op.create_index` / `op.create_check_constraint` /
 > `op.create_foreign_key` calls — is **silently skipped** when the baseline is stamped past it.
-> Prod has been bitten twice: the `008` audit-immutability triggers (found 2026-07-07; see
-> `docs/SUPABASE_SECURITY.md`), and ~42 read-path indexes that lived only in migrations
-> `001`/`003`/`020`/`026`/`027` (found 2026-07-31 via a read-only prod `pg_indexes` audit;
-> restored by `079_restore_stamped_over_idx`, which also mirrors each one into the owning
-> model's `__table_args__` so `create_all` reproduces them from now on).
+> Prod has been bitten three times, all the same cause: the `008` audit-immutability triggers
+> (found 2026-07-07; see `docs/SUPABASE_SECURITY.md`), ~42 read-path indexes that lived only in
+> migrations `001`/`003`/`020`/`026`/`027` (found 2026-07-31 via a read-only prod `pg_indexes`
+> audit; restored by `079_restore_stamped_over_idx`), and — same audit, same day, against
+> `pg_constraint` — `003`'s named lineage foreign keys and value-range CHECK constraints
+> (restored by `080_restore_stamped_over_con`). Both `079` and `080` also mirror every restored
+> object into the owning model (`__table_args__` / `ForeignKey(...)`) so `create_all` reproduces
+> them and a future stamp can never skip them again.
 >
 > On a fresh Supabase Postgres: after `create_all`, stamp at **`058_process_sheets`** so
 > `alembic upgrade head` really runs `059`+ — `059` (dynamic RLS enablement + privilege
 > revocations) and `060` (recreates `008`'s trigger functions *and* triggers) restore the raw
-> DDL `create_all` cannot produce, and `079` no-ops where `create_all` already built the
-> mirrored indexes. All are idempotent on a `create_all` schema.
+> DDL `create_all` cannot produce, and `079`/`080` no-op where `create_all` already built the
+> mirrored indexes and constraints. All are idempotent on a `create_all` schema.
 >
 > **What such a bootstrap still lacks** (swept 2026-07-31: migration-only DDL at or below the
 > stamp point with no model mirror — equally absent from any DB bootstrapped this way. The index
-> drift AND `003`'s constraint drift are both audit-verified against prod: zero `chk_*` CHECK
-> constraints and only 10 of the 22 `fk_*` lineage FKs exist there. Prod *does* have `039`'s
-> `uq_open_time_entry` — its bootstrap predates `039`, which then ran incrementally; the losses
-> below apply in full only to a fresh bootstrap):
+> drift AND `003`'s constraint drift were both audit-verified against prod — **zero** of `003`'s
+> `chk_*` CHECKs and **zero** of its 22 named `fk_*` foreign keys existed there, though 8 of those
+> columns did carry an equivalent *auto-named* FK, because their model column already declared a
+> plain `ForeignKey()` that `create_all` emitted — and **both are now closed**, by `079` for the
+> indexes and `080` for the constraints. Prod *does* have `039`'s `uq_open_time_entry` — its
+> bootstrap predates `039`, which then ran incrementally; the losses below apply in full only to a
+> fresh bootstrap):
 >
-> - `003`'s 22 lineage foreign keys (`fk_*_created_by` / `_approved_by` / `_supplier`, … — the
->   model columns are deliberately plain `Integer`, no `ForeignKey()`).
-> - `003`'s 23 CHECK constraints — including `chk_inventory_items_quantity_non_negative`, the
->   DB-level negative-stock guard. Its absence in prod is currently **load-bearing**: the
->   material-consumption shortage posture deliberately lets a short completion drive a lot
->   negative (record-and-alert, never a rolled-back write), so restoring this CHECK is a design
->   decision, not a drift fix.
+> - ~~`003`'s 22 lineage foreign keys~~ — **closed by `080_restore_stamped_over_con`**, which adds
+>   all 22 (`ON DELETE SET NULL`, no `ON UPDATE` — `003`'s `safe_create_fk` semantics) and mirrors
+>   14 of them onto the model column as `ForeignKey(..., ondelete="SET NULL", name=<003's name>)`.
+>   The other 8 are the equivalence bucket above: they stay **unnamed** on the model, and the
+>   migration's `_equivalent_fk` probe skips `003`'s named twin rather than double-constraining the
+>   column. `work_orders.current_operation_id` closes an FK cycle, so it is pinned `use_alter=True`
+>   and gives `work_orders` ⇄ `work_order_operations` a **second FK path** — an onclause-less
+>   `join(WorkOrder)` between them now raises `AmbiguousForeignKeysError` at query-compile time
+>   (HTTP 500). Seven such call sites were pinned when `080` landed; a static sweep in
+>   `tests/test_migration_080_restore_stamped_over_constraints.py` keeps new ones out.
+> - ~~`003`'s 23 CHECK constraints~~ — **19 closed by `080`** (each mirrored into the owning model's
+>   `__table_args__` with byte-identical predicate text). **Four are deliberately NOT restored** —
+>   read the next block before "completing" the set.
 > - `003`'s server-side `CURRENT_TIMESTAMP` column defaults (minor: the ORM supplies values).
 > - `004`'s four `ix_<table>_version` indexes (negligible: optimistic-lock UPDATEs probe the PK).
 > - `023`'s four QMS indexes (`ix_qms_standards_name`, `ix_qms_clauses_standard_id`,
@@ -432,7 +444,22 @@ After bootstrap, normal incremental `alembic upgrade head` is the standard path.
 > remaining index/constraint DDL (`006`, `016`, `022`, `026`/`027` tenant uniques + per-table
 > `company_id`, `030`–`037`, `041`/`076`, `042`, `044`–`058`) is verified model-mirrored. The rule going
 > forward: DDL the models *can* express must be declared on the model in the same PR as the
-> migration (the `042`/`078`/`079` lock-step convention) — and never stamp past DDL they cannot.
+> migration (the `042`/`078`/`079`/`080` lock-step convention) — and never stamp past DDL they cannot.
+
+> **The four `003` constraints `080` deliberately did NOT restore — do not "complete the set".**
+> Three of them are load-bearing *absences*: shipped code writes exactly the rows they would
+> refuse, so adding one converts a normal operation into an `IntegrityError`. Migration `080`'s
+> header carries the full argument, and
+> `backend/tests/test_migration_080_restore_stamped_over_constraints.py` →
+> `test_the_four_exclusions_stay_excluded` fails if either the migration literals or a model grows
+> one of them (a companion test inserts the rows on SQLite to prove they stay writable).
+>
+> | Not restored | Why it stays out |
+> |---|---|
+> | `chk_inventory_items_quantity_non_negative` (`quantity_on_hand >= 0`) | **Excluded by design, not drift.** The material-consumption shortage posture (CLAUDE.md invariant 6, `docs/MATERIAL_CONSUMPTION_PLAN.md`) deliberately lets a **short completion drive a lot negative** — record-and-alert, never a rolled-back write. This CHECK would make short completions fail at the DB. The 2026-07-31 `pg_constraint` audit confirms it is **not** live in prod, and `080` makes that a decided, test-enforced choice rather than an open question — reversing it is a product decision. (`chk_inventory_items_allocated_non_negative` on `quantity_allocated` **is** restored: that column is written exactly once, as 0 at item creation, and no code path decrements it.) |
+> | `chk_po_receipts_quantity_received_positive` (`quantity_received > 0`) | **Shipped code legitimately writes 0.** `receiving.py::void_receipt` (PR #149) reconciles a voided receipt down to `quantity_received = 0` on the soft-deleted row — 0 is reserved for void, and the correction path is separately bounded `gt=0`. Restoring `003`'s predicate would make every receipt void fail. A future version must be void-aware (e.g. `quantity_received > 0 OR is_deleted`), as its own reviewed migration. The `quantity_accepted` / `quantity_rejected` siblings are unaffected by void and **are** restored. |
+> | `chk_bom_items_quantity_positive` (`quantity > 0`) | **A non-positive BOM quantity is a designed, representable state.** The backflush readiness/refusal layer carries blocking `zero_bom_quantity` / `negative_bom_quantity` diagnostics whose whole job is to surface such a line, refuse the backflush opt-in, and have a human correct it — the same surface-don't-make-unrepresentable posture as the BOM-line UoM mismatches. The DB CHECK would make the bulk import fail on exactly the rows those diagnostics exist to catch, and turn the machinery into dead code. The real gate is the API bound (`schemas/bom.py`, `quantity` `gt=0`). (`chk_bom_items_scrap_factor_range` **is** restored — nothing writes `scrap_factor` outside `[0, 1]`.) |
+> | `chk_work_centers_efficiency_range` | **Obsolete — the column never existed.** `work_centers` has carried `efficiency_factor` (1.0-scale) since the initial commit; a bare `efficiency` column appears nowhere, and `003`'s own `required_columns=['efficiency']` guard skipped this CHECK even on databases that really ran `003`. Not re-derived onto `efficiency_factor` either: the 2026-07-31 pre-flight could not probe that column's bounds and the Pydantic schema puts none on it, so out-of-range prod data cannot be ruled out. Re-derive only after a prod probe. |
 
 > **Keep new revision ids ≤ 32 characters.** On the `create_all → stamp → upgrade` bootstrap path
 > the `alembic_version.version_num` column is `varchar(32)`. Migration `014b_widen_alembic_version`
