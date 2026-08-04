@@ -198,11 +198,30 @@ def build_plan(rows, db, company_id: int):
             r["_skip"] = True
             continue
 
+        # QTY must be a positive number. This used to degrade a blank/non-numeric
+        # cell to 0 and load the work order anyway "for a human to fix later" --
+        # a state migration 080 made unrepresentable: work_orders now carries
+        # chk_work_orders_quantity_ordered_positive, so a 0 aborts the WHOLE
+        # import transaction with an IntegrityError. Refusing the single row and
+        # naming it in the plan (the same _skip idiom the duplicate-WO branch
+        # uses) keeps the rest of the load intact and puts the bad cell in front
+        # of the operator during the dry run, before commit.
         try:
             qty = float(r["qty"]) if r["qty"] is not None else 0.0
         except (TypeError, ValueError):
-            warnings.append(f"Row {r['_row']}: non-numeric QTY {r['qty']!r}, using 0")
-            qty = 0.0
+            warnings.append(
+                f"Row {r['_row']}: non-numeric QTY {r['qty']!r} — row will be SKIPPED on commit "
+                f"(fix the QTY cell and re-run)"
+            )
+            r["_skip"] = True
+            continue
+        if qty <= 0:
+            warnings.append(
+                f"Row {r['_row']}: QTY must be greater than 0 (got {qty:g}) — row will be SKIPPED on commit "
+                f"(fix the QTY cell and re-run)"
+            )
+            r["_skip"] = True
+            continue
 
         wos_to_create.append(
             {

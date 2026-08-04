@@ -37,7 +37,13 @@ not you use it.
   ~42 read-path indexes from migrations `001`/`003`/`020`/`026`/`027` missing for the identical
   reason (index DDL only in stamped-over migrations, never in the models). Not a security
   exposure — performance only — restored, and mirrored into the models so `create_all`
-  reproduces them, by `079_restore_stamped_over_idx`.
+  reproduces them, by `079_restore_stamped_over_idx`. A companion `pg_constraint` read the same
+  day found the constraint half of that drift: **zero** of migration `003`'s `chk_*` CHECKs and
+  **zero** of its 22 named `fk_*` lineage foreign keys existed in prod. Also not a security
+  exposure — data integrity only — restored (22 FKs, 19 CHECKs, four deliberately excluded) and
+  mirrored into the models by `080_restore_stamped_over_con`; see `docs/DEVELOPMENT.md` →
+  Database Migrations for the exclusions. Neither migration creates a table, so the ENABLE-RLS
+  new-table convention below does not apply to either.
 
 ## The fix — migrations 059 and 060
 

@@ -55,11 +55,16 @@ class User(Base):
     # Audit fields
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    created_by = Column(Integer, nullable=True)
+    # Lineage FK mirrors migration 080 (originally 003; skipped by the
+    # create_all+stamp bootstrap).
+    created_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL", name="fk_users_created_by"), nullable=True)
 
     # Relationships
     company = relationship("Company", back_populates="users")
-    time_entries = relationship("TimeEntry", back_populates="user")
+    # foreign_keys is pinned: time_entries carries TWO FK paths to users
+    # (user_id and, since the 080 FK restore, approved_by), so the join must
+    # name which one it follows.
+    time_entries = relationship("TimeEntry", back_populates="user", foreign_keys="TimeEntry.user_id")
     notification_preference = relationship("NotificationPreference", back_populates="user", uselist=False)
 
     @property
