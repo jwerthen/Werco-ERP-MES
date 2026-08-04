@@ -100,7 +100,23 @@ npm run lint           # eslint src --ext .ts,.tsx  (lint:fix to autofix)
                        # interactions / no-noninteractive-element-interactions) — are all `error`.
                        # CI lints with --max-warnings=0 (ci-cd.yml), so any a11y regression FAILS
                        # CI; there is no non-blocking warn tier. Only no-autofocus stays off.
-npm run type-check     # tsc --noEmit
+npm run type-check     # TWO tsc programs: tsconfig.json (src, tests excluded) AND
+                       # tsconfig.test.json (the *.test.*/*.spec.* files, src/test-utils,
+                       # src/setupTests.ts). **Test files are type-checked.** They were not
+                       # until 2026-08-03: the root tsconfig excludes them and ts-jest runs
+                       # transpile-only (isolatedModules), so 229 test files were checked by
+                       # neither gate — which is how SPC.tsx shipped broken with a green suite
+                       # (its test mocked a `{ data: ... }` envelope the real client never
+                       # returns; the page was fixed in PR #197, this closes the hole that hid
+                       # it). So: a mock whose shape contradicts the function it mocks, or a
+                       # fixture annotated with a type it doesn't satisfy, is now a COMPILE
+                       # ERROR, not a passing test.
+                       # Fix the mock to match the real contract — don't reach for `as any`
+                       # (~223 pre-existing ones still defeat the gate at their call sites).
+                       # CI calls this npm script, never a bare `npx tsc --noEmit`, which would
+                       # silently check only the first program. Don't set isolatedModules:false
+                       # in jest.config.js: measured at 30 suites failing to compile and the
+                       # test run going 30s → 430s. This pass costs ~16s and never runs in jest.
 npm run format         # prettier
 
 # Safe browser harness — headless-Chromium screenshot/snapshot/logs/pdf of a running app.

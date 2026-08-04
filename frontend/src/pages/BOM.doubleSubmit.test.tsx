@@ -14,6 +14,7 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import BOMPage from './BOM';
 import api from '../services/api';
+import { Part } from '../types';
 
 jest.mock('../services/api', () => ({
   __esModule: true,
@@ -27,11 +28,24 @@ jest.mock('../services/api', () => ({
 
 const mockedApi = api as jest.Mocked<typeof api>;
 
-const ASSEMBLY_PART = {
+// A full Part, exactly as `api.getParts()` resolves it — a short-shaped fixture
+// is a mock of a payload the real API never sends.
+const ASSEMBLY_PART: Part = {
   id: 7,
+  version: 1,
   part_number: 'PN-ASM-1',
+  revision: 'A',
   name: 'Gearbox',
   part_type: 'assembly',
+  unit_of_measure: 'EA',
+  standard_cost: 0,
+  is_critical: false,
+  requires_inspection: false,
+  backflush_components: false,
+  is_active: true,
+  status: 'active',
+  created_at: '2026-01-01T00:00:00Z',
+  updated_at: '2026-01-01T00:00:00Z',
 };
 
 function renderBOM() {

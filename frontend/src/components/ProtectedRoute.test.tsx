@@ -8,6 +8,8 @@ import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { ProtectedRoute, AuthenticatedRoute, AdminRoute } from './ProtectedRoute';
 import { useAuth } from '../context/AuthContext';
 import { usePermissions } from '../hooks/usePermissions';
+import { Permission } from '../utils/permissions';
+import { User } from '../types';
 
 // Mock auth context and permissions hook
 jest.mock('../context/AuthContext', () => ({
@@ -36,6 +38,22 @@ const renderWithRouter = (ui: React.ReactElement, { initialEntries = ['/protecte
   );
 };
 
+// The signed-in user these tests assume: a plain operator. Typed as the real
+// `User` so the fixture cannot drift from the shape the auth context serves.
+const TEST_USER: User = {
+  id: 1,
+  version: 1,
+  employee_id: 'EMP-001',
+  email: 'test@test.com',
+  first_name: 'Test',
+  last_name: 'Operator',
+  role: 'operator',
+  is_active: true,
+  is_superuser: false,
+  created_at: '2026-01-01T00:00:00Z',
+  updated_at: '2026-01-01T00:00:00Z',
+};
+
 // Default mock setup
 const setupMocks = ({
   isAuthenticated = true,
@@ -48,18 +66,21 @@ const setupMocks = ({
   isAuthenticated?: boolean;
   isLoading?: boolean;
   isAdmin?: boolean;
-  can?: (permission: string) => boolean;
-  canAny?: (permissions: string[]) => boolean;
-  canAll?: (permissions: string[]) => boolean;
+  can?: (permission: Permission) => boolean;
+  canAny?: (permissions: Permission[]) => boolean;
+  canAll?: (permissions: Permission[]) => boolean;
 } = {}) => {
   mockUseAuth.mockReturnValue({
-    user: isAuthenticated ? { id: 1, email: 'test@test.com', role: 'operator' } : null,
+    user: isAuthenticated ? TEST_USER : null,
     isAuthenticated,
     isLoading,
+    sessionWarning: false,
     login: jest.fn(),
+    loginWithEmployeeId: jest.fn(),
     logout: jest.fn(),
-    refreshToken: jest.fn(),
-  } as any);
+    logoutWithEmployeeId: jest.fn(),
+    extendSession: jest.fn(),
+  });
 
   mockUsePermissions.mockReturnValue({
     can,
@@ -67,8 +88,11 @@ const setupMocks = ({
     canAll,
     isAdmin,
     isSuperuser: isAdmin,
+    canManageUsers: isAdmin,
+    canApprove: isAdmin,
+    permissions: [],
     role: isAuthenticated ? 'operator' : undefined,
-  } as any);
+  });
 };
 
 describe('ProtectedRoute', () => {
@@ -153,7 +177,7 @@ describe('ProtectedRoute', () => {
       });
 
       renderWithRouter(
-        <ProtectedRoute permission="admin:manage">
+        <ProtectedRoute permission="admin:system">
           <div>Admin Page</div>
         </ProtectedRoute>
       );
@@ -169,7 +193,7 @@ describe('ProtectedRoute', () => {
       });
 
       renderWithRouter(
-        <ProtectedRoute permission="admin:manage" unauthorizedPath="/custom-unauthorized">
+        <ProtectedRoute permission="admin:system" unauthorizedPath="/custom-unauthorized">
           <div>Admin Page</div>
         </ProtectedRoute>
       );
@@ -201,7 +225,7 @@ describe('ProtectedRoute', () => {
       });
 
       renderWithRouter(
-        <ProtectedRoute anyOf={['admin:view', 'admin:edit']}>
+        <ProtectedRoute anyOf={['admin:settings', 'admin:audit_logs']}>
           <div>Admin Page</div>
         </ProtectedRoute>
       );

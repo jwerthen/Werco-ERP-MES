@@ -55,6 +55,8 @@ const part = (overrides: Partial<Part>): Part => ({
   standard_cost: 0,
   is_critical: false,
   requires_inspection: false,
+  // Automatic BOM backflush is off on every part until it is deliberately armed.
+  backflush_components: false,
   is_active: true,
   status: 'active',
   created_at: '2026-01-01T00:00:00Z',
@@ -139,7 +141,9 @@ beforeEach(() => {
   mockApi.getMaterialAllocations.mockResolvedValue([]);
   mockApi.getWorkOrder.mockResolvedValue({ id: 42, operations: [] });
   mockApi.previewLaserNestPackage.mockResolvedValue(preview);
-  mockApi.importLaserNestPackage.mockResolvedValue({ child_work_order: { id: 909 } });
+  mockApi.importLaserNestPackage.mockResolvedValue({
+    child_work_order: { id: 909, work_order_number: 'WO-909' },
+  });
 });
 
 describe('sheet-part picker', () => {

@@ -145,7 +145,7 @@ npm run format
 npm run lint
 npm run lint:fix
 
-# Type checking
+# Type checking (BOTH programs — src and the test files; see Testing → Frontend)
 npm run type-check
 
 # Run tests
@@ -250,6 +250,36 @@ npm run test:watch
 ```bash
 npm run test:coverage
 ```
+
+**Test files are type-checked (since 2026-08-03)**
+
+`npm run type-check` runs two `tsc --noEmit` programs: `tsconfig.json` (application
+source, which *excludes* tests) and `tsconfig.test.json` (the `*.test.*` / `*.spec.*`
+files, `src/test-utils`, `src/setupTests.ts`). CI runs the same npm script.
+
+This matters because the test runner does **not** type-check: `jest.config.js` hands
+ts-jest an inline tsconfig inheriting `"isolatedModules": true`, so ts-jest is
+transpile-only. Before this second program existed, 229 test files were checked by
+neither gate — the mechanism that let `SPC.tsx` stay green while being non-functional
+in production, because its test mocked the API client as resolving `{ data: ... }`,
+the shape the page wrongly expected rather than what the real client returns.
+
+What it forbids:
+
+- **Wrong-shaped mocks.** `mockResolvedValue(...)` must match the real function's
+  return type. Mocking an envelope the client never returns is a compile error.
+- **Fixtures that don't satisfy their annotation.** A `const c: SPCCharacteristic = {...}`
+  missing required fields, or carrying fields the type doesn't declare, fails.
+
+Fix the mock or fixture to match the real contract. Do **not** silence it with `as any`
+or `@ts-expect-error` — that reopens the exact hole. (~223 pre-existing `as any` casts,
+173 of them on `mockResolvedValue`/`mockReturnValue` lines, still defeat the gate at
+those call sites; they are known debt, not a pattern to copy.)
+
+Do not "fix" this by setting `isolatedModules: false` in `jest.config.js`: that makes
+ts-jest type-check per file at runtime, measured at 30 unrelated suites failing to
+compile and the test run going 30s → 430s. The separate whole-program pass costs ~16s
+and does not touch the test runtime.
 
 ### E2E Testing (Playwright)
 

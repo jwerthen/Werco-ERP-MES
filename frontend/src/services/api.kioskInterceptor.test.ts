@@ -63,12 +63,19 @@ function http401(url: string) {
 
 const NAV_NOT_IMPLEMENTED = /Not implemented: navigation/;
 
-function navigationAttempts(spy: jest.SpyInstance): number {
+/**
+ * console.error is variadic and untyped at the call site, so the spy is typed
+ * with `unknown[]` arguments: each recorded call is a list of unknown values we
+ * only ever stringify.
+ */
+type ConsoleErrorSpy = jest.SpyInstance<void, unknown[]>;
+
+function navigationAttempts(spy: ConsoleErrorSpy): number {
   return spy.mock.calls.filter((call) => call.some((arg) => NAV_NOT_IMPLEMENTED.test(String(arg)))).length;
 }
 
 describe('api response interceptor — kiosk 401 guard', () => {
-  let errorSpy: jest.SpyInstance;
+  let errorSpy: ConsoleErrorSpy;
 
   beforeEach(() => {
     sessionStorage.clear();

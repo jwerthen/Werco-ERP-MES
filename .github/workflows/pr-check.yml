@@ -127,7 +127,14 @@ jobs:
         run: npm run lint -- --max-warnings=0
 
       - name: TypeScript Check
-        run: npx tsc --noEmit
+        # `npm run type-check`, not a bare `npx tsc --noEmit`: the bare form
+        # checks only tsconfig.json, which EXCLUDES every *.test.* / *.spec.*
+        # file, src/test-utils and src/setupTests.ts. The script also runs
+        # tsconfig.test.json over those, so a wrong-shaped mock fails here too.
+        # Keep identical to ci-cd.yml's "Check TypeScript" step -- the comment
+        # above claims both workflows run the same invocations, and a bare tsc
+        # here would quietly make that false again.
+        run: npm run type-check
 
       - name: Run Tests
         run: npm test -- --coverage --watchAll=false --passWithNoTests

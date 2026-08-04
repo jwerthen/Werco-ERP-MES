@@ -103,7 +103,9 @@ beforeEach(() => {
     child_work_order: { id: 1201, work_order_number: 'WO-1201' },
   });
   mockApi.previewLaserNestPackage.mockResolvedValue(preview);
-  mockApi.importLaserNestPackage.mockResolvedValue({ child_work_order: { id: 909 } });
+  mockApi.importLaserNestPackage.mockResolvedValue({
+    child_work_order: { id: 909, work_order_number: 'WO-909' },
+  });
 });
 
 describe('standalone dispatch strip', () => {

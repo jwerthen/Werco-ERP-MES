@@ -16,14 +16,22 @@
  * backend emits (verified against `backend/app/api/endpoints/spc.py`), and the fixtures
  * are annotated with the contract interfaces from `types/spc.ts`.
  *
- * ⚠️ THE FIXTURE ANNOTATIONS ARE NOT A COMPILE-TIME GATE. `tsconfig.json` excludes
- * every `.test.tsx` from `npm run type-check`, and jest.config.js inherits
- * `isolatedModules: true`, which puts ts-jest in transpile-only mode — a wrong-shaped
- * fixture is NOT a compile error here (measured: an object literal with a bogus
- * property passes). Flipping `isolatedModules: false` repo-wide fails 30 unrelated
- * suites and takes the run from 30s to 430s, so it is a separate cleanup. What actually
- * protects the contract is the ASSERTIONS below — each was verified to fail individually
- * against a reintroduction of the defect it covers. Keep them specific.
+ * ✅ THE FIXTURE ANNOTATIONS ARE NOW A COMPILE-TIME GATE (changed 2026-08).
+ * This comment previously read "NOT a compile-time gate": `tsconfig.json` excludes
+ * every `.test.tsx`, and jest.config.js inherits `isolatedModules: true`, which puts
+ * ts-jest in transpile-only mode — so a wrong-shaped fixture was not a compile error.
+ * `tsconfig.test.json` now type-checks all 229 test files as a second whole-program
+ * `tsc --noEmit` pass, wired into `npm run type-check` (which CI calls). Verified by
+ * reintroducing this page's original defect — a fixture typed `SPCCharacteristic`
+ * carrying `nominal`/`usl`/`lsl`, and a mock resolving `{ data: ... }` — which the old
+ * bare `npx tsc --noEmit` exited 0 on and jest passed, and the new gate fails with
+ * TS2353 on both. `isolatedModules: false` in jest was deliberately NOT used: it fails
+ * 30 unrelated suites and takes the run from 30s to 430s. The separate pass costs ~17s
+ * and does not touch the test runtime.
+ *
+ * The ASSERTIONS below are still what protects behaviour the type system cannot see
+ * (which field feeds which axis) — each was verified to fail individually against a
+ * reintroduction of the defect it covers. Keep them specific.
  *
  * WHY recharts IS MOCKED HERE
  * ---------------------------

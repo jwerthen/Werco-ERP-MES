@@ -15,6 +15,7 @@ import { MemoryRouter } from 'react-router-dom';
 import api from '../services/api';
 import RoutingPage from './Routing';
 import { ToastProvider } from '../components/ui';
+import { WorkCenter } from '../types';
 
 jest.mock('../services/api', () => ({
   __esModule: true,
@@ -50,7 +51,20 @@ jest.mock('../context/AuthContext', () => ({
 
 const mockedApi = api as jest.Mocked<typeof api>;
 
-const workCenter = { id: 5, code: 'WC-LASER', name: 'Laser Cell', work_center_type: 'fabrication', hourly_rate: 95 };
+const workCenter: WorkCenter = {
+  id: 5,
+  version: 1,
+  code: 'WC-LASER',
+  name: 'Laser Cell',
+  work_center_type: 'fabrication',
+  hourly_rate: 95,
+  capacity_hours_per_day: 8,
+  efficiency_factor: 1,
+  is_active: true,
+  current_status: 'available',
+  created_at: '2026-01-01T00:00:00Z',
+  updated_at: '2026-01-01T00:00:00Z',
+};
 
 const releasedSheetListItem = {
   id: 55,

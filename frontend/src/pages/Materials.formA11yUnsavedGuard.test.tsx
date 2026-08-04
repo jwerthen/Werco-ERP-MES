@@ -149,12 +149,20 @@ describe('Materials form — unsaved-changes discard guard', () => {
     // (part_type crashed typeLabel(); status crashed StatusBadge the same way).
     mockedApi.createMaterial.mockResolvedValue({
       id: 1,
+      version: 1,
       part_number: 'RM-1001',
+      revision: 'A',
       name: 'Aluminum Plate',
       part_type: 'raw_material',
       unit_of_measure: 'each',
+      standard_cost: 0,
+      is_critical: false,
+      requires_inspection: false,
+      backflush_components: false,
       is_active: true,
       status: 'active',
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
     });
     renderMaterials();
     const { itemNumber, form } = await openCreateModal();

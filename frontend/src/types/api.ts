@@ -221,6 +221,21 @@ export interface RoutingOperation {
 
 // ============ Customer Types ============
 
+/**
+ * The customer READ shape. Mirrors `CustomerResponse` in
+ * backend/app/api/endpoints/customers.py field for field — which is a strict
+ * subset of the model: `country`, `notes`, `special_requirements` and the
+ * ship-to block are accepted on create/update but are NOT serialized back, so
+ * they must not be declared here.
+ *
+ * Corrected 2026-08 (typed-tests pass): this interface previously declared
+ * `address`, `zip`, `country` and `notes` — none of which the endpoint has ever
+ * sent — and omitted `address_line1`, `zip_code`, `payment_terms`,
+ * `requires_coc` and `requires_fai`, which it always does. Reading
+ * `customer.address` compiled and returned `undefined` at runtime. Nothing in
+ * the app consumed this type (Customers.tsx declares its own, correct, local
+ * interface), so the divergence was invisible.
+ */
 export interface Customer {
   id: number;
   name: string;
@@ -228,13 +243,14 @@ export interface Customer {
   contact_name?: string;
   email?: string;
   phone?: string;
-  address?: string;
+  address_line1?: string;
   city?: string;
   state?: string;
-  zip?: string;
-  country?: string;
+  zip_code?: string;
+  payment_terms?: string;
+  requires_coc: boolean;
+  requires_fai: boolean;
   is_active: boolean;
-  notes?: string;
   created_at: string;
 }
 

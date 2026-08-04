@@ -115,7 +115,9 @@ describe('LaserNestImportWizard — bare-PDF preview metadata', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockApi.previewLaserNestPackage.mockResolvedValue(pdfPreview);
-    mockApi.importLaserNestPackage.mockResolvedValue({ child_work_order: { id: 909 } });
+    mockApi.importLaserNestPackage.mockResolvedValue({
+      child_work_order: { id: 909, work_order_number: 'WO-909' },
+    });
   });
 
   it('shows the pages→nests chip and the skipped-pages note', async () => {
@@ -152,7 +154,9 @@ describe('LaserNestImportWizard — per-row PDF display', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockApi.previewLaserNestPackage.mockResolvedValue(pdfPreview);
-    mockApi.importLaserNestPackage.mockResolvedValue({ child_work_order: { id: 909 } });
+    mockApi.importLaserNestPackage.mockResolvedValue({
+      child_work_order: { id: 909, work_order_number: 'WO-909' },
+    });
   });
 
   it('shows each row as its page range, keeping the file name as tooltip', async () => {
@@ -179,7 +183,9 @@ describe('LaserNestImportWizard — low-confidence field highlighting', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockApi.previewLaserNestPackage.mockResolvedValue(pdfPreview);
-    mockApi.importLaserNestPackage.mockResolvedValue({ child_work_order: { id: 909 } });
+    mockApi.importLaserNestPackage.mockResolvedValue({
+      child_work_order: { id: 909, work_order_number: 'WO-909' },
+    });
   });
 
   it("flags field_confidence==='low' fields and blank PDF-row fields, not the rest", async () => {
@@ -233,7 +239,9 @@ describe('LaserNestImportWizard — import payload', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockApi.previewLaserNestPackage.mockResolvedValue(pdfPreview);
-    mockApi.importLaserNestPackage.mockResolvedValue({ child_work_order: { id: 909 } });
+    mockApi.importLaserNestPackage.mockResolvedValue({
+      child_work_order: { id: 909, work_order_number: 'WO-909' },
+    });
   });
 
   it('echoes source_pages back verbatim for every PDF row (even after edits)', async () => {

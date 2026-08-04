@@ -12,7 +12,9 @@ import {
 
 describe('ConflictError', () => {
   const createConflictResponse = () => ({
-    error: 'CONFLICT',
+    // `as const` keeps this the literal 'CONFLICT' the ConflictResponse
+    // discriminant requires — a plain string literal widens to `string`.
+    error: 'CONFLICT' as const,
     message: 'Version conflict detected',
     conflict: {
       current_version: 2,

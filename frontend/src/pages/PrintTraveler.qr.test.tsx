@@ -16,6 +16,7 @@ import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import QRCode from 'qrcode';
 import api from '../services/api';
 import PrintTraveler from './PrintTraveler';
+import type { Part } from '../types';
 
 jest.mock('../services/api', () => ({
   __esModule: true,
@@ -81,13 +82,23 @@ const WORK_ORDER = {
   ],
 };
 
-const PART = {
+const PART: Part = {
   id: 9,
+  version: 0,
   part_number: 'PN-0099',
   name: 'Mount Plate',
   revision: 'C',
   drawing_number: 'DWG-9',
   unit_of_measure: 'each',
+  part_type: 'manufactured',
+  standard_cost: 12.5,
+  is_critical: false,
+  requires_inspection: false,
+  backflush_components: false,
+  is_active: true,
+  status: 'active',
+  created_at: '2026-06-01T12:00:00Z',
+  updated_at: '2026-06-01T12:00:00Z',
 };
 
 function renderTraveler() {

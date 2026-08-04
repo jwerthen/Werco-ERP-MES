@@ -17,6 +17,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import api from '../services/api';
 import ShopFloor from './ShopFloor';
+import { WorkOrderBlocker } from '../types/aiForward';
 
 jest.mock('../services/api', () => ({
   __esModule: true,
@@ -86,6 +87,34 @@ const queueItem = {
   due_date: '2099-01-05',
 };
 
+// What POST /work-order-blockers/work-orders/{id} actually returns — the full
+// blocker row, not a bare `{ id }`. ShopFloor ignores the body (it re-fetches
+// the queue), but the fixture stays honest to the real response shape.
+const createdBlocker: WorkOrderBlocker = {
+  id: 55,
+  company_id: 1,
+  work_order_id: 1001,
+  operation_id: 101,
+  material_part_id: null,
+  category: 'material_missing',
+  severity: 'high',
+  status: 'open',
+  title: 'Missing material',
+  note: DEFAULT_NOTE,
+  resolution_note: null,
+  reported_by: 1,
+  assigned_to: null,
+  resolved_by: null,
+  reported_at: '2026-01-01T00:00:00Z',
+  acknowledged_at: null,
+  resolved_at: null,
+  created_at: '2026-01-01T00:00:00Z',
+  updated_at: '2026-01-01T00:00:00Z',
+  work_order_number: 'WO-9001',
+  operation_name: 'Mill',
+  material_part_number: null,
+};
+
 function renderShopFloor() {
   return render(
     <MemoryRouter>
@@ -105,7 +134,7 @@ beforeEach(() => {
   mockedApi.getWorkCenters.mockResolvedValue([workCenter]);
   mockedApi.getMyActiveJob.mockResolvedValue({ active_jobs: [] });
   mockedApi.getWorkCenterQueue.mockResolvedValue({ queue: [queueItem] });
-  mockedApi.createWorkOrderBlocker.mockResolvedValue({ id: 55 });
+  mockedApi.createWorkOrderBlocker.mockResolvedValue(createdBlocker);
 });
 
 describe('ShopFloor material-blocker InputDialog', () => {
@@ -177,7 +206,7 @@ describe('ShopFloor material-blocker InputDialog', () => {
   });
 
   it('rapid Enter + click submits exactly once while the request hangs (re-entry guard)', async () => {
-    let resolveCreate!: (value: unknown) => void;
+    let resolveCreate!: (value: WorkOrderBlocker) => void;
     mockedApi.createWorkOrderBlocker.mockImplementation(
       () => new Promise((resolve) => { resolveCreate = resolve; })
     );
@@ -198,7 +227,7 @@ describe('ShopFloor material-blocker InputDialog', () => {
     expect(mockedApi.createWorkOrderBlocker).toHaveBeenCalledTimes(1);
 
     // Settle to close cleanly.
-    resolveCreate({ id: 55 });
+    resolveCreate(createdBlocker);
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     expect(mockedApi.createWorkOrderBlocker).toHaveBeenCalledTimes(1);
   });

@@ -5,6 +5,7 @@
 import { renderHook } from '@testing-library/react';
 import { usePermissions } from './usePermissions';
 import { useAuth } from '../context/AuthContext';
+import { User, UserRole } from '../types';
 
 // Mock the auth context
 jest.mock('../context/AuthContext', () => ({
@@ -13,21 +14,38 @@ jest.mock('../context/AuthContext', () => ({
 
 const mockUseAuth = useAuth as jest.MockedFunction<typeof useAuth>;
 
+// AuthContextType is not exported; derive it from the real hook so this mock
+// can never drift from the shape the provider actually supplies.
+type AuthContextValue = ReturnType<typeof useAuth>;
+
 // Helper to create mock user with all required fields
 const createMockUser = (overrides: {
   id: number;
   email: string;
   first_name: string;
   last_name: string;
-  role: 'admin' | 'manager' | 'supervisor' | 'operator' | 'quality' | 'shipping' | 'viewer';
+  role: UserRole;
   is_superuser: boolean;
-}) => ({
+}): User => ({
   ...overrides,
   version: 1,
   employee_id: `EMP${overrides.id.toString().padStart(3, '0')}`,
   is_active: true,
   created_at: '2024-01-01T00:00:00Z',
   updated_at: '2024-01-01T00:00:00Z',
+});
+
+// Helper to create a complete auth context value; only `user` varies per test.
+const createMockAuth = (user: User | null): AuthContextValue => ({
+  user,
+  isAuthenticated: user !== null,
+  isLoading: false,
+  sessionWarning: false,
+  login: jest.fn(),
+  loginWithEmployeeId: jest.fn(),
+  logout: jest.fn(),
+  logoutWithEmployeeId: jest.fn(),
+  extendSession: jest.fn(),
 });
 
 describe('usePermissions', () => {
@@ -37,28 +55,25 @@ describe('usePermissions', () => {
 
   describe('with admin user', () => {
     beforeEach(() => {
-      mockUseAuth.mockReturnValue({
-        user: createMockUser({
-          id: 1,
-          email: 'admin@werco.com',
-          first_name: 'Admin',
-          last_name: 'User',
-          role: 'admin',
-          is_superuser: true,
-        }),
-        isAuthenticated: true,
-        isLoading: false,
-        login: jest.fn(),
-        logout: jest.fn(),
-        refreshToken: jest.fn(),
-      });
+      mockUseAuth.mockReturnValue(
+        createMockAuth(
+          createMockUser({
+            id: 1,
+            email: 'admin@werco.com',
+            first_name: 'Admin',
+            last_name: 'User',
+            role: 'admin',
+            is_superuser: true,
+          })
+        )
+      );
     });
 
     it('can() returns true for any permission', () => {
       const { result } = renderHook(() => usePermissions());
       expect(result.current.can('users:create')).toBe(true);
       expect(result.current.can('parts:delete')).toBe(true);
-      expect(result.current.can('random:permission')).toBe(true);
+      expect(result.current.can('admin:system')).toBe(true);
     });
 
     it('canAny() returns true', () => {
@@ -68,7 +83,7 @@ describe('usePermissions', () => {
 
     it('canAll() returns true', () => {
       const { result } = renderHook(() => usePermissions());
-      expect(result.current.canAll(['users:create', 'parts:delete', 'settings:manage'])).toBe(true);
+      expect(result.current.canAll(['users:create', 'parts:delete', 'admin:settings'])).toBe(true);
     });
 
     it('isAdmin returns true', () => {
@@ -89,21 +104,18 @@ describe('usePermissions', () => {
 
   describe('with operator user', () => {
     beforeEach(() => {
-      mockUseAuth.mockReturnValue({
-        user: createMockUser({
-          id: 2,
-          email: 'operator@werco.com',
-          first_name: 'Operator',
-          last_name: 'User',
-          role: 'operator',
-          is_superuser: false,
-        }),
-        isAuthenticated: true,
-        isLoading: false,
-        login: jest.fn(),
-        logout: jest.fn(),
-        refreshToken: jest.fn(),
-      });
+      mockUseAuth.mockReturnValue(
+        createMockAuth(
+          createMockUser({
+            id: 2,
+            email: 'operator@werco.com',
+            first_name: 'Operator',
+            last_name: 'User',
+            role: 'operator',
+            is_superuser: false,
+          })
+        )
+      );
     });
 
     it('can() returns true for allowed permissions', () => {
@@ -125,12 +137,12 @@ describe('usePermissions', () => {
 
     it('canAny() returns false when no permissions match', () => {
       const { result } = renderHook(() => usePermissions());
-      expect(result.current.canAny(['users:create', 'settings:manage'])).toBe(false);
+      expect(result.current.canAny(['users:create', 'admin:settings'])).toBe(false);
     });
 
     it('canAll() returns false when missing any permission', () => {
       const { result } = renderHook(() => usePermissions());
-      expect(result.current.canAll(['shop_floor:view', 'users:create'])).toBe(false);
+      expect(result.current.canAll(['work_orders:view', 'users:create'])).toBe(false);
     });
 
     it('isAdmin returns false', () => {
@@ -151,21 +163,18 @@ describe('usePermissions', () => {
 
   describe('with manager user', () => {
     beforeEach(() => {
-      mockUseAuth.mockReturnValue({
-        user: createMockUser({
-          id: 3,
-          email: 'manager@werco.com',
-          first_name: 'Manager',
-          last_name: 'User',
-          role: 'manager',
-          is_superuser: false,
-        }),
-        isAuthenticated: true,
-        isLoading: false,
-        login: jest.fn(),
-        logout: jest.fn(),
-        refreshToken: jest.fn(),
-      });
+      mockUseAuth.mockReturnValue(
+        createMockAuth(
+          createMockUser({
+            id: 3,
+            email: 'manager@werco.com',
+            first_name: 'Manager',
+            last_name: 'User',
+            role: 'manager',
+            is_superuser: false,
+          })
+        )
+      );
     });
 
     it('has management permissions', () => {
@@ -183,25 +192,18 @@ describe('usePermissions', () => {
 
   describe('with no user (unauthenticated)', () => {
     beforeEach(() => {
-      mockUseAuth.mockReturnValue({
-        user: null,
-        isAuthenticated: false,
-        isLoading: false,
-        login: jest.fn(),
-        logout: jest.fn(),
-        refreshToken: jest.fn(),
-      });
+      mockUseAuth.mockReturnValue(createMockAuth(null));
     });
 
     it('can() returns false for all permissions', () => {
       const { result } = renderHook(() => usePermissions());
       expect(result.current.can('parts:view')).toBe(false);
-      expect(result.current.can('shop_floor:view')).toBe(false);
+      expect(result.current.can('work_orders:view')).toBe(false);
     });
 
     it('canAny() returns false', () => {
       const { result } = renderHook(() => usePermissions());
-      expect(result.current.canAny(['parts:view', 'shop_floor:view'])).toBe(false);
+      expect(result.current.canAny(['parts:view', 'work_orders:view'])).toBe(false);
     });
 
     it('canAll() returns false', () => {
@@ -227,21 +229,18 @@ describe('usePermissions', () => {
 
   describe('with quality user', () => {
     beforeEach(() => {
-      mockUseAuth.mockReturnValue({
-        user: createMockUser({
-          id: 4,
-          email: 'quality@werco.com',
-          first_name: 'Quality',
-          last_name: 'User',
-          role: 'quality',
-          is_superuser: false,
-        }),
-        isAuthenticated: true,
-        isLoading: false,
-        login: jest.fn(),
-        logout: jest.fn(),
-        refreshToken: jest.fn(),
-      });
+      mockUseAuth.mockReturnValue(
+        createMockAuth(
+          createMockUser({
+            id: 4,
+            email: 'quality@werco.com',
+            first_name: 'Quality',
+            last_name: 'User',
+            role: 'quality',
+            is_superuser: false,
+          })
+        )
+      );
     });
 
     it('has quality-specific permissions', () => {
@@ -254,27 +253,24 @@ describe('usePermissions', () => {
     it('lacks admin permissions', () => {
       const { result } = renderHook(() => usePermissions());
       expect(result.current.can('users:create')).toBe(false);
-      expect(result.current.can('settings:manage')).toBe(false);
+      expect(result.current.can('admin:settings')).toBe(false);
     });
   });
 
   describe('with viewer user', () => {
     beforeEach(() => {
-      mockUseAuth.mockReturnValue({
-        user: createMockUser({
-          id: 5,
-          email: 'viewer@werco.com',
-          first_name: 'Viewer',
-          last_name: 'User',
-          role: 'viewer',
-          is_superuser: false,
-        }),
-        isAuthenticated: true,
-        isLoading: false,
-        login: jest.fn(),
-        logout: jest.fn(),
-        refreshToken: jest.fn(),
-      });
+      mockUseAuth.mockReturnValue(
+        createMockAuth(
+          createMockUser({
+            id: 5,
+            email: 'viewer@werco.com',
+            first_name: 'Viewer',
+            last_name: 'User',
+            role: 'viewer',
+            is_superuser: false,
+          })
+        )
+      );
     });
 
     it('has view-only permissions', () => {

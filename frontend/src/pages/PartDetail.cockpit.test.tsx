@@ -156,7 +156,9 @@ describe('PartDetail cockpit: header identity + MiniStat Quick Stats', () => {
     const stats = within(strip);
 
     // Each MiniStat tile pairs an uppercase label with its value.
-    function tileValue(label: string): HTMLElement {
+    // Returns the tile's scoped query object (not the element) — the tile is the
+    // MiniStat card the label sits in.
+    function tileValue(label: string): ReturnType<typeof within> {
       const labelEl = stats.getByText(label);
       return within(labelEl.closest('div.card') as HTMLElement);
     }

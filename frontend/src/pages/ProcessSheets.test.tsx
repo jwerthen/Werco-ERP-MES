@@ -581,7 +581,7 @@ describe('ProcessSheets page', () => {
 
   it('delete-step confirm stays open and pending mid-flight, blocks a second fire, and closes only on settle', async () => {
     // Hanging promise: the delete is in flight until we resolve it explicitly.
-    let resolveDelete!: (value: unknown) => void;
+    let resolveDelete!: (value: { message: string }) => void;
     mockedApi.deleteProcessSheetStep.mockImplementation(
       () => new Promise((resolve) => { resolveDelete = resolve; })
     );
@@ -608,7 +608,7 @@ describe('ProcessSheets page', () => {
 
     // Only once the promise settles does the dialog close (after the
     // non-optimistic refresh).
-    resolveDelete(undefined);
+    resolveDelete({ message: 'Step deleted' });
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     expect(mockedApi.deleteProcessSheetStep).toHaveBeenCalledTimes(1);
   });
