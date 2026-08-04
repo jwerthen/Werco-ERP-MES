@@ -27,6 +27,10 @@ def _active_bom_for_part(db: Session, part_id: int, company_id: int) -> Optional
             BOM.part_id == part_id,
             BOM.company_id == company_id,
             BOM.is_active == True,
+            # Invariant 3: ``BOM`` carries ``SoftDeleteMixin`` and ``DELETE /bom/{bom_id}``
+            # is a SOFT delete, so a deleted BOM would otherwise still satisfy every
+            # go-live readiness check on this page.
+            BOM.is_deleted == False,
         )
         .first()
     )
@@ -134,7 +138,7 @@ def _component_part_ids(db: Session, company_id: int):
     return (
         db.query(BOMItem.component_part_id)
         .join(BOM, BOM.id == BOMItem.bom_id)
-        .filter(BOM.company_id == company_id, BOM.is_active == True)
+        .filter(BOM.company_id == company_id, BOM.is_active == True, BOM.is_deleted == False)
     )
 
 
@@ -192,11 +196,19 @@ def get_setup_health(
                 ~Part.id.in_(component_part_ids),
             ),
         ),
-        "boms": _count(db, db.query(func.count(BOM.id)).filter(BOM.company_id == company_id, BOM.is_active == True)),
+        "boms": _count(
+            db,
+            db.query(func.count(BOM.id)).filter(
+                BOM.company_id == company_id, BOM.is_active == True, BOM.is_deleted == False
+            ),
+        ),
         "released_boms": _count(
             db,
             db.query(func.count(BOM.id)).filter(
-                BOM.company_id == company_id, BOM.is_active == True, BOM.status == "released"
+                BOM.company_id == company_id,
+                BOM.is_active == True,
+                BOM.is_deleted == False,
+                BOM.status == "released",
             ),
         ),
         "routings": _count(
@@ -259,7 +271,9 @@ def get_setup_health(
     ]
     progress = round(sum(1 for step in steps if step.status == "complete") / len(steps) * 100)
 
-    make_part_ids_with_bom = db.query(BOM.part_id).filter(BOM.company_id == company_id, BOM.is_active == True)
+    make_part_ids_with_bom = db.query(BOM.part_id).filter(
+        BOM.company_id == company_id, BOM.is_active == True, BOM.is_deleted == False
+    )
     make_part_ids_with_routing = db.query(Routing.part_id).filter(
         Routing.company_id == company_id, Routing.is_active == True
     )
@@ -305,6 +319,7 @@ def get_setup_health(
         .filter(
             BOM.company_id == company_id,
             BOM.is_active == True,
+            BOM.is_deleted == False,
             or_(Part.company_id != company_id, Part.is_active == False, Part.is_deleted == True),
         ),
     )

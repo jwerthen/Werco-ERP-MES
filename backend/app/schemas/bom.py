@@ -1,8 +1,9 @@
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
+from app.core.time_utils import ensure_utc
 from app.models.bom import BOMItemType, BOMLineType
 from app.schemas.base import UTCModel
 
@@ -130,11 +131,59 @@ class BOMCreate(BOMBase):
 
 
 class BOMUpdate(BaseModel):
+    # ``status`` IS DELIBERATELY ABSENT. It used to be an unvalidated ``Optional[str]`` that
+    # ``PUT /bom/{id}`` blind-``setattr``'d, behind a role gate one tier WIDER than the
+    # release verb it shadowed -- so a SUPERVISOR could send {"status": "released"} and
+    # bypass both ``release_bom``'s Admin/Manager gate and its "no items" precondition,
+    # producing a RELEASED controlled document with ``approved_by``/``approved_at`` NULL:
+    # an approved document with no approver. Sending "draft" un-released a BOM without
+    # clearing the approver, and any junk string ("RELEASED", "obsolete", garbage) stuck,
+    # making the frontend's ``BOMStatus`` union a lie.
+    #
+    # Removed rather than enum-validated with a transition check: both transitions belong to
+    # dedicated verbs (``draft -> released`` = ``release_bom``, ``released -> draft`` =
+    # ``unrelease_bom``, each Admin/Manager and each stamping or clearing approval
+    # evidence), so a validated field's only surviving legal writes would be
+    # ``draft -> draft`` and ``released -> released`` -- a field that can never legally
+    # change anything, but that keeps the parse surface and a standing invitation to
+    # "just allow one more transition".
+    #
+    # Consequence, accepted: ``"obsolete"`` is unreachable for BOMs. Nothing writes it today
+    # (only ``Routing`` does) and the only reader is ``setup.py``'s generic
+    # ``!= "released"`` warning. If BOM obsoletion is wanted it ships as its own audited
+    # verb, mirroring ``delete_routing``'s released branch -- not as a generic string
+    # setattr.
     revision: Optional[str] = None
     description: Optional[str] = None
-    status: Optional[str] = None
     bom_type: Optional[str] = None
     effective_date: Optional[datetime] = None
+
+    @field_validator("effective_date")
+    @classmethod
+    def _normalize_to_naive_utc(cls, v: Optional[datetime]) -> Optional[datetime]:
+        """Normalize to naive UTC to match ``BOM.effective_date``, a naive ``DateTime``
+        column. Same pattern (and the same helper) as ``VisitorManualEntryRequest``; see
+        ``schemas/visitor_log.py``. ``ensure_utc`` treats a zone-less value as UTC.
+
+        Load-bearing for TWO things, not just storage hygiene:
+
+        1. ``update_bom``'s ``changed_fields`` is ``getattr(bom, f) != v``. ``BOMResponse``
+           inherits ``UTCModel``, so ``GET /bom/{id}`` serves this field as
+           ``...T12:00:00Z``; a form-shaped client that PUTs the record straight back used
+           to parse to an AWARE datetime, and ``naive != aware`` is ``True`` in Python --
+           so ``effective_date`` landed in ``changed_fields`` on EVERY such request, and a
+           RELEASED BOM answered 400 to a PUT that changed nothing (the freeze reads the
+           field as an edit to the AS9100D effectivity). The audit chain was NOT corrupted
+           by this -- ``bom.py::_audit_values`` runs both halves of the diff through
+           ``to_utc_iso`` and ``AuditService.log_update`` drops an empty diff -- but that is
+           a second layer catching the first one's mistake, not a reason to leave it.
+        2. A payload carrying a non-UTC offset (``...T07:00:00-05:00``) was ``setattr``'d
+           onto the naive column as-is, storing the local wall clock (07:00) instead of the
+           UTC instant (12:00) -- silently re-dating an approved effectivity by the offset.
+           This one WAS a persisted-data defect, on every status.
+        """
+        dt = ensure_utc(v)
+        return dt.replace(tzinfo=None) if dt is not None else None
 
 
 class PartInfo(BaseModel):

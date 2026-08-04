@@ -23,6 +23,12 @@ from sqlalchemy.orm.attributes import set_committed_value
 from sqlalchemy.orm.exc import StaleDataError
 
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
+
+# THE tenant-scoped ``{part_id: Part}`` resolver for BOM-line components. Imported rather
+# than re-implemented: this module and ``bom.py`` render the same rows, and a third private
+# copy is a third place for the ``company_id`` predicate to go missing. ``bom.py`` imports
+# no endpoint module, so there is no cycle.
+from app.api.endpoints.bom import tenant_parts_by_id
 from app.core.cache import invalidate_work_centers_cache
 from app.core.realtime import safe_broadcast
 from app.core.time_utils import to_utc_iso
@@ -545,16 +551,44 @@ def _assert_work_center_in_company(db: Session, work_center_id: int, company_id:
         raise HTTPException(status_code=404, detail="Work center not found")
 
 
-def _get_active_bom(db: Session, part_id: int, company_id: int) -> Optional[BOM]:
-    return (
-        db.query(BOM)
-        .filter(
-            BOM.part_id == part_id,
-            BOM.company_id == company_id,
-            BOM.is_active == True,
-        )
-        .first()
+def _get_active_bom(db: Session, part_id: int, company_id: int, *, include_deleted: bool = False) -> Optional[BOM]:
+    """THE "which BOM does this part build from" lookup — ten-odd call sites across work
+    orders, job costing and the backflush engine.
+
+    ``BOM.is_deleted`` is now part of the predicate by DEFAULT (invariant 3). ``BOM``
+    carries ``SoftDeleteMixin`` and ``DELETE /bom/{bom_id}`` is now a SOFT delete, so
+    without it a deleted BOM keeps resolving here and the structure the shop believes it
+    deleted drives work-order release readiness, material requirements, job costing and the
+    sub-assembly descent inside the backflush explosion. ``is_active`` alone is not a
+    substitute: it is an independent flag a user can set either way, not a tombstone.
+
+    ``include_deleted=True`` is a NARROW opt-in with exactly two callers, both of them the
+    TOP-LEVEL entry points of the backflush resolver
+    (``completion_inventory_service._resolve_backflush_demand`` and
+    ``backflush_readiness_for_part``). They resolve the deleted row **only in order to
+    refuse it out loud**: each one calls ``_record_bom_header_diagnostics`` immediately
+    afterwards, which raises the BLOCKING ``deleted_active_bom`` diagnostic, so the
+    structure is named and condemned rather than silently absent. Nothing issues stock down
+    that path. Do NOT pass this anywhere else, and in particular not on the child-BOM
+    descent, where no header diagnostic runs and a deleted sub-assembly would be exploded
+    for real.
+
+    What the opt-in does NOT do is change the outcome for a BOM deleted through the
+    product's own verb. ``is_active == True`` stays in the predicate unconditionally and
+    ``DELETE /bom/{bom_id}`` clears ``is_active`` alongside the tombstone, so such a row
+    misses here either way and the backflush refuses with the generic — but equally
+    BLOCKING — ``no_demand_source``. The opt-in covers the ``is_deleted=True,
+    is_active=True`` shape a script or a fixture can leave behind. Both paths refuse; only
+    the wording differs.
+    """
+    query = db.query(BOM).filter(
+        BOM.part_id == part_id,
+        BOM.company_id == company_id,
+        BOM.is_active == True,  # noqa: E712
     )
+    if not include_deleted:
+        query = query.filter(BOM.is_deleted == False)  # noqa: E712
+    return query.first()
 
 
 def _collect_bom_components(
@@ -564,13 +598,23 @@ def _collect_bom_components(
     parent_qty: float = 1.0,
     visited_part_ids: Optional[set[int]] = None,
 ) -> List[tuple[BOMItem, Part, float]]:
-    """Return BOM components in multi-level order with quantity per parent assembly."""
+    """Return BOM components in multi-level order with quantity per parent assembly.
+
+    Components are resolved through ``tenant_parts_by_id`` (invariant #1), never off
+    the ``BOMItem.component_part`` relationship this used to ``joinedload``: that
+    relationship joins on ``component_part_id`` alone and applies no ``company_id``
+    predicate, so on a mis-parented line it materialises ANOTHER COMPANY's ``Part`` -- and
+    everything downstream of this helper renders it, ``GET /work-orders/preview-operations``
+    printing the foreign part number and name straight back to the caller. Scoping the
+    LOOKUP means the foreign object is never materialised, rather than materialised and
+    then carefully not printed. A component that does not resolve is skipped, which is what
+    the ``if not component`` branch already did for a hard-deleted part row.
+    """
     if visited_part_ids is None:
         visited_part_ids = {bom.part_id}
 
     items = (
         db.query(BOMItem)
-        .options(joinedload(BOMItem.component_part))
         .filter(
             BOMItem.bom_id == bom.id,
             BOMItem.company_id == company_id,
@@ -581,10 +625,12 @@ def _collect_bom_components(
         )
         .all()
     )
+    # One scoped read per BOM level, not one per line -- the walk is recursive and hot.
+    components_by_id = tenant_parts_by_id(db, [item.component_part_id for item in items], company_id)
 
     components: List[tuple[BOMItem, Part, float]] = []
     for item in items:
-        component = item.component_part
+        component = components_by_id.get(item.component_part_id)
         if not component or component.id in visited_part_ids:
             continue
 
@@ -3314,14 +3360,16 @@ def get_material_requirements(
     company_id: int = Depends(get_current_company_id),
 ):
     """Get BOM material requirements for a work order with quantities calculated"""
-    from app.models.bom import BOM, BOMItem
-
+    # (``BOM`` / ``BOMItem`` are imported at module scope; the local re-import that used to
+    # sit here went unused once the BOM lookup moved to ``_get_active_bom``.)
     work_order = db.query(WorkOrder).filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id).first()
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")
 
-    # Get BOM for the part
-    bom = db.query(BOM).filter(BOM.part_id == work_order.part_id, BOM.is_active == True).first()
+    # Get BOM for the part, through THE shared lookup: this hand-rolled query filtered
+    # neither ``company_id`` (invariant 1 — it could resolve another tenant's BOM for the
+    # same part id) nor ``is_deleted`` (invariant 3).
+    bom = _get_active_bom(db, work_order.part_id, company_id)
 
     if not bom:
         return {
@@ -3332,12 +3380,17 @@ def get_material_requirements(
             "materials": [],
         }
 
-    # Get BOM items with component parts
-    items = db.query(BOMItem).options(joinedload(BOMItem.component_part)).filter(BOMItem.bom_id == bom.id).all()
+    # Get BOM items with component parts. Both predicates are invariant #1: the line query
+    # carried no ``company_id``, and the components came off ``joinedload(BOMItem.
+    # component_part)`` -- a relationship with no ``company_id`` predicate, which on a
+    # mis-parented line rendered ANOTHER COMPANY's part number and name into this response.
+    # Resolved TENANT-SCOPED and batched instead; see ``tenant_parts_by_id``.
+    items = db.query(BOMItem).filter(BOMItem.bom_id == bom.id, BOMItem.company_id == company_id).all()
+    components_by_id = tenant_parts_by_id(db, [item.component_part_id for item in items], company_id)
 
     materials = []
     for item in items:
-        component = item.component_part
+        component = components_by_id.get(item.component_part_id)
         if component:
             qty_per_assembly = float(item.quantity)
             qty_required = qty_per_assembly * float(work_order.quantity_ordered)

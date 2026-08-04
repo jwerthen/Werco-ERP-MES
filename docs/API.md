@@ -1413,6 +1413,12 @@ mixed**:
 > `bom_depth_exceeded`, `foreign_component_part`; plus, on the work-order preview only,
 > `operation_names_own_part`, `operations_disagree_on_component`,
 > `routing_component_excluded_by_bom`, `routing_bom_quantity_disagreement`. Advisories:
+> **A BOM deleted through `DELETE /bom/{id}` reports as `no_demand_source`, not
+> `deleted_active_bom`.** That verb clears `is_active` alongside the tombstone, and the shared BOM
+> lookup requires `is_active`, so the deleted row is not resolved at all. `deleted_active_bom`
+> covers the `is_deleted=true, is_active=true` shape a script or fixture can leave behind. Both are
+> **blocking** and both refuse the whole leg — only the wording differs.
+>
 > `routing_only_no_bom`, `zero_quantity_ordered`, `incomplete_operation_demand`, `tie_basis_mismatch`,
 > `tie_operation_missing`.
 >
@@ -1488,14 +1494,93 @@ mixed**:
 | GET | `/bom/{id}/explode` | Multi-level explosion (`max_levels` **1–20**, default 10) — see tenant-scoping note below | Yes |
 | GET | `/bom/{id}/flatten` | Flattened multi-level view for reports/MRP (`max_levels` **1–20**, default 10) — same scoping | Yes |
 | GET | `/bom/{id}/where-used` | Parent assemblies using this BOM's part — same scoping | Yes |
-| PUT | `/bom/{id}` | Update BOM | Yes |
-| DELETE | `/bom/{id}` | Delete BOM | Admin |
+| PUT | `/bom/{id}` | Update BOM header. **`status` is not accepted**, and a released BOM accepts only `description` — see [Controlled-document state](#bom-controlled-document-state) | Admin / Manager / Supervisor |
+| POST | `/bom/{id}/release` | Approve the BOM for production. Requires a draft with at least one line, else **400** | Admin / Manager |
+| POST | `/bom/{id}/unrelease` | Withdraw the approval back to draft, clearing `approved_by` / `approved_at` / `effective_date` | Admin / Manager |
+| DELETE | `/bom/{id}` | **Soft**-delete a draft BOM; its lines are retained. Returns `{"message": "BOM deleted", "can_restore": true}` | Admin / Manager |
+| POST | `/bom/{id}/restore` | Restore a soft-deleted BOM (**400** if it is not deleted) | Admin / Manager |
 | POST | `/bom/{id}/items` | Add a line to a BOM. ⚠️ **`unit_of_measure` changed behaviour on 2026-07-27** — see [below](#bom-line-unit-of-measure) | Admin / Manager / Supervisor |
 | PUT | `/bom/items/{id}` | Update a BOM line. ⚠️ Same — an omitted `unit_of_measure` is left alone; an explicit clear re-inherits | Admin / Manager / Supervisor |
 | DELETE | `/bom/items/{id}` | Remove a BOM line | Admin / Manager |
 
 `POST /bom/` also accepts its lines inline, so it is a BOM-line write path too and carries the
 same `unit_of_measure` change.
+
+<a id="bom-controlled-document-state"></a>
+> **Controlled-document state: what each verb refuses, and why.** A BOM's `status` is either
+> `draft` or `released`; `released` is an approval, and the write surface enforces that. Every
+> refusal below is **400** with a plain-string `detail` that is safe to render.
+>
+> | `status` | `PUT /bom/{id}` | line writes | `release` | `unrelease` | `delete` |
+> |---|---|---|---|---|---|
+> | `draft` | all fields | allowed | ✓ | 400 *"BOM is not released"* | ✓ (soft) |
+> | `released` | **`description` only**; anything else 400 | **400** | 400 *"BOM is already released"* | ✓ | 400 *"Only draft BOMs can be deleted"* |
+> | anything else (legacy) | 400 *"Cannot modify a BOM with status '…'"* | same 400 | 400 | ✓ → `draft` | 400 |
+>
+> - **`BOMUpdate.status` was removed.** It was an unvalidated free string that `PUT /bom/{id}`
+>   blind-`setattr`'d behind a role gate one tier **wider** (Supervisor) than the `release` verb it
+>   shadowed. A Supervisor could `PUT {"status": "released"}` and bypass both the Admin/Manager gate
+>   and the "cannot release a BOM with no items" precondition, producing a released controlled
+>   document with `approved_by` / `approved_at` **NULL** — an approved document with no approver.
+>   `"draft"` un-released without clearing the approver, and any junk string stuck, which made the
+>   frontend's `BOMStatus` union a lie. A client that still sends `status` gets **200**, the field
+>   ignored (Pydantic `extra="ignore"`) and the true status echoed back in `BOMResponse`.
+> - **A released BOM is frozen, not carved out.** Unlike `routing.update_operation`, which allows
+>   in-place time-standard edits on a released routing, BOM has an `unrelease` verb — so the workflow
+>   is **unrelease → edit → release**, which leaves withdrawal, changes and re-approval as three
+>   separate rows on the audit chain instead of one silent mutation. Only `description` survives on a
+>   released header, because it is metadata *about* the document rather than the configuration
+>   (`revision` is the document's identity, `bom_type` changes how it explodes, `effective_date` is
+>   AS9100D effectivity). A released `description` edit deliberately does **not** re-stamp the
+>   approver. This is also the answer for the unit-of-measure worklist below: a mismatched line on a
+>   released BOM cannot be corrected in place.
+> - **`effective_date` on the request body is normalized to UTC before anything compares or stores
+>   it.** The column is naive UTC while `BOMResponse` serves the field with a trailing `Z`, so a
+>   client that PUT back exactly what `GET /bom/{id}` served it parsed to a *timezone-aware* value
+>   that compared unequal to the stored naive one — the freeze above then answered **400** to a
+>   request that changed nothing, and a payload carrying a non-UTC offset (`...T07:00:00-05:00`) was
+>   stored as the local wall clock rather than the UTC instant. Both are fixed: the round trip is a
+>   true no-op (**200**, nothing written, no audit row), an offset is *applied* rather than dropped,
+>   and a genuine effectivity change on a released BOM is still refused.
+> - **`unrelease` refuses only an already-`draft` BOM**, so it doubles as the de-corruption door for
+>   any row the removed free-string field left holding a junk status — otherwise every verb would
+>   refuse it and `BOM.part_id` being UNIQUE would strand the part with a permanently unusable BOM.
+>   Its audit row records the *actual* prior status, not a hardcoded `"released"`.
+> - **`POST /bom/` refuses when any BOM row already occupies the part** — active, inactive **or
+>   soft-deleted** — because `BOM.part_id` is UNIQUE with no carve-out. The body names the recovery:
+>   *"A deleted BOM exists for part 'X' — restore it before creating a new one."* The same probe and
+>   bodies guard the import paths. Previously the probe looked only for active rows and the insert
+>   then died on the constraint as an uncaught **500**; a residual row belonging to another tenant is
+>   invisible to the (correctly company-scoped) probe and now yields a flat 400 rather than a 500.
+
+<a id="bom-header-writes"></a>
+> **BOM header writes are audited, and the delete is soft.** `create` / `update` / `release` /
+> `unrelease` / `delete` / `restore` previously wrote **nothing** to `audit_log` — `release` was an
+> unaudited approval of a controlled document, and `unrelease` NULLed `approved_by` / `approved_at`
+> with no record that a named approval had ever existed. Each now writes one tamper-evident row
+> under `resource_type="bom"`, logged **before** the terminal commit so it commits atomically with
+> the change; `resource_identifier` is `"{part number} BOM rev {rev}"`, the part number resolved
+> tenant-scoped. **The two import paths write that same handle**, so one `resource_type="bom"` chain
+> carries one shape — see the audit note under the import endpoints for the forward-only
+> discontinuity that creates. `POST /bom/` additionally writes one `bom_line` CREATE row per inline line.
+> `unrelease`'s row carries the pre-image (`cleared_approved_by` / `cleared_approved_at` /
+> `cleared_effective_date`) because that evidence exists nowhere else once the columns are cleared.
+>
+> `DELETE /bom/{id}` is a **soft** delete (`BOM` carries `SoftDeleteMixin`; the old handler issued a
+> physical `db.delete` plus a bulk delete of every line — invariant 3). The lines are **kept
+> physically intact** and reported as `extra_data.retained_line_count`, with no per-line DELETE audit
+> rows: writing them for rows that still exist would be a false record, and `restore` would otherwise
+> bring back an empty BOM. `POST /bom/{id}/restore` is a **prerequisite** of that conversion rather
+> than a convenience — the UNIQUE `part_id` means a soft-deleted BOM permanently occupies its part's
+> only BOM slot. Every BOM read path now filters `BOM.is_deleted`, including the shared
+> `_get_active_bom` lookup that work-order release readiness, material requirements, job costing and
+> MRP all resolve through, so a deleted structure stops driving production. Retention is only safe
+> while **every** `BOMItem` reader reaches its lines through a header filtered on `is_deleted`; the
+> two deliberate exceptions are the "is this part referenced anywhere" probes behind
+> `DELETE /parts/{id}?hard_delete` and `DELETE /materials/{id}?hard_delete`, which must not filter
+> because a retained line still holds a real foreign key. The inventory-demand forecast
+> (`GET /analytics/predict/inventory-demand`) was an unlisted third and now joins the header like
+> everything else; `delete_bom`'s docstring enumerates the full list with the grep that re-verifies it.
 
 <a id="bom-line-writes"></a>
 > **BOM line writes: audited, tenant-checked, and armed-part aware.** All three verbs above
@@ -1562,6 +1647,19 @@ same `unit_of_measure` change.
 > BOM and filters `company_id`, so foreign parents never appear; and the circular-reference check on
 > `POST /bom/{id}/items` walks only the active company's BOMs. Previously all of these were
 > unscoped reads.
+
+> **Part names on BOM responses are resolved tenant-scoped, not through the ORM relationships.**
+> `BOM.part` and `BOMItem.component_part` both join on the foreign key alone and carry no
+> `company_id` predicate, so on a mis-parented row (a residual foreign key — no supported write path
+> creates one) they materialise **another company's** `Part` and every response builder printed its
+> part number, name and revision straight back to the caller. Both the assembly's part and every
+> line's component are now resolved through one batched, company-scoped read; a part that does not
+> resolve renders as `null` (`part`, `component_part`) rather than as someone else's. This covers
+> `GET /bom/`, `GET /bom/{id}`, `/by-part`, `/explode`, `/flatten`, `/where-used`,
+> `PUT /bom/items/{id}`, `GET /work-orders/{id}/material-requirements`,
+> `GET /work-orders/preview-operations/{part_id}`, and the `bom` / `routing` result titles on
+> `GET /search`. The **write** side was already scoped. Clients must treat `part` and
+> `component_part` as nullable on every one of these responses.
 
 #### BOM Item Schema
 
@@ -1775,6 +1873,17 @@ uploads go through text extraction + LLM. See
 > (`item_count` + `component_part_numbers` in `extra_data` — the same parent-row pattern as the
 > WO/PO imports' audit rows). Audit rows are flushed before the terminal commit so they persist
 > atomically with the import. `POST /bom/import/preview` writes nothing.
+>
+> The BOM row's `resource_identifier` is `"{part number} BOM rev {rev}"` — the **same** handle the
+> six [BOM header verbs](#bom-header-writes) write, so an auditor pulling one document's
+> `resource_type="bom"` chain sees one shape from the CREATE through every later row. Both importers
+> previously wrote the **bare** assembly part number here, which made the import-born CREATE the only
+> row about that BOM that did not match the rest (and omitted the revision the importer had just
+> written to the row). Audit rows are immutable and are never backfilled (invariant 2), so this is
+> **forward-only**: rows written before the change keep the bare shape. The discontinuity is
+> one-directional — the new form *contains* the old one, and audit search matches
+> `resource_identifier` with a substring `ILIKE`, so a search by part number still finds rows of both
+> shapes; only a search for the full new string misses the older ones.
 
 > **Conflicts are refused with actionable 400s** rather than silently reusing soft-deleted rows or
 > dying with an IntegrityError **500**. On refusal the whole import rolls back — no partial

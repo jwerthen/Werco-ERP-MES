@@ -125,7 +125,13 @@ class MRPService:
             # Get the BOM for this work order's part (scoped to this tenant)
             bom = (
                 self.db.query(BOM)
-                .filter(BOM.company_id == self.company_id, BOM.part_id == wo.part_id, BOM.is_active == True)
+                .filter(
+                    BOM.company_id == self.company_id,
+                    BOM.part_id == wo.part_id,
+                    BOM.is_active == True,
+                    # Invariant 3 — MRP must not plan demand off a BOM the shop deleted.
+                    BOM.is_deleted == False,
+                )
                 .first()
             )
 
@@ -163,7 +169,11 @@ class MRPService:
         visited.add(bom_id)
         requirements = []
 
-        bom = self.db.query(BOM).filter(BOM.id == bom_id, BOM.company_id == self.company_id).first()
+        bom = (
+            self.db.query(BOM)
+            .filter(BOM.id == bom_id, BOM.company_id == self.company_id, BOM.is_deleted == False)
+            .first()
+        )
         if not bom:
             return requirements
 
@@ -201,7 +211,12 @@ class MRPService:
             if self._enum_value(item.item_type) == BOMItemType.MAKE.value:
                 child_bom = (
                     self.db.query(BOM)
-                    .filter(BOM.company_id == self.company_id, BOM.part_id == part.id, BOM.is_active == True)
+                    .filter(
+                        BOM.company_id == self.company_id,
+                        BOM.part_id == part.id,
+                        BOM.is_active == True,
+                        BOM.is_deleted == False,
+                    )
                     .first()
                 )
 
