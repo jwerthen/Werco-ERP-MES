@@ -34,7 +34,13 @@ a file a manager opens, so counting rows would pass on a file that still leaks.
 
 Two sibling exporters (purchase orders, parts) carry the same-shape assertion so
 this file is the home for the defect class rather than a single-defect
-regression test.
+regression test, and a parameterized sweep at the end asserts the property for
+**all seven** exporters -- tenant scoping belongs to the category, not to the one
+route that happened to be broken.
+
+All seven now require ADMIN/MANAGER (``docs/RBAC_PERMISSIONS.md`` -> Bulk data
+export), so ``make_user`` here defaults to ADMIN. The gate itself is covered in
+``test_export_gate_and_audit.py``.
 
 Fixture conventions follow ``test_receiving_compliance.py`` /
 ``test_inventory_hardening.py``: company A is the seeded default (id=1), company
@@ -56,6 +62,7 @@ from app.models.company import Company
 from app.models.part import Part
 from app.models.purchasing import POStatus, PurchaseOrder, PurchaseOrderLine, Vendor
 from app.models.user import User, UserRole
+from app.models.work_order import WorkOrder, WorkOrderStatus
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
 
@@ -379,3 +386,185 @@ def test_parts_export_excludes_other_company(client: TestClient, db_session: Ses
     body = response.text
     assert a_part.part_number in body
     assert b_part.part_number not in body
+
+
+# ===========================================================================
+# Every exporter, swept
+#
+# The three tests above grew out of one confirmed defect and cover three of the
+# seven routes. Tenant scoping is a property of the CATEGORY, not of the route
+# that happened to be broken, so the sweep below asserts it for all seven --
+# including work orders, inventory, quotes and the inventory ledger, which had
+# no cross-tenant coverage at all.
+#
+# Each company is seeded with one row of every exported kind, and every one of
+# those rows carries the same per-company TAG in a field that appears in the
+# exported file. The assertion is then a single, format-agnostic property: the
+# other tenant's tag appears NOWHERE in the bytes, and the caller's own tag does
+# (so an endpoint that leaks nothing because it returns nothing cannot pass).
+# ===========================================================================
+
+
+def seed_tagged_tenant(db: Session, *, company_id: int) -> str:
+    """Seed one row of every exported dataset, all stamped with a unique tag."""
+    from app.models.inventory import InventoryItem, InventoryTransaction, TransactionType
+    from app.models.quote import Quote, QuoteStatus
+
+    tag = f"TAG{_next():05d}X"
+    user = make_user(db, company_id=company_id)
+
+    part = Part(
+        part_number=f"EXPI-{tag}-PART",
+        name=f"Part {tag}",
+        part_type="purchased",
+        unit_of_measure="each",
+        standard_cost=13.50,
+        is_active=True,
+        company_id=company_id,
+    )
+    db.add(part)
+    db.flush()
+
+    db.add(
+        WorkOrder(
+            work_order_number=f"EXPI-{tag}-WO",
+            part_id=part.id,
+            quantity_ordered=7.0,
+            status=WorkOrderStatus.RELEASED,
+            priority=3,
+            customer_name=f"Customer {tag}",
+            customer_po=f"EXPI-{tag}-CPO",
+            due_date=date.today(),
+            company_id=company_id,
+            is_deleted=False,
+        )
+    )
+    db.add(
+        InventoryItem(
+            part_id=part.id,
+            location=f"EXPI-{tag}-LOC",
+            warehouse="MAIN",
+            quantity_on_hand=4.0,
+            quantity_available=4.0,
+            lot_number=f"EXPI-{tag}-LOT",
+            unit_cost=13.50,
+            is_active=True,
+            company_id=company_id,
+        )
+    )
+    db.add(
+        InventoryTransaction(
+            part_id=part.id,
+            transaction_type=TransactionType.RECEIVE,
+            quantity=4.0,
+            reference_type="purchase_order",
+            reference_number=f"EXPI-{tag}-TXN",
+            lot_number=f"EXPI-{tag}-LOT",
+            unit_cost=13.50,
+            total_cost=54.0,
+            created_by=user.id,
+            company_id=company_id,
+        )
+    )
+    db.add(
+        Quote(
+            quote_number=f"EXPI-{tag}-QUOTE",
+            customer_name=f"Customer {tag}",
+            customer_contact=f"Contact {tag}",
+            customer_email=f"{tag}@expi.test",
+            status=QuoteStatus.SENT,
+            quote_date=date.today(),
+            total=1234.56,
+            company_id=company_id,
+        )
+    )
+
+    vendor = Vendor(
+        code=f"EXPI-{tag}-V",
+        name=f"Vendor {tag}",
+        is_active=True,
+        is_approved=True,
+        company_id=company_id,
+    )
+    db.add(vendor)
+    db.flush()
+    po = PurchaseOrder(
+        po_number=f"EXPI-{tag}-PO",
+        vendor_id=vendor.id,
+        status=POStatus.SENT,
+        order_date=date.today(),
+        total=54.0,
+        company_id=company_id,
+        is_deleted=False,
+    )
+    db.add(po)
+    db.flush()
+    db.add(
+        PurchaseOrderLine(
+            purchase_order_id=po.id,
+            line_number=1,
+            part_id=part.id,
+            quantity_ordered=4.0,
+            quantity_received=0.0,
+            unit_price=13.50,
+            line_total=54.0,
+            is_closed=False,
+            company_id=company_id,
+        )
+    )
+    db.commit()
+    return tag
+
+
+ALL_EXPORT_ROUTES = [
+    "/api/v1/exports/work-orders/export",
+    "/api/v1/exports/parts/export",
+    "/api/v1/exports/inventory/export",
+    "/api/v1/exports/purchase-orders/export",
+    "/api/v1/exports/purchase-orders/lines/export",
+    "/api/v1/exports/quotes/export",
+    "/api/v1/exports/inventory/transactions/export",
+]
+
+
+@pytest.mark.parametrize("route", ALL_EXPORT_ROUTES)
+def test_no_exporter_emits_another_tenants_rows(client: TestClient, db_session: Session, route: str):
+    a_tag = seed_tagged_tenant(db_session, company_id=COMPANY_A)
+    b_tag = seed_tagged_tenant(db_session, company_id=COMPANY_B)
+
+    headers = headers_for(make_user(db_session, company_id=COMPANY_A))
+    response = client.get(route, headers=headers, params={"format": "csv"})
+
+    assert response.status_code == http_status.HTTP_200_OK, f"{route}: {response.text}"
+    body = response.text
+    # Control: the caller's own dataset IS in the file, so "leaks nothing"
+    # cannot be satisfied by "returns nothing".
+    assert a_tag in body, f"{route} returned none of the caller's own rows"
+    assert b_tag not in body, f"{route} leaked company B rows"
+
+
+@pytest.mark.parametrize("route", ALL_EXPORT_ROUTES)
+def test_no_exporter_emits_rows_to_a_tenant_that_has_none(client: TestClient, db_session: Session, route: str):
+    """The empty-tenant case: an unscoped query is most obvious when A owns nothing."""
+    b_tag = seed_tagged_tenant(db_session, company_id=COMPANY_B)
+
+    headers = headers_for(make_user(db_session, company_id=COMPANY_A))
+    response = client.get(route, headers=headers, params={"format": "csv"})
+
+    assert response.status_code == http_status.HTTP_200_OK, f"{route}: {response.text}"
+    assert b_tag not in response.text, f"{route} leaked company B rows to an empty tenant"
+
+
+@pytest.mark.parametrize("route", ALL_EXPORT_ROUTES)
+def test_no_exporter_emits_another_tenants_rows_in_xlsx(client: TestClient, db_session: Session, route: str):
+    """Same property against the workbook bytes -- both formats share one query."""
+    a_tag = seed_tagged_tenant(db_session, company_id=COMPANY_A)
+    b_tag = seed_tagged_tenant(db_session, company_id=COMPANY_B)
+
+    headers = headers_for(make_user(db_session, company_id=COMPANY_A))
+    response = client.get(route, headers=headers, params={"format": "xlsx"})
+
+    assert response.status_code == http_status.HTTP_200_OK, route
+    cells = " ".join(xlsx_cell_text(response.content))
+    assert a_tag in cells, f"{route} returned none of the caller's own rows"
+    assert b_tag not in cells, f"{route} leaked company B rows"

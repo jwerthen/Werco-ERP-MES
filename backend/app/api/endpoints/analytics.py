@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_company_id, get_current_user, require_role
+from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
 from app.models.analytics import ReportTemplate
 from app.models.user import User, UserRole
@@ -38,6 +38,8 @@ from app.schemas.analytics import (
 )
 from app.services.adoption_metrics_service import get_adoption_metrics
 from app.services.analytics_service import AnalyticsService, get_date_range
+from app.services.audit_service import AuditService
+from app.services.export_audit import log_export
 from app.services.export_safety import sanitize_csv_mapping, sanitize_csv_row
 from app.services.flow_metrics_service import get_flow_metrics, get_wip_aging
 from app.services.prediction_service import PredictionService
@@ -282,8 +284,9 @@ def export_custom_report(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Export a custom report to file."""
+    """Export a custom report to file (ADMIN/MANAGER). The export is audited."""
     template = (
         db.query(ReportTemplate)
         .filter(ReportTemplate.id == template_id, ReportTemplate.company_id == company_id)
@@ -314,10 +317,29 @@ def export_custom_report(
     # tenant's rows.
     data = service.execute_report(request, company_id)
 
-    if format == "csv":
-        return _export_csv(data, template.name)
-    else:
+    if format != "csv":
         raise HTTPException(status_code=400, detail=f"Format {format} not yet supported")
+
+    # Build the file first: ``_export_csv`` refuses an empty result set with 400,
+    # and a refusal disclosed nothing, so it must not leave an EXPORT row behind.
+    response = _export_csv(data, template.name)
+    # This is the most general bulk export in the system -- a tenant-authored
+    # template over a whole data source -- so the row records the template and the
+    # query shape it ran, never the rows. ``columns`` comes from the stored
+    # template, not the query string, so no ``known_columns`` fence is needed.
+    log_export(
+        db,
+        audit,
+        dataset="custom_report",
+        label="custom report",
+        row_count=len(data),
+        export_format="csv",
+        columns=template.columns or [],
+        filters={"data_source": template.data_source, "template_filters": template.filters},
+        resource_id=template.id,
+        resource_identifier=template.name,
+    )
+    return response
 
 
 def _export_csv(data: List[dict], filename: str) -> StreamingResponse:
