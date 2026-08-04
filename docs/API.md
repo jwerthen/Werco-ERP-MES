@@ -5549,6 +5549,52 @@ through create/read/update. Server-rendered PDFs escape at render.
 
 ## Spreadsheet Exports (CSV / XLSX)
 
+### Access: bulk export is `ADMIN` / `MANAGER`, and every export is audited
+
+All seven `/exports/*` endpoints and `GET /analytics/custom-report/export` require
+`require_role([ADMIN, MANAGER])` and return **403** otherwise. This is a deliberate carve-out from
+the read-broad domain default: the *reads* behind these datasets remain open to any authenticated
+user in the tenant, but handing the **whole dataset over as a file** — the parts master with
+`standard_cost`, the full inventory valuation, every PO line with `unit_price` and vendor, every
+quote with its customer contacts — is a disclosure event, not navigation. See
+[docs/RBAC_PERMISSIONS.md](RBAC_PERMISSIONS.md) → *Bulk Data Export* for the matrix and the full
+in-scope / out-of-scope list.
+
+Each successful export writes one audit row (`app/services/export_audit.py`, via `AuditService`):
+
+| Field | Value |
+|---|---|
+| `action` | `EXPORT` |
+| `resource_type` | the dataset — `work_order`, `part`, `inventory_item`, `purchase_order`, `purchase_order_line`, `quote`, `inventory_transaction`, `custom_report` |
+| `description` | `Exported {n} {dataset} record(s) to {CSV or XLSX}` |
+| `new_values` | `{"format": …, "columns": [...], "filters": {...}}` — the request, never the payload |
+
+The row is committed **before** the file streams, so an abandoned download is still recorded. A
+**403 writes no row**, and neither does a refusal (the 10,000-row cap below, an oversized filter
+value, an unsupported `format`, or an empty custom-report result) — nothing was disclosed.
+
+Because an `audit_log` row is immutable and undeletable, everything the request contributes to it is
+bounded first. `columns` is filtered to the names the endpoint recognizes; free-text filters are
+declared with a `max_length` and a value over it is a **422** before the export runs:
+
+| Endpoint | Parameter | `max_length` |
+|---|---|---|
+| `GET /exports/inventory/export` | `warehouse` | 50 (the `inventory_items.warehouse` column width) |
+| `GET /exports/quotes/export` | `customer` | 255 (the `quotes.customer_name` column width) |
+| `GET /exports/inventory/transactions/export` | `transaction_type` | 40 |
+
+Each bound matches the column the filter compares against, so no request that could match a row is
+refused. (Auditing is best-effort in the usual repo-wide sense: `AuditService.log` never propagates
+a failure to the caller, so a chain-write failure lets the export stream unrecorded rather than
+failing the request.)
+
+`GET /visitor-logs/export.csv` (`[ADMIN, MANAGER]`, already audited — visitor PII) and
+`GET /estimate-workbench/{estimate_id}/export/*` (`[ADMIN, MANAGER, SUPERVISOR]`, one estimate
+rather than a dataset) keep their existing, stricter gates. Single-record document downloads — CoC
+PDFs, quote PDFs, nest drawings, kiosk document views — are **not** bulk exports and are unchanged.
+
+### Formula-injection neutralization (CWE-1236)
+
 Every endpoint that returns a spreadsheet artifact neutralizes formula-initiating cell text before
 writing it, so an export cannot execute as a formula when the recipient opens it (CWE-1236).
 Spreadsheet applications evaluate a cell whose text begins with `=`, `+`, `-`, `@`, TAB (`0x09`) or
@@ -5689,11 +5735,11 @@ log. `unconfigured` means every enqueue will fail and no background job or cron 
 | 204 | No Content |
 | 400 | Bad Request (also returned for a `Host` header not on the `ALLOWED_HOSTS` allowlist, and for an `/exports/*` request matching more than `MAX_EXPORT_ROWS` — see [Row cap on `/exports/*`](#row-cap-on-exports--refuses-at-10000-400)) |
 | 401 | Unauthorized |
-| 403 | Forbidden |
+| 403 | Forbidden (also returned to a caller below `ADMIN` / `MANAGER` on any bulk-export endpoint — see [Access: bulk export is `ADMIN` / `MANAGER`](#access-bulk-export-is-admin--manager-and-every-export-is-audited)) |
 | 404 | Not Found |
 | 409 | Conflict — concurrent modification of an operation / work order / time entry on a completion or clock endpoint (the row was updated by another writer between read and commit; refresh and retry) |
 | 413 | Content Too Large — a JSON body over `MAX_JSON_BODY_BYTES` (default 256 KB, rejected by middleware before the route runs), or a file upload over its endpoint's own cap (e.g. 50 MB `LASER_UPLOAD_MAX_BYTES`). See [Request Size Limits](#request-size-limits) |
-| 422 | Validation Error — including a paging or window parameter outside its range (`limit`, `skip`/`offset`, `days`, `max_levels`); see [Bounds on paging and window parameters](#bounds-on-paging-and-window-parameters) |
+| 422 | Validation Error — including a paging or window parameter outside its range (`limit`, `skip`/`offset`, `days`, `max_levels`), and a free-text `/exports/*` filter over its `max_length` (`warehouse` 50, `customer` 255, `transaction_type` 40); see [Bounds on paging and window parameters](#bounds-on-paging-and-window-parameters) |
 | 429 | Too Many Requests |
 | 500 | Internal Server Error |
 | 502 | Bad Gateway — upstream AI-service failure on an AI endpoint (e.g. `/copilot/chat?stream=false`) |

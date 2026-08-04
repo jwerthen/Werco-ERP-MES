@@ -23,8 +23,43 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 - **Writes / state changes** (Create, Edit, Delete, Approve, Release, Send, Adjust, Transfer, Complete, Inspect, …) are enforced **server-side** via the `require_role` dependency on the endpoint. These are the authoritative access controls and match the matrix below.
 - **Operational/domain reads** — the **View** rows for the operational modules below (e.g. Work Orders, Parts, BOMs, Routings, Inventory, Purchasing, Receiving, Customers, Quotes) — are **tenant-scoped** (every query is filtered to the caller's active company via `get_current_company_id`) and are available to **any authenticated user within that tenant**. The list/detail GET endpoints depend on `get_current_user` only and do **not** restrict reads by role. The **View** columns therefore describe the *intended in-app navigation* (which the frontend gates for usability), not a server-enforced read restriction. This is the current intended design: **read-broad / write-restricted**.
 - **Administrative / governance reads are the exception and _are_ enforced server-side:** **Users** (`require_role([ADMIN, MANAGER])`), **Admin Settings** (`ADMIN`), and **Audit Logs** (`require_role([ADMIN, MANAGER])`).
+- **Bulk data export is its own access category, not a domain read, and _is_ enforced server-side** — `require_role([ADMIN, MANAGER])` plus an `EXPORT` audit row on every one of them. See [Bulk data export is not a domain read](#bulk-data-export-is-not-a-domain-read) immediately below, and [Bulk Data Export](#bulk-data-export) in the matrix for the route list.
 
 > If the business requires least-privilege on domain reads (e.g. hiding vendor pricing / PO financials from Operator/Quality/Shipping at the API), enforce it **uniformly** by adding `require_role` to the read endpoints across modules, with authorization tests — not per-router. Until then, treat the **View** columns for operational modules as UI-visibility, not as a server-enforced control.
+
+### Bulk data export is not a domain read
+
+**Handing over a whole dataset as a file is server-gated to Admin / Manager and audited, and is
+deliberately outside the read-broad rule above.** The read-broad paragraph still stands exactly as
+written — it is, and remains, the rule for domain reads. This is a separate category sitting beside
+it, not an amendment to it.
+
+**Why the two are different exposures.** A domain read returns **one record** through the UI, to
+someone who had to navigate to it and who can carry away only what is on the screen in front of
+them. A bulk export returns the **entire dataset as a file, in a single request** — the parts master
+with `standard_cost`, the full inventory valuation, every PO line with `unit_price` and vendor,
+every quote with its customer contacts. That is a disclosure event rather than navigation: the file
+leaves the system, keeps its value after the account is disabled, and is the shape a departing
+employee or a compromised low-privilege session actually uses. Auditing follows from the same fact —
+if a dataset can leave in one request, there has to be a record of it having left.
+
+**Why this is not the per-router least-privilege the paragraph above warns against.** The objection
+there is to tiering *reads* one router at a time, which produces a system where the same record is
+visible on one screen and refused on another. This carve-out does the opposite: it changes nothing
+about who can open a record on screen (a Supervisor, Operator, Quality, Shipping or Viewer user
+still reads every one of these datasets in the UI), and the gate is applied **uniformly to every
+bulk-export surface in the system at once** — which is precisely the "uniformly, not per-router"
+discipline being asked for. The trigger is the shape of the response, not the identity of the
+router.
+
+**The boundary: one record is not a dataset.** Single-record document routes are on the other side
+of the line and are deliberately untouched — a CoC PDF, one quote PDF, one nest drawing, one
+work-order traveler, one estimate breakdown, a kiosk document view. Two of those are load-bearing on
+the shop floor (an Operator must be able to pull the traveler and open the controlled drawing at the
+point of use), so gating them would break production, not tighten it. The test for whether a new
+route falls under this rule is: *does one request return a whole table's worth of rows as a file?*
+If the path carries a record id, the answer is no. Where a surface already sits at a **stricter**
+tier, that tier stands — this rule is a floor, never a loosening.
 
 ## Permission Matrix
 
@@ -1079,6 +1114,73 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 >   `source = "import"`; dry runs write nothing (savepoint rollback). See `docs/API.md` →
 >   Bulk Imports & Templates and `docs/EXCEL_MIGRATION_RUNBOOK.md`.
 
+### Bulk Data Export
+
+| Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
+|------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
+| Export any bulk dataset (CSV / XLSX) | ✓ | ✓ | | | | | |
+
+**This row is server-enforced**, unlike the **View** rows for the same modules — see
+[Access enforcement model](#access-enforcement-model). Supervisor, Operator, Quality, Shipping and
+Viewer can still *read* every one of these datasets in the UI; what they cannot do is download the
+whole set as a file.
+
+Every route below is `require_role([ADMIN, MANAGER])`, tenant-scoped via `get_current_company_id`,
+and writes an `EXPORT` audit row through `AuditService`:
+
+| Endpoint | Dataset (`resource_type`) | Notably discloses |
+|---|---|---|
+| `GET /api/v1/exports/work-orders/export` | `work_order` | customer name / customer PO, scrap quantities |
+| `GET /api/v1/exports/parts/export` | `part` | **`standard_cost`**, reorder points, customer part numbers |
+| `GET /api/v1/exports/inventory/export` | `inventory_item` | **`unit_cost` + computed `total_value`**, lot / serial, locations |
+| `GET /api/v1/exports/purchase-orders/export` | `purchase_order` | vendor identity, subtotal / tax / shipping / total |
+| `GET /api/v1/exports/purchase-orders/lines/export` | `purchase_order_line` | **`unit_price`** per line — the open purchase commitments |
+| `GET /api/v1/exports/quotes/export` | `quote` | **customer contact + email (PII)**, subtotal / total |
+| `GET /api/v1/exports/inventory/transactions/export` | `inventory_transaction` | the whole valuation ledger incl. free-text `notes` |
+| `GET /api/v1/analytics/custom-report/export` | `custom_report` | a tenant-authored query over a whole data source — unbounded by construction |
+
+> **Two surfaces sit at a stricter tier and stay there.** `GET /visitor-logs/export.csv` is
+> `require_role([ADMIN, MANAGER])` because **visitor PII is a documented exception to read-broad**
+> (its list endpoint is gated too) — a PII decision, not this one, and it is the audit-shape
+> precedent the seven `/exports/*` routes now follow.
+> `GET /estimate-workbench/{id}/export/audit.xlsx|.json|customer.pdf` is
+> `require_role([ADMIN, MANAGER, SUPERVISOR])` and is **out of scope**: the path carries an estimate
+> id, so it is one record, not a dataset. The gate above is a **floor** — an existing stricter tier
+> is never loosened to meet it.
+
+> **The audit row records the request, never the payload** (`app/services/export_audit.py`):
+> `action="EXPORT"`, `resource_type` = the dataset, the row count in the description, and
+> `new_values` carrying the format, the columns actually disclosed and the filters that selected the
+> rows. It is committed **before** the file streams, so an abandoned download is still on record. A
+> **403 leaves no row** — a refusal disclosed nothing.
+>
+> **Caller-supplied text is fenced on the way in, because on the way out there is no remedy.** An
+> `audit_log` row is un-`UPDATE`-able and un-`DELETE`-able (the `008`/`060` triggers) and is covered
+> by the integrity hash, so anything the request puts in `new_values` is permanent. Two fences,
+> because the two inputs have different shapes: `columns` is fenced by **allowlist** (only names the
+> endpoint recognizes are recorded — there is a known set to intersect against), and filter *values*
+> are fenced by **length** (free text by definition, so `max_length` on each `Query` — a value past
+> the bound is a **422** and writes nothing, and the bound is set at the width of the column the
+> filter compares against so nothing that could match a row is ever refused). `export_audit._cap`
+> re-applies the length bound inside the shared seam as a backstop for a future exporter that forgets
+> to declare one. Coverage: `backend/tests/api/test_export_gate_and_audit.py`.
+>
+> **"Audited" here is best-effort, as it is everywhere else in the app.** `AuditService.log` never
+> propagates an audit failure to the caller (`app/services/audit_service.py`), so if the chain write
+> itself fails the export still streams and goes unrecorded. That is the repo-wide contract, not
+> something specific to exports — the same is true of the visitor-log export and every audited write
+> path — but read the row above as "every export writes an audit row on the success path", not as an
+> absolute guarantee that no byte can leave without one.
+
+> **Not bulk exports, deliberately ungated:** single-record documents — `GET /shipping/{id}/coc/pdf`,
+> `POST /quotes/{id}/generate-pdf`, `GET /laser-nests/{id}/document`,
+> `GET /shop-floor/documents/{id}/inline` (gating it would break the kiosk document viewer),
+> `GET /documents/{id}/download`, `GET /po-upload/pdf/{path}`,
+> `GET /rfq-packages/{id}/internal-estimate-export` — and `GET /import/templates/{entity}`, a static
+> workbook containing no tenant data. The frontend `<DataTable>` CSV button is also untouched: it
+> serializes rows the client already fetched through ordinary reads, so gating it would require
+> gating the reads.
+
 ### Analytics
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
@@ -1087,7 +1189,7 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 | Flow / WIP-aging / adoption (Lean Phase 1) | ✓ | ✓ | ✓ | | | | |
 | FPY / scrap Pareto (Lean Phase 1) | ✓ | ✓ | ✓ | | ✓ | | |
 | Predictive forecasts (delivery / capacity / inventory demand) | ✓ | ✓ | ✓ | | | | |
-| Export | ✓ | ✓ | | | | | |
+| Export (`GET /custom-report/export`, audits an `EXPORT` action) | ✓ | ✓ | | | | | |
 
 > **Lean Phase 1 analytics reads are role-gated in code.** `GET /api/v1/analytics/flow`,
 > `GET /analytics/wip-aging`, and `GET /analytics/adoption` require
