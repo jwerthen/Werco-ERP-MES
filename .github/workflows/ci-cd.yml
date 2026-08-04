@@ -362,6 +362,23 @@ jobs:
           cd frontend
           railway up --service werco-frontend-staging . --path-as-root --environment staging --project "${{ secrets.RAILWAY_PROJECT_ID }}"
 
+      # ARQ background worker. GATED and OFF by default: set the repo variable
+      # DEPLOY_WORKER_STAGING=true (Settings -> Secrets and variables -> Actions ->
+      # Variables) only AFTER the werco-worker-staging service exists. Until then the step
+      # is skipped, so merging this workflow deploys nothing new.
+      #
+      # Deployed from the REPO ROOT, not backend/ -- that is what stops it inheriting
+      # backend/railway.toml's healthcheckPath="/health", which an arq worker can never
+      # satisfy. See the repo-root railway.toml. There is no health verification step for
+      # the worker because it serves no HTTP; verify it from its startup log instead
+      # (docs/WORKER_SERVICE.md).
+      - name: Deploy Worker to Staging
+        if: vars.DEPLOY_WORKER_STAGING == 'true'
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          railway up --service werco-worker-staging . --path-as-root --environment staging --project "${{ secrets.RAILWAY_PROJECT_ID }}"
+
       - name: Verify Staging Deployment
         run: |
           for i in 1 2 3 4 5; do
@@ -426,6 +443,24 @@ jobs:
         run: |
           cd frontend
           railway up --service werco-frontend . --path-as-root --environment production --project "${{ secrets.RAILWAY_PROJECT_ID }}"
+
+      # ARQ background worker. GATED and OFF by default: set the repo variable
+      # DEPLOY_WORKER_PRODUCTION=true only AFTER the werco-worker service exists AND its
+      # variables are set (REDIS_URL above all -- the worker refuses to start without a real
+      # Redis target). Until then this step is skipped and production is untouched.
+      #
+      # Runs AFTER the RELEASE stamp step above so backend/RELEASE ships in the worker's
+      # upload too and its Sentry events carry the same release tag as the API's.
+      #
+      # Deployed from the REPO ROOT so it reads the repo-root railway.toml (no
+      # healthcheckPath) instead of backend/railway.toml (healthcheckPath="/health", which
+      # an arq worker can never satisfy). See the repo-root railway.toml header.
+      - name: Deploy Worker to Production
+        if: vars.DEPLOY_WORKER_PRODUCTION == 'true'
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          railway up --service werco-worker . --path-as-root --environment production --project "${{ secrets.RAILWAY_PROJECT_ID }}"
 
       - name: Verify Production Deployment
         run: |

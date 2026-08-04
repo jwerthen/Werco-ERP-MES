@@ -348,14 +348,18 @@ reconciled when opened in its detail / operations-list views; nothing is permane
 > cost; the **durable fix is the deferred ARQ reconcile job** (move reconcile off the read path
 > entirely), not an ever-higher cap. See `docs/WORK_ORDER_COMPLETION_REMEDIATION.md` → Rank 12.
 
-### Redis Cache
+### Redis (cache, rate limiting, AND the ARQ job queue)
+
+One Redis serves three things: the response cache, the slowapi rate-limit storage, and the
+ARQ background-job queue. **`REDIS_URL` is the single source of truth for all three.**
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `REDIS_URL` | No | - | Full Redis connection URL. Takes precedence over individual settings |
-| `REDIS_HOST` | No | `localhost` | Redis server hostname |
-| `REDIS_PORT` | No | `6379` | Redis server port |
-| `REDIS_DB` | No | `0` | Redis database number |
+| `REDIS_URL` | No | - | Full Redis connection URL. **Takes precedence over the individual settings** — for the cache, the limiter, *and* the job queue |
+| `REDIS_HOST` | No | `localhost` | Redis server hostname — fallback, used only when `REDIS_URL` is unset |
+| `REDIS_PORT` | No | `6379` | Redis server port — fallback |
+| `REDIS_DB` | No | `0` | Redis database number — fallback |
+| `REDIS_PASSWORD` | No | - | Fills in a password when neither source supplied one (docker-compose passes this to the worker without a URL). A password inside `REDIS_URL` always wins |
 
 **Examples:**
 ```bash
@@ -367,7 +371,49 @@ REDIS_URL=redis://:password@localhost:6379/0
 
 # Railway Redis
 REDIS_URL=redis://default:xxx@xxx.railway.internal:6379
+
+# TLS
+REDIS_URL=rediss://default:xxx@host:6380/0
 ```
+
+> **This table was wrong until 2026-08, and the wrongness was load-bearing.** `REDIS_URL`
+> did *not* take precedence for the job queue: `app/core/queue.py` read only
+> `REDIS_HOST`/`REDIS_PORT`/`REDIS_DB` and had no password field at all. Anyone who
+> provisioned from this table — i.e. set `REDIS_URL` and nothing else, exactly the shape
+> Railway hands you — got a queue pointed at `localhost:6379`. **Every enqueue failed with
+> ConnectionRefused, nothing was ever queued, and no background job or cron ever ran** —
+> while `/health/ready` reported `redis: healthy` throughout, because it pings
+> `REDIS_URL`. Both sides now resolve through the same function; `/health/ready` also
+> reports `job_queue_redis.source` so you can see which setting won, and the worker refuses
+> to start rather than drain the wrong (empty) Redis. See `docs/WORKER_SERVICE.md`.
+
+**Setting both is a misconfiguration, not belt-and-braces.** If `REDIS_URL` and the
+host/port/db trio name different instances, `REDIS_URL` wins and the trio is dead config.
+The API and the worker each log a warning at startup, and `/health/ready` reports
+`job_queue_redis.config_warnings > 0`. Set one.
+
+> **`REDIS_URL=redis://localhost:6379/0` still reports `"status": "configured"`.** The status
+> reflects *which setting won*, not whether the host is reachable — and a single-box
+> self-host with Redis on loopback is legitimate, so it is not refused. But inside a Railway
+> container nothing listens there. In `production`/`staging` this raises a startup warning and
+> `job_queue_redis.config_warnings > 0`; **check the host, not just the status.**
+
+### Background worker (ARQ)
+
+Read by the worker process only (`arq app.worker.WorkerSettings`). See
+`docs/WORKER_SERVICE.md` (reference) and `docs/WORKER_DEPLOYMENT_RUNBOOK.md` (procedure).
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `WORKER_CRON_JOBS` | No | all | Which scheduled jobs the worker registers. Unset or `all` → every cron (12 of them). `none` → no crons; the worker still drains enqueue-driven jobs (notifications, webhooks, labels, completion signals). A comma-separated list of job names arms exactly those. **An unrecognised name is a hard startup error, not a silent skip.** `none` is the correct value for a first-ever boot — several crons write or email in bulk on their first run |
+| `TZ` | No | UTC | Container timezone. ARQ resolves cron times in the container's local zone, so unset means `hour=6` fires at **06:00 UTC = 01:00 Central**. Set `TZ=America/Chicago` for shop-local schedules |
+
+The worker also needs the API's `DATABASE_URL`, `SECRET_KEY`, `REFRESH_TOKEN_SECRET_KEY`,
+`REDIS_URL`, `SMTP_*`, `SENTRY_DSN`, `FRONTEND_BASE_URL` (notification email deep links),
+`WEBHOOK_ENCRYPTION_KEY`, `INTEGRATION_ENCRYPTION_KEY`, `STORAGE_BACKEND` + its credentials,
+and — only if the monthly audit-archive cron is armed — an `AUDIT_ARCHIVE_DIR` on **durable**
+storage. In `production`/`staging` the worker **refuses to start** when its Redis resolves to
+the localhost default, rather than silently draining an empty queue.
 
 ### Email (SMTP)
 

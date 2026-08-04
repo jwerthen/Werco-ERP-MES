@@ -78,7 +78,12 @@ AUDIT_ARCHIVE_DIR=/var/lib/werco/audit-archive
 ```
 
 > **Background jobs run in the ARQ worker** (`arq app.worker.WorkerSettings`), separate from the API
-> process — make sure it is running. Its monthly `archive_aged_audit_logs_job` (1st of month, 03:00)
+> process — make sure it is running. **"Make sure it is running" is not a one-liner on Railway:
+> see `docs/WORKER_SERVICE.md`** for creating the service (it must have **no** healthcheck path, and
+> it deploys from the repo root, not `backend/`), the variables it needs, and the staged order for
+> arming crons — several of them write or email in bulk on their first run. The worker and the API
+> must resolve the **same** Redis: set `REDIS_URL` on both and confirm via `/health/ready` →
+> `job_queue_redis`. Its monthly `archive_aged_audit_logs_job` (1st of month, 03:00)
 > exports aged audit rows to `AUDIT_ARCHIVE_DIR`; provision that path as durable, backed-up storage so
 > archives survive restarts/rebuilds. The weekly `cleanup_old_logs_job` purges only ephemeral
 > job/notification logs — **not** audit logs. See `docs/AUDIT_LOG_RETENTION_RUNBOOK.md` and the

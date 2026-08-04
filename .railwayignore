@@ -1,0 +1,23 @@
+# Upload trimming for the ARQ worker service ONLY.
+#
+# The worker is the one service deployed from the REPO ROOT (see railway.toml for why its
+# config file cannot live in backend/). Without this file every `railway up` from the root
+# would upload the frontend, the landing site, the docs and the load tests -- none of which
+# backend/Dockerfile.worker copies into the image.
+#
+# This file is never consulted by the API or frontend deploys: those run
+# `cd backend|frontend && railway up . --path-as-root`, so the repo root is not their
+# archive root and this file is not in their upload.
+#
+# `railway up` already honors .gitignore, so node_modules/.venv/build output need no entry.
+
+frontend/
+landing/
+load-tests/
+docs/
+nginx/
+supabase/
+signature/
+e2e/
+.github/
+.claude/

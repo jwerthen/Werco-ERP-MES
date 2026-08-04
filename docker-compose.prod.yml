@@ -179,10 +179,19 @@ services:
       ANTHROPIC_PO_MODEL: ${ANTHROPIC_PO_MODEL:-}
       ANTHROPIC_ROUTING_MODEL: ${ANTHROPIC_ROUTING_MODEL:-}
       ANTHROPIC_QMS_MODEL: ${ANTHROPIC_QMS_MODEL:-}
+      # Must match the API's REDIS_URL exactly: the API enqueues here and this process
+      # drains it. REDIS_PASSWORD was already passed but NOTHING READ IT until 2026-08 --
+      # the queue had no password field at all, so this worker could never authenticate
+      # against `redis-server --requirepass`. Both are set now.
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       REDIS_HOST: redis
       REDIS_PORT: 6379
       REDIS_DB: 0
       REDIS_PASSWORD: ${REDIS_PASSWORD}
+      # Sentry: without a DSN here a crashing cron is only a container log line.
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      # Deep links in notification emails are built from this; unset means broken links.
+      FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-}
       SMTP_HOST: ${SMTP_HOST}
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_USER: ${SMTP_USER}

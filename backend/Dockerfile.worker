@@ -1,0 +1,65 @@
+# ARQ background worker image.
+#
+# WHY A SEPARATE DOCKERFILE, and not `Dockerfile` + a start-command override:
+#
+#   The API image's CMD is `alembic upgrade head && uvicorn app.main:app ...`. A worker
+#   service built from that image and deployed with its start command left at the default
+#   would come up as a SECOND API REPLICA -- it would answer /health, pass its healthcheck,
+#   look perfectly green in the Railway dashboard, and run exactly zero background jobs.
+#   That is the single most likely way to "deploy a worker" and still have no worker.
+#   Baking `arq` into CMD makes that failure impossible: forget every override and the
+#   container is still a worker.
+#
+# WHY NO `alembic upgrade head` HERE:
+#
+#   Migrations are the API's job and only the API's job. Two services racing `alembic
+#   upgrade head` on the same database at deploy time is a real way to corrupt the version
+#   table. The worker starts against whatever schema the API has already migrated to.
+#
+# BUILD CONTEXT: the REPO ROOT, not backend/ -- see the root railway.toml for why the
+# worker's config file cannot live in backend/. Hence the `backend/` prefixes below.
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies for PostgreSQL and PDF processing. The worker renders
+# receiving labels and archives audit logs, so it needs the same toolchain as the API.
+RUN apt-get update && apt-get install -y \
+    gcc \
+    libpq-dev \
+    poppler-utils \
+    tesseract-ocr \
+    antiword \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+COPY backend/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Create non-root user for security
+RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
+
+# Copy application code (bust cache with ARG)
+ARG CACHEBUST=1
+COPY --chown=appuser:appgroup backend/ .
+
+# Writable dirs for the non-root user. COPY --chown does not change /app itself
+# (root-owned from WORKDIR), and documents.py makedirs /app/uploads at import time.
+# NOTE: /app/uploads and /app/logs are EPHEMERAL on Railway unless a volume is attached.
+# archive_aged_audit_logs_job writes its NDJSON export to AUDIT_ARCHIVE_DIR -- point that
+# at object storage or a mounted volume before arming that cron, or the export vanishes
+# with the container. See docs/WORKER_SERVICE.md.
+RUN mkdir -p /app/uploads /app/logs && chown appuser:appgroup /app /app/uploads /app/logs
+
+# Run as non-root user
+USER appuser
+
+# No EXPOSE and no HEALTHCHECK: this process serves no HTTP. It is not a bug that
+# `curl /health` fails against it -- there is nothing listening, by design. Anything that
+# tries to health-check this container over HTTP is misconfigured; see the root
+# railway.toml, which deliberately declares no healthcheckPath.
+
+# ARQ reads WorkerSettings, which fails fast at import if REDIS_URL / REDIS_HOST resolve to
+# the localhost default in production or staging (app/core/queue.py::assert_redis_configured).
+CMD ["arq", "app.worker.WorkerSettings"]
