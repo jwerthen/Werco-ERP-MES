@@ -45,6 +45,7 @@ from app.schemas.analytics import (
     ReportDataSource,
 )
 from app.services.report_builder import ReportBuilderService
+from tests.api.export_audit_helpers import committed_export_rows
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
 
@@ -318,3 +319,130 @@ def test_custom_report_export_csv_header_row_is_intact(client: TestClient, db_se
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
     assert resp.text.splitlines()[0] == "work_order_number,status"
+
+
+# ---------------------------------------------------------------------------
+# Endpoint: GET /custom-report/export is audited as a disclosure event.
+#
+# This is the most general bulk export in the system -- a tenant-authored query
+# over a whole data source -- so it carries the same EXPORT audit row as
+# /api/v1/exports/* (see tests/api/test_export_gate_and_audit.py). Its role gate
+# (ADMIN/MANAGER) predates this and is unchanged.
+# ---------------------------------------------------------------------------
+
+
+def test_custom_report_export_commits_an_audit_row(client: TestClient, db_session: Session):
+    """The disclosure is recorded, and recorded DURABLY.
+
+    Read through ``committed_export_rows`` (a second connection), never through
+    ``db_session``: ``AuditService.log`` only flushes, and in production
+    ``get_db``'s teardown discards an uncommitted flush -- so asserting through
+    the session the app itself is using would pass on a handler that records
+    nothing at all.
+    """
+    a_user = make_user(db_session, company_id=COMPANY_A)
+    make_work_order(db_session, company_id=COMPANY_A, wo_number="CRPT-A-0008")
+    template = _make_wo_template(db_session, company_id=COMPANY_A, created_by=a_user.id)
+
+    resp = client.get(
+        f"/api/v1/analytics/custom-report/export?template_id={template.id}&format=csv",
+        headers=headers_for(a_user),
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+
+    rows = committed_export_rows()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.resource_type == "custom_report"
+    assert row.resource_id == template.id
+    assert row.resource_identifier == template.name
+    assert row.user_id == a_user.id
+    assert row.company_id == COMPANY_A
+    assert row.description == "Exported 1 custom report record(s) to CSV"
+    # The row describes the QUERY -- which data source, which columns -- never the
+    # rows it returned.
+    assert row.new_values["filters"]["data_source"] == ReportDataSource.WORK_ORDERS.value
+    assert row.new_values["columns"] == [{"field": "work_order_number"}, {"field": "status"}]
+    assert "CRPT-A-0008" not in str(row.new_values)
+
+
+def test_custom_report_export_refusal_writes_no_audit_row(client: TestClient, db_session: Session):
+    """An empty result set refuses 400 -- nothing was disclosed, so nothing is logged."""
+    a_user = make_user(db_session, company_id=COMPANY_A)
+    template = _make_wo_template(db_session, company_id=COMPANY_A, created_by=a_user.id)
+
+    resp = client.get(
+        f"/api/v1/analytics/custom-report/export?template_id={template.id}&format=csv",
+        headers=headers_for(a_user),
+    )
+    assert resp.status_code == status.HTTP_400_BAD_REQUEST, resp.text
+    assert committed_export_rows() == []
+
+
+def test_custom_report_export_unsupported_format_writes_no_audit_row(client: TestClient, db_session: Session):
+    a_user = make_user(db_session, company_id=COMPANY_A)
+    make_work_order(db_session, company_id=COMPANY_A, wo_number="CRPT-A-0009")
+    template = _make_wo_template(db_session, company_id=COMPANY_A, created_by=a_user.id)
+
+    resp = client.get(
+        f"/api/v1/analytics/custom-report/export?template_id={template.id}&format=pdf",
+        headers=headers_for(a_user),
+    )
+    assert resp.status_code == status.HTTP_400_BAD_REQUEST, resp.text
+    assert committed_export_rows() == []
+
+
+@pytest.mark.parametrize(
+    "role", [UserRole.SUPERVISOR, UserRole.OPERATOR, UserRole.QUALITY, UserRole.SHIPPING, UserRole.VIEWER]
+)
+def test_custom_report_export_refuses_below_admin_manager(client: TestClient, db_session: Session, role: UserRole):
+    """The pre-existing ADMIN/MANAGER gate is unchanged and stays the stricter floor.
+
+    Would NOT fail against the old code -- this endpoint was already gated. It is
+    here because the uniform tier chosen for ``/exports/*`` is ADMIN/MANAGER too,
+    and the obvious "tidy-up" is to make one shared constant out of the two. This
+    endpoint's tier is the tighter of the pair by accident of history rather than
+    by design, so the guard is that a later refactor cannot loosen it sideways.
+
+    The template is owned by the CALLER on purpose. This endpoint carries a second
+    403 -- a per-template ownership check ("Access denied to this report") -- so a
+    template owned by somebody else would produce a 403 that proves nothing about
+    the role gate. Owning it removes that explanation, and the detail is asserted
+    to pin which gate actually fired.
+    """
+    caller = make_user(db_session, company_id=COMPANY_A, role=role)
+    template = _make_wo_template(db_session, company_id=COMPANY_A, created_by=caller.id)
+    make_work_order(db_session, company_id=COMPANY_A, wo_number=f"CRPT-A-DENY-{_next():04d}")
+
+    resp = client.get(
+        f"/api/v1/analytics/custom-report/export?template_id={template.id}&format=csv",
+        headers=headers_for(caller),
+    )
+    assert resp.status_code == status.HTTP_403_FORBIDDEN, f"{role.value}: {resp.status_code} {resp.text}"
+    assert "Access denied to this report" not in resp.text, f"{role.value}: 403 came from ownership, not the role gate"
+    assert committed_export_rows() == [], f"{role.value}: a refusal disclosed nothing and must log nothing"
+
+
+@pytest.mark.parametrize("role", [UserRole.ADMIN, UserRole.MANAGER])
+def test_custom_report_export_allows_admin_and_manager_and_audits(
+    client: TestClient, db_session: Session, role: UserRole
+):
+    """Both allowed roles still get the file, and both leave a committed row.
+
+    The 200 half would pass pre-change; the committed-row half is what fails
+    against it, for each allowed role rather than just the one the happy-path
+    test happens to use.
+    """
+    caller = make_user(db_session, company_id=COMPANY_A, role=role)
+    make_work_order(db_session, company_id=COMPANY_A, wo_number=f"CRPT-A-ROLE-{_next():04d}")
+    template = _make_wo_template(db_session, company_id=COMPANY_A, created_by=caller.id)
+
+    resp = client.get(
+        f"/api/v1/analytics/custom-report/export?template_id={template.id}&format=csv",
+        headers=headers_for(caller),
+    )
+    assert resp.status_code == status.HTTP_200_OK, f"{role.value}: {resp.text}"
+
+    rows = committed_export_rows("custom_report")
+    assert len(rows) == 1, f"{role.value} left no committed EXPORT row"
+    assert rows[0].user_id == caller.id

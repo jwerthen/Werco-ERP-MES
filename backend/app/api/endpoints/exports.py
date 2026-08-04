@@ -10,14 +10,16 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Query as SAQuery
 from sqlalchemy.orm import Session, joinedload
 
-from app.api.deps import get_current_company_id, get_current_user
+from app.api.deps import get_audit_service, get_current_company_id, require_role
 from app.db.database import get_db
 from app.models.inventory import InventoryItem, InventoryTransaction
 from app.models.part import Part, PartType
 from app.models.purchasing import POStatus, PurchaseOrder, PurchaseOrderLine
 from app.models.quote import Quote, QuoteStatus
-from app.models.user import User
+from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder, WorkOrderStatus
+from app.services.audit_service import AuditService
+from app.services.export_audit import log_export
 from app.services.export_service import generate_csv, generate_excel
 
 router = APIRouter()
@@ -28,6 +30,28 @@ router = APIRouter()
 # Mirrors MAX_IMPORT_ROWS (app/services/import_service.py) -- an export a human
 # opens in Excel and an import a human uploads are the same size problem.
 MAX_EXPORT_ROWS = 10_000
+
+# Bulk export is its own access category, distinct from a domain read. The
+# operational reads behind these datasets are deliberately read-broad (any
+# authenticated user in the tenant -- docs/RBAC_PERMISSIONS.md -> Access
+# enforcement model), and that stays true; what is gated here is handing the
+# WHOLE dataset over as a file in one request. Tier matches the analytics
+# custom-report export (``analytics.py`` -> ``export_custom_report``), the
+# system's other general-purpose exporter, so /exports/* stops being the odd one
+# out among exports. Every route in this module is also audited -- an export is a
+# disclosure event (see ``app/services/export_audit.py``).
+EXPORT_ROLES = [UserRole.ADMIN, UserRole.MANAGER]
+
+# Every free-text filter below carries a ``max_length``. That is not only the
+# a45f738 "bound every export parameter" precedent: once these routes are
+# audited, a filter value is no longer transient -- it is copied verbatim into an
+# ``audit_log`` row that the 008/060 triggers make un-UPDATE-able and
+# un-DELETE-able and that is covered by the integrity hash. Unbounded caller text
+# would therefore be unbounded, unremovable text in the chain. The bound matches
+# the column each filter compares against (warehouse String(50),
+# Quote.customer_name String(255)), so no request that could ever match a row is
+# refused. ``export_audit._json_safe`` re-caps as defense in depth for callers
+# that reach the seam another way.
 
 
 class ExportFormat(str, Enum):
@@ -75,10 +99,11 @@ def export_work_orders(
     status: Optional[WorkOrderStatus] = Query(None, description="Filter by status"),
     columns: Optional[List[str]] = Query(None, description="Columns to include"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(EXPORT_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Export work orders to CSV or Excel."""
+    """Export work orders to CSV or Excel (ADMIN/MANAGER). The export is audited."""
     query = db.query(WorkOrder).filter(WorkOrder.company_id == company_id).options(joinedload(WorkOrder.part))
     query = query.filter(WorkOrder.is_deleted == False)
 
@@ -132,6 +157,18 @@ def export_work_orders(
         }
         data.append({k: v for k, v in row.items() if k in export_columns})
 
+    log_export(
+        db,
+        audit,
+        dataset="work_order",
+        label="work order",
+        row_count=len(data),
+        export_format=format.value,
+        columns=export_columns,
+        known_columns=default_columns,
+        filters={"start_date": start_date, "end_date": end_date, "status": status},
+    )
+
     filename = f"work_orders_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{get_file_extension(format)}"
 
     if format == ExportFormat.CSV:
@@ -158,10 +195,11 @@ def export_parts(
     active_only: bool = Query(True, description="Only export active parts"),
     columns: Optional[List[str]] = Query(None, description="Columns to include"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(EXPORT_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Export parts to CSV or Excel."""
+    """Export parts to CSV or Excel (ADMIN/MANAGER). The export is audited."""
     query = db.query(Part).filter(Part.company_id == company_id, Part.is_deleted == False)
 
     if part_type:
@@ -212,6 +250,18 @@ def export_parts(
         }
         data.append({k: v for k, v in row.items() if k in export_columns})
 
+    log_export(
+        db,
+        audit,
+        dataset="part",
+        label="part",
+        row_count=len(data),
+        export_format=format.value,
+        columns=export_columns,
+        known_columns=default_columns,
+        filters={"part_type": part_type, "active_only": active_only},
+    )
+
     filename = f"parts_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{get_file_extension(format)}"
 
     if format == ExportFormat.CSV:
@@ -234,14 +284,15 @@ def export_parts(
 @router.get("/inventory/export")
 def export_inventory(
     format: ExportFormat = Query(ExportFormat.CSV, description="Export format (csv or xlsx)"),
-    warehouse: Optional[str] = Query(None, description="Filter by warehouse"),
+    warehouse: Optional[str] = Query(None, max_length=50, description="Filter by warehouse"),
     has_quantity: bool = Query(True, description="Only items with nonzero quantity (negatives included)"),
     columns: Optional[List[str]] = Query(None, description="Columns to include"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(EXPORT_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Export inventory to CSV or Excel."""
+    """Export inventory to CSV or Excel (ADMIN/MANAGER). The export is audited."""
     query = (
         db.query(InventoryItem).filter(InventoryItem.company_id == company_id).options(joinedload(InventoryItem.part))
     )
@@ -295,6 +346,18 @@ def export_inventory(
         }
         data.append({k: v for k, v in row.items() if k in export_columns})
 
+    log_export(
+        db,
+        audit,
+        dataset="inventory_item",
+        label="inventory",
+        row_count=len(data),
+        export_format=format.value,
+        columns=export_columns,
+        known_columns=default_columns,
+        filters={"warehouse": warehouse, "has_quantity": has_quantity},
+    )
+
     filename = f"inventory_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{get_file_extension(format)}"
 
     if format == ExportFormat.CSV:
@@ -323,10 +386,11 @@ def export_purchase_orders(
     vendor_id: Optional[int] = Query(None, description="Filter by vendor"),
     columns: Optional[List[str]] = Query(None, description="Columns to include"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(EXPORT_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Export purchase orders to CSV or Excel."""
+    """Export purchase orders to CSV or Excel (ADMIN/MANAGER). The export is audited."""
     query = (
         db.query(PurchaseOrder)
         .filter(
@@ -384,6 +448,23 @@ def export_purchase_orders(
         }
         data.append({k: v for k, v in row.items() if k in export_columns})
 
+    log_export(
+        db,
+        audit,
+        dataset="purchase_order",
+        label="purchase order",
+        row_count=len(data),
+        export_format=format.value,
+        columns=export_columns,
+        known_columns=default_columns,
+        filters={
+            "start_date": start_date,
+            "end_date": end_date,
+            "status": status,
+            "vendor_id": vendor_id,
+        },
+    )
+
     filename = f"purchase_orders_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{get_file_extension(format)}"
 
     if format == ExportFormat.CSV:
@@ -411,10 +492,11 @@ def export_purchase_order_lines(
     status: Optional[POStatus] = Query(None, description="Filter by PO status"),
     columns: Optional[List[str]] = Query(None, description="Columns to include"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(EXPORT_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Export purchase order lines (detailed) to CSV or Excel."""
+    """Export purchase order lines, detailed, to CSV or Excel (ADMIN/MANAGER). The export is audited."""
     # Tenant scope, on BOTH sides of the join. ``PurchaseOrderLine.company_id``
     # (TenantMixin) is the authoritative scope; the parent predicate additionally
     # stops a line from being read through a foreign PO. The join is
@@ -488,6 +570,18 @@ def export_purchase_order_lines(
         }
         data.append({k: v for k, v in row.items() if k in export_columns})
 
+    log_export(
+        db,
+        audit,
+        dataset="purchase_order_line",
+        label="purchase order line",
+        row_count=len(data),
+        export_format=format.value,
+        columns=export_columns,
+        known_columns=default_columns,
+        filters={"start_date": start_date, "end_date": end_date, "status": status},
+    )
+
     filename = f"po_lines_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{get_file_extension(format)}"
 
     if format == ExportFormat.CSV:
@@ -513,13 +607,14 @@ def export_quotes(
     start_date: Optional[date] = Query(None, description="Filter by quote date from"),
     end_date: Optional[date] = Query(None, description="Filter by quote date to"),
     status: Optional[QuoteStatus] = Query(None, description="Filter by status"),
-    customer: Optional[str] = Query(None, description="Filter by customer name"),
+    customer: Optional[str] = Query(None, max_length=255, description="Filter by customer name"),
     columns: Optional[List[str]] = Query(None, description="Columns to include"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(EXPORT_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Export quotes to CSV or Excel."""
+    """Export quotes to CSV or Excel (ADMIN/MANAGER). The export is audited."""
     query = db.query(Quote).filter(Quote.company_id == company_id).options(joinedload(Quote.lines))
 
     if start_date:
@@ -570,6 +665,23 @@ def export_quotes(
         }
         data.append({k: v for k, v in row.items() if k in export_columns})
 
+    log_export(
+        db,
+        audit,
+        dataset="quote",
+        label="quote",
+        row_count=len(data),
+        export_format=format.value,
+        columns=export_columns,
+        known_columns=default_columns,
+        filters={
+            "start_date": start_date,
+            "end_date": end_date,
+            "status": status,
+            "customer": customer,
+        },
+    )
+
     filename = f"quotes_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{get_file_extension(format)}"
 
     if format == ExportFormat.CSV:
@@ -595,13 +707,14 @@ def export_inventory_transactions(
     start_date: Optional[date] = Query(None, description="Filter by transaction date from"),
     end_date: Optional[date] = Query(None, description="Filter by transaction date to"),
     part_id: Optional[int] = Query(None, description="Filter by part"),
-    transaction_type: Optional[str] = Query(None, description="Filter by transaction type"),
+    transaction_type: Optional[str] = Query(None, max_length=40, description="Filter by transaction type"),
     columns: Optional[List[str]] = Query(None, description="Columns to include"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(EXPORT_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Export inventory transactions to CSV or Excel."""
+    """Export inventory transactions to CSV or Excel (ADMIN/MANAGER). The export is audited."""
     query = (
         db.query(InventoryTransaction)
         .filter(InventoryTransaction.company_id == company_id)
@@ -661,6 +774,23 @@ def export_inventory_transactions(
             "created_at": txn.created_at,
         }
         data.append({k: v for k, v in row.items() if k in export_columns})
+
+    log_export(
+        db,
+        audit,
+        dataset="inventory_transaction",
+        label="inventory transaction",
+        row_count=len(data),
+        export_format=format.value,
+        columns=export_columns,
+        known_columns=default_columns,
+        filters={
+            "start_date": start_date,
+            "end_date": end_date,
+            "part_id": part_id,
+            "transaction_type": transaction_type,
+        },
+    )
 
     filename = f"inventory_transactions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{get_file_extension(format)}"
 
