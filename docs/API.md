@@ -5589,6 +5589,32 @@ Response:
 }
 ```
 
+### Readiness
+
+```http
+GET /health/ready
+```
+
+Unauthenticated. Returns `checks.database`, `checks.redis` (a live PING of `REDIS_URL`), and
+`checks.job_queue_redis` — where the **ARQ background-job queue** resolved its Redis, which is
+a different question from whether `REDIS_URL` pings:
+
+```json
+{
+  "status": "configured",
+  "source": "REDIS_URL",
+  "tls": false,
+  "authenticated": true,
+  "config_warnings": 0
+}
+```
+
+`source` is `REDIS_URL`, `REDIS_HOST/REDIS_PORT/REDIS_DB`, or `defaults(localhost)`; `status`
+is `configured` / `unconfigured` / `misconfigured`. No hostname and no credential is ever
+exposed here — `config_warnings` is a **count**, and the messages themselves go to the startup
+log. `unconfigured` means every enqueue will fail and no background job or cron can run. See
+[`WORKER_SERVICE.md`](WORKER_SERVICE.md).
+
 ## Error Codes
 
 | Status Code | Description |

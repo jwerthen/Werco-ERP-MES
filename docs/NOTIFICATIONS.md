@@ -684,6 +684,17 @@ requirements (enforced in `notification_dispatch.py` / `notification_catalog.py`
 
 ### Cron / worker
 
+> **There is no evidence any of this has ever executed in production.** No workflow, deploy
+> config or runbook in this repo has ever created an ARQ worker service on Railway (whether
+> one exists in the Railway project cannot be determined from the repo — verify it), and —
+> separately — the enqueue side resolved its Redis from `REDIS_HOST` rather than `REDIS_URL`,
+> so enqueues most likely failed outright rather than queuing. Everything below
+> describes what runs *once a worker runs*. Before starting one, read
+> [`WORKER_DEPLOYMENT_RUNBOOK.md`](WORKER_DEPLOYMENT_RUNBOOK.md): the sweeper is safely
+> bounded (24 h floor, 500 per pass), but the four detector crons enumerate current state
+> with no age cap and `check_late_work_orders_job` emails one message per late WO to every
+> supervisor and manager on its first run.
+
 `relay_pending_notifications_job` runs **every 5 minutes** (`worker.py` cron
 `minute=set(range(0, 60, 5))`) as the outbox backstop. The new ARQ jobs are
 `dispatch_notification_job`, `relay_pending_notifications_job`,

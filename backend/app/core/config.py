@@ -528,10 +528,18 @@ class Settings(BaseSettings):
         return self
 
     # Redis / Job Queue
+    #
+    # REDIS_URL is the single source of truth for BOTH the cache/limiter and the ARQ queue
+    # (app/core/queue.py). The host/port/db trio is the fallback for deployments that predate
+    # that -- docker-compose sets only the trio on the worker container. REDIS_PASSWORD fills
+    # in a password neither source supplied (compose passes it to the worker without a URL);
+    # a password already carried by REDIS_URL always wins. See app/core/queue.py's module
+    # docstring for why the queue ignoring REDIS_URL meant nothing was ever enqueued.
     REDIS_URL: Optional[str] = None
     REDIS_HOST: str = "localhost"
     REDIS_PORT: int = 6379
     REDIS_DB: int = 0
+    REDIS_PASSWORD: Optional[str] = None
 
     # LLM Integration
     ANTHROPIC_API_KEY: Optional[str] = None

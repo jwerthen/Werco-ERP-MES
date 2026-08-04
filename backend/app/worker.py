@@ -2,13 +2,42 @@
 ARQ Worker Configuration
 
 Run with: arq app.worker.WorkerSettings
+
+OBSERVABILITY CONTRACT (see docs/WORKER_SERVICE.md)
+--------------------------------------------------
+A background worker fails in silence by construction: nobody is watching at 02:30, and a
+worker that "started successfully" while pointed at the wrong Redis looks identical to a
+healthy one. Three things counter that, all wired below:
+
+1. **Fail fast at import.** ``assert_redis_configured`` raises before arq builds anything
+   if this process would fall back to ``localhost:6379`` in production/staging.
+2. **Say what you connected to.** The startup log prints the resolved Redis target (host /
+   port / db / TLS / whether a password is in play -- never the password itself), the queue
+   name, the release, and every registered cron with its next run time.
+3. **Report crashes.** Sentry is initialized here, tagged ``component=worker``. It was not,
+   before: the worker never imports ``app.main``, where the only ``sentry_sdk.init`` lived.
+
+CRON EXPOSURE
+-------------
+Every cron in ``WorkerSettings.cron_jobs`` fires the moment a worker process runs -- there
+is no separate enable step. Several of them WRITE (``run_mrp_auto_draft_job`` creates draft
+POs and work orders; ``check_late_work_orders_job`` emails one message per late WO to every
+supervisor and manager, with no age cap). ``WORKER_CRON_JOBS`` exists so a first boot can
+drain the enqueue-driven queue with no scheduled work at all; it defaults to "everything",
+i.e. exactly today's behavior.
 """
 
 import logging
+import os
+from datetime import datetime
+from typing import List, Sequence
 
 from arq import cron
+from arq.cron import CronJob
 
-from app.core.queue import get_redis_settings
+from app.core.config import settings
+from app.core.observability import init_sentry
+from app.core.queue import assert_redis_configured, get_redis_settings, redis_config_warnings
 
 # Import for side effects: attaches the transactional-outbox SQLAlchemy Session listeners
 # in the worker process so operational events committed here (e.g. cron writes) also tee
@@ -16,6 +45,13 @@ from app.core.queue import get_redis_settings
 from app.services import notification_outbox  # noqa: F401
 
 logger = logging.getLogger(__name__)
+
+# Resolved once, at import, BEFORE arq constructs a Worker or opens a connection. In
+# production/staging a Redis that resolved to the localhost default raises here, so the
+# container dies loudly instead of idling against an empty queue while the API enqueues
+# somewhere else. Outside those environments it is only described, so dev and pytest are
+# unaffected. See app/core/queue.py for the root cause this guards.
+REDIS_TARGET = assert_redis_configured("arq worker")
 
 
 # ============================================================================
@@ -297,15 +333,156 @@ async def dispatch_notification_direct_job(
 
 
 # ============================================================================
+# CRON SCHEDULE
+# ============================================================================
+
+# Every entry here fires automatically once a worker process is running. The comment on each
+# line is the schedule in the CONTAINER's local timezone -- arq defaults to
+# `datetime.now().astimezone().tzinfo`, which on Railway is UTC unless TZ is set, so "6 AM"
+# means 06:00 UTC (01:00 Central) until somebody sets TZ. See docs/WORKER_SERVICE.md.
+ALL_CRON_JOBS: List[CronJob] = [
+    cron(run_mrp_auto_draft_job, hour=6, minute=0),  # 6 AM daily (MRP AUTO_DRAFT) -- WRITES draft POs/WOs
+    cron(send_daily_digest_job, hour=8, minute=0),  # 8 AM daily -- sends email
+    cron(check_calibrations_job, hour=7, minute=0),  # 7 AM daily -- sends email
+    cron(check_late_work_orders_job, hour=8, minute=0),  # 8 AM daily -- sends email, no age cap
+    cron(check_low_stock_job, hour=7, minute=30),  # 7:30 AM daily -- sends email (aggregated)
+    cron(check_quote_expiring_job, hour=9, minute=0),  # 9 AM daily -- sends email
+    cron(aggregate_ai_learning_job, hour=5, minute=30),  # 5:30 AM daily -- WRITES recommendations/events
+    cron(run_oee_auto_calc_job, hour=2, minute=30),  # 2:30 AM daily (yesterday's OEE, Lean Phase 1)
+    cron(cleanup_old_logs_job, weekday=0, hour=2, minute=0),  # Sunday 2 AM -- physical DELETEs (not audit)
+    cron(archive_aged_audit_logs_job, day=1, hour=3, minute=0),  # 1st of month, 3 AM -- needs a durable volume
+    cron(poll_tracking_job, minute={0, 30}),  # every 30 min (tracking poll fallback) -- carrier egress
+    # Notification relay sweeper: every 5 min re-enqueue catalog-mapped events whose
+    # after_commit enqueue was lost (e.g. Redis outage). See notification_jobs.
+    cron(relay_pending_notifications_job, minute=set(range(0, 60, 5))),
+]
+
+
+def select_cron_jobs(spec: str = None, available: Sequence[CronJob] = None) -> List[CronJob]:
+    """Pick which crons this worker registers, from ``WORKER_CRON_JOBS``.
+
+    Values:
+      * unset / empty / ``"all"``  -> every cron in ``ALL_CRON_JOBS`` (TODAY'S BEHAVIOR --
+        this function is a no-op by default and enables nothing that was previously off).
+      * ``"none"``                 -> no crons at all. The worker still drains the
+        enqueue-driven queue (notifications, webhooks, labels, completion signals), which is
+        the safe shape for a first-ever boot: those jobs correspond to something a user
+        actually did, whereas the crons enumerate accumulated state and fire in bulk.
+      * comma-separated job names  -> only those, enabled one at a time.
+
+    An unrecognised name is a hard error, not a silent skip: "I enabled the cron and nothing
+    happened" is the exact failure mode this whole module is trying to eliminate.
+    """
+    jobs = list(ALL_CRON_JOBS if available is None else available)
+    raw = (os.getenv("WORKER_CRON_JOBS") if spec is None else spec) or ""
+    wanted = raw.strip()
+    if not wanted or wanted.lower() == "all":
+        return jobs
+    if wanted.lower() == "none":
+        return []
+    names = [n.strip() for n in wanted.split(",") if n.strip()]
+    # arq names cron jobs "cron:<coroutine name>". Accept either spelling so the value you
+    # copy out of the startup log and the value you copy out of worker.py both work.
+    by_name = {}
+    for job in jobs:
+        by_name[job.name] = job
+        by_name[job.name.removeprefix("cron:")] = job
+    unknown = [n for n in names if n not in by_name]
+    if unknown:
+        known = sorted({job.name.removeprefix("cron:") for job in jobs})
+        raise ValueError(
+            f"WORKER_CRON_JOBS names unknown cron job(s): {', '.join(sorted(unknown))}. "
+            f"Known jobs: {', '.join(known)}. Use 'all', 'none', or a comma-separated subset."
+        )
+    # De-duplicate by identity, preserving order: a name listed twice -- or once in each
+    # spelling -- must not register the same cron twice. (CronJob is an unhashable dataclass,
+    # hence id() rather than a set of the objects.)
+    selected: List[CronJob] = []
+    seen: set = set()
+    for name in names:
+        job = by_name[name]
+        if id(job) not in seen:
+            seen.add(id(job))
+            selected.append(job)
+    return selected
+
+
+def describe_cron_schedule(jobs: Sequence[CronJob], now: datetime = None) -> List[str]:
+    """One ``name -> next run`` line per registered cron, for the startup log.
+
+    Computed with arq's own ``next_cron`` against COPIES of each job's schedule fields; the
+    ``CronJob`` objects are never mutated, so arq's own scheduling is untouched. ``now`` is
+    timezone-aware in the container's local zone, matching how arq itself resolves its
+    default timezone -- so the printed times are the times that will actually happen.
+    """
+    from arq.cron import next_cron
+
+    reference = now or datetime.now().astimezone()
+    lines: List[str] = []
+    for job in jobs:
+        try:
+            nxt = next_cron(
+                reference,
+                month=job.month,
+                day=job.day,
+                weekday=job.weekday,
+                hour=job.hour,
+                minute=job.minute,
+                second=job.second,
+                microsecond=job.microsecond,
+            )
+            when = nxt.isoformat()
+        except Exception:  # pragma: no cover - never let logging break startup
+            when = "unknown"
+        lines.append(f"{job.name} -> next run {when}")
+    return lines
+
+
+# ============================================================================
 # STARTUP/SHUTDOWN
 # ============================================================================
 
 
 async def startup(ctx):
-    """Worker startup - initialize connections"""
-    logger.info("ARQ worker starting up...")
-    # Database connection will be created per-job
-    logger.info("ARQ worker ready")
+    """Worker startup - announce exactly what this process is and what it will do.
+
+    Everything logged here answers a question that previously required guessing: which Redis
+    did it actually connect to, which commit is running, which crons are armed, and when
+    each of them next fires.
+    """
+    logger.info(
+        "ARQ worker starting up (environment=%s, release=%s)",
+        settings.ENVIRONMENT,
+        settings.APP_RELEASE or "unset",
+    )
+    logger.info(
+        "ARQ worker Redis: %s | queue=%s",
+        REDIS_TARGET.describe(),
+        WorkerSettings.queue_name,
+    )
+    for warning in redis_config_warnings():
+        logger.warning("ARQ worker Redis config: %s", warning)
+
+    registered = list(WorkerSettings.cron_jobs)
+    registered_ids = {id(job) for job in registered}
+    suppressed = [job.name for job in ALL_CRON_JOBS if id(job) not in registered_ids]
+    if suppressed:
+        logger.warning(
+            "ARQ worker cron: %d of %d cron jobs SUPPRESSED by WORKER_CRON_JOBS=%r: %s",
+            len(suppressed),
+            len(ALL_CRON_JOBS),
+            os.getenv("WORKER_CRON_JOBS"),
+            ", ".join(sorted(suppressed)),
+        )
+    if registered:
+        local_zone = datetime.now().astimezone().tzname()
+        logger.info("ARQ worker cron: %d job(s) armed, times in %s", len(registered), local_zone)
+        for line in describe_cron_schedule(registered):
+            logger.info("ARQ worker cron:   %s", line)
+    else:
+        logger.info("ARQ worker cron: none armed; draining enqueue-driven jobs only")
+
+    logger.info("ARQ worker ready (%d job functions registered)", len(WorkerSettings.functions))
 
 
 async def shutdown(ctx):
@@ -318,10 +495,18 @@ async def shutdown(ctx):
 # ============================================================================
 
 
+# Sentry for the WORKER process. The API initializes it at import of app.main, which the
+# worker never imports -- so until now every cron traceback died in the container log.
+# Tagged component=worker so worker and API events are separable in one Sentry project.
+init_sentry(component="worker")
+
+
 class WorkerSettings:
     """ARQ Worker configuration"""
 
-    # Redis connection
+    # Redis connection -- the SAME resolver the enqueue side uses (app/core/queue.py), which
+    # is what makes "the API enqueues where the worker listens" true by construction rather
+    # than by two configs happening to agree. Guarded by tests/test_worker_redis_parity.py.
     redis_settings = get_redis_settings()
 
     # Job functions
@@ -351,23 +536,9 @@ class WorkerSettings:
         dispatch_notification_direct_job,
     ]
 
-    # Cron jobs (scheduled tasks)
-    cron_jobs = [
-        cron(run_mrp_auto_draft_job, hour=6, minute=0),  # 6 AM daily (MRP AUTO_DRAFT)
-        cron(send_daily_digest_job, hour=8, minute=0),  # 8 AM daily
-        cron(check_calibrations_job, hour=7, minute=0),  # 7 AM daily
-        cron(check_late_work_orders_job, hour=8, minute=0),  # 8 AM daily
-        cron(check_low_stock_job, hour=7, minute=30),  # 7:30 AM daily
-        cron(check_quote_expiring_job, hour=9, minute=0),  # 9 AM daily
-        cron(aggregate_ai_learning_job, hour=5, minute=30),  # 5:30 AM daily
-        cron(run_oee_auto_calc_job, hour=2, minute=30),  # 2:30 AM daily (yesterday's OEE, Lean Phase 1)
-        cron(cleanup_old_logs_job, weekday=0, hour=2, minute=0),  # Sunday 2 AM
-        cron(archive_aged_audit_logs_job, day=1, hour=3, minute=0),  # 1st of month, 3 AM
-        cron(poll_tracking_job, minute={0, 30}),  # every 30 min (tracking poll fallback)
-        # Notification relay sweeper: every 5 min re-enqueue catalog-mapped events whose
-        # after_commit enqueue was lost (e.g. Redis outage). See notification_jobs.
-        cron(relay_pending_notifications_job, minute=set(range(0, 60, 5))),
-    ]
+    # Cron jobs (scheduled tasks). Defined in ALL_CRON_JOBS above; WORKER_CRON_JOBS narrows
+    # the set for a controlled first boot and defaults to all of them (unchanged behavior).
+    cron_jobs = select_cron_jobs()
 
     # Lifecycle
     on_startup = startup
