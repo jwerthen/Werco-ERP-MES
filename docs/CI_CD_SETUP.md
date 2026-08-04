@@ -42,10 +42,15 @@ Triggered on: Push to `main` or `develop`
 > with **no manual approval gate**. The `production` GitHub environment no longer carries
 > a required-reviewer rule; the compensating controls are (a) a deployment-branch policy on
 > the `production` environment that allows **only `main`** to deploy, and (b) post-deploy
-> health checks that **fail the job** on a bad deploy — `Verify Production Deployment`
-> (`ci-cd.yml`) and `Verify deployment serves the Vite frontend bundle`
-> (`deploy-frontend-production.yml`). Rollback is re-adding the reviewer rule (and/or
-> redeploying a known-good commit). _(Governance change 2026-06-22.)_
+> checks that **fail the job unless the new commit is actually serving** —
+> `Verify production is serving this commit` (`ci-cd.yml`) and `Verify the deployed bundle
+> is this commit` (`deploy-frontend-production.yml`). Both poll the running service for the
+> release SHA the run stamped into the artifact, via `.github/scripts/verify_release.py`.
+> Rollback is re-adding the reviewer rule (and/or redeploying a known-good commit).
+> _(Governance change 2026-06-22; checks strengthened 2026-08-04 — they previously curl'd
+> `/health`, which the **previous** container answers just as happily, so they proved the
+> site was up and never that the deploy had landed. See
+> [DEPLOYMENT_RUNBOOK.md](DEPLOYMENT_RUNBOOK.md#change-control--production-deploy-model).)_
 
 ### E2E Tests (e2e.yml)
 

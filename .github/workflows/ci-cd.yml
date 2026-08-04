@@ -402,6 +402,26 @@ jobs:
     runs-on: ubuntu-latest
     needs: [security-scan]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    # Production deploys must not overlap, and the exact-SHA gate below is what makes
+    # that load-bearing rather than merely tidy. Railway keeps ONE active deployment per
+    # service, so if two deploy jobs run at once only one run's SHA is ever live -- the
+    # loser then polls for a SHA that will never appear, burns its full timeout, exits 1,
+    # and skips verify_launch and the release tag. That is the exact symptom this whole
+    # change exists to remove. The old `curl /health` check never noticed, because any
+    # answering container satisfied it.
+    #
+    # This repo merges in bursts (five commits landed on main inside 63 seconds on
+    # 2026-08-02), so the overlap is routine, not theoretical.
+    #
+    # cancel-in-progress: false, deliberately -- an in-flight production deploy is never
+    # killed half-way. GitHub still keeps only the MOST RECENT pending run per group and
+    # cancels superseded ones, so a burst settles as "first run completes, intermediates
+    # are cancelled (not failed), last run deploys the tip" -- which is what we want.
+    # The group is shared with deploy-frontend-production.yml so the two workflows cannot
+    # deploy werco-frontend simultaneously either.
+    concurrency:
+      group: production-deploy
+      cancel-in-progress: false
     # contents: write is needed by the Create GitHub Release step; the repo's
     # default workflow token permission is read-only.
     permissions:
@@ -435,19 +455,87 @@ jobs:
           printf '%s' "$GITHUB_SHA" > backend/RELEASE
           echo "Stamped backend/RELEASE = $(cat backend/RELEASE)"
 
+      # The frontend's half of the same contract. It had no way to report what it was
+      # running, so "is the deployed SPA this commit?" was unanswerable and the deploy
+      # was verified by "does / return an HTML page" -- which the OLD container answers
+      # just as well. Vite copies frontend/public/* into the build output verbatim and
+      # nginx serves it, so this lands at /release.txt.
+      #
+      # Same two rules as backend/RELEASE, guarded by the same tests: it must NOT be
+      # gitignored (`railway up` honors .gitignore, so ignoring it silently stops it
+      # shipping) and must NOT be committed (a committed SHA would go stale and keep
+      # reporting the wrong commit -- worse than reporting none).
+      - name: Stamp release SHA into the frontend artifact
+        run: |
+          printf '%s' "$GITHUB_SHA" > frontend/public/release.txt
+          echo "Stamped frontend/public/release.txt = $(cat frontend/public/release.txt)"
+
+      # WHY continue-on-error, AND WHY IT IS NOT A SWALLOWED FAILURE.
+      # `railway up`'s exit status answers "could the CLI tail the build log?", not "did
+      # the deploy land?". On 2026-08-04 it exited 1 on two consecutive production
+      # deploys (#198, #203) with "Failed to stream build logs" ~66s after an upload that
+      # Railway accepted, built, and shipped. Because a failed step skips the rest of the
+      # job, that ALSO skipped the frontend deploy, the worker deploy, verify_launch and
+      # the release tag -- production ran two commits that the release history denied.
+      #
+      # So the exit status is demoted to advisory (still streamed here, still visible in
+      # the UI as a distinct outcome) and the job is gated on two blocking steps instead:
+      # the upload receipt immediately below, and "Verify production is serving this
+      # commit", which polls the running service for the SHA stamped above. That gate is
+      # strictly stronger than the exit status it replaces -- it cannot pass unless the
+      # new image is actually serving traffic.
       - name: Deploy Backend to Production
+        continue-on-error: true
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
+          set -o pipefail
           cd backend
-          railway up --service werco-api . --path-as-root --environment production --project "${{ secrets.RAILWAY_PROJECT_ID }}"
+          railway up --service werco-api . --path-as-root --environment production --project "${{ secrets.RAILWAY_PROJECT_ID }}" | tee "$RUNNER_TEMP/deploy-backend.log"
+
+      - name: Confirm Railway accepted the backend upload
+        # Fails FAST on the one thing the CLI's exit status was genuinely good for: a bad
+        # token or project ID means no build is ever created, and without this the job
+        # would instead sit in the release poll below for its full timeout before saying
+        # so. The CLI prints a "Build Logs:" URL only once the upload is accepted and a
+        # build queued, which makes its presence an honest upload receipt.
+        run: |
+          log="$RUNNER_TEMP/deploy-backend.log"
+          if [ ! -s "$log" ]; then
+            echo "railway up produced no output for werco-api -- the CLI never ran."
+            exit 1
+          fi
+          if ! grep -q "Build Logs:" "$log"; then
+            echo "railway up never reported a build for werco-api -- the upload was rejected."
+            echo "--- deploy log ---"
+            cat "$log"
+            exit 1
+          fi
+          echo "Railway accepted the backend upload and queued a build."
 
       - name: Deploy Frontend to Production
+        continue-on-error: true
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
+          set -o pipefail
           cd frontend
-          railway up --service werco-frontend . --path-as-root --environment production --project "${{ secrets.RAILWAY_PROJECT_ID }}"
+          railway up --service werco-frontend . --path-as-root --environment production --project "${{ secrets.RAILWAY_PROJECT_ID }}" | tee "$RUNNER_TEMP/deploy-frontend.log"
+
+      - name: Confirm Railway accepted the frontend upload
+        run: |
+          log="$RUNNER_TEMP/deploy-frontend.log"
+          if [ ! -s "$log" ]; then
+            echo "railway up produced no output for werco-frontend -- the CLI never ran."
+            exit 1
+          fi
+          if ! grep -q "Build Logs:" "$log"; then
+            echo "railway up never reported a build for werco-frontend -- the upload was rejected."
+            echo "--- deploy log ---"
+            cat "$log"
+            exit 1
+          fi
+          echo "Railway accepted the frontend upload and queued a build."
 
       # ARQ background worker. GATED and OFF by default: set the repo variable
       # DEPLOY_WORKER_PRODUCTION=true only AFTER the werco-worker service exists AND its
@@ -462,23 +550,60 @@ jobs:
       # an arq worker can never satisfy). See the repo-root railway.toml header.
       - name: Deploy Worker to Production
         if: vars.DEPLOY_WORKER_PRODUCTION == 'true'
+        continue-on-error: true
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
-          railway up --service werco-worker . --path-as-root --environment production --project "${{ secrets.RAILWAY_PROJECT_ID }}"
+          set -o pipefail
+          railway up --service werco-worker . --path-as-root --environment production --project "${{ secrets.RAILWAY_PROJECT_ID }}" | tee "$RUNNER_TEMP/deploy-worker.log"
 
-      - name: Verify Production Deployment
+      # The worker serves no HTTP, so the upload receipt is the only gate available to
+      # CI -- there is nothing to poll for a release SHA. Confirm it from the service's
+      # startup log instead (docs/WORKER_SERVICE.md). Carries the same `if:` as the step
+      # above so it stays skipped, rather than failing on a missing log, while the worker
+      # deploy is still gated off.
+      - name: Confirm Railway accepted the worker upload
+        if: vars.DEPLOY_WORKER_PRODUCTION == 'true'
         run: |
-          for i in 1 2 3 4 5; do
-            sleep 15
-            if curl -sf ${{ vars.PRODUCTION_API_URL }}/health; then
-              echo "Production deployment healthy"
-              exit 0
-            fi
-            echo "Attempt $i failed, retrying..."
-          done
-          echo "Production deployment health check failed after 5 attempts"
-          exit 1
+          log="$RUNNER_TEMP/deploy-worker.log"
+          if [ ! -s "$log" ]; then
+            echo "railway up produced no output for werco-worker -- the CLI never ran."
+            exit 1
+          fi
+          if ! grep -q "Build Logs:" "$log"; then
+            echo "railway up never reported a build for werco-worker -- the upload was rejected."
+            echo "--- deploy log ---"
+            cat "$log"
+            exit 1
+          fi
+          echo "Railway accepted the worker upload and queued a build."
+
+      # THE gate for this job, and the reason the deploy steps above can be advisory.
+      #
+      # What this replaced: a loop that curl'd /health and passed the moment anything
+      # answered. The OLD container answers /health perfectly, so the check proved the
+      # site was up and never that the deploy had landed -- it would have gone green
+      # throughout the 2026-08-04 incident had it been reached at all.
+      #
+      # Each poll compares the SHA baked into the artifact against the SHA this run
+      # deployed, so it can only pass once the new image is serving traffic. The frontend
+      # marker is compared by BODY, not status code: nginx's SPA fallback returns 200
+      # with index.html for a missing /release.txt, so a status check would pass when the
+      # marker was never deployed at all.
+      - name: Verify production is serving this commit
+        env:
+          PRODUCTION_API_URL: ${{ vars.PRODUCTION_API_URL }}
+          PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
+        run: |
+          python3 .github/scripts/verify_release.py \
+            --label backend \
+            --url "${PRODUCTION_API_URL}/health/detailed" \
+            --json-path checks.application.release \
+            --expect "${GITHUB_SHA}"
+          python3 .github/scripts/verify_release.py \
+            --label frontend \
+            --url "${PRODUCTION_URL}/release.txt" \
+            --expect "${GITHUB_SHA}"
 
       - name: Verify Production Config
         env:

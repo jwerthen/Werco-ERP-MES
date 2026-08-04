@@ -9,9 +9,18 @@ on:
       - '.github/workflows/ci-cd.yml'
   workflow_dispatch:
 
+# Shared with ci-cd.yml's deploy-production job on purpose: BOTH workflows run
+# `railway up --service werco-frontend` on a push to main that touches frontend/**, and
+# Railway keeps one active deployment per service. Without a shared group they race, and
+# the loser's exact-SHA verification polls for a SHA that will never be live. A single
+# group serializes every production deploy in this repo, whichever workflow owns it.
+#
+# cancel-in-progress flipped true -> false to match: killing an in-flight production
+# deploy mid-upload is worse than queueing behind it, and GitHub still cancels superseded
+# PENDING runs, so a burst of merges does not queue up a long backlog.
 concurrency:
-  group: deploy-frontend-production
-  cancel-in-progress: true
+  group: production-deploy
+  cancel-in-progress: false
 
 jobs:
   deploy-frontend:
@@ -61,11 +70,56 @@ jobs:
             echo "Skipping offline validation; 'railway up --project' below is the real auth check."
           fi
 
-      - name: Deploy frontend service from frontend root
+      # Mirrors the stamp in ci-cd.yml's deploy-production job. Vite copies
+      # frontend/public/* into the build output verbatim and nginx serves it, so this
+      # lands at /release.txt and makes "is production this commit?" a single GET.
+      # Must stay un-gitignored (`railway up` honors .gitignore) and uncommitted.
+      - name: Stamp release SHA into the frontend artifact
         run: |
+          printf '%s' "$GITHUB_SHA" > frontend/public/release.txt
+          echo "Stamped frontend/public/release.txt = $(cat frontend/public/release.txt)"
+
+      # continue-on-error is deliberate; see the long note in ci-cd.yml's deploy-production
+      # job. Short version: on 2026-08-04 this exact step exited 1 on a deploy that
+      # shipped fine, because the CLI could not tail the build log -- its exit status
+      # reports log-stream health, not deploy success. The blocking gates are the upload
+      # receipt below and the release-SHA check after it.
+      - name: Deploy frontend service from frontend root
+        continue-on-error: true
+        run: |
+          set -o pipefail
           cd frontend
           service_name="${RAILWAY_FRONTEND_SERVICE:-werco-frontend}"
-          railway up . --path-as-root --environment production --project "${RAILWAY_PROJECT_ID}" --service "${service_name}"
+          railway up . --path-as-root --environment production --project "${RAILWAY_PROJECT_ID}" --service "${service_name}" | tee "$RUNNER_TEMP/deploy-frontend.log"
+
+      - name: Confirm Railway accepted the upload
+        # A "Build Logs:" URL is printed only once the upload is accepted and a build
+        # queued, so its absence means the upload itself failed (bad token/project) and
+        # the release poll below would only time out slowly on the same fact.
+        run: |
+          log="$RUNNER_TEMP/deploy-frontend.log"
+          if [ ! -s "$log" ]; then
+            echo "railway up produced no output -- the CLI never ran."
+            exit 1
+          fi
+          if ! grep -q "Build Logs:" "$log"; then
+            echo "railway up never reported a build -- the upload was rejected."
+            echo "--- deploy log ---"
+            cat "$log"
+            exit 1
+          fi
+          echo "Railway accepted the upload and queued a build."
+
+      - name: Verify the deployed bundle is this commit
+        env:
+          PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
+        # Compared by BODY, not status code: nginx serves index.html with a 200 for any
+        # unknown path, so a missing /release.txt looks like a healthy response.
+        run: |
+          python3 .github/scripts/verify_release.py \
+            --label frontend \
+            --url "${PRODUCTION_URL}/release.txt" \
+            --expect "${GITHUB_SHA}"
 
       - name: Verify deployment serves the Vite frontend bundle
         env:
@@ -75,8 +129,13 @@ jobs:
           # bundle must be fetchable (nginx returns a real 404 for missing JS).
           # This catches the observed production failure modes: the service
           # running the wrong image (no SPA on /) or serving nothing at all.
-          # Build freshness needs no separate check - `railway up` above fails
-          # the job unless the new image built and deployed.
+          #
+          # Freshness is NOT this step's job and never was, despite what this comment
+          # used to claim ("railway up above fails the job unless the new image built and
+          # deployed"). 2026-08-04 disproved that: `railway up` exited 1 on a deploy that
+          # built and shipped, and it can equally exit 0 while nothing new is serving.
+          # The "Verify the deployed bundle is this commit" step above owns freshness;
+          # this one stays because a correct SHA still cannot prove nginx is serving JS.
           python - <<'PY'
           import os
           import re

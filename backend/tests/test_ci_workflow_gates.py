@@ -32,6 +32,7 @@ a distinct outcome, and still surfaces the command's output.
 import configparser
 import json
 import re
+import subprocess
 from pathlib import Path
 from typing import Iterator, Tuple
 
@@ -285,4 +286,220 @@ class TestCoverageFloors:
             f"frontend jest coverage thresholds were lowered (found vs floor): {lowered}. "
             "Raising them is fine and needs no change here; lowering them needs a reason, since "
             "they are the only thing holding frontend coverage in place."
+        )
+
+
+# The deploy workflows and the artifact each one stamps with the commit SHA. The
+# frontend marker rides in public/ because Vite copies that directory into the build
+# output verbatim; the backend one is read by app/core/config.py into APP_RELEASE.
+DEPLOY_WORKFLOWS = ("ci-cd.yml", "deploy-frontend-production.yml")
+RELEASE_VERIFIER = REPO_ROOT / ".github" / "scripts" / "verify_release.py"
+FRONTEND_RELEASE_MARKER = "frontend/public/release.txt"
+
+# The jobs that deploy to PRODUCTION, and the only ones the release-SHA contract binds.
+# ci-cd.yml's deploy-staging is deliberately excluded: it fires on `develop`, a branch
+# this repo does not use (every PR merges to main), it stamps nothing, and its services
+# have no release endpoint to poll -- so it keeps the older, weaker "did anything
+# answer /health" check. It carries the same latent false-failure as production did; if
+# `develop` is ever revived, give it this treatment and add it here.
+PRODUCTION_DEPLOY_JOBS = (
+    ("ci-cd.yml", "deploy-production"),
+    ("deploy-frontend-production.yml", "deploy-frontend"),
+)
+
+# The single concurrency group both production deploy paths must share. They deploy the
+# same Railway services, and Railway keeps one active deployment per service.
+PRODUCTION_DEPLOY_GROUP = "production-deploy"
+
+
+def _git(*args: str) -> "subprocess.CompletedProcess[bytes]":
+    return subprocess.run(args, cwd=REPO_ROOT, capture_output=True, timeout=15)
+
+
+class TestDeployFailureSignalIsHonest:
+    """The 2026-08-04 false-failure, and the gate that replaced the signal it broke.
+
+    `railway up` exited 1 on two consecutive production deploys (#198, #203) with
+    "Failed to stream build logs" roughly 66s after an upload Railway had accepted,
+    built and shipped. Its exit status reports whether the CLI could tail a log, not
+    whether the deploy landed -- but the job was gated on it, so a healthy deploy went
+    red and, because a failed step skips the rest of the job, ALSO skipped the frontend
+    deploy, the worker deploy, `verify_launch` and the release tag. Production ran two
+    commits the release history denied.
+
+    The fix demotes that exit status to advisory and gates on evidence instead: an
+    upload receipt, then a poll of the running service for the SHA this run stamped.
+    That trade is only safe while BOTH halves stay in place -- an advisory deploy step
+    with no gate behind it is a deploy that cannot fail, which is strictly worse than
+    what it replaced. These tests hold the trade open.
+    """
+
+    @pytest.mark.parametrize("workflow_name", DEPLOY_WORKFLOWS)
+    def test_every_advisory_deploy_step_is_followed_by_a_blocking_gate(self, workflow_name: str) -> None:
+        workflow = _load_workflow(workflow_name)
+        for job_key, job in (workflow.get("jobs") or {}).items():
+            steps = job.get("steps") or []
+            for index, step in enumerate(steps):
+                if "railway up" not in (step.get("run") or ""):
+                    continue
+                if not step.get("continue-on-error"):
+                    continue  # still gated on its own exit status; nothing to check.
+                later = steps[index + 1 :]
+                blocking = [s for s in later if s.get("run") and not s.get("continue-on-error")]
+                assert blocking, (
+                    f"{workflow_name} job {job_key} step {step.get('name')!r} is advisory "
+                    "(continue-on-error) but nothing blocking runs after it, so a failed "
+                    "deploy would report green. Keep the upload receipt and the release check."
+                )
+
+    @pytest.mark.parametrize("workflow_name", DEPLOY_WORKFLOWS)
+    def test_advisory_deploy_steps_are_receipted(self, workflow_name: str) -> None:
+        """A tolerated exit status is only safe because a rejected upload still fails.
+
+        The CLI prints a "Build Logs:" URL once, when the upload has been accepted and a
+        build queued. Grepping the teed log for it is what separates "the flake we mean
+        to tolerate" from "the token is wrong and nothing was ever deployed" -- without
+        it, a misconfigured token would be discovered only by the release poll timing out.
+
+        The receipt must be bound to THIS step's log file and must itself be blocking.
+        An earlier version of this test accepted any later step mentioning "Build Logs:",
+        which meant the backend's own receipt could be deleted and the frontend's would
+        satisfy it forever.
+        """
+        workflow = _load_workflow(workflow_name)
+        for job_key, job in (workflow.get("jobs") or {}).items():
+            steps = job.get("steps") or []
+            for index, step in enumerate(steps):
+                script = step.get("run") or ""
+                if "railway up" not in script or not step.get("continue-on-error"):
+                    continue
+                logs = re.findall(r'tee "([^"]+)"', script)
+                assert logs, (
+                    f"{workflow_name} job {job_key} step {step.get('name')!r} tolerates its exit "
+                    "status but does not tee its output, so the receipt check has nothing to read."
+                )
+                receipts = [
+                    s
+                    for s in steps[index + 1 :]
+                    if "Build Logs:" in (s.get("run") or "")
+                    and any(log in (s.get("run") or "") for log in logs)
+                    and not s.get("continue-on-error")
+                ]
+                assert receipts, (
+                    f"{workflow_name} job {job_key} step {step.get('name')!r} is advisory but no "
+                    f"later BLOCKING step greps {logs} for a 'Build Logs:' upload receipt. "
+                    "A receipt bound to a different service's log does not gate this one."
+                )
+
+    def test_the_release_gate_itself_cannot_be_made_advisory(self) -> None:
+        """The one property that makes this whole trade safe.
+
+        Everything else here tolerates a failure somewhere on the promise that the release
+        check still blocks. Put `continue-on-error: true` on THAT step and deploy-production
+        becomes a job incapable of going red -- strictly worse than the exit status it
+        replaced, and invisible in the checks list. The sibling `TestGateStepsAreBlocking`
+        does not cover this: its GATE_JOBS list is lint/test jobs only.
+        """
+        for workflow_name, job_key in PRODUCTION_DEPLOY_JOBS:
+            workflow = _load_workflow(workflow_name)
+            job = (workflow.get("jobs") or {}).get(job_key)
+            assert job is not None, f"{workflow_name} lost its {job_key!r} job -- was it renamed?"
+
+            verifiers = [s for s in job.get("steps") or [] if "verify_release.py" in (s.get("run") or "")]
+            assert verifiers, f"{workflow_name} job {job_key} no longer runs the release verifier."
+            advisory = [s.get("name", "?") for s in verifiers if s.get("continue-on-error")]
+            assert not advisory, (
+                f"{workflow_name} job {job_key} made the release check advisory: {advisory}. "
+                "That is the single step the advisory deploy steps are traded against -- "
+                "with it non-blocking, nothing in this job can fail."
+            )
+
+    @pytest.mark.parametrize("workflow_name,job_key", PRODUCTION_DEPLOY_JOBS)
+    def test_production_deploys_cannot_overlap(self, workflow_name: str, job_key: str) -> None:
+        """Two concurrent deploys make the exact-SHA gate unsatisfiable for the loser.
+
+        Railway keeps ONE active deployment per service, so if two runs deploy the same
+        service at once only one run's SHA is ever live. The other polls for a SHA that
+        will never appear, burns its full timeout, exits 1, and skips verify_launch and
+        the release tag -- reproducing the exact false-failure this file exists to prevent.
+        Both workflows must therefore share ONE concurrency group.
+        """
+        workflow = _load_workflow(workflow_name)
+        job = (workflow.get("jobs") or {}).get(job_key) or {}
+        concurrency = job.get("concurrency") or workflow.get("concurrency")
+        assert concurrency, (
+            f"{workflow_name} job {job_key} has no concurrency group, so two production "
+            "deploys can overlap and the release check becomes unsatisfiable for the loser."
+        )
+        group = concurrency.get("group") if isinstance(concurrency, dict) else concurrency
+        assert group == PRODUCTION_DEPLOY_GROUP, (
+            f"{workflow_name} job {job_key} uses concurrency group {group!r}, expected "
+            f"{PRODUCTION_DEPLOY_GROUP!r}. Both workflows deploy werco-frontend; separate "
+            "groups do not serialize them against each other."
+        )
+
+    def test_production_deploy_verifies_the_release_sha(self) -> None:
+        """The replacement gate must compare against THIS run's commit.
+
+        The check it replaced curl'd /health, which the previous container answers just
+        as happily -- it proved the site was up, never that the deploy had landed.
+        """
+        workflow = _load_workflow("ci-cd.yml")
+        scripts = [
+            step.get("run") or "" for _, step in _iter_steps(workflow) if "verify_release.py" in (step.get("run") or "")
+        ]
+        assert scripts, "ci-cd.yml no longer verifies the deployed release SHA."
+        joined = "\n".join(scripts)
+        assert "GITHUB_SHA" in joined, "The release check must compare against the SHA this run deployed."
+        for label in ("--label backend", "--label frontend"):
+            assert label in joined, f"ci-cd.yml stopped verifying {label.split()[-1]} deploy freshness."
+
+    def test_release_verifier_exists_and_compiles(self) -> None:
+        assert RELEASE_VERIFIER.is_file(), f"{RELEASE_VERIFIER} is referenced by the deploy workflows but missing."
+        compile(RELEASE_VERIFIER.read_text(encoding="utf-8"), str(RELEASE_VERIFIER), "exec")
+
+
+class TestFrontendReleaseMarkerShipsWithTheArtifact:
+    """Same two rules as backend/RELEASE, for the marker that reports the deployed SPA.
+
+    Mirrors ``test_sentry_observability_config.py::TestReleaseStampShipsWithTheArtifact``
+    -- the failure modes are identical and both are one well-meaning cleanup away.
+    """
+
+    def test_marker_is_not_gitignored(self) -> None:
+        """``railway up`` honors .gitignore, so ignoring it silently stops it shipping."""
+        result = _git("git", "check-ignore", FRONTEND_RELEASE_MARKER)
+        if result.returncode not in (0, 1):  # pragma: no cover - no git metadata
+            pytest.skip(f"git check-ignore could not answer (exit {result.returncode})")
+        assert result.returncode == 1, (
+            f"{FRONTEND_RELEASE_MARKER} is gitignored, so `railway up` will not upload it "
+            "and the frontend release check can never pass."
+        )
+
+    def test_marker_is_never_committed(self) -> None:
+        """A committed SHA would go stale and keep reporting a commit that is not running."""
+        result = _git("git", "ls-files", "--error-unmatch", FRONTEND_RELEASE_MARKER)
+        assert result.returncode != 0, (
+            f"{FRONTEND_RELEASE_MARKER} is committed; it must stay a per-deploy artifact, "
+            "or every build without a stamping step will advertise a stale commit."
+        )
+
+    @pytest.mark.parametrize("workflow_name,job_key", PRODUCTION_DEPLOY_JOBS)
+    def test_stamp_is_written_before_the_frontend_upload(self, workflow_name: str, job_key: str) -> None:
+        workflow = _load_workflow(workflow_name)
+        job = (workflow.get("jobs") or {}).get(job_key)
+        assert job is not None, f"{workflow_name} lost its {job_key!r} job -- was it renamed?"
+        steps = job.get("steps") or []
+
+        uploads = [
+            i
+            for i, s in enumerate(steps)
+            if "railway up" in (s.get("run") or "") and "frontend" in (s.get("run") or "")
+        ]
+        assert uploads, f"{workflow_name} job {job_key} no longer uploads the frontend."
+        stamps = [i for i, s in enumerate(steps) if FRONTEND_RELEASE_MARKER in (s.get("run") or "")]
+        assert stamps, f"{workflow_name} job {job_key} uploads the frontend without stamping {FRONTEND_RELEASE_MARKER}."
+        assert min(stamps) < min(uploads), (
+            f"{workflow_name} job {job_key} stamps {FRONTEND_RELEASE_MARKER} at step {min(stamps)} "
+            f"but uploads the frontend at step {min(uploads)} -- the stamp must precede the upload."
         )

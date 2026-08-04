@@ -392,7 +392,11 @@ Create `/etc/logrotate.d/werco-erp`:
   [ENVIRONMENT_VARIABLES.md → Monitoring & Error Tracking](ENVIRONMENT_VARIABLES.md#monitoring--error-tracking)
 - **Prometheus + Grafana** for metrics monitoring
 - **Health checks**: `GET /health`; `GET /health/detailed` additionally reports the
-  running commit at `checks.application.release`
+  running commit at `checks.application.release`. The frontend reports its own commit as
+  the plain-text body of `GET /release.txt`. Both are what CI polls to prove a deploy
+  landed — compare the **body**, never the status code: nginx's SPA fallback answers a
+  missing `/release.txt` with `200` and `index.html`. See
+  [DEPLOYMENT_RUNBOOK.md](DEPLOYMENT_RUNBOOK.md#change-control--production-deploy-model)
 - **Application logs**: Check `/var/log/werco-erp/`
 
 ## Backup Strategy
