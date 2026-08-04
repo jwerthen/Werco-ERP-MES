@@ -420,9 +420,15 @@ def predict_delivery_date(
     work_order_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
 ):
-    """Predict completion date for a work order."""
-    service = PredictionService(db)
+    """Predict completion date for a work order.
+
+    A work order belonging to another company 404s exactly as an absent id does: the
+    refusal carries no identifier and the two are indistinguishable, so the status code
+    cannot be used as an existence oracle (#189 convention).
+    """
+    service = PredictionService(db, company_id)
     try:
         return service.predict_delivery(work_order_id)
     except ValueError as e:
@@ -434,9 +440,10 @@ def get_capacity_forecast(
     weeks_ahead: int = Query(4, ge=1, le=12),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get capacity utilization forecast for upcoming weeks."""
-    service = PredictionService(db)
+    service = PredictionService(db, company_id)
     return service.forecast_capacity(weeks_ahead)
 
 
@@ -444,9 +451,10 @@ def get_capacity_forecast(
 def get_inventory_demand_prediction(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Predict inventory stockout dates."""
-    service = PredictionService(db)
+    service = PredictionService(db, company_id)
     return service.predict_inventory_demand()
 
 
