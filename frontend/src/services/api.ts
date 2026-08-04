@@ -40,6 +40,19 @@ import {
 } from '../types';
 import { ScanResolveRequest, ScanResolveResult } from '../types/scan';
 import {
+  SPCCapability,
+  SPCChartData,
+  SPCCharacteristic,
+  SPCCharacteristicCreate,
+  SPCCharacteristicUpdate,
+  SPCControlLimit,
+  SPCDashboard,
+  SPCMeasurement,
+  SPCMeasurementBatchCreate,
+  SPCOutOfControlAlert,
+  SPCViolationsResponse,
+} from '../types/spc';
+import {
   AIInteractionEventInput,
   AIOutcomeInput,
   AIRecommendation,
@@ -4249,74 +4262,151 @@ class ApiService {
   }
 
   // SPC (Statistical Process Control)
-  async getSPCDashboard() {
-    const response = await this.api.get('/spc/dashboard');
+  //
+  // Every method below returns `response.data` — the UNWRAPPED payload. Consume the
+  // return value directly; a second `.data` yields `undefined` (and for the bare-array
+  // routes an `xs.data?.results || xs.data || []` fallback silently collapses to `[]`,
+  // which is exactly how the SPC page shipped an always-empty characteristic list).
+  // The declared return types below make that mistake a compile error.
+  async getSPCDashboard(): Promise<SPCDashboard> {
+    const response = await this.api.get<SPCDashboard>('/spc/dashboard');
     return response.data;
   }
 
   // Backend filter param is `is_active` (see backend/app/api/endpoints/spc.py list_characteristics).
-  async getSPCCharacteristics(params?: { part_id?: number; is_active?: boolean }) {
-    const response = await this.api.get('/spc/characteristics', { params });
+  // Returns a BARE ARRAY ordered by name — no envelope, no `results` key, no total.
+  //
+  // ⚠️ The route defaults to `limit=100` (max 500). Because there is no envelope, nothing
+  // in the response says the set was truncated: past the 100th characteristic by name the
+  // rest silently vanish AND the caller renders that 100 as if it were the total. When no
+  // explicit `limit` is passed this pages through to completion — same shape as `getParts`
+  // above, for the same reason.
+  async getSPCCharacteristics(params?: {
+    skip?: number;
+    limit?: number;
+    part_id?: number;
+    is_active?: boolean;
+  }): Promise<SPCCharacteristic[]> {
+    if (params?.limit) {
+      const response = await this.api.get<SPCCharacteristic[]>('/spc/characteristics', { params });
+      return response.data;
+    }
+
+    const pageSize = 500;
+    const all: SPCCharacteristic[] = [];
+    let skip = params?.skip ?? 0;
+
+    while (true) {
+      const response = await this.api.get<SPCCharacteristic[]>('/spc/characteristics', {
+        params: { ...params, skip, limit: pageSize },
+      });
+      all.push(...response.data);
+      if (response.data.length < pageSize) break;
+      skip += pageSize;
+    }
+
+    return all;
+  }
+
+  async getSPCCharacteristic(id: number): Promise<SPCCharacteristic> {
+    const response = await this.api.get<SPCCharacteristic>(`/spc/characteristics/${id}`);
     return response.data;
   }
 
-  async getSPCCharacteristic(id: number) {
-    const response = await this.api.get(`/spc/characteristics/${id}`);
+  async createSPCCharacteristic(data: SPCCharacteristicCreate): Promise<SPCCharacteristic> {
+    const response = await this.api.post<SPCCharacteristic>('/spc/characteristics', data);
     return response.data;
   }
 
-  async createSPCCharacteristic(data: any) {
-    const response = await this.api.post('/spc/characteristics', data);
+  async updateSPCCharacteristic(id: number, data: SPCCharacteristicUpdate): Promise<SPCCharacteristic> {
+    const response = await this.api.put<SPCCharacteristic>(`/spc/characteristics/${id}`, data);
     return response.data;
   }
 
-  async updateSPCCharacteristic(id: number, data: any) {
-    const response = await this.api.put(`/spc/characteristics/${id}`, data);
+  /**
+   * Body is the `{measurements: [...]}` WRAPPER — a flat measurement 422s with
+   * `{"loc":["measurements"],"msg":"Field required"}`. The server validates every
+   * distinct characteristic/work-order id before the first insert, so a whole subgroup
+   * can be posted atomically. `measured_by` is not accepted (the server stamps it).
+   */
+  async addSPCMeasurements(data: SPCMeasurementBatchCreate): Promise<SPCMeasurement[]> {
+    const response = await this.api.post<SPCMeasurement[]>('/spc/measurements', data);
     return response.data;
   }
 
-  async addSPCMeasurements(data: any) {
-    const response = await this.api.post('/spc/measurements', data);
+  /**
+   * ⚠️ Ordered `subgroup_number ASC, sample_number ASC` and THEN limited, so `limit`
+   * takes the OLDEST rows, not the newest. There is no `offset` and no `order` param,
+   * and `limit` is capped at 5000 — so "fetch a big window and slice the tail" is not a
+   * fix, it just moves the cliff. The only way to reach the newest rows on a
+   * characteristic with a long history is `start_date`: bound the window by time first,
+   * then slice. `start_date`/`end_date` are parsed with `datetime.fromisoformat` and
+   * compared against a NAIVE UTC column, so pass a naive UTC ISO string (no trailing `Z`).
+   */
+  async getSPCMeasurements(
+    characteristicId: number,
+    params?: { start_date?: string; end_date?: string; limit?: number },
+  ): Promise<SPCMeasurement[]> {
+    const response = await this.api.get<SPCMeasurement[]>(`/spc/measurements/${characteristicId}`, { params });
     return response.data;
   }
 
-  async getSPCMeasurements(characteristicId: number, params?: { limit?: number; offset?: number }) {
-    const response = await this.api.get(`/spc/measurements/${characteristicId}`, { params });
+  // The only server param is `last_n_subgroups` (default 50); `chart_type`/`limit` were
+  // never read server-side. Returns an OBJECT: {characteristic, chart_points, control_limits}.
+  async getSPCChartData(characteristicId: number, params?: { last_n_subgroups?: number }): Promise<SPCChartData> {
+    const response = await this.api.get<SPCChartData>(`/spc/chart-data/${characteristicId}`, { params });
     return response.data;
   }
 
-  async getSPCChartData(characteristicId: number, params?: { chart_type?: string; limit?: number }) {
-    const response = await this.api.get(`/spc/chart-data/${characteristicId}`, { params });
+  /**
+   * ADMIN/MANAGER/QUALITY only. Supersedes the prior `is_current` limits AND rewrites
+   * `is_out_of_control` / `violation_rules` in place on historical measurements in the
+   * window — a server-GATED, evidence-mutating action, so keep its UI non-optimistic.
+   */
+  async calculateSPCControlLimits(
+    characteristicId: number,
+    params?: { last_n_subgroups?: number },
+  ): Promise<SPCControlLimit> {
+    const response = await this.api.post<SPCControlLimit>(
+      `/spc/control-limits/${characteristicId}/calculate`,
+      undefined,
+      { params },
+    );
     return response.data;
   }
 
-  async calculateSPCControlLimits(characteristicId: number) {
-    const response = await this.api.post(`/spc/control-limits/${characteristicId}/calculate`);
+  // 200 with a JSON `null` body when no limits have been calculated yet — not an error.
+  async getSPCControlLimits(characteristicId: number): Promise<SPCControlLimit | null> {
+    const response = await this.api.get<SPCControlLimit | null>(`/spc/control-limits/${characteristicId}`);
     return response.data;
   }
 
-  async getSPCControlLimits(characteristicId: number) {
-    const response = await this.api.get(`/spc/control-limits/${characteristicId}`);
+  // 400 "USL and LSL must be defined to run capability study" unless BOTH spec limits are set.
+  async runSPCCapabilityStudy(
+    characteristicId: number,
+    params?: { last_n_subgroups?: number },
+  ): Promise<SPCCapability> {
+    const response = await this.api.post<SPCCapability>(`/spc/capability-study/${characteristicId}`, undefined, {
+      params,
+    });
     return response.data;
   }
 
-  async runSPCCapabilityStudy(characteristicId: number) {
-    const response = await this.api.post(`/spc/capability-study/${characteristicId}`);
+  // 200 with a JSON `null` body when no study has been run. Returns the LATEST study.
+  async getSPCCapability(characteristicId: number): Promise<SPCCapability | null> {
+    const response = await this.api.get<SPCCapability | null>(`/spc/capability/${characteristicId}`);
     return response.data;
   }
 
-  async getSPCCapability(characteristicId: number) {
-    const response = await this.api.get(`/spc/capability/${characteristicId}`);
+  async getSPCOutOfControl(): Promise<SPCOutOfControlAlert[]> {
+    const response = await this.api.get<SPCOutOfControlAlert[]>('/spc/out-of-control');
     return response.data;
   }
 
-  async getSPCOutOfControl() {
-    const response = await this.api.get('/spc/out-of-control');
-    return response.data;
-  }
-
-  async getSPCViolations(characteristicId: number) {
-    const response = await this.api.get(`/spc/violations/${characteristicId}`);
+  // Returns an OBJECT. Recomputed live over ALL subgroups against the current limits,
+  // so it can legitimately disagree with the stored per-measurement OOC flags.
+  async getSPCViolations(characteristicId: number): Promise<SPCViolationsResponse> {
+    const response = await this.api.get<SPCViolationsResponse>(`/spc/violations/${characteristicId}`);
     return response.data;
   }
 
