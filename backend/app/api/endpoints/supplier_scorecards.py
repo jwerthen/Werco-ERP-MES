@@ -1,16 +1,17 @@
 from datetime import date, datetime, timedelta
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session, joinedload
 
-from app.api.deps import get_current_company_id, get_current_user, require_role
+from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
 from app.models.purchasing import POReceipt, POStatus, PurchaseOrder, PurchaseOrderLine, Vendor
 from app.models.quality import NonConformanceReport
 from app.models.supplier_scorecard import ApprovedSupplierList, ScorecardPeriod, SupplierAudit, SupplierScorecard
 from app.models.user import User, UserRole
+from app.services.audit_service import AuditService
 
 router = APIRouter()
 
@@ -64,6 +65,45 @@ class ScorecardUpdate(BaseModel):
     rejected_qty: Optional[float] = None
     ncr_count: Optional[int] = None
     car_count: Optional[int] = None
+
+    @field_validator(
+        "quality_score",
+        "quality_weight",
+        "delivery_score",
+        "delivery_weight",
+        "responsiveness_score",
+        "responsiveness_weight",
+        "price_score",
+        "price_weight",
+        "total_pos",
+        "total_lines",
+        "on_time_deliveries",
+        "late_deliveries",
+        "total_received_qty",
+        "rejected_qty",
+        "ncr_count",
+        "car_count",
+        mode="before",
+    )
+    @classmethod
+    def _no_explicit_null(cls, value: Any) -> Any:
+        """Refuse an explicitly-sent ``null`` on a numeric field.
+
+        ``None`` on these fields means "not provided" -- every one of them backs
+        a NOT NULL column. ``model_dump(exclude_unset=True)`` keeps an explicit
+        ``null`` though, so ``{"quality_weight": null}`` used to reach the
+        setattr loop and then ``calculate_overall``, which raised
+        ``unsupported operand type(s) for *: 'float' and 'NoneType'`` -- a 500.
+        (``auto_calculate_scorecard`` hit the same crash for a different reason
+        and was fixed there; this is the other call site.)
+
+        Pydantic does not validate defaults, so an omitted field never reaches
+        this validator -- only a null the caller actually sent, which now gets a
+        422 naming the field instead of an opaque 500.
+        """
+        if value is None:
+            raise ValueError("must be a number, not null; omit the field to leave it unchanged")
+        return value
 
 
 class ScorecardResponse(BaseModel):
@@ -207,6 +247,61 @@ class ASLResponse(BaseModel):
 # ============ Helper Functions ============
 
 
+def _vendor_in_company(db: Session, vendor_id: int, company_id: int) -> Vendor:
+    """Resolve a vendor inside the caller's tenant, or 404.
+
+    Every row in this router hangs off a vendor, and all three create paths
+    resolved that vendor with no company predicate. Stamping ``company_id``
+    correctly on the new row (which they did) is not enough on its own: a
+    scorecard/audit/ASL entry owned by company B could point at company A's
+    vendor, and each serializer renders ``vendor.name`` / ``vendor.code``
+    straight back, so the write doubled as a read of the foreign supplier.
+
+    Flat 404 (not 403), matching ``_assert_work_center_in_company`` in
+    work_orders.py: a foreign vendor must be indistinguishable from a
+    nonexistent one.
+    """
+    vendor = db.query(Vendor).filter(Vendor.id == vendor_id, Vendor.company_id == company_id).first()
+    if not vendor:
+        raise HTTPException(status_code=404, detail="Vendor not found")
+    return vendor
+
+
+def _same_tenant_vendor(row: Any) -> Optional[Vendor]:
+    """Return ``row.vendor`` only when it belongs to the same tenant as ``row``.
+
+    The create paths in this file now validate ``vendor_id`` against the
+    caller's company, which stops NEW cross-tenant rows -- but it does nothing
+    about rows written BEFORE that guard existed, and the ``vendor``
+    relationship (and the ``joinedload`` on it) carries no predicate of its own.
+    A legacy scorecard/audit/ASL row owned by company B pointing at company A's
+    vendor passes every ``company_id`` filter in the query -- it really is B's
+    row -- and would still render company A's ``vendor.name`` / ``vendor.code``
+    straight back.
+
+    Ingress is closed by ``_vendor_in_company``; this closes egress. A foreign
+    vendor reads as absent rather than raising, so a legacy row stays listable
+    and correctable instead of 500-ing the whole page.
+    """
+    vendor = row.vendor
+    if vendor is None:
+        return None
+    return vendor if vendor.company_id == row.company_id else None
+
+
+def _vendor_identifier(row: Any) -> str:
+    """Human-readable audit identifier for a row that hangs off a vendor.
+
+    Falls back to the raw id when the vendor is missing or belongs to another
+    tenant (a legacy row -- see ``_same_tenant_vendor``), so auditing an update
+    can never become the thing that discloses a foreign supplier's code.
+    """
+    vendor = _same_tenant_vendor(row)
+    if vendor:
+        return vendor.code or vendor.name
+    return f"vendor #{row.vendor_id}"
+
+
 def calculate_rating(score: float) -> str:
     """Determine rating from overall score."""
     if score >= 90:
@@ -233,11 +328,12 @@ def calculate_overall(scorecard: SupplierScorecard) -> float:
 
 def scorecard_to_response(sc: SupplierScorecard) -> dict:
     """Convert a scorecard ORM object to a response dict with vendor info."""
+    vendor = _same_tenant_vendor(sc)
     data = {
         "id": sc.id,
         "vendor_id": sc.vendor_id,
-        "vendor_name": sc.vendor.name if sc.vendor else None,
-        "vendor_code": sc.vendor.code if sc.vendor else None,
+        "vendor_name": vendor.name if vendor else None,
+        "vendor_code": vendor.code if vendor else None,
         "period_type": sc.period_type.value if isinstance(sc.period_type, ScorecardPeriod) else sc.period_type,
         "period_start": sc.period_start,
         "period_end": sc.period_end,
@@ -269,11 +365,12 @@ def scorecard_to_response(sc: SupplierScorecard) -> dict:
 
 
 def audit_to_response(a: SupplierAudit) -> dict:
+    vendor = _same_tenant_vendor(a)
     return {
         "id": a.id,
         "vendor_id": a.vendor_id,
-        "vendor_name": a.vendor.name if a.vendor else None,
-        "vendor_code": a.vendor.code if a.vendor else None,
+        "vendor_name": vendor.name if vendor else None,
+        "vendor_code": vendor.code if vendor else None,
         "audit_type": a.audit_type,
         "audit_date": a.audit_date,
         "next_audit_date": a.next_audit_date,
@@ -290,11 +387,12 @@ def audit_to_response(a: SupplierAudit) -> dict:
 
 
 def asl_to_response(a: ApprovedSupplierList) -> dict:
+    vendor = _same_tenant_vendor(a)
     return {
         "id": a.id,
         "vendor_id": a.vendor_id,
-        "vendor_name": a.vendor.name if a.vendor else None,
-        "vendor_code": a.vendor.code if a.vendor else None,
+        "vendor_name": vendor.name if vendor else None,
+        "vendor_code": vendor.code if vendor else None,
         "approval_status": a.approval_status,
         "approved_date": a.approved_date,
         "approved_by": a.approved_by,
@@ -314,9 +412,13 @@ def asl_to_response(a: ApprovedSupplierList) -> dict:
 
 
 @router.get("/supplier-scorecards/dashboard")
-def scorecard_dashboard(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def scorecard_dashboard(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
     """Dashboard stats: avg score, suppliers below threshold, audits due, probationary count."""
-    scorecards = db.query(SupplierScorecard).all()
+    scorecards = db.query(SupplierScorecard).filter(SupplierScorecard.company_id == company_id).all()
 
     # Get latest scorecard per vendor
     latest_by_vendor = {}
@@ -335,20 +437,31 @@ def scorecard_dashboard(db: Session = Depends(get_db), current_user: User = Depe
     thirty_days = date.today() + timedelta(days=30)
     audits_due = (
         db.query(SupplierAudit)
-        .filter(SupplierAudit.next_audit_date != None, SupplierAudit.next_audit_date <= thirty_days)
+        .filter(
+            SupplierAudit.company_id == company_id,
+            SupplierAudit.next_audit_date != None,
+            SupplierAudit.next_audit_date <= thirty_days,
+        )
         .count()
     )
 
     # Reviews due (ASL)
     reviews_due = (
         db.query(ApprovedSupplierList)
-        .filter(ApprovedSupplierList.next_review_date != None, ApprovedSupplierList.next_review_date <= thirty_days)
+        .filter(
+            ApprovedSupplierList.company_id == company_id,
+            ApprovedSupplierList.next_review_date != None,
+            ApprovedSupplierList.next_review_date <= thirty_days,
+        )
         .count()
     )
 
-    # Top and worst performer
+    # Top and worst performer. Vendor names go through the same-tenant guard as
+    # every other vendor read in this file (see ``_same_tenant_vendor``).
     top_performer = max(latest, key=lambda s: s.overall_score) if latest else None
     worst_performer = min(latest, key=lambda s: s.overall_score) if latest else None
+    top_vendor = _same_tenant_vendor(top_performer) if top_performer else None
+    worst_vendor = _same_tenant_vendor(worst_performer) if worst_performer else None
 
     return {
         "avg_score": round(avg_score, 1),
@@ -361,7 +474,7 @@ def scorecard_dashboard(db: Session = Depends(get_db), current_user: User = Depe
         "top_performer": (
             {
                 "vendor_id": top_performer.vendor_id,
-                "vendor_name": top_performer.vendor.name if top_performer.vendor else "Unknown",
+                "vendor_name": top_vendor.name if top_vendor else "Unknown",
                 "score": round(top_performer.overall_score, 1),
                 "rating": top_performer.rating,
             }
@@ -371,7 +484,7 @@ def scorecard_dashboard(db: Session = Depends(get_db), current_user: User = Depe
         "worst_performer": (
             {
                 "vendor_id": worst_performer.vendor_id,
-                "vendor_name": worst_performer.vendor.name if worst_performer.vendor else "Unknown",
+                "vendor_name": worst_vendor.name if worst_vendor else "Unknown",
                 "score": round(worst_performer.overall_score, 1),
                 "rating": worst_performer.rating,
             }
@@ -382,9 +495,18 @@ def scorecard_dashboard(db: Session = Depends(get_db), current_user: User = Depe
 
 
 @router.get("/supplier-scorecards/ranking")
-def scorecard_ranking(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def scorecard_ranking(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
     """All vendors ranked by their latest overall score."""
-    scorecards = db.query(SupplierScorecard).options(joinedload(SupplierScorecard.vendor)).all()
+    scorecards = (
+        db.query(SupplierScorecard)
+        .filter(SupplierScorecard.company_id == company_id)
+        .options(joinedload(SupplierScorecard.vendor))
+        .all()
+    )
 
     # Get latest scorecard per vendor
     latest_by_vendor = {}
@@ -398,17 +520,18 @@ def scorecard_ranking(db: Session = Depends(get_db), current_user: User = Depend
 
 @router.get("/supplier-scorecards/vendor/{vendor_id}/history")
 def vendor_scorecard_history(
-    vendor_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+    vendor_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Performance history for a specific vendor over time."""
-    vendor = db.query(Vendor).filter(Vendor.id == vendor_id).first()
-    if not vendor:
-        raise HTTPException(status_code=404, detail="Vendor not found")
+    _vendor_in_company(db, vendor_id, company_id)
 
     scorecards = (
         db.query(SupplierScorecard)
         .options(joinedload(SupplierScorecard.vendor))
-        .filter(SupplierScorecard.vendor_id == vendor_id)
+        .filter(SupplierScorecard.company_id == company_id, SupplierScorecard.vendor_id == vendor_id)
         .order_by(SupplierScorecard.period_start.asc())
         .all()
     )
@@ -445,11 +568,16 @@ def list_scorecards(
 
 
 @router.get("/supplier-scorecards/{scorecard_id}", response_model=ScorecardResponse)
-def get_scorecard(scorecard_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def get_scorecard(
+    scorecard_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
     sc = (
         db.query(SupplierScorecard)
         .options(joinedload(SupplierScorecard.vendor))
-        .filter(SupplierScorecard.id == scorecard_id)
+        .filter(SupplierScorecard.id == scorecard_id, SupplierScorecard.company_id == company_id)
         .first()
     )
     if not sc:
@@ -463,11 +591,10 @@ def create_scorecard(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Create a new scorecard."""
-    vendor = db.query(Vendor).filter(Vendor.id == data.vendor_id).first()
-    if not vendor:
-        raise HTTPException(status_code=404, detail="Vendor not found")
+    vendor = _vendor_in_company(db, data.vendor_id, company_id)
 
     sc = SupplierScorecard(
         vendor_id=data.vendor_id,
@@ -499,6 +626,11 @@ def create_scorecard(
 
     sc.company_id = company_id
     db.add(sc)
+    # Logged BEFORE the terminal commit so the audit row commits atomically with
+    # the change -- AuditService.log() only flushes, and a call placed after
+    # db.commit() lands in a fresh transaction that get_db teardown rolls back.
+    db.flush()
+    audit.log_create("supplier_scorecard", sc.id, vendor.code or vendor.name, new_values=sc)
     db.commit()
     db.refresh(sc)
     return scorecard_to_response(sc)
@@ -511,16 +643,23 @@ def update_scorecard(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Update an existing scorecard."""
+    """Update an existing scorecard.
+
+    Explicit ``null`` on any numeric field is refused at parse time with a 422
+    (see ``ScorecardUpdate``) -- it used to reach ``calculate_overall`` and 500.
+    """
     sc = (
         db.query(SupplierScorecard)
         .options(joinedload(SupplierScorecard.vendor))
-        .filter(SupplierScorecard.id == scorecard_id)
+        .filter(SupplierScorecard.id == scorecard_id, SupplierScorecard.company_id == company_id)
         .first()
     )
     if not sc:
         raise HTTPException(status_code=404, detail="Scorecard not found")
+
+    old_values = {c.key: getattr(sc, c.key) for c in sc.__table__.columns}
 
     update_data = data.model_dump(exclude_unset=True)
     for field, value in update_data.items():
@@ -530,6 +669,14 @@ def update_scorecard(
     sc.rating = calculate_rating(sc.overall_score)
     sc.evaluated_by = current_user.id
 
+    db.flush()
+    audit.log_update(
+        resource_type="supplier_scorecard",
+        resource_id=sc.id,
+        resource_identifier=_vendor_identifier(sc),
+        old_values=old_values,
+        new_values=sc,
+    )
     db.commit()
     db.refresh(sc)
     return scorecard_to_response(sc)
@@ -541,16 +688,20 @@ def auto_calculate_scorecard(
     data: CalculateRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Auto-calculate scorecard from PO/receipt/NCR data for a vendor and date range."""
-    vendor = db.query(Vendor).filter(Vendor.id == vendor_id).first()
-    if not vendor:
-        raise HTTPException(status_code=404, detail="Vendor not found")
+    vendor = _vendor_in_company(db, vendor_id, company_id)
 
-    # Get POs in the period
+    # Get POs in the period. Every leg below carries its own company_id
+    # predicate rather than relying on the vendor_id / po_id joins to bound it:
+    # transitive scoping holds only as long as every FK was stamped correctly at
+    # write time, and it is exactly that assumption that failed in #191.
     pos = (
         db.query(PurchaseOrder)
         .filter(
+            PurchaseOrder.company_id == company_id,
             PurchaseOrder.vendor_id == vendor_id,
             PurchaseOrder.is_deleted == False,  # noqa: E712
             PurchaseOrder.order_date >= data.period_start,
@@ -567,7 +718,14 @@ def auto_calculate_scorecard(
     # Get PO lines
     lines = []
     if po_ids:
-        lines = db.query(PurchaseOrderLine).filter(PurchaseOrderLine.purchase_order_id.in_(po_ids)).all()
+        lines = (
+            db.query(PurchaseOrderLine)
+            .filter(
+                PurchaseOrderLine.company_id == company_id,
+                PurchaseOrderLine.purchase_order_id.in_(po_ids),
+            )
+            .all()
+        )
     total_lines = len(lines)
     line_ids = [line.id for line in lines]
 
@@ -577,6 +735,7 @@ def auto_calculate_scorecard(
         receipts = (
             db.query(POReceipt)
             .filter(
+                POReceipt.company_id == company_id,
                 POReceipt.po_line_id.in_(line_ids),
                 POReceipt.is_deleted == False,  # noqa: E712
             )
@@ -634,6 +793,7 @@ def auto_calculate_scorecard(
             ncr_count = (
                 db.query(NonConformanceReport)
                 .filter(
+                    NonConformanceReport.company_id == company_id,
                     NonConformanceReport.receipt_id.in_(receipt_ids),
                     NonConformanceReport.is_deleted == False,  # noqa: E712
                     NonConformanceReport.detected_date >= data.period_start,
@@ -649,6 +809,7 @@ def auto_calculate_scorecard(
         ncrs_with_car = (
             db.query(NonConformanceReport)
             .filter(
+                NonConformanceReport.company_id == company_id,
                 NonConformanceReport.receipt_id.in_(receipt_ids),
                 NonConformanceReport.is_deleted == False,  # noqa: E712
                 NonConformanceReport.car_id != None,
@@ -664,16 +825,34 @@ def auto_calculate_scorecard(
     responsiveness_score = data.responsiveness_score
     price_score = data.price_score
 
-    # Create the scorecard
+    # Create the scorecard.
+    #
+    # Two things had to be added here for this endpoint to commit at all:
+    #
+    # 1. company_id. SupplierScorecard carries TenantMixin's NOT NULL
+    #    company_id, so the insert raised IntegrityError.
+    # 2. The four weights. They are declared as COLUMN defaults on the model,
+    #    which SQLAlchemy applies at INSERT time -- but calculate_overall() runs
+    #    on the in-memory object BEFORE the flush, where all four are still
+    #    None, so it raised "unsupported operand type(s) for *: 'float' and
+    #    'NoneType'" before the insert was even attempted. create_scorecard
+    #    never hit this because ScorecardCreate carries the same four values as
+    #    schema defaults. They are stated explicitly rather than left implicit
+    #    so the weights used in the arithmetic are the weights that get stored.
     sc = SupplierScorecard(
+        company_id=company_id,
         vendor_id=vendor_id,
         period_type=data.period_type,
         period_start=data.period_start,
         period_end=data.period_end,
         quality_score=round(quality_score, 1),
+        quality_weight=0.40,
         delivery_score=round(delivery_score, 1),
+        delivery_weight=0.30,
         responsiveness_score=responsiveness_score,
+        responsiveness_weight=0.15,
         price_score=price_score,
+        price_weight=0.15,
         total_pos=total_pos,
         total_lines=total_lines,
         on_time_deliveries=on_time,
@@ -688,6 +867,15 @@ def auto_calculate_scorecard(
     sc.rating = calculate_rating(sc.overall_score)
 
     db.add(sc)
+    db.flush()
+    audit.log_create(
+        "supplier_scorecard",
+        sc.id,
+        vendor.code or vendor.name,
+        new_values=sc,
+        description=f"Auto-calculated supplier scorecard for {vendor.code or vendor.name}",
+        extra_data={"period_start": str(data.period_start), "period_end": str(data.period_end), "auto": True},
+    )
     db.commit()
     db.refresh(sc)
     return scorecard_to_response(sc)
@@ -701,13 +889,18 @@ def audits_due_soon(
     days: int = Query(30, ge=1, le=365),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get audits due within N days."""
     cutoff = date.today() + timedelta(days=days)
     audits = (
         db.query(SupplierAudit)
         .options(joinedload(SupplierAudit.vendor))
-        .filter(SupplierAudit.next_audit_date != None, SupplierAudit.next_audit_date <= cutoff)
+        .filter(
+            SupplierAudit.company_id == company_id,
+            SupplierAudit.next_audit_date != None,
+            SupplierAudit.next_audit_date <= cutoff,
+        )
         .order_by(SupplierAudit.next_audit_date.asc())
         .all()
     )
@@ -722,8 +915,11 @@ def list_audits(
     limit: int = Query(100, ge=1, le=5000),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
-    query = db.query(SupplierAudit).options(joinedload(SupplierAudit.vendor))
+    query = (
+        db.query(SupplierAudit).filter(SupplierAudit.company_id == company_id).options(joinedload(SupplierAudit.vendor))
+    )
     if vendor_id:
         query = query.filter(SupplierAudit.vendor_id == vendor_id)
     if result:
@@ -738,17 +934,18 @@ def create_audit(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    vendor = db.query(Vendor).filter(Vendor.id == data.vendor_id).first()
-    if not vendor:
-        raise HTTPException(status_code=404, detail="Vendor not found")
+    vendor = _vendor_in_company(db, data.vendor_id, company_id)
 
-    audit = SupplierAudit(**data.model_dump())
-    audit.company_id = company_id
-    db.add(audit)
+    record = SupplierAudit(**data.model_dump())
+    record.company_id = company_id
+    db.add(record)
+    db.flush()
+    audit.log_create("supplier_audit", record.id, vendor.code or vendor.name, new_values=record)
     db.commit()
-    db.refresh(audit)
-    return audit_to_response(audit)
+    db.refresh(record)
+    return audit_to_response(record)
 
 
 @router.put("/supplier-audits/{audit_id}", response_model=AuditResponse)
@@ -757,19 +954,34 @@ def update_audit(
     data: AuditUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    audit = (
-        db.query(SupplierAudit).options(joinedload(SupplierAudit.vendor)).filter(SupplierAudit.id == audit_id).first()
+    record = (
+        db.query(SupplierAudit)
+        .options(joinedload(SupplierAudit.vendor))
+        .filter(SupplierAudit.id == audit_id, SupplierAudit.company_id == company_id)
+        .first()
     )
-    if not audit:
+    if not record:
         raise HTTPException(status_code=404, detail="Audit not found")
 
-    for field, value in data.model_dump(exclude_unset=True).items():
-        setattr(audit, field, value)
+    old_values = {c.key: getattr(record, c.key) for c in record.__table__.columns}
 
+    for field, value in data.model_dump(exclude_unset=True).items():
+        setattr(record, field, value)
+
+    db.flush()
+    audit.log_update(
+        resource_type="supplier_audit",
+        resource_id=record.id,
+        resource_identifier=_vendor_identifier(record),
+        old_values=old_values,
+        new_values=record,
+    )
     db.commit()
-    db.refresh(audit)
-    return audit_to_response(audit)
+    db.refresh(record)
+    return audit_to_response(record)
 
 
 # ============ Approved Supplier List Endpoints ============
@@ -782,8 +994,13 @@ def list_approved_suppliers(
     limit: int = Query(100, ge=1, le=5000),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
-    query = db.query(ApprovedSupplierList).options(joinedload(ApprovedSupplierList.vendor))
+    query = (
+        db.query(ApprovedSupplierList)
+        .filter(ApprovedSupplierList.company_id == company_id)
+        .options(joinedload(ApprovedSupplierList.vendor))
+    )
     if status:
         query = query.filter(ApprovedSupplierList.approval_status == status)
     entries = query.order_by(ApprovedSupplierList.id.desc()).offset(skip).limit(limit).all()
@@ -791,11 +1008,16 @@ def list_approved_suppliers(
 
 
 @router.get("/approved-suppliers/{asl_id}", response_model=ASLResponse)
-def get_approved_supplier(asl_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def get_approved_supplier(
+    asl_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
     entry = (
         db.query(ApprovedSupplierList)
         .options(joinedload(ApprovedSupplierList.vendor))
-        .filter(ApprovedSupplierList.id == asl_id)
+        .filter(ApprovedSupplierList.id == asl_id, ApprovedSupplierList.company_id == company_id)
         .first()
     )
     if not entry:
@@ -809,11 +1031,15 @@ def create_approved_supplier(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    vendor = db.query(Vendor).filter(Vendor.id == data.vendor_id).first()
-    if not vendor:
-        raise HTTPException(status_code=404, detail="Vendor not found")
+    vendor = _vendor_in_company(db, data.vendor_id, company_id)
 
+    # Deliberately NOT tenant-scoped: ApprovedSupplierList.vendor_id carries a
+    # GLOBAL unique constraint, so this check must mirror the constraint exactly
+    # or a miss turns into an IntegrityError 500 instead of a 400. It is
+    # unreachable across tenants anyway now that the vendor is scoped above --
+    # a vendor belongs to exactly one company.
     existing = db.query(ApprovedSupplierList).filter(ApprovedSupplierList.vendor_id == data.vendor_id).first()
     if existing:
         raise HTTPException(status_code=400, detail="Vendor already has an ASL entry")
@@ -828,6 +1054,8 @@ def create_approved_supplier(
         entry.approved_date = date.today()
 
     db.add(entry)
+    db.flush()
+    audit.log_create("approved_supplier", entry.id, vendor.code or vendor.name, new_values=entry)
     db.commit()
     db.refresh(entry)
     return asl_to_response(entry)
@@ -839,21 +1067,33 @@ def update_approved_supplier(
     data: ASLUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     entry = (
         db.query(ApprovedSupplierList)
         .options(joinedload(ApprovedSupplierList.vendor))
-        .filter(ApprovedSupplierList.id == asl_id)
+        .filter(ApprovedSupplierList.id == asl_id, ApprovedSupplierList.company_id == company_id)
         .first()
     )
     if not entry:
         raise HTTPException(status_code=404, detail="ASL entry not found")
+
+    old_values = {c.key: getattr(entry, c.key) for c in entry.__table__.columns}
 
     for field, value in data.model_dump(exclude_unset=True).items():
         setattr(entry, field, value)
 
     entry.last_review_date = date.today()
 
+    db.flush()
+    audit.log_update(
+        resource_type="approved_supplier",
+        resource_id=entry.id,
+        resource_identifier=_vendor_identifier(entry),
+        old_values=old_values,
+        new_values=entry,
+    )
     db.commit()
     db.refresh(entry)
     return asl_to_response(entry)
