@@ -30,6 +30,7 @@ a distinct outcome, and still surfaces the command's output.
 """
 
 import configparser
+import json
 import re
 from pathlib import Path
 from typing import Iterator, Tuple
@@ -43,6 +44,13 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 PYTEST_INI = REPO_ROOT / "backend" / "pytest.ini"
 JEST_CONFIG = REPO_ROOT / "frontend" / "jest.config.js"
+PACKAGE_JSON = REPO_ROOT / "frontend" / "package.json"
+
+
+def _frontend_script(name: str) -> str:
+    """Return frontend/package.json's script body, or "" when it is absent."""
+    return json.loads(PACKAGE_JSON.read_text())["scripts"].get(name, "")
+
 
 # The two workflows that carry the merge-relevant gates.
 GATE_WORKFLOWS = ("pr-check.yml", "ci-cd.yml")
@@ -180,7 +188,54 @@ class TestFrontendLintGateMatchesCiCd:
     def test_typescript_is_checked(self, workflow_name: str, job_key: str) -> None:
         workflow = _load_workflow(workflow_name)
         runs = [step.get("run") or "" for key, step in _iter_steps(workflow) if key == job_key]
-        assert any("tsc --noEmit" in run for run in runs), f"{workflow_name} job {job_key} lost its tsc check"
+
+        inline = [run for run in runs if "tsc --noEmit" in run]
+        delegated = [run for run in runs if "npm run type-check" in run]
+        assert inline or delegated, f"{workflow_name} job {job_key} lost its TypeScript check"
+
+        if delegated and not inline:
+            # A workflow may call the npm script instead of tsc directly -- that is
+            # how the two programs (source + tests) stay in one place. But then the
+            # SCRIPT is the gate, so follow the indirection: pointing the step at a
+            # script that does not run tsc would satisfy the assertion above while
+            # checking nothing, which is precisely the fail-open shape this file exists
+            # to catch.
+            script = _frontend_script("type-check")
+            assert "tsc --noEmit" in script, (
+                f"{workflow_name} job {job_key} delegates to `npm run type-check`, but that "
+                f"script does not run tsc: {script!r}"
+            )
+
+    def test_the_type_check_script_covers_the_test_files_too(self) -> None:
+        """The test files must stay inside a tsc program.
+
+        They were outside every one until 2026-08-04: ``tsconfig.json`` excludes
+        ``**/*.test.ts(x)``, and CI ran a bare ``tsc --noEmit`` that inherited the
+        exclusion, while ts-jest ran transpile-only. 229 test files were checked by
+        nothing, which is how ``SPC.tsx`` stayed green for months while being
+        non-functional in production -- its test mocked the API client as resolving
+        the shape the page wrongly expected, and no gate could see the contradiction.
+
+        Asserting both ``-p`` targets is what stops the test program being quietly
+        dropped from the script, which would restore that hole without touching a
+        workflow file.
+        """
+        script = _frontend_script("type-check")
+        assert "-p tsconfig.json" in script, "the type-check script must still check the source program"
+        assert "-p tsconfig.test.json" in script, (
+            "the type-check script must check the TEST program too; without it the test "
+            "files are type-checked by nothing (see this test's docstring)"
+        )
+
+        test_tsconfig = REPO_ROOT / "frontend" / "tsconfig.test.json"
+        assert test_tsconfig.is_file(), "frontend/tsconfig.test.json is missing"
+        # Strip // comments -- the file is JSONC, like the tsconfig it extends.
+        raw = re.sub(r"^\s*//.*$", "", test_tsconfig.read_text(), flags=re.MULTILINE)
+        config = json.loads(raw)
+        excluded = " ".join(config.get("exclude", []))
+        assert (
+            "test" not in excluded
+        ), f"tsconfig.test.json must not exclude the test files it exists to cover; exclude={config.get('exclude')!r}"
 
 
 class TestCoverageFloors:
