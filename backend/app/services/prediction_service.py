@@ -5,7 +5,7 @@ Prediction Service - Delivery dates, capacity forecasting, inventory demand
 import logging
 from collections import defaultdict
 from datetime import date, datetime, timedelta
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Set
 
 from sqlalchemy import case, func
 from sqlalchemy.orm import Session, contains_eager
@@ -33,8 +33,23 @@ DEFAULT_HOURS_PER_WEEK = 40
 
 
 class PredictionService:
-    def __init__(self, db: Session):
+    """Forecasts scoped to ONE company.
+
+    ``company_id`` is a constructor argument, not a per-call one, for the same reason it is
+    on ``AnalyticsService`` (which the very same endpoints construct as
+    ``AnalyticsService(db, company_id)``): every public method here is a tenant-scoped read,
+    every private helper feeds one, and there is no install-wide computation in the module.
+    Putting it on the constructor makes the scope impossible to forget on a new helper and
+    makes an unscoped construction a TypeError rather than a silent platform-wide read --
+    which is exactly how all three endpoints were leaking before.
+
+    Pass the ACTIVE company from ``get_current_company_id``, never ``current_user
+    .company_id``: only the former honours platform-admin context switching.
+    """
+
+    def __init__(self, db: Session, company_id: int):
         self.db = db
+        self.company_id = company_id
 
     # ============ DELIVERY PREDICTION ============
 
@@ -45,19 +60,48 @@ class PredictionService:
         - Current queue depth at each work center
         - Operation sequence
         """
-        wo = self.db.query(WorkOrder).filter(WorkOrder.id == work_order_id).first()
+        # Invariant 1: ``work_order_id`` is a caller-supplied sequential PK and nothing
+        # else on this path checked ownership, so enumerating integers walked every
+        # tenant's work orders -- header, part number, AND the sequenced routing with
+        # per-step machine and hours, which for a job shop is the process plan itself.
+        # Invariant 3: ``WorkOrder`` carries ``SoftDeleteMixin``; a deleted job is not a
+        # job to forecast.
+        wo = (
+            self.db.query(WorkOrder)
+            .filter(
+                WorkOrder.id == work_order_id,
+                WorkOrder.company_id == self.company_id,
+                WorkOrder.is_deleted.is_(False),
+            )
+            .first()
+        )
         if not wo:
-            raise ValueError(f"Work order {work_order_id} not found")
+            # Flat, identifier-free message, per the #189 convention: a foreign id must be
+            # indistinguishable from an absent one so the status code is not an existence
+            # oracle. The "no operations" refusal below can now only be reached for a work
+            # order this caller OWNS, so keeping it distinct discloses nothing.
+            raise ValueError("Work order not found")
 
         operations = (
             self.db.query(WorkOrderOperation)
-            .filter(WorkOrderOperation.work_order_id == work_order_id)
+            .filter(
+                WorkOrderOperation.work_order_id == work_order_id,
+                WorkOrderOperation.company_id == self.company_id,
+            )
             .order_by(WorkOrderOperation.sequence)
             .all()
         )
 
         if not operations:
-            raise ValueError(f"No operations found for work order {work_order_id}")
+            raise ValueError("Work order has no routing operations")
+
+        # Work-center names are rendered into the response (and into
+        # ``bottleneck_work_center``), so resolve them through a scoped read rather than
+        # the ``op.work_center`` relationship: ``work_center_id`` is a plain FK that was
+        # cross-tenant-writable until #194, so a historically mis-parented row would lazy-
+        # load -- and render -- another tenant's machine name. Same reasoning #200 applied
+        # to the BOM component renders.
+        wc_names = self._work_center_names({op.work_center_id for op in operations})
 
         # Get historical cycle times per work center
         cycle_times = self._get_historical_cycle_times()
@@ -78,7 +122,7 @@ class PredictionService:
                     OperationPrediction(
                         operation_id=op.id,
                         operation_name=op.name,
-                        work_center_name=op.work_center.name if op.work_center else "Unknown",
+                        work_center_name=wc_names.get(op.work_center_id, "Unknown"),
                         predicted_start=op.actual_start or current_time,
                         predicted_end=op.actual_end or current_time,
                         queue_position=0,
@@ -107,7 +151,7 @@ class PredictionService:
             # Track bottleneck
             if queue_wait_hours > max_queue_wait:
                 max_queue_wait = queue_wait_hours
-                bottleneck = op.work_center.name if op.work_center else None
+                bottleneck = wc_names.get(op.work_center_id)
 
             # Calculate start and end times (8-hour work days)
             queue_wait_days = queue_wait_hours / 8
@@ -120,7 +164,7 @@ class PredictionService:
                 OperationPrediction(
                     operation_id=op.id,
                     operation_name=op.name,
-                    work_center_name=op.work_center.name if op.work_center else "Unknown",
+                    work_center_name=wc_names.get(op.work_center_id, "Unknown"),
                     predicted_start=predicted_start,
                     predicted_end=predicted_end,
                     queue_position=queue_depth,
@@ -149,10 +193,25 @@ class PredictionService:
             else:
                 on_time_prob = 0.95
 
+        # Same treatment as the work-center names above: ``WorkOrder.part_id`` is a plain
+        # FK, so the part number goes through a scoped read rather than ``wo.part``. Note
+        # the deliberate absence of an ``is_deleted`` predicate here -- this is the
+        # identity of the part this job is building, and blanking it to "Unknown" because
+        # the part was later retired would corrupt the record, not protect it. The tenant
+        # predicate is the one that matters.
+        part_number = "Unknown"
+        if wo.part_id is not None:
+            part_number = (
+                self.db.query(Part.part_number)
+                .filter(Part.id == wo.part_id, Part.company_id == self.company_id)
+                .scalar()
+                or "Unknown"
+            )
+
         return DeliveryPrediction(
             work_order_id=wo.id,
             work_order_number=wo.work_order_number,
-            part_number=wo.part.part_number if wo.part else "Unknown",
+            part_number=part_number,
             quantity=wo.quantity_ordered,
             due_date=wo.due_date,
             predicted_completion=predicted_completion,
@@ -161,6 +220,24 @@ class PredictionService:
             operations=predicted_ops,
             bottleneck_work_center=bottleneck,
         )
+
+    def _work_center_names(self, work_center_ids: Set[Optional[int]]) -> Dict[int, str]:
+        """Resolve work-center ids to names, tenant-scoped, in one query.
+
+        The single place this module turns a ``work_center_id`` into a string a caller
+        sees. Ids belonging to another company simply do not resolve, so the render falls
+        back to "Unknown" instead of disclosing a foreign machine name.
+        """
+        wanted = {wc_id for wc_id in work_center_ids if wc_id is not None}
+        if not wanted:
+            return {}
+
+        rows = (
+            self.db.query(WorkCenter.id, WorkCenter.name)
+            .filter(WorkCenter.id.in_(wanted), WorkCenter.company_id == self.company_id)
+            .all()
+        )
+        return {row.id: row.name for row in rows}
 
     def _get_historical_cycle_times(self) -> Dict[int, Dict[str, float]]:
         """Get average cycle times per work center from historical data."""
@@ -179,7 +256,29 @@ class PredictionService:
                 ).label('avg_ratio'),
                 func.count(WorkOrderOperation.id).label('count'),
             )
-            .filter(WorkOrderOperation.status == OperationStatus.COMPLETE, WorkOrderOperation.actual_end >= cutoff)
+            .join(WorkOrder, WorkOrder.id == WorkOrderOperation.work_order_id)
+            .filter(
+                # Invariant 1. Grouping by ``work_center_id`` does NOT make this
+                # transitively safe: the column is a plain FK that was cross-tenant-
+                # writable until #194, so historically mis-parented rows mix two shops'
+                # cycle times into one bucket -- and even where the FKs are clean, another
+                # tenant's efficiency ratio was steering this caller's estimates through
+                # ``avg_ratio``. Same reasoning #191 used to reject transitive scoping.
+                WorkOrderOperation.company_id == self.company_id,
+                # Invariant 3, via the job the operation belongs to. ``WorkOrderOperation``
+                # has no soft-delete of its own, so its work order is the only deletion
+                # dimension -- and this read did not reach it, which is why the join is
+                # here rather than a bare predicate. Both sibling reads in this module
+                # (``predict_delivery``'s header lookup, ``forecast_capacity``'s open-job
+                # set) already filter it, so without the join the module disagreed with
+                # itself about whether a deleted job exists. ``company_id`` on the joined
+                # header too: ``work_order_id`` is a plain FK, so it is exactly the
+                # transitive-scoping argument rejected above.
+                WorkOrder.company_id == self.company_id,
+                WorkOrder.is_deleted.is_(False),
+                WorkOrderOperation.status == OperationStatus.COMPLETE,
+                WorkOrderOperation.actual_end >= cutoff,
+            )
             .group_by(WorkOrderOperation.work_center_id)
             .all()
         )
@@ -194,10 +293,26 @@ class PredictionService:
         }
 
     def _get_queue_depths(self) -> Dict[int, int]:
-        """Get number of jobs waiting at each work center."""
+        """Get number of jobs waiting at each work center.
+
+        Counts operations on LIVE work orders only. The join is load-bearing twice over --
+        see ``_get_historical_cycle_times``, which reads the same table the same way.
+        """
         results = (
             self.db.query(WorkOrderOperation.work_center_id, func.count(WorkOrderOperation.id).label('queue'))
-            .filter(WorkOrderOperation.status.in_([OperationStatus.PENDING, OperationStatus.READY]))
+            .join(WorkOrder, WorkOrder.id == WorkOrderOperation.work_order_id)
+            .filter(
+                # Surfaced verbatim as ``OperationPrediction.queue_position``: unscoped,
+                # this disclosed how loaded every other tenant's machines are.
+                WorkOrderOperation.company_id == self.company_id,
+                # Invariant 3: a soft-deleted job is not work waiting at a machine. Left
+                # uncounted, it inflated the caller's OWN queue depth -- and queue depth is
+                # not just a displayed number, it multiplies into ``queue_wait_hours`` and
+                # so into every downstream predicted date.
+                WorkOrder.company_id == self.company_id,
+                WorkOrder.is_deleted.is_(False),
+                WorkOrderOperation.status.in_([OperationStatus.PENDING, OperationStatus.READY]),
+            )
             .group_by(WorkOrderOperation.work_center_id)
             .all()
         )
@@ -229,25 +344,51 @@ class PredictionService:
         """
         Forecast capacity utilization by work center for upcoming weeks.
         """
-        work_centers = self.db.query(WorkCenter).filter(WorkCenter.is_active == True).all()
-
-        # Get all open/in-progress work orders
-        open_wos = (
-            self.db.query(WorkOrder)
-            .filter(WorkOrder.status.in_([WorkOrderStatus.RELEASED, WorkOrderStatus.IN_PROGRESS]))
+        # Invariant 1: this returned EVERY tenant's machine list, by name, to any
+        # Admin/Manager/Supervisor -- and it is the default ``/analytics`` landing panel.
+        work_centers = (
+            self.db.query(WorkCenter)
+            .filter(WorkCenter.company_id == self.company_id, WorkCenter.is_active == True)
             .all()
         )
 
-        # Build operation hours by work center
-        op_hours_by_wc = defaultdict(float)
-        for wo in open_wos:
-            for op in wo.operations:
-                if op.status != OperationStatus.COMPLETE:
-                    hours = op.setup_time_hours + (op.run_time_per_piece * wo.quantity_ordered)
-                    # Subtract already completed portion
-                    if op.quantity_complete > 0:
-                        hours *= 1 - op.quantity_complete / wo.quantity_ordered
-                    op_hours_by_wc[op.work_center_id] += hours
+        # Get all open/in-progress work orders. Invariant 1 + invariant 3: every tenant's
+        # open jobs were feeding ``committed_hours``, and soft-deleted ones with them.
+        open_wos = (
+            self.db.query(WorkOrder)
+            .filter(
+                WorkOrder.company_id == self.company_id,
+                WorkOrder.is_deleted.is_(False),
+                WorkOrder.status.in_([WorkOrderStatus.RELEASED, WorkOrderStatus.IN_PROGRESS]),
+            )
+            .all()
+        )
+
+        # Build operation hours by work center. The operations are read in ONE scoped
+        # query rather than through ``wo.operations``: the relationship lazy-loaded per
+        # work order (an N+1 over every open job on the shop) and, being driven off a
+        # plain FK, would have pulled in a mis-parented foreign row. Ordered so the
+        # float accumulation is deterministic across runs.
+        ordered_qty_by_wo = {wo.id: wo.quantity_ordered for wo in open_wos}
+        op_hours_by_wc: Dict[Optional[int], float] = defaultdict(float)
+        if ordered_qty_by_wo:
+            open_ops = (
+                self.db.query(WorkOrderOperation)
+                .filter(
+                    WorkOrderOperation.work_order_id.in_(ordered_qty_by_wo.keys()),
+                    WorkOrderOperation.company_id == self.company_id,
+                    WorkOrderOperation.status != OperationStatus.COMPLETE,
+                )
+                .order_by(WorkOrderOperation.work_order_id, WorkOrderOperation.sequence, WorkOrderOperation.id)
+                .all()
+            )
+            for op in open_ops:
+                quantity_ordered = ordered_qty_by_wo[op.work_order_id]
+                hours = op.setup_time_hours + (op.run_time_per_piece * quantity_ordered)
+                # Subtract already completed portion
+                if op.quantity_complete > 0:
+                    hours *= 1 - op.quantity_complete / quantity_ordered
+                op_hours_by_wc[op.work_center_id] += hours
 
         # Build weekly forecasts
         weeks = []
@@ -318,16 +459,45 @@ class PredictionService:
         """
         predictions = []
 
-        # Get all active parts with inventory
+        # Get all active parts with inventory.
+        # Invariant 1: this selected the part set with NO scope, which is what made the
+        # whole endpoint cross-tenant end to end -- the three per-part reads below were
+        # then executed for every other tenant's parts, and foreign part numbers/names
+        # were rendered into ``predictions``. Invariant 3: ``Part`` carries
+        # ``SoftDeleteMixin``, so retired parts were being forecast and reordered.
         parts = (
-            self.db.query(Part).filter(Part.is_active == True, Part.part_type.in_(["purchased", "raw_material"])).all()
+            self.db.query(Part)
+            .filter(
+                Part.company_id == self.company_id,
+                Part.is_deleted.is_(False),
+                Part.is_active == True,
+                Part.part_type.in_(["purchased", "raw_material"]),
+            )
+            .all()
         )
 
+        # KNOWN LIMITATION (unbounded fan-out, deliberately NOT fixed here). This loop issues
+        # four to six queries PER PART -- the on-hand sum below, one or two inside
+        # ``_calculate_wo_demand``, one in ``_calculate_daily_usage``, one in
+        # ``_get_open_po_info`` -- and nothing bounds ``parts``. Tenant scoping shrinks that set
+        # (it was previously every tenant's parts) but does NOT bound it: a single company with
+        # a large purchased/raw-material catalogue still fans out linearly in the part count.
+        # Note the ``predictions[:50]`` below caps the RESPONSE, not the work -- every part is
+        # fully computed before the slice. This endpoint was therefore left out of the #193
+        # bounding pass, which capped list/export/pagination parameters; the fix here is not a
+        # request cap but batching the four per-part reads into grouped queries, which is a
+        # behaviour-preserving refactor rather than a scoping change and is out of scope for a
+        # tenancy fix. Revisit before this endpoint is put in front of a large catalogue.
         for part in parts:
-            # Current stock
+            # Current stock. ``InventoryItem`` carries ``TenantMixin`` (no soft delete;
+            # ``is_active`` is the existing liveness filter and is unchanged).
             current_stock = (
                 self.db.query(func.sum(InventoryItem.quantity_on_hand))
-                .filter(InventoryItem.part_id == part.id, InventoryItem.is_active == True)
+                .filter(
+                    InventoryItem.part_id == part.id,
+                    InventoryItem.company_id == self.company_id,
+                    InventoryItem.is_active == True,
+                )
                 .scalar()
                 or 0
             )
@@ -335,6 +505,9 @@ class PredictionService:
             # Calculate demand from open work orders (BOM explosion). Scoped to the
             # part's OWN company -- see ``_calculate_wo_demand`` for why that argument is
             # required. The return value is not consumed by the stockout model today.
+            # With the part set above now scoped, ``part.company_id`` is necessarily
+            # ``self.company_id``; the argument is kept rather than dropped so the helper
+            # stays independently unit-testable (see its docstring).
             self._calculate_wo_demand(part.id, part.company_id)
 
             # Historical daily usage (last 90 days)
@@ -425,6 +598,13 @@ class PredictionService:
         that model is a forecasting change, not a bug fix, so it is left alone here; the
         computation is kept correct and scoped so that wiring it up is a one-line change
         rather than a one-line change plus three latent defects.
+
+        The parameter SURVIVES the service gaining a ``self.company_id``: every production
+        caller now passes a company it is entitled to (the part set that reaches here is
+        itself scoped, so the two are necessarily equal), but keeping it explicit leaves
+        this helper unit-testable on its own and keeps the queries below reading as the
+        self-contained, scoped unit #200 made them. The bodies of the two queries are
+        unchanged by that PR's successor.
         """
         demand = 0.0
 
@@ -494,17 +674,15 @@ class PredictionService:
             (InventoryTransaction.transaction_type == TransactionType.RETURN, -func.abs(InventoryTransaction.quantity)),
             else_=func.abs(InventoryTransaction.quantity),
         )
-        # KNOWN GAP (pre-existing, module-wide): no ``company_id`` predicate. This service
-        # is constructed with a session and nothing else, so there is no active company to
-        # scope by, and scoping THIS query alone would read as though the module were
-        # tenant-safe when none of its other queries are. No practical cross-tenant read
-        # exists today -- ``part_id`` is globally unique and tenant-owned, so the filter
-        # already selects one company's rows -- but it does not satisfy invariant 1 and
-        # should be closed by threading the active company through the service.
+        # The gap #200 documented here is closed: the active company is now a constructor
+        # argument, so this read carries its own predicate rather than relying on
+        # ``part_id`` being tenant-owned. ``InventoryTransaction.part_id`` is a plain FK,
+        # which is precisely the condition that makes transitive scoping unsafe (#191).
         total_issued = (
             self.db.query(func.sum(signed_usage))
             .filter(
                 InventoryTransaction.part_id == part_id,
+                InventoryTransaction.company_id == self.company_id,
                 InventoryTransaction.transaction_type.in_((TransactionType.ISSUE, TransactionType.RETURN)),
                 InventoryTransaction.created_at >= cutoff,
             )
@@ -519,12 +697,27 @@ class PredictionService:
         return max(0.0, float(total_issued)) / 90
 
     def _get_open_po_info(self, part_id: int) -> Dict[str, Any]:
-        """Get open PO quantity and next due date for a part."""
+        """Get open PO quantity and next due date for a part.
+
+        Both sides carry the tenant predicate: the line (``TenantMixin``) and its header.
+        ``PurchaseOrderLine`` has no ``SoftDeleteMixin`` -- its parent PO is the only
+        deletion dimension, the same shape #191 settled on vendor-performance -- and a
+        soft-deleted PO was previously still counted as inbound supply, which suppresses a
+        real stockout warning.
+
+        ``contains_eager`` makes the ``line.purchase_order`` read below reuse the FILTERED
+        header rather than lazy-loading an unscoped one, following #200's treatment of the
+        BOM join in this same module.
+        """
         lines = (
             self.db.query(PurchaseOrderLine)
-            .join(PurchaseOrder)
+            .join(PurchaseOrder, PurchaseOrder.id == PurchaseOrderLine.purchase_order_id)
+            .options(contains_eager(PurchaseOrderLine.purchase_order))
             .filter(
                 PurchaseOrderLine.part_id == part_id,
+                PurchaseOrderLine.company_id == self.company_id,
+                PurchaseOrder.company_id == self.company_id,
+                PurchaseOrder.is_deleted.is_(False),
                 PurchaseOrder.status.in_([POStatus.SENT, POStatus.PARTIAL]),
                 PurchaseOrderLine.is_closed == False,
             )
