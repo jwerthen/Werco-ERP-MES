@@ -2891,13 +2891,13 @@ def get_all_operations(
     from app.core.pagination import paginate_query
 
     query = (
-        db.query(WorkOrderOperation)
-        .options(
+        db.query(WorkOrderOperation).options(
             joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part),
             joinedload(WorkOrderOperation.work_center),
             selectinload(WorkOrderOperation.laser_nest).selectinload(LaserNest.document),
         )
-        .join(WorkOrder)
+        # Onclause pinned -- two FK paths to work_orders since migration 080.
+        .join(WorkOrder, WorkOrderOperation.work_order_id == WorkOrder.id)
         # Outer join (ORDER BY only): operations with no work center must still
         # appear -- they sort last via the IS NULL key below, not drop out.
         .outerjoin(WorkCenter, WorkOrderOperation.work_center_id == WorkCenter.id)

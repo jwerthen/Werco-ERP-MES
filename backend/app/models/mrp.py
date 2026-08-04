@@ -126,7 +126,11 @@ class MRPAction(Base, TenantMixin):
     # Status
     processed = Column(Boolean, default=False)
     processed_at = Column(DateTime, nullable=True)
-    processed_by = Column(Integer, nullable=True)
+    # Lineage FK mirrors migration 080 (originally 003; skipped by the
+    # create_all+stamp bootstrap).
+    processed_by = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL", name="fk_mrp_actions_processed_by"), nullable=True
+    )
     result_wo_id = Column(Integer, ForeignKey("work_orders.id"), nullable=True)
     result_po_id = Column(Integer, ForeignKey("purchase_orders.id"), nullable=True)
     error_message = Column(Text, nullable=True)

@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, DateTime
+from sqlalchemy import Boolean, CheckConstraint, Column, DateTime
 from sqlalchemy import Enum as SQLEnum
 from sqlalchemy import Float, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
@@ -12,7 +12,15 @@ from app.models.operator_certification import CertificationType
 
 class WorkCenter(Base, TenantMixin):
     __tablename__ = "work_centers"
-    __table_args__ = (UniqueConstraint('company_id', 'code', name='uq_work_centers_company_code'),)
+    __table_args__ = (
+        UniqueConstraint('company_id', 'code', name='uq_work_centers_company_code'),
+        # Lock-step with migration 080_restore_stamped_over_con (originally
+        # migration 003, which the create_all+stamp bootstrap skipped). 003's
+        # chk_work_centers_efficiency_range is NOT here: it targeted an
+        # `efficiency` column that never existed (this model has always carried
+        # efficiency_factor) -- see migration 080's DELIBERATE EXCLUSIONS.
+        CheckConstraint("hourly_rate >= 0", name="chk_work_centers_hourly_rate_non_negative"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     code = Column(String(20), index=True, nullable=False)

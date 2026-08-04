@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, CheckConstraint, Column, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import relationship
 
 from app.db.database import Base
@@ -47,8 +47,12 @@ class BOM(Base, SoftDeleteMixin, TenantMixin):
     # Audit fields
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    created_by = Column(Integer, nullable=True)
-    approved_by = Column(Integer, nullable=True)
+    # Lineage FKs mirror migration 080 (originally 003; skipped by the
+    # create_all+stamp bootstrap).
+    created_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL", name="fk_boms_created_by"), nullable=True)
+    approved_by = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL", name="fk_boms_approved_by"), nullable=True
+    )
     approved_at = Column(DateTime, nullable=True)
 
     # Relationships
@@ -60,6 +64,16 @@ class BOMItem(Base, TenantMixin):
     """Individual line item in a BOM - supports multi-level nesting"""
 
     __tablename__ = "bom_items"
+    # Lock-step with migration 080_restore_stamped_over_con (originally
+    # migration 003, which the create_all+stamp bootstrap skipped). 003's
+    # chk_bom_items_quantity_positive is DELIBERATELY not restored: a BOM line
+    # with quantity <= 0 is a designed, representable state -- surfaced by the
+    # blocking zero_bom_quantity / negative_bom_quantity backflush diagnostics
+    # and corrected by a human, never made unrepresentable at the DB. See
+    # migration 080's DELIBERATE EXCLUSIONS.
+    __table_args__ = (
+        CheckConstraint("scrap_factor >= 0 AND scrap_factor <= 1", name="chk_bom_items_scrap_factor_range"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     bom_id = Column(Integer, ForeignKey("boms.id"), nullable=False, index=True)

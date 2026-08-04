@@ -15,7 +15,13 @@ from app.schemas.base import UTCModel
 
 class FabLineRecalcIn(BaseModel):
     material: str = ""
-    qty: int = 1
+    # ge=0, not gt=0: a 0 qty is an ordinary mid-edit state that finalize's
+    # ``float(fl.qty or 1)`` already rescues to 1. A NEGATIVE qty is the real
+    # gap -- it flows straight into QuoteLine.quantity and violates the
+    # chk_quote_lines_quantity_positive CHECK migration 080 restored, aborting
+    # finalize with an IntegrityError instead of a 422. Inherited by
+    # FabLinePersistIn, so this bounds the persisted path too.
+    qty: int = Field(default=1, ge=0)
     thickness_in: Optional[float] = None
     width_in: Optional[float] = None
     length_in: Optional[float] = None
@@ -36,7 +42,9 @@ class FabLineRecalcIn(BaseModel):
 
 
 class BuyoutLineRecalcIn(BaseModel):
-    qty: float = 1.0
+    # See FabLineRecalcIn.qty: ge=0 keeps 0 representable, bars the negative that
+    # would reach QuoteLine.quantity. Inherited by BuyoutLinePersistIn.
+    qty: float = Field(default=1.0, ge=0)
     unit_cost: float = 0.0
     description: str = ""
     category: Optional[str] = None
@@ -50,7 +58,8 @@ class BuyoutLineRecalcIn(BaseModel):
 
 class MachinedLineRecalcIn(BaseModel):
     material: str = ""
-    qty: int = 1
+    # See FabLineRecalcIn.qty. Inherited by MachinedLinePersistIn.
+    qty: int = Field(default=1, ge=0)
     stock_dia_in: Optional[float] = None
     stock_length_in: Optional[float] = None
     turning_minutes: float = 0.0

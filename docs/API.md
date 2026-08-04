@@ -1767,6 +1767,23 @@ would issue the wrong quantity of the right material — the diagnostic refuses
 Against a real sheet-metal BOM set that fired on a value nobody had chosen. **The fix was the
 default; the severity was deliberately left alone.**
 
+#### BOM line `scrap_factor` — a fraction, bounded `0 ≤ scrap_factor ≤ 1`
+
+`scrap_factor` is a **fraction**, not a percentage: `0.05` is a 5% allowance. Entering `5`
+meaning "5%" is the natural mistake, and it used to be accepted and stored as a 500%
+allowance. `BOMItemBase` / `BOMItemUpdate` now bound it `ge=0, le=1`, so an out-of-range value
+is a **422** naming the bound on `POST /bom/` (lines supplied inline), `POST /bom/{id}/items`
+and `PUT /bom/items/{id}`. The ceiling matches `chk_bom_items_scrap_factor_range`, the DB CHECK
+migration `080_restore_stamped_over_con` restored; without it the same request would fail as an
+`IntegrityError` **500** at flush. The two document importers are unaffected — their schema has
+no `scrap_factor` field, so an imported line always takes the `0.0` default.
+
+Note the asymmetry with BOM-line **`quantity`**, which stays bounded at the API (`gt=0`) but
+deliberately carries **no** DB CHECK: a non-positive quantity must remain *representable* so the
+blocking `zero_bom_quantity` / `negative_bom_quantity` backflush diagnostics can surface it for a
+human to correct. See `docs/DEVELOPMENT.md` → Database Migrations for why that exclusion is
+deliberate.
+
 #### `GET /bom/uom-mismatches` — the pre-arming remediation worklist
 
 Existing lines are **not rewritten** — this series is correct-forward and does not backfill —
@@ -2019,6 +2036,14 @@ uploads go through text extraction + LLM. See
 > `AttributeError` at request time while type-checking and importing clean; use literal int
 > status codes. The parameter name is part of the API contract and is not renamed.
 
+> **`hourly_rate` is bounded `ge=0` — a negative rate is a 422, not a stored value.** `POST
+> /work-centers/` and `PUT /work-centers/{id}` refuse `hourly_rate < 0` at the data boundary
+> (Pydantic `Field(ge=0)` on `WorkCenterBase` / `WorkCenterUpdate`). It used to be accepted and
+> persisted; the bound matches `chk_work_centers_hourly_rate_non_negative`, the DB CHECK migration
+> `080_restore_stamped_over_con` restored, so without it the same request would now fail as an
+> `IntegrityError` **500** at flush instead. No other work-center field changed, and the
+> 2026-07-31 prod pre-flight found zero existing rows below 0.
+
 #### Work Center Schema
 
 ```json
@@ -2155,6 +2180,18 @@ uploads go through text extraction + LLM. See
 > UPDATE (old→new values); a successful **released** time-standard edit also re-stamps
 > `routing.approved_by` / `approved_at` (the editor / now), leaving `effective_date` and the revision
 > letter unchanged. See [docs/RBAC_PERMISSIONS.md](RBAC_PERMISSIONS.md) → Routings.
+
+> **Time standards are bounded `ge=0` — a negative `setup_hours` / `run_hours_per_unit` is a 422.**
+> Enforced at the data boundary on `RoutingOperationBase` / `RoutingOperationUpdate`, so it covers
+> `POST /routing/{id}/operations`, `PUT /routing/{id}/operations/{operation_id}`, and the AI
+> routing-generation approve payload (`RoutingCreateFromGeneration.operations`, a list of
+> `RoutingOperationCreate`). The CSV importer already rejected negative hours
+> (`routing_import_service._parse_hours`); the interactive and AI paths did not. The bounds match
+> `chk_routing_ops_setup_hours_non_negative` / `chk_routing_ops_run_hours_non_negative`, the DB
+> CHECKs migration `080_restore_stamped_over_con` restored — without them a negative value would now
+> be an `IntegrityError` **500**, and it would chain: work-order operations snapshot these into
+> `setup_time_hours` / `run_time_hours`, which carry CHECKs of their own. `move_hours`,
+> `queue_hours` and `cycle_time_seconds` are **not** bounded (no DB CHECK targets them).
 
 > **Attaching a process sheet to an operation (`feat/process-sheets-library`).** Routing operations
 > carry an optional **`process_sheet_id`** (on create, update, and every operation response) that

@@ -125,14 +125,20 @@ class TimeEntry(Base, TenantMixin):
 
     # Approval workflow
     approved = Column(DateTime, nullable=True)
-    approved_by = Column(Integer, nullable=True)
+    # Lineage FK mirrors migration 080 (originally 003; skipped by the
+    # create_all+stamp bootstrap).
+    approved_by = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL", name="fk_time_entries_approved_by"), nullable=True
+    )
 
     # Audit fields
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     # Relationships
-    user = relationship("User", back_populates="time_entries")
+    # foreign_keys pinned: user_id and approved_by are both FK paths to users
+    # since the 080 FK restore.
+    user = relationship("User", back_populates="time_entries", foreign_keys=[user_id])
     work_order = relationship("WorkOrder", back_populates="time_entries")
     operation = relationship("WorkOrderOperation", back_populates="time_entries")
     work_center = relationship("WorkCenter", back_populates="time_entries")

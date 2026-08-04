@@ -53,7 +53,8 @@ def _live_work_refusal(db: Session, company_id: int, work_center: WorkCenter) ->
     """
     counts = dict(
         db.query(WorkOrderOperation.status, func.count(WorkOrderOperation.id))
-        .join(WorkOrder)
+        # Onclause pinned -- two FK paths to work_orders since migration 080.
+        .join(WorkOrder, WorkOrderOperation.work_order_id == WorkOrder.id)
         .filter(
             WorkOrder.company_id == company_id,
             WorkOrder.is_deleted == False,  # noqa: E712
