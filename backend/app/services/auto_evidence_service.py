@@ -834,11 +834,19 @@ def _query_maintenance(db: Session, company_id: int) -> dict:
         .scalar()
         or 0
     )
+    # Overdue is DERIVED from due_date, not read off a stored OVERDUE flag.
+    # Nothing writes that flag by itself any more: the two GETs in
+    # api/endpoints/maintenance.py that used to persist SCHEDULED -> OVERDUE were
+    # unaudited status changes committed from a poll, and were removed. Counting
+    # the stored value here would leave an AS9100D evidence health verdict
+    # depending on whether a human had loaded the Maintenance page today. This
+    # predicate matches the one GET /maintenance/dashboard uses.
     overdue = (
         db.query(func.count(MaintenanceWorkOrder.id))
         .filter(
             MaintenanceWorkOrder.company_id == company_id,
-            MaintenanceWorkOrder.status == MaintenanceStatus.OVERDUE,
+            MaintenanceWorkOrder.status.in_([MaintenanceStatus.SCHEDULED, MaintenanceStatus.OVERDUE]),
+            MaintenanceWorkOrder.due_date < datetime.utcnow().date(),
         )
         .scalar()
         or 0

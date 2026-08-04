@@ -31,6 +31,66 @@ Response:
 }
 ```
 
+#### Login when an address exists in more than one company
+
+Email is unique **per company** (`uq_users_company_email`), never globally, and every
+company-scoped creation path (`POST /auth/register`, `POST /users/`, the user CSV importer,
+`PUT /users/{id}`) enforces uniqueness only within its own tenant. Two tenants may therefore
+legitimately hold the same address, while `POST /auth/login` has no tenant to scope to — the
+company context is derived *from* the matched row.
+
+Login used to resolve such an address with an unordered "pick one", so which tenant's account it
+authenticated as depended on row order. It now refuses instead:
+
+| Matches for the submitted address | Result |
+|------|------|
+| exactly one | normal login (existing 401/403 rules unchanged) |
+| two or more | **409** `Email is not unique. Please contact an administrator.` |
+
+The refusal happens **before** the password is checked, so it never increments another account's
+failed-login counter, and it writes a `LOGIN_BLOCKED` audit row (`error_message`: `Email resolves
+to more than one account`) — that row is the only place the collision is reported. Same shape as
+the existing 409 on `POST /auth/employee-login` for a non-unique badge.
+
+**Operators: check for duplicate addresses before deploying this behavior.**
+
+```sql
+SELECT lower(email) AS address, count(*) AS accounts, array_agg(company_id) AS companies
+FROM users GROUP BY lower(email) HAVING count(*) > 1;
+```
+
+Any address returned is a user who will get 409 at login until an admin renames one side
+(`PUT /users/{id}`). Resolving the collision automatically is not possible without a tenant
+discriminator (company slug/subdomain) on the login form — an open product decision, not a defect
+in this rule.
+
+### Public registration (`POST /auth/register-public`)
+
+Unauthenticated, 3/minute per IP, and **install-wide**: its email and employee-ID uniqueness
+checks span every company, not just the one it registers into.
+
+It used to answer `400 Email already registered` or, distinctly, `400 Employee ID already
+exists` — two account-existence oracles over every tenant's user list and badge numbers, on a
+route that also inserts rows into `users`. Both 400s are gone. Outside the first-user bootstrap
+**every** outcome returns the same body, and a duplicate does not insert:
+
+```json
+{ "message": "Account submitted for approval", "is_first_user": false }
+```
+
+The password is hashed before the duplicate check so accepted and refused calls do the same
+bcrypt work (skipping it would rebuild the oracle in the response time), and a lost insert race
+(`IntegrityError`) returns that same body rather than a 500. Refusals are recorded server-side as
+a `PUBLIC_REGISTRATION_REJECTED` audit row.
+
+The first-user bootstrap is unchanged and still returns its distinct
+`{"message": "Admin account created successfully", "is_first_user": true}` — with zero users
+nothing can collide, so it never reaches the uniform path.
+
+The uniqueness checks stay install-wide **on purpose**: scoping them per company would let this
+public route mint the cross-tenant duplicate emails and badge numbers that make login and
+badge login refuse with 409.
+
 ### Using the Token
 
 Include the token in the Authorization header:
@@ -1864,6 +1924,95 @@ uploads go through text extraction + LLM. See
 }
 ```
 
+### Maintenance (PM schedules, maintenance work orders, event log)
+
+`app/api/endpoints/maintenance.py`, mounted at `/maintenance`.
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/maintenance/schedules` | List PM schedules | Yes |
+| GET | `/maintenance/schedules/{id}` | PM schedule detail | Yes |
+| POST | `/maintenance/schedules` | Create PM schedule | Admin / Manager / Supervisor |
+| PUT | `/maintenance/schedules/{id}` | Update PM schedule | Admin / Manager / Supervisor |
+| DELETE | `/maintenance/schedules/{id}` | Deactivate PM schedule (`is_active` → `false`; no soft-delete mixin) | Admin / Manager / Supervisor |
+| GET | `/maintenance/work-orders` | List maintenance work orders (**pure read**, see below) | Yes |
+| GET | `/maintenance/work-orders/overdue` | Overdue maintenance work orders (**pure read**) | Yes |
+| GET | `/maintenance/work-orders/{id}` | Maintenance work order detail | Yes |
+| POST | `/maintenance/work-orders` | Create maintenance work order | Admin / Manager / Supervisor |
+| PUT | `/maintenance/work-orders/{id}` | Update maintenance work order | Admin / Manager / Supervisor |
+| POST | `/maintenance/work-orders/{id}/start` | Start (→ `in_progress`) | Admin / Manager / Supervisor / Operator |
+| POST | `/maintenance/work-orders/{id}/complete` | Complete (→ `completed`, advances the linked schedule) | Admin / Manager / Supervisor / Operator |
+| GET | `/maintenance/calendar` | Work orders in a date window (**capped at 366 days**) | Yes |
+| GET | `/maintenance/dashboard` | Counts, cost, per-machine MTBF/MTTR | Yes |
+| GET | `/maintenance/history/{work_center_id}` | Event log for one machine (`limit` 1…5000, default 100) | Yes |
+| POST | `/maintenance/log` | Add a maintenance event log entry | Admin / Manager / Supervisor / Operator |
+
+> ⚠️ **Three write paths were returning 500 in production, two of them *after* committing.**
+> `MaintenanceLog` carries `TenantMixin`'s NOT NULL `company_id` (migration `026` drops the interim
+> `server_default`) and `start`, `complete` and `POST /maintenance/log` all built one without it, so
+> the insert raised `IntegrityError`. `start` and `complete` had already committed the work-order
+> state change in a separate `db.commit()`, so an operator saw a 500, reloaded, and found the job
+> running or closed anyway — a silent partial success that left the PM event history permanently
+> empty. All three now stamp `company_id` and share **one** commit with the state change, so a
+> request either fully succeeds or fully rolls back.
+
+> **Every handler is now tenant-scoped, and foreign ids 404.** Ten of the sixteen handlers took no
+> company argument: `start` and `complete` resolved the work order by bare id (guessing an integer
+> started or closed another company's maintenance, and `complete` then advanced whatever
+> `MaintenanceSchedule` that work order pointed at), and `dashboard` / `calendar` / `history` /
+> `overdue` aggregated across every tenant. `work_center_id` (create schedule, create work order,
+> create log), `schedule_id` (create work order) and `maintenance_wo_id` (create log) are all
+> validated against the caller's company and answer a flat **404** — never 403 — with the same
+> detail a genuinely missing id gets, so the status code is not an existence oracle over another
+> tenant's equipment list.
+>
+> **Expect the dashboard numbers to drop on a multi-company install.** They were summing every
+> tenant; that is the correction, not a regression. On a single-company install nothing changes and
+> a smoke test can detect neither the bug nor the fix.
+
+> **`work_center_name` reads as `null` for a legacy cross-tenant row.** The write guards stop new
+> mis-tenanted rows but do nothing about rows written before them, and the serializer's relationship
+> carries no predicate — a row owned by company B pointing at company A's machine passes every
+> `company_id` filter (it really *is* B's row) and used to render A's machine name straight back.
+> The serializers now null the related field when its `company_id` differs; `work_center_id` stays
+> visible so the row can be corrected. See the pre-deploy detection SQL in
+> `docs/RBAC_PERMISSIONS.md` → Maintenance.
+
+> **No GET persists a status change any more.** Both `GET /maintenance/work-orders` and `GET
+> /maintenance/work-orders/overdue` used to walk their result set flipping `scheduled` → `overdue`
+> and `db.commit()` it — a status change with no actor behind it, no reason recorded and no
+> `AuditService` row (invariant 2); `/overdue` did it **unscoped**, i.e. on every tenant's rows.
+> Both are now pure reads. The `overdue` label still appears in the payload (derived from
+> `due_date`), so responses are unchanged. Both consumers of the signal — `GET
+> /maintenance/dashboard` and the AS9100D evidence card in `auto_evidence_service` — now derive it
+> from `due_date` too, which is strictly more accurate: the overdue count no longer depends on
+> whether a human loaded the Maintenance page today.
+
+> **RBAC was added; there was none.** Every endpoint was a bare `get_current_user`, so a **viewer
+> could create, start and complete maintenance work orders**. Reads stay open to any authenticated
+> user (the `/maintenance` route is gated on `work_orders:view`, which a viewer holds). Planning
+> verbs match the `work_orders:create`/`work_orders:edit` role set; performing verbs (start /
+> complete / log) additionally admit **Operator**, mirroring `work_orders:complete` — the
+> maintenance tech doing the work signs in as one. `require_role` always admits platform admins and
+> superusers.
+
+> **Every state change writes a tamper-evident `audit_log` row** (invariant 2 — the router
+> previously wrote none at all). Resource types: `maintenance_schedule` (`CREATE` / `UPDATE`, with
+> the deactivation logged as the `is_active` flip), `maintenance_work_order` (`CREATE` / `UPDATE`,
+> plus `STATUS_CHANGE` on start and complete — the complete row carries `total_cost`,
+> `downtime_minutes`, `actual_duration_hours` and `schedule_id` in `extra_data`), and
+> `maintenance_log` (`CREATE`). Rows are logged **before** the terminal commit so they commit
+> atomically with the change.
+
+> **`GET /maintenance/calendar` refuses a window wider than 366 days (400)**, and refuses
+> `end_date < start_date` (400). It was the one unbounded read left in the file — `start_date` and
+> `end_date` are caller-supplied and there is no `limit`, so a single request could serialize every
+> maintenance work order a tenant has ever had. Same posture as the list/export bounds elsewhere.
+
+> **`wo_number` allocation stays install-wide on purpose.** `MaintenanceWorkOrder.wo_number` carries
+> a *global* unique constraint, so a per-tenant sequence would hand two companies the same number
+> and the second insert would fail. The scan reads only the highest number, never row content.
+
 ### Routing
 
 | Method | Endpoint | Description | Auth Required |
@@ -3188,6 +3337,86 @@ the public paths are `/eco/eco/…`.
 > - **Creating a PO against a soft-deleted or inactive vendor is refused** (**404** "Vendor not found"):
 >   `POST /purchasing/purchase-orders` now resolves the vendor with `is_deleted == false` **and**
 >   `is_active == true`.
+
+### Supplier Scorecards, Audits & Approved Supplier List
+
+`app/api/endpoints/supplier_scorecards.py`, mounted at `/supplier-scorecards`.
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/supplier-scorecards/supplier-scorecards/dashboard` | Avg score, below-threshold, audits/reviews due, top & worst performer | Yes |
+| GET | `/supplier-scorecards/supplier-scorecards/ranking` | Vendors ranked by latest overall score | Yes |
+| GET | `/supplier-scorecards/supplier-scorecards/vendor/{vendor_id}/history` | One vendor's scorecards over time | Yes |
+| GET | `/supplier-scorecards/supplier-scorecards/` | List scorecards (`skip`/`limit` 1…5000) | Yes |
+| GET | `/supplier-scorecards/supplier-scorecards/{id}` | Scorecard detail | Yes |
+| POST | `/supplier-scorecards/supplier-scorecards/` | Create scorecard | Admin / Manager |
+| PUT | `/supplier-scorecards/supplier-scorecards/{id}` | Update scorecard | Admin / Manager |
+| POST | `/supplier-scorecards/supplier-scorecards/calculate/{vendor_id}` | Auto-calculate from PO / receipt / NCR data | Admin / Manager |
+| GET | `/supplier-scorecards/supplier-audits/due-soon` | Audits due within `days` (1…365, default 30) | Yes |
+| GET | `/supplier-scorecards/supplier-audits/` | List supplier audits | Yes |
+| POST | `/supplier-scorecards/supplier-audits/` | Create supplier audit | Admin / Manager |
+| PUT | `/supplier-scorecards/supplier-audits/{id}` | Update supplier audit | Admin / Manager |
+| GET | `/supplier-scorecards/approved-suppliers/` | List ASL entries | Yes |
+| GET | `/supplier-scorecards/approved-suppliers/{id}` | ASL entry detail | Yes |
+| POST | `/supplier-scorecards/approved-suppliers/` | Create ASL entry | Admin / Manager |
+| PUT | `/supplier-scorecards/approved-suppliers/{id}` | Update ASL entry | Admin / Manager |
+
+> ⚠️ **`POST .../calculate/{vendor_id}` was returning 500 in production, for two reasons.** The
+> `SupplierScorecard` insert omitted `TenantMixin`'s NOT NULL `company_id` — but the handler never
+> reached it, because `calculate_overall()` runs on the in-memory object *before* the flush, where
+> the four weight **column** defaults are still `None` (`float * None`). `POST
+> /supplier-scorecards/` never hit that, because `ScorecardCreate` carries the same values as
+> **schema** defaults. Both are fixed, and the weights used in the arithmetic are now stated
+> explicitly so they are the weights that get stored.
+>
+> **`PUT .../supplier-scorecards/{id}` was the second call site of the same crash.** Every numeric
+> field on `ScorecardUpdate` is `Optional`, and `model_dump(exclude_unset=True)` **keeps** an
+> explicitly-sent `null`, so `{"quality_weight": null}` reached `calculate_overall` and 500'd. An
+> explicit `null` on any numeric field is now refused at parse time with a **422** naming the field;
+> *omitting* the field is unchanged (leaves the stored value), and nullable text fields
+> (`notes`, `action_items`) may still be nulled.
+
+> **Fifteen of sixteen handlers were reaching outside the caller's tenant.** Three of them were
+> **cross-tenant writes** — `PUT` on scorecard, supplier audit and ASL entry each resolved their row
+> by bare id (the scorecard handler even took a `company_id` dependency and never used it), so
+> guessing an integer was enough to rewrite another company's AS9100D supplier evaluation, fail
+> their audit, or set their approved supplier to `removed`. The reads (dashboard, ranking, both
+> lists, due-soon, both detail reads) took no company argument at all, and the three creates stamped
+> `company_id` correctly but resolved `vendor_id` with no predicate — and every serializer renders
+> `vendor.name` / `vendor.code` straight back, so a create doubled as a read of the foreign
+> supplier. All are scoped; a foreign `vendor_id`, scorecard, audit or ASL id answers a flat **404**
+> with the same detail a genuinely missing id gets.
+>
+> **Expect the dashboard and ranking numbers to drop on a multi-company install** — they were
+> summing every tenant.
+
+> **`vendor_name` / `vendor_code` read as `null` for a legacy cross-tenant row.** Same shape as
+> maintenance above: the create guards stop new mis-tenanted rows but do nothing about rows written
+> before them, and the `vendor` relationship (plus the `joinedload` on it) carries no predicate.
+> The serializers now null both fields when the vendor's `company_id` differs; `vendor_id` stays
+> visible so the row can be corrected. Audit-row identifiers fall back to `vendor #{id}` in the same
+> case, so recording an update can never become the thing that discloses the foreign supplier's
+> code. See the pre-deploy detection SQL in `docs/RBAC_PERMISSIONS.md` → Supplier Scorecards.
+
+> **The ASL duplicate check stays install-wide on purpose.** `ApprovedSupplierList.vendor_id`
+> carries a *global* unique constraint, so the check must mirror the constraint exactly or a miss
+> becomes an `IntegrityError` 500 instead of the **400** "Vendor already has an ASL entry". It is
+> unreachable across tenants now that the vendor is scoped first — a vendor belongs to exactly one
+> company. ⚠️ One consequence worth knowing: a **legacy** ASL row owned by company B against
+> company A's vendor permanently consumes that vendor's single global slot, and company A can
+> neither see nor edit it. The detection SQL above finds these; correcting them is a data task.
+
+> **Every state change writes a tamper-evident `audit_log` row** (invariant 2 — the router
+> previously wrote none at all). Resource types: `supplier_scorecard` (`CREATE` on both the manual
+> and the auto-calculate path — the latter carries `period_start` / `period_end` / `auto: true` in
+> `extra_data` — and `UPDATE`), `supplier_audit` (`CREATE` / `UPDATE`) and `approved_supplier`
+> (`CREATE` / `UPDATE`). Rows are logged **before** the terminal commit so they commit atomically
+> with the change.
+
+> ⚠️ **Known frontend gap, not fixed here:** `apiClient.calculateSupplierScorecard` (`api.ts`) posts
+> `calculate/{vendorId}` with **no body** while the handler requires `period_start` / `period_end`,
+> so any UI call would 422 before reaching the handler — and nothing in `SupplierScorecards.tsx`
+> calls it today.
 
 ### PO Upload (AI document extraction)
 
@@ -4888,6 +5117,7 @@ negative `LIMIT`/`OFFSET`, while SQLite silently reads a negative limit as "unbo
 | `limit` — typeahead & search | `1 … 50`, default `20` (`GET /search/`); `1 … 20`, default `10` (`GET /search/recent`); `1 … 50`, default `10` (`/po-upload/search-parts`, `/po-upload/search-vendors`) | |
 | `days` — rolling window | `1 … 365`, default `30` | `/audit/summary`, `/admin/settings/audit-log`, `/receiving/history`, `/receiving/stats`, `/calibration/equipment/due-soon`, `/certifications/certifications/expiring`, `/supplier-scorecards/supplier-audits/due-soon` |
 | `max_levels` | `1 … 20`, default `10` | `GET /bom/{id}/explode`, `GET /bom/{id}/flatten` |
+| date **window width** | `start_date … end_date` at most `366` days, `400` over it (and `400` when `end_date < start_date`) | `GET /maintenance/calendar` |
 
 Some endpoints carry their own **tighter** ceiling than the tier above — `GET /parts/`,
 `GET /materials/`, `GET /process-sheets/` and `GET /bom/uom-mismatches` cap at `500`,
