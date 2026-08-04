@@ -15,6 +15,7 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom';
 import ShopFloorSimple from './ShopFloorSimple';
 import api from '../services/api';
+import { WorkCenter } from '../types';
 
 jest.mock('../services/api', () => ({
   __esModule: true,
@@ -35,6 +36,21 @@ jest.mock('../hooks/usePermissions', () => ({
 }));
 
 const mockedApi = api as jest.Mocked<typeof api>;
+
+const WORK_CENTER: WorkCenter = {
+  id: 1,
+  version: 1,
+  code: 'LASER1',
+  name: 'Laser 1',
+  work_center_type: 'laser',
+  hourly_rate: 95,
+  capacity_hours_per_day: 8,
+  efficiency_factor: 1,
+  is_active: true,
+  current_status: 'available',
+  created_at: '2026-01-01T00:00:00Z',
+  updated_at: '2026-01-01T00:00:00Z',
+};
 
 const OPERATION = {
   id: 101,
@@ -147,7 +163,7 @@ describe('ShopFloorSimple scan resolution', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     localStorage.clear();
-    mockedApi.getWorkCenters.mockResolvedValue([{ id: 1, name: 'Laser 1', code: 'LASER1' }]);
+    mockedApi.getWorkCenters.mockResolvedValue([WORK_CENTER]);
     mockedApi.getDashboard.mockResolvedValue({ work_centers: [] });
     mockedApi.getMyActiveJob.mockResolvedValue({ active_jobs: [], active_job: null });
     mockedApi.getShopFloorOperations.mockResolvedValue({ operations: [OPERATION] });

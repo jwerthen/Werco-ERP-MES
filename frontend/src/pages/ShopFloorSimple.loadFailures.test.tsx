@@ -21,6 +21,7 @@ import { render, screen, fireEvent, waitFor, within } from '@testing-library/rea
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import ShopFloorSimple from './ShopFloorSimple';
 import api from '../services/api';
+import { WorkCenter } from '../types';
 
 jest.mock('../services/api', () => ({
   __esModule: true,
@@ -67,6 +68,23 @@ const OPERATION = {
   requires_inspection: false,
 };
 
+// A full WorkCenter, exactly as `api.getWorkCenters()` resolves it — a
+// short-shaped fixture is a mock of a payload the real API never sends.
+const LASER_1: WorkCenter = {
+  id: 1,
+  version: 1,
+  code: 'LASER1',
+  name: 'Laser 1',
+  work_center_type: 'laser_cutting',
+  hourly_rate: 125,
+  capacity_hours_per_day: 8,
+  efficiency_factor: 1,
+  is_active: true,
+  current_status: 'available',
+  created_at: '2026-01-01T00:00:00Z',
+  updated_at: '2026-01-01T00:00:00Z',
+};
+
 const ACTIVE_JOB = {
   time_entry_id: 9001,
   clock_in: '2026-08-01T12:00:00Z',
@@ -104,7 +122,7 @@ describe('ShopFloorSimple load-failure surfacing', () => {
     localStorage.clear();
     // Every failure path also console.error()s; keep test output clean.
     consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
-    mockedApi.getWorkCenters.mockResolvedValue([{ id: 1, name: 'Laser 1', code: 'LASER1' }]);
+    mockedApi.getWorkCenters.mockResolvedValue([LASER_1]);
     mockedApi.getDashboard.mockResolvedValue({ work_centers: [] });
     mockedApi.getMyActiveJob.mockResolvedValue({ active_jobs: [], active_job: null });
     mockedApi.getShopFloorOperations.mockResolvedValue({ operations: [OPERATION] });

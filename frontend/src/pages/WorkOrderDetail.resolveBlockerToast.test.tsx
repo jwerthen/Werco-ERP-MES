@@ -21,6 +21,7 @@ import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import api from '../services/api';
 import WorkOrderDetail from './WorkOrderDetail';
 import { ToastProvider } from '../components/ui';
+import { WorkOrderBlocker } from '../types/aiForward';
 
 jest.mock('../services/api', () => ({
   __esModule: true,
@@ -58,7 +59,7 @@ jest.mock('../services/realtime', () => ({
 
 const mockedApi = api as jest.Mocked<typeof api>;
 
-const BLOCKER = {
+const BLOCKER: WorkOrderBlocker = {
   id: 7,
   company_id: 1,
   work_order_id: 42,

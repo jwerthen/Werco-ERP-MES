@@ -32,6 +32,7 @@ import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import ShopFloorSimple from './ShopFloorSimple';
 import api from '../services/api';
 import { SCRAP_REASONS, HOLD_REASONS } from '../components/kiosk/kioskConstants';
+import { WorkCenter } from '../types';
 
 jest.mock('../services/api', () => ({
   __esModule: true,
@@ -98,6 +99,22 @@ const ACTIVE_JOB = {
   quantity_complete: 5,
 };
 
+// The work center the op above sits on, as /work-centers/ actually returns it.
+const LASER_1: WorkCenter = {
+  id: 1,
+  version: 1,
+  code: 'LASER1',
+  name: 'Laser 1',
+  work_center_type: 'laser',
+  hourly_rate: 95,
+  capacity_hours_per_day: 8,
+  efficiency_factor: 0.85,
+  is_active: true,
+  current_status: 'available',
+  created_at: '2026-01-01T00:00:00Z',
+  updated_at: '2026-01-01T00:00:00Z',
+};
+
 function renderShopFloor() {
   return render(
     <MemoryRouter initialEntries={['/shop-floor/operations']}>
@@ -135,7 +152,7 @@ beforeAll(() => {
 beforeEach(() => {
   jest.clearAllMocks();
   localStorage.clear();
-  mockedApi.getWorkCenters.mockResolvedValue([{ id: 1, name: 'Laser 1', code: 'LASER1' }]);
+  mockedApi.getWorkCenters.mockResolvedValue([LASER_1]);
   mockedApi.getDashboard.mockResolvedValue({ work_centers: [] });
   mockedApi.getMyActiveJob.mockResolvedValue({ active_jobs: [ACTIVE_JOB], active_job: ACTIVE_JOB });
   mockedApi.getShopFloorOperations.mockResolvedValue({ operations: [IN_PROGRESS_OP] });

@@ -1,0 +1,36 @@
+{
+  // Second type-check program: everything tsconfig.json deliberately excludes.
+  //
+  // The root tsconfig excludes *.test.*/ *.spec.* / src/test-utils / src/setupTests.ts,
+  // and jest.config.js hands ts-jest an inline tsconfig that inherits
+  // "isolatedModules": true -- so ts-jest runs TRANSPILE-ONLY. Net effect before
+  // this file existed: 229 test files were type-checked by NEITHER gate, and a
+  // wrong-shaped API mock was not a compile error. That is the exact mechanism
+  // that let SPC.tsx ship broken with a green suite (fixed in PR #197).
+  //
+  // Deliberately a separate whole-program `tsc --noEmit` pass rather than
+  // flipping isolatedModules:false in jest.config.js -- that was measured at
+  // 30 unrelated suites failing to compile and the test run going 30s -> 430s,
+  // because ts-jest would then type-check per file at runtime. This pass does
+  // not touch the test runtime at all.
+  //
+  // Run via `npm run type-check`, which checks both programs. CI calls the same
+  // npm script (ci-cd.yml -> "Check TypeScript") so the two cannot drift.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // Jest globals (describe/it/expect). The jest-dom matcher augmentation
+    // comes from `import '@testing-library/jest-dom'` in src/setupTests.ts,
+    // which this program includes -- so it applies program-wide.
+    "types": ["jest", "node"]
+  },
+  "include": [
+    "src",
+    "src/**/*.test.ts",
+    "src/**/*.test.tsx",
+    "src/**/*.spec.ts",
+    "src/**/*.spec.tsx",
+    "src/test-utils",
+    "src/setupTests.ts"
+  ],
+  "exclude": ["node_modules"]
+}

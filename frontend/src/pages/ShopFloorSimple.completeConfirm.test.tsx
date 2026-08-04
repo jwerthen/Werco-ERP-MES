@@ -17,6 +17,7 @@ import { render, screen, fireEvent, waitFor, within } from '@testing-library/rea
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import ShopFloorSimple from './ShopFloorSimple';
 import api from '../services/api';
+import { WorkCenter } from '../types';
 
 jest.mock('../services/api', () => ({
   __esModule: true,
@@ -35,6 +36,23 @@ jest.mock('../hooks/usePermissions', () => ({
 }));
 
 const mockedApi = api as jest.Mocked<typeof api>;
+
+// The work center the op runs on. Typed as the real `WorkCenter` so the fixture
+// carries every field the endpoint actually serves.
+const LASER_1: WorkCenter = {
+  id: 1,
+  version: 1,
+  code: 'LASER1',
+  name: 'Laser 1',
+  work_center_type: 'laser_cutting',
+  hourly_rate: 85,
+  capacity_hours_per_day: 16,
+  efficiency_factor: 1,
+  is_active: true,
+  current_status: 'available',
+  created_at: '2026-01-01T00:00:00Z',
+  updated_at: '2026-01-01T00:00:00Z',
+};
 
 // An op that has hit its target (complete >= ordered) and is in_progress, which
 // is the only state that surfaces the "Complete Operation" button.
@@ -98,7 +116,7 @@ describe('ShopFloorSimple full-quantity complete confirm', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     localStorage.clear();
-    mockedApi.getWorkCenters.mockResolvedValue([{ id: 1, name: 'Laser 1', code: 'LASER1' }]);
+    mockedApi.getWorkCenters.mockResolvedValue([LASER_1]);
     mockedApi.getDashboard.mockResolvedValue({ work_centers: [] });
     mockedApi.getMyActiveJob.mockResolvedValue({ active_jobs: [ACTIVE_JOB], active_job: ACTIVE_JOB });
     mockedApi.getShopFloorOperations.mockResolvedValue({ operations: [TARGET_REACHED_OP] });

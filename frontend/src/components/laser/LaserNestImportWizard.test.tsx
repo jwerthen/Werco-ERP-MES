@@ -61,7 +61,9 @@ describe('LaserNestImportWizard', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockApi.previewLaserNestPackage.mockResolvedValue(preview);
-    mockApi.importLaserNestPackage.mockResolvedValue({ child_work_order: { id: 909 } });
+    mockApi.importLaserNestPackage.mockResolvedValue({
+      child_work_order: { id: 909, work_order_number: 'WO-0909' },
+    });
   });
 
   it('previews the package and renders an editable row per nest', async () => {

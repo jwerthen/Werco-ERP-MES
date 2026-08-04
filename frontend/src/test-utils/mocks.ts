@@ -4,9 +4,16 @@
  * Centralized mock data that matches the application's types.
  */
 
-import { Part, WorkOrderSummary, Customer, WorkCenter } from '../types';
+import { Part, WorkOrderSummary, WorkCenter } from '../types';
+import { Customer } from '../types/api';
 
 // Mock Parts
+//
+// NOTE: the costing/inventory fields the server's PartResponse actually sends
+// (material_cost, labor_cost, overhead_cost, lead_time_days, safety_stock,
+// reorder_point, reorder_quantity, inspection_requirements) are absent here
+// because the client-side `Part` interface does not declare them. See the
+// finding recorded against src/types/index.ts:80.
 export const mockPart: Part = {
   id: 1,
   part_number: 'TEST-001',
@@ -16,13 +23,6 @@ export const mockPart: Part = {
   description: 'A test part for unit testing',
   unit_of_measure: 'each',
   standard_cost: 100,
-  material_cost: 50,
-  labor_cost: 30,
-  overhead_cost: 20,
-  lead_time_days: 5,
-  safety_stock: 10,
-  reorder_point: 20,
-  reorder_quantity: 50,
   is_critical: false,
   requires_inspection: true,
   // Automatic BOM backflush is OFF for every part until someone explicitly and
@@ -54,10 +54,16 @@ export const mockParts: Part[] = [
 ];
 
 // Mock Work Orders
+//
+// The list/dashboard payload is deliberately lean: the server's
+// WorkOrderSummary sends neither `scheduled_start` nor `created_at`, so this
+// fixture must not either — inventing them here is exactly the wrong-shaped-mock
+// class that let SPC.tsx ship broken with a green suite.
 export const mockWorkOrder: WorkOrderSummary = {
   id: 1,
   work_order_number: 'WO-20240101-001',
   part_id: 1,
+  work_order_type: 'production',
   part_number: 'TEST-001',
   part_name: 'Test Part',
   quantity_ordered: 100,
@@ -65,8 +71,6 @@ export const mockWorkOrder: WorkOrderSummary = {
   status: 'in_progress',
   priority: 3,
   due_date: '2024-02-01',
-  scheduled_start: '2024-01-15',
-  created_at: '2024-01-01T00:00:00Z',
   customer_name: 'Test Customer',
 };
 
@@ -129,6 +133,8 @@ export const mockWorkCenter: WorkCenter = {
   is_active: true,
   current_status: 'available',
   version: 1,
+  created_at: '2024-01-01T00:00:00Z',
+  updated_at: '2024-01-01T00:00:00Z',
 };
 
 export const mockWorkCenters: WorkCenter[] = [

@@ -19,6 +19,7 @@ import { render, screen, within, waitFor } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import ShopFloorSimple from './ShopFloorSimple';
 import api from '../services/api';
+import type { WorkCenter } from '../types';
 
 jest.mock('../services/api', () => ({
   __esModule: true,
@@ -63,6 +64,21 @@ function operation(overrides: Record<string, unknown>) {
   };
 }
 
+const LASER_1: WorkCenter = {
+  id: 1,
+  version: 0,
+  name: 'Laser 1',
+  code: 'LASER1',
+  work_center_type: 'laser_cutting',
+  hourly_rate: 95,
+  capacity_hours_per_day: 16,
+  efficiency_factor: 1,
+  is_active: true,
+  current_status: 'available',
+  created_at: '2026-07-01T12:00:00Z',
+  updated_at: '2026-07-01T12:00:00Z',
+};
+
 /**
  * SERVER order (canonical dispatch sort): ranked cards first, unranked tail
  * after. The LAST row (WO-8003) is overdue at priority 1 — the old
@@ -88,7 +104,7 @@ describe('ShopFloorSimple renders the server run order verbatim', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     localStorage.clear();
-    mockedApi.getWorkCenters.mockResolvedValue([{ id: 1, name: 'Laser 1', code: 'LASER1' }]);
+    mockedApi.getWorkCenters.mockResolvedValue([LASER_1]);
     mockedApi.getDashboard.mockResolvedValue({ work_centers: [] });
     mockedApi.getMyActiveJob.mockResolvedValue({ active_jobs: [], active_job: null });
     mockedApi.getShopFloorOperations.mockResolvedValue({ operations: serverOrderedOperations });

@@ -274,7 +274,10 @@ describe('useAsyncValidation', () => {
     const validateFn = jest.fn().mockResolvedValue(null);
     const { result } = renderHook(() => useAsyncValidation(validateFn, 100));
 
-    let cleanup: (() => void) | void;
+    // `validate` always returns a cleanup thunk; the `undefined` arm only covers
+    // the window before the act() callback assigns it. (`| void` reads the same
+    // at runtime but is not definite-assignment-friendly — TS2454 on first use.)
+    let cleanup: (() => void) | undefined;
     act(() => {
       cleanup = result.current.validate('test');
     });

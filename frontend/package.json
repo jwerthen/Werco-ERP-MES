@@ -72,7 +72,7 @@
     "lint:fix": "eslint src --ext .ts,.tsx --fix",
     "format": "prettier --write \"src/**/*.{ts,tsx,css,json}\"",
     "format:check": "prettier --check \"src/**/*.{ts,tsx,css,json}\"",
-    "type-check": "tsc --noEmit",
+    "type-check": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
     "prepare": "husky install"
   },
   "lint-staged": {

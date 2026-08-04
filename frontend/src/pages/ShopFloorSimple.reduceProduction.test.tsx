@@ -103,7 +103,22 @@ beforeAll(() => {
 beforeEach(() => {
   jest.clearAllMocks();
   localStorage.clear();
-  mockedApi.getWorkCenters.mockResolvedValue([{ id: 1, name: 'Laser 1', code: 'LASER1' }]);
+  mockedApi.getWorkCenters.mockResolvedValue([
+    {
+      id: 1,
+      version: 1,
+      name: 'Laser 1',
+      code: 'LASER1',
+      work_center_type: 'laser_cutting',
+      hourly_rate: 85,
+      capacity_hours_per_day: 16,
+      efficiency_factor: 1,
+      is_active: true,
+      current_status: 'available',
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+    },
+  ]);
   mockedApi.getDashboard.mockResolvedValue({ work_centers: [] });
   mockedApi.getMyActiveJob.mockResolvedValue({ active_jobs: [ACTIVE_JOB], active_job: ACTIVE_JOB });
   mockedApi.getShopFloorOperations.mockResolvedValue({ operations: [IN_PROGRESS_OP] });

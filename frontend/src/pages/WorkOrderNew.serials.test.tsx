@@ -14,6 +14,7 @@ import { MemoryRouter } from 'react-router-dom';
 import WorkOrderNew from './WorkOrderNew';
 import api from '../services/api';
 import { ToastProvider } from '../components/ui/Toast';
+import { Part } from '../types';
 
 jest.mock('../services/api', () => ({
   __esModule: true,
@@ -32,11 +33,24 @@ jest.mock('../services/api', () => ({
 
 const mockedApi = api as jest.Mocked<typeof api>;
 
-const PART = {
+// Typed as the real `Part` the parts endpoint serves, so the fixture cannot
+// claim a shape the API never sends.
+const PART: Part = {
   id: 1,
+  version: 1,
   part_number: 'PN-7731',
+  revision: 'A',
   name: 'Bracket, hinge',
   part_type: 'manufactured',
+  unit_of_measure: 'EA',
+  standard_cost: 0,
+  is_critical: false,
+  requires_inspection: false,
+  backflush_components: false,
+  is_active: true,
+  status: 'active',
+  created_at: '2026-01-01T00:00:00Z',
+  updated_at: '2026-01-01T00:00:00Z',
 };
 
 beforeEach(() => {

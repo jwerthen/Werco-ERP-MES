@@ -133,7 +133,12 @@ jobs:
         run: npm run lint -- --max-warnings=0
 
       - name: Check TypeScript
-        run: npx tsc --noEmit
+        # Must stay the npm script, never a bare `npx tsc --noEmit`: the bare
+        # form only checks tsconfig.json, which EXCLUDES every *.test.* /
+        # *.spec.* file, src/test-utils and src/setupTests.ts. The script also
+        # runs tsconfig.test.json over those. Calling the script is what stops
+        # CI and the local gate drifting apart again.
+        run: npm run type-check
 
   frontend-test:
     name: Frontend Tests

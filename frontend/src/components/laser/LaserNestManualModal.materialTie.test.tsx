@@ -47,6 +47,7 @@ const part = (overrides: Partial<Part>): Part => ({
   standard_cost: 0,
   is_critical: false,
   requires_inspection: false,
+  backflush_components: false,
   is_active: true,
   status: 'active',
   created_at: '2026-01-01T00:00:00Z',

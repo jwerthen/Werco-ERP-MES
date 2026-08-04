@@ -56,6 +56,17 @@ repos:
       - id: check-yaml
       - id: check-toml
       - id: check-json
+        # frontend/tsconfig.test.json is JSONC, not JSON. Comments in a
+        # tsconfig are idiomatic and supported (`tsc --init` emits them), but
+        # check-json uses a strict json.load and rejects them, so without this
+        # it is the ONLY file in the repo that fails the hook -- turning the
+        # documented `pre-commit run --all-files` red on a clean tree.
+        # Nothing is lost by excluding it: `tsc --noEmit -p tsconfig.test.json`
+        # parses and validates the file on every CI run (ci-cd.yml -> "Check
+        # TypeScript"), which is a strictly stronger check than json.load.
+        # Scoped to that one path so the other 16 .json files stay guarded --
+        # in particular frontend/tsconfig.json, which is plain JSON.
+        exclude: ^frontend/tsconfig\.test\.json$
       - id: check-added-large-files
       - id: check-merge-conflict
       - id: detect-private-key

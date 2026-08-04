@@ -156,11 +156,11 @@ describe('ActionInbox Top 3 hero', () => {
     ]);
     // A pending promise that never resolves during the assertion window: the card
     // must disappear from the optimistic update alone, not from the server response.
-    let resolveDismiss: (value: unknown) => void = () => {};
+    let resolveDismiss: (value: AIRecommendation) => void = () => {};
     mockApi.dismissAIRecommendation.mockReturnValue(
-      new Promise((resolve) => {
+      new Promise<AIRecommendation>((resolve) => {
         resolveDismiss = resolve;
-      }) as ReturnType<typeof api.dismissAIRecommendation>
+      })
     );
 
     renderInbox();
