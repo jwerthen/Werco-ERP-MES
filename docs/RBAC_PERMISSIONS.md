@@ -442,6 +442,111 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > in this table writes a tamper-evident `audit_log` row (`resource_type = "work_center"`);
 > create/status were the last two that did not.
 
+### Maintenance (PM schedules, maintenance work orders, event log)
+
+| Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
+|------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
+| View (schedules, work orders, overdue, calendar, dashboard, history) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Create / edit PM schedule (`POST`/`PUT /maintenance/schedules`) | ✓ | ✓ | ✓ | | | | |
+| Deactivate PM schedule (`DELETE /maintenance/schedules/{id}`) | ✓ | ✓ | ✓ | | | | |
+| Create / edit maintenance WO (`POST`/`PUT /maintenance/work-orders`) | ✓ | ✓ | ✓ | | | | |
+| Start / complete maintenance WO (`POST .../{id}/start`, `.../complete`) | ✓ | ✓ | ✓ | ✓ | | | |
+| Add event log entry (`POST /maintenance/log`) | ✓ | ✓ | ✓ | ✓ | | | |
+
+> ⚠️ **This table is new because the router had NO role gating at all.** All sixteen handlers were
+> `Depends(get_current_user)`, so a **Viewer could create, start and complete maintenance work
+> orders** on any machine in the tenant — while the sibling supplier-scorecard router already gated
+> its writes to Admin / Manager.
+>
+> **The split follows the work-order permissions the frontend already uses.** Planning verbs
+> (schedules, opening/editing a maintenance WO) match `work_orders:create` / `work_orders:edit`
+> (Admin / Manager / Supervisor). Performing verbs (start / complete / log) additionally admit
+> **Operator**, mirroring `work_orders:complete` — the maintenance tech doing the work signs in as
+> one. Superuser / Platform Admin bypass, as elsewhere.
+>
+> **Reads stay open to every role.** `/maintenance` is route-guarded on `work_orders:view`
+> (`App.tsx` → `routeAccessRequirements`), which every role holds, so refusing reads would break the
+> page for its intended audience.
+>
+> ⚠️ **The client has no matching gate yet.** `Maintenance.tsx` renders its Create / Start /
+> Complete controls unconditionally, so a Viewer or Operator will see a control the server now
+> refuses and get a 403 toast after clicking. Pairing the client gate with the server gate — the way
+> the work-center status `<select>` is paired above — is a follow-up.
+
+> **Tenancy: ten of the sixteen handlers took no company argument.** `start` and `complete`
+> resolved the work order by bare id, and `dashboard` / `calendar` / `history` / `overdue`
+> aggregated across every tenant. All are scoped now, and `work_center_id`, `schedule_id` and
+> `maintenance_wo_id` are validated against the caller's company (flat **404**, never 403). See
+> `docs/API.md` → Maintenance for the three production 500s this also fixed and the removal of the
+> unaudited status write from two GETs.
+
+> **Every state change writes a tamper-evident `audit_log` row** — `maintenance_schedule`,
+> `maintenance_work_order` (with `STATUS_CHANGE` on start and complete) and `maintenance_log`. The
+> router previously wrote none, so who started or closed a PM job was unrecoverable, and PM records
+> are AS9100D-auditable quality records.
+
+> **Before deploying, check for legacy cross-tenant rows.** The new write guards stop *new*
+> mis-tenanted rows; they do nothing about rows written before them. Such a row is owned by the
+> caller's company and so passes every scoping filter, while the serializer used to render the
+> foreign machine's name. The serializers now null the related field, but the rows themselves are a
+> data problem:
+>
+> ```sql
+> SELECT 'maintenance_work_orders' AS t, m.id, m.company_id AS owner, w.company_id AS fk_owner
+>   FROM maintenance_work_orders m JOIN work_centers w ON w.id = m.work_center_id
+>  WHERE w.company_id <> m.company_id
+> UNION ALL SELECT 'maintenance_work_orders.schedule', m.id, m.company_id, s.company_id
+>   FROM maintenance_work_orders m JOIN maintenance_schedules s ON s.id = m.schedule_id
+>  WHERE s.company_id <> m.company_id
+> UNION ALL SELECT 'maintenance_schedules', s.id, s.company_id, w.company_id
+>   FROM maintenance_schedules s JOIN work_centers w ON w.id = s.work_center_id
+>  WHERE w.company_id <> s.company_id
+> UNION ALL SELECT 'maintenance_logs', l.id, l.company_id, w.company_id
+>   FROM maintenance_logs l JOIN work_centers w ON w.id = l.work_center_id
+>  WHERE w.company_id <> l.company_id;
+> ```
+>
+> Empty result → nothing to do. Non-empty → those rows need repointing at a machine the owning
+> company actually has.
+
+### Supplier Scorecards, Audits & Approved Supplier List
+
+| Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
+|------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
+| View (dashboard, ranking, history, lists, detail, due-soon) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Create / edit scorecard | ✓ | ✓ | | | | | |
+| Auto-calculate scorecard (`POST .../calculate/{vendor_id}`) | ✓ | ✓ | | | | | |
+| Create / edit supplier audit | ✓ | ✓ | | | | | |
+| Create / edit ASL entry | ✓ | ✓ | | | | | |
+
+> **The write tiers are unchanged** — this router already gated its writes to Admin / Manager. The
+> table is recorded here because it never was, and because the reads are open to every role: a
+> supplier's score, audit result and approval status are visible to anyone signed in.
+>
+> **What changed is tenancy, not roles.** Fifteen of sixteen handlers reached outside the caller's
+> company, including three cross-tenant **writes** (`PUT` on scorecard / supplier audit / ASL entry
+> each resolved its row by bare id — the scorecard handler took a `company_id` dependency and never
+> used it). Every state change now also writes a tamper-evident `audit_log` row
+> (`supplier_scorecard`, `supplier_audit`, `approved_supplier`); the router previously wrote none,
+> so who downgraded a supplier to `Disqualified` or flipped an ASL entry to `removed` was
+> unrecoverable. See `docs/API.md` → Supplier Scorecards.
+
+> **Before deploying, check for legacy cross-tenant rows** (same reasoning as Maintenance above):
+>
+> ```sql
+> SELECT 'supplier_scorecards' AS t, x.id, x.company_id AS owner, v.company_id AS fk_owner
+>   FROM supplier_scorecards x JOIN vendors v ON v.id = x.vendor_id WHERE v.company_id <> x.company_id
+> UNION ALL SELECT 'supplier_audits', a.id, a.company_id, v.company_id
+>   FROM supplier_audits a JOIN vendors v ON v.id = a.vendor_id WHERE v.company_id <> a.company_id
+> UNION ALL SELECT 'approved_supplier_list', p.id, p.company_id, v.company_id
+>   FROM approved_supplier_list p JOIN vendors v ON v.id = p.vendor_id WHERE v.company_id <> p.company_id;
+> ```
+>
+> A legacy ASL row is the one that also needs manual repair rather than just repointing: it
+> permanently consumes the vendor's single **global** ASL slot, and the owning company can neither
+> see nor edit it (both endpoints are now scoped), so it gets a 400 "Vendor already has an ASL
+> entry" with no self-service recovery.
+
 ### Process Sheets
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |

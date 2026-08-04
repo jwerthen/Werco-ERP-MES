@@ -6,6 +6,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.deps import (
@@ -117,8 +118,31 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db
     **Raises**:
     - 401: Invalid credentials
     - 403: Account locked or inactive
+    - 409: The address exists in more than one company (see ``_find_user_by_auth_email``)
     """
-    user = _find_user_by_auth_email(db, form_data.username)
+    try:
+        user = _find_user_by_auth_email(db, form_data.username)
+    except HTTPException as exc:
+        # The address resolves to accounts in more than one company. Refuse
+        # instead of authenticating an arbitrary one, and leave a trail an
+        # admin can act on — nothing else in the system reports the collision,
+        # and the affected users only see a login that stopped working.
+        #
+        # The status is checked, not assumed. The 409 is the only HTTPException
+        # the lookup can raise today, but writing a specific cause onto the
+        # tamper-evident chain for whatever a future edit happens to raise
+        # would make the audit row a lie.
+        if exc.status_code == status.HTTP_409_CONFLICT:
+            log_auth_event(
+                db,
+                "LOGIN_BLOCKED",
+                email=form_data.username,
+                success=False,
+                request=request,
+                error="Email resolves to more than one account",
+            )
+            db.commit()
+        raise
 
     if not user:
         # Log the audit row, then commit so it persists before raising
@@ -197,26 +221,68 @@ def _normalize_employee_id(value: str) -> Optional[str]:
     return digits[-4:]
 
 
+_AMBIGUOUS_EMAIL_DETAIL = "Email is not unique. Please contact an administrator."
+
+
+def _one_user_for_email_or_refuse(db: Session, normalized_email: str) -> Optional[User]:
+    """Resolve an already-lowercased address to exactly ONE user, or refuse.
+
+    ``limit(2)`` is all it takes to tell "one" from "more than one" without
+    loading a whole duplicate set; ``order_by(User.id)`` makes the single-match
+    case deterministic too, so the query plan can never change which row a
+    given address resolves to.
+
+    Refusal is a 409 with the same shape and wording as the badge equivalent
+    (``_find_user_by_employee_id``): an admin data problem, stated plainly, not
+    an auth probe.
+    """
+    matches = db.query(User).filter(func.lower(User.email) == normalized_email).order_by(User.id).limit(2).all()
+    if len(matches) > 1:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=_AMBIGUOUS_EMAIL_DETAIL)
+    return matches[0] if matches else None
+
+
 def _find_user_by_auth_email(db: Session, email: str) -> Optional[User]:
     """
     Find a user for email login using a case-insensitive lookup.
 
+    Email is unique PER COMPANY, never globally: the constraint is
+    ``uq_users_company_email`` (app/models/user.py), and every creation and
+    rename path scopes its duplicate check to the company — admin ``register``
+    below, ``POST /users/``, the user CSV importer, and ``PUT /users/{id}``.
+    Two tenants may therefore legitimately hold the same address. This lookup,
+    by contrast, has no company to scope to: the caller is unauthenticated and
+    the company context is derived FROM the row this returns.
+
+    That mismatch used to end in ``.first()`` — an unordered, unscoped "pick
+    one". Which tenant's account an ambiguous address authenticated as was
+    decided by row order, so the same credentials could resolve differently
+    across restarts or plan changes, and a legitimate user whose row was not
+    the one picked failed their own password against a stranger's hash and
+    incremented THAT stranger's lockout counter.
+
+    Resolution is now all-or-nothing: exactly one match logs in, two or more
+    refuse with a 409. Refusing beats guessing because no guess can be made
+    correct without a tenant discriminator on the login form (a company
+    slug/subdomain), and adding one is a product change, not a bug fix. See
+    the caller for the audit trail this leaves.
+
     Legacy imports may still have `@werco.local` stored until first successful
     login repair. Allow the repaired `@users.werco.com` address to find the
-    legacy record so the repair path can complete.
+    legacy record so the repair path can complete — the legacy probe is held
+    to the same one-or-refuse rule.
     """
     normalized_email = (email or "").strip().lower()
     if not normalized_email:
         return None
 
-    user = db.query(User).filter(func.lower(User.email) == normalized_email).first()
+    user = _one_user_for_email_or_refuse(db, normalized_email)
     if user:
         return user
 
     if normalized_email.endswith("@users.werco.com"):
         local_part = normalized_email.removesuffix("@users.werco.com")
-        legacy_email = f"{local_part}@werco.local"
-        return db.query(User).filter(func.lower(User.email) == legacy_email).first()
+        return _one_user_for_email_or_refuse(db, f"{local_part}@werco.local")
 
     return None
 
@@ -726,6 +792,13 @@ def setup_status(db: Session = Depends(get_db)):
     return {"has_users": user_count > 0, "is_setup_required": user_count == 0}
 
 
+# The ONE body every non-bootstrap outcome returns. A duplicate email or
+# employee ID has to be indistinguishable from a fresh submission, so the
+# refusal path returns exactly this too. Handed out as a copy so a handler can
+# never mutate the shared literal.
+_PUBLIC_REGISTRATION_PENDING = {"message": "Account submitted for approval", "is_first_user": False}
+
+
 @router.post("/register-public")
 def register_public(
     request: Request,
@@ -735,39 +808,72 @@ def register_public(
     """
     Public registration endpoint.
 
+    **Rate limited**: 3/minute per IP (``AUTH_RATE_LIMITS`` in app/main.py).
+
     - If no users exist yet this is the initial system setup: the first user
       is created as an active admin with superuser privileges.
     - Otherwise the account is created with the VIEWER role, inactive
       (pending admin approval).
+
+    This route is unauthenticated AND install-wide — its uniqueness checks span
+    every company, not just the one it registers into. It used to answer
+    "Email already registered" (400) or, distinctly, "Employee ID already
+    exists" (400), which made it two account-existence oracles over every
+    tenant's user list and badge numbers, on a route that also inserts
+    attacker-controlled rows into ``users``. Both 400s are gone: outside the
+    first-user bootstrap EVERY outcome returns the same body, and a duplicate
+    simply does not insert.
+
+    The checks stay install-wide on purpose. Scoping them to the target
+    company would let this path mint the cross-tenant duplicate emails and
+    badge numbers that make ``_find_user_by_auth_email`` (409) and
+    ``_find_user_by_employee_id`` (409) refuse — i.e. it would create the
+    lockout it is now non-committal about.
+
+    The password is hashed BEFORE the duplicate check so the accepted and
+    refused paths do the same ~100 ms of bcrypt work. Skipping the hash on a
+    refusal would rebuild the oracle in the response time.
     """
-    # Check for duplicate email
-    if db.query(User).filter(func.lower(User.email) == user_in.email.lower()).first():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email already registered",
-        )
+    # Hash first: same work on both paths (see docstring).
+    hashed_password = get_password_hash(user_in.password)
+
+    user_count = db.query(User).count()
+    is_first_user = user_count == 0
+
+    normalized_email = (user_in.email or "").strip().lower()
+    already_taken = db.query(User).filter(func.lower(User.email) == normalized_email).first() is not None
 
     # Auto-generate employee_id from email if not provided
     employee_id = user_in.employee_id
     if not employee_id:
-        # Use email local part as base, e.g. "jmw@wercomfg.com" -> "jmw"
-        base = re.sub(r'[^a-zA-Z0-9\-_]', '', user_in.email.split('@')[0])
+        # Use email local part as base, e.g. "jmw@wercomfg.com" -> "jmw".
+        # The local part can legally be all-punctuation, which used to yield an
+        # empty employee_id; fall back so the column always gets a real value.
+        base = re.sub(r'[^a-zA-Z0-9\-_]', '', user_in.email.split('@')[0]) or "user"
         candidate = base
         suffix = 2
         while db.query(User).filter(func.lower(User.employee_id) == candidate.lower()).first():
             candidate = f"{base}-{suffix}"
             suffix += 1
         employee_id = candidate
-    else:
-        # Check for duplicate employee_id only if explicitly provided
-        if db.query(User).filter(func.lower(User.employee_id) == employee_id.lower()).first():
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Employee ID already exists",
-            )
+    elif db.query(User).filter(func.lower(User.employee_id) == employee_id.lower()).first():
+        # Explicitly supplied and already in use. Recorded, not reported.
+        already_taken = True
 
-    user_count = db.query(User).count()
-    is_first_user = user_count == 0
+    # With zero users nothing can be taken, so the bootstrap can never reach
+    # this branch; the guard is explicit anyway so no later edit can turn the
+    # one-time setup path into a silent no-op.
+    if already_taken and not is_first_user:
+        log_auth_event(
+            db,
+            "PUBLIC_REGISTRATION_REJECTED",
+            email=user_in.email,
+            success=False,
+            request=request,
+            error="Email or employee ID already in use",
+        )
+        db.commit()
+        return dict(_PUBLIC_REGISTRATION_PENDING)
 
     if is_first_user:
         role = UserRole.PLATFORM_ADMIN
@@ -796,7 +902,7 @@ def register_public(
         role=role,
         is_superuser=is_superuser,
         is_active=is_active,
-        hashed_password=get_password_hash(user_in.password),
+        hashed_password=hashed_password,
         company_id=initial_company_id,
     )
 
@@ -807,13 +913,32 @@ def register_public(
     # user (and the initial company, if this is the first-user bootstrap).
     action = "FIRST_USER_REGISTERED" if is_first_user else "PUBLIC_REGISTRATION"
     log_auth_event(db, action, user=user, success=True, request=request)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # Lost the race to a concurrent registration of the same address or
+        # badge (uq_users_company_email / uq_users_company_employee_id). Answer
+        # exactly as the duplicate path does: a 500 here would be the same
+        # existence oracle wearing a different status code. The bootstrap has
+        # no uniform response to fall back to, so it still surfaces.
+        db.rollback()
+        if is_first_user:
+            raise
+        log_auth_event(
+            db,
+            "PUBLIC_REGISTRATION_REJECTED",
+            email=user_in.email,
+            success=False,
+            request=request,
+            error="Email or employee ID already in use",
+        )
+        db.commit()
+        return dict(_PUBLIC_REGISTRATION_PENDING)
     db.refresh(user)
 
     if is_first_user:
         return {"message": "Admin account created successfully", "is_first_user": True}
-    else:
-        return {"message": "Account submitted for approval", "is_first_user": False}
+    return dict(_PUBLIC_REGISTRATION_PENDING)
 
 
 @router.post("/switch-company/{target_company_id}", response_model=Token)
