@@ -322,11 +322,44 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 |------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
 | View | ✓ | ✓ | ✓ | ✓ | ✓ | | ✓ |
 | Create | ✓ | ✓ | ✓ | | | | |
-| Edit | ✓ | ✓ | ✓ | | | | |
+| Edit — header (`PUT /bom/{id}`) and lines (`POST`/`PUT`/`DELETE` on items). **Status-dependent — see below** | ✓ | ✓ | ✓ | | | | |
 | **View unit-of-measure mismatch report** (`GET /bom/uom-mismatches`) | ✓ | ✓ | ✓ | | | | |
 | **BOM Unit Mismatches page** (`/bom/uom-mismatches`) — nav entry + route, `boms:edit` | ✓ | ✓ | ✓ | | | | |
-| Delete | ✓ | ✓ | | | | | |
-| Release | ✓ | ✓ | | | | | |
+| Delete (`DELETE /bom/{id}`) — **soft**, draft only | ✓ | ✓ | | | | | |
+| **Restore** (`POST /bom/{id}/restore`) | ✓ | ✓ | | | | | |
+| Release (`POST /bom/{id}/release`) | ✓ | ✓ | | | | | |
+| **Unrelease** (`POST /bom/{id}/unrelease`) | ✓ | ✓ | | | | | |
+
+> **Edit is status-dependent, and that is a second gate on top of the role.** A role tick above
+> means "may attempt the verb"; whether it succeeds depends on the BOM's `status`, which is a
+> controlled-document state:
+>
+> | BOM `status` | Header `PUT /bom/{id}` | Line writes | `release` | `unrelease` | `delete` |
+> |---|---|---|---|---|---|
+> | `draft` | all fields | allowed | ✓ | 400 *"BOM is not released"* | ✓ (soft) |
+> | `released` | **`description` only** — anything else **400** | **400** | 400 *already released* | ✓ | 400 |
+> | anything else (legacy/corrupt) | **400** | **400** | **400** | ✓ — **normalises back to `draft`** | 400 |
+>
+> The workflow for changing a released BOM is therefore **unrelease → edit → release**, three
+> audited rows on the chain rather than one silent in-place mutation. That is also the answer for
+> the unit-of-measure worklist above: a mismatched line on a *released* BOM cannot be corrected in
+> place — unrelease it, fix the line, release it again.
+>
+> **`status` is not writable through `PUT /bom/{id}` at all.** The field was removed from
+> `BOMUpdate`. Previously it was an unvalidated free string on a verb open to **Supervisor**, one
+> tier wider than the Admin/Manager `release` verb it shadowed — so a Supervisor could
+> `PUT {"status": "released"}` and bypass both the release role gate and its "cannot release a BOM
+> with no items" precondition, producing an approved controlled document with `approved_by` /
+> `approved_at` **NULL**: an approved document with no approver. Sending `"draft"` un-released a BOM
+> without clearing the approver. Both transitions now belong exclusively to `release` / `unrelease`,
+> which are Admin/Manager and which stamp or clear the approval evidence. A legacy client that still
+> sends `status` gets a 200 with the field ignored and the true status echoed back.
+>
+> **`unrelease` is also the de-corruption door.** It refuses only a BOM that is *already* `draft`;
+> anything else it withdraws to `draft`, audited with the actual prior status. That matters because
+> the removed free-string field could have written junk (`"RELEASED"`, `"obsolete"`, anything), and
+> every other verb requires a draft — without this, `BOM.part_id` being UNIQUE would leave such a
+> part permanently unable to hold a working BOM.
 
 > **The unit-of-measure mismatch report is gated to the Edit tier, not the View tier — deliberately**
 > (`feat/backflush-exposure`, PR 4.5). It is a **remediation worklist**, not a browse view: every row on

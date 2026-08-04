@@ -8,9 +8,9 @@ from datetime import date, datetime, timedelta
 from typing import Any, Dict, List
 
 from sqlalchemy import case, func
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, contains_eager
 
-from app.models.bom import BOMItem
+from app.models.bom import BOM, BOMItem
 from app.models.inventory import InventoryItem, InventoryTransaction, TransactionType
 from app.models.part import Part
 from app.models.purchasing import POStatus, PurchaseOrder, PurchaseOrderLine
@@ -332,8 +332,10 @@ class PredictionService:
                 or 0
             )
 
-            # Calculate demand from open work orders (BOM explosion)
-            self._calculate_wo_demand(part.id)
+            # Calculate demand from open work orders (BOM explosion). Scoped to the
+            # part's OWN company -- see ``_calculate_wo_demand`` for why that argument is
+            # required. The return value is not consumed by the stockout model today.
+            self._calculate_wo_demand(part.id, part.company_id)
 
             # Historical daily usage (last 90 days)
             daily_usage = self._calculate_daily_usage(part.id)
@@ -394,27 +396,83 @@ class PredictionService:
             warning_count=warning_count,
         )
 
-    def _calculate_wo_demand(self, part_id: int) -> float:
-        """Calculate total demand from open work orders via BOM explosion."""
+    def _calculate_wo_demand(self, part_id: int, company_id: int) -> float:
+        """Total demand for ``part_id`` from open work orders, via BOM explosion.
+
+        ``company_id`` is REQUIRED, not optional: this was the one place in the backend that
+        read ``bom_items`` WITHOUT reaching them through their ``BOM`` header -- no join, no
+        ``company_id``, no ``is_deleted``. Four defects came out of those two queries.
+
+        * **Invariant 1.** ``BOMItem`` carries ``TenantMixin``; an unfiltered read summed
+          every tenant's lines (and then every tenant's open work orders) into one number.
+        * **Invariant 3.** ``delete_bom`` is a SOFT delete that deliberately RETAINS the
+          lines, on the documented premise that every ``BOMItem`` read reaches them through
+          a header filtered on ``is_deleted == False``. This reader did not, so a deleted
+          BOM's lines would have gone on generating demand forever -- where the old hard
+          delete removed them. The join below is what makes that premise true; see
+          ``delete_bom``'s docstring, which now enumerates the readers.
+        * **``item.quantity_per`` does not exist.** The column is ``BOMItem.quantity``
+          (``quantity_per`` is the BOM *response schema*'s name for it, and
+          ``quantity_per_assembly`` is an RFQ-quote column). Reaching this line raised
+          ``AttributeError`` -> 500 on ``GET /analytics/predict/inventory-demand`` for any
+          tenant with a purchased or raw-material part on any BOM.
+        * **Invariant 3 again, on the other side.** ``WorkOrder`` carries
+          ``SoftDeleteMixin`` and the per-line work-order query did not filter it either, so
+          a deleted job kept its material on order.
+
+        The value this returns is CURRENTLY DISCARDED by ``predict_inventory_demand`` -- the
+        stockout model runs off historical daily usage alone. Feeding open-WO demand into
+        that model is a forecasting change, not a bug fix, so it is left alone here; the
+        computation is kept correct and scoped so that wiring it up is a one-line change
+        rather than a one-line change plus three latent defects.
+        """
         demand = 0.0
 
-        # Get BOMs that use this part
-        bom_items = self.db.query(BOMItem).filter(BOMItem.component_part_id == part_id).all()
+        # Lines that use this part, reached THROUGH their BOM header -- tenant-scoped on
+        # both sides and excluding soft-deleted (and inactive) BOMs.
+        # ``contains_eager`` reuses the joined header rather than lazy-loading ``item.bom``
+        # once per line -- and, more importantly, makes the loaded ``item.bom`` the FILTERED
+        # one, so the parent part id below can never come from a header this filter excluded.
+        bom_items = (
+            self.db.query(BOMItem)
+            .join(BOM, BOM.id == BOMItem.bom_id)
+            .options(contains_eager(BOMItem.bom))
+            .filter(
+                BOMItem.component_part_id == part_id,
+                BOMItem.company_id == company_id,
+                BOM.company_id == company_id,
+                # ``is_active`` matches every other component lookup in the backend
+                # (parts.py / routing.py / setup.py / the backflush ancestor walk); a BOM
+                # that is not the active one for its part is not building anything.
+                BOM.is_active.is_(True),
+                BOM.is_deleted.is_(False),
+            )
+            .all()
+        )
+
+        parent_part_ids = {item.bom.part_id for item in bom_items}
+        if not parent_part_ids:
+            return demand
+
+        open_wos_by_part: Dict[int, List[WorkOrder]] = defaultdict(list)
+        for wo in (
+            self.db.query(WorkOrder)
+            .filter(
+                WorkOrder.part_id.in_(parent_part_ids),
+                WorkOrder.company_id == company_id,
+                # ``WorkOrder`` carries ``SoftDeleteMixin`` and this read did not filter it:
+                # a deleted job is not open demand.
+                WorkOrder.is_deleted.is_(False),
+                WorkOrder.status.in_([WorkOrderStatus.RELEASED, WorkOrderStatus.IN_PROGRESS]),
+            )
+            .all()
+        ):
+            open_wos_by_part[wo.part_id].append(wo)
 
         for item in bom_items:
-            # Find open work orders for the parent part
-            wos = (
-                self.db.query(WorkOrder)
-                .filter(
-                    WorkOrder.part_id == item.bom.part_id,
-                    WorkOrder.status.in_([WorkOrderStatus.RELEASED, WorkOrderStatus.IN_PROGRESS]),
-                )
-                .all()
-            )
-
-            for wo in wos:
-                remaining_qty = wo.quantity_ordered - wo.quantity_complete
-                demand += remaining_qty * item.quantity_per
+            for wo in open_wos_by_part.get(item.bom.part_id, ()):
+                remaining_qty = (wo.quantity_ordered or 0) - (wo.quantity_complete or 0)
+                demand += remaining_qty * float(item.quantity or 0)
 
         return demand
 
