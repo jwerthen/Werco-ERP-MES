@@ -1086,6 +1086,7 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 | View | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Flow / WIP-aging / adoption (Lean Phase 1) | ✓ | ✓ | ✓ | | | | |
 | FPY / scrap Pareto (Lean Phase 1) | ✓ | ✓ | ✓ | | ✓ | | |
+| Predictive forecasts (delivery / capacity / inventory demand) | ✓ | ✓ | ✓ | | | | |
 | Export | ✓ | ✓ | | | | | |
 
 > **Lean Phase 1 analytics reads are role-gated in code.** `GET /api/v1/analytics/flow`,
@@ -1095,6 +1096,33 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > (`require_role([ADMIN, MANAGER, SUPERVISOR, QUALITY])`) — yield and scrap categorization are
 > quality-system reads. All five are read-only and tenant-scoped (`app/api/endpoints/analytics.py`).
 > The pre-existing View row (overview / KPIs / trends / quality metrics) remains any-authenticated.
+>
+> **Predictive analytics are role-gated AND now tenant-scoped.**
+> `GET /api/v1/analytics/predict/delivery/{work_order_id}`, `GET /analytics/predict/capacity` and
+> `GET /analytics/predict/inventory-demand` require `require_role([ADMIN, MANAGER, SUPERVISOR])`.
+> All three are read-only and write nothing (no ledger row, no audit row, no event).
+>
+> **The role gate was already there; tenancy was not.** `PredictionService` was constructed with a
+> session and **no `company_id`**, so every read underneath these three routes ran unscoped — an
+> invariant-1 defect, and the role gate did nothing to contain it: the ADMIN / MANAGER / SUPERVISOR
+> check confirms the caller holds a privileged role *in their own company*, then the service read
+> every company's data. `/predict/delivery/{work_order_id}` was the worst of the three — it resolved
+> a caller-supplied sequential primary key with **no ownership check at all**, returning any tenant's
+> work-order header plus its sequenced routing (machine and hours per step), which for a job shop is
+> the process plan itself.
+>
+> Each route now takes `company_id: int = Depends(get_current_company_id)` — the **active** company,
+> so platform-admin context switching is honoured — and passes it to the constructor, matching the
+> sibling `AnalyticsService(db, company_id)` in the same router. `company_id` is a constructor
+> argument rather than a per-call one so an unscoped construction is a `TypeError` rather than a
+> silent platform-wide read. A foreign `work_order_id` now 404s **byte-identically to an absent one**
+> (`{"detail": "Work order not found"}`), so the refusal is not an existence oracle (#189
+> convention). Tenancy is pinned by `backend/tests/api/test_prediction_tenancy.py`.
+>
+> **Operational note for multi-company installs:** because these figures previously summed across
+> every tenant, they will **drop** after this change — see
+> [Predictive analytics behavior change](API.md#predictive-analytics-behavior-change) in `docs/API.md`.
+> The old numbers were wrong; the smaller ones are correct.
 >
 > **`GET /reports/ship-otd` is any-authenticated (pre-existing reports posture).** The Lean Phase 1
 > ship-based OTD/OTIF detail report follows `reports.py`'s convention — `get_current_user` only, no

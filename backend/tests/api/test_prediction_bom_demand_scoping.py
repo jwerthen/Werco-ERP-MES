@@ -193,7 +193,7 @@ def make_open_wo(
 
 
 def demand_for(db: Session, component: Part) -> float:
-    return PredictionService(db)._calculate_wo_demand(component.id, component.company_id)
+    return PredictionService(db, component.company_id)._calculate_wo_demand(component.id, component.company_id)
 
 
 # ===========================================================================

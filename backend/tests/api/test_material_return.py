@@ -1454,7 +1454,7 @@ def test_a_work_order_with_no_returns_reads_byte_identically_to_before(client: T
             # analytics_service.get_inventory_analytics (the grouped per-part COGS read)
             round(_part_cogs(db_session, sheet.id), 6),
             # prediction_service._calculate_daily_usage (drives reorder points)
-            round(PredictionService(db_session)._calculate_daily_usage(sheet.id), 8),
+            round(PredictionService(db_session, COMPANY_A)._calculate_daily_usage(sheet.id), 8),
         )
 
     before = control_fingerprint()
@@ -1488,7 +1488,7 @@ def test_a_work_order_with_no_returns_reads_byte_identically_to_before(client: T
     )
     assert AnalyticsService(db_session, COMPANY_A)._issued_material_cost(subject_wo.id) == pytest.approx(0.0)
     assert _part_cogs(db_session, subject_sheet.id) == pytest.approx(0.0)
-    assert PredictionService(db_session)._calculate_daily_usage(subject_sheet.id) == pytest.approx(0.0)
+    assert PredictionService(db_session, COMPANY_A)._calculate_daily_usage(subject_sheet.id) == pytest.approx(0.0)
     assert consumed_components(client, subject_admin, subject_wo, db_session) == []
 
 
@@ -1551,7 +1551,7 @@ def test_window_scoped_cogs_clamps_a_boundary_artifact_instead_of_going_negative
     window = (date.today() - timedelta(days=1), date.today() + timedelta(days=1))
     assert analytics._get_turnover_value(*window) == 0.0, "a window-scoped COGS must never go negative"
     assert _part_cogs(db_session, sheet.id, start=window[0], end=window[1]) == 0.0
-    assert PredictionService(db_session)._calculate_daily_usage(sheet.id) == 0.0, "usage cannot be negative"
+    assert PredictionService(db_session, COMPANY_A)._calculate_daily_usage(sheet.id) == 0.0, "usage cannot be negative"
 
     # The WORK-ORDER-scoped readers are unclamped by design and still net to zero here.
     assert wo_issued_material_cost(db_session, db_session.get(WorkOrder, wo.id), COMPANY_A) == pytest.approx(0.0)
@@ -1567,7 +1567,7 @@ def test_a_return_is_not_counted_as_more_usage_by_the_reorder_predictor(client: 
     """
     supervisor, _operator, sheet, _lot, wo, op, allocation = _consumed_scenario(client, db_session, qty=4.0)
 
-    predictor = PredictionService(db_session)
+    predictor = PredictionService(db_session, COMPANY_A)
     assert predictor._calculate_daily_usage(sheet.id) == pytest.approx(4.0 / 90)
 
     assert office_reduce(client, supervisor, op, delta=2).status_code == status.HTTP_200_OK
@@ -1577,7 +1577,7 @@ def test_a_return_is_not_counted_as_more_usage_by_the_reorder_predictor(client: 
     )
     db_session.expire_all()
 
-    assert PredictionService(db_session)._calculate_daily_usage(sheet.id) == pytest.approx(
+    assert PredictionService(db_session, COMPANY_A)._calculate_daily_usage(sheet.id) == pytest.approx(
         2.0 / 90
     ), "a return must REDUCE forecast usage, never raise it"
 

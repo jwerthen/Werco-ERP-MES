@@ -4142,6 +4142,9 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 | GET | `/analytics/fpy` | First-pass yield / rolled throughput yield by part and work center | Admin / Manager / Supervisor / Quality |
 | GET | `/analytics/scrap-pareto` | Scrap quantity/cost Pareto by reason code | Admin / Manager / Supervisor / Quality |
 | GET | `/analytics/adoption` | Digital-adoption + hidden-factory metrics | Admin / Manager / Supervisor |
+| GET | `/analytics/predict/delivery/{work_order_id}` | Predicted completion date + per-operation forecast for one work order | Admin / Manager / Supervisor |
+| GET | `/analytics/predict/capacity` | Capacity utilization forecast by work center, by week | Admin / Manager / Supervisor |
+| GET | `/analytics/predict/inventory-demand` | Predicted stockout dates / reorder urgency by part | Admin / Manager / Supervisor |
 | POST | `/analytics/custom-report` | Run a custom-report query (returns rows) | Admin / Manager |
 | GET | `/analytics/custom-report/export` | Export a saved report template (csv / xlsx / pdf) | Admin / Manager |
 
@@ -4181,6 +4184,68 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 > promise precedence (`must_ship_by` || `due_date`) are documented under
 > `GET /reports/ship-otd` (Reports). The fields are optional-with-default in the schema so cached
 > consumers/fixtures keep validating; the live endpoint always populates both.
+
+<a id="predictive-analytics"></a>
+> **Predictive analytics (delivery / capacity / inventory demand).** Three read-only endpoints
+> gated `require_role([ADMIN, MANAGER, SUPERVISOR])`, served by `PredictionService`
+> (`app/services/prediction_service.py`). All three are heuristic forecasts off live operational
+> data — they write nothing: no ledger row, no audit row, no event.
+> - **`GET /analytics/predict/delivery/{work_order_id}`** — no query params. Returns
+>   `DeliveryPrediction`: the header (`work_order_number`, `part_number`, `quantity`, `due_date`),
+>   `predicted_completion`, `confidence` (0.5–0.9, scaled by how much historical data backs the
+>   estimate), `on_time_probability` (0.1 / 0.5 / 0.75 / 0.95 by days of margin against `due_date`),
+>   `bottleneck_work_center`, and `operations[]` — per routing step the `operation_name`,
+>   `work_center_name`, `predicted_start` / `predicted_end`, `queue_position` and `estimated_hours`.
+>   Estimates are planned hours scaled by that work center's trailing-90-day actual-vs-planned ratio,
+>   offset by queue depth at 8 h/day.
+> - **`GET /analytics/predict/capacity`** — `weeks_ahead` (int, default `4`, `ge=1`, `le=12`).
+>   Returns `CapacityForecastResponse`: `weeks[]` (each `week_start` / `week_end`, `work_centers[]`
+>   with `committed_hours` / `available_hours` / `utilization_pct` / `is_overloaded`, plus
+>   `total_committed` / `total_available` / `overall_utilization`) and `alerts[]` for week 0
+>   overloads (`severity` `high` above 110% utilization, else `medium`). Committed hours are the
+>   remaining hours on RELEASED/IN_PROGRESS work orders spread evenly across the window; available
+>   hours are `capacity_hours_per_day × 5 × efficiency_factor`.
+> - **`GET /analytics/predict/inventory-demand`** — no query params. Returns
+>   `InventoryDemandResponse`: `predictions[]` (**capped at the 50 most urgent**) with `part_number`
+>   / `part_name`, `current_stock`, `daily_usage_rate` (net 90-day issues less returns ÷ 90),
+>   `predicted_stockout_date`, `days_until_stockout`, `open_po_quantity`, `next_po_due` and
+>   `urgency` (`critical` ≤ 7 days, `warning` ≤ 14, else `ok`, de-escalated one step when an open PO
+>   lands before the stockout date), plus `critical_count` / `warning_count`. Considers active,
+>   non-deleted `purchased` / `raw_material` parts only.
+>
+> **Refusals on `/predict/delivery/{work_order_id}` (new).** A work order belonging to **another
+> company** now returns **404 `{"detail": "Work order not found"}` — byte-identical to the response
+> for an id that does not exist at all**, and identical for a soft-deleted work order. The refusal
+> carries no identifier, so the status code cannot be used as an existence oracle (the #189
+> convention). Previously this route looked the work order up **by primary key with no ownership
+> check of any kind**, so a sequential-integer walk returned any tenant's header *and* its sequenced
+> routing. The second refusal, 404 `{"detail": "Work order has no routing operations"}`, is now
+> reachable only for a work order the caller owns, so keeping it distinct discloses nothing.
+>
+> <a id="predictive-analytics-behavior-change"></a>
+> **⚠️ Behavior change on multi-company installs: these figures will DROP, and the old ones were
+> wrong.** All three endpoints previously ran **entirely unscoped** — `PredictionService` was
+> constructed with a session and no `company_id`, so every read underneath it (parts, inventory
+> items, inventory transactions, work orders, work-order operations, work centers, purchase orders
+> and PO lines) summed across **every tenant on the install**. Concretely, before this fix:
+> `/predict/capacity` listed every tenant's machines by name and folded their open jobs into
+> `committed_hours` / `overall_utilization`; `/predict/inventory-demand` rendered foreign part
+> numbers and names into `predictions[]` and inflated `current_stock`, `daily_usage_rate` and
+> `open_po_quantity` for shared part ids; and `/predict/delivery` reported `queue_position` counting
+> other tenants' queued operations and `estimated_hours` steered by their efficiency ratios.
+> **Anyone comparing a dashboard across this deploy should expect utilization, committed hours,
+> queue positions, stock figures and part counts to fall, and in some cases for work centers or
+> parts to disappear from the list entirely. That is the correction, not a regression — the smaller
+> numbers are the first correct ones.** Single-company installs are unaffected, with one exception
+> noted below.
+>
+> **Also corrected (single-tenant installs too): soft-deleted rows stopped counting.** Independent of
+> tenancy, these reads did not filter `is_deleted` and so a caller's **own** deleted records were
+> steering its own forecasts — a soft-deleted work order inflated its own queue depth (which
+> multiplies into every predicted date) and its own `committed_hours`; a soft-deleted BOM kept
+> generating component demand; a soft-deleted purchase order still counted as inbound supply, which
+> suppresses a real stockout warning; and retired (`is_deleted`) parts were still being forecast and
+> reordered. All are now excluded, so these figures can move on a single-company install as well.
 
 > **Custom reports are tenant-scoped.** Both `POST /analytics/custom-report` and
 > `GET /analytics/custom-report/export` run the report through the shared `ReportBuilderService`, which
