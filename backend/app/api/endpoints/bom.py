@@ -5,9 +5,11 @@ from typing import Any, Dict, Iterable, List, NoReturn, Optional, Sequence, Set,
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import String, cast, func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased, joinedload, selectinload
 
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
+from app.core.time_utils import to_utc_iso
 from app.db.database import get_db
 from app.models.bom import BOM, BOMItem, BOMItemType, BOMLineType
 from app.models.part import Part, PartType, UnitOfMeasure, uom_disagrees, uom_label
@@ -84,12 +86,56 @@ def parts_with_active_bom(db: Session, part_ids: Iterable[int], company_id: int)
     return {row.part_id for row in rows}
 
 
-def get_component_part_info(part: Part, db: Session) -> ComponentPartInfo:
-    """Build component part info with has_bom flag - handles NULL values defensively"""
-    # Scoped to the COMPONENT PART's own company: a BOM for a part in company X belongs to
-    # company X, so this needs no extra parameter and no caller change. See
-    # ``parts_with_active_bom`` for what the unscoped, is_deleted-blind version got wrong.
-    has_bom = bool(parts_with_active_bom(db, [part.id], part.company_id))
+def tenant_parts_by_id(db: Session, part_ids: Iterable[Optional[int]], company_id: int) -> Dict[int, Part]:
+    """``{part_id: Part}`` for a BOM's parts, resolved TENANT-SCOPED, in ONE query.
+
+    THE way this module turns a part id on a BOM row into a renderable ``Part`` -- both the
+    LINE's ``component_part_id`` and the HEADER's ``part_id``. Never ``BOMItem.
+    component_part`` and never ``BOM.part``: both relationships join on the foreign key
+    alone (``models/bom.py``) and apply no ``company_id`` predicate, so on a mis-parented
+    row either one happily materialises ANOTHER COMPANY's part and every response builder
+    here rendered its part number, name and revision straight back to the caller.
+
+    The WRITE side of that hole is already closed -- all four line-write paths scope
+    ``component_part_id`` to the active company, and ``create_bom`` / the importers scope
+    the header's ``part_id`` -- but the READ side must not lean on that: it renders rows
+    written before those fixes, rows a future door might write, and rows a residual foreign
+    key left behind. Scoping the LOOKUP means the foreign object is never materialised at
+    all, rather than materialised and then carefully not printed (the same reasoning, and
+    the same shape, as ``completion_inventory_service._tenant_components``).
+
+    Batched because the read paths are hot: a 40-line BOM must not become 40 round trips.
+    A part that does not come back is simply absent from the map, and the callers render
+    ``component_part: null`` / ``part: null`` -- exactly what they already did for a
+    component whose part row had been hard-deleted.
+    """
+    ids = {int(pid) for pid in part_ids if pid}
+    if not ids:
+        return {}
+    rows = db.query(Part).filter(Part.id.in_(ids), Part.company_id == company_id).all()
+    return {row.id: row for row in rows}
+
+
+def component_part_info(part: Part, *, has_bom: bool) -> ComponentPartInfo:
+    """Render a component part into the response - handles NULL values defensively.
+
+    THE one place the ``ComponentPartInfo`` shape is built; ``has_bom`` is supplied rather
+    than probed, because this module knows it in three different ways and two of them
+    already hold the answer:
+
+    * PROBE it -- ``get_component_part_info`` (below), for a single part. The general path.
+    * A BATCHED ``has_bom_by_part_id`` map, resolved once per page by ``list_boms`` /
+      ``get_bom`` and passed down, so a 40-line BOM costs one probe instead of forty.
+    * Straight off a BOM ROW already in hand: ``explode_bom_recursive`` has resolved the
+      component's own BOM because it needs it to recurse into, and
+      ``component_bom is not None`` is the same predicate ``parts_with_active_bom``
+      evaluates (same ``part_id`` / ``company_id`` / ``is_active`` / ``is_deleted``
+      filters), so probing again was a second identical query per line.
+
+    Keeping the construction here is what stops those three ``has_bom`` sources drifting
+    into subtly different ``ComponentPartInfo`` shapes -- three sites had already
+    open-coded this constructor, which is how the drift starts.
+    """
     return ComponentPartInfo(
         id=part.id,
         part_number=part.part_number or "",
@@ -98,6 +144,86 @@ def get_component_part_info(part: Part, db: Session) -> ComponentPartInfo:
         part_type=part.part_type.value if part.part_type else "manufactured",
         has_bom=has_bom,
     )
+
+
+def get_component_part_info(part: Part, db: Session, company_id: int) -> ComponentPartInfo:
+    """``component_part_info`` for a single part, probing ``has_bom`` itself.
+
+    ``company_id`` is the CALLER'S ACTIVE COMPANY, and it is a required argument rather
+    than something read off ``part``. The previous version probed ``part.company_id``,
+    which is only ever the right answer when ``part`` was itself resolved tenant-scoped --
+    and the one caller that mattered handed it an object off the unscoped
+    ``BOMItem.component_part`` relationship. Every caller now resolves the part through
+    ``tenant_parts_by_id`` first, so this parameter is the active company by
+    construction; taking it explicitly is what stops the next caller re-deriving it from
+    data it does not control.
+
+    One query per call: use it on single-item paths only. A path that already knows
+    ``has_bom`` -- from a batched probe or from a BOM row it has in hand -- must call
+    ``component_part_info`` directly rather than pay for the probe again.
+    """
+    return component_part_info(part, has_bom=bool(parts_with_active_bom(db, [part.id], company_id)))
+
+
+# ---------------------------------------------------------------------------
+# Released-BOM edit policy
+# ---------------------------------------------------------------------------
+# FROZEN <=> ``bom.status != "draft"``. Allowlist-shaped ON PURPOSE: a BOM whose status
+# column holds junk (an unvalidated ``BOMUpdate.status`` used to be able to write any
+# string -- that hole is closed by deleting the field, but rows it already wrote may exist)
+# lands on the SAFE side, frozen, instead of being accidentally editable. The comparison is
+# against the lowercase literals ``release_bom`` / ``unrelease_bom`` write, nothing else.
+#
+# Unlike ``routing.py``, which carves out an in-place lane for time standards on a released
+# routing, a released BOM is refused OUTRIGHT: BOM has an ``unrelease`` verb (routing does
+# not), so ``unrelease -> edit -> re-release`` strands nobody, costs one gated click, and
+# leaves a BETTER AS9100D record than an in-place edit would -- withdrawal, changes, and
+# re-approval are three separate rows on the chain instead of one silent mutation.
+#
+# 400, not 409, for every status-state refusal: same class of guard as routing's, and no
+# frontend path branches on 409 for BOM. Role refusals stay 403 via ``require_role``.
+_BOM_FROZEN_LINE_MSG = (
+    "Released BOM: lines cannot be added, changed or removed — unrelease the BOM to edit it, then release it again."
+)
+_BOM_NOT_DRAFT_MSG = "Cannot modify a BOM with status '{status}'."
+
+# The ONLY field editable on a released BOM header. ``revision`` relabels an approved
+# controlled document without re-approval (the revision IS the document's identity),
+# ``bom_type`` changes how the BOM explodes into demand (phantom vs standard), and
+# ``effective_date`` is AS9100D effectivity stamped by ``release_bom`` -- re-dating it
+# rewrites when the approved configuration took effect. A description is metadata ABOUT the
+# document, not the configuration.
+_BOM_RELEASED_EDITABLE_FIELDS = {"description"}
+
+
+def _assert_bom_lines_editable(bom: BOM) -> None:
+    """Refuse a BOM-LINE write unless the parent BOM is a draft (400).
+
+    Called by all three line verbs (``add_bom_item`` / ``update_bom_item`` /
+    ``delete_bom_item``) BEFORE the first ``setattr`` / ``db.add`` / ``db.delete``, so a
+    refusal leaves the row untouched -- the same "evaluate before mutating" placement
+    ``routing.update_operation`` and ``parts.assert_backflush_change_allowed`` use.
+
+    On ``add_bom_item`` it must also sit AFTER the parent 404, so a foreign ``bom_id``
+    cannot be probed by the shape of the error it comes back with.
+    """
+    if bom.status == "draft":
+        return
+    if bom.status == "released":
+        raise HTTPException(status_code=400, detail=_BOM_FROZEN_LINE_MSG)
+    raise HTTPException(status_code=400, detail=_BOM_NOT_DRAFT_MSG.format(status=bom.status))
+
+
+def bom_identifier(part_number: Optional[str], revision: Optional[str]) -> str:
+    """The human handle for a BOM HEADER, used as the audit row's ``resource_identifier``.
+
+    Same reasoning as ``bom_line_identifier``: an auditor reads the trail by part number
+    and revision, not by row id. The part number is resolved TENANT-SCOPED by the callers
+    (``_tenant_part_number``) -- never off ``BOM.part``, which carries no ``company_id``
+    predicate and on a mis-parented row would write a foreign part number into this
+    tenant's audit chain.
+    """
+    return f"{part_number or '?'} BOM rev {revision or '?'}"
 
 
 def bom_line_identifier(
@@ -114,6 +240,24 @@ def bom_line_identifier(
     parent = parent_part_number or "?"
     component = f" ({component_part_number})" if component_part_number else ""
     return f"{parent} line {item_number if item_number is not None else '?'}{component}"
+
+
+def _audit_values(bom: BOM, fields: Iterable[str]) -> Dict[str, Any]:
+    """``{field: value}`` for an audit diff, with datetimes normalised to UTC ISO-8601.
+
+    ``old_values`` is read off the persisted row, where a ``DateTime`` column comes back
+    NAIVE; ``new_values`` is read back after the setattr, where an ``effective_date`` that
+    arrived on the request body is OFFSET-AWARE. Serialised raw, the same instant appears on
+    the two halves of one audit row in two different formats ("2026-01-02T03:04:05" vs
+    "...+00:00"), which reads as a change of shape rather than of value to anyone diffing
+    the chain. Both halves go through ``to_utc_iso`` so the comparison is like-for-like --
+    the same "store UTC, serve UTC (Z)" rule the response schemas follow.
+    """
+    values: Dict[str, Any] = {}
+    for field in fields:
+        value = getattr(bom, field)
+        values[field] = to_utc_iso(value) if isinstance(value, datetime) else value
+    return values
 
 
 def _tenant_part_number(db: Session, part_id: Optional[int], company_id: int) -> Optional[str]:
@@ -167,24 +311,33 @@ def build_bom_item_response(
     db: Session,
     has_bom_by_part_id: Optional[dict] = None,
     *,
+    company_id: int,
+    components_by_id: Optional[Dict[int, Part]] = None,
     backflush_armed_warning: Optional[str] = None,
 ) -> BOMItemResponse:
-    """Build BOM item response with part info - handles NULL values defensively"""
-    # Handle component_part safely - it might be None if the part was deleted
+    """Build BOM item response with part info - handles NULL values defensively.
+
+    ``company_id`` is REQUIRED (keyword-only) because this function renders the component
+    part into the response: it resolves ``item.component_part_id`` through
+    ``tenant_parts_by_id`` rather than reading the unscoped
+    ``BOMItem.component_part`` relationship. ``components_by_id`` is that same map,
+    pre-resolved by a list caller so a page of BOMs costs one component query instead of
+    one per line; omit it on a single-item path and this does the one scoped read itself.
+    """
+    # Handle component_part safely - it might be None if the part was deleted, hard-deleted,
+    # or (the case this scoping exists for) owned by another tenant.
     component_info = None
-    if item.component_part:
+    component = (
+        components_by_id.get(item.component_part_id)
+        if components_by_id is not None
+        else tenant_parts_by_id(db, [item.component_part_id], company_id).get(item.component_part_id)
+    )
+    if component:
         try:
             if has_bom_by_part_id is not None:
-                component_info = ComponentPartInfo(
-                    id=item.component_part.id,
-                    part_number=item.component_part.part_number or "",
-                    name=item.component_part.name or "",
-                    revision=item.component_part.revision or "A",
-                    part_type=item.component_part.part_type.value if item.component_part.part_type else "manufactured",
-                    has_bom=has_bom_by_part_id.get(item.component_part.id, False),
-                )
+                component_info = component_part_info(component, has_bom=has_bom_by_part_id.get(component.id, False))
             else:
-                component_info = get_component_part_info(item.component_part, db)
+                component_info = get_component_part_info(component, db, company_id)
         except Exception as e:
             logger.warning("Failed to get component part info for BOM item %s: %s", item.id, e)
 
@@ -405,6 +558,26 @@ def _reject_deleted_part(db: Session, part_number: str) -> NoReturn:
     )
 
 
+def _existing_bom_conflict_detail(
+    part_number: Optional[str], *, bom_is_deleted: bool, bom_is_active: bool, retry: str
+) -> str:
+    """The 400 body for "this assembly part already owns a BOM row", branched on its state.
+
+    Shared by the importer (``_reject_existing_bom``) and ``POST /bom/`` because they hit
+    the SAME wall: ``BOM.part_id`` is UNIQUE with no soft-delete/active carve-out, so a
+    probe that only looks for ``is_active == True`` rows cannot see the row that owns the
+    slot and the insert dies on the constraint with an IntegrityError 500. Now that
+    ``delete_bom`` is a SOFT delete that leaves the row in place, the deleted branch is the
+    common case rather than the theoretical one -- and both doors name the same recovery,
+    ``POST /bom/{bom_id}/restore``.
+    """
+    if bom_is_deleted:
+        return f"A deleted BOM exists for part '{part_number}' — restore it before {retry}."
+    if not bom_is_active:
+        return f"An inactive BOM exists for part '{part_number}' — reactivate or delete it before {retry}."
+    return f"A BOM already exists for assembly part '{part_number}'"
+
+
 def _reject_existing_bom(db: Session, assembly_part: Part, company_id: int) -> None:
     """Fail the import if ANY BOM row already occupies the assembly part.
 
@@ -413,28 +586,52 @@ def _reject_existing_bom(db: Session, assembly_part: Part, company_id: int) -> N
     invisible, so the import tried to create a second BOM and died with an
     IntegrityError 500. Branch on the row's state instead and return an
     actionable 400.
+
+    This is also why NO import path needs a released-BOM guard: it refuses *any*
+    pre-existing BOM row for the assembly part, so an importer can never reach a released
+    BOM's lines in the first place.
     """
     existing_bom = db.query(BOM).filter(BOM.part_id == assembly_part.id, BOM.company_id == company_id).first()
     if existing_bom is None:
         return
     # Capture state before rollback expires the instances.
-    part_number = assembly_part.part_number
-    bom_is_deleted = bool(existing_bom.is_deleted)
-    bom_is_active = bool(existing_bom.is_active)
+    detail = _existing_bom_conflict_detail(
+        assembly_part.part_number,
+        bom_is_deleted=bool(existing_bom.is_deleted),
+        bom_is_active=bool(existing_bom.is_active),
+        retry="importing",
+    )
     # Single-transaction import: discard anything already staged (e.g. the
     # in-place part_type promotion and its audit row) before failing.
     db.rollback()
-    if bom_is_deleted:
+    raise HTTPException(status_code=400, detail=detail)
+
+
+def _flush_new_bom(db: Session, part_number: Optional[str], *, retry: str) -> None:
+    """Flush a freshly-added ``BOM``, turning the UNIQUE-slot collision into a 400.
+
+    The LAST line of defence behind ``_reject_existing_bom`` / ``create_bom``'s probe, not a
+    replacement for them: those give a specific, actionable body ("restore it", "reactivate
+    it") and this cannot, because the row it collided with is one this caller is not allowed
+    to see. ``BOM.part_id`` is UNIQUE **globally**, with no ``company_id`` in the
+    constraint, while both probes are correctly company-scoped -- so a residual row
+    belonging to ANOTHER tenant occupies the slot invisibly and the insert died on the
+    constraint as an uncaught IntegrityError 500. The body is deliberately flat and says
+    nothing about who owns the row or that one exists elsewhere (invariant #1: never
+    confirm existence across a tenant boundary); 400 because the caller genuinely cannot
+    create this BOM, and a 500 would page someone for a data condition no code path
+    produces any more.
+    """
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        logger.warning("BOM insert collided with the unique part_id slot for part %r", part_number)
         raise HTTPException(
             status_code=400,
-            detail=f"A deleted BOM exists for part '{part_number}' — restore it before importing.",
+            detail=f"Cannot create a BOM for part '{part_number}' — the part already has one. Contact an administrator "
+            f"before {retry}.",
         )
-    if not bom_is_active:
-        raise HTTPException(
-            status_code=400,
-            detail=f"An inactive BOM exists for part '{part_number}' — reactivate or delete it before importing.",
-        )
-    raise HTTPException(status_code=400, detail=f"A BOM already exists for assembly part '{part_number}'")
 
 
 def _ensure_part(
@@ -805,7 +1002,7 @@ def _create_from_import_payload(
         company_id=company_id,
     )
     db.add(bom)
-    db.flush()
+    _flush_new_bom(db, assembly_part.part_number, retry="retrying the import")
     bom_id = bom.id
 
     next_line = 10
@@ -871,10 +1068,13 @@ def _create_from_import_payload(
     # One audit row for the BOM with the items summarized (house pattern: the
     # WO import logs the parent and summarizes children in extra_data), before
     # the terminal commit so it persists atomically with the import.
+    #
+    # ``bom_identifier``, NOT the bare part number -- see the note on the same call in
+    # ``import_bom_or_part``.
     audit.log_create(
         "bom",
         bom.id,
-        assembly_part.part_number,
+        bom_identifier(assembly_part.part_number, bom.revision),
         new_values=bom,
         extra_data={
             "source": "bom_import",
@@ -1158,7 +1358,7 @@ async def import_bom_or_part(
             company_id=company_id,
         )
         db.add(bom)
-        db.flush()
+        _flush_new_bom(db, assembly_part.part_number, retry="retrying the import")
         bom_id = bom.id
 
         next_line = 10
@@ -1225,10 +1425,27 @@ async def import_bom_or_part(
         # One audit row for the BOM with the items summarized (house pattern:
         # the WO import logs the parent and summarizes children in extra_data),
         # before the terminal commit so it persists atomically with the import.
+        #
+        # ``bom_identifier``, NOT the bare part number. Both importers used to write
+        # ``"WRC-1001"`` here while the six header verbs write ``"WRC-1001 BOM rev A"`` for
+        # the SAME ``resource_type="bom"`` chain -- so an import-born BOM's CREATE row was
+        # the one row about that document that did not match the shape of every row that
+        # follows it, and the revision (which the importer knows: it just wrote it) appeared
+        # nowhere on the row. The bare number also collides visually with the
+        # ``resource_type="part"`` rows this same import writes.
+        #
+        # Forward-only, deliberately: audit rows are immutable and prod already holds bare-
+        # shaped rows, so this is a documented discontinuity rather than a rewritten history
+        # -- the house "correct-forward, never backfill" posture, and invariant 2 forbids the
+        # alternative outright. The discontinuity is one-directional and mild: the new form
+        # CONTAINS the old one, and the audit search filters on
+        # ``resource_identifier.ilike("%q%")`` (``audit.py``), so an auditor searching the
+        # part number still matches rows of both shapes. Only a search for the full new
+        # string misses the pre-existing ones.
         audit.log_create(
             "bom",
             bom.id,
-            assembly_part.part_number,
+            bom_identifier(assembly_part.part_number, bom.revision),
             new_values=bom,
             extra_data={
                 "source": "bom_import",
@@ -1270,11 +1487,14 @@ def list_boms(
     # Use selectinload to avoid N+1 queries for parts and items
     query = (
         db.query(BOM)
-        .filter(BOM.company_id == company_id)
-        .options(
-            selectinload(BOM.part),
-            selectinload(BOM.items).selectinload(BOMItem.component_part),
+        .filter(
+            BOM.company_id == company_id,
+            # Invariant 3: ``BOM`` carries ``SoftDeleteMixin`` and ``delete_bom`` is now a
+            # SOFT delete, so every read path has to say so or a deleted BOM keeps showing
+            # up in the list exactly as it did before it was deleted.
+            BOM.is_deleted == False,  # noqa: E712
         )
+        .options(selectinload(BOM.items))
     )
 
     if active_only:
@@ -1288,12 +1508,21 @@ def list_boms(
     # Preload BOM existence for component parts to avoid per-item queries
     component_ids = {item.component_part_id for bom in boms for item in (bom.items or []) if item.component_part_id}
     has_bom_by_part_id = {pid: True for pid in parts_with_active_bom(db, component_ids, company_id)}
+    # One TENANT-SCOPED read for every component on the page. This replaced
+    # ``selectinload(BOMItem.component_part)``: that relationship has no ``company_id``
+    # predicate, so on a mis-parented line it rendered a FOREIGN part's number and name
+    # into this tenant's list response. See ``tenant_parts_by_id``.
+    components_by_id = tenant_parts_by_id(db, component_ids, company_id)
+    # And the same read for the HEADERS' parent parts, which came off the equally unscoped
+    # ``selectinload(BOM.part)``: a mis-parented header rendered a foreign part number and
+    # name as the assembly this BOM builds.
+    parents_by_id = tenant_parts_by_id(db, {bom.part_id for bom in boms}, company_id)
 
     result = []
     for bom in boms:
         try:
-            # Part is already loaded via selectinload
-            part = bom.part
+            # Resolved TENANT-SCOPED above, never off ``bom.part``.
+            part = parents_by_id.get(bom.part_id)
 
             # Build part info safely
             part_info = None
@@ -1311,19 +1540,15 @@ def list_boms(
             items_list = []
             for item in items:
                 try:
-                    # Component part is already loaded via selectinload
-                    component = item.component_part
+                    # Resolved TENANT-SCOPED above, never off ``item.component_part``.
+                    component = components_by_id.get(item.component_part_id)
 
                     component_info = None
                     if component:
-                        has_bom = has_bom_by_part_id.get(component.id, False)
-                        component_info = ComponentPartInfo(
-                            id=component.id,
-                            part_number=component.part_number or "",
-                            name=component.name or "",
-                            revision=component.revision or "A",
-                            part_type=component.part_type.value if component.part_type else "manufactured",
-                            has_bom=has_bom,
+                        # ``has_bom`` from the ONE batched probe above -- a page of BOMs
+                        # must not become one probe per line.
+                        component_info = component_part_info(
+                            component, has_bom=has_bom_by_part_id.get(component.id, False)
                         )
 
                     items_list.append(
@@ -1383,19 +1608,37 @@ def create_bom(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Create a new BOM for a part"""
+    """Create a new BOM for a part.
+
+    Audited as ``bom`` (CREATE) for the header **plus** one ``bom_line`` (CREATE) per inline
+    line. Recording a line added later while not recording the lines the document was born
+    with is not a record -- this is BOM-line write path 3 of 4, and PR #194 audited the
+    other three.
+    """
     # Check if part exists
     part = db.query(Part).filter(Part.id == bom_in.part_id, Part.company_id == company_id).first()
     if not part:
         raise HTTPException(status_code=404, detail="Part not found")
 
-    # Check if BOM already exists for this part
-    existing = db.query(BOM).filter(BOM.part_id == bom_in.part_id, BOM.is_active == True).first()
+    # Check if ANY BOM row already occupies this part -- not just an active one.
+    # ``BOM.part_id`` is UNIQUE with no soft-delete/active carve-out, so the old
+    # ``is_active == True`` probe could not see a soft-deleted (or merely deactivated) row
+    # that still owns the slot: it passed its own guard and then died on the constraint
+    # with an IntegrityError 500. Now that ``delete_bom`` soft-deletes, that is the
+    # ordinary path, not a corner. Scoped to the active company, which the old probe also
+    # was not.
+    existing = db.query(BOM).filter(BOM.part_id == bom_in.part_id, BOM.company_id == company_id).first()
     if existing:
         raise HTTPException(
             status_code=400,
-            detail=f"Active BOM already exists for part {part.part_number}. Deactivate it first or update the existing BOM.",
+            detail=_existing_bom_conflict_detail(
+                part.part_number,
+                bom_is_deleted=bool(existing.is_deleted),
+                bom_is_active=bool(existing.is_active),
+                retry="creating a new one",
+            ),
         )
 
     # Create BOM
@@ -1408,7 +1651,12 @@ def create_bom(
     )
     bom.company_id = company_id
     db.add(bom)
-    db.flush()
+    # Last line of defence behind the probe above -- see ``_flush_new_bom``.
+    _flush_new_bom(db, part.part_number, retry="creating it")
+
+    # (line, component) pairs, kept so the per-line audit rows below can name the component
+    # by the part number this request already resolved TENANT-SCOPED.
+    created_lines: List[Tuple[BOMItem, Part]] = []
 
     # Add items
     for item_data in bom_in.items:
@@ -1439,6 +1687,31 @@ def create_bom(
 
         item = BOMItem(bom_id=bom.id, company_id=company_id, **line_values)
         db.add(item)
+        created_lines.append((item, component))
+
+    db.flush()  # assigns every item.id for the audit rows below
+
+    # Resolved ONCE, after every line is in place, so the walk sees the finished document
+    # rather than a prefix of it -- and so a 40-line assembly does not pay for 40 walks.
+    # Same ``extra_data`` shape as the three line verbs, which is what makes an arming
+    # verdict and the edits around it correlatable on one chain (see ``_armed_extra_data``).
+    armed = armed_parts_affected_by_bom(db, bom, company_id=company_id)
+    armed_extra = _armed_extra_data(armed)
+    identifier = bom_identifier(part.part_number, bom.revision)
+
+    # BEFORE the terminal commit. AuditService.log() only FLUSHES, and the request session
+    # never commits on teardown -- a call placed after db.commit() opens a fresh transaction
+    # that get_db teardown rolls back, silently discarding the row. Same rule and same
+    # comment as ``add_bom_item``.
+    audit.log_create("bom", bom.id, identifier, new_values=bom, extra_data=armed_extra)
+    for item, component in created_lines:
+        audit.log_create(
+            "bom_line",
+            item.id,
+            bom_line_identifier(part.part_number, item.item_number, component.part_number),
+            new_values=item,
+            extra_data=armed_extra,
+        )
 
     db.commit()
     db.refresh(bom)
@@ -1535,6 +1808,10 @@ def list_bom_uom_mismatches(
             BOMItem.company_id == company_id,
             assembly_part.company_id == company_id,
             component_part.company_id == company_id,
+            # A soft-deleted BOM is not a remediation target: nothing explodes it any more
+            # (invariant 3), so a line on one blocks nothing and listing it would send a
+            # human to fix a document the shop has deleted.
+            BOM.is_deleted == False,  # noqa: E712
             line_label != "",
             part_label != "",
             line_label != part_label,
@@ -1608,24 +1885,32 @@ def get_bom(
     try:
         bom = (
             db.query(BOM)
-            .options(joinedload(BOM.part), joinedload(BOM.items).joinedload(BOMItem.component_part))
-            .filter(BOM.id == bom_id, BOM.company_id == company_id)
+            .options(joinedload(BOM.items))
+            .filter(BOM.id == bom_id, BOM.company_id == company_id, BOM.is_deleted == False)  # noqa: E712
             .first()
         )
 
         if not bom:
             raise HTTPException(status_code=404, detail="BOM not found")
 
+        # The parent part TENANT-SCOPED, never ``bom.part`` -- that relationship carries no
+        # ``company_id`` predicate, so on a mis-parented header it rendered another
+        # company's part number and name as the assembly. See ``tenant_parts_by_id``.
+        parent_part = tenant_parts_by_id(db, [bom.part_id], company_id).get(bom.part_id)
+
         # Safely get part_type - handle both enum and string values
         part_type_val = "manufactured"
-        if bom.part and bom.part.part_type:
-            if hasattr(bom.part.part_type, 'value'):
-                part_type_val = bom.part.part_type.value
+        if parent_part and parent_part.part_type:
+            if hasattr(parent_part.part_type, 'value'):
+                part_type_val = parent_part.part_type.value
             else:
-                part_type_val = str(bom.part.part_type)
+                part_type_val = str(parent_part.part_type)
 
         component_ids = {item.component_part_id for item in bom.items if item.component_part_id}
         has_bom_by_part_id = {pid: True for pid in parts_with_active_bom(db, component_ids, company_id)}
+        # TENANT-SCOPED component resolution, batched, replacing
+        # ``joinedload(BOMItem.component_part)`` -- see ``tenant_parts_by_id``.
+        components_by_id = tenant_parts_by_id(db, component_ids, company_id)
 
         return BOMResponse(
             id=bom.id,
@@ -1640,16 +1925,21 @@ def get_bom(
             updated_at=bom.updated_at,
             part=(
                 PartInfo(
-                    id=bom.part.id,
-                    part_number=bom.part.part_number or "",
-                    name=bom.part.name or "",
-                    revision=bom.part.revision or "A",
+                    id=parent_part.id,
+                    part_number=parent_part.part_number or "",
+                    name=parent_part.name or "",
+                    revision=parent_part.revision or "A",
                     part_type=part_type_val,
                 )
-                if bom.part
+                if parent_part
                 else None
             ),
-            items=[build_bom_item_response(item, db, has_bom_by_part_id) for item in bom.items],
+            items=[
+                build_bom_item_response(
+                    item, db, has_bom_by_part_id, company_id=company_id, components_by_id=components_by_id
+                )
+                for item in bom.items
+            ],
         )
     except HTTPException:
         raise
@@ -1672,8 +1962,12 @@ def get_bom_by_part(
     """Get the active BOM for a part"""
     bom = (
         db.query(BOM)
-        .options(joinedload(BOM.part), joinedload(BOM.items).joinedload(BOMItem.component_part))
-        .filter(BOM.part_id == part_id, BOM.company_id == company_id, BOM.is_active == True)
+        .filter(
+            BOM.part_id == part_id,
+            BOM.company_id == company_id,
+            BOM.is_active == True,  # noqa: E712
+            BOM.is_deleted == False,  # noqa: E712
+        )
         .first()
     )
 
@@ -1690,15 +1984,97 @@ def update_bom(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Update a BOM"""
-    bom = db.query(BOM).filter(BOM.id == bom_id, BOM.company_id == company_id).first()
+    """Update a BOM header.
+
+    On a DRAFT BOM every field in ``BOMUpdate`` is editable. On a RELEASED BOM only
+    ``description`` is -- ``revision`` / ``bom_type`` / ``effective_date`` are the approved
+    document's identity, its explosion semantics and its AS9100D effectivity, and changing
+    any of them in place would relabel or re-date an approved configuration without
+    re-approval. Unrelease the BOM to change those. Any other status is fully locked.
+
+    ``status`` is NOT in ``BOMUpdate`` and cannot be written here at all -- both transitions
+    belong to ``release_bom`` / ``unrelease_bom``, which are Admin/Manager and stamp (or
+    clear) the approval evidence. Before that field was deleted a SUPERVISOR could
+    ``PUT {"status": "released"}`` and produce a released controlled document with
+    ``approved_by``/``approved_at`` NULL -- an approved document with no approver -- while
+    bypassing both the Admin/Manager gate and the "no items" precondition on the release
+    verb. An unset field on the request body is ignored (Pydantic ``extra="ignore"``), so a
+    legacy client still gets 200 with the true status echoed back in ``BOMResponse``.
+
+    A released ``description`` edit deliberately does NOT re-stamp ``approved_by`` /
+    ``approved_at`` -- a divergence from ``routing.update_operation``, which re-stamps
+    because its carved-out fields ARE the released production content. A BOM description is
+    metadata about the document, not the configuration; re-stamping it would overwrite the
+    record of who approved the actual configuration in order to record a typo fix.
+
+    Audited as ``bom`` (UPDATE), and only when something actually changed.
+    """
+    bom = (
+        db.query(BOM)
+        .filter(BOM.id == bom_id, BOM.company_id == company_id, BOM.is_deleted == False)  # noqa: E712
+        .first()
+    )
     if not bom:
         raise HTTPException(status_code=404, detail="BOM not found")
 
     update_data = bom_in.model_dump(exclude_unset=True)
+
+    # Only fields present in the payload AND different from the current value count as
+    # changes (semantics copied from ``routing.update_operation``). Without this, a
+    # form-shaped client that PUTs the whole record back would be refused for changing
+    # nothing.
+    #
+    # The comparison is only sound while both sides are of the same shape, and
+    # ``effective_date`` is the one field where that took work: the column is a NAIVE
+    # ``DateTime`` while ``BOMResponse`` (a ``UTCModel``) serves the value with a trailing
+    # ``Z``, so a round-tripped payload parsed to an AWARE datetime -- and ``naive !=
+    # aware`` is ``True``. The field therefore counted as changed on EVERY no-op PUT, which
+    # 400'd released BOMs (the freeze reads it as an edit to the AS9100D effectivity). The
+    # chain itself stayed clean only because ``_audit_values`` below normalizes BOTH halves
+    # of the diff and ``log_update`` drops an empty one -- do not remove that belt while
+    # relying on this. ``BOMUpdate`` now normalizes the field to naive UTC in the schema
+    # (``_normalize_to_naive_utc``); do not add a datetime field to that model without the
+    # same validator.
+    changed_fields = {f for f, v in update_data.items() if getattr(bom, f) != v}
+
+    # Status gate -- evaluated BEFORE the first setattr, so a refusal leaves the row
+    # untouched. See ``_assert_bom_lines_editable`` for the same placement rule on lines.
+    if changed_fields:
+        if bom.status == "released":
+            frozen = changed_fields - _BOM_RELEASED_EDITABLE_FIELDS
+            if frozen:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Released BOM: only the description can be edited — unrelease the BOM "
+                        "to change revision, BOM type or effectivity."
+                    ),
+                )
+        elif bom.status != "draft":
+            raise HTTPException(status_code=400, detail=_BOM_NOT_DRAFT_MSG.format(status=bom.status))
+
+    # Named as the document was BEFORE the edit, so the identifier matches what an auditor
+    # searching the chain for the prior state would look for; the new revision is in
+    # ``new_values``.
+    identifier = bom_identifier(_tenant_part_number(db, bom.part_id, company_id), bom.revision)
+    old_values = _audit_values(bom, changed_fields)
+
     for field, value in update_data.items():
         setattr(bom, field, value)
+
+    if changed_fields:
+        # BEFORE the terminal commit -- see ``add_bom_item`` for why that ordering is
+        # load-bearing.
+        db.flush()
+        audit.log_update(
+            "bom",
+            bom.id,
+            identifier,
+            old_values=old_values,
+            new_values=_audit_values(bom, changed_fields),
+        )
 
     db.commit()
     db.refresh(bom)
@@ -1711,22 +2087,59 @@ def release_bom(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Release a BOM for production use"""
-    bom = db.query(BOM).filter(BOM.id == bom_id, BOM.company_id == company_id).first()
+    """Release a BOM for production use.
+
+    This is the APPROVAL of a controlled document and it is the ONLY door to
+    ``status == "released"``. It was unaudited: a BOM went from draft to approved-for-
+    production with nothing on the chain saying who approved it or when the state changed
+    (``approved_by`` on the row is the current state, not a record of the transition).
+    """
+    bom = (
+        db.query(BOM)
+        .filter(BOM.id == bom_id, BOM.company_id == company_id, BOM.is_deleted == False)  # noqa: E712
+        .first()
+    )
     if not bom:
         raise HTTPException(status_code=404, detail="BOM not found")
 
     if bom.status == "released":
         raise HTTPException(status_code=400, detail="BOM is already released")
 
+    # Only a DRAFT can be released. Previously anything that was not already ``released``
+    # fell through -- including the junk statuses the old unvalidated ``BOMUpdate.status``
+    # could write, and a terminal ``obsolete``.
+    if bom.status != "draft":
+        raise HTTPException(status_code=400, detail=f"Only a draft BOM can be released (this BOM is '{bom.status}').")
+
     if not bom.items:
         raise HTTPException(status_code=400, detail="Cannot release BOM with no items")
+
+    # Read off the row rather than written as a literal -- but the draft-only guard above
+    # pins it, so on this verb it is ALWAYS "draft". It is read anyway so the row and the
+    # chain cannot disagree if that guard is ever widened, which is exactly what happened to
+    # ``unrelease_bom``: the identical expression there IS general (it withdraws any
+    # non-draft status back to draft, and the chain has to say which one it was).
+    # ``routing.release_routing`` writes the literal; that is the shape not worth copying
+    # onto a chain that is supposed to be evidence.
+    previous_status = bom.status
+    identifier = bom_identifier(_tenant_part_number(db, bom.part_id, company_id), bom.revision)
 
     bom.status = "released"
     bom.approved_by = current_user.id
     bom.approved_at = datetime.utcnow()
     bom.effective_date = datetime.utcnow()
+
+    # BEFORE the terminal commit -- see ``add_bom_item``.
+    audit.log_status_change(
+        "bom",
+        bom.id,
+        identifier,
+        old_status=previous_status,
+        new_status="released",
+        extra_data={"approved_by": current_user.id, "line_count": len(bom.items)},
+    )
 
     db.commit()
     return {"message": "BOM released", "bom_id": bom.id}
@@ -1738,17 +2151,75 @@ def unrelease_bom(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Unrelease a BOM to allow editing"""
+    """Unrelease a BOM to allow editing.
+
+    This is the WITHDRAWAL of an approved controlled document, and it DESTROYS the approval
+    evidence on the row -- it NULLs ``approved_by`` / ``approved_at`` (and now
+    ``effective_date``, which a draft has no business carrying: leaving it is the same
+    defect class as leaving a stale approver). It wrote nothing anywhere, so the fact that a
+    named approval had ever existed was simply gone. The pre-image goes on the chain in
+    ``extra_data`` BEFORE the clear.
+
+    **No free-text reason is required**, deliberately, against the NCR-void / receipt-void /
+    vendor-delete precedent. Those are irreversible compensating actions whose "why" is
+    unrecoverable from state. This is reversible, it is the routine FIRST STEP of the only
+    revision workflow BOMs have (``unrelease -> edit -> bump revision -> release``), and its
+    "why" is fully reconstructible from the chain: this row (who withdrew, when, what
+    approval was cleared) -> the ``bom_line`` rows written while it was open (what changed)
+    -> the re-release row (who re-approved). Forcing a reason on the everyday editing
+    gesture yields ``"edit"`` and degrades the record.
+
+    **This is also THE de-corruption door, and that is why it refuses only ``draft``
+    rather than requiring ``released``.** A BOM's status column has exactly two legal values
+    now, but the unvalidated ``BOMUpdate.status`` that was just deleted could write any
+    string, so rows holding junk ("RELEASED", "obsolete", garbage) may exist. Every other
+    verb refuses those -- ``release_bom`` wants a draft, ``update_bom`` and the three line
+    verbs want a draft, ``delete_bom`` wants a draft -- and ``BOM.part_id`` is UNIQUE, so
+    the part could never get a working BOM again: the document would be permanently
+    unmanageable, readable and useless. Withdrawing anything that is not already a draft
+    BACK to draft is both the correct semantic ("this is not a draft; withdraw it") and the
+    one escape hatch, and it is a safe widening because nothing downstream treats a junk
+    status as approved -- every consumer tests ``status == "released"`` exactly. The
+    transition is audited with the ACTUAL prior status, so a normalisation is visible on the
+    chain as exactly what it was.
+    """
     try:
-        bom = db.query(BOM).filter(BOM.id == bom_id, BOM.company_id == company_id).first()
+        bom = (
+            db.query(BOM)
+            .filter(BOM.id == bom_id, BOM.company_id == company_id, BOM.is_deleted == False)  # noqa: E712
+            .first()
+        )
         if not bom:
             raise HTTPException(status_code=404, detail="BOM not found")
-        if bom.status != "released":
+        if bom.status == "draft":
+            # Message unchanged: for the only status a supported verb can produce besides
+            # ``released``, "BOM is not released" is exactly what happened.
             raise HTTPException(status_code=400, detail="BOM is not released")
+
+        previous_status = bom.status
+
+        # BEFORE the clear, and before the terminal commit -- the whole point of this row is
+        # the approval pre-image, which does not exist anywhere else once the columns are
+        # NULLed.
+        audit.log_status_change(
+            "bom",
+            bom.id,
+            bom_identifier(_tenant_part_number(db, bom.part_id, company_id), bom.revision),
+            old_status=previous_status,
+            new_status="draft",
+            extra_data={
+                "cleared_approved_by": bom.approved_by,
+                "cleared_approved_at": to_utc_iso(bom.approved_at),
+                "cleared_effective_date": to_utc_iso(bom.effective_date),
+            },
+        )
+
         bom.status = "draft"
         bom.approved_by = None
         bom.approved_at = None
+        bom.effective_date = None
         db.commit()
         return {"message": "BOM unreleased", "bom_id": bom.id}
     except HTTPException:
@@ -1765,21 +2236,155 @@ def delete_bom(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Delete a BOM (only draft BOMs can be deleted)"""
-    bom = db.query(BOM).filter(BOM.id == bom_id, BOM.company_id == company_id).first()
+    r"""Delete a BOM (only draft BOMs can be deleted). The delete is SOFT, and audited.
+
+    ``BOM`` carries ``SoftDeleteMixin``, so the previous ``db.delete(bom)`` was a straight
+    invariant-3 violation: it physically destroyed a controlled document's header and, with
+    a bulk ``db.query(BOMItem)...delete()``, every one of its lines, leaving no record that
+    any of it had ever existed.
+
+    **The lines are KEPT, physically intact.** ``BOMItem`` carries only ``TenantMixin``, so
+    a physical delete of them WOULD be legitimate under invariant 3 -- but it is wrong here
+    for two independent reasons. (1) The header is a tombstone, not a grave: the lines are
+    the document's content, and ``POST /bom/{bom_id}/restore`` can only mean something if
+    they survive. Wiping them would make "restore" bring back an empty BOM, which is a
+    worse outcome than the bug being fixed. (2) Invariant 5 -- preserve historical records.
+
+    **Nothing reads them while the header is deleted.** That claim is what makes retention
+    safe, so it is enumerated rather than asserted. Re-verify it with
+    ``grep -rn 'query(BOMItem)\|select(BOMItem)\|join(BOMItem' app/``; every hit is one of:
+
+    * reaches the lines through a ``BOM`` header that filters ``is_deleted == False``
+      (``bom.py`` throughout, ``work_orders.py`` x2, ``setup.py`` x3, ``parts.py``,
+      ``routing.py``, ``completion_inventory_service.py`` x2, and ``mrp_service.py`` via
+      the ``BOM.items`` relationship) -- these are the safe majority; or
+    * is one of the TWO deliberate exceptions: the "is this part referenced anywhere"
+      probes behind ``hard_delete`` in ``parts.py`` (``DELETE /parts/{id}?hard_delete``)
+      and ``materials.py`` (``DELETE /materials/{id}?hard_delete``). They query
+      ``BOMItem.component_part_id`` with NO header join, and they must not filter one: a
+      retained line still holds a real foreign key to the part, so hard-deleting it would
+      fail or orphan the line.
+
+    ``prediction_service._calculate_wo_demand`` used to be an unlisted THIRD direct reader
+    (``query(BOMItem).filter(component_part_id == part_id)`` -- no join, no ``company_id``,
+    no ``is_deleted``). It now reaches through the header like everything else. Anything
+    added to this list that is NOT a hard-delete probe should be presumed a defect.
+
+    So there are no per-line DELETE audit rows -- writing them for rows that still exist
+    would be a false record. The count of retained lines goes on the header's DELETE row
+    instead.
+    """
+    bom = (
+        db.query(BOM)
+        .filter(BOM.id == bom_id, BOM.company_id == company_id, BOM.is_deleted == False)  # noqa: E712
+        .first()
+    )
     if not bom:
         raise HTTPException(status_code=404, detail="BOM not found")
 
     if bom.status != "draft":
         raise HTTPException(status_code=400, detail="Only draft BOMs can be deleted")
 
-    # Delete all items first
-    db.query(BOMItem).filter(BOMItem.bom_id == bom_id).delete()
+    # log_delete serializes the model synchronously, so passing the live attached instance
+    # captures the header's full pre-image. Logged BEFORE the terminal commit.
+    audit.log_delete(
+        "bom",
+        bom.id,
+        bom_identifier(_tenant_part_number(db, bom.part_id, company_id), bom.revision),
+        old_values=bom,
+        soft_delete=True,
+        # ``previous_is_active`` is recorded because the clear below is unconditional and
+        # ``restore_bom`` reinstates ``is_active = True`` unconditionally too. For every row
+        # a supported verb can produce that round-trips exactly (this verb and ``restore_bom``
+        # are the only two writers of the flag in the backend), but if a legacy or
+        # hand-edited inactive row ever exists the chain says what the flag was. It is
+        # EVIDENCE only -- ``restore_bom`` deliberately does not read it back to decide what
+        # to reinstate; see its docstring for why.
+        extra_data={"retained_line_count": len(bom.items), "previous_is_active": bool(bom.is_active)},
+    )
 
-    db.delete(bom)
+    bom.soft_delete(current_user.id)
+    # ``is_active`` is what the ten-odd "the active BOM for this part" lookups across the
+    # backend key on; clearing it alongside the tombstone means a reader that predates the
+    # ``is_deleted`` predicate still cannot resolve this row.
+    bom.is_active = False
+
     db.commit()
-    return {"message": "BOM deleted"}
+    return {"message": "BOM deleted", "can_restore": True}
+
+
+@router.post("/{bom_id}/restore", summary="Restore a soft-deleted BOM")
+def restore_bom(
+    bom_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Restore a soft-deleted BOM.
+
+    **Required roles**: Admin or Manager (the same tier that can delete one).
+
+    This endpoint is not optional garnish on the soft-delete conversion, it is a
+    PREREQUISITE for it. ``BOM.part_id`` is UNIQUE with no soft-delete carve-out, so a
+    soft-deleted BOM permanently occupies its part's only BOM slot: without a restore verb,
+    deleting a BOM would mean that part can never have a BOM again. Mirrors
+    ``parts.restore_part``, which ``_reject_existing_bom`` and ``create_bom`` already point
+    callers at by name.
+
+    Restoring cannot collide with anything: the unique constraint guarantees no second BOM
+    row took the slot while this one was deleted. The BOM comes back as a DRAFT -- only
+    drafts can be deleted, so that is the state it left in, and no approval is resurrected.
+
+    ``is_active`` comes back TRUE unconditionally, which is the exact inverse of
+    ``delete_bom`` clearing it unconditionally. That is a faithful round trip for every row
+    the API can produce: ``delete_bom`` and this verb are the ONLY two writers of
+    ``BOM.is_active`` in the backend -- no create path sets it (the column default is TRUE),
+    ``BOMUpdate`` does not carry the field, and neither importer touches it -- so a BOM that
+    is deleted was active.
+
+    **It deliberately does NOT read ``previous_is_active`` back off the DELETE audit row**,
+    even though ``delete_bom`` records it. Two reasons, and the first is the general one:
+    the audit chain is a RECORD, not a source of truth. Driving a business decision off it
+    inverts that -- this verb's behaviour would then depend on the ``extra_data`` shape of a
+    row nothing enforces a schema on, and on that row still being resolvable (aged segments
+    are archived to cold storage, and a partition drop is a documented DBA option; see
+    ``docs/AUDIT_LOG_RETENTION_RUNBOOK.md``), so the same BOM could restore differently
+    depending on how old it is. Second, there is nothing to read: per the paragraph above,
+    the value is TRUE for every row a supported verb can produce, so the branch would be
+    dead code guarding an unreachable state. ``previous_is_active`` stays on the delete row
+    as EVIDENCE for a legacy or hand-edited row, which is the right job for an audit row.
+
+    If BOM deactivation ever becomes a real verb ("obsolete this BOM without deleting it"),
+    the prior value belongs on the ``boms`` row itself -- a column, set by that verb and
+    consulted here -- not in the chain. Adding that column now, for a state nothing can
+    reach, would be a migration over live multi-tenant data buying nothing.
+    """
+    bom = db.query(BOM).filter(BOM.id == bom_id, BOM.company_id == company_id).first()
+    if not bom:
+        raise HTTPException(status_code=404, detail="BOM not found")
+
+    if not bom.is_deleted:
+        raise HTTPException(status_code=400, detail="BOM is not deleted")
+
+    bom.restore()
+    bom.is_active = True
+
+    # BEFORE the terminal commit. ``action="restore"`` is the same verb ``restore_part``
+    # uses, and log_update's empty-diff self-suppression does not apply to it.
+    audit.log_update(
+        "bom",
+        bom.id,
+        bom_identifier(_tenant_part_number(db, bom.part_id, company_id), bom.revision),
+        old_values={"is_deleted": True, "is_active": False},
+        new_values={"is_deleted": False, "is_active": True},
+        action="restore",
+    )
+
+    db.commit()
+    return {"message": "BOM restored", "bom_id": bom.id}
 
 
 # BOM Item operations
@@ -1799,9 +2404,17 @@ def add_bom_item(
     from, and the stated reason the UoM-mismatch worklist shipped read-only.
     """
     try:
-        bom = db.query(BOM).filter(BOM.id == bom_id, BOM.company_id == company_id).first()
+        bom = (
+            db.query(BOM)
+            .filter(BOM.id == bom_id, BOM.company_id == company_id, BOM.is_deleted == False)  # noqa: E712
+            .first()
+        )
         if not bom:
             raise HTTPException(status_code=404, detail="BOM not found")
+
+        # Parent 404 FIRST, then the status gate: a foreign ``bom_id`` must not be
+        # distinguishable from a released one by the shape of the refusal.
+        _assert_bom_lines_editable(bom)
 
         # Validate component exists IN THIS COMPANY (invariant #1) -- see the matching
         # scoping in ``create_bom``. A 404 rather than a 403 so a foreign id cannot be probed.
@@ -1878,18 +2491,9 @@ def add_bom_item(
         db.commit()
         db.refresh(item)
 
-        # Build response manually to avoid joinedload issues
-        component_info = None
-        if component:
-            has_bom = bool(parts_with_active_bom(db, [component.id], company_id))
-            component_info = ComponentPartInfo(
-                id=component.id,
-                part_number=component.part_number or "",
-                name=component.name or "",
-                revision=component.revision or "A",
-                part_type=component.part_type.value if component.part_type else "manufactured",
-                has_bom=has_bom,
-            )
+        # Build response manually to avoid joinedload issues. Single-item path, so the
+        # probing helper is the right one -- one component, one probe.
+        component_info = get_component_part_info(component, db, company_id) if component else None
 
         return BOMItemResponse(
             id=item.id,
@@ -1947,17 +2551,24 @@ def update_bom_item(
     """
     item = (
         db.query(BOMItem)
-        .options(joinedload(BOMItem.component_part))
         .join(BOM)
-        .filter(BOMItem.id == item_id, BOM.company_id == company_id)
+        .filter(BOMItem.id == item_id, BOM.company_id == company_id, BOM.is_deleted == False)  # noqa: E712
         .first()
     )
     if not item:
         raise HTTPException(status_code=404, detail="BOM item not found")
 
-    bom = db.query(BOM).filter(BOM.id == item.bom_id, BOM.company_id == company_id).first()
+    bom = (
+        db.query(BOM)
+        .filter(BOM.id == item.bom_id, BOM.company_id == company_id, BOM.is_deleted == False)  # noqa: E712
+        .first()
+    )
     if not bom:  # pragma: no cover - the join above already proved it
         raise HTTPException(status_code=404, detail="BOM item not found")
+
+    # The scoped join above IS the tenant proof, so the parent status gate comes next --
+    # still before the first setattr.
+    _assert_bom_lines_editable(bom)
 
     # Hoisted out of the UoM branch below: the identifier, the UoM resolution and the
     # cross-tenant guard all need the TENANT-SCOPED component, and one indexed read serves
@@ -2010,7 +2621,7 @@ def update_bom_item(
 
     db.commit()
     db.refresh(item)
-    return build_bom_item_response(item, db, backflush_armed_warning=warning)
+    return build_bom_item_response(item, db, company_id=company_id, backflush_armed_warning=warning)
 
 
 @router.delete("/items/{item_id}")
@@ -2033,13 +2644,25 @@ def delete_bom_item(
     ``log_delete(..., soft_delete=False)`` with the full pre-image, logged while the
     instance is still attached and BEFORE the delete.
     """
-    item = db.query(BOMItem).join(BOM).filter(BOMItem.id == item_id, BOM.company_id == company_id).first()
+    item = (
+        db.query(BOMItem)
+        .join(BOM)
+        .filter(BOMItem.id == item_id, BOM.company_id == company_id, BOM.is_deleted == False)  # noqa: E712
+        .first()
+    )
     if not item:
         raise HTTPException(status_code=404, detail="BOM item not found")
 
-    bom = db.query(BOM).filter(BOM.id == item.bom_id, BOM.company_id == company_id).first()
+    bom = (
+        db.query(BOM)
+        .filter(BOM.id == item.bom_id, BOM.company_id == company_id, BOM.is_deleted == False)  # noqa: E712
+        .first()
+    )
     if not bom:  # pragma: no cover - the join above already proved it
         raise HTTPException(status_code=404, detail="BOM item not found")
+
+    # Parent status gate, before the delete is staged.
+    _assert_bom_lines_editable(bom)
 
     armed = armed_parts_affected_by_bom(db, bom, company_id=company_id)
     warning = backflush_armed_edit_warning(armed, item_number=item.item_number)
@@ -2072,6 +2695,8 @@ def would_create_circular_reference(
 
     Tenant-scoped (invariant #1): every BOM lookup in the walk carries ``company_id`` so the
     recursion can never traverse into — or leak the structure of — another company's BOMs.
+    Soft-deleted BOMs are skipped (invariant 3): a structure the shop has deleted cannot
+    close a loop, and refusing a legal line because of one would be a phantom refusal.
     """
     if visited is None:
         visited = set()
@@ -2087,7 +2712,12 @@ def would_create_circular_reference(
     # Get the component's BOM (scoped to the active company)
     component_bom = (
         db.query(BOM)
-        .filter(BOM.part_id == component_part_id, BOM.company_id == company_id, BOM.is_active == True)
+        .filter(
+            BOM.part_id == component_part_id,
+            BOM.company_id == company_id,
+            BOM.is_active == True,  # noqa: E712
+            BOM.is_deleted == False,  # noqa: E712
+        )
         .first()
     )
 
@@ -2115,7 +2745,9 @@ def explode_bom_recursive(
 
     Tenant-scoped (invariant #1): the top-level and every sub-BOM lookup filter on
     ``company_id`` so the recursive walk cannot cross a tenant boundary even through a
-    corrupt/mis-parented row.
+    corrupt/mis-parented row. Soft-deleted BOMs are not exploded (invariant 3), and every
+    component is resolved through ``tenant_parts_by_id`` rather than the unscoped
+    ``BOMItem.component_part`` relationship the explosion used to render.
     """
     if visited is None:
         visited = set()
@@ -2125,13 +2757,16 @@ def explode_bom_recursive(
 
     bom = (
         db.query(BOM)
-        .options(joinedload(BOM.items).joinedload(BOMItem.component_part))
-        .filter(BOM.id == bom_id, BOM.company_id == company_id)
+        .options(joinedload(BOM.items))
+        .filter(BOM.id == bom_id, BOM.company_id == company_id, BOM.is_deleted == False)  # noqa: E712
         .first()
     )
 
     if not bom:
         return []
+
+    # One scoped component read per BOM level, not one per line.
+    components_by_id = tenant_parts_by_id(db, [i.component_part_id for i in bom.items], company_id)
 
     result = []
     for item in bom.items:
@@ -2143,10 +2778,18 @@ def explode_bom_recursive(
         scrap = item.scrap_factor if item.scrap_factor is not None else 0.0
         extended_qty = qty * parent_qty * (1 + scrap)
 
-        # Check if component has its own BOM (scoped to the active company)
+        # Check if component has its own BOM (scoped to the active company). This row is
+        # what the recursion descends into AND, below, the component's ``has_bom`` flag --
+        # the predicate is identical to ``parts_with_active_bom``'s, so the response builder
+        # is handed the answer instead of re-running the same query per line.
         component_bom = (
             db.query(BOM)
-            .filter(BOM.part_id == item.component_part_id, BOM.company_id == company_id, BOM.is_active == True)
+            .filter(
+                BOM.part_id == item.component_part_id,
+                BOM.company_id == company_id,
+                BOM.is_active == True,  # noqa: E712
+                BOM.is_deleted == False,  # noqa: E712
+            )
             .first()
         )
 
@@ -2180,7 +2823,11 @@ def explode_bom_recursive(
             is_optional=item.is_optional or False,
             is_alternate=item.is_alternate or False,
             alternate_group=item.alternate_group,
-            component_part=get_component_part_info(item.component_part, db) if item.component_part else None,
+            component_part=(
+                component_part_info(components_by_id[item.component_part_id], has_bom=component_bom is not None)
+                if item.component_part_id in components_by_id
+                else None
+            ),
             created_at=item.created_at,
             updated_at=item.updated_at,
             children=children,
@@ -2211,9 +2858,17 @@ def explode_bom(
 ):
     """Explode a BOM to show all levels (multi-level BOM)"""
     # Tenant-scoped (invariant #1): a foreign id gets a flat 404 — never confirm existence.
-    bom = db.query(BOM).options(joinedload(BOM.part)).filter(BOM.id == bom_id, BOM.company_id == company_id).first()
+    bom = (
+        db.query(BOM)
+        .filter(BOM.id == bom_id, BOM.company_id == company_id, BOM.is_deleted == False)  # noqa: E712
+        .first()
+    )
     if not bom:
         raise HTTPException(status_code=404, detail="BOM not found")
+
+    # The parent part TENANT-SCOPED, never the unscoped ``BOM.part`` relationship this used
+    # to ``joinedload`` — see ``tenant_parts_by_id``.
+    parent_part = tenant_parts_by_id(db, [bom.part_id], company_id).get(bom.part_id)
 
     items = explode_bom_recursive(db, bom_id, company_id, 1.0, 0, max_levels)
     total_levels = get_max_level(items) + 1 if items else 0
@@ -2221,8 +2876,8 @@ def explode_bom(
     return BOMExploded(
         bom_id=bom.id,
         part_id=bom.part_id,
-        part_number=bom.part.part_number,
-        part_name=bom.part.name,
+        part_number=parent_part.part_number if parent_part else "",
+        part_name=parent_part.name if parent_part else "",
         revision=bom.revision,
         total_levels=total_levels,
         items=items,
@@ -2274,9 +2929,16 @@ def flatten_bom(
 ):
     """Get a flattened view of a multi-level BOM (for reports/MRP)"""
     # Tenant-scoped (invariant #1): a foreign id gets a flat 404 — never confirm existence.
-    bom = db.query(BOM).options(joinedload(BOM.part)).filter(BOM.id == bom_id, BOM.company_id == company_id).first()
+    bom = (
+        db.query(BOM)
+        .filter(BOM.id == bom_id, BOM.company_id == company_id, BOM.is_deleted == False)  # noqa: E712
+        .first()
+    )
     if not bom:
         raise HTTPException(status_code=404, detail="BOM not found")
+
+    # The parent part TENANT-SCOPED — see ``tenant_parts_by_id``.
+    parent_part = tenant_parts_by_id(db, [bom.part_id], company_id).get(bom.part_id)
 
     exploded = explode_bom_recursive(db, bom_id, company_id, 1.0, 0, max_levels)
 
@@ -2287,8 +2949,8 @@ def flatten_bom(
 
     return BOMFlattened(
         bom_id=bom.id,
-        part_number=bom.part.part_number,
-        part_name=bom.part.name,
+        part_number=parent_part.part_number if parent_part else "",
+        part_name=parent_part.name if parent_part else "",
         revision=bom.revision,
         total_items=len(flat_items),
         total_unique_parts=len(unique_parts),
@@ -2305,7 +2967,11 @@ def where_used(
 ):
     """Find all parent assemblies that use this BOM's part"""
     # Tenant-scoped (invariant #1): a foreign id gets a flat 404 — never confirm existence.
-    bom = db.query(BOM).options(joinedload(BOM.part)).filter(BOM.id == bom_id, BOM.company_id == company_id).first()
+    bom = (
+        db.query(BOM)
+        .filter(BOM.id == bom_id, BOM.company_id == company_id, BOM.is_deleted == False)  # noqa: E712
+        .first()
+    )
     if not bom:
         raise HTTPException(status_code=404, detail="BOM not found")
 
@@ -2313,19 +2979,35 @@ def where_used(
     usages = (
         db.query(BOMItem)
         .join(BOM, BOMItem.bom_id == BOM.id)
-        .options(joinedload(BOMItem.bom).joinedload(BOM.part))
-        .filter(BOMItem.component_part_id == bom.part_id, BOM.company_id == company_id)
+        .options(joinedload(BOMItem.bom))
+        .filter(
+            BOMItem.component_part_id == bom.part_id,
+            BOM.company_id == company_id,
+            # A deleted parent assembly is not a "where used" (invariant 3) -- its lines are
+            # retained by ``delete_bom`` on purpose, so without this they keep reporting a
+            # usage the shop has deleted.
+            BOM.is_deleted == False,  # noqa: E712
+        )
         .all()
     )
 
+    # Every part this response names — this BOM's own part and each parent assembly's —
+    # resolved TENANT-SCOPED in one read, never off ``BOM.part``. That relationship carries
+    # no ``company_id`` predicate, and this endpoint prints the part number and name of
+    # every assembly it finds; on a mis-parented row it printed a foreign one.
+    parent_part_ids = {usage.bom.part_id for usage in usages if usage.bom}
+    parent_part_ids.add(bom.part_id)
+    parts_by_id = tenant_parts_by_id(db, parent_part_ids, company_id)
+
     result = []
     for usage in usages:
-        if usage.bom and usage.bom.part:
+        parent_part = parts_by_id.get(usage.bom.part_id) if usage.bom else None
+        if parent_part:
             result.append(
                 {
                     "parent_part_id": usage.bom.part_id,
-                    "parent_part_number": usage.bom.part.part_number,
-                    "parent_part_name": usage.bom.part.name,
+                    "parent_part_number": parent_part.part_number,
+                    "parent_part_name": parent_part.name,
                     "bom_id": usage.bom_id,
                     "quantity_used": usage.quantity,
                     # item_type is a String(20) column — handle enum-or-string like get_bom does
@@ -2333,4 +3015,9 @@ def where_used(
                 }
             )
 
-    return {"part_id": bom.part_id, "part_number": bom.part.part_number, "used_in": result}
+    own_part = parts_by_id.get(bom.part_id)
+    return {
+        "part_id": bom.part_id,
+        "part_number": own_part.part_number if own_part else None,
+        "used_in": result,
+    }

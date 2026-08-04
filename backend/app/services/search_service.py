@@ -175,12 +175,19 @@ def run_global_search(
 
     # Search BOMs
     if should_search("bom"):
+        # The part is SELECTED from the join rather than read back off ``bom.part``, and the
+        # join itself carries ``Part.company_id`` (invariant #1). Neither was true before:
+        # the join was on ``part_id`` alone and the render used the relationship, which
+        # applies no ``company_id`` predicate — so a mis-parented BOM row put another
+        # company's part number in this tenant's search results as the result title.
         boms = (
-            db.query(BOM)
+            db.query(BOM, Part)
             .join(Part, BOM.part_id == Part.id)
             .filter(
                 BOM.company_id == company_id,
+                Part.company_id == company_id,
                 BOM.is_active == True,  # noqa: E712
+                BOM.is_deleted == False,  # noqa: E712
                 or_(
                     func.lower(Part.part_number).like(search_term),
                     func.lower(Part.name).like(search_term),
@@ -191,13 +198,13 @@ def run_global_search(
             .all()
         )
 
-        for bom in boms:
+        for bom, bom_part in boms:
             results.append(
                 SearchResult(
                     id=bom.id,
                     type="bom",
-                    title=bom.part.part_number if bom.part else f"BOM #{bom.id}",
-                    subtitle=f"{bom.part.name if bom.part else 'BOM'} - Rev {bom.revision}".strip(" -"),
+                    title=bom_part.part_number or f"BOM #{bom.id}",
+                    subtitle=f"{bom_part.name or 'BOM'} - Rev {bom.revision}".strip(" -"),
                     url=f"/bom?id={bom.id}",
                     icon="document",
                 )
@@ -206,11 +213,15 @@ def run_global_search(
 
     # Search Routings
     if should_search("routing"):
+        # Same shape, same fix as the BOM block above: ``Routing.part`` carries no
+        # ``company_id`` predicate either, so the join is scoped and the part is selected
+        # from it rather than read back off the relationship.
         routings = (
-            db.query(Routing)
+            db.query(Routing, Part)
             .join(Part, Routing.part_id == Part.id)
             .filter(
                 Routing.company_id == company_id,
+                Part.company_id == company_id,
                 Routing.is_active == True,  # noqa: E712
                 or_(
                     func.lower(Part.part_number).like(search_term),
@@ -222,13 +233,13 @@ def run_global_search(
             .all()
         )
 
-        for routing in routings:
+        for routing, routing_part in routings:
             results.append(
                 SearchResult(
                     id=routing.id,
                     type="routing",
-                    title=routing.part.part_number if routing.part else f"Routing #{routing.id}",
-                    subtitle=f"{routing.part.name if routing.part else 'Routing'} - Rev {routing.revision}".strip(" -"),
+                    title=routing_part.part_number or f"Routing #{routing.id}",
+                    subtitle=f"{routing_part.name or 'Routing'} - Rev {routing.revision}".strip(" -"),
                     url=f"/routing?id={routing.id}",
                     icon="list",
                 )

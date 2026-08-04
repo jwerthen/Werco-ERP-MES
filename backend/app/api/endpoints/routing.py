@@ -713,6 +713,9 @@ def list_routings(
             .filter(
                 BOM.company_id == company_id,
                 BOM.is_active == True,
+                # Invariant 3 — a soft-deleted BOM's retained lines must not keep a part
+                # classified as "a BOM component" and hide its routing from this list.
+                BOM.is_deleted == False,
             )
         )
         query = query.filter(~Routing.part_id.in_(component_part_ids))

@@ -331,13 +331,45 @@ class TestBOMImportAudit:
         assert len(bom_creates) == 1
         bom_row = bom_creates[0]
         assert bom_row.resource_id == data["bom_id"]
-        assert bom_row.resource_identifier == "ASSY-AUD"
+        # The SAME handle the six BOM header verbs write for resource_type="bom", not the
+        # bare part number this importer used to write. One resource_type, one shape.
+        assert bom_row.resource_identifier == "ASSY-AUD BOM rev A"
         assert bom_row.extra_data["source"] == "bom_import"
         assert bom_row.extra_data["item_count"] == 2
         assert bom_row.extra_data["component_part_numbers"] == ["COMP-A", "COMP-B"]
 
         # Every audit row carries the requesting user's company scope.
         assert {row.company_id for row in part_creates + bom_creates} == {1}
+
+    def test_import_born_bom_shares_one_identifier_shape_with_the_header_verbs(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        """One ``resource_type="bom"`` chain, one handle on it.
+
+        The importers wrote the bare assembly part number (``"WRC-1001"``) while all six
+        header verbs write ``bom_identifier`` (``"WRC-1001 BOM rev A"``), so an auditor
+        pulling the chain for one document saw its CREATE row named differently from every
+        row that followed it -- and the revision, which the importer had just written to the
+        row, appeared nowhere on the CREATE. This drives the *same* BOM through an import
+        and then a header verb and asserts the two rows agree, which is the property that
+        actually matters and which neither importer test alone can express.
+        """
+        response = client.post(
+            "/api/v1/bom/import/commit",
+            headers=auth_headers,
+            json=_commit_payload("ASSY-SHAPE"),
+        )
+        assert response.status_code == status.HTTP_201_CREATED, response.text
+        bom_id = response.json()["bom_id"]
+
+        # A header verb on the same document. Release is the interesting one: it is the
+        # approval row an auditor correlates with the CREATE.
+        released = client.post(f"/api/v1/bom/{bom_id}/release", headers=auth_headers)
+        assert released.status_code == status.HTTP_200_OK, released.text
+
+        rows = db_session.query(AuditLog).filter(AuditLog.resource_type == "bom", AuditLog.resource_id == bom_id).all()
+        assert {row.action for row in rows} == {"CREATE", "STATUS_CHANGE"}
+        assert {row.resource_identifier for row in rows} == {"ASSY-SHAPE BOM rev A"}
 
     def test_commit_part_type_promotion_writes_update_audit(
         self, client: TestClient, auth_headers: dict, db_session: Session
@@ -431,6 +463,8 @@ class TestBOMImportAudit:
         )
         assert len(bom_creates) == 1
         assert bom_creates[0].resource_id == data["bom_id"]
+        # Same handle as every other resource_type="bom" row (see the commit-importer test).
+        assert bom_creates[0].resource_identifier == "ASSY-LLM BOM rev A"
         assert bom_creates[0].extra_data["item_count"] == 1
         assert bom_creates[0].extra_data["component_part_numbers"] == ["COMP-LLM"]
         assert {row.company_id for row in part_creates + bom_creates} == {1}
