@@ -146,7 +146,7 @@ is deterministic and makes no LLM calls.)
 | `nl_search` | Pinned Fast (Haiku) — cheap intent classification | `ANTHROPIC_NL_SEARCH_MODEL` |
 | `laser_nest_extraction` | Default (Sonnet) — the native-PDF path sets `has_pdf_document`, lifting it off the Fast tier; the text fallback escalates for OCR'd/large sheets. The verification pass (`feature="laser_nest_verification"`) runs under this same task, so the override covers both passes | `ANTHROPIC_LASER_NEST_MODEL` |
 | `laser_nest_segmentation` | Default (Sonnet) — unrouted; the whole-PDF `document` block sets `has_pdf_document` | — (none; tier-level overrides only) |
-- **Laser-nest extraction now sends the PDF natively (vision).** As of prompt
+- **Laser-nest extraction now sends the PDF natively (vision).** Since prompt
   `laser_nest_extraction` 1.1.0, the primary path hands the rendered nest report to the model as a
   base64 `document` content block (layout-aware vision) instead of flattened extracted text — this
   fixes the glued-digits and material-grade-on-the-wrong-line errors that came from a 1-D text
@@ -159,7 +159,7 @@ is deterministic and makes no LLM calls.)
 - **Laser-nest extraction is two-pass, and bare multi-page PDFs get a segmentation pass
   (2026-07-20).** Everywhere nest PDFs are extracted (single-PDF `POST /laser-nests/extract` and
   the laser-nest-package preview/import), a successful extraction is followed by an **independent
-  verification read** (prompt `laser_nest_verification` 1.0.0, `feature="laser_nest_verification"`,
+  verification read** (prompt `laser_nest_verification` 1.1.0, `feature="laser_nest_verification"`,
   same `laser_nest_extraction` routing task) merged per field — agreement = "high", one-sided null
   = "medium", conflict = the verifier's value at "low"; a pass-2 failure keeps pass 1 with a
   warning (`passes` 1|2). Bare multi-page PDF uploads additionally run a page-grouping pass first
@@ -168,6 +168,22 @@ is deterministic and makes no LLM calls.)
   Cost note: a verified nest sheet is **two** Sonnet-tier native-PDF calls instead of one, plus one
   segmentation call per multi-page upload — each visible per feature string in `ai_usage_events`;
   the bare-PDF import path re-splits by confirmed pages with **zero** AI calls.
+- **`planned_runs` guidance rewritten in both nest prompts (2026-08-05).** `laser_nest_extraction`
+  1.1.0 → **1.2.0** and `laser_nest_verification` 1.0.0 → **1.1.0**; `planned_runs` only, the other
+  four fields and the request layout are untouched, so nothing about routing, tiering or cost
+  changes. It was the field the extractor missed by a wide margin — a 42-nest package came back with
+  the count defaulted on essentially every row. Both prompts now define it as how many times the
+  WHOLE nest is cut, list the label vocabulary CAM post-processors actually print ("Sheets", "No. of
+  Sheets", "Sheet Qty", "Nest Qty", "Repeat", "Runs", "Cycles", …) with an instruction to match on
+  meaning rather than exact wording, name the specific confusion to avoid — the parts table's
+  per-sheet and total PART quantities are not sheet repeats, and the count is never derived by
+  dividing one by the other — and require **null + confidence "low"** when the sheet states no count
+  instead of defaulting to 1. **The verification prompt carries the same guidance on purpose:** the
+  merge policy hands a conflict to the VERIFIER's value, so a verifier that mistook a part quantity
+  for a run count would overwrite a correct first read. Downstream, `planned_runs` is a non-optional
+  `int` on the preview row (floored at 1), so `field_confidence["planned_runs"]` is the only thing
+  separating "reads 1" from "not found" — see `docs/API.md` → Laser Nests. Full entry in
+  `backend/app/services/prompts/CHANGELOG.md` → 2026-08-05.
 - Routing generation sends its stable prefix (system prompt + schema/allowed work-center types +
   learned-examples context) as `cache_control: ephemeral` system blocks, so repeat generations
   hit the prompt cache and only the drawing content is reprocessed at full input price.
@@ -231,8 +247,8 @@ and success/error type.
 
 ### Versioned prompt registry
 - Prompt text lives in `backend/app/services/prompts/` (PO/quote extraction, BOM extraction,
-  routing generation, `laser_nest_extraction` 1.1.0 — laser-nest report PDF field extraction —
-  with `laser_nest_verification` 1.0.0 (its independent second read) and
+  routing generation, `laser_nest_extraction` 1.2.0 — laser-nest report PDF field extraction —
+  with `laser_nest_verification` 1.1.0 (its independent second read) and
   `laser_nest_segmentation` 1.0.0 (multi-page bare-PDF page grouping),
   `copilot_chat` 1.0.0 — the Werco Copilot system prompt — and
   `nl_search_intent` 1.0.0 — the `/search/nl` fast-tier intent parser; QMS clause extraction is

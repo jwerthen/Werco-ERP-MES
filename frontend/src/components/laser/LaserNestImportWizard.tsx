@@ -1,6 +1,8 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { ExclamationTriangleIcon } from '@heroicons/react/24/outline';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { ExclamationTriangleIcon, LinkIcon, TrashIcon } from '@heroicons/react/24/outline';
 import { Modal } from '../ui/Modal';
+import { ComboBoxOption } from '../ui/ComboBox';
+import { SheetPartPicker, sheetPartOptionLabel } from './SheetPartPicker';
 import {
   LaserNestImportRow,
   LaserNestPreviewRow,
@@ -17,6 +19,7 @@ import { defaultLaserWorkCenter, sortWorkCentersForLaserDispatch } from '../../u
 // Shared with the Dispatch Board chip and the kiosk deduction notice, so one
 // quantity never renders three ways across the feature.
 import { formatTieQty } from '../../utils/materialTie';
+import { deriveSheetSpec, isSheetLikePart } from '../../utils/sheetPart';
 
 interface LaserNestImportWizardProps {
   open: boolean;
@@ -43,6 +46,23 @@ interface LaserNestImportWizardProps {
 }
 
 type WizardStep = 'pick' | 'review';
+
+/** The two nest fields a tied sheet part can supply. */
+type SpecField = 'thickness' | 'sheet_size';
+
+/**
+ * A spec value written by the sheet-part pull-through.
+ *
+ * `replaced` is kept so two things stay possible: telling the planner what the
+ * extractor had read (a divergence usually means the wrong part was picked),
+ * and putting it back if the tie is cleared before anyone edits the field.
+ */
+interface DerivedSpec {
+  /** Exactly what the pull-through wrote, so a later manual edit is detectable. */
+  value: string;
+  /** The extractor's value it displaced; `''` when the field was empty. */
+  replaced: string;
+}
 
 /** Local, editable mirror of a preview row. Keeps `source_file` as the stable
  *  key the backend matches PDFs by; everything else the planner can correct.
@@ -73,6 +93,8 @@ interface EditableRow {
   material_part_id: number | null;
   /** Sheets per completed run. String while editing, mirroring `planned_runs`. */
   qty_per_run: string;
+  /** Spec fields currently sourced from the tied sheet part (see `DerivedSpec`). */
+  derived: Partial<Record<SpecField, DerivedSpec>>;
 }
 
 /** Preview metadata about the uploaded package itself (bare-PDF uploads). */
@@ -88,12 +110,6 @@ interface InventorySummaryRow {
   total_on_hand: number;
 }
 
-/** A sheet-part choice in the pickers: the part id plus its rendered label. */
-interface MaterialOption {
-  id: number;
-  label: string;
-}
-
 /**
  * Explicit page size for the material load. `api.getMaterials` (like
  * `getParts`) falls into an unbounded `while (true)` loop pulling 500 rows at a
@@ -107,13 +123,41 @@ const CONFIDENCE_BADGE: Record<LaserNestExtractionConfidence, { label: string; c
   low: { label: 'Low', className: 'border-fd-red/40 bg-fd-red/10 text-fd-red' },
 };
 
-const TH = 'px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wide text-fd-mute';
-// Border/background split from the base so the low-confidence variant never
-// fights the default colors on Tailwind specificity.
+const TH = 'px-2 py-2 text-left text-[11px] font-semibold uppercase tracking-wide text-fd-mute';
+// Border/background split from the base so the low-confidence and
+// sourced-from-part variants never fight the default colors on Tailwind
+// specificity.
 const CELL_INPUT_BASE =
   'w-full rounded-none border px-2 py-1 text-sm text-fd-ink focus:border-fd-blue focus:outline-none';
 const CELL_INPUT = `${CELL_INPUT_BASE} border-fd-line bg-fd-sunken`;
 const CELL_INPUT_VERIFY = `${CELL_INPUT_BASE} border-fd-amber bg-fd-amber/10`;
+/** A value the tied sheet part supplied rather than the extractor. */
+const CELL_INPUT_DERIVED = `${CELL_INPUT_BASE} border-fd-blue/50 bg-fd-blue/5`;
+
+/**
+ * Fixed column widths for the review grid.
+ *
+ * The grid is `table-fixed` over an explicit `<colgroup>` and scrolls
+ * horizontally inside its container, rather than being auto-laid-out and
+ * squeezed to fit. Auto layout is what made this unreadable: a `w-20` input in
+ * an over-full table shrinks below its declared width, and a CNC number is the
+ * field that suffers most — `04886` rendered as `0`, which is worse than
+ * useless on the one value an operator keys into the machine.
+ */
+const COLUMN_WIDTHS = [
+  '11rem', // Source (sticky) — page range / file name, confidence, warning
+  '7rem', // CNC #
+  '15rem', // Sheet part
+  '6.5rem', // Material
+  '6rem', // Thickness
+  '6.5rem', // Sheet size
+  '5.5rem', // Sheets/run
+  '4.5rem', // Runs
+  '9rem', // WC
+  '3rem', // Remove
+];
+/** Sum of `COLUMN_WIDTHS`; the table never renders narrower than this. */
+const TABLE_MIN_WIDTH = '74.5rem';
 
 function toEditable(row: LaserNestPreviewRow): EditableRow {
   return {
@@ -133,25 +177,11 @@ function toEditable(row: LaserNestPreviewRow): EditableRow {
     work_center_id: null,
     material_part_id: null,
     qty_per_run: '1',
+    derived: {},
   };
 }
 
 const workCenterLabel = (wc: WorkCenter) => wc.name || wc.code;
-
-/**
- * Label for one sheet-part option.
- *
- * The stock figure is deliberately called **on hand**, never "available":
- * `quantity_allocated` is never written by anything, so an "available" number
- * would just be on-hand under a name that goes false the day reservations ship.
- * `onHand === undefined` means the stock read didn't land — show no figure at
- * all rather than a fabricated zero.
- */
-function materialOptionLabel(part: Part, onHand: number | undefined): string {
-  const name = part.part_number ? `${part.part_number} — ${part.name}` : part.name;
-  if (onHand == null) return name;
-  return `${name} (${formatTieQty(onHand)} ${part.unit_of_measure} on hand)`;
-}
 
 /**
  * Await a degradable side-load. Any failure — a real error, or a test double
@@ -205,6 +235,83 @@ function fieldNeedsVerify(row: EditableRow, field: LaserNestConfidenceField): bo
   if (row.field_confidence?.[field] === 'low') return true;
   const isPdfRow = row.source_pages != null && row.source_pages.length > 0;
   return isPdfRow && fieldValue(row, field).trim() === '';
+}
+
+/**
+ * Was this row's run count actually read off the sheet?
+ *
+ * `planned_runs` arrives floored at 1 by the server no matter what happened
+ * upstream, so a genuine "1 run" and "neither extraction pass could find a run
+ * count" are the SAME number on the wire. The per-field confidence is the only
+ * thing that separates them, which is why the wizard counts these out loud
+ * instead of letting 42 confident-looking 1s ride into a released work order.
+ */
+function runsNotRead(row: EditableRow): boolean {
+  return !row.edited.planned_runs && row.field_confidence?.planned_runs === 'low';
+}
+
+/**
+ * Apply (or clear) a nest's sheet-part tie, pulling the part's thickness and
+ * sheet size through onto the row.
+ *
+ * Picking the part is the stronger statement about what will actually be cut:
+ * it names a specific stock item with real dimensions, whereas thickness and
+ * sheet size are an AI read of a nest report. So the derived values WIN — but
+ * visibly, never silently. The row records what was displaced, the cells render
+ * in the derived style, and a divergence from a non-empty extractor value gets
+ * its own marker, because that divergence is usually the signal that the wrong
+ * part was picked.
+ *
+ * The pull-through is limited to parts `isSheetLikePart` accepts. That is the
+ * same predicate behind the picker's default filter, so the one case where the
+ * dimension grammar could mis-read — a planner deliberately tying a nest to
+ * non-sheet stock through the "show all materials" escape hatch — writes
+ * nothing rather than writing angle-iron dimensions onto a sheet.
+ *
+ * `partId` and `part` are SEPARATE arguments on purpose. A tie can name a part
+ * the material list never returned (capped list, deactivated part, failed
+ * read), and those ties are the ones a re-import must carry forward — deriving
+ * the id from a `Part | undefined` lookup would drop exactly them, which is the
+ * silent un-tying this whole path exists to prevent. An absent record costs the
+ * spec pull-through and nothing else.
+ */
+function withSheetPart(
+  row: EditableRow,
+  partId: number | null,
+  part: Part | undefined,
+  qtyPerRun?: string
+): EditableRow {
+  const next: EditableRow = {
+    ...row,
+    material_part_id: partId,
+    qty_per_run: qtyPerRun ?? row.qty_per_run,
+    derived: {},
+  };
+
+  // Untying (or retying) first restores anything the previous pull-through
+  // displaced — but ONLY where the field still holds exactly what was written.
+  // If the planner has typed since, their value stands: putting the extractor's
+  // read back over it would be a second uncommanded write, which is the whole
+  // failure mode this marking exists to prevent.
+  const restore = (field: SpecField, current: string): string => {
+    const previous = row.derived[field];
+    return previous && current === previous.value ? previous.replaced : current;
+  };
+  next.thickness = restore('thickness', row.thickness);
+  next.sheet_size = restore('sheet_size', row.sheet_size);
+
+  if (partId == null || !part || !isSheetLikePart(part)) return next;
+
+  const spec = deriveSheetSpec(part);
+  if (spec.thickness) {
+    next.derived.thickness = { value: spec.thickness, replaced: next.thickness };
+    next.thickness = spec.thickness;
+  }
+  if (spec.sheetSize) {
+    next.derived.sheet_size = { value: spec.sheetSize, replaced: next.sheet_size };
+    next.sheet_size = spec.sheetSize;
+  }
+  return next;
 }
 
 /** `[3]` → `p. 3`, `[3,4]` → `p. 3–4`, `[3,4,7]` → `p. 3–4, 7`. */
@@ -287,7 +394,7 @@ export default function LaserNestImportWizard({
   // (capped list, deactivated part, failed read). Appended to the options so an
   // existing tie can never render as an empty picker while still riding on the
   // import payload.
-  const [extraMaterialOptions, setExtraMaterialOptions] = useState<MaterialOption[]>([]);
+  const [extraMaterialOptions, setExtraMaterialOptions] = useState<ComboBoxOption[]>([]);
   const [tiePrefillCount, setTiePrefillCount] = useState(0);
 
   // Reset everything whenever the wizard (re)opens, then load the active work
@@ -310,6 +417,9 @@ export default function LaserNestImportWizard({
     setPackageQtyPerRun('1');
     setExtraMaterialOptions([]);
     setTiePrefillCount(0);
+    // Supersede any tie pre-fill still in flight from the previous session, so
+    // it cannot write the last package's ties onto a freshly opened wizard.
+    previewGenerationRef.current += 1;
 
     let cancelled = false;
     (async () => {
@@ -350,23 +460,24 @@ export default function LaserNestImportWizard({
     };
   }, [open, workOrderId, workCenterId]);
 
-  /**
-   * Sheet-part choices: the loaded material parts plus any part a pre-filled
-   * tie names that the list didn't include.
-   */
-  const materialOptions = useMemo<MaterialOption[]>(() => {
-    const options: MaterialOption[] = materials.map((part) => ({
-      id: part.id,
-      label: materialOptionLabel(part, onHandByPart ? (onHandByPart[part.id] ?? 0) : undefined),
-    }));
-    const known = new Set(options.map((option) => option.id));
-    for (const extra of extraMaterialOptions) {
-      if (!known.has(extra.id)) options.push(extra);
-    }
-    return options;
-  }, [materials, onHandByPart, extraMaterialOptions]);
+  /** Loaded material parts by id, for the spec pull-through and option labels. */
+  const partsById = useMemo(() => {
+    const index = new Map<number, Part>();
+    for (const part of materials) index.set(part.id, part);
+    return index;
+  }, [materials]);
 
-  const hasInput = Boolean(file) || sourcePath.trim().length > 0;
+  // Mirror of `partsById` readable from the un-awaited tie pre-fill, which
+  // outlives the render that created it (see `prefillTiesFromExistingNests`).
+  const partsByIdRef = useRef(partsById);
+  partsByIdRef.current = partsById;
+
+  // Bumped on every preview. The tie pre-fill compares against it after each
+  // await so a result from a superseded preview can never write over the
+  // current one's state.
+  const previewGenerationRef = useRef(0);
+
+  const hasPicker = materials.length > 0 || extraMaterialOptions.length > 0;
 
   /**
    * Pre-fill each row's sheet-part picker from the tie the matching nest
@@ -381,8 +492,23 @@ export default function LaserNestImportWizard({
    * Entirely degradable and read-only: no ties, an older server, or a
    * parent-addressed import (whose ties live on the laser CHILD work order,
    * not on the parent) simply leaves the pickers empty.
+   *
+   * IT RUNS UN-AWAITED, BEHIND AN ALREADY-INTERACTIVE SCREEN. The review step
+   * renders the moment the preview resolves, while this is still fetching, so
+   * two things have to be true and neither is automatic:
+   *
+   *  - It must never overwrite a pick the planner made in that window. A stale
+   *    server tie replacing a deliberate choice is the same end state the whole
+   *    feature guards against — importing a part nobody chose, depleting the
+   *    wrong heat lot — and unlike the spec pull-through it leaves no marking
+   *    and nothing to restore. Hence the `material_part_id != null` skip: the
+   *    pre-fill only ever fills a row that is still empty.
+   *  - It must not land on a DIFFERENT preview. Back → re-Preview while this is
+   *    in flight would otherwise write the old package's part options and its
+   *    "N existing ties pre-filled" chip over the new package's reset state.
+   *    `generation` is the guard, checked after every await.
    */
-  const prefillTiesFromExistingNests = async (previewRows: EditableRow[]) => {
+  const prefillTiesFromExistingNests = async (previewRows: EditableRow[], generation: number) => {
     if (workOrderId == null || previewRows.length === 0) return;
 
     let ties: MaterialAllocation[] = [];
@@ -395,6 +521,7 @@ export default function LaserNestImportWizard({
     } catch {
       return; // the pre-fill is a safety net, never a gate on the review step
     }
+    if (previewGenerationRef.current !== generation) return;
 
     const sourceByOperation = new Map<number, string>();
     for (const operation of workOrder?.operations ?? []) {
@@ -416,20 +543,37 @@ export default function LaserNestImportWizard({
     setRows((prev) =>
       prev.map((row) => {
         const tie = tieBySource.get(row.source_file);
-        if (!tie) return row;
-        return { ...row, material_part_id: tie.part_id, qty_per_run: String(tie.qty_per_run ?? 1) };
+        // Never over-write a pick the planner made while this was in flight.
+        if (!tie || row.material_part_id != null) return row;
+        // Routed through the same helper as a manual pick, so a pre-filled tie
+        // pulls its sheet spec through exactly like one the planner chooses.
+        // The part record is read from a ref rather than the render-time memo:
+        // this function was created by the render that handled the Preview
+        // click, and /materials may only have landed after it — a stale empty
+        // map would cost a pre-filled tie the spec pull-through that the very
+        // same part gets when picked by hand.
+        return withSheetPart(row, tie.part_id, partsByIdRef.current.get(tie.part_id), String(tie.qty_per_run ?? 1));
       })
     );
     // Keep every tied part selectable even if it is missing from the material
-    // list (capped, deactivated, or a failed load).
-    setExtraMaterialOptions(
-      Array.from(tieBySource.values()).map((tie) => ({
-        id: tie.part_id,
+    // list (capped, deactivated, or a failed load). DEDUPED BY PART: a package
+    // cut entirely from one sheet is the ordinary shape, not an exotic one, and
+    // `tieBySource` is keyed per NEST — mapping it straight through pushed the
+    // same option once per tied nest, which renders duplicate rows in the
+    // picker and trips React's duplicate-key warning.
+    const optionByPartId = new Map<number, ComboBoxOption>();
+    for (const tie of Array.from(tieBySource.values())) {
+      if (optionByPartId.has(tie.part_id)) continue;
+      optionByPartId.set(tie.part_id, {
+        value: String(tie.part_id),
         label: [tie.part_number, tie.part_name].filter(Boolean).join(' — ') || `Part ${tie.part_id}`,
-      }))
-    );
+      });
+    }
+    setExtraMaterialOptions(Array.from(optionByPartId.values()));
     setTiePrefillCount(tieBySource.size);
   };
+
+  const hasInput = Boolean(file) || sourcePath.trim().length > 0;
 
   const handlePreview = async () => {
     if (!hasInput) {
@@ -438,6 +582,9 @@ export default function LaserNestImportWizard({
     }
     setLoading(true);
     setError('');
+    // Claim this preview before the request goes out, so an in-flight pre-fill
+    // from a previous one is already superseded by the time it resolves.
+    const generation = ++previewGenerationRef.current;
     try {
       const input = { file, source_path: sourcePath.trim() || undefined };
       const result =
@@ -454,7 +601,7 @@ export default function LaserNestImportWizard({
       setExtraMaterialOptions([]);
       setTiePrefillCount(0);
       setStep('review');
-      void prefillTiesFromExistingNests(editable);
+      void prefillTiesFromExistingNests(editable, generation);
     } catch (err: any) {
       setError(err?.response?.data?.detail || 'Failed to preview laser nest package.');
     } finally {
@@ -463,12 +610,21 @@ export default function LaserNestImportWizard({
   };
 
   /** Edit one extracted field: applies the value and marks the field as
-   *  planner-touched so its low-confidence highlight clears. */
+   *  planner-touched so its low-confidence highlight clears. A hand-typed spec
+   *  also drops its "from sheet part" marking — the value is the planner's now,
+   *  and the tie must not silently reclaim it. */
   const updateField = (index: number, field: LaserNestConfidenceField, value: string) => {
     setRows((prev) =>
-      prev.map((row, i) =>
-        i === index ? { ...row, [field]: value, edited: { ...row.edited, [field]: true } } : row
-      )
+      prev.map((row, i) => {
+        if (i !== index) return row;
+        const next = { ...row, [field]: value, edited: { ...row.edited, [field]: true } };
+        if (field === 'thickness' || field === 'sheet_size') {
+          const derived = { ...row.derived };
+          delete derived[field];
+          next.derived = derived;
+        }
+        return next;
+      })
     );
   };
 
@@ -490,8 +646,11 @@ export default function LaserNestImportWizard({
 
   /** Per-row sheet-part tie; '' leaves the nest untied. */
   const updateRowMaterialPart = (index: number, value: string) => {
+    const partId = value ? Number(value) : null;
     setRows((prev) =>
-      prev.map((row, i) => (i === index ? { ...row, material_part_id: value ? Number(value) : null } : row))
+      prev.map((row, i) =>
+        i === index ? withSheetPart(row, partId, partId != null ? partsById.get(partId) : undefined) : row
+      )
     );
   };
 
@@ -501,7 +660,8 @@ export default function LaserNestImportWizard({
   };
 
   /**
-   * Package-level default: stamp the picked sheet part + qty onto EVERY row.
+   * Package-level default: stamp the picked sheet part + qty onto EVERY row,
+   * pulling its thickness / sheet size through with it.
    *
    * Deliberately an explicit action rather than a fuzzy auto-match off the
    * AI-extracted `material` text — a wrong tie depletes the wrong heat lot into
@@ -510,8 +670,9 @@ export default function LaserNestImportWizard({
   const applyPackageMaterial = () => {
     if (!packageMaterialPartId) return;
     const partId = Number(packageMaterialPartId);
+    const part = partsById.get(partId);
     const qty = packageQtyPerRun.trim() || '1';
-    setRows((prev) => prev.map((row) => ({ ...row, material_part_id: partId, qty_per_run: qty })));
+    setRows((prev) => prev.map((row) => withSheetPart(row, partId, part, qty)));
   };
 
   const handleImport = async () => {
@@ -591,6 +752,7 @@ export default function LaserNestImportWizard({
   };
 
   const lowConfidenceCount = rows.filter((r) => r.confidence === 'low').length;
+  const runsNotReadCount = rows.filter(runsNotRead).length;
   const totalRuns = rows.reduce((sum, r) => sum + (Number(r.planned_runs) || 0), 0);
   const tiedRowCount = rows.filter((r) => r.material_part_id != null).length;
   const tiedSheetTotal = rows.reduce(
@@ -603,7 +765,7 @@ export default function LaserNestImportWizard({
     <Modal
       open={open}
       onClose={onClose}
-      size={step === 'review' ? '5xl' : 'lg'}
+      size={step === 'review' ? '7xl' : 'lg'}
       ariaLabelledBy="laser-nest-wizard-title"
       closeOnBackdrop={!loading}
     >
@@ -615,7 +777,7 @@ export default function LaserNestImportWizard({
           <p className="mt-1 text-sm text-fd-mute">
             {step === 'pick'
               ? 'Upload a ZIP package of nest report PDFs (or CNC program files), or a nest-report PDF — single or multi-page. We read the CNC number, material, and size from each sheet so you can review before importing.'
-              : 'Review and correct each nest, then import. AI-extracted values are editable — verify low-confidence rows before importing.'}
+              : 'Review and correct each nest, then import. AI-extracted values are editable — verify low-confidence rows before importing. Picking a sheet part fills in that nest’s thickness and sheet size from the stock item.'}
             {workOrderId == null &&
               ' Importing creates a new released laser cutting work order sized to the total sheet runs — no parent work order or part required.'}
             {' Every nest is ready to run the moment the import lands, and the WC picks let you spread them across lasers.'}
@@ -705,26 +867,24 @@ export default function LaserNestImportWizard({
 
             {/* Package-level sheet-part default. Optional in every mode: an
                 untied package imports exactly as it always has. */}
-            {materialOptions.length > 0 && (
+            {hasPicker && (
               <div className="flex flex-wrap items-end gap-x-4 gap-y-2 rounded-none border border-fd-line bg-fd-sunken px-3 py-2">
                 <span className="pb-1.5 text-[11px] font-semibold uppercase tracking-wide text-fd-mute">Sheet</span>
-                <div>
+                <div className="min-w-[18rem] flex-1 sm:max-w-[26rem]">
                   <label htmlFor="nest-package-material-part" className="block text-xs font-medium text-fd-mute">
                     Sheet part
                   </label>
-                  <select
-                    id="nest-package-material-part"
-                    value={packageMaterialPartId}
-                    onChange={(e) => setPackageMaterialPartId(e.target.value)}
-                    className="input mt-1 max-w-[22rem] !py-1 text-sm"
-                  >
-                    <option value="">(none)</option>
-                    {materialOptions.map((option) => (
-                      <option key={option.id} value={String(option.id)}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
+                  <div className="mt-1">
+                    <SheetPartPicker
+                      id="nest-package-material-part"
+                      ariaLabel="Sheet part"
+                      parts={materials}
+                      onHandByPart={onHandByPart}
+                      extraOptions={extraMaterialOptions}
+                      value={packageMaterialPartId}
+                      onChange={setPackageMaterialPartId}
+                    />
+                  </div>
                 </div>
                 <div>
                   <label htmlFor="nest-package-qty-per-run" className="block text-xs font-medium text-fd-mute">
@@ -748,9 +908,9 @@ export default function LaserNestImportWizard({
                 >
                   Apply to all rows
                 </button>
-                <p className="basis-full text-xs text-fd-faint sm:basis-auto sm:pb-1.5">
-                  Optional. Stamps every row below — each row stays editable. Tied sheets leave inventory when that nest's
-                  operation completes, not per run.
+                <p className="basis-full text-xs text-fd-faint">
+                  Optional. Stamps every row below — including its thickness and sheet size — and each row stays
+                  editable. Tied sheets leave inventory when that nest&apos;s operation completes, not per run.
                 </p>
               </div>
             )}
@@ -766,6 +926,14 @@ export default function LaserNestImportWizard({
                 <span className="rounded-none border border-fd-line bg-fd-sunken px-2 py-1 font-semibold text-fd-body">
                   {packageMeta.source_page_count} {packageMeta.source_page_count === 1 ? 'page' : 'pages'} →{' '}
                   {rows.length} {rows.length === 1 ? 'nest' : 'nests'}
+                </span>
+              )}
+              {/* The run count is the one extracted field whose "not found" is
+                  invisible in the value itself — the server floors it at 1. Say
+                  so plainly rather than shipping 42 confident-looking 1s. */}
+              {runsNotReadCount > 0 && (
+                <span className="rounded-none border border-fd-amber/40 bg-fd-amber/10 px-2 py-1 font-semibold text-fd-amber">
+                  {runsNotReadCount} {runsNotReadCount === 1 ? 'run count' : 'run counts'} not read — defaulted to 1
                 </span>
               )}
               {lowConfidenceCount > 0 && (
@@ -801,27 +969,35 @@ export default function LaserNestImportWizard({
               )}
             </div>
 
-            <div className="max-h-[55vh] overflow-auto border border-fd-line">
-              <table className="min-w-full border-collapse">
-                <thead className="sticky top-0 z-10 bg-fd-panel">
+            {/* Both axes scroll: vertical for the row count, horizontal because
+                the grid keeps its declared column widths instead of squeezing
+                them. The Source column is sticky so a row stays identifiable
+                once it is scrolled sideways. */}
+            <div className="max-h-[58vh] overflow-auto border border-fd-line">
+              <table className="w-full table-fixed border-collapse" style={{ minWidth: TABLE_MIN_WIDTH }}>
+                <colgroup>
+                  {COLUMN_WIDTHS.map((width, i) => (
+                    <col key={i} style={{ width }} />
+                  ))}
+                </colgroup>
+                <thead className="sticky top-0 z-20 bg-fd-panel">
                   <tr className="border-b border-fd-line">
-                    <th className={TH}>Source</th>
+                    <th className={`${TH} sticky left-0 z-30 bg-fd-panel`}>Source</th>
                     <th className={TH}>CNC #</th>
+                    <th className={`${TH} border-l border-fd-line`}>Sheet part</th>
                     <th className={TH}>Material</th>
                     <th className={TH}>Thickness</th>
                     <th className={TH}>Sheet size</th>
-                    <th className={TH}>Sheet part</th>
-                    <th className={`${TH} text-right`}>Sheets/run</th>
+                    <th className={`${TH} border-l border-fd-line text-right`}>Sheets/run</th>
                     <th className={`${TH} text-right`}>Runs</th>
-                    <th className={TH}>WC</th>
-                    <th className={TH}>Conf.</th>
+                    <th className={`${TH} border-l border-fd-line`}>WC</th>
                     <th className={TH} aria-label="Remove" />
                   </tr>
                 </thead>
                 <tbody>
                   {rows.length === 0 && (
                     <tr>
-                      <td colSpan={11} className="px-3 py-6 text-center text-sm text-fd-mute">
+                      <td colSpan={10} className="px-3 py-6 text-center text-sm text-fd-mute">
                         No nests left to import. Re-preview a package or close.
                       </td>
                     </tr>
@@ -841,31 +1017,96 @@ export default function LaserNestImportWizard({
                       needsVerify ? `${base} — low confidence, verify` : base;
                     const pageRange =
                       row.source_pages && row.source_pages.length > 0 ? formatPageRange(row.source_pages) : null;
+                    const tiedPart = row.material_part_id != null ? partsById.get(row.material_part_id) : undefined;
+
+                    // A spec cell sourced from the tied part: derived styling wins
+                    // over the amber verify highlight, because the field is no
+                    // longer an unverified AI read — a human named the stock it
+                    // came from.
+                    const specCell = (field: SpecField, needsVerify: boolean) => {
+                      const derived = row.derived[field];
+                      if (!derived) {
+                        return {
+                          className: needsVerify ? CELL_INPUT_VERIFY : CELL_INPUT,
+                          title: needsVerify ? 'Low confidence — verify' : undefined,
+                          diverged: false,
+                        };
+                      }
+                      const partLabel = tiedPart ? sheetPartOptionLabel(tiedPart) : 'the tied sheet part';
+                      const diverged = derived.replaced.trim() !== '' && derived.replaced.trim() !== derived.value;
+                      return {
+                        className: CELL_INPUT_DERIVED,
+                        title: diverged
+                          ? `From ${partLabel}. The nest report was read as "${derived.replaced}" — check that the right sheet part is tied.`
+                          : `From ${partLabel}.`,
+                        diverged,
+                      };
+                    };
+                    const thicknessCell = specCell('thickness', verify.thickness);
+                    const sheetSizeCell = specCell('sheet_size', verify.sheet_size);
+
                     return (
                       <tr key={row.source_file} className="border-b border-fd-line align-top">
-                        <td className="px-3 py-2 text-xs text-fd-mute">
+                        <td className="sticky left-0 z-10 bg-fd-panel px-2 py-2 text-xs text-fd-mute">
                           {/* For PDF uploads the generated file name is noise — show the
                               page range and keep the file name as the tooltip. */}
-                          <span className="block max-w-[16rem] truncate" title={row.source_file}>
+                          <span className="block truncate font-medium text-fd-body" title={row.source_file}>
                             {pageRange ?? row.source_file}
                           </span>
                           {row.cnc_file_name && (
-                            <span className="block max-w-[16rem] truncate text-fd-faint" title={row.cnc_file_name}>
+                            <span className="block truncate text-fd-faint" title={row.cnc_file_name}>
                               {row.cnc_file_name}
                             </span>
                           )}
+                          {/* Confidence and the extraction warning are metadata
+                              about the row, not editable fields — they live with
+                              the row's identity instead of costing two columns
+                              the data fields need. */}
+                          {(badge || row.warning) && (
+                            <span className="mt-1 inline-flex items-center gap-1">
+                              {badge && (
+                                <span
+                                  className={`rounded-none border px-1 py-0.5 text-[10px] font-semibold uppercase ${badge.className}`}
+                                  title={`Extraction confidence: ${badge.label}`}
+                                >
+                                  {badge.label}
+                                </span>
+                              )}
+                              {row.warning && (
+                                <span
+                                  role="img"
+                                  aria-label={`Warning for ${row.source_file}: ${row.warning}`}
+                                  title={row.warning}
+                                  className="inline-flex cursor-help text-fd-amber"
+                                >
+                                  <ExclamationTriangleIcon className="h-3.5 w-3.5" aria-hidden="true" />
+                                </span>
+                              )}
+                            </span>
+                          )}
                         </td>
-                        <td className="px-3 py-2">
+                        <td className="px-2 py-2">
                           <input
                             type="text"
                             value={row.cnc_number}
                             onChange={(e) => updateField(index, 'cnc_number', e.target.value)}
-                            className={verify.cnc_number ? CELL_INPUT_VERIFY : CELL_INPUT}
+                            className={`${verify.cnc_number ? CELL_INPUT_VERIFY : CELL_INPUT} font-mono tracking-tight`}
                             aria-label={verifyLabel(`CNC number for ${row.source_file}`, verify.cnc_number)}
-                            title={verify.cnc_number ? 'Low confidence — verify' : undefined}
+                            title={verify.cnc_number ? 'Low confidence — verify' : row.cnc_number}
                           />
                         </td>
-                        <td className="px-3 py-2">
+                        <td className="border-l border-fd-line px-2 py-2">
+                          <SheetPartPicker
+                            ariaLabel={`Sheet part for ${row.source_file}`}
+                            parts={materials}
+                            onHandByPart={onHandByPart}
+                            extraOptions={extraMaterialOptions}
+                            value={row.material_part_id != null ? String(row.material_part_id) : ''}
+                            onChange={(value) => updateRowMaterialPart(index, value)}
+                            disabled={!hasPicker}
+                          />
+                        </td>
+                        <td className="px-2 py-2">
                           <input
                             type="text"
                             value={row.material}
@@ -875,43 +1116,59 @@ export default function LaserNestImportWizard({
                             title={verify.material ? 'Low confidence — verify' : undefined}
                           />
                         </td>
-                        <td className="px-3 py-2">
-                          <input
-                            type="text"
-                            value={row.thickness}
-                            onChange={(e) => updateField(index, 'thickness', e.target.value)}
-                            className={verify.thickness ? CELL_INPUT_VERIFY : CELL_INPUT}
-                            aria-label={verifyLabel(`Thickness for ${row.source_file}`, verify.thickness)}
-                            title={verify.thickness ? 'Low confidence — verify' : undefined}
-                          />
+                        <td className="px-2 py-2">
+                          <div className="relative">
+                            <input
+                              type="text"
+                              value={row.thickness}
+                              onChange={(e) => updateField(index, 'thickness', e.target.value)}
+                              className={`${thicknessCell.className} ${row.derived.thickness ? 'pr-6' : ''}`}
+                              // The verify suffix is suppressed once the value
+                              // comes from the tied part, matching what the
+                              // derived styling already tells a sighted user.
+                              // Announcing "low confidence, verify" on a field
+                              // a human sourced from named stock is the two
+                              // channels contradicting each other.
+                              aria-label={verifyLabel(
+                                `Thickness for ${row.source_file}`,
+                                verify.thickness && !row.derived.thickness
+                              )}
+                              title={thicknessCell.title}
+                            />
+                            {row.derived.thickness && (
+                              <LinkIcon
+                                className={`pointer-events-none absolute right-1.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 ${
+                                  thicknessCell.diverged ? 'text-fd-amber' : 'text-fd-blue'
+                                }`}
+                                aria-hidden="true"
+                              />
+                            )}
+                          </div>
                         </td>
-                        <td className="px-3 py-2">
-                          <input
-                            type="text"
-                            value={row.sheet_size}
-                            onChange={(e) => updateField(index, 'sheet_size', e.target.value)}
-                            className={verify.sheet_size ? CELL_INPUT_VERIFY : CELL_INPUT}
-                            aria-label={verifyLabel(`Sheet size for ${row.source_file}`, verify.sheet_size)}
-                            title={verify.sheet_size ? 'Low confidence — verify' : undefined}
-                          />
+                        <td className="px-2 py-2">
+                          <div className="relative">
+                            <input
+                              type="text"
+                              value={row.sheet_size}
+                              onChange={(e) => updateField(index, 'sheet_size', e.target.value)}
+                              className={`${sheetSizeCell.className} ${row.derived.sheet_size ? 'pr-6' : ''}`}
+                              aria-label={verifyLabel(
+                                `Sheet size for ${row.source_file}`,
+                                verify.sheet_size && !row.derived.sheet_size
+                              )}
+                              title={sheetSizeCell.title}
+                            />
+                            {row.derived.sheet_size && (
+                              <LinkIcon
+                                className={`pointer-events-none absolute right-1.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 ${
+                                  sheetSizeCell.diverged ? 'text-fd-amber' : 'text-fd-blue'
+                                }`}
+                                aria-hidden="true"
+                              />
+                            )}
+                          </div>
                         </td>
-                        <td className="px-3 py-2">
-                          <select
-                            value={row.material_part_id != null ? String(row.material_part_id) : ''}
-                            onChange={(e) => updateRowMaterialPart(index, e.target.value)}
-                            disabled={materialOptions.length === 0}
-                            className={`${CELL_INPUT} min-w-[10rem] max-w-[18rem] disabled:opacity-50`}
-                            aria-label={`Sheet part for ${row.source_file}`}
-                          >
-                            <option value="">(none)</option>
-                            {materialOptions.map((option) => (
-                              <option key={option.id} value={String(option.id)}>
-                                {option.label}
-                              </option>
-                            ))}
-                          </select>
-                        </td>
-                        <td className="px-3 py-2">
+                        <td className="border-l border-fd-line px-2 py-2">
                           <input
                             type="number"
                             min={0}
@@ -919,27 +1176,33 @@ export default function LaserNestImportWizard({
                             value={row.qty_per_run}
                             onChange={(e) => updateRowQtyPerRun(index, e.target.value)}
                             disabled={row.material_part_id == null}
-                            className={`${CELL_INPUT} w-20 text-right tabular-nums disabled:opacity-50`}
+                            className={`${CELL_INPUT} text-right tabular-nums disabled:opacity-50`}
                             aria-label={`Sheets per run for ${row.source_file}`}
                           />
                         </td>
-                        <td className="px-3 py-2">
+                        <td className="px-2 py-2">
                           <input
                             type="number"
                             min={1}
                             step={1}
                             value={row.planned_runs}
                             onChange={(e) => updateField(index, 'planned_runs', e.target.value)}
-                            className={`${verify.planned_runs ? CELL_INPUT_VERIFY : CELL_INPUT} w-20 text-right tabular-nums`}
+                            className={`${verify.planned_runs ? CELL_INPUT_VERIFY : CELL_INPUT} text-right tabular-nums`}
                             aria-label={verifyLabel(`Runs for ${row.source_file}`, verify.planned_runs)}
-                            title={verify.planned_runs ? 'Low confidence — verify' : undefined}
+                            title={
+                              runsNotRead(row)
+                                ? 'No run count was found on this sheet — defaulted to 1. Verify against the nest report.'
+                                : verify.planned_runs
+                                  ? 'Low confidence — verify'
+                                  : undefined
+                            }
                           />
                         </td>
-                        <td className="px-3 py-2">
+                        <td className="border-l border-fd-line px-2 py-2">
                           <select
                             value={row.work_center_id != null ? String(row.work_center_id) : ''}
                             onChange={(e) => updateRowWorkCenter(index, e.target.value)}
-                            className={`${CELL_INPUT} min-w-[8rem]`}
+                            className={CELL_INPUT}
                             aria-label={`Work center for ${row.source_file}`}
                           >
                             <option value="">package default</option>
@@ -950,37 +1213,15 @@ export default function LaserNestImportWizard({
                             ))}
                           </select>
                         </td>
-                        <td className="px-3 py-2">
-                          <span className="inline-flex items-center gap-1">
-                            {badge ? (
-                              <span
-                                className={`rounded-none border px-1.5 py-0.5 text-[10px] font-semibold uppercase ${badge.className}`}
-                              >
-                                {badge.label}
-                              </span>
-                            ) : (
-                              <span className="text-xs text-fd-faint">—</span>
-                            )}
-                            {row.warning && (
-                              <span
-                                role="img"
-                                aria-label={`Warning for ${row.source_file}: ${row.warning}`}
-                                title={row.warning}
-                                className="inline-flex cursor-help text-fd-amber"
-                              >
-                                <ExclamationTriangleIcon className="h-4 w-4" aria-hidden="true" />
-                              </span>
-                            )}
-                          </span>
-                        </td>
-                        <td className="px-3 py-2 text-right">
+                        <td className="px-2 py-2 text-right">
                           <button
                             type="button"
                             onClick={() => removeRow(index)}
                             className="text-fd-mute hover:text-fd-red"
                             aria-label={`Remove ${row.source_file}`}
+                            title={`Remove ${row.source_file}`}
                           >
-                            Remove
+                            <TrashIcon className="h-4 w-4" aria-hidden="true" />
                           </button>
                         </td>
                       </tr>

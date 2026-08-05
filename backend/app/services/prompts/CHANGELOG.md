@@ -4,6 +4,30 @@ Bump a prompt's semver `version` and add an entry here whenever its text or
 request layout changes. The version string is recorded on `AIUsageEvent`
 (every API call) and on `AIInteractionEvent`/`AIRecommendation` learning rows.
 
+## 2026-08-05
+
+- `laser_nest_extraction` 1.1.0 → 1.2.0 and `laser_nest_verification` 1.0.0 →
+  1.1.0 — `planned_runs` guidance only; the other four fields are untouched and
+  the request layout is unchanged. Both prompts previously described the field
+  in one line ("the sheet or run count, if the sheet states one"), and it was
+  the field the extractor missed by a wide margin: a 42-nest package came back
+  with the count defaulted on essentially every row. The schema line and both
+  system prompts now (a) define it as how many times the WHOLE nest is cut,
+  (b) list the label vocabulary CAM post-processors actually print ("Sheets",
+  "No. of Sheets", "Sheets Required", "Sheet Qty", "Nest Qty", "Qty", "Repeat",
+  "Repetitions", "Runs", "Cycles", …) and say to match on meaning rather than
+  exact wording, (c) name the specific confusion to avoid — the parts table's
+  per-sheet and total PART quantities, which are not sheet repeats — and forbid
+  deriving the count by dividing one by the other, and (d) require null +
+  confidence "low" when the sheet states no count, explicitly rather than
+  defaulting to 1. That last point matters downstream: `planned_runs` is a
+  non-optional int on the wire (floored at 1 by `_coerce_planned_runs`), so
+  `field_confidence["planned_runs"]` is the ONLY thing separating "reads 1" from
+  "not found", and the import wizard now counts and labels the not-found rows.
+  The verification prompt carries the same guidance on purpose — the merge
+  policy hands a conflict to the VERIFIER's value, so a verifier that mistook a
+  part quantity for a run count would overwrite a correct first read.
+
 ## 2026-07-20
 
 - `laser_nest_segmentation` 1.0.0 — new prompt (pass 0 of the multi-page bare-PDF

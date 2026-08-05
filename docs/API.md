@@ -1226,9 +1226,9 @@ mixed**:
 > (vision)**: the PDF bytes are sent to Claude as a base64 `document` content block so the model
 > reads the rendered sheet with its 2-D layout (PDFs over a ~20 MB native cap, or whose bytes can't
 > be read, fall back to flattened-text extraction). Extraction is **two-pass** everywhere PDFs are
-> extracted (both entry points below): the extraction pass (prompt `laser_nest_extraction` 1.1.0,
+> extracted (both entry points below): the extraction pass (prompt `laser_nest_extraction` 1.2.0,
 > `feature="laser_nest_extraction"`) plus an **independent verification pass** (prompt
-> `laser_nest_verification` 1.0.0, `feature="laser_nest_verification"`, same routing task) that
+> `laser_nest_verification` 1.1.0, `feature="laser_nest_verification"`, same routing task) that
 > re-reads the same sheet; the two reads are merged per field — agreement → **high** confidence, a
 > one-sided null → the non-null value at **medium**, a conflict → the **verifier's** value at
 > **low**, both null → null at **low** — and the overall `confidence` is the minimum across fields.
@@ -1328,6 +1328,18 @@ mixed**:
 >   `cnc_number` for bare-PDF segments; the planner fills the rest manually) and bare-PDF
 >   segmentation defaults to one nest per page — the page split itself is local `pypdf` and keeps
 >   working.
+> - **`planned_runs` reads differently on the two entry points, and the difference is load-bearing.**
+>   The stateless single-PDF `POST /laser-nests/extract` passes the model's value straight through, so
+>   it returns **`null`** when no run count was found. **Preview rows do not**: `LaserNestPreviewRow`
+>   types `planned_runs` as a non-optional `int` and `_coerce_planned_runs` **floors it at 1**, so a
+>   nest that genuinely runs once and a nest whose count neither pass could find are the **same `1`**
+>   in the response. `field_confidence["planned_runs"] == "low"` is the **only** signal that separates
+>   them — read the confidence, never the number, and the import wizard accordingly counts and labels
+>   those rows rather than presenting them as read values. Accepted coercion shapes (widened
+>   2026-08-05, since a model asked for one integer emits all of these): `3`, `3.0`, `"3"`, `"x3"`,
+>   `"3 sheets"`, `"3 of 5"` — a **leading** integer is required for the free-text case, so `"sheet 4"`
+>   reads as 1 rather than mistaking a label for a count. Anything else (a fractional float, junk,
+>   missing) falls back to 1 rather than raising and 400-ing the whole preview batch.
 >
 > **Manual nest create (`POST /work-orders/{id}/laser-nests/manual`).** Body: `cnc_number`
 > (required, 1–100 chars), `planned_runs` (required, **≥ 1**), and optional `nest_name`,
