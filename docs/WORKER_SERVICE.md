@@ -34,17 +34,30 @@ set correctly.
 
 So on a deployment provisioned from those docs — set `REDIS_URL`, which is the single
 string Railway hands you, and nothing else — the queue resolved to `localhost:6379`. Every
-enqueue failed with `ConnectionRefused`. **Nothing was queued. There is no Redis backlog.**
+enqueue failed with `ConnectionRefused`. **Nothing was queued.**
 And `/health/ready` reported `redis: healthy` throughout, because it pings `REDIS_URL`.
+
+> **"There is no Redis backlog" was true only until the fix deployed.** That sentence
+> described the state *while the enqueue side was broken*. The fix shipped to production on
+> 2026-08-04 (PR #201, `50d8d1c`), and from that moment the API enqueued successfully into
+> `arq:queue` with no consumer, so a backlog did begin to accumulate — self-bounding at 24 h,
+> because arq gives job payloads a 24-hour TTL (`expires_extra_ms = 86_400_000`) and pops
+> anything older as "job expired". Measured directly before the worker's first boot on
+> 2026-08-05: **4 jobs**, all enqueued within the preceding hour. Not three weeks of work.
 
 What that cost while it was broken:
 
 | Path | Symptom |
 |---|---|
-| `POST /scheduling/run-background` | **500 after ~5 s.** The only user-visible hard break — `enqueue_job` is awaited with no try/except. |
-| PO receiving, WO completion, visitor check-in | Silent ~5 s latency tax per action (arq's 5 × 1 s connect retries), then swallowed. |
+| `POST /scheduling/run-background` | **500 after ~11 s.** The only user-visible hard break — `enqueue_job` is awaited with no try/except. |
+| PO receiving, WO completion, visitor check-in | Silent ~11 s latency tax per action, then swallowed. |
 | Notification outbox (`after_commit`) | Silent ~1 s tax (fast-fail path), then swallowed. |
 | Everything else | No background work of any kind. |
+
+> The **~11 s** figures were documented as "~5 s" until 2026-08-05. `arq/connections.py:271-299`
+> retries `conn_retries` times *after* the first attempt, so the default budget is
+> 6 attempts × 1 s + 5 sleeps × 1 s = 11 s, not 5 × 1 s. Any earlier decision citing ~5 s was
+> made against a number 2.2× low.
 
 ### Fixed in the code
 
@@ -57,6 +70,60 @@ and `WorkerSettings` call the same `get_redis_settings()`, and
 A worker whose Redis resolves to the localhost default in `production`/`staging` now
 **refuses to start** (`assert_redis_configured`, raised at import of `app.worker`, before
 arq builds anything). "Started successfully and consumed nothing" is no longer reachable.
+
+### Redis transport profiles — same target, different patience
+
+Added 2026-08-05 after the worker's **first production boot crashed 22 seconds in**:
+
+```
+redis.exceptions.TimeoutError: Timeout connecting to server
+  redis/asyncio/connection.py:296   connect()
+  redis/asyncio/client.py:1567      pipeline execute -> NEW pooled connection
+  arq/worker.py:488                 run_job's FIRST pipeline
+  arq/worker.py:404                 t.result()   <- bare, no filter -> process exit
+```
+
+That pipeline is arq's own job bookkeeping and sits **outside** `run_job`'s broad `except`
+(which does not begin until `arq/worker.py:518`), and `_poll_iteration` re-raises
+unconditionally — so **any** Redis blip during bookkeeping kills the process by arq's
+design. The worker cannot rely on arq tolerating a blip; it has to not see one.
+
+`get_redis_settings(profile=...)` now returns three transport profiles. **All three resolve
+the same target** — the parity property is unchanged and is now stated over `TARGET_FIELDS`
+(which Redis) rather than whole-object equality, with `TRANSPORT_FIELDS` (how long we wait)
+allowed to differ and pinned to a declared list. The two lists together must cover every
+field arq has, which is itself a test.
+
+| Profile | Used by | `conn_timeout` | `conn_retries` | `retry_on_timeout` |
+|---|---|---|---|---|
+| `REQUEST` (default) | API enqueues | 1 s | 5 | `False` |
+| `COMMIT_PATH` (= `fast_fail=True`) | notification outbox, in a request's commit path | 1 s | 0 | `False` |
+| `WORKER` | `WorkerSettings` only | 5 s | 1 | **`True`** |
+
+**`retry_on_timeout=True` is load-bearing and not optional.** Passing `retry=` alone is a
+measured no-op: redis-py raises its own `redis.exceptions.TimeoutError` at
+`connection.py:296`, **outside** `call_with_retry`, and that class is *not* a subclass of the
+builtin `TimeoutError` the retry policy knows about. Measured against a blackholed IP on a
+connection built exactly as arq builds it:
+
+| Configuration | Attempts | Elapsed |
+|---|---|---|
+| arq defaults (`conn_timeout=1`) | 1 | **1.00 s → dead** |
+| `retry=Retry(ExponentialBackoff, 3)` alone | 1 | 5.00 s — **no-op, never fires** |
+| `retry_on_timeout=True` alone | 2 | 10.00 s |
+| both (the `WORKER` profile) | 4 | **27.01 s** |
+
+This converts "dies at 1 s" into "dies at 27 s". It is deliberately **not** a guarantee — an
+outage longer than ~27 s still kills the process, and `restartPolicyMaxRetries` stays at
+**3** so a genuinely broken Redis still surfaces as a loud Railway *Crashed* deployment
+rather than being absorbed silently.
+
+**What this does not fix:** `arq.connections.create_pool` sets only `socket_connect_timeout`;
+`socket_timeout` stays `None` on every connection, on the worker and on every request-path
+enqueue. A Redis that accepts TCP and then goes silent blocks **forever** at any
+`conn_timeout`. `RedisSettings` exposes no `socket_timeout` field, and reaching it means
+bypassing `create_pool` via `Worker(redis_pool=...)`, which sets `self.redis_settings = None`
+and destroys the parity guard outright. Named here, deliberately not fixed.
 
 ---
 

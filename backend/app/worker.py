@@ -37,7 +37,7 @@ from arq.cron import CronJob
 
 from app.core.config import settings
 from app.core.observability import init_sentry
-from app.core.queue import assert_redis_configured, get_redis_settings, redis_config_warnings
+from app.core.queue import RedisProfile, assert_redis_configured, get_redis_settings, redis_config_warnings
 
 # Import for side effects: attaches the transactional-outbox SQLAlchemy Session listeners
 # in the worker process so operational events committed here (e.g. cron writes) also tee
@@ -507,7 +507,14 @@ class WorkerSettings:
     # Redis connection -- the SAME resolver the enqueue side uses (app/core/queue.py), which
     # is what makes "the API enqueues where the worker listens" true by construction rather
     # than by two configs happening to agree. Guarded by tests/test_worker_redis_parity.py.
-    redis_settings = get_redis_settings()
+    #
+    # The WORKER profile differs from the enqueue side ONLY in transport tuning (how long it
+    # waits for Redis), never in which Redis it reaches -- the parity guard enforces exactly
+    # that split. It exists because arq re-raises a Redis blip during its own job bookkeeping
+    # straight out of _poll_iteration and kills the process; this worker's first production
+    # boot died that way on 2026-08-05, 22 seconds in. See RedisProfile in app/core/queue.py
+    # for the traceback, the measurements, and why retry_on_timeout is load-bearing.
+    redis_settings = get_redis_settings(profile=RedisProfile.WORKER)
 
     # Job functions
     functions = [

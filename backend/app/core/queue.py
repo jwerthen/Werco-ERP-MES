@@ -24,8 +24,10 @@ Resolution order is now, in both the enqueueing process and the worker process:
    what makes the docker-compose worker -- which is handed ``REDIS_PASSWORD`` but no URL --
    able to authenticate against ``redis-server --requirepass``.
 
-Both the API and the worker call ``get_redis_settings()``, so the two sides cannot drift.
-``tests/test_worker_redis_parity.py`` is the regression guard.
+Both the API and the worker call ``get_redis_settings()``, so the two sides cannot drift in
+WHICH REDIS THEY REACH. They may differ in how patiently they wait for it -- see
+``RedisProfile`` below -- and that divergence is itself confined to ``TRANSPORT_FIELDS`` and
+machine-checked. ``tests/test_worker_redis_parity.py`` is the regression guard for both.
 """
 
 from __future__ import annotations
@@ -34,10 +36,13 @@ import asyncio
 import dataclasses
 import logging
 from dataclasses import dataclass
+from enum import Enum
 from typing import List, Optional, Tuple
 
 from arq import create_pool
 from arq.connections import ArqRedis, RedisSettings
+from redis.asyncio.retry import Retry
+from redis.backoff import ExponentialBackoff
 
 from app.core.config import settings
 
@@ -53,6 +58,110 @@ _DEPLOYED_ENVIRONMENTS = {"production", "staging"}
 SOURCE_URL = "REDIS_URL"
 SOURCE_PARTS = "REDIS_HOST/REDIS_PORT/REDIS_DB"
 SOURCE_DEFAULTS = "defaults(localhost)"
+
+# ---------------------------------------------------------------------------
+# Target vs transport: which Redis, versus how patiently we wait for it.
+#
+# The root-cause defect above was a TARGET divergence -- the enqueue side reached
+# localhost while the worker (and /health/ready) reached the real Redis. Any disagreement
+# in these fields means the system is silently broken, so parity over them is absolute.
+#
+# TRANSPORT fields structurally CANNOT change which Redis is reached; they only decide how
+# long a process waits before giving up. A worker that dies rather than waiting is a
+# different (and worse) failure than a request handler that waits rather than failing fast,
+# so these legitimately differ per profile.
+#
+# Together these must cover every field arq's RedisSettings has -- a field in neither bucket
+# would be silently unguarded. test_the_field_partition_is_exhaustive holds that, as a TEST
+# rather than an import-time assert: an arq upgrade that adds a field should fail CI, not
+# take the API down at boot.
+# ---------------------------------------------------------------------------
+TARGET_FIELDS = (
+    "host",
+    "port",
+    "unix_socket_path",
+    "database",
+    "username",
+    "password",
+    "ssl",
+    "ssl_keyfile",
+    "ssl_certfile",
+    "ssl_cert_reqs",
+    "ssl_ca_certs",
+    "ssl_ca_data",
+    "ssl_check_hostname",
+    "sentinel",
+    "sentinel_master",
+)
+TRANSPORT_FIELDS = (
+    "conn_timeout",
+    "conn_retries",
+    "conn_retry_delay",
+    "max_connections",
+    "retry_on_timeout",
+    "retry_on_error",
+    "retry",
+)
+
+
+class RedisProfile(str, Enum):
+    """How patiently a given process waits for Redis. Never which Redis."""
+
+    #: Today's default, unchanged: arq's conn_timeout=1, conn_retries=5, conn_retry_delay=1.
+    REQUEST = "request"
+    #: Enqueues inside a request's commit path -- fail fast, the relay sweeper backstops.
+    COMMIT_PATH = "commit_path"
+    #: The arq worker process. See WORKER below for why it needs its own profile.
+    WORKER = "worker"
+
+
+# WHY THE WORKER NEEDS ITS OWN PROFILE (2026-08-05 incident).
+#
+# The worker's first-ever production boot crashed 22 seconds in:
+#
+#     redis.exceptions.TimeoutError: Timeout connecting to server
+#       redis/asyncio/connection.py:296  connect()
+#       redis/asyncio/client.py:1567     pipeline execute -> NEW pooled connection
+#       arq/worker.py:488                run_job's FIRST pipeline
+#       arq/worker.py:404                t.result()  <- bare, no filter -> process exit
+#
+# That pipeline sits OUTSIDE run_job's broad ``except`` (which does not begin until
+# arq/worker.py:518), and _poll_iteration re-raises unconditionally, so a Redis blip during
+# arq's own job bookkeeping is an unconditional process kill by arq's design. The worker
+# cannot rely on arq tolerating a blip; it has to not see one.
+#
+# ``retry_on_timeout=True`` IS LOAD-BEARING AND NOT OPTIONAL. Passing ``retry=`` alone is a
+# measured no-op: redis-py raises its OWN ``redis.exceptions.TimeoutError`` at
+# connection.py:296, OUTSIDE ``call_with_retry``, and that class is NOT a subclass of the
+# builtin ``TimeoutError`` the retry policy knows about. Measured against a blackholed IP on
+# a connection built exactly as arq builds it:
+#
+#     arq defaults (conn_timeout=1)                 0 retries    1.00s  -> dead
+#     retry=Retry(ExponentialBackoff, 3) alone      3 retries    5.00s  -> NO-OP, never fires
+#     retry_on_timeout=True alone                   1 retry     10.00s
+#     retry=Retry(...) + retry_on_timeout=True      3 retries   27.01s  <- this profile
+#
+# This converts "dies at 1s" into "dies at 27s". It is not a guarantee: an outage longer
+# than ~27s still kills the process, which is the correct posture -- Railway's
+# restartPolicyMaxRetries stays at 3 so a genuinely broken Redis still surfaces as a loud
+# Crashed deployment rather than being absorbed silently.
+#
+# conn_retries=1 (down from arq's 5) CAPS the widening rather than shortening anything:
+# each outer attempt is now internally ~27s, so 1 retry gives ~55s of startup budget where
+# leaving it at 5 would give ~167s.
+#
+# Module-level, not per-call: ``Retry`` defines __slots__ and no ``__eq__``, so a fresh
+# instance per call would compare by identity.
+_WORKER_CONNECT_RETRY = Retry(ExponentialBackoff(cap=5, base=0.5), 3)
+
+
+def redis_target_divergence(a: RedisSettings, b: RedisSettings) -> List[str]:
+    """Target fields on which two resolutions disagree. Empty list == the same Redis.
+
+    This is the parity property, stated over the fields that actually carry it. Whole-object
+    equality conflates it with transport tuning, which is allowed to differ per profile.
+    """
+    return [name for name in TARGET_FIELDS if getattr(a, name) != getattr(b, name)]
 
 
 class RedisConfigurationError(RuntimeError):
@@ -111,18 +220,46 @@ def _resolve() -> Tuple[RedisSettings, str]:
     return resolved, source
 
 
-def get_redis_settings(fast_fail: bool = False) -> RedisSettings:
+def get_redis_settings(*, profile: Optional[RedisProfile] = None, fast_fail: bool = False) -> RedisSettings:
     """Get Redis settings for ARQ. Used by BOTH the enqueue side and ``WorkerSettings``.
 
-    ``fast_fail=True`` collapses arq's default reconnect budget (5 retries with a
-    1s delay + 1s connect timeout each, ~5s worst case) to a single ~1s attempt.
-    Used by enqueues that run inside a request's commit path (the notification
-    transactional outbox, §3.1): a Redis outage there must fail fast rather than
-    stall the committing thread for ~5s. Delivery is not lost -- the 5-min relay
-    sweeper re-enqueues any event still marked ``notified_at IS NULL``.
+    All profiles resolve the SAME target; they differ only in ``TRANSPORT_FIELDS``.
+
+    ``profile=RedisProfile.COMMIT_PATH`` (and its retained alias ``fast_fail=True``)
+    collapses arq's default reconnect budget to a single ~1s attempt. Used by enqueues that
+    run inside a request's commit path (the notification transactional outbox, §3.1): a
+    Redis outage there must fail fast rather than stall the committing thread. Delivery is
+    not lost -- the 5-min relay sweeper re-enqueues any event still ``notified_at IS NULL``.
+
+    That default budget is **~11s**, not the "~5s" this docstring claimed until 2026-08-05:
+    ``arq/connections.py:271-299`` retries ``conn_retries`` times *after* the first attempt,
+    so it is 6 attempts x 1s + 5 sleeps x 1s. Decisions citing ~5s were made against a
+    number 2.2x low.
+
+    ``profile=RedisProfile.WORKER`` is the arq worker's transport -- see ``_WORKER_CONNECT_RETRY``
+    above for the incident that required it and the measurements behind each value.
+
+    ``profile`` is keyword-only on purpose: positionally, ``get_redis_settings(True)`` would
+    silently mean ``profile=True`` and return the REQUEST profile.
     """
+    if profile is RedisProfile.WORKER and fast_fail:
+        raise ValueError(
+            "fast_fail is meaningless for RedisProfile.WORKER: one wants a wide connect "
+            "budget, the other the narrowest possible. Pick one."
+        )
+
     resolved, _source = _resolve()
-    if fast_fail:
+
+    if profile is RedisProfile.WORKER:
+        return dataclasses.replace(
+            resolved,
+            conn_timeout=5,
+            conn_retries=1,
+            retry_on_timeout=True,
+            retry=_WORKER_CONNECT_RETRY,
+        )
+
+    if fast_fail or profile is RedisProfile.COMMIT_PATH:
         resolved = dataclasses.replace(
             resolved,
             conn_retries=0,
