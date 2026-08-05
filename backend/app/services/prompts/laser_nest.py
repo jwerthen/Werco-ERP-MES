@@ -18,7 +18,7 @@ LASER_NEST_EXTRACTION_SCHEMA = """
   "material": "string or null - the material grade (e.g. 'A36', '304SS', 'Stainless Steel')",
   "thickness": "string or null - material thickness, include units when present (e.g. '0.25in', '0.063')",
   "sheet_size": "string or null - sheet/material size (e.g. '48x96' or a single dimension like '72.5')",
-  "planned_runs": "integer or null - the sheet/run count if stated on the sheet",
+  "planned_runs": "integer or null - how many times this WHOLE nest is cut (sheets/repeats). NOT a part quantity",
   "confidence": {
     "cnc_number": "high, medium, or low",
     "material": "high, medium, or low",
@@ -39,7 +39,15 @@ Extract these fields:
 2. material - the material grade only (e.g. "A36", "SS", "304SS", "Stainless Steel"). This is NOT the machine name.
 3. thickness - the material thickness; preserve units when present (e.g. "0.25in", "0.063", "0.135"). Units are often implied as inches.
 4. sheet_size - the sheet/material size; this may be a single dimension (e.g. "72.5") or two numbers (e.g. "96x48").
-5. planned_runs - the sheet or run count, if the sheet states one. Otherwise null.
+5. planned_runs - how many times this WHOLE nest is cut. See the dedicated section below; this field is missed far more often than the others.
+
+Finding planned_runs (the run / sheet count):
+- Definition: the number of times the ENTIRE nest is run, i.e. how many identical sheets get cut from this program. It is almost always a small integer (1-50).
+- It is the value next to a label such as: "Sheets", "No. of Sheets", "Number of Sheets", "Sheets Required", "Sheet Qty", "Qty", "Quantity", "Nest Qty", "Repeat", "Repeats", "Repetitions", "Runs", "Cycles", "Programs", "Plates", "Blanks Required". Label wording varies by CAM post-processor — match on meaning, not on an exact string.
+- CRITICAL — do NOT confuse it with a PART quantity. A nest report also lists the individual parts on the sheet with their own per-sheet and total quantities (often in a parts table with columns like "Part No / Qty / Qty per Sheet / Total Qty"). Those describe PARTS, not sheet repeats. planned_runs is a property of the SHEET.
+- If the sheet shows both a per-sheet part quantity and a total part quantity, planned_runs is NEITHER of them — it is the separate sheet/nest repeat count, if one is stated at all.
+- Do not compute or infer it by dividing a total quantity by a per-sheet quantity. Report only a figure the sheet itself states.
+- If the sheet genuinely states no run/sheet count, return null with confidence "low". Never default it to 1 — a stated 1 and an unstated count are different answers, and the system distinguishes them.
 
 Key extraction guidance:
 - The material grade often sits on a DIFFERENT line or in a different block than the CNC number and thickness — frequently on the machine line (e.g. "Ermaksan Laser / Beckhoff A36 ..."). Do not confuse the machine name with the material grade.
@@ -52,7 +60,7 @@ Return ONLY valid JSON matching the schema. No explanations or markdown."""
 
 LASER_NEST_EXTRACTION_PROMPT = Prompt(
     id="laser_nest_extraction",
-    version="1.1.0",
+    version="1.2.0",
     text=_SYSTEM_PROMPT_TEXT,
 )
 
@@ -88,7 +96,7 @@ Extract these fields, each from its own labeled position on the sheet:
 2. material - the material grade only (e.g. "A36", "304SS", "Stainless Steel"). This is NOT the machine name; the grade often sits on the machine line, in a different block than the CNC number and thickness.
 3. thickness - the material thickness; preserve units when present (e.g. "0.25in", "0.063").
 4. sheet_size - the sheet/material size; may be one dimension ("72.5") or two ("96x48").
-5. planned_runs - the sheet or run count, if the sheet states one. Otherwise null.
+5. planned_runs - how many times the WHOLE nest is cut (the sheet/run/repeat count), if the sheet states one. Look for a label such as "Sheets", "No. of Sheets", "Sheets Required", "Sheet Qty", "Nest Qty", "Qty", "Repeat", "Repetitions", "Runs" or "Cycles" — match on meaning, not exact wording. This is a property of the SHEET: it is NOT any quantity from the parts table (per-sheet or total part quantities describe parts, not sheet repeats), and it is never computed by dividing one by the other. If the sheet states no such count, return null with confidence "low" rather than defaulting to 1.
 
 Rules:
 - Keep adjacent numeric fields (CNC number, sheet size, thickness) separate — never merge neighboring numbers. In flattened text they may be glued together with no delimiters; be especially careful there.
@@ -99,6 +107,6 @@ Return ONLY valid JSON matching the schema you are given. No explanations or mar
 
 LASER_NEST_VERIFICATION_PROMPT = Prompt(
     id="laser_nest_verification",
-    version="1.0.0",
+    version="1.1.0",
     text=_VERIFICATION_PROMPT_TEXT,
 )

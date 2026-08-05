@@ -29,6 +29,10 @@ export type { InputDialogProps } from './InputDialog';
 export { Breadcrumbs } from './Breadcrumbs';
 export type { Crumb } from './Breadcrumbs';
 
+// Searchable single-select — the type-ahead alternative to a long <select>.
+export { ComboBox } from './ComboBox';
+export type { ComboBoxProps, ComboBoxOption } from './ComboBox';
+
 // Generic data table (sort / paginate / select / CSV / responsive / grouped)
 export { DataTable, buildCsv, partitionGroups } from './DataTable';
 export type {

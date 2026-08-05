@@ -26,6 +26,12 @@ import { render, screen, fireEvent, waitFor, within } from '@testing-library/rea
 import LaserNestImportWizard from './LaserNestImportWizard';
 import { LaserNestPackagePreview, MaterialAllocation, Part } from '../../types';
 import api from '../../services/api';
+import {
+  comboBoxListbox,
+  expectComboBoxOptions,
+  openComboBox,
+  selectComboBoxOption,
+} from '../../test-utils/comboBox';
 
 jest.mock('../../services/api', () => ({
   __esModule: true,
@@ -130,8 +136,22 @@ async function previewPackage() {
   await waitFor(() => expect(mockApi.getMaterials).toHaveBeenCalled());
 }
 
-const optionLabels = (select: HTMLElement): string[] =>
-  Array.from((select as HTMLSelectElement).options).map((option) => option.textContent ?? '');
+/** The label a committed pick shows in the picker's trigger. */
+const SHEET_304_LABEL = 'SHT-304-125 — 304 SS 0.125 Sheet';
+
+/**
+ * The sheet-part picker for one nest row, once the material list has landed.
+ *
+ * The picker is a searchable combobox, not a `<select>`: it renders disabled
+ * until `/materials` resolves, and its options only exist while the popup is
+ * open. Waiting on `toBeEnabled` is what keeps these tests from opening an
+ * empty list and asserting on nothing.
+ */
+async function rowPicker(sourceFile: string): Promise<HTMLElement> {
+  const picker = await screen.findByLabelText(`Sheet part for ${sourceFile}`);
+  await waitFor(() => expect(picker).toBeEnabled());
+  return picker;
+}
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -160,13 +180,16 @@ describe('sheet-part picker', () => {
     // Read once per wizard open, never per row/keystroke.
     expect(mockApi.getInventorySummary).toHaveBeenCalledTimes(1);
 
-    const rowSelect = await screen.findByLabelText('Sheet part for sheet-1.pdf');
-    await waitFor(() => expect(optionLabels(rowSelect)).toHaveLength(3)); // (none) + 2 parts
-    expect(optionLabels(rowSelect)).toEqual([
-      '(none)',
-      'SHT-304-125 — 304 SS 0.125 Sheet (12 EA on hand)',
+    const picker = await rowPicker('sheet-1.pdf');
+    openComboBox(picker);
+    // (none) + 2 parts. Asserted by ACCESSIBLE NAME, which is label + on-hand
+    // hint the way a screen reader announces it — the hint is its own element
+    // now, not a suffix baked into one option string.
+    expectComboBoxOptions(picker, [
+      '(none — untied)',
+      'SHT-304-125 — 304 SS 0.125 Sheet 12 EA on hand',
       // No stock row => genuinely zero on hand (the summary only returns > 0).
-      'SHT-AL-090 — AL 6061 0.090 Sheet (0 EA on hand)',
+      'SHT-AL-090 — AL 6061 0.090 Sheet 0 EA on hand',
     ]);
     // "available" is quantity_allocated-dependent and that column is never
     // written — the hint must not claim it.
@@ -189,7 +212,7 @@ describe('sheet-part picker', () => {
 
     const qty = screen.getByLabelText('Sheets per run for sheet-1.pdf');
     expect(qty).toBeDisabled();
-    fireEvent.change(await screen.findByLabelText('Sheet part for sheet-1.pdf'), { target: { value: '31' } });
+    selectComboBoxOption(await rowPicker('sheet-1.pdf'), /SHT-304-125/);
     expect(qty).toBeEnabled();
   });
 });
@@ -199,12 +222,13 @@ describe('package-level default', () => {
     render(<LaserNestImportWizard open workOrderId={42} onClose={jest.fn()} onImported={jest.fn()} />);
     await previewPackage();
 
-    fireEvent.change(await screen.findByLabelText('Sheet part'), { target: { value: '31' } });
+    await rowPicker('sheet-1.pdf'); // materials loaded
+    selectComboBoxOption(screen.getByLabelText('Sheet part'), /SHT-304-125/);
     fireEvent.change(screen.getByLabelText('Sheets / run'), { target: { value: '2' } });
     fireEvent.click(screen.getByRole('button', { name: /apply to all rows/i }));
 
-    expect(screen.getByLabelText('Sheet part for sheet-1.pdf')).toHaveValue('31');
-    expect(screen.getByLabelText('Sheet part for sheet-2.pdf')).toHaveValue('31');
+    expect(screen.getByLabelText('Sheet part for sheet-1.pdf')).toHaveValue(SHEET_304_LABEL);
+    expect(screen.getByLabelText('Sheet part for sheet-2.pdf')).toHaveValue(SHEET_304_LABEL);
     expect(screen.getByLabelText('Sheets per run for sheet-1.pdf')).toHaveValue(2);
 
     // 2/run x (5 + 2) runs = 14 sheets, each nest's share deducted as ITS
@@ -218,9 +242,14 @@ describe('package-level default', () => {
     render(<LaserNestImportWizard open workOrderId={42} onClose={jest.fn()} onImported={jest.fn()} />);
     await previewPackage();
 
-    fireEvent.change(await screen.findByLabelText('Sheet part'), { target: { value: '31' } });
+    await rowPicker('sheet-1.pdf'); // materials loaded
+    // A real commit on the package picker — not just typing in it — so the
+    // assertion below is about the pick not leaking, not about nothing happening.
+    selectComboBoxOption(screen.getByLabelText('Sheet part'), /SHT-304-125/);
+    expect(screen.getByLabelText('Sheet part')).toHaveValue(SHEET_304_LABEL);
 
     expect(screen.getByLabelText('Sheet part for sheet-1.pdf')).toHaveValue('');
+    expect(screen.getByLabelText('Sheets per run for sheet-1.pdf')).toBeDisabled();
   });
 });
 
@@ -229,7 +258,7 @@ describe('import payload', () => {
     render(<LaserNestImportWizard open workOrderId={42} onClose={jest.fn()} onImported={jest.fn()} />);
     await previewPackage();
 
-    fireEvent.change(await screen.findByLabelText('Sheet part for sheet-1.pdf'), { target: { value: '31' } });
+    selectComboBoxOption(await rowPicker('sheet-1.pdf'), /SHT-304-125/);
     fireEvent.change(screen.getByLabelText('Sheets per run for sheet-1.pdf'), { target: { value: '2' } });
     fireEvent.click(screen.getByRole('button', { name: /^import 2 nests$/i }));
 
@@ -247,7 +276,7 @@ describe('import payload', () => {
     render(<LaserNestImportWizard open workOrderId={42} onClose={jest.fn()} onImported={jest.fn()} />);
     await previewPackage();
 
-    fireEvent.change(await screen.findByLabelText('Sheet part for sheet-1.pdf'), { target: { value: '31' } });
+    selectComboBoxOption(await rowPicker('sheet-1.pdf'), /SHT-304-125/);
     fireEvent.change(screen.getByLabelText('Sheets per run for sheet-1.pdf'), { target: { value: '0' } });
     fireEvent.click(screen.getByRole('button', { name: /^import 2 nests$/i }));
 
@@ -275,7 +304,7 @@ describe('re-import pre-fill', () => {
     render(<LaserNestImportWizard open workOrderId={42} onClose={jest.fn()} onImported={jest.fn()} />);
     await previewPackage();
 
-    await waitFor(() => expect(screen.getByLabelText('Sheet part for sheet-1.pdf')).toHaveValue('31'));
+    await waitFor(() => expect(screen.getByLabelText('Sheet part for sheet-1.pdf')).toHaveValue(SHEET_304_LABEL));
     expect(screen.getByLabelText('Sheets per run for sheet-1.pdf')).toHaveValue(2);
     // The cancelled tie on sheet-2 must NOT come back.
     expect(screen.getByLabelText('Sheet part for sheet-2.pdf')).toHaveValue('');
@@ -365,13 +394,13 @@ describe('degraded loads', () => {
     render(<LaserNestImportWizard open workOrderId={42} onClose={jest.fn()} onImported={jest.fn()} />);
     await previewPackage();
 
-    const rowSelect = await screen.findByLabelText('Sheet part for sheet-1.pdf');
-    await waitFor(() => expect(optionLabels(rowSelect)).toHaveLength(3));
-    expect(optionLabels(rowSelect)).toEqual([
-      '(none)',
+    const picker = await rowPicker('sheet-1.pdf');
+    openComboBox(picker);
+    expectComboBoxOptions(picker, [
+      '(none — untied)',
       'SHT-304-125 — 304 SS 0.125 Sheet',
       'SHT-AL-090 — AL 6061 0.090 Sheet',
     ]);
-    expect(within(rowSelect).queryByText(/on hand/i)).not.toBeInTheDocument();
+    expect(within(comboBoxListbox(picker)).queryByText(/on hand/i)).not.toBeInTheDocument();
   });
 });

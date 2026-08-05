@@ -206,7 +206,18 @@ class LaserNestPreviewRow(BaseModel):
     nest_name: str
     cnc_file_name: Optional[str] = None
     cnc_number: Optional[str] = None
-    planned_runs: int = 1
+    planned_runs: int = Field(
+        1,
+        description=(
+            "Planned sheet runs. NON-OPTIONAL and floored at 1 by "
+            "``_coerce_planned_runs``, so a nest whose run count could not be read "
+            "and a nest that genuinely runs once are the SAME 1 here. "
+            "``field_confidence['planned_runs'] == 'low'`` is the only thing that "
+            "separates them -- consumers must read it before treating this as an "
+            "extracted value. (The single-PDF ``POST /laser-nests/extract`` "
+            "response is the one place that keeps a real null.)"
+        ),
+    )
     material: Optional[str] = None
     thickness: Optional[str] = None
     sheet_size: Optional[str] = None

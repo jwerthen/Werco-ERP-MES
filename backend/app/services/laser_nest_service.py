@@ -178,16 +178,60 @@ def _coerce_planned_runs(value: object) -> int:
     """Coerce a model-supplied ``planned_runs`` to a sane int, flooring at 1.
 
     Defensive: the extraction result is AI output, so ``planned_runs`` may be a
-    non-numeric string, a float-ish string, or junk. Only an int or a digit
-    string is honored (floored at 1); anything else falls back to 1 so a bad
-    model value can never ``ValueError`` -> 400 the whole preview batch.
+    non-numeric string, a float-ish string, or junk. Anything unreadable falls
+    back to 1 so a bad model value can never ``ValueError`` -> 400 the whole
+    preview batch.
+
+    THE FLOOR IS NOT A READ. ``planned_runs`` is a non-optional ``int`` on the
+    wire, so a nest whose run count could not be found and a nest that genuinely
+    runs once are the SAME 1 in the preview response. Only
+    ``field_confidence["planned_runs"]`` tells them apart, which is why the
+    wizard counts the low-confidence ones out loud rather than presenting 40
+    identical-looking 1s as read values. Do not "simplify" that signal away.
+
+    Accepted shapes, widened deliberately: the previous rule was int-or-digit-
+    string ONLY, so every near-miss a model actually emits for this field --
+    ``3.0`` (JSON has one number type), ``"3"`` with stray whitespace, ``"3
+    sheets"``, ``"x3"`` -- landed on the same silent 1 as genuine junk. Each of
+    those is an unambiguous 3, and reading it is strictly better than defaulting
+    it. A LEADING integer is required for the free-text case: ``"3 of 5"`` is 3,
+    while ``"sheet 4"`` stays 1 rather than reading a label as a count.
+
+    A FRACTIONAL count is refused on BOTH the number and the string path, and
+    the two must not drift apart: half a run is not a sheet count, and rounding
+    one would invent a quantity nobody wrote. ``2.5`` and ``"2.5"`` therefore
+    both fall back to 1 -- reading the string form as 2 would make the answer
+    depend on whether the model happened to quote its JSON number, which is the
+    one thing a caller can neither see nor control.
     """
     if isinstance(value, bool):
         return 1
     if isinstance(value, int):
         return max(1, value)
-    if isinstance(value, str) and value.strip().isdigit():
-        return max(1, int(value.strip()))
+    if isinstance(value, float):
+        return max(1, int(value)) if value.is_integer() else 1
+    if isinstance(value, str):
+        text = value.strip()
+        # NOTE: there is deliberately no `text.isdigit()` fast path here, and
+        # the character class is `[0-9]` rather than `\d`. Both guard the same
+        # hazard -- this function promises never to raise, and a raise here
+        # would 400 a whole 50-nest batch over one odd row.
+        #
+        # `str.isdigit()` is True for superscripts and other non-ASCII digits
+        # ('³'), and `int()` rejects exactly those, so that fast path was
+        # the one surviving ValueError route. It was also redundant: the regex
+        # reads "007", "12" and "0" identically. `\d` is Unicode-aware under
+        # `re` for str patterns and would re-open the same hole, so the class is
+        # spelled out.
+        #
+        # The trailing \b keeps this conservative: "3 sheets" and "3 of 5" read
+        # as 3, but "3abc" does not -- a digit glued to a word is not a count.
+        match = re.match(r"^[xX]?\s*([0-9]+)(\.[0-9]+)?\b", text)
+        if match:
+            fraction = match.group(2)
+            if fraction and float(fraction) != 0:
+                return 1
+            return max(1, int(match.group(1)))
     return 1
 
 
