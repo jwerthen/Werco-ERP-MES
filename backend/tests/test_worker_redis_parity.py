@@ -77,16 +77,99 @@ class TestEnqueueAndWorkerAgree:
     """The parity property. This is the test that stops the root cause recurring."""
 
     def test_worker_settings_use_the_same_resolver_as_the_enqueue_side(self):
-        """``WorkerSettings.redis_settings`` must come from ``get_redis_settings()``.
+        """``WorkerSettings.redis_settings`` must resolve the same TARGET as the enqueue side.
 
         If someone ever gives the worker its own resolution (a second ``os.getenv`` block,
         a different env var, a hard-coded host), the API can enqueue to one Redis while the
         worker drains another and every symptom is silence.
+
+        Stated over ``TARGET_FIELDS`` rather than whole-object equality since 2026-08-05.
+        The worker now carries its own transport tuning (``RedisProfile.WORKER``: a wider
+        connect budget so an arq-level Redis blip cannot kill the process), and those fields
+        structurally cannot change which Redis is reached. ``==`` conflated the two.
+        Divergence in transport is bounded by the next test; divergence in target is still
+        absolutely forbidden, which is the property this file exists to defend.
         """
-        from app.core.queue import get_redis_settings
+        from app.core.queue import get_redis_settings, redis_target_divergence
         from app.worker import WorkerSettings
 
-        assert WorkerSettings.redis_settings == get_redis_settings()
+        assert redis_target_divergence(WorkerSettings.redis_settings, get_redis_settings()) == []
+
+    def test_worker_diverges_from_the_enqueue_side_only_in_transport(self):
+        """Pin the exact set of fields the worker is allowed to differ on.
+
+        Without this, "parity is over target fields" would license any future divergence.
+        """
+        import dataclasses
+
+        from app.core.queue import TARGET_FIELDS, get_redis_settings
+        from app.worker import WorkerSettings
+
+        differing = {
+            f.name
+            for f in dataclasses.fields(WorkerSettings.redis_settings)
+            if getattr(WorkerSettings.redis_settings, f.name) != getattr(get_redis_settings(), f.name)
+        }
+        assert differing == {"conn_timeout", "conn_retries", "retry_on_timeout", "retry"}, (
+            f"The worker's transport divergence changed to {differing}. That is allowed only "
+            "for deliberate, documented reasons -- and never for a TARGET field "
+            f"({sorted(set(differing) & set(TARGET_FIELDS))} would be a silent split-brain)."
+        )
+
+    def test_the_field_partition_is_exhaustive(self):
+        """Every arq RedisSettings field must be classified as target or transport.
+
+        A field in NEITHER bucket is silently unguarded: parity would ignore it and the
+        transport pin would not mention it. Deliberately a test rather than an import-time
+        assert -- an arq upgrade that adds a field should fail CI, not take the API down at
+        boot.
+        """
+        import dataclasses
+
+        from arq.connections import RedisSettings
+
+        from app.core.queue import TARGET_FIELDS, TRANSPORT_FIELDS
+
+        declared = set(TARGET_FIELDS) | set(TRANSPORT_FIELDS)
+        actual = {f.name for f in dataclasses.fields(RedisSettings())}
+        assert not (set(TARGET_FIELDS) & set(TRANSPORT_FIELDS)), "a field cannot be both target and transport"
+        assert declared == actual, (
+            f"arq's RedisSettings fields changed. Unclassified: {sorted(actual - declared)}; "
+            f"no longer real: {sorted(declared - actual)}. Classify each into TARGET_FIELDS "
+            "(changes WHICH Redis) or TRANSPORT_FIELDS (changes only how long we wait)."
+        )
+
+    def test_the_worker_profile_survives_a_connect_timeout_that_kills_the_default(self):
+        """The whole point of the profile, asserted on the real redis-py objects.
+
+        ``retry=`` alone is a NO-OP here: redis-py raises its own
+        ``redis.exceptions.TimeoutError`` OUTSIDE ``call_with_retry``, and that class is not
+        a subclass of the builtin ``TimeoutError`` the retry policy knows about. Only
+        ``retry_on_timeout=True`` adds it. Anyone "simplifying" this profile by dropping
+        that flag reintroduces the crash while leaving a retry object in place that looks
+        like it is doing something.
+        """
+        from app.core.queue import RedisProfile, get_redis_settings
+        from app.worker import WorkerSettings
+
+        worker = get_redis_settings(profile=RedisProfile.WORKER)
+        assert worker.retry_on_timeout is True, "without this the retry policy never fires on a connect timeout"
+        assert worker.retry is not None, "retry_on_timeout alone gives only one extra attempt"
+        assert worker.conn_timeout > get_redis_settings().conn_timeout
+        assert WorkerSettings.redis_settings.retry_on_timeout is True
+
+    def test_the_request_profile_is_unchanged_by_the_worker_profile(self):
+        """The API's enqueue path must be byte-identical to its pre-2026-08-05 behavior.
+
+        The worker fix is worker-only; if it ever leaks into the default profile, every
+        request-path enqueue inherits a 5x wider connect budget.
+        """
+        from app.core.queue import get_redis_settings
+
+        d = get_redis_settings()
+        assert (d.conn_timeout, d.conn_retries, d.conn_retry_delay) == (1, 5, 1)
+        assert d.retry_on_timeout is False
+        assert d.retry is None
 
     @pytest.mark.parametrize(
         "overrides",
@@ -105,7 +188,7 @@ class TestEnqueueAndWorkerAgree:
         import app.worker as worker
 
         worker = importlib.reload(worker)
-        assert worker.WorkerSettings.redis_settings == queue.get_redis_settings()
+        assert queue.redis_target_divergence(worker.WorkerSettings.redis_settings, queue.get_redis_settings()) == []
 
     def test_reloaded_worker_carries_the_url_credentials(self, monkeypatch: pytest.MonkeyPatch):
         """The exact shape Railway hands you: one URL with a password, nothing else set."""
