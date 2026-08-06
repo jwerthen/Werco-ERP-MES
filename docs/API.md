@@ -207,6 +207,7 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 | POST | `/work-orders/{id}/release` | Release to production | Yes |
 | POST | `/work-orders/{id}/start` | Start production | Yes |
 | POST | `/work-orders/{id}/complete` | Complete work order (409 if the WO is CANCELLED) | Yes |
+| POST | `/work-orders/{id}/duplicate` | **Duplicate a work order** — copy its *plan* (operations, laser nests, open material ties, re-snapshotted process-sheet steps) onto a new **DRAFT** WO. Body `{quantity_ordered, due_date}`; **201** returning an **envelope**, not a bare work order. See "Duplicating a work order" below | Admin / Manager / Supervisor |
 | POST | `/work-orders/{id}/operations` | Add an operation to a work order | Admin / Manager / Supervisor |
 | PUT | `/work-orders/operations/{id}` | Update an operation (body now also accepts `work_center_id` — move the operation to another work center; see note below). **409** if it sets `status` to COMPLETE on a not-yet-complete operation — completion goes through the completion endpoints (see "Terminal-state lock") | Admin / Manager / Supervisor |
 | POST | `/work-orders/operations/{id}/start` | Start an operation | Yes |
@@ -732,6 +733,119 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > **Laser nest WOs refuse free-form operations.** `POST /work-orders/{id}/operations` returns
 > **400** on a `laser_cutting` work order — dispatch pools are managed exclusively by the nest
 > package import and manual nest entry, so a non-nest op can never ride the laser gating exemption.
+
+> **Duplicating a work order (`POST /work-orders/{id}/duplicate`).** Re-runs a job's **plan** without
+> re-entering it — the motivating case is a 40-nest laser package confirmed once through the import
+> wizard and run again next month, without re-uploading the PDFs or re-confirming a single row. Body:
+> `quantity_ordered` (required, `> 0`) and `due_date` (optional; `null` leaves it unset). Unlike
+> `WorkOrderCreate`, `due_date` carries **no "not in the past" validator** — a duplicate is most often
+> raised to re-run something that is already late. Response **201**, and it is an **envelope, not a
+> bare work order** — the one endpoint in this section that does not return the resource directly:
+>
+> ```json
+> {
+>   "work_order": { "…": "the same shape GET /work-orders/{id} returns" },
+>   "skipped_operations": [
+>     {"source_operation_id": 812, "operation_number": "10", "sequence": 10, "reason": "laser_nest_deleted"}
+>   ],
+>   "skipped_material_allocations": [
+>     {"source_allocation_id": 44, "part_id": 91, "source_work_order_operation_id": 812, "reason": "part_not_available"}
+>   ]
+> }
+> ```
+>
+> **Copied (the plan):** every operation with its setup/run instructions, work center, inspection
+> flags and component fields; the live laser nests (CNC number, material, thickness, sheet size,
+> planned runs, work center) onto **one** new package; the **open** material ties; and a re-snapshot of
+> the process-sheet steps. **Not copied (the production record):** `quantity_complete` /
+> `quantity_scrapped` and their scrap reasons, actual dates / hours / cost, lot and serial numbers,
+> release info, `current_operation_id`, scheduled dates, and time entries — copying any of it would
+> fabricate history on a job that has not run, which an AS9100D reader would take for a real record.
+> Three further omissions are decisions rather than oversights:
+> - **`parent_work_order_id`** — the duplicate is an **independent** work order. Re-attaching it to the
+>   source's assembly parent would add a second laser child against demand the first child already
+>   satisfied, and the parent's completion rollup would count both. A genuine second child is a nest
+>   import against the parent, not a duplicate.
+> - **`must_ship_by`** — it is the **original** order's promise, and it outranks `due_date` in OTD/OTIF
+>   scoring (see [docs/LEAN_ROADMAP.md](LEAN_ROADMAP.md)). Carrying it would silently override the
+>   `due_date` just supplied and score the new job against a promise nobody made for it.
+> - **`run_order`** — a manager's dispatch ranking for one machine's board, not part of the plan. A
+>   40-nest duplicate arriving pre-ranked would, at release, displace the sequence the manager set for
+>   work already queued at that laser. (`scheduled_start` / `scheduled_end` are dropped for the
+>   adjacent reason: they are `SchedulingService` output for the *source's* dates, and release
+>   reschedules anyway.)
+>
+> **A nest-bearing work order's quantity is DERIVED, not chosen.** When nests come across, the server
+> **ignores** the requested `quantity_ordered` and stores the sum of the copied nests' `planned_runs` —
+> the same definition `_recompute_child_quantity_ordered` enforces and every nest mutation path
+> re-asserts, so honoring the caller here would leave the duplicate as the one laser WO in the system
+> where that is false, until the next nest edit corrected it out from under the planner. Read the
+> quantity back off the response rather than assuming what was sent was stored; the audit row records
+> `requested_quantity` when the two differ. (The UI disables the field with that reason on it.)
+>
+> **Quantity-derived plan numbers are SCALED** by `new_qty / source_qty`: operation `run_time_hours`
+> and header `estimated_hours` / `estimated_cost` are stored **pre-multiplied by the ordered
+> quantity**, so an unscaled copy would claim the source's hours at the duplicate's quantity —
+> scheduling sizes capacity from `run_time_hours` and job costing reads it first. `setup_time_hours`
+> is deliberately **not** scaled (setup is per-job). The nest path returns a ratio of exactly **1.0**
+> on purpose: the runs carry across verbatim, so per-run nothing about the plan changed.
+>
+> **Process-sheet steps are RE-snapshotted, never copied** (`wo_operation_steps`), from each sheet
+> family's *currently released* revision — the same resolution `POST /work-orders/` performs. Copying
+> the source's snapshot rows would freeze a revision that may since have been superseded; copying
+> nothing would silently disarm the operation-completion gate on a job whose whole premise is "same
+> plan as last time". See [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md) → snapshot semantics.
+>
+> **Material ties land inert.** `qty_consumed = 0`, `status = open`, and the **pinned lot / pinned
+> inventory item are ALWAYS cleared** — a lot pin says "consume from *this* lot", and the lot the
+> source job pinned was very likely consumed by the source job. `qty_planned` is **recomputed**, not
+> copied: `qty_per_run × planned_runs` for a nest-backed operation tie (re-derived, because a nest tie
+> has a better basis than the old number), and the **source value scaled by the quantity ratio** for
+> every other tie — ordinary operation-scoped *and* work-order-scoped alike. That matters because
+> `qty_planned` is caller-supplied and INDEPENDENT of `qty_per_run` on the tie API: a tie created as
+> "500 lb to OP20" with no `qty_per_run` would otherwise reappear as `1.0 × quantity_ordered`, a silent
+> rewrite with no skip and nothing on the response. A same-quantity duplicate therefore reproduces
+> both shapes bit-for-bit. `unit_of_measure` is re-snapshotted from the part, since the
+> column is a snapshot of `Part.unit_of_measure` *at tie time* and this tie's time is now.
+>
+> **Refusals — nothing is written in any of these cases:**
+> - **404** — the source work order is not in the active company, or is soft-deleted. There is
+>   **no status gate**: the headline case is duplicating a COMPLETE job, so a terminal source is
+>   expected and allowed.
+> - **409** — the source's produced part has since been **soft-deleted**. A retired part must not go
+>   back into production in one click. (Part-less standalone laser WOs are exempt — there is no part.)
+> - **409 `PROCESS_SHEET_UNAVAILABLE`** — an attached process-sheet family has no released revision.
+>   The same structured detail `POST /work-orders/` raises for the same condition; the rule is that a
+>   duplicate must never mint a work order the create path would have rejected.
+> - **409** on an `IntegrityError` (a work-order-number race, a nest key collision, a violated CHECK on
+>   the copied data). The message deliberately does **not** promise that a retry helps: only the number
+>   race is transient, and the rest are properties of the source and would fail identically forever.
+>
+> **Skips are first-class, not silent.** A skip is **not** an error — the work order was created and is
+> a valid draft — but it means the copy is *missing* something the source had, and the planner has to
+> be told: a skipped material tie that nobody surfaces means the job runs, no shortage shows, and stock
+> is never deducted until the inventory count disagrees. Every skip is written to the work order's
+> audit `extra_data` **and** returned in the envelope, and both lists empty is the "clean copy" signal.
+> Reasons — operations: `laser_nest_deleted` (the operation's nest was soft-deleted, so copying it
+> would put a nest task with no nest on the kiosk queue at release). Ties: `part_not_available` (the
+> tied part has been soft-deleted, which `POST …/material-allocations` refuses outright),
+> `operation_not_copied` (its operation was skipped — re-scoping the tie to the work order is not
+> available, since a work-order-scoped tie carrying `qty_per_run` is a 422 on the tie API), and
+> `nest_runs_unavailable` — **server-side defence, not currently producible**: an operation that is
+> nest-backed with no run count is already skipped upstream as `laser_nest_deleted`, so its tie reports
+> `operation_not_copied` first. The branch is kept because the alternative it guards against is
+> planning at the work-order quantity, which for a laser WO is the sum of *every* nest's runs and would
+> inflate one nest's demand by roughly the nest count. **Treat the reason list as open** — render an
+> unrecognized value verbatim rather than dropping the row.
+>
+> **Audit / lineage.** The duplicate carries **no FK back to its source**, so the work-order
+> `log_create` row is the only place that lineage exists: it records `source_work_order_id` and
+> `source_work_order_number`, plus `skipped_operations`, `skipped_material_allocations`,
+> `process_sheet_snapshot` (which sheet family resolved to which released revision) and
+> `quantity_ratio`. Nest and tie rows are audited byte-parallel to the import and tie-creation paths.
+> Everything — header, operations, step snapshots, nest package, nests, ties and every audit row —
+> flushes into **one** transaction, so a partial duplicate (a header with no nests) cannot survive a
+> failure mid-copy.
 
 > **Material ties (`/work-orders/{id}/material-allocations`).** The optional tie between a work order
 > (or one of its operations) and a **material** part — what makes stock deplete as work completes.
@@ -1396,6 +1510,20 @@ mixed**:
 > instead (badge-minted kiosk tokens can't reach `/laser-nests` — see Shop Floor → "Kiosk doc
 > viewer"); this route remains the desktop path. Detach only clears the FK — the Document row and
 > its stored bytes survive.
+>
+> **Duplicating a work order copies its nests and SHARES their drawing.**
+> `POST /work-orders/{id}/duplicate` (see Work Orders → "Duplicating a work order") copies every live
+> nest — CNC number, material, thickness, sheet size, planned runs, work center — onto one new package
+> on the new draft WO, carrying the `document_id` as a **reference**: no new `Document` row, no second
+> document number, no blob copy. That reads correctly, because this route resolves the PDF by
+> `nest.document_id` and filters the Document by **`company_id` only**, never by work order, so the
+> operator preview works on the duplicate exactly as on the source. The consequence to know: the
+> Document still belongs to the **source** work order, so deleting the source's drawing breaks the
+> duplicate's preview. Copying the blob was rejected as the alternative — it doubles storage for a
+> byte-identical PDF and mints a second document number for one drawing, which is worse for
+> traceability than a shared reference. A nest that was **soft-deleted** on the source is not copied,
+> and its operation is skipped and reported in the duplicate's response envelope (`reason:
+> "laser_nest_deleted"`) rather than arriving as a nest task with no nest.
 >
 > **Soft delete (`DELETE /laser-nests/{id}`).** Soft-deletes the nest (`SoftDeleteMixin`; never a
 > hard delete) and sets its operation to **`ON_HOLD`**, which removes it from the operator/work-center

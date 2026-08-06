@@ -56,6 +56,8 @@ from app.schemas.work_order import (
     LaserNestManualResponse,
     LaserNestPreviewRow,
     WorkOrderCreate,
+    WorkOrderDuplicateRequest,
+    WorkOrderDuplicateResponse,
     WorkOrderOperationCreate,
     WorkOrderOperationResponse,
     WorkOrderOperationUpdate,
@@ -135,6 +137,7 @@ from app.services.scheduling_service import SchedulingService
 from app.services.scrap_reason_service import resolve_scrap_reason_code_or_http
 from app.services.storage_service import delete_ref
 from app.services.work_center_type_service import get_work_center_group
+from app.services.work_order_duplicate_service import duplicate_work_order
 from app.services.work_order_state_service import (
     TERMINAL_WO_STATUSES,
     StatusTransition,
@@ -1695,6 +1698,136 @@ def create_work_order(
     )
 
     return work_order
+
+
+@router.post(
+    "/{work_order_id}/duplicate",
+    response_model=WorkOrderDuplicateResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Duplicate a work order as a new DRAFT job",
+)
+def duplicate_work_order_endpoint(
+    work_order_id: int,
+    payload: WorkOrderDuplicateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Re-run a job's PLAN without re-entering it.
+
+    The motivating case is a laser nest package: 40+ nests confirmed once through the
+    AI import wizard, re-run next month without re-uploading the PDFs or re-confirming
+    a single row. The new work order copies the header, every operation, the nests
+    (each pointing at the SAME drawing Document — the reference is copied, the blob is
+    not) and the OPEN material ties, and lands in DRAFT so a planner reviews it before
+    release. Process-sheet step snapshots are RE-taken from each sheet family's
+    currently-released revision, so the duplicate's traveler gates completion exactly as
+    the source's did.
+
+    What is deliberately NOT copied is the production record — quantities, actual hours
+    and cost, actual timestamps, lot/serial numbers, who released it, consumed material,
+    lot pins. Copying any of it would fabricate history on a job that has not run.
+    ``parent_work_order_id`` is not copied either: the duplicate is an INDEPENDENT work
+    order, and re-attaching it to the source's assembly parent would add a second child
+    against demand the first one already satisfied. The field-by-field decisions and
+    their reasons live in ``services/work_order_duplicate_service``.
+
+    The response is an ENVELOPE, not a bare work order: ``work_order`` plus
+    ``skipped_operations`` / ``skipped_material_allocations``. Both lists are normally
+    empty; when they are not, the duplicate is a valid draft that is MISSING something
+    the source had, and the planner has to be told — a skipped material tie that nobody
+    surfaces means the job runs and stock is never deducted.
+
+    **404** when the source work order is not in the active company or is soft-deleted —
+    never 403, and never a leak of "exists elsewhere". There is no status gate: the
+    headline case is duplicating a COMPLETE job, so a terminal source is expected.
+
+    **409** when the duplicate would mint a work order the create path would have
+    rejected: the source's produced part has been deleted, or one of its operations
+    references a process-sheet family with no released revision (structured detail,
+    ``code: PROCESS_SHEET_UNAVAILABLE`` — byte-identical to ``POST /work-orders``).
+    Nothing is written in either case.
+    """
+    source = (
+        tenant_query(db, WorkOrder, company_id)
+        .filter(
+            WorkOrder.id == work_order_id,
+            WorkOrder.is_deleted == False,  # noqa: E712
+        )
+        .first()
+    )
+    if not source:
+        raise HTTPException(status_code=404, detail="Work order not found")
+
+    try:
+        # ONE unit of work: header, operations, nest package, nests, material ties and
+        # every audit row commit together or not at all. A header without its nests must
+        # not survive — that is a plan the planner never approved.
+        with atomic_transaction(db):
+            result = duplicate_work_order(
+                db,
+                source=source,
+                quantity_ordered=float(payload.quantity_ordered),
+                due_date=payload.due_date,
+                company_id=company_id,
+                user_id=current_user.id,
+                audit=audit,
+            )
+            new_work_order_id = result.work_order.id
+            # Read the skips off the result INSIDE the block: the objects survive the
+            # commit, but the lists are the only record of them outside the audit chain.
+            skipped_operations = list(result.skipped_operations)
+            skipped_material_allocations = list(result.skipped_allocations)
+    except IntegrityError as exc:
+        # A uniqueness/constraint fault (a work-order-number race on a non-Postgres
+        # deployment, a nest key collision) must not surface as a 500 on a poisoned
+        # session. Nothing was committed.
+        #
+        # The message deliberately does NOT tell the planner to retry. Only ONE of the
+        # faults that land here is transient — the work-order-number race, where a retry
+        # picks the next number and succeeds. The rest (a nest key collision, a
+        # violated CHECK on the copied data) are properties of the source work order and
+        # will fail identically every time, so "try again" would send the planner into a
+        # loop and hide a real data problem.
+        logger.warning("Work order duplicate failed on a constraint error (source %s): %s", work_order_id, exc)
+        raise HTTPException(
+            status_code=409,
+            detail="Could not duplicate this work order; a generated record conflicts with an existing one. "
+            "If duplicating it again fails the same way, the source work order has data that cannot be "
+            "copied — check its nests and material ties.",
+        ) from exc
+
+    work_order = (
+        db.query(WorkOrder)
+        .options(
+            joinedload(WorkOrder.part),
+            selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.component_part),
+            selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.work_center),
+            selectinload(WorkOrder.operations)
+            .selectinload(WorkOrderOperation.laser_nest)
+            .selectinload(LaserNest.document),
+        )
+        .filter(WorkOrder.id == new_work_order_id, WorkOrder.company_id == company_id)
+        .first()
+    )
+    _enrich_work_order_operations(work_order)
+
+    safe_broadcast(
+        broadcast_dashboard_update,
+        {
+            "event": "work_order_created",
+            "work_order_id": work_order.id,
+            "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
+        },
+        company_id=company_id,
+    )
+
+    return WorkOrderDuplicateResponse(
+        work_order=WorkOrderResponse.model_validate(work_order),
+        skipped_operations=skipped_operations,
+        skipped_material_allocations=skipped_material_allocations,
+    )
 
 
 def _create_assembly_routing_operations(

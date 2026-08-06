@@ -297,6 +297,70 @@ export interface LaserNestPreviewRow {
   passes?: number | null;
 }
 
+/**
+ * One source operation the duplicate did NOT copy.
+ *
+ * Today the only reason is `laser_nest_deleted`: the operation's nest was
+ * soft-deleted, which parks the operation ON_HOLD without cancelling its tie.
+ * Copying it would put a nest task with no nest, no CNC number and no drawing
+ * on the kiosk queue, because releasing a laser work order promotes every
+ * pending operation to READY.
+ *
+ * `reason` is deliberately a bare `string`, not a union: the server owns the
+ * vocabulary and may add to it, and a client that narrows it would either stop
+ * compiling against a truthful response or silently mis-label a reason it has
+ * never seen. Render it through a lookup with a default, never a hard-coded
+ * sentence.
+ */
+export interface WorkOrderDuplicateSkippedOperation {
+  source_operation_id: number;
+  operation_number?: string | null;
+  sequence?: number | null;
+  reason: string;
+}
+
+/**
+ * One source material tie the duplicate did NOT copy.
+ *
+ * `source_work_order_operation_id` joins a skipped tie back to the skipped
+ * operation that explains it (null for a work-order-scoped tie).
+ *
+ * Reasons, and treat this list as open — render an unrecognized one verbatim
+ * rather than dropping the row:
+ *  - `part_not_available` — the tie's part has since been soft-deleted.
+ *  - `operation_not_copied` — the operation the tie hung off was itself skipped.
+ *  - `nest_runs_unavailable` — SERVER-SIDE DEFENCE, not currently producible: an
+ *    operation that is nest-backed with no run count is already skipped upstream,
+ *    so its tie reports `operation_not_copied` first.
+ *
+ * `part_id` is non-null: `work_order_material_allocations.part_id` is
+ * `nullable=False`, so a skipped tie always names the part it would have drawn.
+ */
+export interface WorkOrderDuplicateSkippedAllocation {
+  source_allocation_id: number;
+  part_id: number;
+  source_work_order_operation_id?: number | null;
+  reason: string;
+}
+
+/**
+ * `POST /work-orders/{id}/duplicate`.
+ *
+ * An ENVELOPE, not a bare work order — the skip lists are the point. A skipped
+ * tie means the new job carries no demand for that material: no shortage shows,
+ * the nests run, and stock is never deducted. Both lists empty is the
+ * "nothing was lost" signal, so a caller must read them rather than assume.
+ *
+ * `work_order.quantity_ordered` is authoritative and can differ from what was
+ * requested: on a nest-bearing work order the server derives it from the copied
+ * nests' planned runs.
+ */
+export interface WorkOrderDuplicateResult {
+  work_order: WorkOrder;
+  skipped_operations: WorkOrderDuplicateSkippedOperation[];
+  skipped_material_allocations: WorkOrderDuplicateSkippedAllocation[];
+}
+
 export interface LaserNestPackagePreview {
   package_name: string;
   nest_count: number;

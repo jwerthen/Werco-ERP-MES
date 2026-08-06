@@ -143,6 +143,29 @@ tier, that tier stands — this rule is a floor, never a loosening.
 > the **Correct count** action on the work-order detail page, gated on `work_orders:edit`. See
 > `docs/API.md` → Work Orders → "Over-count correction … (supervisor/office)".
 
+> **Duplicate a work order — endpoint mapping.** `POST /api/v1/work-orders/{id}/duplicate` (copy a
+> job's *plan* — operations, laser nests, open material ties, re-snapshotted process-sheet steps —
+> onto a new **DRAFT** work order) is enforced **in code** to `require_role([ADMIN, MANAGER,
+> SUPERVISOR])` — the Work Orders **Create** row above. It reaches no wider than the trio already
+> holds: it is a create verb (Create), it mints operations (`POST /work-orders/{id}/operations`, same
+> trio), it mints nests (the laser-nest note below, same trio) and it mints material ties (the Material
+> ties note below, same trio). **An Operator gets 403**, matching every other planning act.
+>
+> Three things about it are RBAC-relevant beyond the gate itself. First, there is **no status gate** —
+> duplicating a COMPLETE job is the headline case — so read-broad/write-restricted is the only control
+> in front of it; the tenant scope is what does the rest (a source outside the active company or
+> soft-deleted → **404**, never 403, and never a "exists elsewhere" leak). Second, it **refuses** two
+> conditions the create path would also have refused (**409** on a soft-deleted produced part, **409
+> `PROCESS_SHEET_UNAVAILABLE`** on a sheet family with no released revision) — one button is not a
+> licence to route around a gate a planner would have hit by hand. Third, every write it performs is on
+> the tamper-evident chain: one `work_order` `log_create` carrying `source_work_order_id` /
+> `source_work_order_number` (the duplicate holds **no FK** back to its source, so that row is the only
+> record of the lineage) plus the deliberate omissions, and one row per copied nest and per copied tie,
+> byte-parallel to the import and tie-creation paths. In the UI this is the **Duplicate** action on the
+> work-order detail header and the Work Orders row/mobile-card actions, gated on `work_orders:edit` so
+> the hidden control and the refused call agree. See `docs/API.md` → Work Orders → "Duplicating a work
+> order".
+
 > **Laser-nest manual entry + reference PDF — endpoint mapping.** Manually keying a laser nest and
 > all per-nest mutations follow the Work Orders **Create / Edit / Delete** rows above —
 > `require_role([ADMIN, MANAGER, SUPERVISOR])`: `POST /api/v1/work-orders/{id}/laser-nests/manual`

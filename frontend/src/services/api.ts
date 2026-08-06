@@ -37,6 +37,7 @@ import {
   PartBackflushReadiness,
   BOMUomMismatchParams,
   BOMUomMismatchReport,
+  WorkOrderDuplicateResult,
 } from '../types';
 import { ScanResolveRequest, ScanResolveResult } from '../types/scan';
 import {
@@ -891,6 +892,34 @@ class ApiService {
 
   async updateWorkOrder(id: number, data: any) {
     const response = await this.api.put(`/work-orders/${id}`, data);
+    return response.data;
+  }
+
+  /**
+   * Copy a work order's PLAN onto a new DRAFT work order.
+   *
+   * Copied: operations (with their setup/run instructions), any laser nests
+   * attached to them, and any sheet-part ties. NOT copied: the production
+   * record — quantities complete/scrapped, actual hours, lot/serial.
+   *
+   * `due_date` is deliberately a caller decision, not an inheritance: passing
+   * the source's old date would land the new work order overdue the moment it
+   * exists, on the dispatch board and in OTD. Send `null` to leave it unset.
+   * The server is the gate (admin/manager/supervisor), so callers must stay
+   * non-optimistic and render only what comes back.
+   */
+  async duplicateWorkOrder(
+    id: number,
+    data: { quantity_ordered: number; due_date?: string | null }
+  ): Promise<WorkOrderDuplicateResult> {
+    const response = await this.api.post<WorkOrderDuplicateResult>(`/work-orders/${id}/duplicate`, {
+      quantity_ordered: data.quantity_ordered,
+      due_date: data.due_date ?? null,
+    });
+    // The response is an ENVELOPE, not a bare work order. Typing the post call
+    // is what keeps that true: `response.data` is `any`, so an unwrapped return
+    // here type-checks clean and only fails in front of a planner — as "undefined
+    // created as a draft" and a navigation to /work-orders/undefined.
     return response.data;
   }
 

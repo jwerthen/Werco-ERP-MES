@@ -3,7 +3,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Dict, List, Optional
 
-from pydantic import BaseModel, Field, field_serializer, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
 
 from app.core.time_utils import to_utc_iso
 from app.core.validation import (
@@ -555,6 +555,41 @@ class WorkOrderUpdate(BaseModel):
         return self
 
 
+class WorkOrderDuplicateRequest(BaseModel):
+    """Body for ``POST /work-orders/{id}/duplicate``.
+
+    Only two things about a duplicate are the caller's to decide: how many, and by
+    when. Everything else is copied from the source work order (see
+    ``services/work_order_duplicate_service``) — which is the whole point, since the
+    motivating case is re-running a 40-nest laser package without re-confirming it.
+
+    The response is a ``WorkOrderDuplicateResponse`` ENVELOPE — the new work order under
+    ``work_order`` (the same shape ``GET /work-orders/{id}`` returns, so the client can
+    navigate straight to it) plus the things the copy had to leave behind. Read that
+    schema's docstring before treating the envelope as a formality.
+
+    ``due_date`` deliberately carries NO "not in the past" validator, unlike
+    ``WorkOrderCreate``. That rule is planning hygiene for a job being planned; a
+    duplicate is most often raised to re-run something that is ALREADY late, and
+    refusing yesterday's date there would block the case the endpoint exists for.
+    """
+
+    quantity_ordered: MoneySmall = Field(
+        ...,
+        gt=Decimal("0"),
+        description="Quantity ordered on the NEW work order. Not copied from the source — a duplicate is "
+        "usually a re-run at a different quantity. Note that for a laser nest work order this does NOT "
+        "rescale the copied nests: each nest keeps its own planned_runs, and the stored quantity is "
+        "DERIVED from the sum of those runs, so it may differ from the value sent here. Read it back "
+        "from the response rather than assuming this value was stored.",
+    )
+    due_date: Optional[date] = Field(
+        None,
+        description="Due date for the new work order. Null leaves it unset. The source's due date is never "
+        "carried, and neither is its must_ship_by promise date.",
+    )
+
+
 class WorkOrderResponse(WorkOrderBase):
     id: int
     # READ-side relaxation: standalone laser-cutting nest WOs carry no part, so
@@ -626,6 +661,97 @@ class WorkOrderResponse(WorkOrderBase):
 
     class Config:
         from_attributes = True
+
+
+class WorkOrderDuplicateSkippedOperation(UTCModel):
+    """One source operation the duplicate deliberately did not copy.
+
+    Built by ``services/work_order_duplicate_service`` AS THIS MODEL, inside the copy's
+    transaction — not as a hand-rolled dict validated after the commit. A mistyped key is
+    then a ``ValidationError`` that rolls the whole duplicate back, rather than a 500 on a
+    work order that already exists, which is precisely the "the planner never sees the
+    skip" outcome this envelope exists to prevent.
+
+    ``extra="forbid"`` is what extends that guarantee to the OPTIONAL fields. A misspelled
+    required field already fails as "field required"; without ``forbid``, a misspelled
+    ``operation_number`` would be silently dropped and the entry would reach the planner
+    naming nothing. Safe on a response model — this is only ever constructed server-side
+    from keywords, never validated from client input.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_operation_id: int = Field(..., description="Id of the operation on the SOURCE work order.")
+    operation_number: Optional[str] = Field(None, description="The source operation's number, for display.")
+    sequence: Optional[int] = Field(None, description="The source operation's sequence, for display.")
+    reason: str = Field(
+        ...,
+        description="Machine-readable reason. Currently only 'laser_nest_deleted' — the operation's laser "
+        "nest was soft-deleted, so copying it would put a nest task with no nest on the kiosk queue.",
+    )
+
+
+class WorkOrderDuplicateSkippedAllocation(UTCModel):
+    """One source material tie the duplicate deliberately did not copy.
+
+    Built by ``services/work_order_duplicate_service`` as this model, and sealed with
+    ``extra="forbid"``, for the same reasons ``WorkOrderDuplicateSkippedOperation`` is.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_allocation_id: int = Field(..., description="Id of the allocation row on the SOURCE work order.")
+    part_id: int = Field(
+        ...,
+        description="The tied part, so the client can name it. Never null — "
+        "``work_order_material_allocations.part_id`` is NOT NULL.",
+    )
+    source_work_order_operation_id: Optional[int] = Field(
+        None,
+        description="The source operation the tie was scoped to, or null for a work-order-scoped tie. Joins "
+        "to skipped_operations when an operation skip is what caused this one.",
+    )
+    reason: str = Field(
+        ...,
+        description="Machine-readable reason. Two values are producible: 'part_not_available' (the tied part "
+        "has been deleted) and 'operation_not_copied' (its operation was skipped). A third, "
+        "'nest_runs_unavailable', is kept server-side as DEFENCE and is not currently reachable — a "
+        "nest-backed operation with no live nest is skipped first, so its tie reports 'operation_not_copied'. "
+        "Treat the set as open and tolerate an unknown reason rather than switching on it exhaustively.",
+    )
+
+
+class WorkOrderDuplicateResponse(UTCModel):
+    """Response for ``POST /work-orders/{id}/duplicate``: the new work order AND what it lost.
+
+    The envelope exists because the two skip lists are SAFETY information, not telemetry,
+    and ``WorkOrderResponse`` has nowhere to put them. The failing scenario is specific:
+    the source's sheet part was soft-deleted since the source ran, so the material tie is
+    skipped; the planner sees only "created as a draft", releases the laser work order
+    believing it carries its material demand, no shortage shows, the nests run, and stock
+    is never deducted. A skip that reaches only the audit chain is a skip nobody reads
+    until the inventory count disagrees.
+
+    Both lists are normally EMPTY, which is the "clean copy" signal — clients should say
+    something when either is non-empty and stay quiet when both are. Neither list is an
+    error: the work order was created and is a valid draft. Conditions the duplicate
+    refuses outright (a retired produced part, a process-sheet family with no released
+    revision) fail the whole call with a 409 instead and produce no response body.
+    """
+
+    work_order: WorkOrderResponse = Field(
+        ...,
+        description="The new DRAFT work order, in the same shape GET /work-orders/{id} returns.",
+    )
+    skipped_operations: List[WorkOrderDuplicateSkippedOperation] = Field(
+        default_factory=list,
+        description="Source operations not copied. Empty on a clean duplicate.",
+    )
+    skipped_material_allocations: List[WorkOrderDuplicateSkippedAllocation] = Field(
+        default_factory=list,
+        description="Source material ties not copied — the planner must re-tie these by hand or the job "
+        "will run without the material demand the source had. Empty on a clean duplicate.",
+    )
 
 
 class WorkOrderSummary(UTCModel):
