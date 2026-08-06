@@ -17,6 +17,14 @@ import { render, screen, fireEvent, waitFor, within } from '@testing-library/rea
 import { MemoryRouter } from 'react-router-dom';
 import api from '../services/api';
 import WorkOrders from './WorkOrders';
+import type { UserRole } from '../types';
+
+// Only `useNavigate` is stubbed; MemoryRouter and the rest stay real.
+const mockNavigate = jest.fn();
+jest.mock('react-router-dom', () => ({
+  ...jest.requireActual('react-router-dom'),
+  useNavigate: () => mockNavigate,
+}));
 
 jest.mock('../services/api', () => ({
   __esModule: true,
@@ -24,13 +32,21 @@ jest.mock('../services/api', () => ({
     getWorkOrders: jest.fn(),
     deleteWorkOrder: jest.fn(),
     releaseWorkOrder: jest.fn(),
+    // The Duplicate row action mounts DuplicateWorkOrderModal, which resolves
+    // nest-ness with its own read because a WorkOrderSummary carries no operations.
+    getWorkOrder: jest.fn(),
+    duplicateWorkOrder: jest.fn(),
   },
 }));
 
+// Mutable so the RBAC block can re-render the page as a different role. Defaults
+// to admin + superuser, which is what every pre-existing test in this file assumes.
+const mockDefaultUser = { id: 1, role: 'admin' as UserRole, is_superuser: true };
+let mockAuthUser: { id: number; role: UserRole; is_superuser: boolean } = { ...mockDefaultUser };
+
 jest.mock('../context/AuthContext', () => ({
   useAuth: () => ({
-    // admin + superuser so delete controls render
-    user: { id: 1, role: 'admin', is_superuser: true },
+    user: mockAuthUser,
     isAuthenticated: true,
     isLoading: false,
   }),
@@ -106,6 +122,7 @@ async function getDesktopTable(): Promise<HTMLElement> {
 describe('FEPERF-5: WorkOrders list renders rows correctly after memo refactor', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockAuthUser = { ...mockDefaultUser };
     mockedApi.getWorkOrders.mockResolvedValue([draftWorkOrder, inProgressWorkOrder]);
     mockedApi.releaseWorkOrder.mockResolvedValue({});
     mockedApi.deleteWorkOrder.mockResolvedValue({});
@@ -173,5 +190,129 @@ describe('FEPERF-5: WorkOrders list renders rows correctly after memo refactor',
     await waitFor(() => {
       expect(mockedApi.deleteWorkOrder).toHaveBeenCalledWith(2);
     });
+  });
+});
+
+/**
+ * Duplicate is `require_role([ADMIN, MANAGER, SUPERVISOR])` on the server — the trio
+ * `work_orders:edit` maps to. A hidden control and a refused call have to agree in
+ * BOTH directions: a supervisor who cannot see the button loses a feature they are
+ * entitled to, and an operator who can see it gets a 403 for their trouble. The
+ * server stays the enforcement; this is the half that keeps the UI honest about it.
+ */
+describe('WorkOrders row actions: Duplicate is gated on work_orders:edit', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockAuthUser = { ...mockDefaultUser };
+    mockedApi.getWorkOrders.mockResolvedValue([draftWorkOrder, inProgressWorkOrder]);
+    mockedApi.releaseWorkOrder.mockResolvedValue({});
+    mockedApi.deleteWorkOrder.mockResolvedValue({});
+    mockedApi.getWorkOrder.mockResolvedValue({
+      id: 1,
+      work_order_number: 'WO-1001',
+      quantity_ordered: 50,
+      operations: [],
+    });
+  });
+
+  it.each([
+    ['admin', true],
+    ['manager', true],
+    ['supervisor', true],
+  ] as const)('shows Duplicate on every row for a %s', async (role, _allowed) => {
+    mockAuthUser = { id: 1, role: role as UserRole, is_superuser: false };
+    renderWorkOrders();
+    const table = await getDesktopTable();
+
+    expect(within(table).getAllByTitle('Duplicate')).toHaveLength(2);
+  });
+
+  it.each([
+    ['operator'],
+    ['viewer'],
+    ['quality'],
+    ['shipping'],
+  ] as const)('hides Duplicate from a %s', async (role) => {
+    mockAuthUser = { id: 1, role: role as UserRole, is_superuser: false };
+    renderWorkOrders();
+    const table = await getDesktopTable();
+
+    // Gone, not disabled — and the row itself still renders, so the absence is
+    // the gate rather than a blank page.
+    expect(within(table).queryAllByTitle('Duplicate')).toHaveLength(0);
+    expect(within(table).getByRole('link', { name: 'WO-1001' })).toBeInTheDocument();
+  });
+
+  it('labels each Duplicate control with its own work order number', async () => {
+    mockAuthUser = { id: 1, role: 'supervisor' as UserRole, is_superuser: false };
+    renderWorkOrders();
+    const table = await getDesktopTable();
+
+    // Icon-only control, so the accessible name has to carry the row identity —
+    // otherwise a screen-reader user hears "Duplicate" twice with no way to tell
+    // which job they are about to copy.
+    expect(within(table).getByLabelText('Duplicate WO-1001')).toBeInTheDocument();
+    expect(within(table).getByLabelText('Duplicate WO-1002')).toBeInTheDocument();
+  });
+
+  it('opens the duplicate dialog for the clicked row and copies nothing until confirmed', async () => {
+    mockAuthUser = { id: 1, role: 'supervisor' as UserRole, is_superuser: false };
+    renderWorkOrders();
+    const table = await getDesktopTable();
+
+    fireEvent.click(within(table).getByLabelText('Duplicate WO-1002'));
+
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText(/Duplicate work order — WO-1002/)).toBeInTheDocument();
+    // Server-gated write: nothing is sent, and nothing is added to this list,
+    // until the planner confirms.
+    expect(mockedApi.duplicateWorkOrder).not.toHaveBeenCalled();
+  });
+
+  it('mounts no duplicate dialog at all for a role that cannot duplicate', async () => {
+    mockAuthUser = { id: 1, role: 'operator' as UserRole, is_superuser: false };
+    renderWorkOrders();
+    await getDesktopTable();
+
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(mockedApi.getWorkOrder).not.toHaveBeenCalled();
+  });
+
+  it('navigates to the NEW work order via the envelope once the copy lands', async () => {
+    // The response is an envelope, so the id lives at `result.work_order.id`.
+    // Reading it off the envelope itself is what produced /work-orders/undefined.
+    mockAuthUser = { id: 1, role: 'supervisor' as UserRole, is_superuser: false };
+    mockedApi.duplicateWorkOrder.mockResolvedValue({
+      work_order: {
+        id: 501,
+        version: 1,
+        work_order_number: 'WO-20260805-007',
+        part_id: 10,
+        work_order_type: 'production',
+        quantity_ordered: 50,
+        quantity_complete: 0,
+        quantity_scrapped: 0,
+        status: 'draft',
+        priority: 2,
+        estimated_hours: 0,
+        actual_hours: 0,
+        created_at: '2026-08-05T12:00:00Z',
+        updated_at: '2026-08-05T12:00:00Z',
+        operations: [],
+      },
+      skipped_operations: [],
+      skipped_material_allocations: [],
+    });
+    renderWorkOrders();
+    const table = await getDesktopTable();
+
+    fireEvent.click(within(table).getByLabelText('Duplicate WO-1001'));
+    const dialog = await screen.findByRole('dialog');
+    await waitFor(() => expect(within(dialog).getByLabelText(/Quantity/i)).toBeEnabled());
+
+    fireEvent.click(within(dialog).getByRole('button', { name: /Duplicat/i }));
+
+    await waitFor(() => expect(mockNavigate).toHaveBeenCalledWith('/work-orders/501'));
+    expect(mockNavigate).not.toHaveBeenCalledWith('/work-orders/undefined');
   });
 });

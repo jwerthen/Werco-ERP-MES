@@ -18,6 +18,7 @@ import {
   TrashIcon,
   CheckCircleIcon,
   ArrowUpTrayIcon,
+  DocumentDuplicateIcon,
 } from '@heroicons/react/24/outline';
 import { SkeletonTable, SkeletonCard } from '../components/ui/Skeleton';
 import { ConfirmDialog, EmptyState, ErrorState, useToast, DataTable, DataTableColumn, StatusBadge, Button } from '../components/ui';
@@ -25,6 +26,7 @@ import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { useOptimisticMutation } from '../hooks/useOptimisticMutation';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import LaserNestImportWizard from '../components/laser/LaserNestImportWizard';
+import DuplicateWorkOrderModal from '../components/workorders/DuplicateWorkOrderModal';
 
 const priorityConfig: Record<number, { bg: string; text: string; label: string }> = {
   1: { bg: 'bg-red-500/20', text: 'text-red-400', label: 'Critical' },
@@ -122,12 +124,14 @@ function DueDateCell({ wo }: { wo: WorkOrderSummary }) {
 function RowActionsCell({
   wo,
   onDelete,
+  onDuplicate,
   onRelease,
   isReleasing,
   isDeleting,
 }: {
   wo: WorkOrderSummary;
   onDelete?: (wo: WorkOrderSummary) => void;
+  onDuplicate?: (wo: WorkOrderSummary) => void;
   onRelease?: (wo: WorkOrderSummary) => void;
   isReleasing: boolean;
   isDeleting: boolean;
@@ -149,6 +153,16 @@ function RowActionsCell({
           aria-label={`Release ${wo.work_order_number}`}
         >
           <CheckCircleIcon className="h-4 w-4" aria-hidden="true" />
+        </button>
+      )}
+      {onDuplicate && (
+        <button
+          onClick={() => onDuplicate(wo)}
+          className="p-2 rounded-lg text-surface-400 hover:text-werco-600 hover:bg-werco-50 transition-colors"
+          title="Duplicate"
+          aria-label={`Duplicate ${wo.work_order_number}`}
+        >
+          <DocumentDuplicateIcon className="h-4 w-4" aria-hidden="true" />
         </button>
       )}
       {onDelete && (
@@ -176,6 +190,7 @@ function RowActionsCell({
 interface WorkOrderColumnOptions {
   hideColumn?: 'customer' | 'part';
   onDelete?: (wo: WorkOrderSummary) => void;
+  onDuplicate?: (wo: WorkOrderSummary) => void;
   onRelease?: (wo: WorkOrderSummary) => void;
   releasingIds?: Set<number>;
   deletePending?: boolean;
@@ -184,6 +199,7 @@ interface WorkOrderColumnOptions {
 function buildWorkOrderColumns({
   hideColumn,
   onDelete,
+  onDuplicate,
   onRelease,
   releasingIds,
   deletePending,
@@ -272,11 +288,13 @@ function buildWorkOrderColumns({
     {
       key: 'actions',
       header: '',
-      className: 'w-28',
+      // Fits the widest row: Release (draft only) + Duplicate + Delete + View.
+      className: 'w-36',
       render: (wo) => (
         <RowActionsCell
           wo={wo}
           onDelete={onDelete}
+          onDuplicate={onDuplicate}
           onRelease={onRelease}
           isReleasing={Boolean(releasingIds?.has(wo.id))}
           isDeleting={Boolean(deletePending)}
@@ -297,6 +315,10 @@ export default function WorkOrders() {
   // Matches the backend RBAC on the nest endpoints (admin/manager/supervisor,
   // + platform_admin) — the same gate WorkOrderDetail uses for nest actions.
   const canImportNests = hasPermission(user?.role, 'routings:create');
+  // Duplicate is require_role([ADMIN, MANAGER, SUPERVISOR]) on the backend —
+  // the trio work_orders:edit maps to. A hidden control and a refused call have
+  // to agree, so this mirrors WorkOrderDetail's gate exactly.
+  const canDuplicateWorkOrders = hasPermission(user?.role, 'work_orders:edit') || !!user?.is_superuser;
   const [nestWizardOpen, setNestWizardOpen] = useState(false);
   const [workOrders, setWorkOrders] = useState<WorkOrderSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -459,6 +481,15 @@ export default function WorkOrders() {
     setDeleteTarget(wo);
   }, []);
 
+  // Duplicate opens the shared dialog; the write itself is server-gated and
+  // stays non-optimistic (nothing is added to this list until the server
+  // answers — and by then we have navigated to the new draft anyway).
+  const [duplicateTarget, setDuplicateTarget] = useState<WorkOrderSummary | null>(null);
+
+  const handleDuplicate = useCallback((wo: WorkOrderSummary) => {
+    setDuplicateTarget(wo);
+  }, []);
+
   const handleConfirmDelete = useCallback(async () => {
     const wo = deleteTarget;
     if (!wo || deletePending) return;
@@ -515,11 +546,20 @@ export default function WorkOrders() {
     () =>
       buildWorkOrderColumns({
         onDelete: canDeleteWorkOrders ? handleDelete : undefined,
+        onDuplicate: canDuplicateWorkOrders ? handleDuplicate : undefined,
         onRelease: handleRelease,
         releasingIds,
         deletePending,
       }),
-    [canDeleteWorkOrders, handleDelete, handleRelease, releasingIds, deletePending]
+    [
+      canDeleteWorkOrders,
+      canDuplicateWorkOrders,
+      handleDelete,
+      handleDuplicate,
+      handleRelease,
+      releasingIds,
+      deletePending,
+    ]
   );
 
   const customers = useMemo(() => {
@@ -768,6 +808,7 @@ export default function WorkOrders() {
                   columns={buildWorkOrderColumns({
                     hideColumn: groupBy === 'customer' ? 'customer' : groupBy === 'part' ? 'part' : undefined,
                     onDelete: canDeleteWorkOrders ? handleDelete : undefined,
+                    onDuplicate: canDuplicateWorkOrders ? handleDuplicate : undefined,
                     onRelease: handleRelease,
                     releasingIds,
                     deletePending,
@@ -782,6 +823,7 @@ export default function WorkOrders() {
               <WorkOrderMobileList
                 workOrders={orders}
                 onDelete={canDeleteWorkOrders ? handleDelete : undefined}
+                onDuplicate={canDuplicateWorkOrders ? handleDuplicate : undefined}
                 onRelease={handleRelease}
                 releasingIds={releasingIds}
                 deletePending={deletePending}
@@ -813,6 +855,7 @@ export default function WorkOrders() {
               <WorkOrderMobileList
                 workOrders={filteredWorkOrders}
                 onDelete={canDeleteWorkOrders ? handleDelete : undefined}
+                onDuplicate={canDuplicateWorkOrders ? handleDuplicate : undefined}
                 onRelease={handleRelease}
                 releasingIds={releasingIds}
                 deletePending={deletePending}
@@ -828,6 +871,27 @@ export default function WorkOrders() {
           open={nestWizardOpen}
           onClose={() => setNestWizardOpen(false)}
           onImported={handleNestPackageImported}
+        />
+      )}
+
+      {/* Duplicate a work order's plan onto a new draft. On success we navigate
+          to the new WO rather than refreshing this list — a draft that nobody
+          reviews is worse than no copy at all. */}
+      {canDuplicateWorkOrders && (
+        <DuplicateWorkOrderModal
+          open={duplicateTarget !== null}
+          workOrder={duplicateTarget}
+          // Answer nest-ness from the row we already have wherever we can. Left
+          // undefined the dialog probes with `getWorkOrder`, and that endpoint
+          // is not a plain read: it runs the operation-quantity reconcile and
+          // can COMMIT writes against the SOURCE work order. Nests only ever
+          // land on a laser_cutting work order (the auto-created child, the
+          // target when it is already laser, or a standalone nest WO), so every
+          // other row is a `false` we can state outright — no round trip, and
+          // no write fired just because a planner opened a dialog.
+          hasLaserNests={duplicateTarget?.work_order_type === 'laser_cutting' ? undefined : false}
+          onClose={() => setDuplicateTarget(null)}
+          onDuplicated={(result) => navigate(`/work-orders/${result.work_order.id}`)}
         />
       )}
 
@@ -881,13 +945,14 @@ function isWorkOrderOverdue(wo: WorkOrderSummary) {
 interface WorkOrderMobileListProps {
   workOrders: WorkOrderSummary[];
   onDelete?: (wo: WorkOrderSummary) => void;
+  onDuplicate?: (wo: WorkOrderSummary) => void;
   onRelease?: (wo: WorkOrderSummary) => void;
   releasingIds?: Set<number>;
   deletePending?: boolean;
   className?: string;
 }
 
-const WorkOrderMobileList = React.memo(function WorkOrderMobileList({ workOrders, onDelete, onRelease, releasingIds, deletePending, className = '' }: WorkOrderMobileListProps) {
+const WorkOrderMobileList = React.memo(function WorkOrderMobileList({ workOrders, onDelete, onDuplicate, onRelease, releasingIds, deletePending, className = '' }: WorkOrderMobileListProps) {
   if (workOrders.length === 0) return null;
 
   return (
@@ -897,6 +962,7 @@ const WorkOrderMobileList = React.memo(function WorkOrderMobileList({ workOrders
           key={wo.id}
           workOrder={wo}
           onDelete={onDelete}
+          onDuplicate={onDuplicate}
           onRelease={onRelease}
           isReleasing={Boolean(releasingIds?.has(wo.id))}
           isDeleting={Boolean(deletePending)}
@@ -909,16 +975,18 @@ const WorkOrderMobileList = React.memo(function WorkOrderMobileList({ workOrders
 interface WorkOrderMobileCardProps {
   workOrder: WorkOrderSummary;
   onDelete?: (wo: WorkOrderSummary) => void;
+  onDuplicate?: (wo: WorkOrderSummary) => void;
   onRelease?: (wo: WorkOrderSummary) => void;
   isReleasing?: boolean;
   isDeleting?: boolean;
 }
 
-const WorkOrderMobileCard = React.memo(function WorkOrderMobileCard({ workOrder: wo, onDelete, onRelease, isReleasing, isDeleting }: WorkOrderMobileCardProps) {
+const WorkOrderMobileCard = React.memo(function WorkOrderMobileCard({ workOrder: wo, onDelete, onDuplicate, onRelease, isReleasing, isDeleting }: WorkOrderMobileCardProps) {
   const priority = priorityConfig[wo.priority] || priorityConfig[4];
   const overdue = isWorkOrderOverdue(wo);
   const canRelease = onRelease && wo.status === 'draft';
   const canDelete = Boolean(onDelete);
+  const canDuplicate = Boolean(onDuplicate);
   const progress = getWorkOrderProgress(wo);
 
   return (
@@ -990,6 +1058,17 @@ const WorkOrderMobileCard = React.memo(function WorkOrderMobileCard({ workOrder:
               <CheckCircleIcon className="h-4 w-4 mr-1" />
               Release
             </button>
+          )}
+          {canDuplicate && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => onDuplicate?.(wo)}
+              aria-label={`Duplicate ${wo.work_order_number}`}
+            >
+              <DocumentDuplicateIcon className="h-4 w-4 mr-1" aria-hidden="true" />
+              Duplicate
+            </Button>
           )}
           {canDelete && (
             <Button

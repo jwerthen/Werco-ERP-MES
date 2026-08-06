@@ -13,6 +13,7 @@ import LaserNestPdfPreview from '../components/laser/LaserNestPdfPreview';
 import { CompleteWorkModal, CompleteWorkSubmit } from '../components/workorders/CompleteWorkModal';
 import MaterialTiesPanel from '../components/workorders/MaterialTiesPanel';
 import OperationMaterialTieModal from '../components/workorders/OperationMaterialTieModal';
+import DuplicateWorkOrderModal from '../components/workorders/DuplicateWorkOrderModal';
 import BackflushPreviewPanel from '../components/workorders/BackflushPreviewPanel';
 import OperationStepsPanel from '../components/processSheets/OperationStepsPanel';
 import {
@@ -56,6 +57,7 @@ import {
   ClipboardDocumentCheckIcon,
   UserGroupIcon,
   WrenchScrewdriverIcon,
+  DocumentDuplicateIcon,
 } from '@heroicons/react/24/outline';
 
 const CURRENT_WORK_ORDER_STATUSES = ['released', 'in_progress', 'on_hold'];
@@ -282,11 +284,17 @@ export default function WorkOrderDetail() {
   // operation now consumes tied material, so this button moves stock and writes
   // hash-chain rows. Operators complete work from the shop floor / kiosk.
   const canCompleteOperation = canCorrectCount || user?.role === 'quality';
+  // Duplicate is require_role([ADMIN, MANAGER, SUPERVISOR]) on the backend —
+  // the same trio work_orders:edit maps to. Named separately from
+  // canCorrectCount so the gate reads at its call site: hiding the control and
+  // refusing the call must agree, or a supervisor sees a button that 403s.
+  const canDuplicateWorkOrder = canCorrectCount;
   const [workOrder, setWorkOrder] = useState<WorkOrder | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [deleting, setDeleting] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [duplicateOpen, setDuplicateOpen] = useState(false);
   const [deleteNestTarget, setDeleteNestTarget] = useState<LaserNestInfo | null>(null);
   const [completing, setCompleting] = useState(false);
   const [completingOpId, setCompletingOpId] = useState<number | null>(null);
@@ -1201,6 +1209,16 @@ export default function WorkOrderDetail() {
                 <CheckCircleIcon className="h-5 w-5 mr-2" />
               )}
               {completing ? 'Completing...' : 'Complete'}
+            </Button>
+          )}
+          {canDuplicateWorkOrder && (
+            <Button
+              variant="secondary"
+              onClick={() => setDuplicateOpen(true)}
+              className="flex items-center"
+            >
+              <DocumentDuplicateIcon className="h-5 w-5 mr-2" />
+              Duplicate
             </Button>
           )}
           <Button
@@ -2224,6 +2242,21 @@ export default function WorkOrderDetail() {
         onClose={() => setTieTarget(null)}
         onSaved={() => setTieRefreshToken((token) => token + 1)}
       />
+
+      {/* Duplicate this work order's plan onto a new draft. Navigation is the
+          caller's job so the dialog stays reusable; the new WO is a draft, so
+          landing on it is where the planner reviews and releases. */}
+      {canDuplicateWorkOrder && (
+        <DuplicateWorkOrderModal
+          open={duplicateOpen}
+          workOrder={workOrder}
+          // This page already has the operations loaded, so the dialog must not
+          // re-read the work order just to learn its quantity is nest-derived.
+          hasLaserNests={laserNests.length > 0}
+          onClose={() => setDuplicateOpen(false)}
+          onDuplicated={(result) => navigate(`/work-orders/${result.work_order.id}`)}
+        />
+      )}
 
       {/* Backflush dry run — the OTHER consumption path: BOM/routing components
           pulled automatically at completion when the finished part has opted in.

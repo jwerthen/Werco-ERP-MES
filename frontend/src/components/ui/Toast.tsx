@@ -4,7 +4,16 @@ import { toDisplayString } from '../../utils/apiError';
 
 interface Toast {
   id: number;
-  type: 'success' | 'error' | 'info';
+  /**
+   * `warning` is for an action that SUCCEEDED but did not do everything the
+   * caller asked — a partial result the user has to act on. It exists because
+   * the alternatives both mislead: `success` hides the shortfall, and `error`
+   * claims a failure that did not happen (the record was created, and saying
+   * otherwise sends someone looking for it in vain). First caller: a duplicated
+   * work order that could not carry a material tie across, where believing the
+   * copy was complete means releasing a job whose stock is never deducted.
+   */
+  type: 'success' | 'error' | 'warning' | 'info';
   message: string;
 }
 
@@ -45,12 +54,14 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   const icons = {
     success: <CheckCircleIcon className="h-5 w-5 flex-shrink-0" />,
     error: <ExclamationTriangleIcon className="h-5 w-5 flex-shrink-0" />,
+    warning: <ExclamationTriangleIcon className="h-5 w-5 flex-shrink-0" />,
     info: <InformationCircleIcon className="h-5 w-5 flex-shrink-0" />,
   };
 
   const colors = {
     success: 'bg-green-600',
     error: 'bg-red-600',
+    warning: 'bg-amber-600',
     info: 'bg-blue-600',
   };
 
@@ -65,7 +76,10 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
         {toasts.map(toast => (
           <div
             key={toast.id}
-            role={toast.type === 'error' ? 'alert' : 'status'}
+            // `alert` interrupts the screen reader; `status` waits for a pause.
+            // A warning earns the interruption for the same reason an error
+            // does — it reports something the user has to act on now.
+            role={toast.type === 'error' || toast.type === 'warning' ? 'alert' : 'status'}
             className={`${colors[toast.type]} text-white px-4 py-3 rounded-lg shadow-lg flex items-center gap-3 animate-slide-up pointer-events-auto max-w-sm`}
           >
             {icons[toast.type]}
