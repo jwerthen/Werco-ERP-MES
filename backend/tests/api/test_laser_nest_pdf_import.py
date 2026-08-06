@@ -243,7 +243,13 @@ class TestPdfPreview:
         first = rows["05749"]
         assert first["material"] == "A36"
         assert first["thickness"] == "0.25in"
-        assert first["sheet_size"] == "72.5x120"
+        # CANONICALIZED, not raw: the extraction mock returns "72.5x120" and
+        # `build_parsed_nest_from_extraction` normalizes through
+        # `services/laser_nest_text` before the row ever reaches the wizard. It
+        # has to happen here rather than at the DB write, because the planner
+        # confirms THIS row and the import echoes it back -- normalizing later
+        # would store a spelling the planner never saw.
+        assert first["sheet_size"] == "72.5 x 120"
         assert first["planned_runs"] == 3
         assert first["confidence"] == "high"
         # source_file is the row key the wizard echoes back on import.
@@ -387,10 +393,15 @@ class TestPdfImport:
         by_cnc = {n.cnc_number: n for n in nests}
         assert set(by_cnc) == {"05749-CONFIRMED", "05750"}
         edited = by_cnc["05749-CONFIRMED"]
-        # CONFIRMED values were persisted verbatim.
+        # CONFIRMED values were persisted -- with the sheet descriptors
+        # CANONICALIZED (`services/laser_nest_text`), which is the one way the
+        # stored row may differ from what the planner sent. The transform is
+        # spelling-only: "72.5x120" -> "72.5 x 120". Note the trailing zero in
+        # "0.250in" SURVIVES on purpose -- precision on a thickness is not the
+        # normalizer's to rewrite.
         assert edited.material == "A36-EDITED"
         assert edited.thickness == "0.250in"
-        assert edited.sheet_size == "72.5x120"
+        assert edited.sheet_size == "72.5 x 120"
 
         # Each nest got a DRAWING Document created + attached (document_id set).
         for nest in nests:

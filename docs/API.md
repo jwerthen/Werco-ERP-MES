@@ -1499,7 +1499,35 @@ mixed**:
 > `planned_runs`, `material`, `thickness`, `sheet_size`). A `planned_runs` change **reverse-syncs**
 > the operation's `component_quantity` and re-derives the laser WO's `quantity_ordered` over
 > its non-deleted nests. Lowering `planned_runs` below `completed_runs` is allowed (over-run is
-> acceptable); only the schema's `ge=1` floor applies.
+> acceptable); only the schema's `ge=1` floor applies. `material` / `thickness` / `sheet_size` are
+> **canonicalized on write** — see below.
+
+> **Sheet descriptors are canonicalized on every write (`services/laser_nest_text.py`).**
+> `material` / `thickness` / `sheet_size` carry **no `Part` foreign key** — sheet recognition on
+> this path is a deliberate heuristic — so the *string* is the only grouping key anything has, and
+> the values arrive from an LLM extraction pass that spells the same sheet more than one way. A
+> 2026-08-06 production reconciliation found one physical sheet split across two rows on whitespace
+> alone (`144x60` vs `144 x 60`): 25 output rows for 19 real specs, so every group under-reported
+> and the under-report looked like a smaller number rather than like an error.
+>
+> Every seam that writes a nest normalizes — the extraction mapper, the filename-inference
+> fallback, the package build, `POST …/laser-nests/manual`, `PATCH /laser-nests/{id}`, and the
+> work-order **duplicate** copy (canonicalized on the way across rather than copied byte-for-byte,
+> so duplicating a pre-normalization job cannot re-inject a legacy spelling into new data).
+> Canonical forms: `"a36 "` → `A36`, `"16 GA"` → `16ga`, `".25"` → `0.25`, `"144x60"` /
+> `"144X60"` / `"120×48"` → `144 x 60` / `120 x 48`.
+>
+> **The rule is normalize spelling, never meaning**, and three things are deliberately NOT done:
+> trailing zeros are **preserved** (`0.250` stays `0.250` — the digits state precision on a
+> manufacturing thickness, so `0.25` and `0.250` do still group apart, which is the accepted cost of
+> not rewriting a spec); units are **not inferred** (a bare `16` is not promoted to `16ga`); and
+> alloys are **not expanded** (`SS` is not rewritten to `304 SS` — it could be 304 or 316 and the
+> nest does not say). A descriptor the parser cannot read as two dimensions passes through with
+> whitespace collapsed and nothing else touched, rather than being mangled into something tidy and
+> wrong. The transform is idempotent, which the overlapping seams rely on.
+>
+> **This is forward-only.** Rows written before it are untouched; a backfill would rewrite historical
+> nest records and is a separate, explicit decision.
 >
 > **Reference PDF (attach / detach / preview).** The attached PDF is a plain **shop-reference
 > drawing** — optional, with **no approval workflow**, and it **never gates clock-in**. Attach
