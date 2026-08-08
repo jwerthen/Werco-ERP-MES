@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import api from '../services/api';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { formatCentralDate } from '../utils/centralTime';
@@ -86,15 +86,45 @@ export default function Quotes() {
     loadData();
   }, []);
 
+  // Once-per-id latch for the `?id=` deep-link fallback fetch below. Required,
+  // not cosmetic: `quotes` is in the effect's dependency array.
+  const deepLinkedQuoteIdRef = useRef<number | null>(null);
+
   useEffect(() => {
     const requestedId = Number(searchParams.get('id') || 0);
     if (!requestedId) {
+      deepLinkedQuoteIdRef.current = null;
       setSelectedQuote(null);
       return;
     }
     const quote = quotes.find(q => q.id === requestedId);
-    if (quote) setSelectedQuote(quote);
-  }, [quotes, searchParams]);
+    if (quote) {
+      setSelectedQuote(quote);
+      return;
+    }
+    // Not in the list: list_quotes caps at 100 and excludes CONVERTED/EXPIRED,
+    // so a `quote.expiring` notification clicked after the quote actually
+    // expired would otherwise land here and silently do nothing.
+    if (loading || loadError || deepLinkedQuoteIdRef.current === requestedId) return;
+    deepLinkedQuoteIdRef.current = requestedId;
+    void loadDeepLinkedQuote(requestedId);
+  }, [quotes, searchParams, loading, loadError]);
+
+  /**
+   * `GET /quotes/{id}` returns the same QuoteResponse shape the list returns,
+   * so the row satisfies the local Quote interface with no field mapping. The
+   * detail panel renders from `selectedQuote` alone, so it displays correctly
+   * even though the row is not in the list to highlight.
+   */
+  const loadDeepLinkedQuote = async (quoteId: number) => {
+    try {
+      const detail: Quote = await api.getQuote(quoteId);
+      setSelectedQuote(detail);
+    } catch (err) {
+      console.error('Failed to load deep-linked quote:', err);
+      showToast('error', 'Quote not found');
+    }
+  };
 
   const loadData = async () => {
     setLoading(true);

@@ -5002,6 +5002,15 @@ their own inbox).
 > `event_key` is the catalog key (see `GET /notifications/catalog`); `link` is a **relative** SPA
 > route the UI deep-links to; timestamps are UTC `Z` (display Central).
 >
+> **`link` values are drawn from a fixed registry** (`app/services/notification_links.py`), are
+> always a relative path beginning with a single `/`, and may carry a query string — this app has
+> few detail routes, so record selection is done with a param the landing page already reads
+> (`/purchasing?po=812`, `/quality?tab=fai&fai=17`). `link` is **`null`** whenever there is no
+> destination that can honour the record, which is a legitimate answer, not a gap — the UI renders
+> a non-navigating row. A backend test parses `frontend/src/App.tsx` and fails if an emittable path
+> stops resolving. Response contract unchanged (`link` was already `Optional[str]`); see
+> [docs/NOTIFICATIONS.md → Deep links must resolve](NOTIFICATIONS.md#deep-links-must-resolve).
+>
 > **Content (revised 2026-07-29, after CMMC L2 was descoped):** `title` is the catalog label plus
 > the record identifier. `body` is the catalog description, then a blank line, then a detail line
 > composed from a curated payload allowlist — statuses and transitions, the `quantity_*` family,

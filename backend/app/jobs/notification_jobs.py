@@ -6,6 +6,7 @@ from app.core.queue import enqueue_job
 from app.db.session import SessionLocal
 from app.models.company import Company
 from app.models.operational_event import OperationalEvent
+from app.services import notification_links as links
 from app.services.notification_catalog import SOURCE_EVENT_TYPE_TO_KEY
 from app.services.notification_dispatch import dispatch_direct, dispatch_for_event
 from app.services.notification_service import get_notification_recipients
@@ -223,12 +224,12 @@ async def check_calibrations_task():
                         related_id=cal.id,
                         title=f"Calibration due soon: {cal.name}",
                         body=f"Calibration is due in {days} day(s).",
-                        link=f"/calibration/{cal.id}",
+                        link=links.CALIBRATION_LIST,
                         template="calibration_due",
                         context={
                             "equipment_name": cal.name,
                             "days_until_due": days,
-                            "link_path": f"/calibration/{cal.id}",
+                            "link_path": links.CALIBRATION_LIST,
                         },
                     )
 
@@ -242,13 +243,13 @@ async def check_calibrations_task():
                         related_id=cal.id,
                         title=f"URGENT: Calibration due tomorrow: {cal.name}",
                         body="Calibration is due within 1 day.",
-                        link=f"/calibration/{cal.id}",
+                        link=links.CALIBRATION_LIST,
                         template="calibration_due",
                         context={
                             "equipment_name": cal.name,
                             "days_until_due": 1,
                             "urgent": True,
-                            "link_path": f"/calibration/{cal.id}",
+                            "link_path": links.CALIBRATION_LIST,
                         },
                     )
 
@@ -311,13 +312,13 @@ async def check_late_work_orders_task():
                             f"Work Order {wo.work_order_number} is {days_late} days late"
                         ),
                         body="This work order is past its due date.",
-                        link=f"/work-orders/{wo.id}",
+                        link=links.work_order_detail(wo.id),
                         template="work_order_late",
                         context={
                             "work_order_number": wo.work_order_number,
                             "days_late": days_late,
                             "critical": is_critical,
-                            "link_path": f"/work-orders/{wo.id}",
+                            "link_path": links.work_order_detail(wo.id),
                         },
                     )
 
@@ -374,9 +375,9 @@ async def check_low_stock_task():
                     related_id=None,
                     title=f"Low Stock Alert: {len(low_stock)} items below reorder point",
                     body=f"{len(low_stock)} item(s) are at or below their reorder point.",
-                    link="/inventory",
+                    link=links.INVENTORY_LIST,
                     template="low_stock",
-                    context={"count": len(low_stock), "link_path": "/inventory"},
+                    context={"count": len(low_stock), "link_path": links.INVENTORY_LIST},
                 )
 
                 total_low_stock += len(low_stock)
@@ -432,12 +433,12 @@ async def check_quote_expiring_task():
                         related_id=quote.id,
                         title=f"Quote {quote.quote_number} expires in {days_until_expiry} days",
                         body="This quote is about to expire.",
-                        link=f"/quotes/{quote.id}",
+                        link=links.quote(quote.id),
                         template="quote_expiring",
                         context={
                             "quote_number": quote.quote_number,
                             "days_until_expiry": days_until_expiry,
-                            "link_path": f"/quotes/{quote.id}",
+                            "link_path": links.quote(quote.id),
                         },
                     )
 

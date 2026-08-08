@@ -31,5 +31,7 @@
     </tr>
 </table>
 
+{% if base_url %}
 <a href="{{ base_url }}/work-orders/{{ work_order.id }}" class="button">View Work Order</a>
+{% endif %}
 {% endblock %}

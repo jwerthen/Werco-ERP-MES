@@ -1,5 +1,5 @@
 import React, { Suspense } from 'react';
-import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { CompanyProvider } from './context/CompanyContext';
 import { TourProvider } from './context/TourContext';
@@ -177,6 +177,70 @@ function getRouteAccessRequirement(pathname: string): RouteAccessRequirement | u
   return routeAccessRequirements
     .filter(requirement => pathname === requirement.prefix || pathname.startsWith(`${requirement.prefix}/`))
     .sort((a, b) => b.prefix.length - a.prefix.length)[0];
+}
+
+/**
+ * Legacy notification / QMS-evidence deep links.
+ *
+ * Rows already written to `notifications.link` — and absolute URLs already
+ * DELIVERED by email (`notification_dispatch._enqueue_email` bakes
+ * `FRONTEND_BASE_URL + link` into the "Open in Werco" button) — carry route
+ * shapes that no longer exist. `vercel.json` rewrites every path to
+ * index.html, so even a cold navigation from a mail client lands in the
+ * router and hits these routes.
+ *
+ * That makes them a PERMANENT compatibility guarantee, not a temporary shim:
+ * the shapes are enumerated in `backend/app/services/notification_links.py`
+ * (`LEGACY_LINK_SHAPES`) and `backend/tests/test_notification_link_routes.py`
+ * parses this file and fails if one of them stops resolving.
+ *
+ * An UNRECOGNIZED shape deliberately still falls through to the catch-all
+ * `NotFound` — this is an allowlist of shapes we know were written, and
+ * guessing at a destination is what produced the original bug.
+ */
+type LegacyRouteParams = Readonly<Record<string, string | undefined>>;
+
+/**
+ * Path params are attacker-influenceable text, and these resolvers interpolate
+ * into a QUERY STRING — a raw `&` in the segment would inject extra params.
+ * Anything that isn't a bare integer degrades to the plain list page.
+ */
+export const legacyId = (value?: string): string | null => (value && /^\d+$/.test(value) ? value : null);
+
+export const resolveLegacyPurchasing = (params: LegacyRouteParams): string => {
+  const id = legacyId(params.poId);
+  return id ? `/purchasing?po=${id}` : '/purchasing';
+};
+
+export const resolveLegacyQuality = (params: LegacyRouteParams): string => {
+  const id = legacyId(params.legacyId);
+  if (params.legacyTab === 'fai' && id) return `/quality?tab=fai&fai=${id}`;
+  if (params.legacyTab === 'car') return '/quality?tab=car';
+  if (params.legacyTab === 'ncr') return '/quality?tab=ncr';
+  return '/quality';
+};
+
+export const resolveLegacyQuote = (params: LegacyRouteParams): string => {
+  const id = legacyId(params.quoteId);
+  return id ? `/quotes?id=${id}` : '/quotes';
+};
+
+// No per-equipment calibration view exists, and the due-soon FILTER is the wrong
+// destination even though the notification says "calibration due": the cron that
+// wrote these legacy links selects `Equipment.status == ACTIVE`, while
+// `?status=due` filters the persisted column before the backend recomputes it, so
+// the notified equipment is precisely what that filter excludes. Unfiltered, the
+// list sorts due-soonest first and repairs the stale status. See
+// backend/app/services/notification_links.py :: CALIBRATION_LIST.
+export const resolveLegacyCalibration = (): string => '/calibration';
+
+// Shipments have no detail view; /shipping already redirects to the warehouse
+// shipping tab, so the legacy id-bearing shape lands in the same place.
+export const resolveLegacyShipping = (): string => '/warehouse?tab=shipping';
+
+export function LegacyDeepLinkRedirect({ resolve }: { resolve: (params: LegacyRouteParams) => string }) {
+  const params = useParams();
+  return <Navigate to={resolve(params)} replace />;
 }
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
@@ -521,6 +585,41 @@ function AppRoutes() {
           <Navigate to="/warehouse?tab=inventory&group=materials" replace />
         </PrivateRoute>
       } />
+
+      {/* Legacy notification / evidence deep links — see LegacyDeepLinkRedirect
+          above. These are a permanent compatibility guarantee (already-delivered
+          emails carry them as absolute URLs), enforced by a backend test that
+          parses this file. Do NOT remove them.
+          No routeAccessRequirements entries are needed: getRouteAccessRequirement
+          matches by longest prefix, so each inherits its parent's permission
+          (purchasing:view / quality:view / quality:calibration / shipping:view)
+          and every redirect target is equal-or-looser. */}
+      <Route path="/purchasing/:poId" element={
+        <PrivateRoute>
+          <LegacyDeepLinkRedirect resolve={resolveLegacyPurchasing} />
+        </PrivateRoute>
+      } />
+      <Route path="/quality/:legacyTab/:legacyId" element={
+        <PrivateRoute>
+          <LegacyDeepLinkRedirect resolve={resolveLegacyQuality} />
+        </PrivateRoute>
+      } />
+      <Route path="/calibration/:equipmentId" element={
+        <PrivateRoute>
+          <LegacyDeepLinkRedirect resolve={resolveLegacyCalibration} />
+        </PrivateRoute>
+      } />
+      <Route path="/quotes/:quoteId" element={
+        <PrivateRoute>
+          <LegacyDeepLinkRedirect resolve={resolveLegacyQuote} />
+        </PrivateRoute>
+      } />
+      <Route path="/shipping/:shipmentId" element={
+        <PrivateRoute>
+          <LegacyDeepLinkRedirect resolve={resolveLegacyShipping} />
+        </PrivateRoute>
+      } />
+
       <Route path="/mrp" element={
         <PrivateRoute>
           <Layout>

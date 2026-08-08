@@ -3,6 +3,7 @@ from typing import List, Optional
 
 from app.db.session import SessionLocal
 from app.models.company import Company
+from app.services import notification_links as links
 from app.services.notification_dispatch import dispatch_direct
 from app.services.notification_service import get_notification_recipients
 from app.services.scheduling_service import SchedulingService
@@ -103,12 +104,12 @@ async def _run_scheduling_for_company(
                 related_id=None,
                 title=f"Production Scheduling: {len(conflicts)} Capacity Conflicts Detected",
                 body=f"{len(conflicts)} capacity conflict(s) were detected in the latest scheduling run.",
-                link="/scheduling",
+                link=links.SCHEDULING_LIST,
                 template="scheduling_conflicts",
                 context={
                     "conflict_count": len(conflicts),
                     "scheduled_count": results["scheduled_count"],
-                    "link_path": "/scheduling",
+                    "link_path": links.SCHEDULING_LIST,
                 },
             )
 
