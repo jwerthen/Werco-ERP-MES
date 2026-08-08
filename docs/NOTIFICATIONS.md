@@ -5,8 +5,10 @@ in-app inbox)** — the transactional outbox, the event catalog, the in-app and 
 the compliance invariants — and **PR 4 (SMS / Twilio)**, the deliberately terse SMS channel (see
 [SMS channel](#sms-channel-twilio)). The email and SMS **content rules were revised 2026-07-29**
 after CMMC L2 was descoped — read
-[Content rules](#content-rules-compliance) before changing what a notification says. Later PRs
-extend this file (see
+[Content rules](#content-rules-compliance) before changing what a notification says, and
+[Deep links must resolve](#deep-links-must-resolve) — **added 2026-08-07**, after six emitted link
+shapes were found pointing at routes that don't exist — before changing where one points. Later
+PRs extend this file (see
 [Deferred / roadmap](#deferred--roadmap) at the end). The authoritative design spec is
 [NOTIFICATIONS_PLAN.md](NOTIFICATIONS_PLAN.md); this runbook describes what is actually
 implemented.
@@ -356,7 +358,12 @@ is skipped — the `notified_at` marker still bounds duplicates).
     that exists is reachable.
   - **Deep links**: `base.html` renders an "Open in Werco" button + a "Manage notifications" footer
     built from `FRONTEND_BASE_URL` (see [ENVIRONMENT_VARIABLES.md](ENVIRONMENT_VARIABLES.md#email-smtp)).
-    Empty `FRONTEND_BASE_URL` → the absolute link/footer are omitted.
+    Empty `FRONTEND_BASE_URL` → the absolute link **and** footer are both omitted. (True of the
+    *button* only since 2026-08-07: `_enqueue_email` used to set `notification_link`
+    unconditionally, so an empty base URL emitted `<a href="/quality?tab=ncr">` — a relative href
+    inside an email, unresolvable in every mail client. `base.html` had always guarded the footer
+    this way; the button now matches.) Every path that goes in that button comes from the link
+    registry — see [Deep links must resolve](#deep-links-must-resolve).
 - **Digest** — a `DigestQueue` row; the daily digest cron (8:00) is unchanged in PR 1.
 - **SMS** — live over Twilio as of PR 4. The leg fires only when **all** of the following hold:
   the catalog entry is `sms_eligible`, the user has explicitly enabled `sms` for that event
@@ -365,6 +372,143 @@ is skipped — the `notified_at` marker still bounds duplicates).
   enqueues `send_sms_job`; the `allow_sms_egress` kill switch is then re-checked fail-closed inside
   `sms_service` before anything leaves the boundary. Full detail in
   [SMS channel](#sms-channel-twilio).
+
+### Deep links must resolve
+
+A notification's `link` is a **relative SPA path**, rendered two ways: in-app as a
+`<Link to={item.link}>` in the bell popover / `/notifications` inbox, and in email as
+`FRONTEND_BASE_URL + link` in the "Open in Werco" button. If the path doesn't match a route
+declared in `frontend/src/App.tsx`, React Router falls through to its catch-all `NotFound` —
+which is mounted with **no `Layout` and no `PrivateRoute`**, so the sidebar, the top bar and the
+bell itself all disappear. To the user that doesn't read as "bad link", it reads as *"the app
+broke"*. That is why this got escalated: four of the five shapes `_link_for_event` emitted pointed
+at routes that had never existed, and two more lived in `dispatch_direct` callers (fixed
+2026-08-07).
+
+**The registry.** Every value written to `notifications.link` comes from
+`app/services/notification_links.py` — a pure module of path templates plus five `.format()`
+builders, importing nothing from the app — and never from an inline f-string at a call site. `backend/tests/test_notification_link_routes.py`
+enforces both halves: it **parses `frontend/src/App.tsx`** and asserts every emittable template
+resolves to a declared, non-catch-all route, and it greps `backend/app/**` for `link=f"/…"` /
+`"link_path": f"/…"` and fails on a hit. The grep is what makes the resolution test *total* rather
+than a sample of whatever someone remembered to register. App.tsx is parsed rather than mirrored
+into a shared constant on purpose — App.tsx **is** the routing source of truth, and a duplicated
+TS/Python constant would be a second source that drifts, which is exactly the failure being fixed.
+
+**Two producers — the second is the one everyone forgets.**
+
+| Producer | Where | How the link is chosen |
+|---|---|---|
+| `_link_for_event(event)` | `notification_dispatch.py` — the **outbox** path | Derived from the committed event: `work_order_id` first, then `entity_type` / `entity_id` / payload. Pure function, no DB re-query. |
+| the `link=` kwarg on `dispatch_direct(...)` | crons (`jobs/notification_jobs.py`), MRP (`jobs/mrp_jobs.py`, `services/mrp_auto_service.py`), scheduling (`jobs/scheduling_jobs.py`), visitor check-in (`services/visitor_log_service.py`) | Passed by the caller. **Two of the six original 404s lived here** — `calibration.due` and `quote.expiring`, both wired daily crons. |
+
+**Three rules** (stated verbatim in the module docstring):
+
+1. A link value comes from a template in `notification_links.py`, never an inline f-string.
+2. The destination must be able to **honour** it. A record-bearing link (one carrying an id)
+   requires the landing page to resolve that id — ideally by a by-id fetch. A page that filters an
+   already-loaded, windowed array can silently miss, which is **worse than a 404 because it looks
+   like success**. If the page can't resolve by id, either fix the page or emit a link with no
+   record id in it.
+3. When there is no honest destination, emit **`None`**. A non-navigating inbox row is correct; a
+   link into a page that cannot honour it is not.
+
+**Query params are the record-selection mechanism.** This app has few detail routes, so the landing
+pattern is an existing list page plus a param that page already reads (`pages/Purchasing.tsx`'s
+`?po=` handling is the reference).
+
+#### What each event links to
+
+| Trigger | Emitted link | Honoured by |
+|---|---|---|
+| any outbox event with `event.work_order_id` set — checked **first**, wins over `entity_type` | `/work-orders/{id}` | `WorkOrderDetail` — a genuine by-id route. The model the others imitate. |
+| `entity_type="po_receipt"` with `po_id` in the payload — `receipt.created` (**the reported bug**), `receipt.voided`, `receipt.corrected`, and now `inspection.failed` | `/purchasing?po={po_id}` | `Purchasing.tsx` selects the PO and **falls back to `GET /purchasing/purchase-orders/{id}`** when it's outside the list window. |
+| `entity_type="purchase_order"` — `po.sent` | `/purchasing?po={entity_id}` | Same. Previously emitted nothing at all. |
+| `entity_type="fai"`, no work order | `/quality?tab=fai&fai={id}` | `Quality.tsx` opens the report via `GET /quality/fai/{id}` — a real by-id fetch — then clears the `fai` param so closing the modal doesn't re-open it. |
+| `entity_type="ncr"`, no work order | `/quality?tab=ncr` — **record-less on purpose** | There is **no NCR detail view** in the app, so an id in the URL would be a promise the page can't keep. The tab is newest-first. |
+| `entity_type="car"`, no work order | `/quality?tab=car` — record-less | Same: no CAR detail view. Previously `None`. |
+| `entity_type="downtime_event"`, no work order (the normal case — downtime is reported against a work center) | `/downtime` — record-less | No per-event detail view. Previously `None`. |
+| `calibration.due` — both the 7-day and 1-day cron windows | `/calibration` — record-less and **deliberately unfiltered** | `?filter=due` reads as more helpful and is provably empty: the cron selects `Equipment.status == ACTIVE`, while `GET /calibration/equipment?status=due` filters the **persisted** status column *before* `update_equipment_status` recomputes it — so the rows that trigger the notification are exactly the rows that filter excludes. The unfiltered list sorts by `next_calibration_date` ascending (due item first) and repairs the stale status for every row it returns. |
+| `quote.expiring` (cron) | `/quotes?id={id}` | `Quotes.tsx` selects the quote with a `GET /quotes/{id}` fallback — needed because the list excludes `CONVERTED`/`EXPIRED`, i.e. exactly the quote you were warned about. |
+| `wo.late`, `stock.low`, `mrp.completed` / `mrp.review_needed`, `capacity.overload`, `mrp.expedite_required`, `visitor.check_in` (all `dispatch_direct`) | `/work-orders/{id}`, `/inventory`, `/mrp`, `/scheduling`, `/parts/{id}`, `/visitor-log` — **values unchanged** | Already resolved; moved into the registry so the guard test covers them and the no-inline-literal grep can be total. |
+| everything else — any `entity_type` with no branch, plus every still-dormant catalog entry | **`None`** | The row renders as a non-navigating button. This is the correct default, not an omission. |
+
+`entity_type="shipment"` was **removed**, not repointed: `shipments.work_order_id` is
+`nullable=False`, so the `work_order_id` branch always won first and the old `/shipping/{id}`
+branch was unreachable dead code that never served a 404. Don't restore it.
+
+`inspection.failed` gained a link by adding `"po_id": receipt.po_line.purchase_order_id` to its
+payload in `api/endpoints/receiving.py` — the one `po_receipt` payload that lacked it. Note the
+attribute: `purchase_order_id` lives on `PurchaseOrderLine`, **not** on `POReceipt`, and because
+the payload dict is a call *argument* a wrong attribute raises before `emit_best_effort`'s guard
+and 500s the inspection endpoint (caught in review; pinned by
+`tests/api/test_receiving_inspect_deep_link_payload.py`). That key is in **none**
+of `_IDENTIFIER_KEYS` / `_DETAIL_KEYS` / `_SMS_DETAIL_KEYS`, so **no email or SMS body text
+changed**; it is visible only to the link builder. That is the point — see
+[Content rules](#content-rules-compliance).
+
+`_fan_out` also drops any `link` that isn't a single-leading-slash relative path (logged at
+`error`), guarding the `Notification` row and the `DigestQueue` copy alike. Not reachable today —
+every value is a template over an integer PK — but `dispatch_direct(link=...)` is an open kwarg,
+and react-router renders a value carrying a scheme or a leading `//` as a plain external
+`<a href>` with the SPA click handler dropped.
+
+#### Legacy shapes: a permanent compatibility guarantee
+
+The broken shapes were **already written** to `notifications.link`, copied into
+`DigestQueue.event_data["link"]`, and — worst — mailed as **absolute URLs** in delivered "Open in
+Werco" buttons. Those emails are in mailboxes forever, and `frontend/vercel.json` rewrites every
+path to `index.html`, so a cold click from a mail client is resolved client-side by React Router.
+**A data migration cannot repair a delivered email; a redirect route can.** So the fix is routing,
+not a backfill: no Alembic migration, no `UPDATE` over live `notifications` rows, and the third
+store (`DigestQueue.event_data`) is covered for free.
+
+`App.tsx` carries a `<Navigate replace>` route for each historical shape, wrapped in
+`<PrivateRoute>` alongside the pre-existing `{/* Legacy redirects */}` block. No
+`routeAccessRequirements` entries were needed — `getRouteAccessRequirement` matches by longest
+prefix, so each inherits its parent's permission and every redirect target is equal-or-looser.
+
+| Legacy shape (in prod rows and delivered mail) | Redirects to |
+|---|---|
+| `/purchasing/{id}` | `/purchasing?po={id}` |
+| `/quality/ncr/{id}` | `/quality?tab=ncr` |
+| `/quality/car/{id}` | `/quality?tab=car` |
+| `/quality/fai/{id}` | `/quality?tab=fai&fai={id}` |
+| `/calibration/{id}` | `/calibration` (unfiltered, for the same reason as the forward link — these legacy rows were written by that same cron) |
+| `/quotes/{id}` | `/quotes?id={id}` |
+| `/shipping/{id}` — belt-and-braces; **no row should carry it** (the branch was unreachable, see above) | `/warehouse?tab=shipping` |
+
+The same seven are listed in `notification_links.LEGACY_LINK_SHAPES`, and the guard test asserts
+each still resolves — **deleting one of these routes turns a backend test red**. They are not a
+temporary shim; treat them as permanent.
+
+Two details worth keeping. A non-numeric id degrades to the bare list page rather than being
+interpolated into a query string (a path segment is attacker-influenceable text, and a raw `&`
+would inject params into the redirect target). And an **unrecognised** shape still falls through to
+`NotFound` on purpose — this is an allowlist of shapes we know were written, and guessing at a
+destination is what produced the original bug. The protection against a *future* unknown shape is
+the guard test, not a runtime fallback.
+
+Optional read-only pre-flight against prod, to confirm no historical shape was missed:
+
+```sql
+SELECT link, count(*) FROM notifications
+WHERE link ~ '^/(quality/(ncr|car|fai)|shipping|purchasing|calibration|quotes)/[0-9]+$'
+GROUP BY 1 ORDER BY 2 DESC;
+```
+
+Anything outside the seven above needs a redirect route **and** a `LEGACY_LINK_SHAPES` entry.
+
+#### Related, not covered here
+
+`services/auto_evidence_service.py` emits 12 `module_link` values on the same pattern for the QMS
+evidence view, rendered by `QMSStandards.tsx` as a raw `<a href>` — a full page reload into the
+404, a **harder** failure than the bell. The new redirects incidentally repair four of them
+(`ncr` / `car` / `fai` / `calibration`) and `/work-orders/{id}` was always fine; the remaining
+seven — `/documents/{id}`, `/customer-complaints/{id}`, `/operator-certifications/{id}` (the route
+is `/certifications`), `/spc/{id}`, `/maintenance/{id}`, `/engineering-changes/{id}`,
+`/purchasing/vendors/{id}` — are still dead. Fixing them means routing that service through the
+same registry, and it is deliberately out of scope of the notification fix.
 
 ---
 
@@ -829,6 +973,14 @@ Surfaced by the PR-1 adversarial review; each is safe in PR 1 and has a designat
   (`dispatch_direct` forwards `sms_detail` to `_fan_out` alongside `sms_identifier`; both reach
   `build_sms_body` and both are re-vetted there, so a direct caller can pass a classifier and have
   it behave exactly as on the outbox path.)
+- **The daily digest email renders none of its queued events** (pre-existing; not a dispatcher
+  bug). `send_daily_digest_task` groups `DigestQueue` rows by `event_type`, which `_fan_out` writes
+  as the catalog `event_key` (`wo.late`), but `templates/email/daily_digest.html` tests the retired
+  SCREAMING_CASE keys (`events.WO_LATE`, `events.LOW_STOCK`, `events.WO_COMPLETED`) and reads
+  fields (`wo_number`, `part_number`) that `event_data` doesn't carry — so every `{% if %}` is
+  false and a recipient gets a greeting and a button. The template's dead `/dashboard` button was
+  repointed at `/` on 2026-08-07 (there is no `/dashboard` route; the dashboard is `path="/"`); the
+  key mismatch was **not** fixed and needs its own change.
 
 ## Deferred / roadmap
 

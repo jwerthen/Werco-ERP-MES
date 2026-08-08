@@ -78,6 +78,13 @@ const BLANK_EQUIPMENT_FORM = {
   notes: ''
 };
 
+// Status values the `?filter=` param may carry — the exact vocabulary of the
+// filter <select> below. Anything else normalizes to "no filter".
+const CALIBRATION_FILTERS: readonly string[] = ['active', 'due', 'overdue', 'out_of_service'];
+
+const normalizeCalibrationFilter = (value: string | null): string =>
+  value !== null && CALIBRATION_FILTERS.includes(value) ? value : '';
+
 export default function Calibration() {
   const { showToast } = useToast();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -88,12 +95,7 @@ export default function Calibration() {
   const [showCalibrationModal, setShowCalibrationModal] = useState(false);
   const [editingEquipment, setEditingEquipment] = useState<Equipment | null>(null);
   const [selectedEquipmentId, setSelectedEquipmentId] = useState<number | null>(null);
-  const [statusFilter, setStatusFilter] = useState<string>(() => {
-    const filter = searchParams.get('filter');
-    if (filter === 'overdue') return 'overdue';
-    if (filter === 'due') return 'due';
-    return '';
-  });
+  const [statusFilter, setStatusFilter] = useState<string>(() => normalizeCalibrationFilter(searchParams.get('filter')));
 
   const [formData, setFormData] = useState(BLANK_EQUIPMENT_FORM);
   // Snapshot captured when the equipment modal opens (blank for create, the
@@ -142,6 +144,21 @@ export default function Calibration() {
   useEffect(() => {
     loadEquipment();
   }, [loadEquipment]);
+
+  // Keep `statusFilter` live with the URL. The initializer above only runs at
+  // mount, so a `?filter=` link (Dashboard's calibration tiles) followed while
+  // the page is ALREADY open would otherwise be a silent no-op. statusFilter
+  // drives a SERVER query (api.getEquipment), so a change re-fetches rather than
+  // filtering a possibly-incomplete client array. Functional update so React
+  // bails out when nothing changed — no needless re-fetch.
+  //
+  // NOTE: the calibration-due NOTIFICATION deliberately links here unfiltered —
+  // `?filter=due` cannot contain the equipment it names. See
+  // backend/app/services/notification_links.py :: CALIBRATION_LIST.
+  useEffect(() => {
+    const next = normalizeCalibrationFilter(searchParams.get('filter'));
+    setStatusFilter(prev => (prev === next ? prev : next));
+  }, [searchParams]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

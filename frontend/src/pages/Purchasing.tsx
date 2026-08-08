@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import api from '../services/api';
 import { useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
@@ -230,6 +230,9 @@ export default function Purchasing() {
     file: null as File | null
   });
 
+  // Once-per-id latch for the `?po=` deep-link fallback fetch below.
+  const deepLinkedPoIdRef = useRef<number | null>(null);
+
   useEffect(() => {
     loadData();
   }, []);
@@ -246,14 +249,28 @@ export default function Purchasing() {
       }
     }
 
-    if (poId && purchaseOrders.length > 0) {
+    if (!poId) {
+      // Allow a later click on the same deep link to re-attempt the fetch.
+      deepLinkedPoIdRef.current = null;
+    } else if (!loading && !loadError) {
       const po = purchaseOrders.find(order => order.id === poId);
       if (po) {
         setActiveTab('orders');
         setPoSearch(po.po_number);
+      } else if (deepLinkedPoIdRef.current !== poId) {
+        // The PO is not in the loaded list — list_purchase_orders excludes
+        // CLOSED/CANCELLED — so re-fetch it by id and merge the row in rather
+        // than silently doing nothing (a silent miss looks like success, which
+        // is worse than a 404).
+        //
+        // The ref guard is NOT optional: `purchaseOrders` is in this effect's
+        // dependency array and the fetch WRITES it, so without a once-per-id
+        // latch the miss path is an infinite fetch loop.
+        deepLinkedPoIdRef.current = poId;
+        void loadDeepLinkedPurchaseOrder(poId);
       }
     }
-  }, [searchParams, vendors, purchaseOrders, selectedVendor?.id]);
+  }, [searchParams, vendors, purchaseOrders, selectedVendor?.id, loading, loadError]);
 
   const loadData = async () => {
     setLoading(true);
@@ -272,6 +289,35 @@ export default function Purchasing() {
       setLoadError(true);
     } finally {
       setLoading(false);
+    }
+  };
+
+  /**
+   * `?po=<id>` deep-link fallback: fetch the PO by id and fold it into the
+   * list so the search filter can actually match it. `GET /purchasing/purchase-orders/{id}`
+   * returns POResponse (nested `vendor`, full `lines`) rather than the list's
+   * flat summary shape, hence the explicit mapping.
+   */
+  const loadDeepLinkedPurchaseOrder = async (poId: number) => {
+    try {
+      const detail = await api.getPurchaseOrder(poId);
+      const summary: PurchaseOrder = {
+        id: detail.id,
+        po_number: detail.po_number,
+        vendor_id: detail.vendor_id,
+        vendor_name: detail.vendor?.name,
+        status: detail.status,
+        order_date: detail.order_date,
+        required_date: detail.required_date,
+        total: detail.total,
+        line_count: Array.isArray(detail.lines) ? detail.lines.length : 0,
+      };
+      setPurchaseOrders(prev => (prev.some(p => p.id === summary.id) ? prev : [summary, ...prev]));
+      setActiveTab('orders');
+      setPoSearch(summary.po_number);
+    } catch (err) {
+      console.error('Failed to load deep-linked purchase order:', err);
+      showToast('error', 'Purchase order not found');
     }
   };
 

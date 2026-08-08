@@ -33,6 +33,11 @@ import {
 
 type TabType = 'ncr' | 'car' | 'fai' | 'scrap';
 
+const TAB_IDS: readonly TabType[] = ['ncr', 'car', 'fai', 'scrap'];
+
+const isTabType = (value: string | null): value is TabType =>
+  value !== null && (TAB_IDS as readonly string[]).includes(value);
+
 interface NCR {
   id: number;
   ncr_number: string;
@@ -154,6 +159,52 @@ export default function QualityPage() {
     return filter === 'open' ? 'open' : '';
   });
   
+  // ── Deep links ────────────────────────────────────────────────────────────
+  // Notification/email links land here as `/quality?tab=<id>`, optionally with
+  // `&fai=<id>`. These MUST be effects, not useState lazy initializers: a bell
+  // click while the user is already on /quality only changes the query string,
+  // which a mount-time initializer never observes (that is the bug the
+  // `filter` initializer above still has).
+  useEffect(() => {
+    const tab = searchParams.get('tab');
+    if (isTabType(tab) && tab !== activeTab) {
+      setActiveTab(tab);
+    }
+  }, [searchParams, activeTab]);
+
+  // `?fai=<id>` opens the FAI detail by id — openFaiDetail does a real
+  // `GET /quality/fai/{id}` with its own error state, so it cannot silently
+  // miss the way an array .find() over a windowed list would. The param is
+  // consumed (copy-and-set, keeping `tab`/`filter`) so closing the modal
+  // cannot immediately re-open it.
+  useEffect(() => {
+    const raw = searchParams.get('fai');
+    if (raw === null) return;
+    const next = new URLSearchParams(searchParams);
+    next.delete('fai');
+    setSearchParams(next, { replace: true });
+    if (/^\d+$/.test(raw)) {
+      openFaiDetail(Number(raw));
+    }
+  }, [searchParams]);
+
+  /**
+   * Tab selection is URL-backed (CLAUDE.md: state that should survive reload
+   * lives in URL params), which also guarantees the effect above can never
+   * fight a manual click — the param and `activeTab` always agree. Copy-and-set
+   * rather than `setSearchParams({ tab })`: a whole-query replace here would
+   * clobber `filter`.
+   */
+  const selectTab = (tab: TabType) => {
+    setActiveTab(tab);
+    const next = new URLSearchParams(searchParams);
+    next.set('tab', tab);
+    // REPLACE, not push. A tab is a view of one page, not a destination: pushing would
+    // make clicking NCR -> CAR -> FAI -> Scrap cost four Back presses to leave Quality.
+    // The deep link only ever READS this param, so replace serves it just as well.
+    setSearchParams(next, { replace: true });
+  };
+
   const [showNCRModal, setShowNCRModal] = useState(false);
   const [showCARModal, setShowCARModal] = useState(false);
   const [showFAIModal, setShowFAIModal] = useState(false);
@@ -781,7 +832,12 @@ export default function QualityPage() {
             onClick={() => {
               setActiveTab('ncr');
               setNcrStatusFilter('open');
-              setSearchParams({ filter: 'open' });
+              // Both params in ONE copy-and-set — two sequential updates would
+              // each copy the same stale searchParams and lose one of them.
+              const next = new URLSearchParams(searchParams);
+              next.set('tab', 'ncr');
+              next.set('filter', 'open');
+              setSearchParams(next);
             }}
           />
           <MiniStat
@@ -792,7 +848,7 @@ export default function QualityPage() {
             value={summary.open_cars}
             valueColor={summary.open_cars > 0 ? 'text-fd-amber' : undefined}
             active={activeTab === 'car'}
-            onClick={() => setActiveTab('car')}
+            onClick={() => selectTab('car')}
           />
           <MiniStat
             icon={DocumentMagnifyingGlassIcon}
@@ -802,7 +858,7 @@ export default function QualityPage() {
             value={summary.pending_fais}
             valueColor={summary.pending_fais > 0 ? 'text-fd-blue' : undefined}
             active={activeTab === 'fai'}
-            onClick={() => setActiveTab('fai')}
+            onClick={() => selectTab('fai')}
           />
         </MiniStatStrip>
         </div>
@@ -819,7 +875,7 @@ export default function QualityPage() {
           ].map((tab) => (
             <button
               key={tab.id}
-              onClick={() => setActiveTab(tab.id as TabType)}
+              onClick={() => selectTab(tab.id as TabType)}
               className={`flex items-center py-4 px-1 border-b-2 font-medium text-sm ${
                 activeTab === tab.id
                   ? 'border-werco-primary text-werco-primary'

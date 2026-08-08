@@ -34,7 +34,9 @@
 </ul>
 {% endif %}
 
-<a href="{{ base_url }}/dashboard" class="button">View Dashboard</a>
+{% if base_url %}
+<a href="{{ base_url }}/" class="button">View Dashboard</a>
+{% endif %}
 
 <p style="margin-top: 30px; font-size: 12px; color: #6c757d;">
     To change your notification preferences, visit your user settings.
