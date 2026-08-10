@@ -1617,14 +1617,22 @@ mixed**:
 > **Provenance on import (`sheet_match_provenance`).** Both import endpoints
 > (`…/{id}/laser-nest-packages/import` and `…/laser-nest-packages/standalone/import`) accept a new
 > **optional** form field: a JSON object mapping each row's `source_file` to how that row's sheet
-> part came to be chosen, over a closed four-value vocabulary:
+> part came to be chosen, over a closed three-value vocabulary:
 >
 > | Value | Meaning |
 > |---|---|
-> | `auto` | The deterministic gate's pre-fill, imported untouched |
-> | `suggested` | The planner picked one of the offered shortlist candidates |
-> | `prefill` | A pre-filled part the planner **replaced** with something from outside the shortlist |
-> | `planner` | Chosen with no suggestion in play |
+> | `auto` | The server suggested it and the planner **confirmed** it in the accept dialog |
+> | `planner` | The planner chose it themselves — per row or package-wide — whether or not a suggestion was on offer |
+> | `prefill` | Carried forward from the tie the nest already had, on re-import |
+>
+> **Committed ties only.** A row the planner left untied, and a suggestion they never confirmed, both
+> import *without* a tie — so there is no decision to describe and the client omits them rather than
+> sending a fourth value. An entirely untied package sends `{}`. Inventing an entry for a decision
+> nobody made is worse than omitting it in a row someone reads when asking why the wrong lot was
+> depleted. The client's richer internal `TieSource` (which also models the uncommitted states) maps
+> down to exactly these three on the way out — see `PROVENANCE_BY_TIE_SOURCE` in
+> `frontend/src/components/laser/LaserNestImportWizard.tsx`, kept in lock-step with
+> `_SHEET_MATCH_PROVENANCE_VALUES` in `work_orders.py`.
 >
 > It exists so "did the suggestions actually get used, and were they right?" is answerable later
 > from the audit trail — the first question anyone reviewing a wrong-lot depletion will ask. The map
