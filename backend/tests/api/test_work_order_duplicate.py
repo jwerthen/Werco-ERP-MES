@@ -687,7 +687,17 @@ class TestThePlanCarries:
         assert copied.planned_runs == 6
         assert copied.material == "304 SS"
         assert copied.thickness == "0.125"
-        assert copied.sheet_size == "48x96"
+        # THE ONE FIELD GROUP THAT IS NOT COPIED BYTE-FOR-BYTE. The sheet
+        # descriptors are canonicalized on the way across (`48x96` -> `48 x 96`,
+        # via `services/laser_nest_text`), deliberately breaking this test's
+        # otherwise-verbatim contract: `material`/`thickness`/`sheet_size` have
+        # no `Part` FK, so the STRING is the only grouping key anything has, and
+        # a faithful copy of a pre-normalization job would re-inject a legacy
+        # spelling into new data and re-fragment that key. The transform is
+        # meaning-preserving (case / whitespace / separator only), so the copied
+        # plan still describes the same sheet. Every other field above stays
+        # verbatim.
+        assert copied.sheet_size == "48 x 96"
         # THE reference, not the blob.
         assert copied.document_id == document.id
         assert (

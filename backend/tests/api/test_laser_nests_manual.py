@@ -634,3 +634,104 @@ class TestTenantIsolation:
             client.get(f"/api/v1/laser-nests/{nest['id']}/document", headers=admin_b).status_code
             == status.HTTP_404_NOT_FOUND
         )
+
+
+# --------------------------------------------------------------------------- #
+# Sheet-descriptor normalization (services/laser_nest_text)
+# --------------------------------------------------------------------------- #
+class TestSheetDescriptorNormalization:
+    """A nest cannot be born with an uncanonical sheet descriptor.
+
+    ``material`` / ``thickness`` / ``sheet_size`` carry no ``Part`` FK, so the
+    STRING is the only grouping key anything has. A 2026-08-06 production
+    reconciliation found the same physical sheet split across two rows on
+    whitespace alone (``144x60`` vs ``144 x 60``), which made every group
+    under-report. These lock the two WRITE seams reachable over HTTP -- create
+    and edit -- rather than only the pure helper, because it is the seams that
+    regress when someone adds a third one.
+    """
+
+    def test_manual_create_canonicalizes_the_descriptors(self, client, db_session, laser_setup):
+        headers = headers_for(laser_setup["admin"])
+        resp = _create_manual_nest(
+            client,
+            headers,
+            laser_setup["parent"].id,
+            {
+                "cnc_number": "PRG-NORM-1",
+                "planned_runs": 1,
+                "material": "  a36 ",
+                "thickness": "16 GA",
+                "sheet_size": "144x60",
+            },
+        )
+        assert resp.status_code == status.HTTP_201_CREATED, resp.text
+
+        nest = db_session.query(LaserNest).filter(LaserNest.id == resp.json()["id"]).first()
+        assert nest.material == "A36"
+        assert nest.thickness == "16ga"
+        assert nest.sheet_size == "144 x 60"
+
+    def test_two_spellings_of_one_sheet_land_on_the_same_key(self, client, db_session, laser_setup):
+        """THE regression, end to end: the exact pair that fragmented in prod."""
+        headers = headers_for(laser_setup["admin"])
+        parent_id = laser_setup["parent"].id
+        first = _create_manual_nest(
+            client,
+            headers,
+            parent_id,
+            {
+                "cnc_number": "PRG-NORM-2",
+                "planned_runs": 1,
+                "material": "A36",
+                "thickness": "0.25",
+                "sheet_size": "144x60",
+            },
+        ).json()
+        second = _create_manual_nest(
+            client,
+            headers,
+            parent_id,
+            {
+                "cnc_number": "PRG-NORM-3",
+                "planned_runs": 1,
+                "material": "A36",
+                "thickness": "0.25",
+                "sheet_size": "144 x 60",
+            },
+        ).json()
+
+        rows = db_session.query(LaserNest).filter(LaserNest.id.in_([first["id"], second["id"]])).all()
+        assert len({(r.material, r.thickness, r.sheet_size) for r in rows}) == 1
+
+    def test_patch_canonicalizes_too(self, client, db_session, laser_setup):
+        """An edit is another way a nest is written; a hand-typed '144x60' here
+        would reintroduce exactly what import normalization removes."""
+        headers = headers_for(laser_setup["admin"])
+        created = _create_manual_nest(
+            client, headers, laser_setup["parent"].id, {"cnc_number": "PRG-NORM-4", "planned_runs": 1}
+        ).json()
+
+        resp = client.patch(
+            f"/api/v1/laser-nests/{created['id']}",
+            headers=headers,
+            json={"material": "ss", "thickness": ".125", "sheet_size": "120×48"},
+        )
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        assert resp.json()["material"] == "SS"
+        assert resp.json()["thickness"] == "0.125"
+        assert resp.json()["sheet_size"] == "120 x 48"
+
+    def test_unrecognized_descriptor_survives_verbatim(self, client, db_session, laser_setup):
+        """Normalization must never mangle what it cannot parse -- a descriptor
+        it does not understand is collapsed on whitespace and nothing else."""
+        headers = headers_for(laser_setup["admin"])
+        resp = _create_manual_nest(
+            client,
+            headers,
+            laser_setup["parent"].id,
+            {"cnc_number": "PRG-NORM-5", "planned_runs": 1, "sheet_size": "remnant   drop"},
+        )
+        assert resp.status_code == status.HTTP_201_CREATED, resp.text
+        nest = db_session.query(LaserNest).filter(LaserNest.id == resp.json()["id"]).first()
+        assert nest.sheet_size == "remnant drop"
