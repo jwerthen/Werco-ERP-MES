@@ -425,7 +425,7 @@ the localhost default, rather than silently draining an empty queue.
 | `SMTP_PASSWORD` | No | - | SMTP password or app-specific password |
 | `SMTP_FROM` | No | `noreply@werco.com` | From email address |
 | `SMTP_FROM_NAME` | No | `Werco ERP System` | From display name |
-| `FRONTEND_BASE_URL` | No | `""` (empty) | Base URL used to build **absolute** deep links + the "Manage notifications" footer in outbound emails (e.g. `https://app.werco.com`). Empty by default → the link button/footer are omitted (relative `link` only). No trailing slash. |
+| `FRONTEND_BASE_URL` | No | `""` (empty) | Base URL used to build **absolute** deep links + the "Manage notifications" footer in outbound emails (e.g. `https://app.werco.com`). Empty by default → **both** the "Open in Werco" button and the footer are omitted, and the notification keeps its relative `link` for in-app use only. No trailing slash. |
 
 **Gmail Setup:**
 1. Enable 2FA on your Google account
@@ -440,6 +440,13 @@ the localhost default, rather than silently draining an empty queue.
 > so the job retries and records the outcome. Eight previously-missing templates plus deep links
 > now actually send — **verify SPF/DKIM/DMARC on the `SMTP_FROM` domain** before enabling in prod
 > (deliverability checklist in [docs/NOTIFICATIONS.md](NOTIFICATIONS.md)).
+>
+> **Setting this makes deep links permanent.** Once `FRONTEND_BASE_URL` is set, every emailed
+> "Open in Werco" button is an absolute URL sitting in someone's mailbox forever, so a route the
+> backend emits can never be un-emitted. That is why the emittable paths live in a guarded registry
+> (`app/services/notification_links.py`) and why `App.tsx` keeps permanent redirects for the
+> historical shapes — see
+> [docs/NOTIFICATIONS.md → Deep links must resolve](NOTIFICATIONS.md#deep-links-must-resolve).
 >
 > **SMS egress kill switch — no env var.** The Twilio egress gate is the per-company **database**
 > column `Company.allow_sms_egress` (Boolean, non-null, **default OFF** for every tenant), the same

@@ -3,6 +3,7 @@ from typing import List, Optional
 
 from app.db.session import SessionLocal
 from app.models.company import Company
+from app.services import notification_links as links
 from app.services.mrp_auto_service import MRPAutoMode, MRPAutoService
 from app.services.mrp_service import MRPService
 from app.services.notification_dispatch import dispatch_direct
@@ -101,13 +102,13 @@ async def _run_mrp_for_company(db, company_id: int, mode: str, planning_horizon_
                 related_id=mrp_run.id,
                 title=f"MRP Run {mrp_run.run_number} Completed",
                 body=f"MRP run {mrp_run.run_number} completed with {mrp_run.total_actions} action(s).",
-                link="/mrp",
+                link=links.MRP_LIST,
                 template="mrp_complete",
                 context={
                     "run_number": mrp_run.run_number,
                     "total_actions": mrp_run.total_actions,
                     "mode": mode,
-                    "link_path": "/mrp",
+                    "link_path": links.MRP_LIST,
                 },
             )
 
@@ -133,12 +134,12 @@ async def _run_mrp_for_company(db, company_id: int, mode: str, planning_horizon_
                 related_id=mrp_run.id,
                 title=f"MRP Run {mrp_run.run_number}: {mrp_run.total_actions} Actions Need Review",
                 body=f"MRP run {mrp_run.run_number} produced {mrp_run.total_actions} action(s) needing review.",
-                link="/mrp",
+                link=links.MRP_LIST,
                 template="mrp_review_needed",
                 context={
                     "run_number": mrp_run.run_number,
                     "total_actions": mrp_run.total_actions,
-                    "link_path": "/mrp",
+                    "link_path": links.MRP_LIST,
                 },
             )
 

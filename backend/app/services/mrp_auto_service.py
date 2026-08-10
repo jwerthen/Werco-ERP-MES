@@ -231,6 +231,7 @@ class MRPAutoService:
 
         async def _dispatch_expedite() -> None:
             from app.db.session import SessionLocal
+            from app.services import notification_links as links
             from app.services.notification_dispatch import dispatch_direct
 
             if not recipient_ids:
@@ -253,12 +254,12 @@ class MRPAutoService:
                     related_id=part_id,
                     title=f"EXPEDITE REQUIRED: {part_number}",
                     body="MRP flagged this part for manual expedite.",
-                    link=f"/parts/{part_id}",
+                    link=links.part_detail(part_id),
                     template="expedite_required",
                     context={
                         "part_number": part_number,
                         "required_date": required_date,
-                        "link_path": f"/parts/{part_id}",
+                        "link_path": links.part_detail(part_id),
                     },
                 )
             except Exception:  # pragma: no cover - an expedite notification must not fail MRP
