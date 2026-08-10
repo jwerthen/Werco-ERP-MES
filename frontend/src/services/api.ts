@@ -39,6 +39,8 @@ import {
   BOMUomMismatchParams,
   BOMUomMismatchReport,
   WorkOrderDuplicateResult,
+  InventoryTransaction,
+  InventoryTransactionParams,
 } from '../types';
 import { ScanResolveRequest, ScanResolveResult } from '../types/scan';
 import {
@@ -2289,6 +2291,22 @@ class ApiService {
 
   async getLowStockAlerts() {
     const response = await this.api.get('/inventory/low-stock');
+    return response.data;
+  }
+
+  /**
+   * The inventory ledger — every stock movement for the active company, newest first.
+   *
+   * Offset-paged with NO total count (same contract as `getAuditLogs`): request
+   * `pageSize + 1` rows and infer `hasNext` from the overflow row.
+   *
+   * `start_date`/`end_date` are compared against UTC-stored timestamps, so callers
+   * must convert a shop-local (Central) day boundary with `centralWallClockToUtcISO`
+   * rather than sending a bare date — a bare date is read as UTC midnight and drops
+   * second-shift movements into the wrong day.
+   */
+  async getInventoryTransactions(params?: InventoryTransactionParams): Promise<InventoryTransaction[]> {
+    const response = await this.api.get('/inventory/transactions', { params });
     return response.data;
   }
 

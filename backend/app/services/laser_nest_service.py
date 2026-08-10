@@ -23,6 +23,12 @@ from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation
 from app.models.work_order_material import AllocationSource, AllocationStatus, WorkOrderMaterialAllocation
 from app.services.audit_service import AuditService
 from app.services.laser_nest_extraction_service import extract_nest_fields_from_pdf
+from app.services.laser_nest_text import (
+    normalize_material,
+    normalize_nest_descriptors,
+    normalize_sheet_size,
+    normalize_thickness,
+)
 from app.services.material_consumption_service import cancel_allocations_for_operations
 from app.services.storage_service import get_storage, resolve_upload_dir, sanitize_ext
 from app.services.work_center_type_service import get_work_center_group
@@ -268,14 +274,21 @@ def build_parsed_nest_from_extraction(result: dict, *, abs_path: str, rel_path: 
     file_name = Path(abs_path).name
     warning = result.get("warning")
     passes = result.get("passes")
+    # Canonicalize the sheet descriptors HERE, at the earliest point they exist,
+    # rather than only at the DB write: the wizard shows this row to the planner
+    # and echoes it back on commit, so normalizing later would mean the planner
+    # confirmed one spelling and a different one was stored.
+    material, thickness, sheet_size = normalize_nest_descriptors(
+        result.get("material"), result.get("thickness"), result.get("sheet_size")
+    )
     return ParsedLaserNest(
         nest_name=cnc_number or Path(file_name).stem,
         cnc_file_name=file_name,
         cnc_file_path=rel_path,
         planned_runs=_coerce_planned_runs(result.get("planned_runs")),
-        material=result.get("material"),
-        thickness=result.get("thickness"),
-        sheet_size=result.get("sheet_size"),
+        material=material,
+        thickness=thickness,
+        sheet_size=sheet_size,
         cnc_number=cnc_number,
         pdf_source_path=abs_path,
         confidence=result.get("extraction_confidence"),
@@ -702,6 +715,13 @@ def build_laser_nest_child_work_order(
             saved_storage_keys=saved_storage_keys,
         )
 
+        # Re-normalized rather than trusted: these rows can arrive from the
+        # planner-EDITED import payload, not only from the extraction mapper
+        # (which already normalized). Cheap, idempotent, and it closes the one
+        # path by which a hand-typed spelling could still reach the column.
+        nest_material, nest_thickness, nest_sheet_size = normalize_nest_descriptors(
+            nest.material, nest.thickness, nest.sheet_size
+        )
         db.add(
             LaserNest(
                 company_id=company_id,
@@ -714,9 +734,9 @@ def build_laser_nest_child_work_order(
                 document_id=document.id if document is not None else None,
                 planned_runs=nest.planned_runs,
                 completed_runs=0,
-                material=nest.material,
-                thickness=nest.thickness,
-                sheet_size=nest.sheet_size,
+                material=nest_material,
+                thickness=nest_thickness,
+                sheet_size=nest_sheet_size,
             )
         )
 
@@ -830,9 +850,9 @@ def create_manual_laser_nest(
     cnc_number = (payload.get("cnc_number") or "").strip()
     planned_runs = int(payload.get("planned_runs") or 1)
     nest_name = (payload.get("nest_name") or "").strip() or cnc_number
-    material = payload.get("material")
-    thickness = payload.get("thickness")
-    sheet_size = payload.get("sheet_size")
+    material, thickness, sheet_size = normalize_nest_descriptors(
+        payload.get("material"), payload.get("thickness"), payload.get("sheet_size")
+    )
 
     # Find or create the single reusable "Manual entry" package on this parent/child.
     # Standalone nest WOs carry parent_work_order_id IS NULL on their packages.
@@ -1027,9 +1047,12 @@ def _parse_filename(file_name: str, rel_path: str) -> ParsedLaserNest:
         cnc_file_name=file_name,
         cnc_file_path=rel_path,
         planned_runs=planned_runs,
-        material=_infer_material(cleaned),
-        thickness=_infer_thickness(cleaned),
-        sheet_size=_infer_sheet_size(cleaned),
+        # The filename-inference fallback goes through the same canonicalizer as
+        # the AI path, so a CNC-file nest and a PDF nest describing the same
+        # sheet land on one grouping key.
+        material=normalize_material(_infer_material(cleaned)),
+        thickness=normalize_thickness(_infer_thickness(cleaned)),
+        sheet_size=normalize_sheet_size(_infer_sheet_size(cleaned)),
     )
 
 

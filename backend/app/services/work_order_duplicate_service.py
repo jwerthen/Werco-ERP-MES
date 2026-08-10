@@ -152,6 +152,7 @@ from app.services.audit_service import AuditService
 #     ordered quantity (sum of its non-deleted planned runs).
 #   _uom_value — the unit snapshot every other tie-creating path takes.
 from app.services.laser_nest_service import _recompute_child_quantity_ordered, _uom_value
+from app.services.laser_nest_text import normalize_nest_descriptors
 
 # No module logger, deliberately. Every omission this service can produce has a channel
 # that reaches the planner (the two ``skipped_*`` lists) and the audit chain; anything
@@ -890,6 +891,16 @@ def _copy_laser_nests(
                 "neither the response nor the audit chain must not be silently dropped."
             )
         planned_runs_by_source_operation[nest.work_order_operation_id] = int(nest.planned_runs or 0)
+        # The sheet descriptors are canonicalized on the way across, NOT copied
+        # byte-for-byte -- the one field group on this path where faithful
+        # copying works against the caller. Duplicating a pre-normalization job
+        # would re-inject a legacy spelling ("144x60") into new data and
+        # re-fragment the grouping key `laser_nest_text` exists to keep whole.
+        # The transform is meaning-preserving (case / whitespace / separator
+        # only), so the copied plan still describes the same sheet.
+        copied_material, copied_thickness, copied_sheet_size = normalize_nest_descriptors(
+            nest.material, nest.thickness, nest.sheet_size
+        )
         new_nest = LaserNest(
             company_id=company_id,
             package_id=package.id,
@@ -902,9 +913,9 @@ def _copy_laser_nests(
             document_id=nest.document_id,
             planned_runs=nest.planned_runs,
             completed_runs=0,
-            material=nest.material,
-            thickness=nest.thickness,
-            sheet_size=nest.sheet_size,
+            material=copied_material,
+            thickness=copied_thickness,
+            sheet_size=copied_sheet_size,
         )
         db.add(new_nest)
         new_nests.append(new_nest)

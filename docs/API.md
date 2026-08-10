@@ -1661,7 +1661,35 @@ mixed**:
 > `planned_runs`, `material`, `thickness`, `sheet_size`). A `planned_runs` change **reverse-syncs**
 > the operation's `component_quantity` and re-derives the laser WO's `quantity_ordered` over
 > its non-deleted nests. Lowering `planned_runs` below `completed_runs` is allowed (over-run is
-> acceptable); only the schema's `ge=1` floor applies.
+> acceptable); only the schema's `ge=1` floor applies. `material` / `thickness` / `sheet_size` are
+> **canonicalized on write** — see below.
+
+> **Sheet descriptors are canonicalized on every write (`services/laser_nest_text.py`).**
+> `material` / `thickness` / `sheet_size` carry **no `Part` foreign key** — sheet recognition on
+> this path is a deliberate heuristic — so the *string* is the only grouping key anything has, and
+> the values arrive from an LLM extraction pass that spells the same sheet more than one way. A
+> 2026-08-06 production reconciliation found one physical sheet split across two rows on whitespace
+> alone (`144x60` vs `144 x 60`): 25 output rows for 19 real specs, so every group under-reported
+> and the under-report looked like a smaller number rather than like an error.
+>
+> Every seam that writes a nest normalizes — the extraction mapper, the filename-inference
+> fallback, the package build, `POST …/laser-nests/manual`, `PATCH /laser-nests/{id}`, and the
+> work-order **duplicate** copy (canonicalized on the way across rather than copied byte-for-byte,
+> so duplicating a pre-normalization job cannot re-inject a legacy spelling into new data).
+> Canonical forms: `"a36 "` → `A36`, `"16 GA"` → `16ga`, `".25"` → `0.25`, `"144x60"` /
+> `"144X60"` / `"120×48"` → `144 x 60` / `120 x 48`.
+>
+> **The rule is normalize spelling, never meaning**, and three things are deliberately NOT done:
+> trailing zeros are **preserved** (`0.250` stays `0.250` — the digits state precision on a
+> manufacturing thickness, so `0.25` and `0.250` do still group apart, which is the accepted cost of
+> not rewriting a spec); units are **not inferred** (a bare `16` is not promoted to `16ga`); and
+> alloys are **not expanded** (`SS` is not rewritten to `304 SS` — it could be 304 or 316 and the
+> nest does not say). A descriptor the parser cannot read as two dimensions passes through with
+> whitespace collapsed and nothing else touched, rather than being mangled into something tidy and
+> wrong. The transform is idempotent, which the overlapping seams rely on.
+>
+> **This is forward-only.** Rows written before it are untouched; a backfill would rewrite historical
+> nest records and is a separate, explicit decision.
 >
 > **Reference PDF (attach / detach / preview).** The attached PDF is a plain **shop-reference
 > drawing** — optional, with **no approval workflow**, and it **never gates clock-in**. Attach
@@ -4013,7 +4041,7 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 | GET | `/inventory/low-stock` | Parts at/below reorder point (on-hand summed per part) | Yes |
 | GET | `/inventory/locations` | List warehouse locations / bins | Yes |
 | POST | `/inventory/locations` | Create a location | Admin / Manager |
-| GET | `/inventory/transactions` | Inventory transaction (ledger) history, newest first | Yes |
+| GET | `/inventory/transactions` | Inventory transaction (ledger) history, newest first. Filters: `part_id`, `transaction_type`, `reference_type`, `reference_id`, `work_order_id`, `lot_number`, `start_date`, `end_date`. Offset-paged (`limit` 1–500 default 100, `offset` ≥ 0), **no total count** — see note below | Yes |
 | POST | `/inventory/receive` | Receive inventory into stock | Admin / Manager / Supervisor |
 | POST | `/inventory/issue` | Issue inventory manually (**deprecated** — see below; **400** if `work_order_number` is sent) | Admin / Manager / Supervisor |
 | POST | `/inventory/transfer` | Transfer inventory between locations | Admin / Manager / Supervisor |
@@ -4027,6 +4055,28 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 > **There is no `GET /inventory/{part_id}`.** An earlier revision of this doc listed one; no such
 > route exists in `app/api/endpoints/inventory.py`. Use `GET /inventory/?part_id=<id>` for that
 > part's stock rows, or `GET /inventory/summary` for the per-part rollup with locations.
+
+> **`GET /inventory/transactions` is the ledger read behind the Warehouse → Inventory →
+> **Stock Movements** tab** (`frontend/src/components/inventory/StockMovementsPanel.tsx`), which was
+> the endpoint's first frontend consumer. Three things a caller must get right:
+>
+> * **The sign convention is not uniform.** `receive` is positive, `issue` is negative,
+>   `adjust`/`count` carry the signed delta — but `transfer` carries a **positive** quantity for a
+>   **zero net** on-hand change (it names both `from_location` and `to_location`). A naive
+>   `SUM(quantity)` over a mixed set over-counts; exclude `transfer` before totalling.
+> * **`reference_number` names the work order; `reference_id` does not.** Work-order-driven movements
+>   post under three reference shapes, and on `work_order_operation` (per-operation material-tie
+>   consumption — the laser-nest case) `reference_id` is an **operation** id. Every shape stamps the
+>   work order **number** into `reference_number`, so that is the field to display or group by.
+>   `work_order_id=` as a *filter* is safe — it resolves all three shapes plus the legacy
+>   `reference_number` shape via `work_order_ledger_filter`.
+> * **Paged with no total.** Like `GET /audit/`, request `limit = pageSize + 1` and infer "has next"
+>   from the overflow row. `start_date`/`end_date` compare against **UTC-stored** timestamps, so a
+>   shop-local (Central) day boundary must be converted before sending — a bare `YYYY-MM-DD` is read
+>   as UTC midnight and buckets second-shift movements into the wrong day.
+>
+> Deliberately **no `is_deleted` filter**: a soft-deleted work order's movements are still real
+> ledger facts, and hiding them would drop rows from that job's history.
 
 > **Movement quantities are strictly positive — direction is the verb, never the sign (422).**
 > `quantity` on `/receive`, `/issue`, and `/transfer` is validated `> 0` at the schema

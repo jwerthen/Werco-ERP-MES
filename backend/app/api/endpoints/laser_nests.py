@@ -33,6 +33,7 @@ from app.services.laser_nest_service import (
     soft_delete_laser_nest,
     sync_laser_nest_to_operation,
 )
+from app.services.laser_nest_text import normalize_material, normalize_sheet_size, normalize_thickness
 from app.services.storage_service import is_s3_ref, open_ref_stream, ref_exists
 
 router = APIRouter()
@@ -148,12 +149,17 @@ def update_laser_nest(
         nest.nest_name = (fields["nest_name"] or "").strip() or nest.nest_name
     if "planned_runs" in fields and fields["planned_runs"] is not None:
         nest.planned_runs = fields["planned_runs"]
+    # Canonicalized on the way in, exactly as on the import paths -- an edit is
+    # another way a nest is written, and a hand-typed "144x60" here would
+    # reintroduce the fragmentation the import normalization removes. The audit
+    # row below records the STORED value, so the chain shows what the column
+    # actually holds rather than what was typed.
     if "material" in fields:
-        nest.material = fields["material"]
+        nest.material = normalize_material(fields["material"])
     if "thickness" in fields:
-        nest.thickness = fields["thickness"]
+        nest.thickness = normalize_thickness(fields["thickness"])
     if "sheet_size" in fields:
-        nest.sheet_size = fields["sheet_size"]
+        nest.sheet_size = normalize_sheet_size(fields["sheet_size"])
 
     if planned_runs_changed:
         # Reverse-sync the operation's component_quantity + child WO rollup.

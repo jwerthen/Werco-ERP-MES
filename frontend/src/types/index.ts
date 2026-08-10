@@ -1556,3 +1556,75 @@ export interface OperationDocumentsResponse {
   material: string | null;
   critical_dims: OperationCriticalDim[];
 }
+
+/**
+ * One row of the inventory ledger (`GET /inventory/transactions`).
+ *
+ * SIGN CONVENTION — the endpoint documents it and any consumer must honor it:
+ * `receive` is positive, `issue` is negative, `adjust`/`count` carry the signed
+ * delta, and `transfer` carries a POSITIVE quantity representing a ZERO net
+ * change in on-hand (it names both `from_location` and `to_location`). So a
+ * naive sum over a mixed set OVER-COUNTS — exclude `transfer` before totalling.
+ *
+ * `reference_number` is the load-bearing field for "what moved this?": every
+ * work-order-driven movement stamps the WORK ORDER NUMBER there regardless of
+ * which of the three reference shapes it posted under, so the UI can name the
+ * job without resolving `reference_id` (which is an OPERATION id on the
+ * per-operation consumption shape, not a work order id).
+ */
+export interface InventoryTransactionPartRef {
+  id: number;
+  part_number: string;
+  name?: string | null;
+  description?: string | null;
+  revision?: string | null;
+  unit_of_measure?: string | null;
+}
+
+export type InventoryTransactionType =
+  | 'receive'
+  | 'issue'
+  | 'return'
+  | 'adjust'
+  | 'scrap'
+  | 'transfer'
+  | 'ship'
+  | 'count';
+
+export interface InventoryTransaction {
+  id: number;
+  company_id: number;
+  inventory_item_id?: number | null;
+  part_id: number;
+  transaction_type: InventoryTransactionType;
+  quantity: number;
+  reference_type?: string | null;
+  reference_id?: number | null;
+  reference_number?: string | null;
+  from_location?: string | null;
+  to_location?: string | null;
+  lot_number?: string | null;
+  serial_number?: string | null;
+  unit_cost?: number | null;
+  total_cost?: number | null;
+  notes?: string | null;
+  reason_code?: string | null;
+  created_at?: string | null;
+  created_by?: number | null;
+  part?: InventoryTransactionPartRef | null;
+}
+
+/** Query params accepted by `GET /inventory/transactions`. */
+export interface InventoryTransactionParams {
+  part_id?: number;
+  transaction_type?: string;
+  reference_type?: string;
+  reference_id?: number;
+  work_order_id?: number;
+  lot_number?: string;
+  /** UTC ISO-8601. Build from a Central wall clock via `centralWallClockToUtcISO`. */
+  start_date?: string;
+  end_date?: string;
+  limit?: number;
+  offset?: number;
+}

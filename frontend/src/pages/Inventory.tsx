@@ -21,6 +21,7 @@ import {
   FormField,
 } from '../components/ui';
 import { getBreadcrumbParent, getRouteTitle } from '../utils/routeMeta';
+import StockMovementsPanel from '../components/inventory/StockMovementsPanel';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import { useAuth } from '../context/AuthContext';
@@ -51,7 +52,13 @@ interface InventorySummary {
   locations: Array<{ location: string; quantity: number; lot_number?: string }>;
 }
 
-type TabType = 'summary' | 'details' | 'receive' | 'transactions';
+/**
+ * `receive` is a modal, not a rendered tab — it stays in the union because the
+ * receive flow reads `activeTab` nowhere else. `movements` is the ledger tab
+ * (`StockMovementsPanel`); it replaces a long-dead `transactions` member that was
+ * declared here but never given a tab or a panel.
+ */
+type TabType = 'summary' | 'details' | 'receive' | 'movements';
 type InventoryGroup = 'all' | 'parts' | 'materials';
 
 const MATERIAL_TYPES = new Set(['raw_material', 'purchased', 'hardware', 'consumable']);
@@ -597,7 +604,11 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
         />
       </MiniStatStrip>
 
-      {/* Quick Filters */}
+      {/* Quick Filters — snapshot tabs only. These are CLIENT-side filters over
+          the on-hand lists; the Stock Movements tab is a server-paged ledger with
+          its own filters, and the "Showing N of M items" counter here would be
+          counting a different set than the one on screen. */}
+      {activeTab !== 'movements' && (
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex flex-col gap-3 w-full sm:max-w-xl">
           <div className="relative">
@@ -695,6 +706,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
           )}
         </div>
       </div>
+      )}
 
       {/* Tabs */}
       <div className="border-b border-slate-700">
@@ -702,6 +714,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
           {[
             { id: 'summary', label: 'Summary by Part' },
             { id: 'details', label: 'Detail by Location' },
+            { id: 'movements', label: 'Stock Movements' },
           ].map((tab) => (
             <button
               key={tab.id}
@@ -759,6 +772,12 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
             }}
           />
         )}
+
+        {/* The ledger. Owns its own fetch, filters and server pagination — the
+            page-level filter bar above is a client-side filter over the on-hand
+            snapshot and does not apply to it, which is why that bar is HIDDEN on
+            this tab rather than left sitting there implying it filters these rows. */}
+        {activeTab === 'movements' && <StockMovementsPanel parts={parts} />}
       </div>
 
       {/* Receive Modal */}
