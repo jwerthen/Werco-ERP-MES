@@ -50,6 +50,7 @@ from app.core.config import settings
 from app.core.queue import enqueue_job, get_redis_pool
 from app.models.notification import DigestQueue, Notification, NotificationLog, NotificationPreference
 from app.models.user import User
+from app.services import notification_links as links
 from app.services.notification_catalog import (
     ALL_CHANNELS,
     CHANNEL_DIGEST,
@@ -202,20 +203,46 @@ def _content_for_event(entry: CatalogEntry, event) -> tuple[str, str]:
 
 
 def _link_for_event(event) -> Optional[str]:
-    """Best-effort relative SPA route for an outbox event's deep link."""
+    """Relative SPA route for an outbox event's deep link, or ``None``.
+
+    CONTRACT: every path returned here MUST resolve to a real route declared in
+    ``frontend/src/App.tsx``. An unresolvable path renders App.tsx's catch-all
+    ``NotFound``, which is mounted with no ``Layout`` and no ``PrivateRoute`` — the whole
+    chrome vanishes and it reads to the user as "the app broke", not "bad link". This app
+    has few detail routes, so QUERY PARAMS are the mechanism for record selection: the
+    link lands on an existing list page plus a param that page already reads. When no
+    honest destination exists, return ``None`` — a non-navigating row is correct; a link
+    into a page that cannot honour it is not.
+
+    Every value comes from ``app/services/notification_links.py``; never build one inline.
+    ``tests/test_notification_link_routes.py`` parses App.tsx and enforces both halves.
+
+    Pure function of the event — reads ``work_order_id`` / ``entity_type`` / ``entity_id``
+    and the PAYLOAD only, no DB re-query (same rule as ``_title_body_for_event``).
+    """
     if event.work_order_id:
-        return f"/work-orders/{event.work_order_id}"
+        return links.work_order_detail(event.work_order_id)
     payload = event.event_payload or {}
     entity_type = (event.entity_type or "").lower()
     entity_id = event.entity_id
-    if entity_type == "ncr" and entity_id:
-        return f"/quality/ncr/{entity_id}"
-    if entity_type == "fai" and entity_id:
-        return f"/quality/fai/{entity_id}"
-    if entity_type == "shipment" and entity_id:
-        return f"/shipping/{entity_id}"
     if entity_type == "po_receipt" and payload.get("po_id"):
-        return f"/purchasing/{payload['po_id']}"
+        return links.purchase_order(payload["po_id"])
+    if entity_type == "purchase_order" and entity_id:
+        return links.purchase_order(entity_id)
+    if entity_type == "fai" and entity_id:
+        return links.quality_fai_detail(entity_id)
+    # NCR / CAR / downtime land RECORD-LESS on purpose: the app has no detail view for any
+    # of the three, so an id in the URL would be a promise the page cannot keep. No
+    # ``entity_id`` is required to build these.
+    if entity_type == "ncr":
+        return links.QUALITY_NCR_LIST
+    if entity_type == "car":
+        return links.QUALITY_CAR_LIST
+    if entity_type == "downtime_event":
+        return links.DOWNTIME_LIST
+    # entity_type == "shipment" is deliberately absent: shipments.work_order_id is
+    # nullable=False (models/shipping.py), so the work_order_id branch above always wins
+    # first and the old /shipping/{id} branch was unreachable dead code. Do not "restore" it.
     return None
 
 
@@ -352,6 +379,17 @@ async def _fan_out(
     Returns the number of in-app rows created (for logging/tests)."""
     severity = entry.severity
     created = 0
+
+    # Relative-path fence. ``link`` is String(500) with no validation and reaches the SPA
+    # as ``<Link to={item.link}>``; react-router treats a value with a scheme or a leading
+    # "//" as EXTERNAL and renders a plain <a href> with the SPA click handler dropped, so
+    # "//evil.example/x" or "javascript:..." would become a live anchor. Not reachable
+    # today (every value is a template over an integer PK) but ``dispatch_direct(link=...)``
+    # is an open kwarg for future callers. Guards the Notification row and the DigestQueue
+    # copy alike, which is why it sits above both.
+    if link is not None and not (link.startswith("/") and not link.startswith("//")):
+        logger.error("Dropping non-relative notification link %r for %s", link, entry.event_key)
+        link = None
 
     # Actor exclusion + is_active + de-dup by id.
     recipients: Dict[int, User] = {}
@@ -565,7 +603,11 @@ async def _enqueue_email(
     email_context.setdefault("year", datetime.utcnow().year)
     email_context.setdefault("title", title)
     email_context.setdefault("body", body)
-    if link:
+    # Only compose the "Open in Werco" button when we can make it ABSOLUTE. With an empty
+    # FRONTEND_BASE_URL this used to emit <a href="/quality?tab=ncr"> inside an email — a
+    # relative href no mail client can resolve. base.html already guards the footer the
+    # same way; this makes the button match (and makes the docs' claim true).
+    if link and settings.FRONTEND_BASE_URL:
         email_context.setdefault("notification_link", f"{settings.FRONTEND_BASE_URL}{link}")
     await enqueue_job(
         "send_email_job",

@@ -3879,7 +3879,7 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 | GET | `/inventory/low-stock` | Parts at/below reorder point (on-hand summed per part) | Yes |
 | GET | `/inventory/locations` | List warehouse locations / bins | Yes |
 | POST | `/inventory/locations` | Create a location | Admin / Manager |
-| GET | `/inventory/transactions` | Inventory transaction (ledger) history, newest first | Yes |
+| GET | `/inventory/transactions` | Inventory transaction (ledger) history, newest first. Filters: `part_id`, `transaction_type`, `reference_type`, `reference_id`, `work_order_id`, `lot_number`, `start_date`, `end_date`. Offset-paged (`limit` 1–500 default 100, `offset` ≥ 0), **no total count** — see note below | Yes |
 | POST | `/inventory/receive` | Receive inventory into stock | Admin / Manager / Supervisor |
 | POST | `/inventory/issue` | Issue inventory manually (**deprecated** — see below; **400** if `work_order_number` is sent) | Admin / Manager / Supervisor |
 | POST | `/inventory/transfer` | Transfer inventory between locations | Admin / Manager / Supervisor |
@@ -3893,6 +3893,28 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 > **There is no `GET /inventory/{part_id}`.** An earlier revision of this doc listed one; no such
 > route exists in `app/api/endpoints/inventory.py`. Use `GET /inventory/?part_id=<id>` for that
 > part's stock rows, or `GET /inventory/summary` for the per-part rollup with locations.
+
+> **`GET /inventory/transactions` is the ledger read behind the Warehouse → Inventory →
+> **Stock Movements** tab** (`frontend/src/components/inventory/StockMovementsPanel.tsx`), which was
+> the endpoint's first frontend consumer. Three things a caller must get right:
+>
+> * **The sign convention is not uniform.** `receive` is positive, `issue` is negative,
+>   `adjust`/`count` carry the signed delta — but `transfer` carries a **positive** quantity for a
+>   **zero net** on-hand change (it names both `from_location` and `to_location`). A naive
+>   `SUM(quantity)` over a mixed set over-counts; exclude `transfer` before totalling.
+> * **`reference_number` names the work order; `reference_id` does not.** Work-order-driven movements
+>   post under three reference shapes, and on `work_order_operation` (per-operation material-tie
+>   consumption — the laser-nest case) `reference_id` is an **operation** id. Every shape stamps the
+>   work order **number** into `reference_number`, so that is the field to display or group by.
+>   `work_order_id=` as a *filter* is safe — it resolves all three shapes plus the legacy
+>   `reference_number` shape via `work_order_ledger_filter`.
+> * **Paged with no total.** Like `GET /audit/`, request `limit = pageSize + 1` and infer "has next"
+>   from the overflow row. `start_date`/`end_date` compare against **UTC-stored** timestamps, so a
+>   shop-local (Central) day boundary must be converted before sending — a bare `YYYY-MM-DD` is read
+>   as UTC midnight and buckets second-shift movements into the wrong day.
+>
+> Deliberately **no `is_deleted` filter**: a soft-deleted work order's movements are still real
+> ledger facts, and hiding them would drop rows from that job's history.
 
 > **Movement quantities are strictly positive — direction is the verb, never the sign (422).**
 > `quantity` on `/receive`, `/issue`, and `/transfer` is validated `> 0` at the schema
@@ -5029,6 +5051,15 @@ their own inbox).
 > ```
 > `event_key` is the catalog key (see `GET /notifications/catalog`); `link` is a **relative** SPA
 > route the UI deep-links to; timestamps are UTC `Z` (display Central).
+>
+> **`link` values are drawn from a fixed registry** (`app/services/notification_links.py`), are
+> always a relative path beginning with a single `/`, and may carry a query string — this app has
+> few detail routes, so record selection is done with a param the landing page already reads
+> (`/purchasing?po=812`, `/quality?tab=fai&fai=17`). `link` is **`null`** whenever there is no
+> destination that can honour the record, which is a legitimate answer, not a gap — the UI renders
+> a non-navigating row. A backend test parses `frontend/src/App.tsx` and fails if an emittable path
+> stops resolving. Response contract unchanged (`link` was already `Optional[str]`); see
+> [docs/NOTIFICATIONS.md → Deep links must resolve](NOTIFICATIONS.md#deep-links-must-resolve).
 >
 > **Content (revised 2026-07-29, after CMMC L2 was descoped):** `title` is the catalog label plus
 > the record identifier. `body` is the catalog description, then a blank line, then a detail line

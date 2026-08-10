@@ -32,5 +32,7 @@
 
 <p><strong>Immediate Action Required:</strong> Review and disposition this NCR.</p>
 
-<a href="{{ base_url }}/quality/ncr/{{ ncr.id }}" class="button">View NCR</a>
+{% if base_url %}
+<a href="{{ base_url }}/quality?tab=ncr" class="button">View NCR</a>
+{% endif %}
 {% endblock %}

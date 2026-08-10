@@ -24,6 +24,7 @@ from app.core.time_utils import CENTRAL_TIME_ZONE, ensure_utc, to_utc_iso
 from app.models.user import User
 from app.models.visitor_log import VisitorLog, VisitorStatus
 from app.schemas.visitor_log import VisitorManualEntryRequest, VisitorSignInRequest
+from app.services import notification_links as links
 from app.services.audit_service import AuditService
 
 logger = logging.getLogger(__name__)
@@ -93,7 +94,7 @@ def _notify_host_best_effort(db: Session, *, host: User, row: VisitorLog) -> Non
             related_id=row.id,
             title=summary,
             body=f"{summary} and named you as their host.",
-            link="/visitor-log",
+            link=links.VISITOR_LOG,
             template="visitor_check_in",
             # ARQ kwargs are serialized through Redis: JSON-safe primitives only,
             # never the ORM row and never a raw datetime.
