@@ -7,11 +7,12 @@ import os
 import shutil
 import tempfile
 import uuid
+from dataclasses import asdict as dataclass_asdict
 from dataclasses import replace as dataclass_replace
 from datetime import date, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
@@ -135,6 +136,14 @@ from app.services.quality_gate_service import (
 )
 from app.services.scheduling_service import SchedulingService
 from app.services.scrap_reason_service import resolve_scrap_reason_code_or_http
+
+# The sheet-stock suggestion pair. Both are PURE READS that write nothing -- no
+# ledger row, no audit row, no event -- and neither creates a tie: the preview
+# proposes, the planner confirms on Import. ``resolve_ambiguous_sheet_matches``
+# may only re-rank and annotate an AMBIGUOUS shortlist; ``auto_fill_part_id`` is
+# assigned by the deterministic gate alone and is unreachable from the resolver.
+from app.services.sheet_stock_ai_resolver import resolve_ambiguous_sheet_matches
+from app.services.sheet_stock_matcher import STATUS_AMBIGUOUS, match_sheet_parts
 from app.services.storage_service import delete_ref
 from app.services.work_center_type_service import get_work_center_group
 from app.services.work_order_duplicate_service import duplicate_work_order
@@ -491,6 +500,24 @@ class LaserNestPreviewResponse(BaseModel):
     source_page_count: Optional[int] = None
     segmentation_warning: Optional[str] = None
     skipped_pages: Optional[List[int]] = None
+    # Sheet-stock suggestion roll-ups for the review grid's header banner. All
+    # three default to 0, so every construction that passes no ``sheet_matches``
+    # (notably the IMPORT response echo) reports zeros and its rows carry a null
+    # ``sheet_suggestion`` -- the import contract is unchanged in substance.
+    # These count ROWS, not parts: two nests proposing the same sheet are two.
+    suggested_row_count: int = Field(
+        0, description="Rows the deterministic gate pre-filled (``auto_fill_part_id`` set)."
+    )
+    shortlist_row_count: int = Field(
+        0, description="Rows offering a shortlist but pre-filling nothing (``ambiguous`` with candidates)."
+    )
+    short_stock_row_count: int = Field(
+        0,
+        description=(
+            "Rows whose claimed candidate ends ``short`` or ``none`` on stock, counting this package's "
+            "cumulative demand. Advisory: short stock never blocks an import and never re-ranks a match."
+        ),
+    )
 
 
 def _emit_work_order_event(
@@ -1068,6 +1095,106 @@ def _laser_wo_audit_values(work_order: WorkOrder) -> dict:
     }
 
 
+# The closed vocabulary for how each imported row's sheet part came to be chosen:
+#
+#   ``auto``    -- the server suggested it and the planner CONFIRMED it in the
+#                  review grid's accept dialog.
+#   ``planner`` -- the planner chose it themselves (per row or package-wide),
+#                  whether or not a suggestion was on offer.
+#   ``prefill`` -- carried forward from the tie the nest already had, on re-import.
+#
+# Only COMMITTED ties are described. A row the planner left untied, and a
+# suggestion they never confirmed, both import without a tie -- so there is no
+# decision to record and the client omits them rather than inventing a value.
+# Anything else is dropped (see ``_parse_sheet_match_provenance``).
+#
+# Keep in lock-step with ``PROVENANCE_BY_TIE_SOURCE`` in
+# ``frontend/src/components/laser/LaserNestImportWizard.tsx`` -- the client maps
+# its richer internal ``TieSource`` (which also models the uncommitted states)
+# down to exactly these three on the way out.
+_SHEET_MATCH_PROVENANCE_VALUES = frozenset({"auto", "planner", "prefill"})
+
+
+def _parse_sheet_match_provenance(raw: Optional[str]) -> Dict[str, str]:
+    """Decode the import's optional ``sheet_match_provenance`` form field.
+
+    OBSERVATIONAL ONLY. This is a client-reported breadcrumb -- how the planner
+    says each row's sheet was chosen -- recorded on the WO-level audit row so the
+    "did the suggestions actually get used" question is answerable later. It MUST
+    NEVER participate in resolution and MUST NEVER create a tie: ties come from
+    the validated ``rows`` (``material_part_id``) and nothing else. Because it is
+    untrusted client input that only ever lands in ``extra_data``, a malformed or
+    hostile value is DISCARDED rather than 400'd -- refusing an import over a
+    telemetry field would punish the planner for a wizard bug.
+
+    Bounded like the rows themselves (``LASER_PDF_PACKAGE_MAX``) so it cannot be
+    used to stuff an unbounded blob into the append-only audit table, and filtered
+    to a closed value vocabulary so it cannot smuggle free text there either.
+    """
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        logger.warning("Discarding malformed sheet_match_provenance on laser-nest import")
+        return {}
+    if not isinstance(parsed, dict):
+        logger.warning("Discarding non-object sheet_match_provenance on laser-nest import")
+        return {}
+    provenance: Dict[str, str] = {}
+    dropped = 0
+    for source_file, value in parsed.items():
+        if len(provenance) >= LASER_PDF_PACKAGE_MAX:
+            break
+        if isinstance(source_file, str) and isinstance(value, str) and value in _SHEET_MATCH_PROVENANCE_VALUES:
+            provenance[source_file[:1000]] = value
+        else:
+            dropped += 1
+    if dropped:
+        # Logged, not silent: a client sending a value outside the vocabulary is
+        # far more likely to be a wizard/server vocabulary DRIFT than an attack,
+        # and a drift that produces an empty audit field is otherwise invisible
+        # until someone asks the question this breadcrumb exists to answer.
+        logger.warning(
+            "Dropped %s sheet_match_provenance entr%s outside the accepted vocabulary %s",
+            dropped,
+            "y" if dropped == 1 else "ies",
+            sorted(_SHEET_MATCH_PROVENANCE_VALUES),
+        )
+    return provenance
+
+
+def _suggestion_to_row_value(suggestion: Any) -> dict:
+    """Serialize one ``SheetSuggestion`` dataclass for the wire.
+
+    ``dataclass_asdict`` walks the nested ``CandidatePart`` / ``MatchDiagnostic``
+    dataclasses too, so the only hand-work is DROPPING ``alloy_score``: it is the
+    matcher's internal alloy-agreement weight behind ``score``, not part of the
+    contract, and nothing downstream may start reading it. Dropping it here (not
+    in the schema) means it can never reach the wire even if a caller dumps the
+    dict directly.
+    """
+    payload = dataclass_asdict(suggestion)
+    for candidate in payload.get("candidates") or []:
+        candidate.pop("alloy_score", None)
+    return payload
+
+
+def _claimed_candidate(suggestion: Any) -> Optional[Any]:
+    """The candidate a row's stock annotation was computed against.
+
+    Mirrors ``_annotate_stock``: the pre-filled part when the deterministic gate
+    named one, otherwise the top of the shortlist. Exactly one candidate per row
+    is ever stock-annotated, and this is it.
+    """
+    candidates = suggestion.candidates or []
+    if not candidates:
+        return None
+    if suggestion.auto_fill_part_id is not None:
+        return next((c for c in candidates if c.part_id == suggestion.auto_fill_part_id), None)
+    return candidates[0]
+
+
 def _build_laser_preview_response(
     package_name: str,
     nests: list[dict],
@@ -1075,15 +1202,47 @@ def _build_laser_preview_response(
     source_page_count: Optional[int] = None,
     segmentation_warning: Optional[str] = None,
     skipped_pages: Optional[List[int]] = None,
+    sheet_matches: Optional[dict] = None,
 ) -> LaserNestPreviewResponse:
+    """Assemble a preview response, optionally carrying sheet-stock suggestions.
+
+    ``sheet_matches`` is ``{source_file: SheetSuggestion}`` from the matcher, or
+    None. When it is None NOTHING changes: the row dicts are passed through by
+    reference and the three roll-ups stay 0 -- which is what the IMPORT response
+    echo relies on. When it is present the rows are SHALLOW-COPIED before the
+    ``sheet_suggestion`` key is set, so the caller's dicts (and the
+    ``ParsedLaserNest`` values behind them) are never mutated.
+    """
+    rows = nests
+    suggested = shortlist = short_stock = 0
+    if sheet_matches:
+        enriched: list[dict] = []
+        for nest in nests:
+            row = dict(nest)
+            suggestion = sheet_matches.get(row.get("source_file"))
+            if suggestion is not None:
+                row["sheet_suggestion"] = _suggestion_to_row_value(suggestion)
+                if suggestion.auto_fill_part_id is not None:
+                    suggested += 1
+                elif suggestion.status == STATUS_AMBIGUOUS and suggestion.candidates:
+                    shortlist += 1
+                claimed = _claimed_candidate(suggestion)
+                if claimed is not None and claimed.stock_state in ("short", "none"):
+                    short_stock += 1
+            enriched.append(row)
+        rows = enriched
+
     return LaserNestPreviewResponse(
         package_name=package_name,
         nest_count=len(nests),
         total_planned_runs=sum(int(nest.get("planned_runs") or 0) for nest in nests),
-        nests=nests,
+        nests=rows,
         source_page_count=source_page_count,
         segmentation_warning=segmentation_warning,
         skipped_pages=skipped_pages,
+        suggested_row_count=suggested,
+        shortlist_row_count=shortlist,
+        short_stock_row_count=short_stock,
     )
 
 
@@ -2085,6 +2244,7 @@ async def _run_laser_nest_preview(
     file: Optional[UploadFile],
     source_path: Optional[str],
     company_id: int,
+    db: Session,
 ) -> LaserNestPreviewResponse:
     """Shared preview flow for the ``{work_order_id}`` and standalone endpoints.
 
@@ -2161,12 +2321,30 @@ async def _run_laser_nest_preview(
         if temp_path and os.path.exists(temp_path):
             os.remove(temp_path)
 
+    # Sheet-stock suggestion pass. ADVISORY and BEST-EFFORT: it reads the tenant's
+    # material catalog, tie history and on-hand to propose a sheet per row, then
+    # (for ambiguous rows only) lets the AI resolver re-rank the shortlist. It
+    # writes nothing and ties nothing.
+    #
+    # THE MATCHER CAN NEVER FAIL A PREVIEW. A planner who uploaded a 42-nest
+    # package must get their rows even if the catalog read, the LLM, or the
+    # resolver falls over -- degrading to "no suggestions" costs 42 manual picks,
+    # which is exactly today's behavior; raising costs the whole upload.
+    sheet_matches = None
+    try:
+        sheet_matches = match_sheet_parts(db, company_id=company_id, nests=nests)
+        resolve_ambiguous_sheet_matches(sheet_matches, company_id=company_id)
+    except Exception:  # noqa: BLE001 - a suggestion is never worth failing the preview for
+        logger.warning("sheet-stock matching failed; preview degrades to no suggestions", exc_info=True)
+        sheet_matches = None
+
     return _build_laser_preview_response(
         package_name,
         nests,
         source_page_count=source_page_count,
         segmentation_warning=segmentation_warning,
         skipped_pages=skipped_pages,
+        sheet_matches=sheet_matches,
     )
 
 
@@ -2178,6 +2356,7 @@ async def _run_laser_nest_preview(
 async def preview_standalone_laser_nest_package(
     file: Optional[UploadFile] = File(None),
     source_path: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
 ):
@@ -2186,8 +2365,12 @@ async def preview_standalone_laser_nest_package(
     Identical parsing/extraction behavior to the ``{work_order_id}`` preview,
     just not anchored to any existing work order -- the wizard uses this before
     a standalone import that will create a fresh part-less laser WO.
+
+    The ``db`` session is here for the sheet-stock suggestion pass only; it is
+    used for tenant-scoped READS (``company_id`` from the token, never the body)
+    and this endpoint still persists nothing.
     """
-    return await _run_laser_nest_preview(file=file, source_path=source_path, company_id=company_id)
+    return await _run_laser_nest_preview(file=file, source_path=source_path, company_id=company_id, db=db)
 
 
 @router.post("/{work_order_id}/laser-nest-packages/preview", response_model=LaserNestPreviewResponse)
@@ -2206,7 +2389,7 @@ async def preview_laser_nest_package_import(
     laser-cutting WO itself.
     """
     _load_parent_work_order(db, work_order_id, company_id)
-    return await _run_laser_nest_preview(file=file, source_path=source_path, company_id=company_id)
+    return await _run_laser_nest_preview(file=file, source_path=source_path, company_id=company_id, db=db)
 
 
 async def _run_laser_nest_import(
@@ -2221,6 +2404,7 @@ async def _run_laser_nest_import(
     work_center_id: Optional[int],
     rows: Optional[str],
     due_date: Optional[date] = None,
+    sheet_match_provenance: Optional[str] = None,
 ) -> dict:
     """Shared import flow for the ``{work_order_id}`` and standalone endpoints.
 
@@ -2274,6 +2458,14 @@ async def _run_laser_nest_import(
             confirmed_rows = TypeAdapter(List[LaserNestImportRow]).validate_python(parsed)
         except ValidationError as exc:
             raise HTTPException(status_code=400, detail=f"Invalid nest rows: {exc.errors()}") from exc
+
+    # Decoded HERE -- before ``atomic_transaction``, alongside the rows parse and
+    # deliberately nowhere near the operation wipe or the tie machinery. It feeds
+    # exactly one thing: a key on the WO-level audit row's ``extra_data``. It does
+    # not reach ``_build_confirmed_pdf_nests``, ``row_material_parts``, or
+    # ``create_nest_material_allocation``, so an untied import stays byte-identical
+    # to its pre-feature behavior (invariant 6(d)) whatever this field says.
+    sheet_match_provenance_map = _parse_sheet_match_provenance(sheet_match_provenance)
 
     # Storage blobs for nest-PDF Documents are written by storage.save() INSIDE
     # the atomic_transaction, BEFORE it commits. On rollback they must be reaped
@@ -2464,6 +2656,14 @@ async def _run_laser_nest_import(
                             "source": import_source,
                             "parent_work_order_id": parent_work_order_id,
                             "package_name": package_name,
+                            # Absent (not empty) when the wizard sent nothing, so an
+                            # import from a client that never heard of suggestions
+                            # writes the exact extra_data it wrote before.
+                            **(
+                                {"sheet_match_provenance": sheet_match_provenance_map}
+                                if sheet_match_provenance_map
+                                else {}
+                            ),
                         },
                     )
 
@@ -2483,6 +2683,12 @@ async def _run_laser_nest_import(
                             "quantity": float(child_work_order.quantity_ordered),
                             "source": "laser_nest_standalone_import",
                             "package_name": package_name,
+                            # See the log_update above: omitted entirely when empty.
+                            **(
+                                {"sheet_match_provenance": sheet_match_provenance_map}
+                                if sheet_match_provenance_map
+                                else {}
+                            ),
                         },
                     )
 
@@ -2630,6 +2836,7 @@ async def import_standalone_laser_nest_package(
     work_center_id: Optional[int] = Form(None),
     rows: Optional[str] = Form(None),
     due_date: Optional[date] = Form(None),
+    sheet_match_provenance: Optional[str] = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
@@ -2647,6 +2854,12 @@ async def import_standalone_laser_nest_package(
 
     ``due_date`` (ISO date) is the planner-set due date for the created WO; past
     dates are allowed (an open WO can already be overdue at import).
+
+    ``sheet_match_provenance`` is an optional JSON object mapping each row's
+    ``source_file`` to how its sheet part was chosen (``auto`` | ``suggested`` |
+    ``planner`` | ``prefill``). OBSERVATIONAL ONLY: it is recorded on the WO-level
+    audit row and never used to resolve anything or to create a tie. A malformed
+    value is discarded, not rejected.
     """
     return await _run_laser_nest_import(
         db=db,
@@ -2659,6 +2872,7 @@ async def import_standalone_laser_nest_package(
         work_center_id=work_center_id,
         rows=rows,
         due_date=due_date,
+        sheet_match_provenance=sheet_match_provenance,
     )
 
 
@@ -2669,6 +2883,7 @@ async def import_laser_nest_package(
     source_path: Optional[str] = Form(None),
     work_center_id: Optional[int] = Form(None),
     rows: Optional[str] = Form(None),
+    sheet_match_provenance: Optional[str] = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
@@ -2681,6 +2896,10 @@ async def import_laser_nest_package(
     itself ``laser_cutting`` (e.g. a standalone nest WO) -> it is rebuilt
     directly, no child is nested under it. See ``_run_laser_nest_import`` for
     the PDF confirm-and-commit vs legacy CNC paths and the audit contract.
+
+    ``sheet_match_provenance`` is the same observational, audit-only breadcrumb
+    documented on the standalone import: it never resolves anything and never
+    creates a tie.
     """
     target_work_order = _load_parent_work_order(db, work_order_id, company_id)
     return await _run_laser_nest_import(
@@ -2693,6 +2912,7 @@ async def import_laser_nest_package(
         source_path=source_path,
         work_center_id=work_center_id,
         rows=rows,
+        sheet_match_provenance=sheet_match_provenance,
     )
 
 

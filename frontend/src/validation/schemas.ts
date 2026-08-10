@@ -369,6 +369,12 @@ export const laserNestManualSchema = z
      * explicit pick — never inferred from the free-text `material` field, since
      * a wrong tie depletes the wrong heat lot into an as-built record. Omitted
      * => the nest stays untied and behaves exactly as it did pre-feature.
+     *
+     * This schema validates the MANUAL single-nest modal, which deliberately gets
+     * no auto-matching (2026-08-10): one nest at a time carries none of the per-row
+     * toil the import wizard's server-computed suggestions exist to remove. And in
+     * both surfaces the rule above still holds — nothing is ever inferred from the
+     * free-text `material` on the client.
      */
     material_part_id: optionalPositiveNumber((n) => n.int('Pick a sheet part').positive('Pick a sheet part')),
     /** Sheets consumed per completed run. Meaningless without a sheet part. */

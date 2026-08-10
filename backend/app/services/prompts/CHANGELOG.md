@@ -4,6 +4,40 @@ Bump a prompt's semver `version` and add an entry here whenever its text or
 request layout changes. The version string is recorded on `AIUsageEvent`
 (every API call) and on `AIInteractionEvent`/`AIRecommendation` learning rows.
 
+## 2026-08-10
+
+- `sheet_stock_disambiguation` 1.0.0 — new prompt for the AI leg of laser-nest
+  sheet-stock matching. It runs ONLY on the residue: the `ambiguous` rows
+  `services/sheet_stock_matcher.py` refused to resolve, and only those carrying a
+  shortlist. One call per preview covers every unresolved spec (rows are grouped
+  by candidate part ids + refusal sentence, so a 42-nest package with three
+  unresolved specs is three groups in one request), sent as the `system` argument
+  with the groups in the user message. No `cache_control`: a single call carrying
+  a per-request shortlist would write a cache block that is never read, at 1.25x.
+  No `tools` either — `llm_client._first_text` returns "" when a response leads
+  with a `tool_use` block, which would surface as an obscure JSONDecodeError
+  instead of a clean parse.
+  The prompt's framing is the point: the server has already gated thickness to
+  0.002" and already dropped contradicting grades, so the model is told to take
+  thickness off the table and answer only grade and size. It is told that `null`
+  is a correct answer, that on-hand is context and never a tiebreaker, and that a
+  part number must be copied character-for-character from that group's own
+  shortlist. Response is strict JSON `{"picks": [{key, part_number, reason}]}`,
+  capped at `max_tokens` 512 with `max_retries=0` and a 20s timeout because a
+  planner is watching a spinner.
+  None of this can pre-fill anything. `resolve_ambiguous_sheet_matches`
+  re-resolves the returned part number by exact string match against the
+  shortlist that group was given (the hallucination fence and the cross-tenant
+  fence in one), drops any pick whose reason is blank, and on success only
+  reorders the shortlist and stamps `basis='ai_disambiguated'`.
+  `auto_fill_part_id` and `status` are never touched — that stays the
+  deterministic gate's alone, because the tie depletes real inventory into an
+  as-built record that never auto-reverses.
+  Task `sheet_stock_disambiguation` is routed EXPLICITLY to the DEFAULT (Sonnet)
+  tier in `llm_model_router`. Left unlisted it would fall through to complexity
+  scoring, where a short prompt scores 0 and lands the hardest judgment in the
+  feature on the cheapest model.
+
 ## 2026-08-05
 
 - `laser_nest_extraction` 1.1.0 → 1.2.0 and `laser_nest_verification` 1.0.0 →

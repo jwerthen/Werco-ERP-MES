@@ -559,8 +559,7 @@ def _decide_status(
         )
     elif margin < AUTO_FILL_MIN_MARGIN and runner_up is not None:
         refusal = (
-            f"{best.part_number} and {runner_up.part_number} both fit this nest's spec. "
-            "Pick the one this job runs."
+            f"{best.part_number} and {runner_up.part_number} both fit this nest's spec. " "Pick the one this job runs."
         )
     elif best.alloy_score < _ALLOY_EQUIVALENT:
         refusal = f"{best.part_number} matches on thickness, but the grades were never confirmed against each other."
@@ -569,9 +568,7 @@ def _decide_status(
 
     if refusal is not None:
         if margin < AUTO_FILL_MIN_MARGIN and runner_up is not None and not alloy_ambiguous:
-            diagnostics.append(
-                MatchDiagnostic(code="AMBIGUOUS_CANDIDATES", severity=SEVERITY_GATE, detail=refusal)
-            )
+            diagnostics.append(MatchDiagnostic(code="AMBIGUOUS_CANDIDATES", severity=SEVERITY_GATE, detail=refusal))
         return SheetSuggestion(status=STATUS_AMBIGUOUS, candidates=shortlist, diagnostic=refusal)
 
     return SheetSuggestion(status=STATUS_MATCHED, auto_fill_part_id=best.part_id, candidates=shortlist)
@@ -606,9 +603,7 @@ def _apply_history(
     if historical is None:
         return
 
-    suggestion.candidates = [
-        candidate for candidate in suggestion.candidates if candidate.part_id != history_part_id
-    ]
+    suggestion.candidates = [candidate for candidate in suggestion.candidates if candidate.part_id != history_part_id]
     suggestion.candidates.insert(
         0,
         CandidatePart(
@@ -703,8 +698,7 @@ def _annotate_stock(
                 code="NO_STOCK_ON_HAND",
                 severity=SEVERITY_ADVISORY,
                 detail=(
-                    f"{top.part_number} is the right sheet but has 0 {uom} on hand; "
-                    f"this nest needs {top.demand:g}."
+                    f"{top.part_number} is the right sheet but has 0 {uom} on hand; " f"this nest needs {top.demand:g}."
                 ),
             )
         )
@@ -725,11 +719,7 @@ def _annotate_stock(
 
     if top.stock_state in {"none", "short"}:
         alternate = next(
-            (
-                c
-                for c in suggestion.candidates
-                if c.part_id != top.part_id and on_hand_by_part.get(c.part_id, 0.0) > 0
-            ),
+            (c for c in suggestion.candidates if c.part_id != top.part_id and on_hand_by_part.get(c.part_id, 0.0) > 0),
             None,
         )
         if alternate is not None:
@@ -777,9 +767,7 @@ def match_sheet_parts(
         triple = (row.get("material"), row.get("thickness"), row.get("sheet_size"))
         if triple in by_triple:
             continue
-        candidates, diagnostics, alloy_ambiguous = _candidates_for_triple(
-            triple[0], triple[1], triple[2], catalog
-        )
+        candidates, diagnostics, alloy_ambiguous = _candidates_for_triple(triple[0], triple[1], triple[2], catalog)
         suggestion = _decide_status(candidates, diagnostics, alloy_ambiguous)
         key = spec_key(triple[0], triple[1], triple[2])
         history_entry = history.get(key)

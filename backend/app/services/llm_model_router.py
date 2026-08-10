@@ -51,6 +51,7 @@ TASK_MODEL_ENV = {
     "routing_generation": "ANTHROPIC_ROUTING_MODEL",
     "qms_clause_extraction": "ANTHROPIC_QMS_MODEL",
     "laser_nest_extraction": "ANTHROPIC_LASER_NEST_MODEL",
+    "sheet_stock_disambiguation": "ANTHROPIC_SHEET_STOCK_MODEL",
     "estimate_drawing_extraction": "ANTHROPIC_ESTIMATE_DRAWING_MODEL",
     "copilot_chat": "ANTHROPIC_COPILOT_MODEL",
     "nl_search": "ANTHROPIC_NL_SEARCH_MODEL",
@@ -109,6 +110,18 @@ def select_anthropic_model(context: LLMTaskContext) -> LLMModelDecision:
     if task == "auto_execute":
         # Batch approve/skip of already-structured allowlisted actions — cheap JSON decision.
         return model_decision_for_tier(LLMModelTier.FAST, "auto-execute decision over structured recommendations")
+
+    if task == "sheet_stock_disambiguation":
+        # EXPLICIT so it can never fall through to _complexity_score. The prompt
+        # is a short shortlist (a few hundred chars, no PDF, 512 output tokens),
+        # which scores 0 -> FAST/Haiku -- the cheapest model for the hardest
+        # judgment in the feature. The deterministic matcher has already gated
+        # thickness and dropped conflicting grades; what is left is exactly the
+        # metallurgy-and-size call it refused to make, and a wrong answer ties a
+        # nest to the wrong heat lot. DEFAULT tier, regardless of prompt length.
+        return model_decision_for_tier(
+            LLMModelTier.DEFAULT, "sheet-stock disambiguation is a materials judgment, not a parse"
+        )
 
     if task == "copilot_chat":
         if complexity_score >= 5:

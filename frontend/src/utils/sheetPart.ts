@@ -79,17 +79,27 @@ const EMPTY_SPEC: SheetSpec = { thickness: null, sheetSize: null };
  * `THK` has to go before the dimension match: `0.188" THK x 60 x 120` would
  * otherwise break the thickness away from the two dimensions that follow it.
  *
- * All four quote forms are stripped, not just the two that matter today. Excel
- * autocorrects an inch mark after a digit to the CLOSING `”`, so that is the
- * one this data actually contains — but a part number retyped or pasted from
- * elsewhere can carry the opening `“`, and a dimension that fails to parse is
- * invisible (the picker just stamps nothing). Covering the whole family costs
- * nothing and removes a failure mode nobody would think to look for.
+ * The whole quote family is stripped, not just the forms that matter today.
+ * Excel autocorrects an inch mark after a digit to the CLOSING `”`, so that is
+ * the one this data actually contains — but a part number retyped or pasted from
+ * elsewhere can carry the opening `“`, the straight `'` or the true prime `″`,
+ * and a dimension that fails to parse is invisible (the picker just stamps
+ * nothing). Covering the whole family costs nothing and removes a failure mode
+ * nobody would think to look for.
+ *
+ * THIS CHARACTER CLASS MUST STAY IN LOCK-STEP with `_QUOTES` in
+ * `backend/app/services/sheet_stock_spec.py`. `'` and `″` were missing here
+ * until 2026-08-10, and the divergence failed in the dangerous direction: the
+ * server parsed `0.188″-60X120-A36` as real sheet stock and could pre-fill it,
+ * while this function returned false for the same part so the picker's default
+ * filter HID it — leaving the planner a pre-filled tie with nothing in the list
+ * to check it against. `tests/fixtures/sheet_part_cases.json` now carries a row
+ * for each, read by both test suites, so the two ports cannot drift again.
  */
 function normalize(text: string): string {
   return text
     .toUpperCase()
-    .replace(/["‘’“”„]/g, '')
+    .replace(/["'‘’“”„″]/g, '')
     .replace(/\bTHK\b\.?/g, ' ')
     .replace(/\bINCHES?\b\.?/g, ' ')
     .replace(/\s+/g, ' ')
@@ -143,6 +153,95 @@ export function deriveSheetSpec(part: SheetPartLike | null | undefined): SheetSp
   const fromName = matchTriple(normalize(part.name || ''));
   if (fromName) return fromName;
   return EMPTY_SPEC;
+}
+
+/**
+ * Gauge → decimal inches. Mirrors the backend `GAUGE_TO_INCHES`
+ * (`sheet_metal_costing_service.py`), which is what the server-side matcher's
+ * thickness gate runs on — two implementations of the same table would be a
+ * silent disagreement about which sheet is which.
+ *
+ * Only the gauges this shop stocks are listed. A gauge that is not here (9ga,
+ * 13ga) reads as UNREADABLE rather than being interpolated, for the same reason
+ * a bare `16` is not silently treated as 16 ga: this codebase does not infer
+ * units it was not given.
+ */
+const GAUGE_TO_INCHES: Record<string, number> = {
+  '24': 0.0239,
+  '22': 0.0299,
+  '20': 0.0359,
+  '18': 0.0478,
+  '16': 0.0598,
+  '14': 0.0747,
+  '12': 0.1046,
+  '11': 0.1196,
+  '10': 0.1345,
+  '7': 0.1793,
+};
+
+/**
+ * Bounds a parsed thickness has to sit inside to count as read at all, matching
+ * `sheet_stock_spec.MIN/MAX_PLAUSIBLE_THICKNESS_IN`.
+ *
+ * This exists for one specific failure: the decimal branch reads a bare `16` as
+ * 16 inches. Nobody lasers 16 inches of plate, and letting it through would put
+ * a nonsense number into a numeric comparison. Bounding turns it into a clean
+ * "unreadable", which every caller here already fails closed on.
+ */
+export const MIN_PLAUSIBLE_THICKNESS_IN = 0.005;
+export const MAX_PLAUSIBLE_THICKNESS_IN = 4.0;
+
+/**
+ * A thickness string as inches, or `null` when it cannot be read.
+ *
+ * Reads the same grammar as the backend, in the same order: gauge, mixed
+ * fraction, fraction, millimetres, decimal inches.
+ *
+ * ---------------------------------------------------------------------------
+ * THIS IS FOR COMPARING TWO THICKNESSES, NEVER FOR WRITING ONE
+ * ---------------------------------------------------------------------------
+ * The sheet-part pull-through stays STRING-VERBATIM (`deriveSheetSpec`): what it
+ * stamps onto a nest row is what an operator compares against a tag on a rack,
+ * so `0.250` must not become `0.25` and `10 ga` must not become `0.1345`. The
+ * only caller of this function is the wizard's "the tied part disagrees with the
+ * nest report" marker, which needs to know that `0.1875` and `0.188` are the
+ * same sheet and `0.125` and `0.188` are not.
+ *
+ * `null` means UNREADABLE and must never be coerced to 0: a 0 compares equal to
+ * nothing while looking like a real number. A caller comparing two values falls
+ * back to a string compare when either side is null.
+ */
+export function thicknessInches(value: string | null | undefined): number | null {
+  if (value == null) return null;
+  const text = String(value).trim().toLowerCase().replace(/,/g, '');
+  if (!text) return null;
+
+  const parsed = parseThickness(text);
+  if (parsed == null || !Number.isFinite(parsed)) return null;
+  if (parsed < MIN_PLAUSIBLE_THICKNESS_IN || parsed > MAX_PLAUSIBLE_THICKNESS_IN) return null;
+  return parsed;
+}
+
+/** The grammar half of `thicknessInches`, pre-normalized and unbounded. */
+function parseThickness(text: string): number | null {
+  const gauge = /\b(\d{1,2})\s*(?:ga|gauge)\b/.exec(text);
+  // A gauge NUMBER that is not stocked returns null rather than falling through
+  // to the decimal branch, which would read "9ga" as 9 inches.
+  if (gauge) return GAUGE_TO_INCHES[gauge[1]] ?? null;
+
+  const mixed = /\b(\d+)\s+(\d+)\s*\/\s*(\d+)\b/.exec(text);
+  if (mixed && Number(mixed[3]) !== 0) return Number(mixed[1]) + Number(mixed[2]) / Number(mixed[3]);
+
+  const fraction = /\b(\d+)\s*\/\s*(\d+)\b/.exec(text);
+  if (fraction && Number(fraction[2]) !== 0) return Number(fraction[1]) / Number(fraction[2]);
+
+  const mm = /(\d*\.?\d+)\s*mm\b/.exec(text);
+  if (mm) return Number(mm[1]) / 25.4;
+
+  const inches = /(\d*\.?\d+)\s*(?:in|inch|inches|")?\b/.exec(text);
+  if (inches) return Number(inches[1]);
+
+  return null;
 }
 
 /**

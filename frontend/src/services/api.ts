@@ -24,6 +24,7 @@ import {
   LaserNestPackagePreview,
   LaserNestImportRow,
   LaserNestPackageImportResult,
+  SheetMatchProvenance,
   DispatchBoardResponse,
   RunOrderUpdateResponse,
   OperationDocumentsResponse,
@@ -1017,6 +1018,8 @@ class ApiService {
       // only supplies PDF bytes for storage, so no second AI call runs. Omit to
       // keep the legacy CNC-program import (server parses the ZIP itself).
       rows?: LaserNestImportRow[];
+      /** See `SheetMatchProvenance`. */
+      sheet_match_provenance?: SheetMatchProvenance;
     }
   ): Promise<LaserNestPackageImportResult> {
     const formData = new FormData();
@@ -1024,6 +1027,9 @@ class ApiService {
     if (data.source_path) formData.append('source_path', data.source_path);
     if (data.work_center_id) formData.append('work_center_id', String(data.work_center_id));
     if (data.rows) formData.append('rows', JSON.stringify(data.rows));
+    if (data.sheet_match_provenance) {
+      formData.append('sheet_match_provenance', JSON.stringify(data.sheet_match_provenance));
+    }
     const response = await this.api.post<LaserNestPackageImportResult>(
       `/work-orders/${workOrderId}/laser-nest-packages/import`,
       formData,
@@ -1060,6 +1066,8 @@ class ApiService {
     due_date?: string;
     work_center_id?: number | null;
     rows?: LaserNestImportRow[];
+    /** See `SheetMatchProvenance`. */
+    sheet_match_provenance?: SheetMatchProvenance;
   }): Promise<LaserNestPackageImportResult> {
     const formData = new FormData();
     if (data.file) formData.append('file', data.file);
@@ -1067,6 +1075,9 @@ class ApiService {
     if (data.due_date) formData.append('due_date', data.due_date);
     if (data.work_center_id) formData.append('work_center_id', String(data.work_center_id));
     if (data.rows) formData.append('rows', JSON.stringify(data.rows));
+    if (data.sheet_match_provenance) {
+      formData.append('sheet_match_provenance', JSON.stringify(data.sheet_match_provenance));
+    }
     const response = await this.api.post<LaserNestPackageImportResult>(
       '/work-orders/laser-nest-packages/standalone/import',
       formData,

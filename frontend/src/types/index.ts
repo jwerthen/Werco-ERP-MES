@@ -271,6 +271,107 @@ export interface LaserNestPdfExtraction {
 }
 
 /**
+ * One reason the sheet-stock matcher gives for what it did with a candidate.
+ *
+ * `severity` is the difference between "this candidate was ruled out" (`gate`)
+ * and "this candidate stands, but read this first" (`advisory`) — a truncated
+ * catalog, a sheet size the nest never stated, stock that will not cover the
+ * demand. `code` is the server's vocabulary and deliberately a bare `string`,
+ * not a union: the matcher may add codes, and a client that narrows the type
+ * would either stop compiling against a truthful response or silently drop a
+ * diagnostic it has never seen. Render `detail`, never a hard-coded sentence
+ * keyed off `code`.
+ */
+export interface SheetMatchDiagnostic {
+  code: string;
+  severity: 'gate' | 'advisory';
+  detail: string;
+}
+
+/**
+ * One stock part the matcher offers for a nest.
+ *
+ * Every candidate has already cleared the HARD exact-thickness gate server-side
+ * (±0.002"); `score` ranks what survived on alloy and sheet size. It is a
+ * PROPOSAL — see `SheetPartSuggestion`.
+ *
+ * The stock fields annotate, they never rank: `on_hand_known` false means the
+ * stock read did not land, and `on_hand` must not be rendered as a real zero in
+ * that case (a fabricated 0 reads as "we are out", which is a different and
+ * actionable claim). `demand` is what this package would draw, and
+ * `projected_on_hand` is `on_hand - demand`, so `stock_state` can be shown
+ * without the client re-deriving it.
+ */
+export interface SheetPartCandidate {
+  part_id: number;
+  part_number: string;
+  part_name: string;
+  unit_of_measure?: string | null;
+  score: number;
+  on_hand: number;
+  on_hand_known: boolean;
+  demand: number;
+  projected_on_hand: number;
+  stock_state: 'covered' | 'short' | 'none' | 'unknown';
+  /** Thickness read off the candidate's own part number, for a side-by-side read. */
+  spec_thickness?: string | null;
+  spec_sheet_size?: string | null;
+  is_sheet_like: boolean;
+  /** How many nests have been tied to this part before — corroboration, not proof. */
+  prior_tie_count: number;
+  reason: string;
+  basis: 'deterministic' | 'history' | 'ai_disambiguated';
+  diagnostics: SheetMatchDiagnostic[];
+}
+
+/**
+ * The server's answer for one nest row: which sheet part it thinks this nest is
+ * cut from.
+ *
+ * A SUGGESTION IS ADVISORY. `auto_fill_part_id` is assigned only by the
+ * deterministic gate (exact thickness, agreeing alloy, a clear margin over the
+ * runner-up) and the wizard pre-fills its picker from it — but a pre-filled
+ * picker is a proposal the planner confirms, never a tie. The tie is what makes
+ * stock leave inventory when the nest's operation completes, into an AS9100D
+ * as-built record that never auto-reverses, so nothing commits one without a
+ * deliberate human act.
+ *
+ *  - `matched`   — one part, confidently: pre-fill it, and ask.
+ *  - `ambiguous` — the data does not identify ONE sheet. `auto_fill_part_id` is
+ *    null and `candidates` is the shortlist the planner picks from (2 rows, not
+ *    500).
+ *  - `unmatched` — nothing cleared the thickness gate. `diagnostic` says why.
+ */
+export interface SheetPartSuggestion {
+  status: 'matched' | 'ambiguous' | 'unmatched';
+  auto_fill_part_id?: number | null;
+  candidates: SheetPartCandidate[];
+  diagnostic?: string | null;
+}
+
+/**
+ * How each imported nest's sheet tie came to be, keyed by `source_file`.
+ *
+ * Sent alongside the confirmed rows so the server can record WHERE a tie came
+ * from, which the row payload itself cannot express — a `material_part_id` looks
+ * identical whether a planner searched for it, stamped it package-wide, or
+ * accepted a machine suggestion.
+ *
+ *  - `none`      — the planner left this nest untied.
+ *  - `suggested` — a suggestion the planner never confirmed. It must NEVER reach
+ *    the wire carrying a tie (the wizard drops the tie keys off such a row);
+ *    seeing this value alongside a tie is a client bug.
+ *  - `picked`    — an explicit human choice, including a confirmed suggestion:
+ *    accepting is mechanically identical to a bulk pick.
+ *  - `prefilled` — carried over from the tie the nest already had on a re-import.
+ *
+ * A bare `Record<string, string>` on the wire rather than a narrowed union,
+ * because it is provenance metadata: an unrecognized value must be recorded, not
+ * rejected.
+ */
+export type SheetMatchProvenance = Record<string, string>;
+
+/**
  * One row of a batch `laser-nest-packages/preview`. Carries the existing
  * CNC-program fields plus the new AI-extraction fields: `source_file` (the
  * PDF/CNC file's relative path within the ZIP — the key the import step matches
@@ -295,6 +396,12 @@ export interface LaserNestPreviewRow {
   warning?: string | null;
   /** How many AI passes ran for this row (1 or 2). */
   passes?: number | null;
+  /**
+   * Server-computed sheet-part suggestion for this nest. Absent/null on an
+   * older server, and absent is not "unmatched" — the wizard renders nothing at
+   * all rather than a machine opinion it never received.
+   */
+  sheet_suggestion?: SheetPartSuggestion | null;
 }
 
 /**
@@ -372,6 +479,19 @@ export interface LaserNestPackagePreview {
   skipped_pages?: number[] | null;
   /** Set when segmentation degraded to one-page-per-nest. */
   segmentation_warning?: string | null;
+  /**
+   * Package-level rollups of the sheet-part match, as the SERVER saw it at
+   * preview time: rows with a pre-fillable match, rows with only a shortlist,
+   * and rows whose suggested sheet will not cover this package's demand.
+   *
+   * A SNAPSHOT, not live state. The wizard's own chips are derived from the
+   * rows, because the planner accepts, re-picks and clears them as they review
+   * — a count frozen at preview time would keep claiming work that is already
+   * done. These stay on the type because they are what the response carries.
+   */
+  suggested_row_count?: number | null;
+  shortlist_row_count?: number | null;
+  short_stock_row_count?: number | null;
 }
 
 /**
