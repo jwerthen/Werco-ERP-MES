@@ -423,8 +423,15 @@ describe('an ambiguous row', () => {
     const option = within(comboBoxListbox(picker)).getByRole('option', { name: /SHT-OLD-1/ });
     expect(option).toHaveAccessibleName('SHT-OLD-1 — Retired 0.075 sheet 7 EA on hand');
 
-    // Why it is a shortlist and not an answer.
-    expect(screen.getByTitle(DIAGNOSTIC)).toBeInTheDocument();
+    // Why it is a shortlist and not an answer. The tooltip COMPOSES the server's
+    // refusal with the top candidate's reasoning rather than showing one or the
+    // other — `diagnostic` is always set on an ambiguous row, so returning it
+    // alone made every AI-written reason and advisory unreachable, which is the
+    // inverse of why they are produced.
+    const cell = screen.getByTitle(new RegExp(DIAGNOSTIC.slice(0, 40).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    expect(cell).toBeInTheDocument();
+    expect(cell.getAttribute('title')).toContain(DIAGNOSTIC);
+    expect(cell.getAttribute('title')).toContain('Best fit');
   });
 
   it('picking from the shortlist is an ordinary pick — tied, spec pulled through, serialized', async () => {

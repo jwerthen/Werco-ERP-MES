@@ -78,6 +78,11 @@ interface DerivedSpec {
  *  - `suggested` — the server proposed a part and the picker is pre-filled with
  *    it. NOT A TIE: it is excluded from the tied count, its per-run input stays
  *    disabled, and the import payload drops its tie keys.
+ *  - `cleared`   — the planner emptied the picker themselves. Untied, exactly
+ *    like `none`, and equally never serialized — but it records an INTENT, and
+ *    the in-flight server tie pre-fill must not overwrite it. Suggestions made
+ *    "clear the pre-filled row I know is wrong" the expected first interaction,
+ *    which turned a theoretical race into the ordinary one.
  *  - `accepted`  — the server proposed it and the planner CONFIRMED it in the
  *    accept dialog. Mechanically identical to a pick (same `withTie` seam, same
  *    spec pull-through, same payload); kept distinct only because it is the one
@@ -92,7 +97,7 @@ interface DerivedSpec {
  * enable the per-run input, and serialize their tie keys. Only `suggested` is a
  * proposal, and only `none` is untied.
  */
-type TieSource = 'none' | 'suggested' | 'accepted' | 'picked' | 'prefilled';
+type TieSource = 'none' | 'cleared' | 'suggested' | 'accepted' | 'picked' | 'prefilled';
 
 /**
  * `TieSource` as the import audit row records it — the closed vocabulary the
@@ -380,7 +385,12 @@ function withSheetPart(
 /**
  * `withSheetPart` plus the provenance stamp — the single seam every tie change
  * goes through, so a row can never end up with a part id and a stale source.
- * Clearing the part always lands on `none`, whatever the caller asked for.
+ *
+ * Clearing the part always drops to an untied source, whatever the caller asked
+ * for. WHICH untied source matters: `cleared` when a human emptied the picker,
+ * `none` when the row simply never had anything. Both are untied and neither
+ * serializes a tie — the difference is that `cleared` records an intent the
+ * in-flight server pre-fill must not overwrite.
  */
 function withTie(
   row: EditableRow,
@@ -389,10 +399,53 @@ function withTie(
   source: TieSource,
   qtyPerRun?: string
 ): EditableRow {
+  const untiedSource: TieSource = source === 'none' ? 'none' : 'cleared';
   return {
     ...withSheetPart(row, partId, part, qtyPerRun),
-    tie_source: partId == null ? 'none' : source,
+    tie_source: partId == null ? untiedSource : source,
   };
+}
+
+/** Stable empty shortlist — a fresh `[]` per render would defeat the picker's memo. */
+const NO_SHORTLIST: ComboBoxOption[] = [];
+
+/**
+ * The server's shortlist for one nest, as picker options pinned to the top.
+ *
+ * The on-hand hint is omitted rather than shown as 0 when the stock read did not
+ * land, matching the picker's own "unknown is not zero" posture.
+ */
+function shortlistOptions(suggestion: SheetPartSuggestion): ComboBoxOption[] {
+  return suggestion.candidates.map((candidate) => ({
+    value: String(candidate.part_id),
+    label: candidate.part_number ? `${candidate.part_number} — ${candidate.part_name}` : candidate.part_name,
+    hint: candidate.on_hand_known
+      ? `${formatTieQty(candidate.on_hand)} ${candidate.unit_of_measure || 'EA'} on hand`
+      : undefined,
+    group: 'Suggested for this nest',
+  }));
+}
+
+/**
+ * Everything the server has to say about one row's sheet, as a tooltip.
+ *
+ * Composed rather than picking ONE string. `diagnostic` is always set on an
+ * ambiguous row, and ambiguous rows are the only ones the AI leg can touch — so
+ * returning `diagnostic || reason` made the model's sentence, and every
+ * AI_UNAVAILABLE / AI_PICK_OUT_OF_SET advisory, unreachable by construction: the
+ * exact inverse of why they are produced.
+ */
+function suggestionTitle(suggestion: SheetPartSuggestion | null): string | undefined {
+  if (!suggestion) return undefined;
+  const lines: string[] = [];
+  if (suggestion.diagnostic) lines.push(suggestion.diagnostic);
+  const top = suggestion.candidates[0];
+  if (top?.reason) {
+    const attribution = top.basis === 'ai_disambiguated' ? 'Best fit (AI-ranked)' : 'Best fit';
+    lines.push(`${attribution}: ${top.part_number || top.part_name} — ${top.reason}`);
+  }
+  for (const diagnostic of top?.diagnostics ?? []) lines.push(diagnostic.detail);
+  return lines.length > 0 ? lines.join('\n\n') : undefined;
 }
 
 /** A pre-filled proposal the planner has not confirmed. Not a tie. */
@@ -776,8 +829,11 @@ export default function LaserNestImportWizard({
    *    server tie replacing a deliberate choice is the same end state the whole
    *    feature guards against — importing a part nobody chose, depleting the
    *    wrong heat lot — and unlike the spec pull-through it leaves no marking
-   *    and nothing to restore. Hence the `material_part_id != null` skip: the
-   *    pre-fill only ever fills a row that is still empty.
+   *    and nothing to restore. Hence the skip below: the pre-fill only ever
+   *    fills a row the planner has not spoken about — never one they committed
+   *    to, and never one they deliberately CLEARED (`cleared`, not `none`),
+   *    which with suggestions in play is the expected first interaction on a
+   *    pre-filled row the planner knows is wrong.
    *  - It must not land on a DIFFERENT preview. Back → re-Preview while this is
    *    in flight would otherwise write the old package's part options and its
    *    "N existing ties pre-filled" chip over the new package's reset state.
@@ -828,7 +884,7 @@ export default function LaserNestImportWizard({
         // overwriting it is the same end state the whole feature guards against
         // (importing a part nobody chose), with nothing marked and nothing to
         // restore.
-        if (!tie || isCommittedSource(row.tie_source)) return row;
+        if (!tie || row.tie_source === 'cleared' || isCommittedSource(row.tie_source)) return row;
         // Routed through the same helper as a manual pick, so a pre-filled tie
         // pulls its sheet spec through exactly like one the planner chooses.
         // The part record is read from a ref rather than the render-time memo:
@@ -1475,7 +1531,13 @@ export default function LaserNestImportWizard({
                     const suggested = isSuggested(row);
                     const suggestion = row.sheet_suggestion;
                     const suggestionReason = suggestion?.candidates[0]?.reason ?? null;
-                    const cellTitle = suggestion?.diagnostic || suggestionReason || undefined;
+                    const cellTitle = suggestionTitle(suggestion);
+                    // The shortlist is pinned to the top of THIS row's picker, so
+                    // an unresolved nest is a two-option decision instead of a
+                    // search through the whole catalog. Only for rows the server
+                    // actually left open: a matched row's picker is already filled.
+                    const rowShortlist =
+                      suggestion && suggestion.status === 'ambiguous' ? shortlistOptions(suggestion) : NO_SHORTLIST;
 
                     return (
                       <tr key={row.source_file} className="border-b border-fd-line align-top">
@@ -1545,6 +1607,7 @@ export default function LaserNestImportWizard({
                                 parts={materials}
                                 onHandByPart={onHandByPart}
                                 extraOptions={pickerExtraOptions}
+                                priorityOptions={rowShortlist}
                                 value={row.material_part_id != null ? String(row.material_part_id) : ''}
                                 onChange={(value) => updateRowMaterialPart(index, value)}
                                 disabled={!hasPicker}

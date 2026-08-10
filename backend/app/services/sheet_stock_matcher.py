@@ -46,7 +46,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -153,6 +153,58 @@ STATUS_UNMATCHED = "unmatched"
 SEVERITY_GATE = "gate"
 SEVERITY_ADVISORY = "advisory"
 
+# Every sentence this module produces is quoted back through a schema field
+# capped at 300 characters -- and the sentences quote the nest's OWN
+# AI-extracted descriptors, which carry no length bound anywhere on their path
+# (``build_parsed_nest_from_extraction`` assigns the model's JSON verbatim).
+#
+# A garbled thickness cell is therefore enough to fail response validation, and
+# that failure lands OUTSIDE the endpoint's matcher guard -- turning a 42-nest
+# upload that already burned minutes of extraction into a 500. Clamping at the
+# producer is the primary fix; the endpoint's second guard is the backstop.
+MAX_DETAIL_CHARS = 300
+
+# What a quoted descriptor may occupy inside one of those sentences. Small
+# enough that several can appear alongside the fixed wording without reaching
+# the cap, and long enough that a real thickness or sheet size is never cut.
+MAX_QUOTED_DESCRIPTOR_CHARS = 60
+
+
+def _as_text(value: Any) -> Optional[str]:
+    """A descriptor as a string, or ``None``.
+
+    The nest's ``material`` / ``thickness`` / ``sheet_size`` are raw JSON values
+    from the extraction model, never coerced upstream. A JSON number for
+    ``thickness`` (the single most likely wrong shape) or an object for
+    ``material`` would otherwise reach ``str.upper()`` and raise, or land in a
+    dict key and raise as unhashable -- and one bad row would cost the WHOLE
+    package its suggestions, since the endpoint's guard is per-call, not per-row.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float, bool)):
+        return str(value)
+    # A list/dict/anything else is not a descriptor. Treat it as absent rather
+    # than stringifying a repr into a sentence a planner has to read.
+    return None
+
+
+def _quote(value: Optional[str]) -> str:
+    """A descriptor rendered for a sentence, bounded."""
+    text = (value or "").strip()
+    if len(text) <= MAX_QUOTED_DESCRIPTOR_CHARS:
+        return text
+    return text[: MAX_QUOTED_DESCRIPTOR_CHARS - 1] + "…"
+
+
+def _clamp_detail(text: str) -> str:
+    """Final backstop on a produced sentence, at the schema's own ceiling."""
+    if len(text) <= MAX_DETAIL_CHARS:
+        return text
+    return text[: MAX_DETAIL_CHARS - 1] + "…"
+
 
 @dataclass
 class MatchDiagnostic:
@@ -161,6 +213,12 @@ class MatchDiagnostic:
     code: str
     severity: str
     detail: str
+
+    def __post_init__(self) -> None:
+        # Clamped HERE rather than at each of the dozen construction sites, so a
+        # sentence added later cannot reintroduce the overflow. See
+        # ``MAX_DETAIL_CHARS``.
+        self.detail = _clamp_detail(self.detail)
 
 
 @dataclass
@@ -187,6 +245,13 @@ class CandidatePart:
     # Internal, never serialized: the alloy agreement that produced `score`.
     alloy_score: float = 0.0
 
+    def __post_init__(self) -> None:
+        # Same reasoning as MatchDiagnostic: the schema caps `reason` at 300 and
+        # the sentence quotes unbounded extractor text. Note the AI resolver
+        # reassigns `reason` directly on a promoted candidate -- it applies its
+        # own truncation, and this is not a second chance for that path.
+        self.reason = _clamp_detail(self.reason)
+
 
 @dataclass
 class SheetSuggestion:
@@ -196,6 +261,10 @@ class SheetSuggestion:
     auto_fill_part_id: Optional[int] = None
     candidates: List[CandidatePart] = field(default_factory=list)
     diagnostic: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.diagnostic is not None:
+            self.diagnostic = _clamp_detail(self.diagnostic)
 
 
 @dataclass(frozen=True)
@@ -401,7 +470,7 @@ def _reason_for(
     if alloy_score >= _ALLOY_EXACT and candidate.alloy:
         parts.append(f"grade {candidate.alloy} matches")
     elif alloy_score >= _ALLOY_EQUIVALENT and candidate.alloy:
-        nest_alloy = canonical_alloy(nest_material) or (nest_material or "").strip()
+        nest_alloy = canonical_alloy(nest_material) or _quote(nest_material)
         parts.append(f"nest says {nest_alloy}, this stock is {candidate.alloy} (same steel)")
     elif candidate.alloy:
         parts.append(f"grade not stated on the nest; this stock is {candidate.alloy}")
@@ -409,7 +478,7 @@ def _reason_for(
     if size_score >= _SIZE_EXACT and candidate.size_text:
         parts.append(f"sheet size {candidate.size_text} matches")
     elif size_score == _SIZE_CONFLICT and candidate.size_text and nest_size:
-        parts.append(f"nest reads {nest_size} and this sheet is {candidate.size_text}")
+        parts.append(f"nest reads {_quote(nest_size)} and this sheet is {candidate.size_text}")
     elif size_score == _SIZE_ONE_DIM and candidate.size_text:
         parts.append(f"one dimension matches {candidate.size_text}")
     elif candidate.size_text:
@@ -418,6 +487,15 @@ def _reason_for(
     if not parts:
         return ""
     return "; ".join(parts) + "."
+
+
+def _descriptor_triple(row: dict) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """The nest's (material, thickness, sheet_size) as hashable strings or None."""
+    return (
+        _as_text(row.get("material")),
+        _as_text(row.get("thickness")),
+        _as_text(row.get("sheet_size")),
+    )
 
 
 def _candidates_for_triple(
@@ -440,7 +518,7 @@ def _candidates_for_triple(
                 code="NEST_THICKNESS_UNREADABLE",
                 severity=SEVERITY_GATE,
                 detail=(
-                    f'The nest\'s thickness "{thickness or ""}" could not be read as a decimal or a '
+                    f'The nest\'s thickness "{_quote(thickness)}" could not be read as a decimal or a '
                     "stocked gauge, so no sheet was matched on spec."
                 ).strip(),
             )
@@ -486,7 +564,7 @@ def _candidates_for_triple(
                     code="ALLOY_UNDER_SPECIFIED",
                     severity=SEVERITY_GATE,
                     detail=(
-                        f'The nest says "{material}" without a grade, and the rack holds '
+                        f'The nest says "{_quote(material)}" without a grade, and the rack holds '
                         f"{', '.join(sorted(distinct_alloys))}. Pick the one this job runs."
                     ),
                 )
@@ -595,7 +673,7 @@ def _apply_history(
     top = suggestion.candidates[0] if suggestion.candidates else None
     if top is not None and top.part_id == history_part_id:
         top.prior_tie_count = history_ties
-        top.reason = f"{top.reason} Planners have tied this sheet to {history_ties} nests of this spec."
+        top.reason = _clamp_detail(f"{top.reason} Planners have tied this sheet to {history_ties} nests of this spec.")
         return
 
     # Disagreement. Demote and surface the historical part at rank 1.
@@ -629,7 +707,7 @@ def _apply_history(
             f"{history_ties} nests of this spec to {historical.part_number}."
         )
         suggestion.auto_fill_part_id = None
-        suggestion.diagnostic = detail
+        suggestion.diagnostic = _clamp_detail(detail)
         for candidate in suggestion.candidates:
             candidate.diagnostics.append(
                 MatchDiagnostic(code="HISTORY_SPEC_DISAGREEMENT", severity=SEVERITY_ADVISORY, detail=detail)
@@ -661,9 +739,16 @@ def _annotate_stock(
         candidate.on_hand_known = on_hand_known
         candidate.on_hand = on_hand_by_part.get(candidate.part_id, 0.0) if on_hand_known else 0.0
 
+    # ONLY a PRE-FILLED row claims stock against the projection. An ambiguous
+    # row's rank-1 candidate is precisely the one the matcher refused to trust --
+    # the wizard renders that picker empty and the planner may pick something
+    # else entirely -- so spending its sheets here would invent demand that never
+    # materializes, and then report a shortage on a genuinely matched row further
+    # down the package. That sends someone to buy steel they already have.
+    #
+    # Ambiguous and unmatched rows still get their on-hand figures annotated
+    # above; they simply do not consume.
     claimed = suggestion.auto_fill_part_id
-    if claimed is None and suggestion.candidates:
-        claimed = suggestion.candidates[0].part_id
     if claimed is None:
         return
 
@@ -764,7 +849,12 @@ def match_sheet_parts(
     # One evaluation per distinct descriptor triple.
     by_triple: Dict[Tuple[Optional[str], Optional[str], Optional[str]], SheetSuggestion] = {}
     for row in rows:
-        triple = (row.get("material"), row.get("thickness"), row.get("sheet_size"))
+        # Coerced to str/None HERE, at both read sites, because the values are raw
+        # JSON from the extraction model. A numeric thickness would reach
+        # ``str.upper()`` and raise; a dict material would make ``triple``
+        # unhashable and raise on the dedupe lookup -- and either would cost the
+        # WHOLE package its suggestions, since the endpoint guard is per-call.
+        triple = _descriptor_triple(row)
         if triple in by_triple:
             continue
         candidates, diagnostics, alloy_ambiguous = _candidates_for_triple(triple[0], triple[1], triple[2], catalog)
@@ -799,7 +889,12 @@ def match_sheet_parts(
     remaining: Dict[int, float] = {}
     buckets = {STATUS_MATCHED: 0, STATUS_AMBIGUOUS: 0, STATUS_UNMATCHED: 0}
     for row in rows:
-        triple = (row.get("material"), row.get("thickness"), row.get("sheet_size"))
+        # Coerced to str/None HERE, at both read sites, because the values are raw
+        # JSON from the extraction model. A numeric thickness would reach
+        # ``str.upper()`` and raise; a dict material would make ``triple``
+        # unhashable and raise on the dedupe lookup -- and either would cost the
+        # WHOLE package its suggestions, since the endpoint guard is per-call.
+        triple = _descriptor_triple(row)
         shared = by_triple[triple]
         suggestion = SheetSuggestion(
             status=shared.status,

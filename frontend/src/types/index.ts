@@ -357,17 +357,26 @@ export interface SheetPartSuggestion {
  * identical whether a planner searched for it, stamped it package-wide, or
  * accepted a machine suggestion.
  *
- *  - `none`      — the planner left this nest untied.
- *  - `suggested` — a suggestion the planner never confirmed. It must NEVER reach
- *    the wire carrying a tie (the wizard drops the tie keys off such a row);
- *    seeing this value alongside a tie is a client bug.
- *  - `picked`    — an explicit human choice, including a confirmed suggestion:
- *    accepting is mechanically identical to a bulk pick.
- *  - `prefilled` — carried over from the tie the nest already had on a re-import.
+ * COMMITTED TIES ONLY, over the closed three-value vocabulary the server accepts
+ * (`_SHEET_MATCH_PROVENANCE_VALUES` in `work_orders.py`):
  *
- * A bare `Record<string, string>` on the wire rather than a narrowed union,
- * because it is provenance metadata: an unrecognized value must be recorded, not
- * rejected.
+ *  - `auto`    — the server suggested it and the planner CONFIRMED it in the
+ *    accept dialog.
+ *  - `planner` — the planner chose it themselves, per row or package-wide.
+ *  - `prefill` — carried over from the tie the nest already had on a re-import.
+ *
+ * A row the planner left untied, and a suggestion they never confirmed, are both
+ * OMITTED rather than sent as a fourth value: neither serializes a tie, so there
+ * is no decision to describe, and an invented entry in an append-only audit row
+ * is worse than an absent one. An entirely untied package sends `{}`.
+ *
+ * The wizard's internal `TieSource` is richer — it also models the uncommitted
+ * states — and maps down to these three at the boundary; see
+ * `PROVENANCE_BY_TIE_SOURCE` in `components/laser/LaserNestImportWizard.tsx`.
+ *
+ * A bare `Record<string, string>` rather than a narrowed union, because the
+ * server filters the vocabulary itself and drops what it does not recognize; a
+ * union here would only duplicate that check in the weaker of the two places.
  */
 export type SheetMatchProvenance = Record<string, string>;
 

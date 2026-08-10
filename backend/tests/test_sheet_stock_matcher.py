@@ -1283,3 +1283,88 @@ class TestItNeverRaises:
 def _catalog_for(db: Session):
     catalog, _truncated = sheet_stock_matcher._load_catalog(db, COMPANY_ID)
     return catalog
+
+
+class TestHostileAndMalformedDescriptors:
+    """Regression net for the review findings that could break a whole preview.
+
+    All three were reproduced against the branch before the fix: the matcher
+    quotes the nest's own AI-extracted descriptors, which carry no length bound
+    and no type guarantee anywhere on their path.
+    """
+
+    def test_an_overlong_thickness_cannot_overflow_the_schema_cap(self, db_session, test_company):
+        """A garbled thickness cell must not produce a >300-char diagnostic.
+
+        The schema caps every diagnostic/reason at 300 and that validation runs
+        OUTSIDE the endpoint's matcher guard, so an overflow here is a 500 on a
+        42-nest upload that already burned minutes of AI extraction.
+        """
+        nests = [
+            {
+                "source_file": "n1.pdf",
+                "material": "A36",
+                "thickness": "see customer print revision C sheet two general note four " * 8,
+                "sheet_size": "60x120",
+                "planned_runs": 1,
+            }
+        ]
+        result = match_sheet_parts(db_session, company_id=test_company.id, nests=nests)
+        suggestion = result["n1.pdf"]
+        assert suggestion.diagnostic is None or len(suggestion.diagnostic) <= 300
+        for candidate in suggestion.candidates:
+            assert len(candidate.reason) <= 300
+            for diagnostic in candidate.diagnostics:
+                assert len(diagnostic.detail) <= 300
+
+    def test_an_overlong_material_and_sheet_size_cannot_overflow_either(self, db_session, test_company):
+        nests = [
+            {
+                "source_file": "n1.pdf",
+                "material": "STAINLESS " + ("grade per print " * 20),
+                "thickness": "0.250",
+                "sheet_size": "48x96 " + ("as noted on the traveler " * 12),
+                "planned_runs": 1,
+            }
+        ]
+        result = match_sheet_parts(db_session, company_id=test_company.id, nests=nests)
+        suggestion = result["n1.pdf"]
+        assert suggestion.diagnostic is None or len(suggestion.diagnostic) <= 300
+        for candidate in suggestion.candidates:
+            assert len(candidate.reason) <= 300
+
+    def test_non_string_descriptors_do_not_cost_the_package_its_suggestions(self, db_session, test_company):
+        """One bad row must not raise and take all 42 rows' suggestions with it.
+
+        ``thickness`` as a JSON number is the single most likely wrong shape from
+        the extractor; ``material`` as an object made the dedupe key unhashable.
+        Both raised before the fix, and the endpoint guard is per-CALL, not
+        per-row, so the whole package silently reverted to manual picking.
+        """
+        nests = [
+            {
+                "source_file": "bad-number.pdf",
+                "material": "A36",
+                "thickness": 0.25,
+                "sheet_size": 60.0,
+                "planned_runs": 1,
+            },
+            {
+                "source_file": "bad-object.pdf",
+                "material": {"grade": "A36"},
+                "thickness": ["0.25"],
+                "sheet_size": None,
+                "planned_runs": 1,
+            },
+            {
+                "source_file": "good.pdf",
+                "material": "A36",
+                "thickness": "0.250",
+                "sheet_size": "60x120",
+                "planned_runs": 1,
+            },
+        ]
+        result = match_sheet_parts(db_session, company_id=test_company.id, nests=nests)
+        assert set(result) == {"bad-number.pdf", "bad-object.pdf", "good.pdf"}
+        # The healthy row is unaffected by its neighbours.
+        assert result["good.pdf"].status in {STATUS_MATCHED, STATUS_AMBIGUOUS, STATUS_UNMATCHED}

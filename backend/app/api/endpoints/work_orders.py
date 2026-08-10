@@ -12,7 +12,7 @@ from dataclasses import replace as dataclass_replace
 from datetime import date, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
@@ -1114,8 +1114,13 @@ def _laser_wo_audit_values(work_order: WorkOrder) -> dict:
 # down to exactly these three on the way out.
 _SHEET_MATCH_PROVENANCE_VALUES = frozenset({"auto", "planner", "prefill"})
 
+# A source_file is a relative path inside the uploaded package; LaserNestImportRow
+# already caps it at 1000, but the audit log is append-only and hash-chained, so
+# what lands THERE gets the tighter, realistic filename bound.
+_MAX_PROVENANCE_KEY_CHARS = 255
 
-def _parse_sheet_match_provenance(raw: Optional[str]) -> Dict[str, str]:
+
+def _parse_sheet_match_provenance(raw: Optional[str], known_source_files: Optional[Set[str]] = None) -> Dict[str, str]:
     """Decode the import's optional ``sheet_match_provenance`` form field.
 
     OBSERVATIONAL ONLY. This is a client-reported breadcrumb -- how the planner
@@ -1127,9 +1132,22 @@ def _parse_sheet_match_provenance(raw: Optional[str]) -> Dict[str, str]:
     hostile value is DISCARDED rather than 400'd -- refusing an import over a
     telemetry field would punish the planner for a wizard bug.
 
-    Bounded like the rows themselves (``LASER_PDF_PACKAGE_MAX``) so it cannot be
-    used to stuff an unbounded blob into the append-only audit table, and filtered
-    to a closed value vocabulary so it cannot smuggle free text there either.
+    THE AUDIT LOG IS APPEND-ONLY AND HASH-CHAINED, so everything that reaches it
+    from here is bounded on BOTH axes, not just one:
+
+    * VALUES are filtered to the closed vocabulary above, so no free text lands.
+    * KEYS are capped in count (``LASER_PDF_PACKAGE_MAX``) *and* in length
+      (``_MAX_PROVENANCE_KEY_CHARS``) *and* intersected with the ``source_file``
+      values of the rows actually being imported. Count alone was not enough: 50
+      keys at the old 1000-char truncation is ~50 KB of caller-chosen text
+      permanently appended to the tenant's immutable quality record, per call,
+      with nothing able to redact it.
+
+    The intersection also makes the breadcrumb HONEST rather than merely bounded.
+    Without it a client could assert ``{"nest_07.pdf": "auto"}`` for a row it
+    imported untied, or for a file not in the package at all, and the audit row
+    would record the claim as fact -- in the row someone reads when asking why
+    the wrong lot was depleted.
     """
     if not raw:
         return {}
@@ -1146,8 +1164,14 @@ def _parse_sheet_match_provenance(raw: Optional[str]) -> Dict[str, str]:
     for source_file, value in parsed.items():
         if len(provenance) >= LASER_PDF_PACKAGE_MAX:
             break
-        if isinstance(source_file, str) and isinstance(value, str) and value in _SHEET_MATCH_PROVENANCE_VALUES:
-            provenance[source_file[:1000]] = value
+        if (
+            isinstance(source_file, str)
+            and len(source_file) <= _MAX_PROVENANCE_KEY_CHARS
+            and (known_source_files is None or source_file in known_source_files)
+            and isinstance(value, str)
+            and value in _SHEET_MATCH_PROVENANCE_VALUES
+        ):
+            provenance[source_file] = value
         else:
             dropped += 1
     if dropped:
@@ -2330,21 +2354,56 @@ async def _run_laser_nest_preview(
     # package must get their rows even if the catalog read, the LLM, or the
     # resolver falls over -- degrading to "no suggestions" costs 42 manual picks,
     # which is exactly today's behavior; raising costs the whole upload.
+    # Both calls are SYNCHRONOUS and BLOCKING -- three SQLAlchemy queries, then a
+    # single Anthropic request with a 20-second ceiling -- so they run off the
+    # event loop, exactly like every other blocking step in this function
+    # (``segment_nest_pdf``, ``split_pdf_segments``, ``parse_laser_nest_folder``).
+    # Left inline they would freeze the worker's loop for the whole LLM timeout,
+    # stalling the kiosk polls, the wallboard refresh and /health for everyone
+    # else on that process -- a cost paid by the shop, not by the planner whose
+    # spinner it is.
+    def _match_sheets() -> Optional[dict]:
+        matches = match_sheet_parts(db, company_id=company_id, nests=nests)
+        resolve_ambiguous_sheet_matches(matches, company_id=company_id)
+        return matches
+
     sheet_matches = None
     try:
-        sheet_matches = match_sheet_parts(db, company_id=company_id, nests=nests)
-        resolve_ambiguous_sheet_matches(sheet_matches, company_id=company_id)
+        sheet_matches = await run_in_threadpool(_match_sheets)
     except Exception:  # noqa: BLE001 - a suggestion is never worth failing the preview for
         logger.warning("sheet-stock matching failed; preview degrades to no suggestions", exc_info=True)
         sheet_matches = None
 
+    # Response assembly is INSIDE the guard too. The schema caps
+    # (``max_length=300`` on every diagnostic / reason) are validated here, not
+    # above, and the matcher quotes the nest's own AI-extracted descriptors --
+    # which carry no length bound anywhere on their path. Producing those strings
+    # is clamped at the source as well (``_clamp_detail``), so this is the second
+    # of two independent guards; without it a single garbled thickness cell turns
+    # a 42-nest upload that already burned minutes of extraction into a 500.
+    try:
+        return _build_laser_preview_response(
+            package_name,
+            nests,
+            source_page_count=source_page_count,
+            segmentation_warning=segmentation_warning,
+            skipped_pages=skipped_pages,
+            sheet_matches=sheet_matches,
+        )
+    except ValidationError:
+        logger.warning(
+            "sheet-stock suggestions failed response validation; preview degrades to no suggestions",
+            exc_info=True,
+        )
+
+    # Rebuilt with NO suggestions -- passing the same ``sheet_matches`` again is
+    # what just failed. The planner gets their 42 rows and picks by hand.
     return _build_laser_preview_response(
         package_name,
         nests,
         source_page_count=source_page_count,
         segmentation_warning=segmentation_warning,
         skipped_pages=skipped_pages,
-        sheet_matches=sheet_matches,
     )
 
 
@@ -2465,7 +2524,15 @@ async def _run_laser_nest_import(
     # not reach ``_build_confirmed_pdf_nests``, ``row_material_parts``, or
     # ``create_nest_material_allocation``, so an untied import stays byte-identical
     # to its pre-feature behavior (invariant 6(d)) whatever this field says.
-    sheet_match_provenance_map = _parse_sheet_match_provenance(sheet_match_provenance)
+    # Intersected with the rows actually being imported, so the audit row can only
+    # describe nests this import really carried. A claim about a file that is not
+    # in the package is not a breadcrumb, it is a fabrication in an append-only
+    # record. (Legacy CNC-program imports send no ``rows``; there is nothing to
+    # intersect against and nothing sends provenance on that path either.)
+    sheet_match_provenance_map = _parse_sheet_match_provenance(
+        sheet_match_provenance,
+        {row.source_file for row in confirmed_rows} if confirmed_rows else set(),
+    )
 
     # Storage blobs for nest-PDF Documents are written by storage.save() INSIDE
     # the atomic_transaction, BEFORE it commits. On rollback they must be reaped
