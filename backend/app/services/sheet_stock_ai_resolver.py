@@ -202,6 +202,13 @@ def _promote(group: _Group, part_number: str, reason: str) -> None:
     ``score`` is left exactly as the deterministic matcher computed it -- the
     model did not re-derive it and must not appear to have. Only the order, the
     basis and the sentence change.
+
+    PRIOR-TIE EVIDENCE SURVIVES the rewrite. A candidate the history leg lifted
+    into the shortlist carries the strongest signal in the whole feature -- what
+    planners at this shop actually tied to this spec before -- and replacing its
+    sentence outright would drop that on the floor in favour of a model's
+    opinion. The count itself lives in ``prior_tie_count`` and was never at risk;
+    it is the sentence a planner reads that was.
     """
     for suggestion in group.members:
         chosen = next((c for c in suggestion.candidates if c.part_number == part_number), None)
@@ -209,7 +216,12 @@ def _promote(group: _Group, part_number: str, reason: str) -> None:
             continue
         suggestion.candidates = [chosen] + [c for c in suggestion.candidates if c is not chosen]
         chosen.basis = AI_BASIS
-        chosen.reason = reason
+        if chosen.prior_tie_count > 0:
+            chosen.reason = (f"{reason} Planners have tied this sheet to {chosen.prior_tie_count} nests of this spec.")[
+                :MAX_AI_REASON_CHARS
+            ]
+        else:
+            chosen.reason = reason
 
 
 def _apply_picks(groups_by_key: Dict[str, _Group], payload: Any) -> None:

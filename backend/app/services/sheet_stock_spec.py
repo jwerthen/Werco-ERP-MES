@@ -276,6 +276,11 @@ _ALLOY_ALIASES = {
 # Bare family words: a real statement that the grade was NOT stated. This is how
 # under-specification is RECOGNIZED, never resolved -- `SS` could be 304 or 316
 # and the nest does not say, so the matcher refuses to pick between them.
+# The family words WITHOUT a word boundary, used only to gate the compound-spelling
+# pass below. `304SS` has no boundary between the grade and the family, which is
+# the whole reason that pass exists.
+_GLUED_FAMILY = re.compile(r"(SS|STAINLESS|ALUM|ALUMINI?UM)")
+
 _FAMILY_PATTERNS = (
     ("SS", re.compile(r"\b(SS|STAINLESS)\b")),
     ("AL", re.compile(r"\b(AL|ALUM|ALUMINUM|ALUMINIUM)\b")),
@@ -308,9 +313,16 @@ def canonical_alloy(text: Optional[str]) -> Optional[str]:
 
     Matching is word-boundary first, because the short tokens are the dangerous
     ones: a bare ``in`` test for ``CS`` hits any word containing those letters.
-    The squeezed pass exists only for the compound stainless spellings
-    (``304SS`` / ``SS304``), where no word boundary exists between the grade and
-    the family, and it is restricted to the NUMERIC grades for the same reason.
+
+    The squeezed pass exists for exactly ONE shape -- the compound stainless and
+    aluminum spellings (``304SS`` / ``SS304``), where no word boundary separates
+    the grade from the family -- so it only runs when a family word is actually
+    present. Without that condition it is an unanchored digit search, and digits
+    are everywhere in a part number: ``PL-0.304X60X120`` (a 0.304" carbon plate)
+    read as grade **304 stainless**, and ``SHT-0.316-60X120`` as **316**. Those
+    are wrong-GRADE matches, the failure mode this whole module is built to
+    refuse, and the leading-triple strip does not catch them because it only
+    fires on an anchored triple -- any prefix keeps every digit in scope.
     """
     normalized = normalize_part_text(text)
     if not normalized:
@@ -324,13 +336,28 @@ def canonical_alloy(text: Optional[str]) -> Optional[str]:
         return None
 
     # Pass 1: whole-token match. Handles `A36`, `CS`, `304L`, `6061-T6`
-    # (the hyphen is a word boundary) and `A572-50`.
+    # (the hyphen is a word boundary), `A572-50` and `SHT-304-125`.
+    #
+    # A NUMERIC grade additionally may not sit against a `.` or another digit.
+    # `.` is a word boundary, so the plain rule read the `304` out of the
+    # THICKNESS in `PL-0.304X60X120` and called a carbon plate 304 stainless.
     for token in _ALLOY_TOKENS:
-        if re.search(rf"(?<![A-Z0-9]){re.escape(token)}(?![A-Z0-9])", remainder):
+        before, after = r"(?<![A-Z0-9])", r"(?![A-Z0-9])"
+        if token[0].isdigit():
+            before, after = r"(?<![A-Z0-9.])", r"(?![A-Z0-9.])"
+        if re.search(rf"{before}{re.escape(token)}{after}", remainder):
             return token
 
-    # Pass 2: the compound stainless/aluminum spellings only. Numeric grades
-    # cannot collide with an alloy word, and the dimensions are already gone.
+    # Pass 2: compound family+grade spellings ONLY (`304SS`, `SS304`), where no
+    # boundary exists for pass 1 to find. Gated on the family word actually being
+    # present, because without that gate this is an unanchored digit search and a
+    # part number is full of digits.
+    #
+    # The gate deliberately does NOT use `_FAMILY_PATTERNS`: those are
+    # word-bounded, and the entire point here is the case with no word boundary
+    # (`304SS` has none between `4` and `S`).
+    if not _GLUED_FAMILY.search(remainder):
+        return None
     squeezed = re.sub(r"[\s_/-]+", "", remainder)
     for token in _ALLOY_TOKENS:
         if token[0].isdigit() and token in squeezed:

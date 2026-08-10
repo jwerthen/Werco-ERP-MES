@@ -392,3 +392,54 @@ class TestSpecKey:
     def test_a_family_stands_in_when_no_grade_is_stated(self):
         assert spec_key("SS", "0.125", "60x120").startswith("SS|")
         assert spec_key("304SS", "0.125", "60x120").startswith("304|")
+
+
+class TestAlloyGradeIsNeverReadOutOfADimension:
+    """A digit run inside a thickness or a dimension is not a grade.
+
+    Found in review: ``PL-0.304X60X120`` -- a 0.304" CARBON plate -- came back as
+    grade ``304``, i.e. stainless. That is a wrong-GRADE match, the single failure
+    mode the matcher's alloy gate exists to prevent, and it would have let a nest
+    calling for 304 pre-fill a carbon plate.
+
+    Two separate holes produced it and both are pinned here: ``.`` counts as a
+    word boundary (so the whole-token pass read the thickness), and the
+    compound-spelling pass was an unanchored digit search over a string that is
+    mostly digits.
+    """
+
+    @pytest.mark.parametrize(
+        "part_number",
+        [
+            "PL-0.304X60X120",  # 0.304" plate, not 304 stainless
+            "SHT-0.316-60X120",  # 0.316" sheet, not 316
+            "PL .304 THICK STEEL",
+            "0.316 PLATE",
+        ],
+    )
+    def test_a_decimal_thickness_is_not_a_grade(self, part_number):
+        assert canonical_alloy(part_number) is None
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            # The compound spellings the second pass genuinely exists for: no word
+            # boundary separates the grade from the family.
+            ("0.06X60X144-304SS", "304"),
+            ("0.125-48X96-304SS", "304"),
+            ("SS304", "304"),
+            # ...and the ordinary forms, which must keep working.
+            ("304 SS", "304"),
+            ("SHT-304-125", "304"),
+            ("304 Stainless Sheet", "304"),
+            ("0.250-60X120-A36", "A36"),
+            ("10GA-72X120-CS", "CS"),
+            ("0.1875-60X120-A572-50-RYERSON", "A572"),
+            ("PLATE 6061 T6", "6061"),
+            ("5052-H32", "5052"),
+            ("304L", "304L"),
+            ("17-4PH", "17-4PH"),
+        ],
+    )
+    def test_real_grades_still_resolve(self, text, expected):
+        assert canonical_alloy(text) == expected
