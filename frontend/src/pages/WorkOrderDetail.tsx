@@ -85,20 +85,31 @@ const CURRENT_WORK_ORDER_STATUSES = ['released', 'in_progress', 'on_hold'];
 const WO_NOTE_MAX_LENGTH = 2000;
 
 /**
- * Which of the two note fields a concurrent editor moved, for the lost-update
- * dialog. Named rather than generic so the planner knows where to look before
- * deciding to overwrite someone else's words.
+ * Which fields a concurrent editor moved since an inline editor opened, named
+ * for the lost-update dialog — "notes", "due date", "notes and special
+ * instructions". Named rather than generic so the planner knows where to look
+ * before deciding to overwrite someone else's work.
+ *
+ * Both maps are keyed by the human label. Values are compared trimmed, matching
+ * what the save writes, so whitespace alone never reads as someone else's edit.
+ * `fallback` covers the caller that detected a difference some other way.
  */
-function describeNotesConflictFields(
-  current: { notes: string; special_instructions: string },
-  baseline: { notes: string; special_instructions: string }
+// Labels the lost-update dialog uses to name a field. Consts, not inline
+// literals: describeChangedFields keys both maps by label, so the same string
+// spelled two ways would make that field read as permanently changed.
+const NOTES_LABEL = 'notes';
+const INSTRUCTIONS_LABEL = 'special instructions';
+const DUE_DATE_LABEL = 'due date';
+
+function describeChangedFields(
+  current: Record<string, string>,
+  baseline: Record<string, string>,
+  fallback: string
 ): string {
-  const changed: string[] = [];
-  if (current.notes.trim() !== baseline.notes.trim()) changed.push('notes');
-  if (current.special_instructions.trim() !== baseline.special_instructions.trim()) {
-    changed.push('special instructions');
-  }
-  return changed.join(' and ') || 'notes';
+  const changed = Object.keys(current).filter(
+    (label) => (current[label] ?? '').trim() !== (baseline[label] ?? '').trim()
+  );
+  return changed.join(' and ') || fallback;
 }
 
 /**
@@ -408,6 +419,9 @@ export default function WorkOrderDetail() {
   const [dueDateEditing, setDueDateEditing] = useState(false);
   const [dueDateDraft, setDueDateDraft] = useState('');
   const [savingDueDate, setSavingDueDate] = useState(false);
+  // What the server held when the due-date editor opened, for the same
+  // lost-update guard the notes editor uses — see the notesBaseline comment.
+  const [dueDateBaseline, setDueDateBaseline] = useState('');
   // Inline Notes / Special Instructions edit (pencil in the panel header).
   // Deliberately NOT gated on work-order status — draft, released, in progress,
   // on hold, complete, closed and cancelled are all editable. That is the point:
@@ -435,16 +449,18 @@ export default function WorkOrderDetail() {
   // What the server held when the editor opened — the reference the lost-update
   // guard in handleNotesSave compares against. Seeded by startNotesEdit.
   const [notesBaseline, setNotesBaseline] = useState({ notes: '', special_instructions: '' });
-  // Non-null while the lost-update dialog is open, holding what the server had
-  // when the conflict was noticed. `fields` is frozen at detection rather than
-  // recomputed for the dialog: Replace adopts the new baseline before the write
-  // finishes, which would leave the still-open dialog describing a difference
-  // that no longer exists while its spinner runs.
-  const [notesConflict, setNotesConflict] = useState<{
-    notes: string;
-    special_instructions: string;
-    fields: string;
-  } | null>(null);
+  // Non-null while the lost-update dialog is open, holding which editor hit the
+  // conflict and what the server had when we noticed. One dialog serves both
+  // inline editors so their concurrency behavior cannot drift apart.
+  // `fields` is frozen at detection rather than recomputed for the dialog:
+  // Replace adopts the new baseline before the write finishes, which would leave
+  // the still-open dialog describing a difference that no longer exists while
+  // its spinner runs.
+  const [fieldConflict, setFieldConflict] = useState<
+    | { kind: 'notes'; fields: string; notes: string; special_instructions: string }
+    | { kind: 'due_date'; fields: string; due_date: string }
+    | null
+  >(null);
   // Active work centers (laser-first order) for the per-nest reassign selects,
   // loaded once when the laser card is manageable and has nest ops.
   const [workCenters, setWorkCenters] = useState<WorkCenter[]>([]);
@@ -574,7 +590,7 @@ export default function WorkOrderDetail() {
     // PREVIOUS work order's draft text onto the next one — and Save would write
     // it there. Drafts themselves need no reset; startNotesEdit re-seeds them.
     setNotesEditing(false);
-    setNotesConflict(null);
+    setFieldConflict(null);
     setWorkOrderDocuments([]);
     setAvailablePdfDocuments([]);
     setDocumentUploadFile(null);
@@ -926,40 +942,88 @@ export default function WorkOrderDetail() {
     }
   };
 
+  // --- Shared write for the page's inline work-order field editors ----------
+  // Both the due-date pencil and the notes panel patch the same endpoint with
+  // the same concurrency policy, so they share one writer: the version is read
+  // here (never from a caller's snapshot), and the 409 response is handled in
+  // exactly one place. Callers keep their own in-flight flag and their own
+  // `onSuccess` so the editor closes before the refetch, preserving the
+  // non-optimistic posture — read mode shows server state, never the draft.
+  //
+  // Returns true only on a committed write, so a caller can leave its dialog up
+  // on failure.
+  const saveWorkOrderPatch = async (
+    patch: Record<string, unknown>,
+    options: { successMessage: string; failureMessage: string; onSuccess?: () => void }
+  ): Promise<boolean> => {
+    if (!workOrder) return false;
+    try {
+      await api.updateWorkOrder(workOrder.id, { ...patch, version: workOrder.version });
+      showToast('success', options.successMessage);
+      options.onSuccess?.();
+      await loadWorkOrder();
+      return true;
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail;
+      showToast('error', typeof detail === 'string' && detail ? detail : options.failureMessage);
+      if (err?.response?.status === 409) {
+        // Stale version — someone else changed the WO between our last refetch
+        // and this write. Refetch so the next attempt carries a fresh version;
+        // the editor stays open holding the user's draft so a retry doesn't cost
+        // them their typing. The refetch leaves the editor's baseline behind on
+        // purpose: if that concurrent change touched a field this editor owns,
+        // the retry trips the lost-update guard and asks before overwriting.
+        await loadWorkOrder();
+      }
+      return false;
+    }
+  };
+
   // --- Inline due-date edit ------------------------------------------------
+  // Same lost-update guard as the notes editor, for the same reason: `version`
+  // cannot carry it, because the page refetches on every work_order broadcast
+  // and this endpoint emits one. Without the guard, a concurrent reschedule is
+  // silently overwritten with a clean 200 — and a due date is a promise date
+  // feeding OTD, so losing someone's change is not cosmetic.
+  const dueDateServerStamp = workOrder?.due_date ? getCentralDateStamp(workOrder.due_date) : '';
+
   const startDueDateEdit = () => {
     // getCentralDateStamp passes date-only strings through verbatim and
     // normalizes datetimes to the Central calendar date.
-    setDueDateDraft(workOrder?.due_date ? getCentralDateStamp(workOrder.due_date) : '');
+    setDueDateDraft(dueDateServerStamp);
+    setDueDateBaseline(dueDateServerStamp);
     setDueDateEditing(true);
+  };
+
+  const performDueDateSave = async () => {
+    setSavingDueDate(true);
+    try {
+      await saveWorkOrderPatch(
+        { due_date: dueDateDraft || null },
+        {
+          successMessage: dueDateDraft
+            ? `Due date set to ${formatCentralDate(dueDateDraft)}`
+            : 'Due date cleared',
+          failureMessage: 'Failed to update due date',
+          onSuccess: () => setDueDateEditing(false),
+        }
+      );
+    } finally {
+      setSavingDueDate(false);
+    }
   };
 
   const handleDueDateSave = async () => {
     if (!workOrder || savingDueDate) return;
-    setSavingDueDate(true);
-    try {
-      await api.updateWorkOrder(workOrder.id, {
-        due_date: dueDateDraft || null,
-        version: workOrder.version,
+    if (dueDateServerStamp !== dueDateBaseline) {
+      setFieldConflict({
+        kind: 'due_date',
+        due_date: dueDateServerStamp,
+        fields: DUE_DATE_LABEL,
       });
-      showToast(
-        'success',
-        dueDateDraft ? `Due date set to ${formatCentralDate(dueDateDraft)}` : 'Due date cleared'
-      );
-      setDueDateEditing(false);
-      loadWorkOrder();
-    } catch (err: any) {
-      const detail = err?.response?.data?.detail;
-      showToast('error', typeof detail === 'string' && detail ? detail : 'Failed to update due date');
-      if (err?.response?.status === 409) {
-        // Stale version — someone else changed the WO. Refetch so the next
-        // save attempt carries a fresh version; keep the editor open with the
-        // user's draft so their retry can go through.
-        await loadWorkOrder();
-      }
-    } finally {
-      setSavingDueDate(false);
+      return;
     }
+    await performDueDateSave();
   };
 
   // --- Inline notes / special-instructions edit ----------------------------
@@ -998,35 +1062,25 @@ export default function WorkOrderDetail() {
   };
 
   // The write itself. Reached either straight from Save (no conflict) or from
-  // the lost-update dialog's Replace — the two entry points share it so the 409
-  // policy and the null-on-empty rule can't drift between them.
+  // the lost-update dialog's Replace — the two entry points share it so the
+  // null-on-empty rule can't drift between them.
   const performNotesSave = async () => {
-    if (!workOrder) return;
     setSavingNotes(true);
     try {
-      await api.updateWorkOrder(workOrder.id, {
-        // An emptied field is sent as null, not '': "cleared" should read as
-        // absent everywhere downstream (traveler print, kiosk, notifications),
-        // not as a present-but-blank note.
-        notes: notesDraft.trim() || null,
-        special_instructions: instructionsDraft.trim() || null,
-        version: workOrder.version,
-      });
-      showToast('success', 'Notes updated');
-      setNotesEditing(false);
-      await loadWorkOrder();
-    } catch (err: any) {
-      const detail = err?.response?.data?.detail;
-      showToast('error', typeof detail === 'string' && detail ? detail : 'Failed to update notes');
-      if (err?.response?.status === 409) {
-        // Stale version — someone else changed the WO between our last refetch
-        // and this write. Refetch so the next save carries a fresh version; the
-        // editor stays open holding the user's draft so a retry doesn't cost
-        // them their typing. The refetch leaves `notesBaseline` behind on
-        // purpose: if that concurrent change touched the note text, the retry
-        // trips the lost-update guard below and asks before overwriting.
-        await loadWorkOrder();
-      }
+      await saveWorkOrderPatch(
+        {
+          // An emptied field is sent as null, not '': "cleared" should read as
+          // absent everywhere downstream (traveler print, kiosk, notifications),
+          // not as a present-but-blank note.
+          notes: notesDraft.trim() || null,
+          special_instructions: instructionsDraft.trim() || null,
+        },
+        {
+          successMessage: 'Notes updated',
+          failureMessage: 'Failed to update notes',
+          onSuccess: () => setNotesEditing(false),
+        }
+      );
     } finally {
       setSavingNotes(false);
     }
@@ -1047,7 +1101,7 @@ export default function WorkOrderDetail() {
     // Scope, precisely: this is refetch-then-compare, so it catches a concurrent
     // edit the page has ALREADY pulled in. One landing between the last refetch
     // and this click still gets through to the server — the optimistic-lock 409
-    // is the net for that window, and performNotesSave leaves `notesBaseline`
+    // is the net for that window, and saveWorkOrderPatch leaves the baseline
     // behind on a 409 on purpose so the retry lands here and asks.
     const serverNotes = workOrder.notes ?? '';
     const serverInstructions = workOrder.special_instructions ?? '';
@@ -1055,12 +1109,14 @@ export default function WorkOrderDetail() {
       serverNotes.trim() !== notesBaseline.notes.trim() ||
       serverInstructions.trim() !== notesBaseline.special_instructions.trim()
     ) {
-      setNotesConflict({
+      setFieldConflict({
+        kind: 'notes',
         notes: serverNotes,
         special_instructions: serverInstructions,
-        fields: describeNotesConflictFields(
-          { notes: serverNotes, special_instructions: serverInstructions },
-          notesBaseline
+        fields: describeChangedFields(
+          { [NOTES_LABEL]: serverNotes, [INSTRUCTIONS_LABEL]: serverInstructions },
+          { [NOTES_LABEL]: notesBaseline.notes, [INSTRUCTIONS_LABEL]: notesBaseline.special_instructions },
+          NOTES_LABEL
         ),
       });
       return;
@@ -1069,20 +1125,37 @@ export default function WorkOrderDetail() {
     await performNotesSave();
   };
 
-  const handleNotesConflictReplace = async () => {
-    if (!notesConflict || savingNotes) return;
-    // Adopt what the server holds as the new baseline: this confirmation covers
-    // the change we showed them, and a FURTHER concurrent edit landing after it
-    // re-triggers the dialog rather than riding through on this one's approval.
-    setNotesBaseline({
-      notes: notesConflict.notes,
-      special_instructions: notesConflict.special_instructions,
-    });
-    await performNotesSave();
+  // Which editor's in-flight flag this dialog should reflect. Scoped to the kind
+  // that RAISED the conflict, never `savingNotes || savingDueDate`: both editors
+  // can be open at once, `pending` disables Confirm AND Cancel and refuses
+  // backdrop/Escape, so an unrelated save in flight on the other editor would
+  // freeze this dialog — spinner running for work it isn't doing.
+  const conflictPending = fieldConflict?.kind === 'due_date' ? savingDueDate : savingNotes;
+
+  // Confirmed overwrite, for whichever editor raised the conflict. Adopting the
+  // server's value as the new baseline is what makes this confirmation cover
+  // exactly the change we showed them, so a retry after a FAILED write doesn't
+  // re-ask about a change already approved. It is not a promise that a third
+  // edit can't slip in: one landing while this dialog is open is refetched (so
+  // `version` is fresh and there is no 409) and this Replace overwrites it
+  // unasked. Closing that would mean re-comparing at click time and re-opening
+  // the dialog with the newer value.
+  const handleConflictReplace = async () => {
+    if (!fieldConflict || conflictPending) return;
+    if (fieldConflict.kind === 'notes') {
+      setNotesBaseline({
+        notes: fieldConflict.notes,
+        special_instructions: fieldConflict.special_instructions,
+      });
+      await performNotesSave();
+    } else if (fieldConflict.kind === 'due_date') {
+      setDueDateBaseline(fieldConflict.due_date);
+      await performDueDateSave();
+    }
     // Closed either way. On success the editor is gone; on failure the error
     // toast carries the reason and the editor is still open holding the draft,
     // so a retry from Save re-runs the guard against the adopted baseline.
-    setNotesConflict(null);
+    setFieldConflict(null);
   };
 
   // --- Per-nest work-center reassign ---------------------------------------
@@ -2834,16 +2907,21 @@ export default function WorkOrderDetail() {
         }}
       />
 
-      {/* Lost-update guard for the notes editor. The page refetches on any
-          work-order broadcast, so the optimistic-lock `version` alone would let
-          a concurrent note edit be overwritten with a clean 200 — this is what
-          turns that silent loss into a decision. See handleNotesSave. */}
+      {/* Lost-update guard, shared by both inline editors (notes, due date).
+          The page refetches on any work-order broadcast, so the optimistic-lock
+          `version` alone would let a concurrent edit be overwritten with a clean
+          200 — this is what turns that silent loss into a decision. See
+          handleNotesSave / handleDueDateSave. */}
       <ConfirmDialog
-        open={notesConflict !== null}
-        title="Notes changed by someone else"
+        open={fieldConflict !== null}
+        title={
+          fieldConflict?.kind === 'due_date'
+            ? 'Due date changed by someone else'
+            : 'Notes changed by someone else'
+        }
         message={
-          notesConflict
-            ? `Someone else changed the ${notesConflict.fields} ` +
+          fieldConflict
+            ? `Someone else changed the ${fieldConflict.fields} ` +
               `on ${workOrder.work_order_number} while you were editing.\n\n` +
               'Saving replaces their version with yours. Your draft is kept either way — ' +
               'keep editing, then cancel the editor if you want to read theirs first.'
@@ -2851,11 +2929,11 @@ export default function WorkOrderDetail() {
         }
         confirmLabel="Replace with mine"
         cancelLabel="Keep editing"
-        pending={savingNotes}
+        pending={conflictPending}
         variant="warning"
-        onConfirm={handleNotesConflictReplace}
+        onConfirm={handleConflictReplace}
         onCancel={() => {
-          if (!savingNotes) setNotesConflict(null);
+          if (!conflictPending) setFieldConflict(null);
         }}
       />
 

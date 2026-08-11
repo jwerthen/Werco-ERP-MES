@@ -1,8 +1,22 @@
 /**
- * WorkOrderDetail — inline "Notes & Instructions" edit.
+ * WorkOrderDetail — inline "Notes & Instructions" edit, and the LOST-UPDATE
+ * GUARD it now shares with the page's other inline editor (the due-date pencil
+ * in the Due Date tile).
  *
  * The panel used to be read-only. It now carries a header Edit control that
  * swaps in two textareas (Notes / Special Instructions) plus Save + Cancel.
+ *
+ * Why the due-date conflict cases live in this file rather than beside the
+ * due-date happy path in WorkOrderDetail.nestDispatch.test.tsx: after the
+ * refactor the two editors do not have two concurrency behaviors, they have
+ * ONE — a single `saveWorkOrderPatch` writer, a single `fieldConflict`
+ * discriminated union, a single <ConfirmDialog>, and a single
+ * `handleConflictReplace` switching on `kind`. Tests for one mechanism belong
+ * in one file, so a change that fixes one editor's half and breaks the other's
+ * goes red side by side instead of in a suite nobody re-read. It also keeps
+ * `pushConcurrentChange` — which drives the change through the page's real
+ * websocket handler and its 500ms debounce — to exactly one definition;
+ * nestDispatch.test.tsx has no fake-timer harness and is about laser dispatch.
  *
  * The property this file exists to pin down is STATUS-INDEPENDENCE: the editor
  * is offered at EVERY work-order status — draft, released, in_progress,
@@ -18,7 +32,9 @@
  * Also covered: the exact updateWorkOrder payload (incl. `version` for the
  * optimistic lock and null-on-empty), the work_orders:edit role gate, the
  * NON-optimistic refetch, the 409 branch (refetch + editor stays open holding
- * the draft), and the dirty-Cancel confirm gate.
+ * the draft), the dirty-Cancel confirm gate, and — in the last describe — the
+ * due-date half of the shared guard. The due-date happy path, its 409, cancel
+ * and role gate stay in nestDispatch.test.tsx; they are not duplicated here.
  *
  * Harness mirrors WorkOrderDetail.nestDispatch.test.tsx (side-channels mocked,
  * real ToastProvider so toast text is assertable).
@@ -126,6 +142,35 @@ async function openNotesEditor() {
   renderDetail();
   fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
   return screen.getByLabelText('Notes') as HTMLTextAreaElement;
+}
+
+/**
+ * Lands a concurrent server-side change the way production would: through the
+ * page's own `onMessage` handler (captured off the mocked useWebSocket), which
+ * debounces 500ms in `scheduleRealtimeRefresh` before refetching — hence the
+ * fake timers its callers install.
+ *
+ * `next` is the WHOLE work order the server now holds, not a delta, so a caller
+ * whose guard is keyed on a field must restate that field when it is meant to
+ * be unchanged. That is deliberate: "the due date is still 2026-07-25" should
+ * be visible in the test that depends on it.
+ *
+ * Shared by both editors' guard tests — one definition, because after the
+ * refactor there is one guard.
+ */
+async function pushConcurrentChange(next: Partial<WorkOrder>) {
+  mockedApi.getWorkOrder.mockResolvedValue(makeWorkOrder(next));
+  const options = jest.mocked(useWebSocket).mock.calls.at(-1)?.[0];
+  expect(options?.onMessage).toBeDefined();
+
+  await act(async () => {
+    options?.onMessage?.(
+      { type: 'work_order_update', data: { work_order_id: 42 } },
+      new MessageEvent('message')
+    );
+    // scheduleRealtimeRefresh debounces before calling loadWorkOrder().
+    await jest.advanceTimersByTimeAsync(500);
+  });
 }
 
 beforeEach(() => {
@@ -367,8 +412,8 @@ describe('WorkOrderDetail inline notes edit — lost-update guard', () => {
   // TEXT against the baseline captured when the editor opened.
   //
   // These tests drive the change through the REAL mechanism: the page's own
-  // `onMessage` handler (captured off the mocked useWebSocket), which debounces
-  // 500ms in `scheduleRealtimeRefresh` before refetching — hence fake timers.
+  // `onMessage` handler, via the module-level `pushConcurrentChange` above,
+  // which debounces 500ms in `scheduleRealtimeRefresh` — hence fake timers.
   beforeEach(() => {
     jest.useFakeTimers();
   });
@@ -376,22 +421,6 @@ describe('WorkOrderDetail inline notes edit — lost-update guard', () => {
   afterEach(() => {
     jest.useRealTimers();
   });
-
-  /** Lands a concurrent server-side change the way production would. */
-  async function pushConcurrentChange(next: Partial<WorkOrder>) {
-    mockedApi.getWorkOrder.mockResolvedValue(makeWorkOrder(next));
-    const options = jest.mocked(useWebSocket).mock.calls.at(-1)?.[0];
-    expect(options?.onMessage).toBeDefined();
-
-    await act(async () => {
-      options?.onMessage?.(
-        { type: 'work_order_update', data: { work_order_id: 42 } },
-        new MessageEvent('message')
-      );
-      // scheduleRealtimeRefresh debounces before calling loadWorkOrder().
-      await jest.advanceTimersByTimeAsync(500);
-    });
-  }
 
   async function clickSave() {
     await act(async () => {
@@ -647,5 +676,220 @@ describe('WorkOrderDetail inline notes edit — cancel / unsaved-changes gate', 
 
     expect(confirmSpy).not.toHaveBeenCalled();
     expect(screen.queryByLabelText('Notes')).not.toBeInTheDocument();
+  });
+});
+
+describe('WorkOrderDetail inline due-date edit — lost-update guard', () => {
+  // The other half of the shared guard. Same failure mode as notes and the same
+  // reason `version` cannot carry it: PUT /work-orders/{id} broadcasts a
+  // work_order update, this page refetches on that broadcast, so a concurrent
+  // reschedule silently advances `workOrder.version` under the open editor and
+  // the next Save returns a clean 200 having erased it. A due date is the
+  // promise date feeding OTD/OTIF, so losing someone's change is not cosmetic —
+  // it re-dates a commitment to a customer with nothing on screen saying so.
+  //
+  // Keyed on the DATE, not on `version`: WorkOrder maps version_id_col, so every
+  // operation completion bumps it and a version-keyed check would make the due
+  // date unsettable on any live job.
+  //
+  // The happy path, the 409, cancel and the role gate for this editor live in
+  // WorkOrderDetail.nestDispatch.test.tsx and are deliberately not repeated.
+  const DUE_DATE = '2026-07-25'; // what the server holds when the editor opens
+  const MY_DRAFT = '2026-08-01'; // what this user types
+  const THEIR_DATE = '2026-09-30'; // what a concurrent planner sets meanwhile
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    mockedApi.getWorkOrder.mockResolvedValue(makeWorkOrder({ due_date: DUE_DATE }));
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  /** Renders, waits for the WO, opens the due-date pencil, returns the input. */
+  async function openDueDateEditor() {
+    renderDetail();
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit due date' }));
+    return screen.getByLabelText('Due date') as HTMLInputElement;
+  }
+
+  async function clickSaveDueDate() {
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Save due date' }));
+    });
+  }
+
+  it('refuses the save and opens the dialog when the due date changed under the editor', async () => {
+    const input = await openDueDateEditor();
+    expect(input).toHaveValue(DUE_DATE);
+    fireEvent.change(input, { target: { value: MY_DRAFT } });
+
+    await pushConcurrentChange({ version: 7, due_date: THEIR_DATE });
+    await clickSaveDueDate();
+
+    // The whole point: no write went out.
+    expect(mockedApi.updateWorkOrder).not.toHaveBeenCalled();
+    const dialog = await screen.findByRole('dialog');
+    // Titled for THIS editor — the shared dialog must not tell a planner
+    // rescheduling a job that their notes changed.
+    expect(within(dialog).getByText('Due date changed by someone else')).toBeInTheDocument();
+    expect(
+      within(dialog).getByText(/Someone else changed the due date on WO-0042 while you were editing\./)
+    ).toBeInTheDocument();
+    // No false success.
+    expect(screen.queryByText(/^Due date set to/)).not.toBeInTheDocument();
+  });
+
+  it('"Replace with mine" writes the user draft at the version the concurrent write bumped it to', async () => {
+    const input = await openDueDateEditor();
+    fireEvent.change(input, { target: { value: MY_DRAFT } });
+
+    // The concurrent write also bumped the row version 3 -> 7.
+    await pushConcurrentChange({ version: 7, due_date: THEIR_DATE });
+    await clickSaveDueDate();
+    await screen.findByRole('dialog');
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Replace with mine' }));
+    });
+
+    expect(mockedApi.updateWorkOrder).toHaveBeenCalledTimes(1);
+    expect(mockedApi.updateWorkOrder).toHaveBeenCalledWith(42, {
+      due_date: MY_DRAFT,
+      version: 7,
+    });
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(await screen.findByText('Due date set to Aug 1, 2026')).toBeInTheDocument();
+  });
+
+  it('"Keep editing" makes no API call, closes the dialog, and leaves the date draft intact', async () => {
+    const input = await openDueDateEditor();
+    fireEvent.change(input, { target: { value: MY_DRAFT } });
+
+    await pushConcurrentChange({ version: 7, due_date: THEIR_DATE });
+    await clickSaveDueDate();
+    await screen.findByRole('dialog');
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Keep editing' }));
+    });
+
+    expect(mockedApi.updateWorkOrder).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    // The editor is still open holding what they typed — "keep editing" has to
+    // mean keep editing, not discard and reopen.
+    expect(screen.getByLabelText('Due date')).toHaveValue(MY_DRAFT);
+  });
+
+  it('does not fire on an unrelated concurrent change (version bumped, due date untouched)', async () => {
+    // The design decision this pins: the guard is keyed on the DUE DATE, so a
+    // job that is simply running — operations completing, each bumping
+    // version_id_col — must stay reschedulable. A version-keyed check would put
+    // this dialog in front of the planner on every live work order.
+    const input = await openDueDateEditor();
+    fireEvent.change(input, { target: { value: MY_DRAFT } });
+
+    await pushConcurrentChange({
+      version: 9,
+      due_date: DUE_DATE, // restated: the server did NOT move the date
+      status: 'in_progress',
+      quantity_complete: 4,
+    });
+    await clickSaveDueDate();
+
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(mockedApi.updateWorkOrder).toHaveBeenCalledWith(42, {
+      due_date: MY_DRAFT,
+      version: 9,
+    });
+    expect(await screen.findByText('Due date set to Aug 1, 2026')).toBeInTheDocument();
+  });
+
+  it('clears the due date (empty draft -> null) without mistaking the clear for a conflict', async () => {
+    // The guard compares SERVER state to the baseline, never the draft to the
+    // baseline — an emptied input is this user's own edit, not someone else's.
+    const input = await openDueDateEditor();
+    fireEvent.change(input, { target: { value: '' } });
+
+    await clickSaveDueDate();
+
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(mockedApi.updateWorkOrder).toHaveBeenCalledWith(42, {
+      // null, not '' — "no due date" must read as absent everywhere downstream,
+      // not as a present-but-blank promise date.
+      due_date: null,
+      version: 3,
+    });
+    expect(await screen.findByText('Due date cleared')).toBeInTheDocument();
+  });
+
+  it('adopts the replaced date as the new baseline, so a retry after a refused Replace does not re-ask', async () => {
+    // Confirming an overwrite covers the change the user was SHOWN. Once
+    // approved, that same change must not keep interrupting them — otherwise a
+    // server refusal on an unrelated field (a 422, which does not refetch)
+    // leaves them re-confirming a decision they already made.
+    const input = await openDueDateEditor();
+    fireEvent.change(input, { target: { value: MY_DRAFT } });
+
+    await pushConcurrentChange({ version: 7, due_date: THEIR_DATE });
+    await clickSaveDueDate();
+    await screen.findByRole('dialog');
+
+    const refusal = 'Due date cannot precede the release date';
+    mockedApi.updateWorkOrder.mockRejectedValue({
+      response: { status: 422, data: { detail: refusal } },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Replace with mine' }));
+    });
+    expect(await screen.findByText(refusal)).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(screen.getByLabelText('Due date')).toHaveValue(MY_DRAFT);
+
+    // Retry with nothing further changed server-side: straight through.
+    mockedApi.updateWorkOrder.mockResolvedValue({});
+    const writesBefore = mockedApi.updateWorkOrder.mock.calls.length;
+    await clickSaveDueDate();
+
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(mockedApi.updateWorkOrder.mock.calls.length).toBe(writesBefore + 1);
+    expect(mockedApi.updateWorkOrder).toHaveBeenLastCalledWith(42, {
+      due_date: MY_DRAFT,
+      version: 7,
+    });
+  });
+
+  it('re-triggers on a SECOND concurrent reschedule after a Replace whose write failed', async () => {
+    // The flip side of the test above: the approval covers the change shown,
+    // not every future one.
+    const input = await openDueDateEditor();
+    fireEvent.change(input, { target: { value: MY_DRAFT } });
+
+    await pushConcurrentChange({ version: 7, due_date: THEIR_DATE });
+    await clickSaveDueDate();
+    await screen.findByRole('dialog');
+
+    mockedApi.updateWorkOrder.mockRejectedValue({
+      response: { status: 409, data: { detail: 'Stale work order version' } },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Replace with mine' }));
+    });
+    expect(await screen.findByText('Stale work order version')).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+
+    // A FURTHER reschedule lands. The next Save must ask again.
+    mockedApi.updateWorkOrder.mockResolvedValue({});
+    await pushConcurrentChange({ version: 8, due_date: '2026-10-15' });
+    // Counted, not `not.toHaveBeenCalled()` — the refused Replace above already
+    // put one call on the wire.
+    const writesBefore = mockedApi.updateWorkOrder.mock.calls.length;
+    await clickSaveDueDate();
+
+    expect(mockedApi.updateWorkOrder.mock.calls.length).toBe(writesBefore);
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText('Due date changed by someone else')).toBeInTheDocument();
+    expect(within(dialog).getByText(/changed the due date on WO-0042/)).toBeInTheDocument();
   });
 });
