@@ -26,7 +26,19 @@ import { Breadcrumbs } from '../components/ui/Breadcrumbs';
 import { getBreadcrumbParent } from '../utils/routeMeta';
 import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
 import { ContextualAIStrip } from '../components/ai';
-import { ConfirmDialog, EmptyState, ErrorState, useToast, statusColor, Button, InputDialog, Modal } from '../components/ui';
+import {
+  ConfirmDialog,
+  EmptyState,
+  ErrorState,
+  useToast,
+  statusColor,
+  Button,
+  FormField,
+  InputDialog,
+  LoadingButton,
+  Modal,
+} from '../components/ui';
+import { useUnsavedChanges } from '../hooks/useUnsavedChanges';
 import { formatCentralDate, formatCentralDateTime, getCentralDateStamp } from '../utils/centralTime';
 import { sortWorkCentersForLaserDispatch } from '../utils/laserWorkCenters';
 import {
@@ -61,6 +73,33 @@ import {
 } from '@heroicons/react/24/outline';
 
 const CURRENT_WORK_ORDER_STATUSES = ['released', 'in_progress', 'on_hold'];
+
+/**
+ * Cap for the inline Notes / Special Instructions editor.
+ *
+ * Mirrors `WorkOrderUpdate.notes` / `.special_instructions`
+ * (`Field(None, max_length=2000)` in backend/app/schemas/work_order.py). Kept in
+ * sync deliberately: without it an over-long note comes back as a raw 422 after
+ * the planner has already typed it.
+ */
+const WO_NOTE_MAX_LENGTH = 2000;
+
+/**
+ * Which of the two note fields a concurrent editor moved, for the lost-update
+ * dialog. Named rather than generic so the planner knows where to look before
+ * deciding to overwrite someone else's words.
+ */
+function describeNotesConflictFields(
+  current: { notes: string; special_instructions: string },
+  baseline: { notes: string; special_instructions: string }
+): string {
+  const changed: string[] = [];
+  if (current.notes.trim() !== baseline.notes.trim()) changed.push('notes');
+  if (current.special_instructions.trim() !== baseline.special_instructions.trim()) {
+    changed.push('special instructions');
+  }
+  return changed.join(' and ') || 'notes';
+}
 
 /**
  * How many runs this operation is expected to produce — nest planned runs, else
@@ -272,6 +311,10 @@ export default function WorkOrderDetail() {
   const canCorrectCount = hasPermission(user?.role, 'work_orders:edit') || !!user?.is_superuser;
   // Inline due-date edit shares the same work_orders:edit tier.
   const canEditDueDate = canCorrectCount;
+  // Inline notes / special-instructions edit — same work_orders:edit tier, and
+  // the same endpoint (PUT /work-orders/{id}, require_role ADMIN/MANAGER/
+  // SUPERVISOR). Named separately so the gate reads at its call site.
+  const canEditNotes = canCorrectCount;
   // Material-tie PATCH/untie is require_role([ADMIN, MANAGER, SUPERVISOR]) on
   // the backend — the same tier work_orders:edit maps to. Reads are open to any
   // authenticated tenant user, so the panel itself is not gated.
@@ -365,6 +408,43 @@ export default function WorkOrderDetail() {
   const [dueDateEditing, setDueDateEditing] = useState(false);
   const [dueDateDraft, setDueDateDraft] = useState('');
   const [savingDueDate, setSavingDueDate] = useState(false);
+  // Inline Notes / Special Instructions edit (pencil in the panel header).
+  // Deliberately NOT gated on work-order status — draft, released, in progress,
+  // on hold, complete, closed and cancelled are all editable. That is the point:
+  // the shop-floor instruction worth writing down ("item 80 uses R.375, not the
+  // usual R.19") is usually learned AFTER release, and a note is documentation,
+  // not production record — it moves no stock and completes no operation. The
+  // server agrees: PUT /work-orders/{id} carries no status gate on these two
+  // fields (its only 409s are status TRANSITIONS), so hiding the control on a
+  // released WO would refuse something the API allows. Gated on work_orders:edit
+  // alone, which is exactly the role trio the endpoint enforces.
+  // Same posture as the due-date edit: NON-optimistic — the panel renders only
+  // what the refetch returns — and the optimistic-lock `version` is sent, so a
+  // 409 refetches and keeps the editor open holding the user's draft.
+  //
+  // But `version` alone does NOT protect this editor, and the lost update it
+  // misses is the whole reason `notesBaseline` exists below: this page refetches
+  // on every work_order broadcast (`scheduleRealtimeRefresh`), and PUT
+  // /work-orders/{id} broadcasts one. So a concurrent planner's note edit
+  // quietly advances `workOrder.version` UNDER the open editor, and the next
+  // save then returns a clean 200 having erased words this user never saw.
+  const [notesEditing, setNotesEditing] = useState(false);
+  const [notesDraft, setNotesDraft] = useState('');
+  const [instructionsDraft, setInstructionsDraft] = useState('');
+  const [savingNotes, setSavingNotes] = useState(false);
+  // What the server held when the editor opened — the reference the lost-update
+  // guard in handleNotesSave compares against. Seeded by startNotesEdit.
+  const [notesBaseline, setNotesBaseline] = useState({ notes: '', special_instructions: '' });
+  // Non-null while the lost-update dialog is open, holding what the server had
+  // when the conflict was noticed. `fields` is frozen at detection rather than
+  // recomputed for the dialog: Replace adopts the new baseline before the write
+  // finishes, which would leave the still-open dialog describing a difference
+  // that no longer exists while its spinner runs.
+  const [notesConflict, setNotesConflict] = useState<{
+    notes: string;
+    special_instructions: string;
+    fields: string;
+  } | null>(null);
   // Active work centers (laser-first order) for the per-nest reassign selects,
   // loaded once when the laser card is manageable and has nest ops.
   const [workCenters, setWorkCenters] = useState<WorkCenter[]>([]);
@@ -489,6 +569,12 @@ export default function WorkOrderDetail() {
     setBlockers([]);
     setNestImportWizardOpen(false);
     setDueDateEditing(false);
+    // Same reason as the due-date editor: the route keeps this component
+    // mounted across an :id change, so an editor left open would carry the
+    // PREVIOUS work order's draft text onto the next one — and Save would write
+    // it there. Drafts themselves need no reset; startNotesEdit re-seeds them.
+    setNotesEditing(false);
+    setNotesConflict(null);
     setWorkOrderDocuments([]);
     setAvailablePdfDocuments([]);
     setDocumentUploadFile(null);
@@ -874,6 +960,129 @@ export default function WorkOrderDetail() {
     } finally {
       setSavingDueDate(false);
     }
+  };
+
+  // --- Inline notes / special-instructions edit ----------------------------
+  // Compared against the server values (not a snapshot taken at open) so that a
+  // draft typed back to the saved text stops counting as dirty.
+  // Trimmed on both sides because the save writes trimmed text: a trailing space
+  // typed into a saved note is not an unsaved change, and prompting to discard
+  // one (or writing a byte-identical value that still bumps `version` and costs
+  // an audit row) would be noise.
+  const notesDirty =
+    notesEditing &&
+    (notesDraft.trim() !== (workOrder?.notes ?? '').trim() ||
+      instructionsDraft.trim() !== (workOrder?.special_instructions ?? '').trim());
+  const { confirmDiscard: confirmDiscardNotes } = useUnsavedChanges(
+    notesDirty,
+    'You have unsaved note changes. Discard them?'
+  );
+  // Only reachable for a value that was already over the cap when it arrived
+  // (maxLength stops the user typing past it), but it turns that into a legible
+  // refusal instead of a raw 422 from the server's max_length validator.
+  const notesTooLong = notesDraft.length > WO_NOTE_MAX_LENGTH;
+  const instructionsTooLong = instructionsDraft.length > WO_NOTE_MAX_LENGTH;
+
+  const startNotesEdit = () => {
+    const notes = workOrder?.notes ?? '';
+    const instructions = workOrder?.special_instructions ?? '';
+    setNotesDraft(notes);
+    setInstructionsDraft(instructions);
+    setNotesBaseline({ notes, special_instructions: instructions });
+    setNotesEditing(true);
+  };
+
+  const cancelNotesEdit = () => {
+    if (!confirmDiscardNotes()) return;
+    setNotesEditing(false);
+  };
+
+  // The write itself. Reached either straight from Save (no conflict) or from
+  // the lost-update dialog's Replace — the two entry points share it so the 409
+  // policy and the null-on-empty rule can't drift between them.
+  const performNotesSave = async () => {
+    if (!workOrder) return;
+    setSavingNotes(true);
+    try {
+      await api.updateWorkOrder(workOrder.id, {
+        // An emptied field is sent as null, not '': "cleared" should read as
+        // absent everywhere downstream (traveler print, kiosk, notifications),
+        // not as a present-but-blank note.
+        notes: notesDraft.trim() || null,
+        special_instructions: instructionsDraft.trim() || null,
+        version: workOrder.version,
+      });
+      showToast('success', 'Notes updated');
+      setNotesEditing(false);
+      await loadWorkOrder();
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail;
+      showToast('error', typeof detail === 'string' && detail ? detail : 'Failed to update notes');
+      if (err?.response?.status === 409) {
+        // Stale version — someone else changed the WO between our last refetch
+        // and this write. Refetch so the next save carries a fresh version; the
+        // editor stays open holding the user's draft so a retry doesn't cost
+        // them their typing. The refetch leaves `notesBaseline` behind on
+        // purpose: if that concurrent change touched the note text, the retry
+        // trips the lost-update guard below and asks before overwriting.
+        await loadWorkOrder();
+      }
+    } finally {
+      setSavingNotes(false);
+    }
+  };
+
+  const handleNotesSave = async () => {
+    if (!workOrder || savingNotes || notesTooLong || instructionsTooLong) return;
+
+    // Lost-update guard — see the notesBaseline comment in the state block for
+    // why `version` cannot carry this. Compare what the server holds NOW against
+    // what it held when the editor opened, and refuse a save that would
+    // overwrite someone else's words, putting the choice in front of the user
+    // instead. Replacing their note stays allowed — as a decision, not an
+    // accident. Deliberately keyed on the note TEXT, not on `version`: the
+    // WorkOrder row maps version_id_col, so every operation completion bumps it
+    // and a version-keyed check would make notes unsavable on any live job.
+    //
+    // Scope, precisely: this is refetch-then-compare, so it catches a concurrent
+    // edit the page has ALREADY pulled in. One landing between the last refetch
+    // and this click still gets through to the server — the optimistic-lock 409
+    // is the net for that window, and performNotesSave leaves `notesBaseline`
+    // behind on a 409 on purpose so the retry lands here and asks.
+    const serverNotes = workOrder.notes ?? '';
+    const serverInstructions = workOrder.special_instructions ?? '';
+    if (
+      serverNotes.trim() !== notesBaseline.notes.trim() ||
+      serverInstructions.trim() !== notesBaseline.special_instructions.trim()
+    ) {
+      setNotesConflict({
+        notes: serverNotes,
+        special_instructions: serverInstructions,
+        fields: describeNotesConflictFields(
+          { notes: serverNotes, special_instructions: serverInstructions },
+          notesBaseline
+        ),
+      });
+      return;
+    }
+
+    await performNotesSave();
+  };
+
+  const handleNotesConflictReplace = async () => {
+    if (!notesConflict || savingNotes) return;
+    // Adopt what the server holds as the new baseline: this confirmation covers
+    // the change we showed them, and a FURTHER concurrent edit landing after it
+    // re-triggers the dialog rather than riding through on this one's approval.
+    setNotesBaseline({
+      notes: notesConflict.notes,
+      special_instructions: notesConflict.special_instructions,
+    });
+    await performNotesSave();
+    // Closed either way. On success the editor is gone; on failure the error
+    // toast carries the reason and the editor is still open holding the draft,
+    // so a retry from Save re-runs the guard against the adopted baseline.
+    setNotesConflict(null);
   };
 
   // --- Per-nest work-center reassign ---------------------------------------
@@ -1360,16 +1569,104 @@ export default function WorkOrderDetail() {
         />
       </MiniStatStrip>
 
-      {/* Notes & Instructions — folded into a compact panel */}
-      <CockpitPanel title="Notes & Instructions" bodyClassName="space-y-3 text-sm">
-        <div>
-          <p className="text-xs uppercase tracking-wide text-slate-400">Notes</p>
-          <p className="mt-1 text-fd-body">{workOrder.notes || 'No notes'}</p>
-        </div>
-        <div>
-          <p className="text-xs uppercase tracking-wide text-slate-400">Special Instructions</p>
-          <p className="mt-1 text-fd-body">{workOrder.special_instructions || 'No special instructions'}</p>
-        </div>
+      {/* Notes & Instructions — folded into a compact panel, editable in place
+          at ANY status (see the notesEditing state block for why). */}
+      <CockpitPanel
+        title="Notes & Instructions"
+        // Opt out of CockpitPanel's lg height cap while editing. Verified in the
+        // browser: with the cap on, the two textareas push Save/Cancel below the
+        // fold of the panel's internal scroll area, so the editor opens with no
+        // visible way to commit it. Read mode keeps the cap.
+        bodyClassName={`space-y-3 text-sm${notesEditing ? ' lg:max-h-none' : ''}`}
+        headerExtra={
+          canEditNotes && !notesEditing ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={startNotesEdit}
+              className="flex items-center gap-1.5"
+            >
+              <PencilSquareIcon className="h-4 w-4" />
+              Edit
+            </Button>
+          ) : undefined
+        }
+      >
+        {notesEditing ? (
+          <div className="space-y-3">
+            <FormField
+              label="Notes"
+              error={notesTooLong ? `Notes must be ${WO_NOTE_MAX_LENGTH} characters or fewer` : null}
+              help={`${notesDraft.length} / ${WO_NOTE_MAX_LENGTH}`}
+            >
+              {(field) => (
+                <textarea
+                  {...field}
+                  rows={3}
+                  maxLength={WO_NOTE_MAX_LENGTH}
+                  value={notesDraft}
+                  onChange={(e) => setNotesDraft(e.target.value)}
+                  disabled={savingNotes}
+                  className="input w-full"
+                  placeholder="Planning notes for this work order"
+                />
+              )}
+            </FormField>
+            <FormField
+              label="Special Instructions"
+              error={
+                instructionsTooLong
+                  ? `Special instructions must be ${WO_NOTE_MAX_LENGTH} characters or fewer`
+                  : null
+              }
+              help={`${instructionsDraft.length} / ${WO_NOTE_MAX_LENGTH}`}
+            >
+              {(field) => (
+                <textarea
+                  {...field}
+                  rows={3}
+                  maxLength={WO_NOTE_MAX_LENGTH}
+                  value={instructionsDraft}
+                  onChange={(e) => setInstructionsDraft(e.target.value)}
+                  disabled={savingNotes}
+                  className="input w-full"
+                  placeholder="Instructions the shop should read before running this job"
+                />
+              )}
+            </FormField>
+            <div className="flex items-center gap-2">
+              <LoadingButton
+                size="sm"
+                loading={savingNotes}
+                loadingText="Saving..."
+                disabled={notesTooLong || instructionsTooLong}
+                onClick={handleNotesSave}
+              >
+                Save
+              </LoadingButton>
+              <Button variant="secondary" size="sm" onClick={cancelNotesEdit} disabled={savingNotes}>
+                Cancel
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <>
+            <div>
+              <p className="text-xs uppercase tracking-wide text-slate-400">Notes</p>
+              {/* pre-wrap: the editor accepts newlines, so a multi-line note has
+                  to render as the planner typed it rather than as one run-on. */}
+              <p className="mt-1 whitespace-pre-wrap break-words text-fd-body">
+                {workOrder.notes || 'No notes'}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs uppercase tracking-wide text-slate-400">Special Instructions</p>
+              <p className="mt-1 whitespace-pre-wrap break-words text-fd-body">
+                {workOrder.special_instructions || 'No special instructions'}
+              </p>
+            </div>
+          </>
+        )}
       </CockpitPanel>
 
       <div className="card card-compact">
@@ -2534,6 +2831,31 @@ export default function WorkOrderDetail() {
         onConfirm={handleConfirmDelete}
         onCancel={() => {
           if (!deleting) setDeleteConfirmOpen(false);
+        }}
+      />
+
+      {/* Lost-update guard for the notes editor. The page refetches on any
+          work-order broadcast, so the optimistic-lock `version` alone would let
+          a concurrent note edit be overwritten with a clean 200 — this is what
+          turns that silent loss into a decision. See handleNotesSave. */}
+      <ConfirmDialog
+        open={notesConflict !== null}
+        title="Notes changed by someone else"
+        message={
+          notesConflict
+            ? `Someone else changed the ${notesConflict.fields} ` +
+              `on ${workOrder.work_order_number} while you were editing.\n\n` +
+              'Saving replaces their version with yours. Your draft is kept either way — ' +
+              'keep editing, then cancel the editor if you want to read theirs first.'
+            : ''
+        }
+        confirmLabel="Replace with mine"
+        cancelLabel="Keep editing"
+        pending={savingNotes}
+        variant="warning"
+        onConfirm={handleNotesConflictReplace}
+        onCancel={() => {
+          if (!savingNotes) setNotesConflict(null);
         }}
       />
 
