@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { ExclamationTriangleIcon, LinkIcon, TrashIcon } from '@heroicons/react/24/outline';
+import { ExclamationTriangleIcon, LinkIcon, SparklesIcon, TrashIcon } from '@heroicons/react/24/outline';
 import { Modal } from '../ui/Modal';
+import { Button } from '../ui/Button';
+import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { ComboBoxOption } from '../ui/ComboBox';
 import { SheetPartPicker, sheetPartOptionLabel } from './SheetPartPicker';
 import {
@@ -11,6 +13,9 @@ import {
   LaserNestFieldConfidence,
   MaterialAllocation,
   Part,
+  SheetMatchProvenance,
+  SheetPartCandidate,
+  SheetPartSuggestion,
   WorkCenter,
 } from '../../types';
 import api from '../../services/api';
@@ -19,7 +24,7 @@ import { defaultLaserWorkCenter, sortWorkCentersForLaserDispatch } from '../../u
 // Shared with the Dispatch Board chip and the kiosk deduction notice, so one
 // quantity never renders three ways across the feature.
 import { formatTieQty } from '../../utils/materialTie';
-import { deriveSheetSpec, isSheetLikePart } from '../../utils/sheetPart';
+import { deriveSheetSpec, isSheetLikePart, thicknessInches } from '../../utils/sheetPart';
 
 interface LaserNestImportWizardProps {
   open: boolean;
@@ -64,6 +69,50 @@ interface DerivedSpec {
   replaced: string;
 }
 
+/**
+ * Where a row's sheet tie came from. The wizard had no provenance at all before
+ * suggestions existed — a `material_part_id` was, by construction, always a
+ * human's pick — and every rule below turns on being able to tell them apart.
+ *
+ *  - `none`      — untied.
+ *  - `suggested` — the server proposed a part and the picker is pre-filled with
+ *    it. NOT A TIE: it is excluded from the tied count, its per-run input stays
+ *    disabled, and the import payload drops its tie keys.
+ *  - `cleared`   — the planner emptied the picker themselves. Untied, exactly
+ *    like `none`, and equally never serialized — but it records an INTENT, and
+ *    the in-flight server tie pre-fill must not overwrite it. Suggestions made
+ *    "clear the pre-filled row I know is wrong" the expected first interaction,
+ *    which turned a theoretical race into the ordinary one.
+ *  - `accepted`  — the server proposed it and the planner CONFIRMED it in the
+ *    accept dialog. Mechanically identical to a pick (same `withTie` seam, same
+ *    spec pull-through, same payload); kept distinct only because it is the one
+ *    thing the audit breadcrumb exists to answer — was this tie machine-proposed
+ *    or human-originated? Collapsing it into `picked` would erase exactly that,
+ *    and it is the row someone reads when asking why the wrong lot was depleted.
+ *  - `picked`    — the planner chose it themselves, per row or package-wide.
+ *  - `prefilled` — carried over from the tie the nest already carries on a
+ *    re-import.
+ *
+ * `accepted` / `picked` / `prefilled` are all COMMITTED: they count as tied,
+ * enable the per-run input, and serialize their tie keys. Only `suggested` is a
+ * proposal, and only `none` is untied.
+ */
+type TieSource = 'none' | 'cleared' | 'suggested' | 'accepted' | 'picked' | 'prefilled';
+
+/**
+ * `TieSource` as the import audit row records it — the closed vocabulary the
+ * server accepts (`_SHEET_MATCH_PROVENANCE_VALUES` in work_orders.py).
+ *
+ * Only COMMITTED ties appear: an untied row and an unconfirmed suggestion both
+ * serialize no tie, so recording a provenance for them would describe a decision
+ * that was never made.
+ */
+const PROVENANCE_BY_TIE_SOURCE: Partial<Record<TieSource, string>> = {
+  accepted: 'auto',
+  picked: 'planner',
+  prefilled: 'prefill',
+};
+
 /** Local, editable mirror of a preview row. Keeps `source_file` as the stable
  *  key the backend matches PDFs by; everything else the planner can correct.
  *  `source_pages` is carried verbatim so PDF imports can echo it back, and
@@ -86,15 +135,20 @@ interface EditableRow {
   /** Per-nest WC override; null = follow the package-level pick / auto-detect. */
   work_center_id: number | null;
   /**
-   * Sheet part this nest consumes; null = untied. ALWAYS an explicit pick —
-   * never fuzzy-matched from the AI-read `material` / `thickness` free text,
-   * because a wrong tie depletes the wrong heat lot into an as-built record.
+   * Sheet part this nest consumes; null = untied. Never fuzzy-matched ON THE
+   * CLIENT from the AI-read `material` / `thickness` free text — the wizard
+   * renders a server-computed field, it never guesses — and a non-null value
+   * here is only a real tie once `tie_source` says a human stood behind it.
    */
   material_part_id: number | null;
   /** Sheets per completed run. String while editing, mirroring `planned_runs`. */
   qty_per_run: string;
   /** Spec fields currently sourced from the tied sheet part (see `DerivedSpec`). */
   derived: Partial<Record<SpecField, DerivedSpec>>;
+  /** See `TieSource`. The difference between a proposal and a commitment. */
+  tie_source: TieSource;
+  /** The server's suggestion for this nest, verbatim; null when it sent none. */
+  sheet_suggestion: SheetPartSuggestion | null;
 }
 
 /** Preview metadata about the uploaded package itself (bare-PDF uploads). */
@@ -159,7 +213,19 @@ const COLUMN_WIDTHS = [
 /** Sum of `COLUMN_WIDTHS`; the table never renders narrower than this. */
 const TABLE_MIN_WIDTH = '74.5rem';
 
+/**
+ * Seed one editable row from a preview row.
+ *
+ * The sheet suggestion lands in the picker and NOWHERE ELSE. `derived` stays
+ * empty on purpose: the thickness / sheet-size pull-through does not fire at
+ * suggestion time, because that would overwrite the extractor's read of the nest
+ * report on the strength of a second machine guess — two models agreeing is not
+ * evidence. It fires on ACCEPT, through the same `withSheetPart` an explicit
+ * pick goes through.
+ */
 function toEditable(row: LaserNestPreviewRow): EditableRow {
+  const suggestion = row.sheet_suggestion ?? null;
+  const suggestedPartId = suggestion?.auto_fill_part_id ?? null;
   return {
     source_file: row.source_file,
     cnc_number: row.cnc_number ?? '',
@@ -175,9 +241,11 @@ function toEditable(row: LaserNestPreviewRow): EditableRow {
     warning: row.warning ?? null,
     edited: {},
     work_center_id: null,
-    material_part_id: null,
+    material_part_id: suggestedPartId,
     qty_per_run: '1',
     derived: {},
+    tie_source: suggestedPartId != null ? 'suggested' : 'none',
+    sheet_suggestion: suggestion,
   };
 }
 
@@ -314,6 +382,214 @@ function withSheetPart(
   return next;
 }
 
+/**
+ * `withSheetPart` plus the provenance stamp — the single seam every tie change
+ * goes through, so a row can never end up with a part id and a stale source.
+ *
+ * Clearing the part always drops to an untied source, whatever the caller asked
+ * for. WHICH untied source matters: `cleared` when a human emptied the picker,
+ * `none` when the row simply never had anything. Both are untied and neither
+ * serializes a tie — the difference is that `cleared` records an intent the
+ * in-flight server pre-fill must not overwrite.
+ */
+function withTie(
+  row: EditableRow,
+  partId: number | null,
+  part: Part | undefined,
+  source: TieSource,
+  qtyPerRun?: string
+): EditableRow {
+  const untiedSource: TieSource = source === 'none' ? 'none' : 'cleared';
+  return {
+    ...withSheetPart(row, partId, part, qtyPerRun),
+    tie_source: partId == null ? untiedSource : source,
+  };
+}
+
+/** Stable empty shortlist — a fresh `[]` per render would defeat the picker's memo. */
+const NO_SHORTLIST: ComboBoxOption[] = [];
+
+/**
+ * The server's shortlist for one nest, as picker options pinned to the top.
+ *
+ * The on-hand hint is omitted rather than shown as 0 when the stock read did not
+ * land, matching the picker's own "unknown is not zero" posture.
+ */
+function shortlistOptions(suggestion: SheetPartSuggestion): ComboBoxOption[] {
+  return suggestion.candidates.map((candidate) => ({
+    value: String(candidate.part_id),
+    label: candidate.part_number ? `${candidate.part_number} — ${candidate.part_name}` : candidate.part_name,
+    hint: candidate.on_hand_known
+      ? `${formatTieQty(candidate.on_hand)} ${candidate.unit_of_measure || 'EA'} on hand`
+      : undefined,
+    group: 'Suggested for this nest',
+  }));
+}
+
+/**
+ * Everything the server has to say about one row's sheet, as a tooltip.
+ *
+ * Composed rather than picking ONE string. `diagnostic` is always set on an
+ * ambiguous row, and ambiguous rows are the only ones the AI leg can touch — so
+ * returning `diagnostic || reason` made the model's sentence, and every
+ * AI_UNAVAILABLE / AI_PICK_OUT_OF_SET advisory, unreachable by construction: the
+ * exact inverse of why they are produced.
+ */
+function suggestionTitle(suggestion: SheetPartSuggestion | null): string | undefined {
+  if (!suggestion) return undefined;
+  const lines: string[] = [];
+  if (suggestion.diagnostic) lines.push(suggestion.diagnostic);
+  const top = suggestion.candidates[0];
+  if (top?.reason) {
+    const attribution = top.basis === 'ai_disambiguated' ? 'Best fit (AI-ranked)' : 'Best fit';
+    lines.push(`${attribution}: ${top.part_number || top.part_name} — ${top.reason}`);
+  }
+  for (const diagnostic of top?.diagnostics ?? []) lines.push(diagnostic.detail);
+  return lines.length > 0 ? lines.join('\n\n') : undefined;
+}
+
+/** A pre-filled proposal the planner has not confirmed. Not a tie. */
+const isSuggested = (row: EditableRow): boolean => row.tie_source === 'suggested' && row.material_part_id != null;
+
+/**
+ * The planner has COMMITTED to this row's tie — by accepting the suggestion, by
+ * picking a part, or by carrying one forward from an existing allocation.
+ *
+ * Written as an explicit allowlist rather than `!== 'suggested'`: adding a
+ * sixth, uncommitted `TieSource` later must not silently start counting as a
+ * real tie everywhere this is used.
+ */
+const isCommittedSource = (source: TieSource): boolean =>
+  source === 'accepted' || source === 'picked' || source === 'prefilled';
+
+/**
+ * A REAL tie: a part a human stood behind.
+ *
+ * Everything that claims stock will move — the "N tied — X sheets deducted"
+ * chip, the per-run input, the import payload's tie keys — is gated on this and
+ * never on `material_part_id != null`, which is now also true of an unconfirmed
+ * suggestion.
+ */
+const isTied = (row: EditableRow): boolean => row.material_part_id != null && isCommittedSource(row.tie_source);
+
+/** The candidate a row's suggestion is currently pointing at, when there is one. */
+function suggestedCandidate(row: EditableRow): SheetPartCandidate | undefined {
+  if (row.material_part_id == null) return undefined;
+  return row.sheet_suggestion?.candidates.find((candidate) => candidate.part_id === row.material_part_id);
+}
+
+/** Sheets this row would consume in total: per-run × runs. */
+function rowSheetTotal(row: EditableRow): number {
+  return (Number(row.qty_per_run) || 0) * (Number(row.planned_runs) || 0);
+}
+
+/** One line of the accept-confirmation rollup: a distinct part and its demand. */
+interface SuggestedTieLine {
+  partId: number;
+  /** Part number where there is one — the string a planner recognizes on a rack. */
+  label: string;
+  rowCount: number;
+  sheetTotal: number;
+  /** `null` when the stock read did not land — never a fabricated 0. */
+  onHand: number | null;
+  unit: string;
+}
+
+/**
+ * Roll the pending suggestions up BY DISTINCT PART, not by row.
+ *
+ * This rollup IS the human review, so it is built to make the one wrong line
+ * visible rather than to summarize. A 42-nest Miratech package collapses to two
+ * lines — `34 x 0.250-60X120-A36` and `4 x 10GA-72X120-CS` — and a sheet that
+ * does not belong shows up as a third line with a count of 1, which is loud in a
+ * way 42 identically pre-filled dropdowns are not. Ordered by row count
+ * descending so the outlier lands at the bottom, where the eye stops.
+ */
+function rollUpSuggestedTies(
+  rows: EditableRow[],
+  partsById: Map<number, Part>,
+  onHandByPart: Record<number, number> | null
+): SuggestedTieLine[] {
+  const byPart = new Map<number, SuggestedTieLine>();
+  for (const row of rows) {
+    if (!isSuggested(row) || row.material_part_id == null) continue;
+    const partId = row.material_part_id;
+    const existing = byPart.get(partId);
+    if (existing) {
+      existing.rowCount += 1;
+      existing.sheetTotal += rowSheetTotal(row);
+      continue;
+    }
+    const candidate = suggestedCandidate(row);
+    const part = partsById.get(partId);
+    // The candidate's own stock read wins: it is the server's figure at
+    // suggestion time and it says explicitly whether it landed. The wizard's
+    // summary map is the fallback, and `null` (unknown) is preserved as null.
+    const onHand = candidate?.on_hand_known
+      ? candidate.on_hand
+      : onHandByPart
+        ? (onHandByPart[partId] ?? 0)
+        : null;
+    byPart.set(partId, {
+      partId,
+      label: candidate?.part_number || part?.part_number || part?.name || `Part ${partId}`,
+      rowCount: 1,
+      sheetTotal: rowSheetTotal(row),
+      onHand,
+      unit: candidate?.unit_of_measure || part?.unit_of_measure || 'EA',
+    });
+  }
+  return Array.from(byPart.values()).sort((a, b) => b.rowCount - a.rowCount || a.label.localeCompare(b.label));
+}
+
+/**
+ * The confirmation body. One line per distinct part, and the on-hand figure only
+ * where the stock will NOT cover the demand — a covered line does not need a
+ * number, and a short one is the whole reason to look.
+ */
+function suggestedTieRollupMessage(lines: SuggestedTieLine[]): string {
+  const body = lines.map((line) => {
+    const sheets = `${formatTieQty(line.sheetTotal)} ${line.sheetTotal === 1 ? 'sheet' : 'sheets'}`;
+    const short = line.onHand != null && line.onHand < line.sheetTotal;
+    const stock = short ? ` — ${formatTieQty(line.onHand ?? 0)} ${line.unit} on hand` : '';
+    return `${line.rowCount} x ${line.label} — ${sheets}${stock}`;
+  });
+  // Consumption fires when an OPERATION completes, never per run and never on
+  // import — `utils/materialTie.ts` owns this copy everywhere else.
+  return [...body, '', 'Material leaves stock as each nest operation completes.'].join('\n');
+}
+
+/**
+ * Does the tied part's spec actually disagree with what the extractor read?
+ *
+ * THICKNESS IS COMPARED NUMERICALLY, and that is the point of this function.
+ * A string compare lights the divergence marker on `0.1875` vs `0.188` and on
+ * `10 ga` vs `0.1345` — the same sheet written two ways — so a 42-nest package
+ * comes back with 42 amber markers and the planner learns to ignore the one that
+ * matters. The tolerance mirrors the server matcher's own thickness gate
+ * (`THICKNESS_TOLERANCE_IN`), which is 3× tighter than the closest pair of
+ * stocked gauges, so it can never call two different sheets the same.
+ *
+ * Sheet size keeps the string compare: it has no tolerance semantics here, and
+ * `72x144` vs `60x120` is not a rounding question.
+ */
+const THICKNESS_DIVERGENCE_TOLERANCE_IN = 0.002;
+
+function specDiverged(field: SpecField, replaced: string, value: string): boolean {
+  const before = replaced.trim();
+  if (before === '') return false; // nothing was displaced, so nothing disagrees
+  if (field === 'thickness') {
+    const readInches = thicknessInches(before);
+    const partInches = thicknessInches(value);
+    // Only when BOTH sides parse. Either side unreadable falls back to the
+    // string compare rather than silently declaring agreement.
+    if (readInches != null && partInches != null) {
+      return Math.abs(readInches - partInches) > THICKNESS_DIVERGENCE_TOLERANCE_IN;
+    }
+  }
+  return before !== value;
+}
+
 /** `[3]` → `p. 3`, `[3,4]` → `p. 3–4`, `[3,4,7]` → `p. 3–4, 7`. */
 function formatPageRange(pages: number[]): string {
   const sorted = [...pages].sort((a, b) => a - b);
@@ -396,6 +672,12 @@ export default function LaserNestImportWizard({
   // import payload.
   const [extraMaterialOptions, setExtraMaterialOptions] = useState<ComboBoxOption[]>([]);
   const [tiePrefillCount, setTiePrefillCount] = useState(0);
+  /**
+   * Which act opened the accept-confirmation, or null when it is closed. Both
+   * entry points land on the SAME dialog; the only difference is whether
+   * confirming also proceeds with the import.
+   */
+  const [confirmIntent, setConfirmIntent] = useState<'accept' | 'accept-and-import' | null>(null);
 
   // Reset everything whenever the wizard (re)opens, then load the active work
   // centers for the dispatch picks. In standalone mode the package pick
@@ -417,6 +699,7 @@ export default function LaserNestImportWizard({
     setPackageQtyPerRun('1');
     setExtraMaterialOptions([]);
     setTiePrefillCount(0);
+    setConfirmIntent(null);
     // Supersede any tie pre-fill still in flight from the previous session, so
     // it cannot write the last package's ties onto a freshly opened wizard.
     previewGenerationRef.current += 1;
@@ -477,7 +760,52 @@ export default function LaserNestImportWizard({
   // current one's state.
   const previewGenerationRef = useRef(0);
 
-  const hasPicker = materials.length > 0 || extraMaterialOptions.length > 0;
+  /**
+   * Everything the pickers must offer beyond the loaded material list: the ties
+   * a re-import pre-filled, plus every part the server's suggestions name.
+   *
+   * Both exist for the same reason. `/materials` is read with a hard cap and the
+   * server matches against a much larger catalog, so a suggested part — and in
+   * particular an AUTO-FILLED one — can easily be absent from the local list. A
+   * row whose picker renders blank while `material_part_id` is set is the exact
+   * shape that silently unties a work order, so anything the wizard can select
+   * has to be selectable.
+   *
+   * Ambiguous rows contribute their whole shortlist: that is the feature — the
+   * planner picks from 2, not from 500. Pre-filled ties win any collision, being
+   * decisions someone already committed. `SheetPartPicker` dedupes again on its
+   * own side, so a candidate already in the catalog list is never doubled.
+   */
+  const pickerExtraOptions = useMemo(() => {
+    const byValue = new Map<string, ComboBoxOption>();
+    for (const option of extraMaterialOptions) byValue.set(option.value, option);
+    const offer = (candidate: SheetPartCandidate) => {
+      const value = String(candidate.part_id);
+      if (byValue.has(value)) return;
+      byValue.set(value, {
+        value,
+        label: [candidate.part_number, candidate.part_name].filter(Boolean).join(' — ') || `Part ${candidate.part_id}`,
+        // Same phrasing as the catalog options ("on hand", never "available"),
+        // and omitted entirely when the stock read did not land.
+        hint: candidate.on_hand_known
+          ? `${formatTieQty(candidate.on_hand)} ${candidate.unit_of_measure || 'EA'} on hand`
+          : undefined,
+      });
+    };
+    for (const row of rows) {
+      const suggestion = row.sheet_suggestion;
+      if (!suggestion) continue;
+      if (suggestion.status === 'ambiguous') {
+        suggestion.candidates.forEach(offer);
+        continue;
+      }
+      const autoFilled = suggestion.candidates.find((c) => c.part_id === suggestion.auto_fill_part_id);
+      if (autoFilled) offer(autoFilled);
+    }
+    return Array.from(byValue.values());
+  }, [extraMaterialOptions, rows]);
+
+  const hasPicker = materials.length > 0 || pickerExtraOptions.length > 0;
 
   /**
    * Pre-fill each row's sheet-part picker from the tie the matching nest
@@ -501,8 +829,11 @@ export default function LaserNestImportWizard({
    *    server tie replacing a deliberate choice is the same end state the whole
    *    feature guards against — importing a part nobody chose, depleting the
    *    wrong heat lot — and unlike the spec pull-through it leaves no marking
-   *    and nothing to restore. Hence the `material_part_id != null` skip: the
-   *    pre-fill only ever fills a row that is still empty.
+   *    and nothing to restore. Hence the skip below: the pre-fill only ever
+   *    fills a row the planner has not spoken about — never one they committed
+   *    to, and never one they deliberately CLEARED (`cleared`, not `none`),
+   *    which with suggestions in play is the expected first interaction on a
+   *    pre-filled row the planner knows is wrong.
    *  - It must not land on a DIFFERENT preview. Back → re-Preview while this is
    *    in flight would otherwise write the old package's part options and its
    *    "N existing ties pre-filled" chip over the new package's reset state.
@@ -543,8 +874,17 @@ export default function LaserNestImportWizard({
     setRows((prev) =>
       prev.map((row) => {
         const tie = tieBySource.get(row.source_file);
-        // Never over-write a pick the planner made while this was in flight.
-        if (!tie || row.material_part_id != null) return row;
+        // PRECEDENCE, stated once: server tie > planner pick > suggestion.
+        //
+        // A persisted allocation outranks an unconfirmed suggestion — a human
+        // already committed that decision, and the machine's proposal is only a
+        // proposal. It does NOT outrank anything the planner has committed to
+        // while this was in flight, whether they picked it or accepted the
+        // suggestion: that is a deliberate choice made seconds ago, and
+        // overwriting it is the same end state the whole feature guards against
+        // (importing a part nobody chose), with nothing marked and nothing to
+        // restore.
+        if (!tie || row.tie_source === 'cleared' || isCommittedSource(row.tie_source)) return row;
         // Routed through the same helper as a manual pick, so a pre-filled tie
         // pulls its sheet spec through exactly like one the planner chooses.
         // The part record is read from a ref rather than the render-time memo:
@@ -552,7 +892,13 @@ export default function LaserNestImportWizard({
         // click, and /materials may only have landed after it — a stale empty
         // map would cost a pre-filled tie the spec pull-through that the very
         // same part gets when picked by hand.
-        return withSheetPart(row, tie.part_id, partsByIdRef.current.get(tie.part_id), String(tie.qty_per_run ?? 1));
+        return withTie(
+          row,
+          tie.part_id,
+          partsByIdRef.current.get(tie.part_id),
+          'prefilled',
+          String(tie.qty_per_run ?? 1)
+        );
       })
     );
     // Keep every tied part selectable even if it is missing from the material
@@ -649,7 +995,9 @@ export default function LaserNestImportWizard({
     const partId = value ? Number(value) : null;
     setRows((prev) =>
       prev.map((row, i) =>
-        i === index ? withSheetPart(row, partId, partId != null ? partsById.get(partId) : undefined) : row
+        i === index
+          ? withTie(row, partId, partId != null ? partsById.get(partId) : undefined, 'picked')
+          : row
       )
     );
   };
@@ -672,39 +1020,74 @@ export default function LaserNestImportWizard({
     const partId = Number(packageMaterialPartId);
     const part = partsById.get(partId);
     const qty = packageQtyPerRun.trim() || '1';
-    setRows((prev) => prev.map((row) => withSheetPart(row, partId, part, qty)));
+    setRows((prev) => prev.map((row) => withTie(row, partId, part, 'picked', qty)));
   };
 
-  const handleImport = async () => {
-    if (rows.length === 0) {
-      setError('Add at least one nest to import.');
-      return;
-    }
+  /**
+   * Confirm every pending suggestion at once.
+   *
+   * Mechanically identical to a bulk explicit pick — the same `withSheetPart`
+   * every manual pick runs through, so the accepted part pulls its thickness and
+   * sheet size onto the row exactly as if the planner had searched for it.
+   *
+   * The source becomes `accepted`, NOT `picked`. Both are committed and behave
+   * identically everywhere in the UI; they are separated for one reason, in the
+   * audit row: "the planner took the machine's suggestion" and "the planner
+   * chose this themselves" are different facts, and the breadcrumb exists
+   * precisely to tell them apart later.
+   *
+   * Returns the updated rows rather than only setting state: the accept-and-
+   * import path submits in the same click, and `rows` would still hold the
+   * pre-accept value when it did.
+   */
+  const acceptSuggestedTies = (current: EditableRow[]): EditableRow[] => {
+    const next = current.map((row) =>
+      isSuggested(row) && row.material_part_id != null
+        ? withTie(row, row.material_part_id, partsById.get(row.material_part_id), 'accepted')
+        : row
+    );
+    setRows(next);
+    return next;
+  };
+
+  /**
+   * The first thing wrong with the batch, or null. Surfaced before the backend
+   * rejects the whole package — and before the accept dialog opens, so a blank
+   * CNC number is fixed while the planner is still looking at the grid rather
+   * than after they have confirmed a page of ties.
+   */
+  const validateRows = (candidateRows: EditableRow[]): string | null => {
+    if (candidateRows.length === 0) return 'Add at least one nest to import.';
     // Each row needs a CNC number (the operator-facing program number) and a
-    // whole-sheet run count >= 1; surface the first offender rather than letting
-    // the backend reject the whole batch.
-    for (const row of rows) {
-      if (!row.cnc_number.trim()) {
-        setError(`Enter a CNC number for ${row.source_file}.`);
-        return;
-      }
+    // whole-sheet run count >= 1.
+    for (const row of candidateRows) {
+      if (!row.cnc_number.trim()) return `Enter a CNC number for ${row.source_file}.`;
       const runs = Number(row.planned_runs);
       if (!Number.isInteger(runs) || runs < 1) {
-        setError(`Runs for ${row.source_file} must be a whole number of at least 1.`);
-        return;
+        return `Runs for ${row.source_file} must be a whole number of at least 1.`;
       }
       // A tied row needs a real per-run quantity (the API enforces > 0). A qty
-      // is never sent without a part, and a 0 is never sent at all.
+      // is never sent without a part, and a 0 is never sent at all. Checked for
+      // a pending suggestion too: it is about to become a tie one click from
+      // now, and refusing it then would be a dead end.
       if (row.material_part_id != null) {
         const perRun = Number(row.qty_per_run);
         if (!Number.isFinite(perRun) || perRun <= 0) {
-          setError(`Sheets per run for ${row.source_file} must be greater than 0.`);
-          return;
+          return `Sheets per run for ${row.source_file} must be greater than 0.`;
         }
       }
     }
+    return null;
+  };
 
-    const confirmed: LaserNestImportRow[] = rows.map((row) => ({
+  const submitImport = async (rowsToImport: EditableRow[]) => {
+    const problem = validateRows(rowsToImport);
+    if (problem) {
+      setError(problem);
+      return;
+    }
+
+    const confirmed: LaserNestImportRow[] = rowsToImport.map((row) => ({
       source_file: row.source_file,
       cnc_number: row.cnc_number.trim(),
       nest_name: row.nest_name.trim() || row.cnc_number.trim(),
@@ -719,10 +1102,33 @@ export default function LaserNestImportWizard({
       ...(row.work_center_id != null ? { work_center_id: row.work_center_id } : {}),
       // Same spread-only-when-set rule for the sheet-part tie: an untied row's
       // payload stays byte-identical to a pre-feature import.
-      ...(row.material_part_id != null
+      //
+      // AN UNCONFIRMED SUGGESTION IS NOT A TIE and can never reach the wire.
+      // The dialog is what normally stops it, and this is the structural guard
+      // behind the dialog: the tie keys are spread only for a part a human stood
+      // behind, so no future flow change can turn a machine's proposal into
+      // inventory depletion by accident.
+      ...(isTied(row)
         ? { material_part_id: row.material_part_id, qty_per_run: Number(row.qty_per_run) }
         : {}),
     }));
+
+    // How each COMMITTED tie came to be, in the server's closed vocabulary
+    // (`_SHEET_MATCH_PROVENANCE_VALUES` in work_orders.py, docs/API.md
+    // "Provenance on import"). Recorded on the WO-level audit row so "did the
+    // suggestions actually get used, and did planners keep them?" stays
+    // answerable later.
+    //
+    // Rows with no committed tie are OMITTED rather than sent as a fifth value.
+    // An untied row and an unconfirmed suggestion both serialize no tie, so a
+    // provenance entry for either would describe a decision nobody made — and
+    // this is an append-only audit row, the one someone reads when asking why
+    // the wrong lot was depleted. Absent is honest; invented is not.
+    const provenance: SheetMatchProvenance = {};
+    for (const row of rowsToImport) {
+      const recorded = PROVENANCE_BY_TIE_SOURCE[row.tie_source];
+      if (recorded) provenance[row.source_file] = recorded;
+    }
 
     setLoading(true);
     setError('');
@@ -731,6 +1137,7 @@ export default function LaserNestImportWizard({
         file,
         source_path: sourcePath.trim() || undefined,
         rows: confirmed,
+        sheet_match_provenance: provenance,
       };
       const result =
         workOrderId != null
@@ -754,12 +1161,54 @@ export default function LaserNestImportWizard({
   const lowConfidenceCount = rows.filter((r) => r.confidence === 'low').length;
   const runsNotReadCount = rows.filter(runsNotRead).length;
   const totalRuns = rows.reduce((sum, r) => sum + (Number(r.planned_runs) || 0), 0);
-  const tiedRowCount = rows.filter((r) => r.material_part_id != null).length;
-  const tiedSheetTotal = rows.reduce(
-    (sum, r) =>
-      r.material_part_id == null ? sum : sum + (Number(r.qty_per_run) || 0) * (Number(r.planned_runs) || 0),
-    0
+  // CONFIRMED ties only. This chip states that stock will move; counting an
+  // unconfirmed suggestion in it would claim a deduction nobody agreed to.
+  const tiedRowCount = rows.filter(isTied).length;
+  const tiedSheetTotal = rows.reduce((sum, r) => (isTied(r) ? sum + rowSheetTotal(r) : sum), 0);
+
+  const suggestedRowCount = rows.filter(isSuggested).length;
+  // Suggested rows whose sheet will not cover this package. `none` and `short`
+  // are both "the material is not there"; `unknown` is not — a failed stock read
+  // must not be reported as a shortage.
+  const suggestedShortCount = rows.filter((row) => {
+    if (!isSuggested(row)) return false;
+    const state = suggestedCandidate(row)?.stock_state;
+    return state === 'short' || state === 'none';
+  }).length;
+  const suggestedTieLines = useMemo(
+    () => rollUpSuggestedTies(rows, partsById, onHandByPart),
+    [rows, partsById, onHandByPart]
   );
+
+  /**
+   * Import. A package still holding suggestions routes through the accept
+   * dialog first — the same one the "Accept N suggested" button opens — and
+   * confirming there accepts AND imports in that one click.
+   *
+   * Deliberately NOT an error toast telling the planner to go accept first: the
+   * suggestions are the expected state of a freshly previewed package, and
+   * refusing the expected path is a dead end where one click was the point.
+   */
+  const handleImportClick = () => {
+    const problem = validateRows(rows);
+    if (problem) {
+      setError(problem);
+      return;
+    }
+    if (suggestedRowCount > 0) {
+      setError('');
+      setConfirmIntent('accept-and-import');
+      return;
+    }
+    void submitImport(rows);
+  };
+
+  const handleConfirmSuggestedTies = () => {
+    const intent = confirmIntent;
+    const accepted = acceptSuggestedTies(rows);
+    setConfirmIntent(null);
+    if (intent === 'accept-and-import') void submitImport(accepted);
+  };
 
   return (
     <Modal
@@ -880,7 +1329,7 @@ export default function LaserNestImportWizard({
                       ariaLabel="Sheet part"
                       parts={materials}
                       onHandByPart={onHandByPart}
-                      extraOptions={extraMaterialOptions}
+                      extraOptions={pickerExtraOptions}
                       value={packageMaterialPartId}
                       onChange={setPackageMaterialPartId}
                     />
@@ -908,6 +1357,21 @@ export default function LaserNestImportWizard({
                 >
                   Apply to all rows
                 </button>
+                {/* The one-click path for a package the server matched. It sits
+                    beside "Apply to all rows" because it is the same kind of
+                    act — a bulk tie — and it opens the same rollup the Import
+                    button does, so there is exactly one place to review them. */}
+                {suggestedRowCount > 0 && (
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    className="mb-0.5"
+                    onClick={() => setConfirmIntent('accept')}
+                    disabled={loading}
+                  >
+                    Accept {suggestedRowCount} suggested
+                  </Button>
+                )}
                 <p className="basis-full text-xs text-fd-faint">
                   Optional. Stamps every row below — including its thickness and sheet size — and each row stays
                   editable. Tied sheets leave inventory when that nest&apos;s operation completes, not per run.
@@ -949,6 +1413,21 @@ export default function LaserNestImportWizard({
               {packageMeta != null && packageMeta.skipped_pages.length > 0 && (
                 <span className="px-1 py-1 text-fd-mute">
                   Pages skipped as non-nest: {packageMeta.skipped_pages.join(', ')}
+                </span>
+              )}
+              {/* A matched suggestion is a PROPOSAL sitting in the picker, so
+                  the chip says what is still owed rather than reporting an
+                  accomplishment. It clears the moment the ties are accepted —
+                  as does the shortage chip below it, which is about the
+                  suggestion set specifically. */}
+              {suggestedRowCount > 0 && (
+                <span className="rounded-none border border-fd-amber/40 bg-fd-amber/10 px-2 py-1 font-semibold text-fd-amber">
+                  {suggestedRowCount} {suggestedRowCount === 1 ? 'sheet' : 'sheets'} matched — confirm before importing
+                </span>
+              )}
+              {suggestedShortCount > 0 && (
+                <span className="rounded-none border border-fd-amber/40 bg-fd-amber/10 px-2 py-1 font-semibold text-fd-amber">
+                  {suggestedShortCount} suggested {suggestedShortCount === 1 ? 'sheet is' : 'sheets are'} short on stock
                 </span>
               )}
               {/* Consumption fires when an OPERATION completes, never per run.
@@ -1033,7 +1512,7 @@ export default function LaserNestImportWizard({
                         };
                       }
                       const partLabel = tiedPart ? sheetPartOptionLabel(tiedPart) : 'the tied sheet part';
-                      const diverged = derived.replaced.trim() !== '' && derived.replaced.trim() !== derived.value;
+                      const diverged = specDiverged(field, derived.replaced, derived.value);
                       return {
                         className: CELL_INPUT_DERIVED,
                         title: diverged
@@ -1044,6 +1523,21 @@ export default function LaserNestImportWizard({
                     };
                     const thicknessCell = specCell('thickness', verify.thickness);
                     const sheetSizeCell = specCell('sheet_size', verify.sheet_size);
+
+                    // A pre-filled proposal, and what the server said about it.
+                    // The reason rides on a marker beside the picker and the
+                    // diagnostic on the cell, so an ambiguous row explains its
+                    // own shortlist without costing a column.
+                    const suggested = isSuggested(row);
+                    const suggestion = row.sheet_suggestion;
+                    const suggestionReason = suggestion?.candidates[0]?.reason ?? null;
+                    const cellTitle = suggestionTitle(suggestion);
+                    // The shortlist is pinned to the top of THIS row's picker, so
+                    // an unresolved nest is a two-option decision instead of a
+                    // search through the whole catalog. Only for rows the server
+                    // actually left open: a matched row's picker is already filled.
+                    const rowShortlist =
+                      suggestion && suggestion.status === 'ambiguous' ? shortlistOptions(suggestion) : NO_SHORTLIST;
 
                     return (
                       <tr key={row.source_file} className="border-b border-fd-line align-top">
@@ -1096,15 +1590,42 @@ export default function LaserNestImportWizard({
                           />
                         </td>
                         <td className="border-l border-fd-line px-2 py-2">
-                          <SheetPartPicker
-                            ariaLabel={`Sheet part for ${row.source_file}`}
-                            parts={materials}
-                            onHandByPart={onHandByPart}
-                            extraOptions={extraMaterialOptions}
-                            value={row.material_part_id != null ? String(row.material_part_id) : ''}
-                            onChange={(value) => updateRowMaterialPart(index, value)}
-                            disabled={!hasPicker}
-                          />
+                          {/* The blue hairline marks a value the wizard put
+                              there rather than the planner — the same visual
+                              contract the derived spec cells hold. It sits on a
+                              wrapper, not on the combobox input, so it cannot
+                              fight the input's own focus/border styling. */}
+                          <div
+                            className={`flex items-center gap-1 ${
+                              suggested ? 'border-l-2 border-fd-blue/70 pl-1.5' : ''
+                            }`}
+                            title={cellTitle}
+                          >
+                            <div className="min-w-0 flex-1">
+                              <SheetPartPicker
+                                ariaLabel={`Sheet part for ${row.source_file}`}
+                                parts={materials}
+                                onHandByPart={onHandByPart}
+                                extraOptions={pickerExtraOptions}
+                                priorityOptions={rowShortlist}
+                                value={row.material_part_id != null ? String(row.material_part_id) : ''}
+                                onChange={(value) => updateRowMaterialPart(index, value)}
+                                disabled={!hasPicker}
+                              />
+                            </div>
+                            {suggested && (
+                              // aria-hidden: the count and the call to confirm
+                              // are announced by the chip above the grid, and
+                              // the picker keeps its stable accessible name.
+                              <span
+                                aria-hidden="true"
+                                title={suggestionReason ?? 'Suggested — confirm before importing'}
+                                className="shrink-0 text-fd-blue"
+                              >
+                                <SparklesIcon className="h-3.5 w-3.5" />
+                              </span>
+                            )}
+                          </div>
                         </td>
                         <td className="px-2 py-2">
                           <input
@@ -1175,7 +1696,10 @@ export default function LaserNestImportWizard({
                             step="any"
                             value={row.qty_per_run}
                             onChange={(e) => updateRowQtyPerRun(index, e.target.value)}
-                            disabled={row.material_part_id == null}
+                            // Enabled by a CONFIRMED tie only. A suggestion has
+                            // no quantity to tune yet — there is nothing to
+                            // consume until someone stands behind the part.
+                            disabled={!isTied(row)}
                             className={`${CELL_INPUT} text-right tabular-nums disabled:opacity-50`}
                             aria-label={`Sheets per run for ${row.source_file}`}
                           />
@@ -1245,6 +1769,8 @@ export default function LaserNestImportWizard({
                 onClick={() => {
                   setStep('pick');
                   setError('');
+                  // The rollup describes the grid that is going away.
+                  setConfirmIntent(null);
                 }}
                 disabled={loading}
                 className="btn-ghost btn-sm"
@@ -1264,7 +1790,7 @@ export default function LaserNestImportWizard({
             ) : (
               <button
                 type="button"
-                onClick={handleImport}
+                onClick={handleImportClick}
                 disabled={loading || rows.length === 0}
                 className="btn-primary"
               >
@@ -1273,6 +1799,22 @@ export default function LaserNestImportWizard({
             )}
           </div>
         </div>
+
+        {/* One dialog, two entry points. Rolled up BY DISTINCT PART, because 42
+            identical dropdowns are not reviewable and two lines are. `pending`
+            per the non-optimistic convention: the accept-and-import path is
+            server-gated, so while it is in flight the confirm spins, Cancel is
+            refused, and the dialog cannot be dismissed out from under it. */}
+        <ConfirmDialog
+          open={confirmIntent !== null}
+          variant="warning"
+          title={`Accept ${suggestedRowCount} suggested sheet ${suggestedRowCount === 1 ? 'tie' : 'ties'}?`}
+          message={suggestedTieRollupMessage(suggestedTieLines)}
+          confirmLabel={confirmIntent === 'accept-and-import' ? 'Accept & import' : 'Accept ties'}
+          pending={loading}
+          onConfirm={handleConfirmSuggestedTies}
+          onCancel={() => setConfirmIntent(null)}
+        />
       </div>
     </Modal>
   );

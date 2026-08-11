@@ -191,6 +191,128 @@ class LaserNestPdfExtractionResponse(BaseModel):
     passes: Optional[int] = None
 
 
+class SheetMatchDiagnostic(UTCModel):
+    """One machine-readable reason the matcher wants the planner to see.
+
+    ``severity`` is ``gate`` (something the matcher REFUSED on -- a thickness that
+    could not be read, an alloy that disagreed) or ``advisory`` (something true but
+    not disqualifying -- short stock, a truncated catalog, a same-family alternate).
+    A ``gate`` diagnostic is why a row is not pre-filled; an ``advisory`` one can sit
+    on a row that IS pre-filled.
+
+    Carries NO datetime by construction (see ``SheetPartSuggestion``).
+    """
+
+    code: str
+    severity: str
+    detail: str = Field(..., max_length=300)
+
+
+class SheetPartCandidate(UTCModel):
+    """One stock part the matcher believes could be this nest's sheet.
+
+    ``part_number`` is a PLAIN ``str``, deliberately NOT the ``PartNumber``
+    annotated type used on the parts contracts: the matcher reads the ORM row
+    directly (``_load_catalog``), so it can legitimately surface a part number
+    with a space or an inch mark in it -- real stock that ``materials.py``'s
+    ``_part_to_response`` would refuse to serialize. Constraining it here would
+    500 the preview on exactly the rows the shortlist exists to reveal.
+
+    The matcher's internal ``alloy_score`` is NOT part of this contract and is
+    dropped before serialization -- it is the raw agreement weight behind
+    ``score``, not something a planner can act on.
+    """
+
+    part_id: int
+    part_number: str
+    part_name: str
+    unit_of_measure: Optional[str] = None
+    score: float = Field(..., ge=0.0, le=100.0, description="0-100 confidence; 60 is the shortlist floor.")
+    on_hand: float = 0.0
+    on_hand_known: bool = Field(
+        True,
+        description="False when the on-hand read failed; the stock annotation is then unknown, not zero.",
+    )
+    demand: float = Field(0.0, description="Sheets this nest row would draw (qty_per_run x planned_runs).")
+    projected_on_hand: float = Field(
+        0.0,
+        description="On hand minus this package's cumulative demand on the part, so two nests sharing a sheet stack.",
+    )
+    stock_state: str = Field(
+        "unknown",
+        description="``covered`` | ``short`` | ``none`` | ``unknown``. Annotates; never ranks.",
+    )
+    spec_thickness: Optional[str] = None
+    spec_sheet_size: Optional[str] = None
+    is_sheet_like: bool = True
+    prior_tie_count: int = Field(
+        0,
+        description="How many times planners tied this spec to this part inside the history window. Corroboration only.",
+    )
+    reason: str = Field(..., min_length=1, max_length=300, description="One sentence a planner can check by eye.")
+    basis: str = Field(
+        ...,
+        description=(
+            "How this candidate reached its position: ``deterministic`` (the spec gates alone), "
+            "``history`` (promoted because planners have repeatedly tied this exact spec to it), or "
+            "``ai_disambiguated`` (promoted by the AI resolver inside an already-gated ambiguous "
+            "shortlist). Neither of the latter two can ADMIT a candidate -- they only re-order and "
+            "annotate what the deterministic gates already let through -- and neither can set "
+            "``auto_fill_part_id``. Left a bare ``str``, not an enum: a client that narrowed it would "
+            "stop compiling against a truthful response the day a fourth basis is added."
+        ),
+    )
+    diagnostics: List[SheetMatchDiagnostic] = Field(default_factory=list)
+
+
+class SheetPartSuggestion(UTCModel):
+    """The matcher's advisory answer for one nest row.
+
+    NO DATETIME FIELD MAY BE ADDED TO THIS SCHEMA OR ITS CHILDREN. ``UTCModel``
+    carries its ``Z``-suffixing ``json_encoders`` as Pydantic-v2 *model-level*
+    config, and these schemas are nested inside ``LaserNestPreviewResponse``, a
+    plain ``BaseModel`` -- a datetime here would not reliably serialize with the
+    trailing ``Z`` this codebase requires (invariant: store UTC, serve UTC ``Z``,
+    display Central). ``SheetPartCandidate.prior_tie_count`` carries the
+    "planners have done this before" signal without a timestamp; keep it that way.
+    """
+
+    status: str = Field(
+        ...,
+        description=(
+            "``matched`` (one part cleared the deterministic gate and is pre-filled), "
+            "``ambiguous`` (a shortlist is offered, nothing pre-filled), or "
+            "``unmatched`` (no candidate survived the hard thickness gate)."
+        ),
+    )
+    auto_fill_part_id: Optional[int] = Field(
+        None,
+        gt=0,
+        description=(
+            "The one part the wizard pre-fills the sheet picker with, or null. "
+            "ASSIGNED ONLY BY THE ``sheet_stock_matcher`` DETERMINISTIC GATE -- score "
+            ">= 90, margin over the runner-up >= 8, a stated-and-agreeing alloy, and a "
+            "sheet-like part. It is structurally unreachable from the AI resolver, "
+            "which runs afterwards, may only re-rank and annotate an ``ambiguous`` "
+            "shortlist, and never writes this field. "
+            "PRE-FILL IS A PROPOSAL, NOT A DECISION: the tie it seeds drives real "
+            "inventory depletion at operation completion into an as-built record that "
+            "never auto-reverses, so the planner confirms it on Import. Nothing here "
+            "commits a tie."
+        ),
+    )
+    candidates: List[SheetPartCandidate] = Field(
+        default_factory=list,
+        max_length=5,
+        description="Best-first shortlist, capped at MAX_CANDIDATES.",
+    )
+    diagnostic: Optional[str] = Field(
+        None,
+        max_length=300,
+        description="One sentence explaining a non-``matched`` status, for the row's hint text.",
+    )
+
+
 class LaserNestPreviewRow(BaseModel):
     """One detected nest in a package-preview response.
 
@@ -237,6 +359,13 @@ class LaserNestPreviewRow(BaseModel):
     field_confidence: Optional[Dict[str, str]] = None
     warning: Optional[str] = None
     passes: Optional[int] = None
+    # The sheet-stock matcher's ADVISORY answer for this row. None on every
+    # non-preview construction of this schema (the import response echo builds
+    # rows straight from ``ParsedLaserNest.as_dict()``), and None whenever
+    # matching was skipped or degraded -- a preview never fails because matching
+    # did. Never populated from planner input; it is server-derived, read-only,
+    # and ties nothing.
+    sheet_suggestion: Optional[SheetPartSuggestion] = None
 
 
 class LaserNestImportRow(BaseModel):

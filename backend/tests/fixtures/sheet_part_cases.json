@@ -1,0 +1,572 @@
+[
+  {
+    "id": "decimal-dash",
+    "why": "The shop's canonical plate number: thickness, dash, width X length, grade.",
+    "part_number": "0.188-72X144-A36",
+    "name": null,
+    "description": null,
+    "expect_sheet_like": true,
+    "expect_thickness": "0.188",
+    "expect_sheet_size": "72x144"
+  },
+  {
+    "id": "decimal-x",
+    "why": "The other separator in use -- X between thickness and width.",
+    "part_number": "0.06X60X144-304SS",
+    "name": null,
+    "description": null,
+    "expect_sheet_like": true,
+    "expect_thickness": "0.06",
+    "expect_sheet_size": "60x144"
+  },
+  {
+    "id": "gauge-dash",
+    "why": "Gauge form stays labelled as gauge; '10 ga' is never rewritten to 0.1345 here.",
+    "part_number": "10GA-72X120-CS",
+    "name": null,
+    "description": null,
+    "expect_sheet_like": true,
+    "expect_thickness": "10 ga",
+    "expect_sheet_size": "72x120"
+  },
+  {
+    "id": "gauge-spaced",
+    "why": "Spaces everywhere and a bare GA token.",
+    "part_number": "16 GA X 60 X 144",
+    "name": null,
+    "description": null,
+    "expect_sheet_like": true,
+    "expect_thickness": "16 ga",
+    "expect_sheet_size": "60x144"
+  },
+  {
+    "id": "lowercase-decimal",
+    "why": "Case-insensitive.",
+    "part_number": "0.188-72x144-a36",
+    "name": null,
+    "description": null,
+    "expect_sheet_like": true,
+    "expect_thickness": "0.188",
+    "expect_sheet_size": "72x144"
+  },
+  {
+    "id": "lowercase-gauge",
+    "why": "Case-insensitive, gauge form.",
+    "part_number": "10ga-72x120-cs",
+    "name": null,
+    "description": null,
+    "expect_sheet_like": true,
+    "expect_thickness": "10 ga",
+    "expect_sheet_size": "72x120"
+  },
+  {
+    "id": "inch-mark-thk",
+    "why": "THK has to be dropped BEFORE the dimension match or it breaks the triple apart.",
+    "part_number": "0.188\" THK x 60 x 120",
+    "name": null,
+    "description": null,
+    "expect_sheet_like": true,
+    "expect_thickness": "0.188",
+    "expect_sheet_size": "60x120"
+  },
+  {
+    "id": "curly-inch-mark",
+    "why": "Excel autocorrects an inch mark to the closing curly quote; that is what this data contains.",
+    "part_number": "0.250” x 48 x 96",
+    "name": null,
+    "description": null,
+    "expect_sheet_like": true,
+    "expect_thickness": "0.250",
+    "expect_sheet_size": "48x96"
+  },
+  {
+    "id": "inches-word",
+    "why": "The spelled-out unit is noise too.",
+    "part_number": "0.125 inches x 48 x 96",
+    "name": null,
+    "description": null,
+    "expect_sheet_like": true,
+    "expect_thickness": "0.125",
+    "expect_sheet_size": "48x96"
+  },
+  {
+    "id": "trailing-zero-verbatim",
+    "why": "0.250 stays 0.250. It is a precision claim on a manufacturing thickness.",
+    "part_number": "0.250-48X96-A36",
+    "name": null,
+    "description": null,
+    "expect_sheet_like": true,
+    "expect_thickness": "0.250",
+    "expect_sheet_size": "48x96"
+  },
+  {
+    "id": "leading-dot-verbatim",
+    "why": "A leading-dot decimal is returned exactly as written.",
+    "part_number": ".125-48X96-A36",
+    "name": null,
+    "description": null,
+    "expect_sheet_like": true,
+    "expect_thickness": ".125",
+    "expect_sheet_size": "48x96"
+  },
+  {
+    "id": "supplier-noise",
+    "why": "Grade and supplier after the dimensions are ignored, not parsed.",
+    "part_number": "0.1875-60X120-A572-50-RYERSON",
+    "name": null,
+    "description": null,
+    "expect_sheet_like": true,
+    "expect_thickness": "0.1875",
+    "expect_sheet_size": "60x120"
+  },
+  {
+    "id": "angle-number-only",
+    "why": "Angle. Contains a valid triple; the ANCHOR is what refuses it.",
+    "part_number": "ANG-A36-1.5X1.5X.25",
+    "name": null,
+    "description": null,
+    "expect_sheet_like": false,
+    "expect_thickness": null,
+    "expect_sheet_size": null
+  },
+  {
+    "id": "tube-number-only",
+    "why": "Tube.",
+    "part_number": "TB-1.5X1.5X.188",
+    "name": null,
+    "description": null,
+    "expect_sheet_like": false,
+    "expect_thickness": null,
+    "expect_sheet_size": null
+  },
+  {
+    "id": "beam-number-only",
+    "why": "Beam.",
+    "part_number": "BM-W6X15-A992-20FT",
+    "name": null,
+    "description": null,
+    "expect_sheet_like": false,
+    "expect_thickness": null,
+    "expect_sheet_size": null
+  },
+  {
+    "id": "bar-number-only",
+    "why": "Round bar.",
+    "part_number": "BAR-A36-.5-20FT",
+    "name": null,
+    "description": null,
+    "expect_sheet_like": false,
+    "expect_thickness": null,
+    "expect_sheet_size": null
+  },
+  {
+    "id": "pipe-number-only",
+    "why": "Pipe.",
+    "part_number": "PI-4XSCH5X20",
+    "name": null,
+    "description": null,
+    "expect_sheet_like": false,
+    "expect_thickness": null,
+    "expect_sheet_size": null
+  },
+  {
+    "id": "hardware-number-only",
+    "why": "Hardware.",
+    "part_number": "HW-001",
+    "name": null,
+    "description": null,
+    "expect_sheet_like": false,
+    "expect_thickness": null,
+    "expect_sheet_size": null
+  },
+  {
+    "id": "dash-between-dims",
+    "why": "Width and length must be separated by X, never another dash.",
+    "part_number": "0.188-72-144-A36",
+    "name": null,
+    "description": null,
+    "expect_sheet_like": false,
+    "expect_thickness": null,
+    "expect_sheet_size": null
+  },
+  {
+    "id": "thickness-no-dims",
+    "why": "A thickness with no two dimensions after it is not a sheet.",
+    "part_number": "0.188-A36",
+    "name": null,
+    "description": null,
+    "expect_sheet_like": false,
+    "expect_thickness": null,
+    "expect_sheet_size": null
+  },
+  {
+    "id": "thickness-one-dim",
+    "why": "One dimension is not a sheet size.",
+    "part_number": "0.188-72-A36",
+    "name": null,
+    "description": null,
+    "expect_sheet_like": false,
+    "expect_thickness": null,
+    "expect_sheet_size": null
+  },
+  {
+    "id": "all-null",
+    "why": "Null input must not throw.",
+    "part_number": null,
+    "name": null,
+    "description": null,
+    "expect_sheet_like": false,
+    "expect_thickness": null,
+    "expect_sheet_size": null
+  },
+  {
+    "id": "all-blank",
+    "why": "Blank input must not throw.",
+    "part_number": "",
+    "name": "",
+    "description": "",
+    "expect_sheet_like": false,
+    "expect_thickness": null,
+    "expect_sheet_size": null
+  },
+  {
+    "id": "whitespace-only",
+    "why": "Whitespace-only input must not throw.",
+    "part_number": "   ",
+    "name": null,
+    "description": null,
+    "expect_sheet_like": false,
+    "expect_thickness": null,
+    "expect_sheet_size": null
+  },
+  {
+    "id": "spec-only-in-description",
+    "why": "The description is a sheet-likeness signal ONLY -- a spec is never read from it.",
+    "part_number": "SHT-A36-STD",
+    "name": "A36 sheet",
+    "description": "0.188 x 72 x 144 hot rolled",
+    "expect_sheet_like": true,
+    "expect_thickness": null,
+    "expect_sheet_size": null
+  },
+  {
+    "id": "number-beats-name",
+    "why": "The part number wins: it is keyed once, the name drifts (144 vs 120).",
+    "part_number": "0.188-72X144-A36",
+    "name": "0.188 x 72 x 120 A36 plate",
+    "description": null,
+    "expect_sheet_like": true,
+    "expect_thickness": "0.188",
+    "expect_sheet_size": "72x144"
+  },
+  {
+    "id": "name-fallback",
+    "why": "Off-convention number falls back to the name -- same anchored grammar.",
+    "part_number": "SHT-A36-0188",
+    "name": "0.188 x 72 x 144 A36 plate",
+    "description": null,
+    "expect_sheet_like": true,
+    "expect_thickness": "0.188",
+    "expect_sheet_size": "72x144"
+  },
+  {
+    "id": "anchored-grammar-on-name",
+    "why": "The name gets the SAME anchored grammar, not a looser one.",
+    "part_number": "ANG-A36-1.5X1.5X.25",
+    "name": "A36 Angle 1.5 x 1.5 x .25",
+    "description": null,
+    "expect_sheet_like": false,
+    "expect_thickness": null,
+    "expect_sheet_size": null
+  },
+  {
+    "id": "sheetlike-triple-hr",
+    "why": "A parsing part number is a sheet-likeness signal on its own.",
+    "part_number": "0.188-72X144-A36",
+    "name": "HR A36",
+    "description": null,
+    "expect_sheet_like": true,
+    "expect_thickness": "0.188",
+    "expect_sheet_size": "72x144"
+  },
+  {
+    "id": "sheetlike-triple-cr",
+    "why": "Same, gauge form.",
+    "part_number": "10GA-72X120-CS",
+    "name": "Cold rolled",
+    "description": null,
+    "expect_sheet_like": true,
+    "expect_thickness": "10 ga",
+    "expect_sheet_size": "72x120"
+  },
+  {
+    "id": "sheetlike-triple-ss",
+    "why": "Same, stainless.",
+    "part_number": "0.06X60X144-304SS",
+    "name": "304 stainless",
+    "description": null,
+    "expect_sheet_like": true,
+    "expect_thickness": "0.06",
+    "expect_sheet_size": "60x144"
+  },
+  {
+    "id": "word-sheet",
+    "why": "The word SHEET makes it flat stock regardless of numbering.",
+    "part_number": "MISC-1",
+    "name": "A36 sheet stock",
+    "description": null,
+    "expect_sheet_like": true,
+    "expect_thickness": null,
+    "expect_sheet_size": null
+  },
+  {
+    "id": "word-sheets",
+    "why": "Plural.",
+    "part_number": "MISC-1",
+    "name": "A36 sheets stock",
+    "description": null,
+    "expect_sheet_like": true,
+    "expect_thickness": null,
+    "expect_sheet_size": null
+  },
+  {
+    "id": "word-plate",
+    "why": "PLATE.",
+    "part_number": "MISC-1",
+    "name": "A36 plate stock",
+    "description": null,
+    "expect_sheet_like": true,
+    "expect_thickness": null,
+    "expect_sheet_size": null
+  },
+  {
+    "id": "word-plates",
+    "why": "Plural.",
+    "part_number": "MISC-1",
+    "name": "A36 plates stock",
+    "description": null,
+    "expect_sheet_like": true,
+    "expect_thickness": null,
+    "expect_sheet_size": null
+  },
+  {
+    "id": "word-coil",
+    "why": "COIL.",
+    "part_number": "MISC-1",
+    "name": "A36 coil stock",
+    "description": null,
+    "expect_sheet_like": true,
+    "expect_thickness": null,
+    "expect_sheet_size": null
+  },
+  {
+    "id": "word-in-part-number",
+    "why": "The keyword counts wherever it appears -- here, the part number.",
+    "part_number": "PLATE-A36-STD",
+    "name": "A36",
+    "description": null,
+    "expect_sheet_like": true,
+    "expect_thickness": null,
+    "expect_sheet_size": null
+  },
+  {
+    "id": "word-in-description",
+    "why": "...and here, the description.",
+    "part_number": "MISC-2",
+    "name": "A36",
+    "description": "Hot rolled plate, mill finish",
+    "expect_sheet_like": true,
+    "expect_thickness": null,
+    "expect_sheet_size": null
+  },
+  {
+    "id": "word-uppercase",
+    "why": "Case-insensitive keyword.",
+    "part_number": "MISC-3",
+    "name": "A36 SHEET",
+    "description": null,
+    "expect_sheet_like": true,
+    "expect_thickness": null,
+    "expect_sheet_size": null
+  },
+  {
+    "id": "word-mixed-case",
+    "why": "Case-insensitive keyword.",
+    "part_number": "MISC-4",
+    "name": "a36 Plate",
+    "description": null,
+    "expect_sheet_like": true,
+    "expect_thickness": null,
+    "expect_sheet_size": null
+  },
+  {
+    "id": "angle-with-name",
+    "why": "Angle, number and name. The stock the picker exists to hide.",
+    "part_number": "ANG-A36-1.5X1.5X.25",
+    "name": "A36 Angle 1.5 x 1.5 x .25",
+    "description": null,
+    "expect_sheet_like": false,
+    "expect_thickness": null,
+    "expect_sheet_size": null
+  },
+  {
+    "id": "tube-with-name",
+    "why": "Tube.",
+    "part_number": "TB-1.5X1.5X.188",
+    "name": "A500 Square Tube 1.5 x 1.5 x .188",
+    "description": null,
+    "expect_sheet_like": false,
+    "expect_thickness": null,
+    "expect_sheet_size": null
+  },
+  {
+    "id": "beam-with-name",
+    "why": "Beam.",
+    "part_number": "BM-W6X15-A992-20FT",
+    "name": "A992 Wide Flange Beam W6x15 x 20ft",
+    "description": null,
+    "expect_sheet_like": false,
+    "expect_thickness": null,
+    "expect_sheet_size": null
+  },
+  {
+    "id": "bar-with-name",
+    "why": "Bar.",
+    "part_number": "BAR-A36-.5-20FT",
+    "name": "A36 Round Bar .5 x 20ft",
+    "description": null,
+    "expect_sheet_like": false,
+    "expect_thickness": null,
+    "expect_sheet_size": null
+  },
+  {
+    "id": "pipe-with-name",
+    "why": "Pipe.",
+    "part_number": "PI-4XSCH5X20",
+    "name": "Pipe 4in Sch 5 x 20ft",
+    "description": null,
+    "expect_sheet_like": false,
+    "expect_thickness": null,
+    "expect_sheet_size": null
+  },
+  {
+    "id": "hardware-with-name",
+    "why": "Hardware.",
+    "part_number": "HW-001",
+    "name": "3/8-16 x 1 Hex Bolt Zinc",
+    "description": null,
+    "expect_sheet_like": false,
+    "expect_thickness": null,
+    "expect_sheet_size": null
+  },
+  {
+    "id": "sheetmetal-bracket",
+    "why": "SHEETMETAL is not SHEET -- the keyword match is whole-word, so a fabricated part is not stock.",
+    "part_number": "BRK-100",
+    "name": "Sheetmetal bracket",
+    "description": null,
+    "expect_sheet_like": false,
+    "expect_thickness": null,
+    "expect_sheet_size": null
+  },
+  {
+    "id": "drill-template",
+    "why": "TEMPLATE is not PLATE, same reason.",
+    "part_number": "TPL-1",
+    "name": "Drill template",
+    "description": null,
+    "expect_sheet_like": false,
+    "expect_thickness": null,
+    "expect_sheet_size": null
+  },
+  {
+    "id": "hardware-10-32",
+    "why": "A screw callout whose NAME leads with numbers: deriveSheetSpec alone mis-reads it as 10 / 32x1, and the sheet-likeness gate is the only thing that keeps that off a nest row. The safety property belongs to the PAIR.",
+    "part_number": "HW-10-32",
+    "name": "10-32 x 1/2 SHCS",
+    "description": null,
+    "expect_sheet_like": false,
+    "expect_thickness": "10",
+    "expect_sheet_size": "32x1"
+  },
+  {
+    "id": "consumable-tape",
+    "why": "A consumable: no triple, no keyword.",
+    "part_number": "CON-TAPE",
+    "name": "Masking tape 2in",
+    "description": null,
+    "expect_sheet_like": false,
+    "expect_thickness": null,
+    "expect_sheet_size": null
+  },
+  {
+    "id": "no-veto-list",
+    "why": "PLATE wins next to a word a veto list would have blacklisted. Recognition is only ever a POSITIVE test.",
+    "part_number": "MISC-5",
+    "name": "Tube-laser drop plate",
+    "description": null,
+    "expect_sheet_like": true,
+    "expect_thickness": null,
+    "expect_sheet_size": null
+  },
+  {
+    "id": "angle-name-leads-with-dims",
+    "why": "The one case the anchored grammar still mis-reads. Again: the pair is what is safe, not deriveSheetSpec alone.",
+    "part_number": "ANG-A36-1.5X1.5X.25",
+    "name": "1.50\" x 1.50\" x 0.250\" THK A36 Angle",
+    "description": null,
+    "expect_sheet_like": false,
+    "expect_thickness": "1.50",
+    "expect_sheet_size": "1.50x0.250"
+  },
+  {
+    "id": "sheet-without-dims",
+    "why": "Flat stock (so it stays in the picker) with nothing to pull through -- the nest report's own read stands.",
+    "part_number": "SHT-304-125",
+    "name": "304 SS 0.125 Sheet",
+    "description": null,
+    "expect_sheet_like": true,
+    "expect_thickness": null,
+    "expect_sheet_size": null
+  },
+  {
+    "id": "sheet-a36-std",
+    "why": "Off-convention sheet number: recognized, no spec.",
+    "part_number": "SHT-A36-STD",
+    "name": "A36 sheet",
+    "description": null,
+    "expect_sheet_like": true,
+    "expect_thickness": null,
+    "expect_sheet_size": null
+  },
+  {
+    "id": "plate-a36-std",
+    "why": "Off-convention plate number: recognized, no spec.",
+    "part_number": "PLATE-A36-STD",
+    "name": "A36 plate",
+    "description": null,
+    "expect_sheet_like": true,
+    "expect_thickness": null,
+    "expect_sheet_size": null
+  },
+  {
+    "id": "prime-inch-mark",
+    "why": "A true prime after the thickness. Stripped by BOTH ports since 2026-08-10 -- it was in the Python quote class and missing from the TS one, so the server saw sheet stock the picker's filter hid.",
+    "part_number": "0.188″-60X120-A36",
+    "name": null,
+    "description": null,
+    "expect_sheet_like": true,
+    "expect_thickness": "0.188",
+    "expect_sheet_size": "60x120"
+  },
+  {
+    "id": "straight-apostrophe-inch-mark",
+    "why": "The straight apostrophe used as an inch mark. Same lock-step guard as prime-inch-mark.",
+    "part_number": "0.188'-60X120-A36",
+    "name": null,
+    "description": null,
+    "expect_sheet_like": true,
+    "expect_thickness": "0.188",
+    "expect_sheet_size": "60x120"
+  }
+]

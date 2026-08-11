@@ -1177,10 +1177,10 @@ mixed**:
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| POST | `/work-orders/{id}/laser-nest-packages/preview` | Preview nests detected from a zipped package, a bare nest-report PDF (single- or multi-page), or a server folder (writes nothing). PDF uploads run AI extraction per sheet | Admin / Manager / Supervisor |
-| POST | `/work-orders/{id}/laser-nest-packages/import` | Import a package — creates/rebuilds the child laser WO (or rebuilds the addressed WO directly when it is itself `laser_cutting`), one nest operation per CNC file (or per confirmed PDF row) | Admin / Manager / Supervisor |
-| POST | `/work-orders/laser-nest-packages/standalone/preview` | Same preview with **no work order in the path** — used before a standalone import | Admin / Manager / Supervisor |
-| POST | `/work-orders/laser-nest-packages/standalone/import` | Import a package into a **fresh standalone laser WO** — creates a released, part-less `laser_cutting` work order (no parent; quantity = total planned sheet runs; optional `due_date`) | Admin / Manager / Supervisor |
+| POST | `/work-orders/{id}/laser-nest-packages/preview` | Preview nests detected from a zipped package, a bare nest-report PDF (single- or multi-page), or a server folder (writes nothing). PDF uploads run AI extraction per sheet; every row carries an advisory `sheet_suggestion` | Admin / Manager / Supervisor |
+| POST | `/work-orders/{id}/laser-nest-packages/import` | Import a package — creates/rebuilds the child laser WO (or rebuilds the addressed WO directly when it is itself `laser_cutting`), one nest operation per CNC file (or per confirmed PDF row). Optional `sheet_match_provenance` | Admin / Manager / Supervisor |
+| POST | `/work-orders/laser-nest-packages/standalone/preview` | Same preview with **no work order in the path** — used before a standalone import (same `sheet_suggestion` on every row) | Admin / Manager / Supervisor |
+| POST | `/work-orders/laser-nest-packages/standalone/import` | Import a package into a **fresh standalone laser WO** — creates a released, part-less `laser_cutting` work order (no parent; quantity = total planned sheet runs; optional `due_date`, optional `sheet_match_provenance`) | Admin / Manager / Supervisor |
 | POST | `/laser-nests/extract` | Auto-extract nest fields (CNC #, material, size) from a single uploaded nest PDF. Stateless — no DB write, no audit | Admin / Manager / Supervisor |
 | POST | `/work-orders/{id}/laser-nests/manual` | Manually add **one** nest to a work order (child laser WO of an assembly, or the addressed `laser_cutting` WO directly). Creates a clock-in-able `LASER` operation | Admin / Manager / Supervisor |
 | PATCH | `/laser-nests/{id}` | Edit a manual nest (all fields optional) | Admin / Manager / Supervisor |
@@ -1240,7 +1240,8 @@ mixed**:
 > **Standalone nest work orders (no parent, no part).** The `…/standalone` pair runs the same wizard
 > flow with no work order in the path. `preview` is behaviorally identical to the `{id}` preview;
 > `import` takes the same form fields (`file`/`source_path`, optional `work_center_id`, optional
-> `rows`) plus an optional **`due_date`** form field (ISO date, standalone import only) — the
+> `rows`, optional `sheet_match_provenance`) plus an optional **`due_date`** form field (ISO date,
+> standalone import only) — the
 > planner-set due date stamped on the created WO; **past dates are allowed** (an open WO can
 > already be overdue at import), and the date is editable later via `PUT /work-orders/{id}` (the
 > WO-detail inline due-date edit). It creates a **fresh RELEASED `work_order_type='laser_cutting'` work order** with
@@ -1490,10 +1491,171 @@ mixed**:
 > prior nests, so a bad or cross-tenant id is a clean **404** ("Material part not found", never 403)
 > with nothing persisted; soft-deleted parts are refused the same way. `qty_per_run` **without**
 > `material_part_id` is a **422** on the manual path / **400** on the import path rather than a
-> silently dropped field. There is deliberately **no fuzzy auto-match** from the AI-extracted
+> silently dropped field. There is deliberately **no fuzzy string match** from the AI-extracted
 > `material` free text to a part — a wrong auto-tie would deplete the wrong heat lot into an as-built
-> record — so the planner picks explicitly or the nest ships untied. See "Material ties" under Work
-> Orders for the tie lifecycle and `docs/MATERIAL_CONSUMPTION_PLAN.md` for the design record.
+> record. **Amended 2026-08-10**, when preview gained a server-computed `sheet_suggestion` (see
+> "Sheet-stock suggestions on preview" below). What changed is who computes a *proposal* and how hard
+> it has to work for one; what did not change is what may become a tie. **Nothing is ever derived
+> from the AI-extracted material free text on the CLIENT. A tie is a planner pick, or a
+> server-computed suggestion that cleared an exact-thickness gate, a real alloy agreement, an
+> 8-point ambiguity margin and a sheet-form test — and that the planner then confirmed in the review
+> grid before Import. The AI leg can only reorder a shortlist; it is structurally incapable of
+> setting `auto_fill_part_id`.** `material_part_id` still reaches the import only inside a confirmed
+> `rows` entry, so a row the planner did not confirm still ships untied. See "Material ties" under
+> Work Orders for the tie lifecycle and `docs/MATERIAL_CONSUMPTION_PLAN.md` for the design record.
+>
+> **Sheet-stock suggestions on preview (`sheet_suggestion`).** Both preview endpoints —
+> `POST /work-orders/{id}/laser-nest-packages/preview` and
+> `POST /work-orders/laser-nest-packages/standalone/preview` — return a **`sheet_suggestion`** object
+> on every row: the server's advisory proposal for the stock part that nest is cut from, so the
+> review grid opens with the answer already in it instead of asking the planner for one combobox
+> search per nest (42 of them for one Miratech ZIP). It is computed by
+> `services/sheet_stock_matcher.py` from the row's own `material` / `thickness` / `sheet_size` /
+> `planned_runs` against the tenant's material catalog, and it is a **pure read** — no ledger row, no
+> audit row, no event, no write of any kind, the same structural property
+> `GET /parts/{id}/backflush-readiness` holds and for the same reason: a preview is not an actor and
+> records no intent. It **never raises** (a matcher fault degrades the package to no suggestions,
+> never to a failed preview) and costs **three queries per package** regardless of nest count — the
+> catalog, the tie history, and on-hand for the parts that survived gating — because rows are deduped
+> by their descriptor triple before the gates run.
+>
+> **`sheet_suggestion` is ABSENT from both import responses**, deliberately rather than by omission.
+> By import time the proposal has either been confirmed into a `rows` entry's `material_part_id` or
+> discarded; echoing it back beside a committed tie would invite reading the suggestion as the record
+> of what was tied, and the tie row plus its `log_create` are that record. Nothing about the
+> suggestion is persisted on `laser_nests`.
+>
+> `SheetPartSuggestion` (per row):
+>
+> | Field | Type | Meaning |
+> |---|---|---|
+> | `status` | `matched` \| `ambiguous` \| `unmatched` | `matched` = one part cleared every pre-fill condition; `ambiguous` = candidates worth showing, none worth pre-filling; `unmatched` = nothing survived the gates |
+> | `auto_fill_part_id` | `int \| null` | Non-null **only** when `status` is `matched`. The wizard pre-fills the row's sheet picker from it — as a proposal the planner confirms, never as a committed tie |
+> | `candidates` | `SheetPartCandidate[]` | Ranked shortlist, at most **5**. Deterministic order (score desc, then `part_number`), so two previews of the same package rank identically |
+> | `diagnostic` | `string \| null` | One sentence naming why nothing was pre-filled, written for a planner ("`0.250-60X120-A36` and `0.250-60X120-CS` both fit this nest's spec. Pick the one this job runs."). Null on a clean `matched` row |
+>
+> `SheetPartCandidate`:
+>
+> | Field | Type | Meaning |
+> |---|---|---|
+> | `part_id` / `part_number` / `part_name` / `unit_of_measure` | | The stock part. `unit_of_measure` is the part's current value, not a snapshot |
+> | `score` | `float` | `60 + 25×alloy + 15×size`, one decimal. Every survivor already passed the hard thickness gate, so 60 is the floor for anything shown |
+> | `reason` | `string` | One sentence naming the evidence — never empty; a candidate whose reason would be blank is dropped, because an unauditable proposal is not a proposal |
+> | `basis` | `deterministic` \| `history` \| `ai_disambiguated` | How the candidate reached its position — the spec gates alone, a prior-tie lift, or a promotion by the AI resolver **inside an already-gated shortlist**. None of the three can set `auto_fill_part_id` |
+> | `on_hand` / `on_hand_known` | `float` / `bool` | Consumable on-hand for the part, read through the consumption engine's own `CONSUMABLE_ITEM_CLAUSES` so a number shown here can never promise stock the engine would refuse to draw. `on_hand_known=false` means the stock read failed and `on_hand` is meaningless |
+> | `demand` / `projected_on_hand` | `float` | This row's sheets (`planned_runs`, at the preview default of 1 sheet per run) and what is left after the **package-cumulative** claim — rows are walked in grid order, so twelve nests wanting eight sheets is visible at review time rather than at completion when the lot goes negative. Set on the claimed (top/pre-filled) candidate only |
+> | `stock_state` | `covered` \| `short` \| `none` \| `unknown` | Derived from the two fields above |
+> | `spec_thickness` / `spec_sheet_size` | `string \| null` | What the matcher parsed out of the part number/name — what the wizard's part → free-text pull-through would stamp |
+> | `is_sheet_like` | `bool` | Whether the part reads as sheet/plate stock. A false here blocks pre-fill outright |
+> | `prior_tie_count` | `int` | Ties to this spec inside the 365-day window (0 unless history had something to say) |
+> | `diagnostics` | `SheetMatchDiagnostic[]` | Machine-readable annotations, below |
+>
+> `SheetMatchDiagnostic` is `{ code, severity, detail }` with `severity` ∈ `{gate, advisory}` and
+> `detail` a planner-readable sentence. The codes that reach the wire on a candidate:
+>
+> | Code | Severity | When |
+> |---|---|---|
+> | `HISTORY_SPEC_DISAGREEMENT` | `advisory` | Spec points one way and prior ties point another. This **demotes a `matched` row to `ambiguous`** and clears `auto_fill_part_id` |
+> | `CATALOG_TRUNCATED` | `advisory` | The tenant has more than **3000** material parts; only a deterministic `part_number`-ordered prefix was searched, so a partial list is never mistaken for a complete one |
+> | `ON_HAND_UNKNOWN` | `advisory` | The stock read failed; shortage was not checked |
+> | `NO_STOCK_ON_HAND` | `advisory` | Right sheet, zero on hand |
+> | `PACKAGE_DEMAND_EXCEEDS_STOCK` | `advisory` | The package as a whole needs more of this part than is on hand |
+> | `ALTERNATE_WITH_STOCK` | `advisory` | A different candidate that also fits does have stock |
+> | `AI_PICK_OUT_OF_SET` | `advisory` | The disambiguation leg named a part that was not on the shortlist it was shown; its answer was discarded and the server's own ranking stands |
+> | `AI_UNAVAILABLE` | `advisory` | The disambiguation leg did not run or failed; the deterministic order stands |
+>
+> A row's diagnostics ride on its **rank-1 candidate** — that candidate is the row's face in the
+> grid, and copying one fact onto all five would repeat it without adding anything. `detail` is
+> capped at 300 characters, as is the suggestion-level `diagnostic` and each candidate's `reason`.
+>
+> Three further codes are `gate` severity and are formed inside the matcher when a row is refused —
+> `NEST_THICKNESS_UNREADABLE`, `ALLOY_UNDER_SPECIFIED`, `AMBIGUOUS_CANDIDATES`. Their **sentence** is
+> what surfaces, as the suggestion-level `diagnostic`, because a refusal is something a planner acts
+> on rather than something a client branches on.
+>
+> **Package-level counts.** Alongside the rows, both preview responses carry three integers so the
+> wizard can say what it did before the planner scrolls:
+>
+> | Field | Counts rows where |
+> |---|---|
+> | `suggested_row_count` | `auto_fill_part_id` is set — a part was pre-filled for the planner to confirm |
+> | `shortlist_row_count` | `status == "ambiguous"` **and** the row carries candidates — offered, nothing pre-filled |
+> | `short_stock_row_count` | the claimed candidate's `stock_state` is `short` or `none` |
+>
+> `unmatched` rows are the remainder (total − suggested − shortlist); they are counted by neither of
+> the first two on purpose, since "we found nothing" is not a shortlist. `short_stock_row_count` is
+> **orthogonal** to the other two — a perfectly matched row with no sheets in the rack is counted by
+> both `suggested_row_count` and `short_stock_row_count`, because on-hand annotates and warns but
+> never ranks and never refuses. A right-spec sheet with zero on hand is still returned, still ranked
+> first, and still pre-filled: refusing to propose it ships the nest untied, which is the failure
+> this feature exists to close.
+>
+> **What may be pre-filled.** `auto_fill_part_id` is set only when **all** of: `score ≥ 90`, the
+> runner-up is **≥ 8 points** back, the alloy agreement is exact or an
+> `ALLOY_EQUIVALENCE_SETS` equivalence, the nest actually stated a grade, and the part
+> `is_sheet_like`. Thickness is a **hard gate** (±0.002″), not a score component — no thickness
+> agreement, no candidate, ever. There is no string-similarity anywhere in the matcher; `A36` and
+> `A572` are one edit apart and two different steels. See
+> `docs/MATERIAL_CONSUMPTION_PLAN.md` → "Automatic sheet-stock matching" for the policy behind each
+> number.
+>
+> **AI disambiguation is a re-ranking leg only.** For an `ambiguous` row the server may ask Claude
+> (task `sheet_stock_disambiguation`, override `ANTHROPIC_SHEET_STOCK_MODEL`, gated by the
+> per-company `allow_ai_egress` kill switch like every other Anthropic call) to reorder the shortlist
+> the deterministic gates already produced. It cannot add a candidate, cannot change `status`, and
+> **cannot set `auto_fill_part_id`** — that field is assigned by the deterministic gate alone; the
+> resolver runs afterwards and never writes it. It re-orders and re-words, leaving `score` exactly as
+> the matcher computed it (the model did not re-derive it and must not appear to have), and stamps
+> `basis: "ai_disambiguated"` on the candidate it lifted so the grid can say who ranked it. A package
+> the matcher resolved cleanly costs **no LLM call at all**; ambiguous rows are grouped by descriptor
+> so one package is a handful of groups, and groups past the cap keep the server's ranking with an
+> `AI_UNAVAILABLE` note. A pick naming a part outside the shortlist it was shown, a pick with no
+> reason, a second answer for a group, egress off, no key, unreadable JSON, or any other failure all
+> leave the deterministic order untouched — annotated, never sunk: an advisory leg may not fail a
+> preview.
+>
+> **Provenance on import (`sheet_match_provenance`).** Both import endpoints
+> (`…/{id}/laser-nest-packages/import` and `…/laser-nest-packages/standalone/import`) accept a new
+> **optional** form field: a JSON object mapping each row's `source_file` to how that row's sheet
+> part came to be chosen, over a closed three-value vocabulary:
+>
+> | Value | Meaning |
+> |---|---|
+> | `auto` | The server suggested it and the planner **confirmed** it in the accept dialog |
+> | `planner` | The planner chose it themselves — per row or package-wide — whether or not a suggestion was on offer |
+> | `prefill` | Carried forward from the tie the nest already had, on re-import |
+>
+> **Committed ties only.** A row the planner left untied, and a suggestion they never confirmed, both
+> import *without* a tie — so there is no decision to describe and the client omits them rather than
+> sending a fourth value. An entirely untied package sends `{}`. Inventing an entry for a decision
+> nobody made is worse than omitting it in a row someone reads when asking why the wrong lot was
+> depleted. The client's richer internal `TieSource` (which also models the uncommitted states) maps
+> down to exactly these three on the way out — see `PROVENANCE_BY_TIE_SOURCE` in
+> `frontend/src/components/laser/LaserNestImportWizard.tsx`, kept in lock-step with
+> `_SHEET_MATCH_PROVENANCE_VALUES` in `work_orders.py`.
+>
+> It exists so "did the suggestions actually get used, and were they right?" is answerable later
+> from the audit trail — the first question anyone reviewing a wrong-lot depletion will ask. The map
+> is written to the WO-level audit row's `extra_data` (the `log_update` with reason
+> `laser_nest_package_import`, or the standalone import's `log_create`), and is **omitted entirely
+> when empty** so an import from a client that never heard of suggestions writes the exact
+> `extra_data` it wrote before.
+>
+> It is **observational, not input.** It never resolves anything and never creates a tie:
+> `material_part_id` comes from the validated `rows` and from nothing else. Because it is untrusted
+> client input that only ever lands in `extra_data`, a malformed or hostile value is **discarded, not
+> 400'd** — refusing an import over a telemetry field would punish the planner for a wizard bug.
+> Non-JSON, a non-object, keys or values of the wrong type, and any value outside the four above are
+> dropped; the map is bounded at `LASER_PDF_PACKAGE_MAX` (50) entries with keys truncated to 1000
+> chars, so it cannot be used to stuff an unbounded blob or free text into the append-only audit
+> table.
+>
+> **The single-nest manual modal deliberately does NOT get this.** `POST
+> /work-orders/{id}/laser-nests/manual` and its `LaserNestManualModal` return and render no
+> suggestion, take no provenance, and pre-fill nothing. One nest at a time carries none of the
+> per-row toil this feature exists to remove, and the same planner is already looking at the one
+> sheet they are describing — adding a proposal there would spend the safety budget of an
+> auto-fill to save a single search.
 >
 > **Manual nest edit (`PATCH /laser-nests/{id}`).** All-optional body (`cnc_number`, `nest_name`,
 > `planned_runs`, `material`, `thickness`, `sheet_size`). A `planned_runs` change **reverse-syncs**

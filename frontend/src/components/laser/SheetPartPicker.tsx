@@ -46,6 +46,20 @@ export interface SheetPartPickerProps {
    * deactivated part, failed read). Kept selectable so an existing tie survives.
    */
   extraOptions?: ComboBoxOption[];
+  /**
+   * The server's shortlist for this nest, rendered FIRST under its own heading.
+   *
+   * This is the whole "pick from 2, not 500" promise. Appended like
+   * `extraOptions` they would sort in behind the entire material catalog (and be
+   * skipped outright when the catalog already contains them), so the ranking the
+   * matcher and the AI leg computed would be inert — the planner would still be
+   * scrolling. Pinning them to the top is what makes an ambiguous row a
+   * two-option decision.
+   *
+   * Order is significant and preserved: `<ComboBox>` emits a group header when
+   * the group value changes, so the caller controls layout by array order.
+   */
+  priorityOptions?: ComboBoxOption[];
   /** Selected part id as a string; `''` is untied. */
   value: string;
   onChange: (value: string) => void;
@@ -84,6 +98,7 @@ export function SheetPartPicker({
   parts,
   onHandByPart,
   extraOptions = NO_EXTRA_OPTIONS,
+  priorityOptions = NO_EXTRA_OPTIONS,
   value,
   onChange,
   disabled = false,
@@ -111,10 +126,23 @@ export function SheetPartPicker({
       group,
     });
 
-    const visible: ComboBoxOption[] = sheetParts.map((part) => toOption(part, 'Sheet & plate'));
+    // The server's shortlist goes FIRST, under its own heading, and everything
+    // below dedupes against it — so a shortlisted part appears once, at the top,
+    // instead of once in catalog order where the ranking is invisible.
+    const visible: ComboBoxOption[] = priorityOptions.map((option) => ({
+      ...option,
+      group: option.group ?? 'Suggested for this nest',
+    }));
+    const pinned = new Set(visible.map((option) => option.value));
+
+    visible.push(
+      ...sheetParts.filter((part) => !pinned.has(String(part.id))).map((part) => toOption(part, 'Sheet & plate'))
+    );
     if (showAll) {
-      visible.push(...otherParts.map((part) => toOption(part, 'Other materials')));
-    } else if (selectedIsHidden) {
+      visible.push(
+        ...otherParts.filter((part) => !pinned.has(String(part.id))).map((part) => toOption(part, 'Other materials'))
+      );
+    } else if (selectedIsHidden && !pinned.has(value)) {
       const selectedPart = otherParts.find((part) => String(part.id) === value);
       if (selectedPart) visible.push(toOption(selectedPart, 'Other materials'));
     }
@@ -138,7 +166,7 @@ export function SheetPartPicker({
     const hiddenCount = showAll ? 0 : otherParts.filter((part) => !known.has(String(part.id))).length;
 
     return { options: visible, hiddenCount };
-  }, [parts, onHandByPart, extraOptions, showAll, value]);
+  }, [parts, onHandByPart, extraOptions, priorityOptions, showAll, value]);
 
   return (
     <ComboBox

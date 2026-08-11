@@ -94,6 +94,15 @@ class ParsedLaserNest:
     # auto-match from the AI-extracted ``material`` free text: a wrong auto-tie would
     # deplete the wrong heat lot into an as-built record, so the planner picks
     # explicitly or the nest ships untied.
+    #
+    # 2026-08-10: the PREVIEW now carries a server-computed ``sheet_suggestion``
+    # (``services/sheet_stock_matcher.py``), and the reasoning above is exactly why
+    # that is not the same thing. Nothing is matched by fuzzy string similarity, and
+    # nothing is derived on the client at all. A suggestion is pre-filled only after
+    # clearing an exact-thickness gate, a real alloy agreement, an 8-point ambiguity
+    # margin and a sheet-form test -- and it reaches THIS field only once the planner
+    # has confirmed it in the review grid. What lands here is still, always, a value
+    # a human committed to.
     material_part_id: Optional[int] = None
     qty_per_run: Optional[float] = None
 
