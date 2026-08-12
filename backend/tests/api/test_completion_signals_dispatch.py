@@ -302,6 +302,9 @@ def test_shop_floor_complete_operation_enqueues_signals_on_wo_complete(
     wo, _ = make_wo(db_session, status_=WorkOrderStatus.IN_PROGRESS, quantity_ordered=10)
     wc = make_work_center(db_session)
     op = make_op(db_session, wo, wc, sequence=10, status_=OperationStatus.IN_PROGRESS)
+    # The floor verb requires labor on the operation. Closed + zero pieces, so the
+    # enqueue-once behavior under test is unaffected.
+    make_closed_time_entry(db_session, user=admin, wo=wo, op=op, wc=wc, quantity_produced=0)
     db_session.commit()
 
     resp = client.post(

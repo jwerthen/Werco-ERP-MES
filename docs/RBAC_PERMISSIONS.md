@@ -72,7 +72,10 @@ tier, that tier stands — this rule is a floor, never a loosening.
 | Edit | ✓ | ✓ | ✓ | | | | |
 | Delete | ✓ | ✓ | | | | | |
 | Release | ✓ | ✓ | ✓ | | | | |
-| Complete | ✓ | ✓ | ✓ | ✓ | ✓ | | |
+| Start operation (office verb) | ✓ | ✓ | ✓ | | ✓ | | |
+| Start operation (shop-floor verb) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Complete (office verb) | ✓ | ✓ | ✓ | | ✓ | | |
+| Complete (shop-floor verb) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Approve labor (TimeEntry) | ✓ | ✓ | ✓ | | ✓ | | |
 | View material ties | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Tie / edit / untie material | ✓ | ✓ | ✓ | | | | |
@@ -94,8 +97,43 @@ tier, that tier stands — this rule is a floor, never a loosening.
 > the labor-cost gate) — that returns **403** even for an approver-role user. A cross-tenant id returns
 > **404**. Both actions are audited (`time_entry_approve` / `time_entry_unapprove`).
 
+> **Start operation — the office verb is now gated; the shop-floor verb is not** (`feat/work-center-op-pool`).
+> The **Start operation** row above is split across two endpoints exactly like the **Complete** row is:
+> - `POST /api/v1/work-orders/operations/{id}/start` — the **office** verb — is enforced in code to
+>   `require_role([ADMIN, MANAGER, SUPERVISOR, QUALITY])`. It previously had **no role gate at all**
+>   (bare `get_current_user`), so any authenticated tenant user — **Viewer and Shipping included** —
+>   could stamp `actual_start` / `started_by`, move the work order to IN_PROGRESS, and write rows onto
+>   the tamper-evident chain from a page they were only meant to read. That gap predates this work; it
+>   was masked while the office path ran a **stricter** predecessor gate than the shop floor and so
+>   refused nearly every operation such a user could reach. With same-work-center operations now
+>   promoting to READY together (`docs/API.md` → Work Orders → "READY promotion is pooled by work
+>   center"), the operations a Viewer can reach are exactly the ones the gate no longer refuses, so
+>   the hole became reachable. The gate **matches its office twin** `…/operations/{id}/complete` —
+>   being able to start an operation but not complete it, or the reverse, is incoherent — which is why
+>   QUALITY is included here for the same reason it is there.
+> - `PUT /api/v1/shop-floor/operations/{id}/start` — the **operator** verb — is deliberately
+>   **unchanged** and stays open to any authenticated user, per the note directly below. Operators
+>   start work there and on the kiosk, never through the office page, so **no operator lost a
+>   capability**; the Operator ✓ on the Start operation row is that verb.
+>
+> **The shop-floor rows above are ticked for every role on purpose — that is what the code does, not
+> an aspiration.** `PUT /shop-floor/operations/{id}/start` and `POST /shop-floor/operations/{id}/complete`
+> both take a bare `Depends(get_current_user)`, so a **Viewer** or **Shipping** user can clock in and
+> then complete an operation — booking it at target quantity, receiving finished goods, consuming tied
+> material and writing chain rows. The new labor-evidence gate on floor completion does **not** close
+> this: it is a record-quality check, not an authorization one, and the same caller satisfies it with
+> one extra clock-in request. This is **pre-existing** and was not introduced by the pooling work, but
+> pooling widens its reach (1 reachable operation on a batch WO becomes N). Ticking the cells honestly
+> is deliberate: a matrix that claimed a gate here would be worse than one that admits there isn't one.
+> Closing it means `require_role([...])` on those two verbs — an open owner decision, tracked, not done.
+>
+> No role gained anything. The office verb has **no UI caller today** — the app's only Start control
+> (`ShopFloorSimple`) calls the shop-floor verb — so the gate closes an API-reachable hole rather than
+> hiding a button; wire any future office Start control to `work_orders:edit` so the hidden control
+> and the refused call agree. See `docs/API.md` → Work Orders.
+
 > **Operator-qualification gate is record-only (Batch 11C / G5-B).** `POST /api/v1/shop-floor/clock-in`
-> and `POST /api/v1/shop-floor/operations/{id}/start` stay **operator-facing** — open to **any
+> and `PUT /api/v1/shop-floor/operations/{id}/start` stay **operator-facing** — open to **any
 > authenticated user** (`get_current_user`), no new role gate. The G5-B qualification gate (no active
 > `SkillMatrix` entry at level ≥ 2 for the work center, or a missing/expired required
 > `OperatorCertification`) **only records** a tamper-evident `audit_log` row

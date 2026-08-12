@@ -349,9 +349,19 @@ def import_open_work_orders(
                 op.quantity_complete = operation_target_quantity(op, work_order)
                 sync_work_order_quantity_complete(work_order, op, all_operations_complete=False)
 
-            # Release so the WO shows up in floor queues: same state the
-            # /release endpoint produces (released_by/released_at + first
-            # pending op promoted to READY).
+            # Release so the WO shows up in floor queues: released_by/released_at +
+            # the first pending op promoted to READY.
+            #
+            # NOT identical to the /release endpoint any more, and deliberately left
+            # alone here: that endpoint goes through
+            # ``work_order_state_service.release_first_ready_operation``, which promotes
+            # EVERY pending op whose predecessor gate passes under the clock-in rule
+            # (so all the ops sharing one work center, not just the lowest sequence).
+            # This inline rule promotes exactly one, so an imported open WO carrying
+            # several unordered items at one work center still shows only the first on
+            # the dispatch board until a lifecycle event runs the shared helper. Routing
+            # this path through that helper is a behavior change to a bulk loader and
+            # wants its own decision -- see the promotion-rule note in the PR.
             work_order.status = WorkOrderStatus.IN_PROGRESS if completed_ops else WorkOrderStatus.RELEASED
             work_order.released_by = current_user.id
             work_order.released_at = datetime.utcnow()

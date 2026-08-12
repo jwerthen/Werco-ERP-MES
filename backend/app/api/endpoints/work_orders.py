@@ -119,6 +119,10 @@ from app.services.material_consumption_service import (
     reopen_allocations_cancelled_by_delete,
 )
 from app.services.migration_import_service import import_open_work_orders
+from app.services.operation_action_gates import (
+    MSG_PREDECESSORS_INCOMPLETE,
+    operation_blocked_by_predecessors,
+)
 from app.services.operational_event_service import OperationalEventService
 from app.services.production_reduction_service import (
     approved_produced_total,
@@ -154,8 +158,6 @@ from app.services.work_order_state_service import (
     begin_operation_progress,
     finalize_operation_completion,
     find_parent_to_advance,
-    has_incomplete_predecessors,
-    is_laser_dispatch_work_order,
     operation_target_quantity,
     reconcile_work_orders_from_completion_evidence,
     release_first_ready_operation,
@@ -4642,10 +4644,39 @@ def start_operation(
     operation_id: int,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    # Office verb, and it was open to ANY authenticated tenant user -- VIEWER
+    # included. That was always wrong (starting an operation stamps actual_start /
+    # started_by, moves the work order to IN_PROGRESS and writes the tamper-evident
+    # chain), but it was masked while the predecessor gate refused nearly every
+    # operation a read-only user could reach. With same-work-center operations now
+    # promoting together, the ops a Viewer can reach are exactly the ones the gate
+    # no longer refuses, so the hole became reachable.
+    #
+    # The gate MATCHES its office twin ``complete_operation`` -- being able to start
+    # an operation but not complete it (or vice versa) is incoherent.
+    #
+    # Operators are unaffected and deliberately NOT added: they start work through
+    # PUT /shop-floor/operations/{id}/start and the kiosk, which stay operator-open
+    # (docs/RBAC_PERMISSIONS.md).
+    current_user: User = Depends(
+        require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR, UserRole.QUALITY])
+    ),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Start an operation"""
+    """Start an operation (office verb).
+
+    Stamps ``actual_start`` / ``started_by`` and lifts a RELEASED work order to
+    IN_PROGRESS. Gated to **Admin / Manager / Supervisor / Quality**, matching the
+    office twin ``POST /work-orders/operations/{id}/complete``; operators start work
+    through ``PUT /shop-floor/operations/{id}/start`` and the kiosk, which stay open to
+    any authenticated user.
+
+    Predecessor gate: refused **400** ("Previous operations must be completed first")
+    while a lower-sequence operation of the same work order is incomplete. Operations
+    sharing the candidate's **work center** do not block it -- the same rule clock-in
+    enforces -- except when such a predecessor is **ON_HOLD**, which blocks from any work
+    center. Laser dispatch-pool work orders are exempt from the gate entirely.
+    """
     operation = (
         db.query(WorkOrderOperation)
         .options(joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part))
@@ -4659,17 +4690,15 @@ def start_operation(
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")
 
-    # Laser-nest WOs are dispatch pools -- nests never predecessor-block each
-    # other, even across work centers (see is_laser_dispatch_work_order).
-    if not is_laser_dispatch_work_order(work_order) and has_incomplete_predecessors(
-        db,
-        operation.work_order_id,
-        operation.sequence,
-        operation.id,
-        operation.work_center_id,
-        allow_same_work_center=False,
-    ):
-        raise HTTPException(status_code=400, detail="Previous operations must be completed first")
+    # One predicate, shared with the shop floor, so this gate cannot drift again.
+    # It used to be an inline copy passing allow_same_work_center=False while the
+    # shop-floor twin passed True, which meant the office refused an operation the
+    # floor would happily start -- invisible while both surfaces only ever showed
+    # one READY operation, and immediately contradictory once same-work-center
+    # operations began promoting together. (The laser dispatch-pool exemption
+    # lives inside the predicate too.)
+    if operation_blocked_by_predecessors(db, operation):
+        raise HTTPException(status_code=400, detail=MSG_PREDECESSORS_INCOMPLETE)
 
     old_operation_status = operation.status.value if operation.status else None
     old_work_order_status = work_order.status.value if work_order.status else None
@@ -4788,6 +4817,16 @@ def complete_operation(
     and silently completes it (leaving its blocker open). The quality-gate/blocker
     enforcement that decides what may complete is Batch 4 (rank 7); here the two
     endpoints are only made consistent.
+
+    Predecessor gate: refused **400** ("Previous operations must be completed first")
+    while a lower-sequence operation of the same work order is incomplete. Operations
+    sharing the candidate's **work center** do not block it -- the same rule clock-in and
+    the shop-floor twin enforce -- except when such a predecessor is **ON_HOLD**, which
+    blocks from any work center. Laser dispatch-pool work orders are exempt entirely.
+
+    Unlike the shop-floor twin this verb does NOT require the operation to carry a labor
+    record: closing an operation nobody clocked is a supervisor/quality decision the
+    office path deliberately keeps.
     """
     # Reject non-finite quantities (NaN/Inf) up front: a plain float query param accepts
     # "nan"/"inf", and NaN slips past every `> 0`/`< 0` guard below (including the scrap-
@@ -4854,21 +4893,11 @@ def complete_operation(
             detail=f"cannot complete operation: work order is {work_order.status.value}",
         )
 
-    # Laser-nest WOs are dispatch pools -- nests never predecessor-block each
-    # other, even across work centers (see is_laser_dispatch_work_order).
-    if (
-        work_order
-        and not is_laser_dispatch_work_order(work_order)
-        and has_incomplete_predecessors(
-            db,
-            operation.work_order_id,
-            operation.sequence,
-            operation.id,
-            operation.work_center_id,
-            allow_same_work_center=False,
-        )
-    ):
-        raise HTTPException(status_code=400, detail="Previous operations must be completed first")
+    # Same shared predicate as the office start verb and the shop floor -- see the
+    # note there. No `work_order` guard: the 404 above already returned for a missing
+    # one, so a truthiness check here would be dead code implying a reachable case.
+    if operation_blocked_by_predecessors(db, operation):
+        raise HTTPException(status_code=400, detail=MSG_PREDECESSORS_INCOMPLETE)
 
     target_qty = operation_target_quantity(operation, work_order)
     try:

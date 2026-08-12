@@ -510,13 +510,19 @@ def test_perf3_no_warning_when_under_cap(
 
 def test_perf4_successor_not_released_while_earlier_op_incomplete(client: TestClient, db_session: Session):
     """Completing op1 of a 3-op WO where op2 stays the next-in-sequence releases op2
-    READY (its predecessor op1 is now COMPLETE) but NOT op3 (op2 still open)."""
+    READY (its predecessor op1 is now COMPLETE) but NOT op3 (op2 still open).
+
+    Each op sits at its OWN work center, which is what makes op2 block op3: promotion
+    runs the same predecessor gate clock-in does (``allow_same_work_center=True``), so
+    the block is the CROSS-work-center one. The same three ops on ONE work center are
+    mutually unordered and all promote -- see
+    ``test_perf4_same_work_center_ops_all_release_together``.
+    """
     admin = make_user(db_session)
-    wc = make_work_center(db_session)
     wo = make_wo(db_session, status_=WorkOrderStatus.RELEASED, quantity_ordered=5)
-    op1 = make_op(db_session, wo, wc, sequence=10, status_=OperationStatus.IN_PROGRESS)
-    op2 = make_op(db_session, wo, wc, sequence=20, status_=OperationStatus.PENDING)
-    op3 = make_op(db_session, wo, wc, sequence=30, status_=OperationStatus.PENDING)
+    op1 = make_op(db_session, wo, make_work_center(db_session), sequence=10, status_=OperationStatus.IN_PROGRESS)
+    op2 = make_op(db_session, wo, make_work_center(db_session), sequence=20, status_=OperationStatus.PENDING)
+    op3 = make_op(db_session, wo, make_work_center(db_session), sequence=30, status_=OperationStatus.PENDING)
     db_session.commit()
 
     resp = client.post(
@@ -581,21 +587,92 @@ def test_perf4_release_next_ready_unit_promotes_earliest_eligible(db_session: Se
 
 def test_perf4_release_next_ready_unit_blocks_on_incomplete_predecessor(db_session: Session):
     """release_next_ready_operation must NOT release a PENDING op while an earlier
-    non-COMPLETE op exists (the in-memory blocked test replicates
-    has_incomplete_predecessors exactly)."""
+    non-COMPLETE op at ANOTHER work center exists (the in-memory blocked test replicates
+    has_incomplete_predecessors with allow_same_work_center=True exactly)."""
+    from app.services.work_order_state_service import release_next_ready_operation
+
+    wo = make_wo(db_session, status_=WorkOrderStatus.IN_PROGRESS, quantity_ordered=5)
+    # Earlier, NOT complete, and at a DIFFERENT work center -- so it still blocks.
+    op1 = make_op(db_session, wo, make_work_center(db_session), sequence=10, status_=OperationStatus.IN_PROGRESS)
+    op2 = make_op(db_session, wo, make_work_center(db_session), sequence=20, status_=OperationStatus.PENDING)
+    db_session.commit()
+    db_session.refresh(wo)
+
+    released = release_next_ready_operation(db_session, wo, op1)
+    assert released is None, "no PENDING op may be released while op1 (earlier, other-WC, non-COMPLETE) is open"
+    db_session.refresh(op2)
+    assert op2.status == OperationStatus.PENDING
+
+
+def test_perf4_same_work_center_ops_all_release_together(db_session: Session):
+    """The counterpart: on ONE work center an open earlier op does NOT block, because
+    clock-in never blocked it either (``allow_same_work_center=True``).
+
+    Before this rule, op2 and op3 were legal to clock into yet stayed PENDING, and the
+    dispatch board / kiosk show READY only -- so the work was invisible.
+    """
     from app.services.work_order_state_service import release_next_ready_operation
 
     wc = make_work_center(db_session)
     wo = make_wo(db_session, status_=WorkOrderStatus.IN_PROGRESS, quantity_ordered=5)
     op1 = make_op(db_session, wo, wc, sequence=10, status_=OperationStatus.IN_PROGRESS)  # earlier, NOT complete
     op2 = make_op(db_session, wo, wc, sequence=20, status_=OperationStatus.PENDING)
+    op3 = make_op(db_session, wo, wc, sequence=30, status_=OperationStatus.PENDING)
     db_session.commit()
     db_session.refresh(wo)
 
     released = release_next_ready_operation(db_session, wo, op1)
-    assert released is None, "no PENDING op may be released while op1 (earlier, non-COMPLETE) is open"
+    assert released is not None and released.id == op2.id, "lowest-sequence promoted op is returned"
     db_session.refresh(op2)
-    assert op2.status == OperationStatus.PENDING
+    db_session.refresh(op3)
+    assert op2.status == OperationStatus.READY
+    assert op3.status == OperationStatus.READY, "same-WC siblings are mutually unordered -- all promote"
+
+
+def test_perf4_same_work_center_promotion_runs_no_per_candidate_query(db_session: Session, monkeypatch):
+    """PERF-4 holds under the new rule: the predecessor GATE issues no per-candidate query.
+
+    Promoting 5 ops must cost the same ONE ``work_order_operations`` SELECT as promoting
+    one -- the gate is evaluated over the single ``all_ops`` snapshot, in memory. This is
+    the property whose absence turned ``complete_work_order``'s force-complete loop
+    quadratic, and widening promotion from 1 op to N is exactly the change that could
+    reintroduce it.
+
+    ``emit_operation_ready_event`` is stubbed out because it is NOT part of that
+    property: ``OperationalEventService.emit`` runs its own per-event tenant-scoping
+    SELECT on the operation, one per emitted event, which the laser branch has always
+    paid too. Leaving it in would measure the event layer, not the gate.
+    """
+    from sqlalchemy import event
+
+    import app.services.completion_signal_service as signal_service
+    from app.services.work_order_state_service import release_next_ready_operation
+
+    monkeypatch.setattr(signal_service, "emit_operation_ready_event", lambda *a, **k: None)
+
+    wc = make_work_center(db_session)
+    wo = make_wo(db_session, status_=WorkOrderStatus.IN_PROGRESS, quantity_ordered=5)
+    op1 = make_op(db_session, wo, wc, sequence=10, status_=OperationStatus.COMPLETE, quantity_complete=5)
+    for seq in (20, 30, 40, 50, 60):
+        make_op(db_session, wo, wc, sequence=seq, status_=OperationStatus.PENDING)
+    db_session.commit()
+    db_session.refresh(wo)
+
+    statements: list[str] = []
+
+    def _record(conn, cursor, statement, parameters, context, executemany):
+        if "work_order_operations" in statement.lower() and statement.lstrip().lower().startswith("select"):
+            statements.append(statement)
+
+    bind = db_session.get_bind()
+    event.listen(bind, "before_cursor_execute", _record)
+    try:
+        promoted = release_next_ready_operation(db_session, wo, op1)
+    finally:
+        event.remove(bind, "before_cursor_execute", _record)
+
+    assert promoted is not None, "all five same-WC ops are startable"
+    assert len(statements) == 1, f"expected ONE operations SELECT, got {len(statements)}:\n" + "\n".join(statements)
 
 
 # ===========================================================================
@@ -723,6 +800,10 @@ def test_perf5_shop_floor_complete_operation_atomic_and_invalidates_cache(client
     wc = make_work_center(db_session)
     wo = make_wo(db_session, status_=WorkOrderStatus.RELEASED, quantity_ordered=5)
     op = make_op(db_session, wo, wc, sequence=10, status_=OperationStatus.READY)
+    # The floor verb requires labor on the operation (an operation nobody worked cannot be
+    # booked complete there). Closed + zero quantity, matching the kiosk's clock-out-then-
+    # complete order, so nothing this test measures moves.
+    make_closed_time_entry(db_session, user=admin, wo=wo, op=op, wc=wc, quantity_produced=0)
     db_session.commit()
 
     with patch.object(sf, "invalidate_work_centers_cache") as mock_inv:

@@ -10,6 +10,7 @@ tenant isolation, PHOTO/FILE evidence upload, and the tamper-evident audit rows.
 """
 
 import json
+from datetime import datetime, timedelta
 from io import BytesIO
 
 import pytest
@@ -24,6 +25,7 @@ from app.models.document import Document, DocumentType
 from app.models.part import Part
 from app.models.process_sheet import OperationStepRecord, ProcessSheet, ProcessSheetStep, WOOperationStep
 from app.models.routing import Routing, RoutingOperation
+from app.models.time_entry import TimeEntry, TimeEntryType
 from app.models.user import UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
@@ -192,6 +194,27 @@ def _capture_fixture(db: Session, *, serials: list = None, op_status=OperationSt
         db.commit()
     user = make_user(db, role=UserRole.MANAGER)
     headers = bearer(create_access_token(subject=user.id, company_id=1))
+    # The floor's completion verb refuses an operation with no labor recorded against it
+    # at all, and the completion-gating tests below drive that verb. A CLOSED, zero-piece
+    # entry is the shape the real kiosk leaves behind (it clocks out, then completes) and
+    # it moves nothing these tests measure: it adds no produced quantity, so the
+    # read-time reconcile still sees 0 against the target and the step gate stays the
+    # only thing deciding completion.
+    entry = TimeEntry(
+        user_id=user.id,
+        work_order_id=work_order.id,
+        operation_id=operation.id,
+        work_center_id=work_center.id,
+        entry_type=TimeEntryType.RUN,
+        clock_in=datetime.utcnow() - timedelta(hours=2),
+        clock_out=datetime.utcnow() - timedelta(hours=1),
+        duration_hours=1.0,
+        quantity_produced=0,
+        quantity_scrapped=0,
+        company_id=1,
+    )
+    db.add(entry)
+    db.commit()
     return work_order, operation, user, headers
 
 

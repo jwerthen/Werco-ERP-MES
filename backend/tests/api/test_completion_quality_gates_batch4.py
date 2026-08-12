@@ -292,6 +292,12 @@ def test_shop_floor_complete_with_inspection_incomplete_warns_not_blocks(client:
         requires_inspection=True,
         inspection_complete=False,
     )
+    # The floor verb refuses an operation with no labor recorded at all. Closed (the kiosk
+    # clocks out before completing) and zero-quantity, so the warn-not-block behavior
+    # under test is untouched.
+    entry = make_time_entry(db_session, user, wo, op)
+    entry.clock_out = datetime.utcnow()
+    entry.duration_hours = 1.0
     db_session.commit()
 
     resp = client.post(

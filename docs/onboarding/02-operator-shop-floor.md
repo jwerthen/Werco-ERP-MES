@@ -36,7 +36,7 @@ Some cells have a dedicated wall or machine-side touchscreen that runs a simpler
 3. While you're on a job, a banner stays pinned at the top with three big buttons: **REPORT PRODUCTION** (enter good and scrap on the keypad — any scrap makes you pick a reason from the grid, no skipping it), **COMPLETE** (closes your time and finishes the step), and **HOLD** (pick why the job is stopping — material missing, machine down, and so on). A smaller **CORRECT OVER-COUNT** button sits below them for fixing a miscount — see [Fixing an over-count](#fixing-an-over-count-you-entered-too-many).
 4. **It logs you out by itself** after about 4 minutes of no touching, with a countdown warning first — tap anywhere to stay on. Always scan in as yourself; never work under someone else's badge.
 
-If the screen shows a red **OFFLINE** banner, the kiosk lost its connection — what you've typed stays on screen, but nothing saves until it reconnects. If a button refuses with a message (an earlier step isn't done, the job is on hold), that's the same sequence protection described below — run the next job and tell your lead.
+If the screen shows a red **OFFLINE** banner, the kiosk lost its connection — what you've typed stays on screen, but nothing saves until it reconnects. If a button refuses with a message (an earlier step at another station isn't done, something on your machine is on hold), that's the same sequence protection described below — read the message, then run the next job and tell your lead.
 
 ---
 
@@ -80,11 +80,26 @@ If the list is long, narrow it down. The filters are right at the top of the scr
 
 If the **Check In** button is greyed out or shows **Waiting**, the job isn't ready for you yet. Common reasons:
 
-- **An earlier step isn't done.** Work flows step by step. If the operation before yours (often at another station) hasn't been completed, you can't check in. The button will say **Waiting** with a note that a previous work center must finish first.
-- **The job is on hold.** Someone paused it. See "Resuming held work" below.
+- **An earlier step at another station isn't done.** Work flows station to station. If an earlier
+  operation at a *different* work center hasn't been completed, you can't check in. The button will
+  say **Waiting** with a note that a previous work center must finish first. Earlier steps at **your
+  own** station are different — see the next point.
+- **Something at your own station is on hold.** Several items of one job can sit on your machine at
+  the same time, and normally you may run them in **any order** — they don't wait for each other.
+  But if **any one of them is put on hold**, you cannot **start** any of the others until that hold
+  is cleared. (If you were already clocked into one when the hold landed, you can still finish and
+  clock out of that one — the hold stops the next item, not the one on your machine.) That is
+  deliberate: a hold means somebody found a problem, and the shop shouldn't keep building past it.
+  So "I could check into this five minutes ago and now I can't" usually means a teammate or your lead
+  just held one of the other items on your machine.
+- **The job is on hold.** Someone paused this operation itself. See "Resuming held work" below.
 - **The job is blocked.** There may be a reported problem (missing material, machine down, quality hold) stopping it.
 
-What to do: pick the next job in the list and let your supervisor know the top job is stuck.
+What to do: pick the next job in the list and let your supervisor know the top job is stuck — but if
+the whole group at your station went grey at once, that's a hold, and it's your lead who clears it.
+
+*Laser nests are the exception to the hold rule:* a laser package's nests never block each other, so
+holding one nest leaves the others startable.
 
 ---
 
@@ -208,7 +223,8 @@ Before you leave, leave the floor clean for the next shift:
 
 | Symptom | What to do |
 | --- | --- |
-| **Check In won't work / shows "Waiting"** | An earlier step (often at another station) isn't done yet, or the job is on hold or blocked. Run the next job and tell your supervisor. |
+| **Check In won't work / shows "Waiting"** | An earlier step at **another** station isn't done yet, or the job is on hold or blocked. Earlier steps at *your own* station don't block you — unless one of them is **on hold**, which stops every item of that job on your machine until it's cleared. Run the next job and tell your supervisor; if the whole group greyed out at once, that's a hold and your lead clears it. |
+| **My completion says "Clock in to this operation before completing it"** | Nobody has ever clocked in to that operation, so it can't be booked as finished. Check in first (even briefly), then complete. Your own session doesn't have to still be open — any recorded time on the operation satisfies it. |
 | **My completion was rejected** | Make sure the quantity is a whole, non-negative number and isn't more than what's ordered. Try again and add a note. If it keeps failing, get your supervisor. |
 | **Correct over-count won't remove the parts** | You can only remove what *you* recorded on this operation (your current check-in plus your own earlier ones), and only before the step is finished. If it says to *ask a supervisor*, the operation is already complete — a supervisor fixes it in the office. If it says you can only remove a smaller number, that's all you personally counted that isn't already approved — approved labor and a teammate's count need a supervisor's **Correct count** on the work-order page. |
 | **The queue looks wrong or empty** | You probably have a filter on. Tap **All**, turn off **Due Today**, clear the **Search** box, and confirm the right station is selected. Tap **Refresh** if needed. |

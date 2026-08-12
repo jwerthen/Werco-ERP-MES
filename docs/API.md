@@ -210,8 +210,8 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 | POST | `/work-orders/{id}/duplicate` | **Duplicate a work order** — copy its *plan* (operations, laser nests, open material ties, re-snapshotted process-sheet steps) onto a new **DRAFT** WO. Body `{quantity_ordered, due_date}`; **201** returning an **envelope**, not a bare work order. See "Duplicating a work order" below | Admin / Manager / Supervisor |
 | POST | `/work-orders/{id}/operations` | Add an operation to a work order | Admin / Manager / Supervisor |
 | PUT | `/work-orders/operations/{id}` | Update an operation (body now also accepts `work_center_id` — move the operation to another work center; see note below). **409** if it sets `status` to COMPLETE on a not-yet-complete operation — completion goes through the completion endpoints (see "Terminal-state lock") | Admin / Manager / Supervisor |
-| POST | `/work-orders/operations/{id}/start` | Start an operation | Yes |
-| POST | `/work-orders/operations/{id}/complete` | Complete an operation (or record partial progress; 409 if the parent WO is terminal) | Yes |
+| POST | `/work-orders/operations/{id}/start` | Start an operation (**office** verb — operators start work through `PUT /shop-floor/operations/{id}/start` and the kiosk, which stay operator-open) | Admin / Manager / Supervisor / Quality |
+| POST | `/work-orders/operations/{id}/complete` | Complete an operation (or record partial progress; 409 if the parent WO is terminal). **Office** verb — the shop-floor twin is the operator path | Admin / Manager / Supervisor / Quality |
 | POST | `/work-orders/operations/{id}/reduce-production` | Supervisor/office over-count correction — walk back good-count across **any** operator's **unapproved** labor on the operation; **a COMPLETE operation is correctable here** (unlike the operator's twin), a terminal WO is not; no clock-in required (see note below) | Admin / Manager / Supervisor |
 | GET | `/work-orders/{id}/material-allocations` | List the work order's material ties (`include_inactive`, default `true`) | Yes |
 | POST | `/work-orders/{id}/material-allocations` | Tie a material part to the work order or one of its operations (**201**) | Admin / Manager / Supervisor |
@@ -251,6 +251,70 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > any other path (priority updates, kiosk status flips, soft delete) surfaces as **409 Conflict**
 > (`{"detail": "This record was modified by someone else. Refresh and try again."}`) via an app-wide
 > `StaleDataError` handler instead of silently losing the write.
+>
+> **READY promotion is pooled by work center.** Promotion no longer stops at the lowest-sequence
+> PENDING operation. Both release helpers — one at `POST /work-orders/{id}/release`, the other inside
+> the shared finalizer after each operation completion that leaves work remaining (so it also runs on
+> the shop-floor and reconcile-on-read completion paths) — promote **every** PENDING operation whose
+> predecessor gate passes, and that gate is the one clock-in has always enforced: a predecessor at the
+> **same work center** as the candidate does not block it.
+> - A conventional routing whose steps each sit at a **different** work center is **unchanged**. The
+>   same-work-center allowance never fires, at most one operation can pass, and one operation goes
+>   READY — byte-identical to the old lowest-sequence-only rule.
+> - A work order carrying several **unordered items at one work center** (a batch WO whose ~18
+>   press-brake items are one operation each on one machine) promotes **all** of them together. They
+>   were already legal to clock into — the floor's gate has always allowed same-work-center operations
+>   in any order — but only the lowest-sequence one ever reached READY, and the dispatch board and
+>   kiosk queue surface READY work only, so 17 of 18 were invisible. Aligning the two rules grants no
+>   new authority; it makes already-legal work visible.
+> - **Cross-work-center ordering is preserved.** A downstream operation at another work center stays
+>   PENDING until its predecessors complete, and a promoted operation is READY (not COMPLETE), so it
+>   keeps blocking its own successors exactly as before.
+>
+> This is **unconditional — every work order, no opt-in flag**, and it is primarily a *visibility*
+> change: promoting an operation does not authorize anything the floor's gate did not already allow.
+> Two authorization-shaped changes ride along with it and are documented separately below — the office
+> verbs, which were **stricter** than the floor and are relaxed to match it, and the **ON_HOLD**
+> carve-out, which is the one place this work makes a previously-accepted request **refused**.
+>
+> Two deliberate non-changes: the **laser** dispatch pool keeps its own, strictly fuller exemption
+> (see "Laser WOs are dispatch pools" under Laser Nests), and the bulk loader
+> `POST /work-orders/import` still promotes **exactly one** operation per imported WO — it carries its
+> own inline release rule and was deliberately left alone, so an imported open WO with several
+> same-work-center items shows only the first on the dispatch board until a lifecycle event runs the
+> shared helper.
+>
+> **An ON_HOLD predecessor blocks its own work center too.** The same-work-center allowance carries
+> one carve-out: a predecessor whose status is **ON_HOLD** blocks from **any** work center, its own
+> included. A hold is a quality or material stop, so while item 3 of a batch is held its siblings stop
+> being startable rather than staying on the dispatch board around the problem. Because the predicate
+> is shared, this **tightens clock-in as well** — `POST /shop-floor/clock-in`,
+> `/shop-floor/operations/{id}/start|complete`, the two office verbs, and the scanner resolver all
+> read it, and a hold that took the pool off the board while a badge scan could still start a sibling
+> would be no stop at all. **Exception:** on a **laser** WO a held nest still does not block its
+> siblings — the laser exemption short-circuits the whole predicate before this carve-out is reached.
+>
+> **The office predecessor gate now matches the shop floor.**
+> `POST /work-orders/operations/{id}/start` and `…/complete` each held an **inline copy** of the gate
+> passing `allow_same_work_center=False` while the shop-floor twins passed `True` — so the office
+> refused an operation the floor would happily start. Both office verbs now call the shared predicate
+> (`operation_action_gates.operation_blocked_by_predecessors`, which is what clock-in and the scanner
+> resolver already used), so the same-work-center exemption, the ON_HOLD carve-out, and the laser
+> dispatch-pool exemption now hold identically on **every** live gate: both office verbs,
+> `PUT /shop-floor/operations/{id}/start`, `POST /shop-floor/operations/{id}/complete`,
+> `POST /shop-floor/clock-in`, the queue's check-in-state read, and `POST /scanner/resolve-action`.
+> The refusal shape is unchanged: **400**
+> `{"detail": "Previous operations must be completed first"}`.
+>
+> **`POST /work-orders/operations/{id}/start` is now role-gated** to **Admin / Manager / Supervisor /
+> Quality**, matching its office twin `…/complete`. It previously carried **no** role gate at all
+> (`get_current_user`), so any authenticated tenant user — **Viewer included** — could stamp
+> `actual_start` / `started_by`, drive the work order to IN_PROGRESS, and write tamper-evident audit
+> rows. The gap predates this work but was masked while the stricter office gate refused nearly every
+> operation such a user could reach; with same-work-center operations promoting together, the reachable
+> operations are exactly the ones the gate no longer refuses. An Operator gets **403** here and is
+> unaffected in practice — the shop-floor `PUT /shop-floor/operations/{id}/start` and the kiosk stay
+> operator-open by design. See `docs/RBAC_PERMISSIONS.md` → Work Orders.
 >
 > **Completion contract (shared finalizer).** Operation completion rolls up into the work order
 > through one shared finalizer, so all completion paths behave identically. On the absolute
@@ -1295,8 +1359,18 @@ mixed**:
 > through one shared predicate (`is_laser_dispatch_work_order` in `work_order_state_service`), and
 > the release helpers promote **all** PENDING laser ops to READY (not just the lowest sequence) —
 > a pre-existing laser WO imported before whole-package-ready self-heals (its stranded PENDING
-> nests go READY) on its next release/lifecycle event. Non-laser WOs keep the classic
-> one-at-a-time READY promotion and predecessor gates unchanged.
+> nests go READY) on its next release/lifecycle event.
+>
+> **The laser exemption is strictly fuller than the work-center pooling that now applies to every
+> WO, and the two are not the same rule.** Non-laser WOs also promote every startable PENDING
+> operation now, but under the *predecessor* gate — operations sharing a work center do not block
+> each other, while cross-work-center ordering still holds, and an **ON_HOLD** predecessor blocks even
+> at its own work center (see "READY promotion is pooled by work center" and "An ON_HOLD predecessor
+> blocks its own work center too" under Work Orders). A laser WO drops predecessor gating
+> **entirely**: nests promote and start across different lasers, which the same-work-center allowance
+> would not cover, and — the difference worth knowing on the floor — **a held nest does not block its
+> siblings**, because `is_laser_dispatch_work_order` short-circuits the predicate before the ON_HOLD
+> carve-out is reached. On a non-laser pool, holding one item stops the rest.
 >
 > **Pool WO header progress is the SUM of per-nest progress.** On a `laser_cutting` WO the header
 > `quantity_complete` (sheets complete) is derived as the **sum over its nest operations of
@@ -2670,7 +2744,7 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 | GET | `/shop-floor/documents/{id}/inline` | Serve a kiosk-viewable document PDF inline — DRAWING-type or live-nest-referenced only, tenant-scoped, uniform **404** on any miss (see note below) | Yes |
 | POST | `/shop-floor/clock-in` | Clock in to operation | Yes |
 | POST | `/shop-floor/clock-out/{id}` | Clock out with production data | Yes |
-| POST | `/shop-floor/operations/{id}/start` | Start an operation | Yes |
+| PUT | `/shop-floor/operations/{id}/start` | Start an operation (**operator** verb — deliberately open to any authenticated user; the office twin `POST /work-orders/operations/{id}/start` is role-gated) | Yes |
 | POST | `/shop-floor/operations/{id}/production` | Add produced/scrapped quantity while staying clocked in | Yes |
 | POST | `/shop-floor/operations/{id}/reduce-production` | Correct (walk back) good-count an operator OVER-reported on their **own unapproved** labor (open clock-in first, then their own earlier unapproved sessions), **before** the operation/WO is complete — a miscount fix, **not** scrap (see note + schema below) | Yes |
 | POST | `/shop-floor/operations/{id}/complete` | Complete / report progress on an operation | Yes |
@@ -3262,6 +3336,30 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > capped at the target. Completing an **on-hold** operation is rejected with **409 Conflict**
 > (`{"detail": "Operation is on hold and cannot be completed"}`).
 >
+> **Shop-floor completion requires a labor record — 400.** `POST /shop-floor/operations/{id}/complete`
+> refuses an operation that carries **no `TimeEntry` at all** (tenant-scoped, existence only):
+> **400** `{"detail": "Clock in to this operation before completing it — no one has clocked in to it
+> yet."}`, raised after the quantity and predecessor checks and before any mutation. The verb is
+> absolute — it asserts the full target quantity and auto-starts a READY operation — so without this
+> one call books a finished operation with no labor behind it, and work-center pooling now offers a
+> batch work order N such operations where it offered one.
+>
+> **Any** entry satisfies the gate, **open or closed**, and it is deliberately **not** "the caller is
+> clocked in right now": the kiosk clocks out first and completes second (so the caller's entry is
+> already closed), and the crew station authorizes completion with whichever badge is scanned while it
+> auto-closes the *other* operators' open entries (so the signing badge often holds no entry of its
+> own). Both keep working; what is refused is an operation booked complete that nobody ever worked. A
+> clock-in with zero pieces counts. The scanner resolver reports the same blocker, so
+> `POST /scanner/resolve-action` and this endpoint agree.
+>
+> **The office twin `POST /work-orders/operations/{id}/complete` is deliberately NOT subject to this**
+> — a supervisor or quality user closing an operation from the desk, including cleanup of work that
+> was never clocked, is a decision the owner kept. The asymmetry is intentional and pinned by a test;
+> it is not an oversight to be "aligned" away. This gate is also distinct from the
+> `no_labor_recorded` **quality exception** below, which is warn-and-record at *work-order* completion
+> and is unchanged: that one still fires (200 + audit row) for an operation with zero labor that got
+> completed by some other path.
+>
 > **Reconcile-on-read is audited.** When a read endpoint (e.g. `/shop-floor/dashboard`, the operation
 > list, or a work-order detail) drives an operation or work order to `complete` from durable time-entry
 > evidence, that status change is now written to the tamper-evident audit trail (`GET /audit/`),
@@ -3304,7 +3402,7 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > "FAI required" flag in the data model).
 
 > **Operator-qualification gate is warn-and-record, not blocking (G5-B).** `POST /shop-floor/clock-in`
-> and `POST /shop-floor/operations/{id}/start` evaluate the operator against the operation's work
+> and `PUT /shop-floor/operations/{id}/start` evaluate the operator against the operation's work
 > center and **record** (never block) any unsatisfied qualification gate — the clock-in / start still
 > **succeeds** and is open to **any authenticated user** (these are operator-facing; the gate only
 > records). Each unsatisfied gate writes a tamper-evident `audit_log` row (action
@@ -4546,7 +4644,11 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 >   value-add RUN hours, and PCE (value-add ÷ lead time); summary adds median/avg lead time,
 >   Little's Law WIP/throughput, and per-work-center queue times (measured from `operation_ready`
 >   events where available, predecessor-end → start as fallback, with `from_ready_events` counting
->   the former).
+>   the former). **Queue time has a series break at 2026-08-11:** operations sharing a work center
+>   now all become READY at work-order release rather than one at a time, so for those operations the
+>   ready anchor means "released", not "the previous step finished", and measured queue time steps up
+>   without the shop's flow having changed. Windows spanning that date are not comparable — see
+>   [docs/LEAN_ROADMAP.md](LEAN_ROADMAP.md) → "Queue time — series break".
 > - **`/wip-aging`** — every open released WO with days since release, the current operation and days
 >   in it (since its `actual_start`, or since it became READY), and days to due (negative = past due).
 > - **`/fpy`** — quantity-weighted first-pass yield (`(complete − reworked − scrapped) ÷ attempted`)

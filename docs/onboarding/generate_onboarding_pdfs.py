@@ -471,7 +471,8 @@ def build_refusals_poster():
          "Say it like this: “Get a current gauge — don't retype the same code.”"),
         ("“Previous operations must be completed first”",
          "Sequence gating blocks clock-in while earlier operations at <b>other</b> work centers are still open. "
-         "Earlier operations at your own work center do not block you.",
+         "Earlier operations at your own work center do not block you — <b>unless one of them is ON HOLD</b>, "
+         "which stops the whole group at that machine until the hold is resolved.",
          "Say it like this: “The job isn't ready for you yet — check with your lead.”"),
         ("COMPLETE can be refused — clock-out never is",
          "Completing with required step records missing is refused with a list of exactly what is owed. But clocking "

@@ -105,9 +105,11 @@ from app.services.laser_nest_service import active_laser_nest, sync_laser_nest_f
 from app.services.material_tie_view import MaterialTieView, tie_views_for_operations
 from app.services.operation_action_gates import (
     CLOCK_IN_ALLOWED_STATUSES,
+    MSG_NO_LABOR_RECORDED,
     MSG_WRONG_WORK_CENTER,
     get_open_time_entry,
     operation_blocked_by_predecessors,
+    operation_has_labor_evidence,
 )
 from app.services.operational_event_service import OperationalEventService
 from app.services.operator_qualification_service import evaluate_and_record_operator_qualification
@@ -3753,6 +3755,18 @@ def complete_operation(
     with **409 Conflict** ("Operation is on hold and cannot be completed"),
     matching the office `/work-orders/operations/{id}/complete` twin -- so the
     completion path can no longer silently lift a quality / material hold.
+
+    Labor-evidence gate (floor only): an operation with **no TimeEntry at all** is
+    refused **400** ("Clock in to this operation before completing it -- no one has
+    clocked in to it yet."). ANY entry satisfies it, open or closed -- it is NOT
+    "the caller is clocked in right now", because the kiosk clocks out before
+    completing and the crew station's signing badge often holds no entry of its own.
+    The office twin deliberately carries NO such gate: closing an operation nobody
+    clocked is a supervisor / quality decision made from the desk.
+
+    Predecessor gate: operations sharing this one's **work center** do not block it,
+    except an **ON_HOLD** predecessor, which blocks from any work center. Laser
+    dispatch-pool WOs are exempt entirely.
     """
     operation = (
         db.query(WorkOrderOperation)
@@ -3843,6 +3857,22 @@ def complete_operation(
         allow_same_work_center=True,
     ):
         raise HTTPException(status_code=400, detail="Previous operations must be completed first")
+
+    # An operation nobody ever worked cannot be booked COMPLETE from the floor. This verb
+    # is ABSOLUTE (it asserts the full target quantity) and auto-starts a READY operation,
+    # so without this a single call books a finished operation with no labor behind it --
+    # and same-work-center promotion means a batch work order now offers N such
+    # operations where it offered one.
+    #
+    # ANY TimeEntry satisfies it, open or closed, which is what keeps the real floor flows
+    # working: the kiosk clocks out before completing (closed entry), and the crew station
+    # completes with a badge that may hold no entry while its crew's entries are still
+    # open. See ``operation_has_labor_evidence``. Same decision the scanner's
+    # ``complete_blockers`` reports, so the resolver and this handler agree.
+    #
+    # FLOOR ONLY -- the office twin has no such gate on purpose (desk cleanup).
+    if operation.id is not None and not operation_has_labor_evidence(db, operation.id, company_id):
+        raise HTTPException(status_code=400, detail=MSG_NO_LABOR_RECORDED)
 
     # A0.1 adoption-telemetry channel of THIS completing write (kiosk-token forcing +
     # import guard). Resolved before any mutation so a disallowed 'import' 422s without

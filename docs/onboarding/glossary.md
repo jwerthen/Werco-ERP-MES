@@ -19,7 +19,7 @@ Plain-language definitions for the terms you'll run into while using the Werco s
 | **MRP (material requirements planning)** | A calculation that looks at what you need to build versus what's on hand, finds shortages, and suggests purchase orders to cover them. |
 | **NCR (non-conformance report)** | A record raised when a part or material doesn't meet the requirement (wrong dimension, damage, defect). It documents the issue and how it was resolved. |
 | **OEE (overall equipment effectiveness)** | A score for how productive a machine or work center is, combining how much it's running, how fast, and how much good output it makes. |
-| **Operation** | A single step in making a part — for example cut, bend, weld, or inspect. A job is a sequence of operations done in order. |
+| **Operation** | A single step in making a part — for example cut, bend, weld, or inspect. A job moves through its work centers **in order**, but operations sitting at the *same* work center can be run in any order (they're a pool, not a queue) — unless one of them is on hold, which stops the rest. |
 | **Part revision** | The version of a part or drawing (Rev A, Rev B, and so on). When a part changes, a new revision is created so older records stay accurate. |
 | **Priority (P1–P10)** | The urgency ranking on a work order. **P1** is the most urgent; **P10** is the least. Higher-priority jobs rise to the top of the queue. |
 | **PO (purchase order)** | An official order sent to a supplier to buy materials, parts, or services. |

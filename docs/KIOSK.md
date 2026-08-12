@@ -175,9 +175,25 @@ entry on the floor); the crew station gets them off its queue payload instead (s
 text satisfies the server's scrap-requires-a-reason rule.
 
 **What operators cannot do.** No overrides: backend gating (operation sequence /
-predecessor not complete, on-hold, optimistic-lock 409s, qualification warnings) is
+predecessor not complete, on-hold, optimistic-lock 409s, qualification warnings,
+no-labor-recorded) is
 surfaced **verbatim** in the error toast and never suppressed or retried around. There is
 no resume-from-hold, inspection, or labor-approval verb on the kiosk.
+
+**Completing needs somebody to have clocked in.** `POST /shop-floor/operations/{id}/complete`
+refuses an operation carrying **no time entry at all** with **400** — *"Clock in to this
+operation before completing it — no one has clocked in to it yet."* Neither kiosk flow can
+trip this in normal use, and that is by design rather than luck: the gate asks whether the
+**operation** has any labor on it, open **or closed**, not whether the caller is clocked in
+right now. The single-operator COMPLETE clocks out first and completes second (its entry is
+closed by then), and the crew station's signing badge often holds no entry of its own while
+it auto-closes the crew's. What the gate stops is an operation booked complete at full
+quantity that nobody ever worked — reachable from the operations list when a job's items all
+sit READY together (see "Work-center pools at clock-in" below). The scanner resolver reports
+the same blocker, so a scanned traveler and the endpoint say the same thing. The office verb
+`POST /work-orders/operations/{id}/complete` is deliberately exempt — desk cleanup of
+never-clocked work stays a supervisor/quality call. See `docs/API.md` → Shop Floor →
+"Shop-floor completion requires a labor record".
 
 **Queue order and the RUN chip.** Both kiosk modes list the work center's queue in the order the
 server returns it — the kiosk never re-sorts client-side. That order is:
@@ -199,6 +215,27 @@ chip (`KioskRunOrderChip`, compact `size="sm"` — one implementation, do not fo
 sees one queue order everywhere: kiosk, crew station, desktop, and the manager's Dispatch Board.
 Full ordering rule and the endpoint contract: `docs/API.md` → Shop Floor → "Dispatch run order" /
 "Queue ordering" / "Desktop parity".
+
+**Work-center pools at clock-in.** Operations of one work order that share a **work center** no
+longer block each other for READY promotion, so they all appear on the queue together instead of one
+at a time — a batch work order carrying ~18 press-brake items as one operation each now shows all 18,
+where the queue previously showed one and hid the rest (the queue surfaces READY work only). Nothing
+about what an operator may clock into changed: the floor's gate has always allowed same-work-center
+operations in any order, so this makes already-legal work visible rather than granting anything.
+Operations at a **different, downstream** work center still wait for their predecessors as before.
+
+One consequence worth knowing on the floor: **holding one item stops its siblings being started.**
+An **ON_HOLD** operation blocks from any work center, its own included, so while item 3 of a batch is
+held the other 17 cannot be *started* — a quality or material stop is meant to stop the shop
+building past the problem, not leave the pool running around it. Resuming the held operation puts
+them back. This is the one place a non-laser pool and a laser pool differ (see the next paragraph):
+a held **nest** does *not* block its siblings.
+
+The hold gates **starting**, not **finishing**. An operator already clocked in when the hold lands
+can still clock out, and a clock-out that reaches the target quantity completes the operation and
+consumes its tied material — `POST /shop-floor/clock-out/{id}` carries no predecessor or ON_HOLD
+check. So a hold stops the *next* item, not the one on the machine. Don't read the containment as
+stronger than that when a problem is found mid-run.
 
 **Laser nests at clock-in.** A laser-cutting WO is a **dispatch pool**: every nest operation is
 created READY, so all of a package's nests appear on their work center's queue at once, and

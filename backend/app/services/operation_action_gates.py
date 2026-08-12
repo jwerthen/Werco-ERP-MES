@@ -47,6 +47,12 @@ MSG_ALREADY_COMPLETE = "Operation is already complete"
 MSG_ON_HOLD_CANNOT_COMPLETE = "Operation is on hold and cannot be completed"
 MSG_CANNOT_HOLD_COMPLETE = "Cannot put completed operation on hold"
 MSG_NOT_ON_HOLD = "Operation is not on hold"
+# Deliberately NOT MSG_MUST_BE_CLOCKED_IN, which means something else: that verb needs
+# the CALLER clocked in right now. This one fires only when NOBODY has ever clocked in
+# to the operation, and the flow that hits it most is a screen where the operator just
+# clocked out -- telling them "you must be clocked in" there would send them looking for
+# a state they correctly left. Worded as the action to take, not the row that is missing.
+MSG_NO_LABOR_RECORDED = "Clock in to this operation before completing it — no one has clocked in to it yet."
 
 
 def get_open_time_entry(db: Session, user_id: int, operation_id: int) -> Optional[TimeEntry]:
@@ -67,6 +73,39 @@ def get_open_time_entry(db: Session, user_id: int, operation_id: int) -> Optiona
             )
         )
         .first()
+    )
+
+
+def operation_has_labor_evidence(db: Session, operation_id: int, company_id: int) -> bool:
+    """True when ANY labor has been recorded against this operation -- open or closed.
+
+    The floor's completion verb refuses an operation with no ``TimeEntry`` at all, which
+    is the one thing it can check without breaking how the floor actually works. It is
+    deliberately NOT "the caller is clocked in right now":
+
+    * the ``/kiosk`` finish-job button clocks the operator OUT first (quantities and the
+      scrap reason land on the TimeEntry) and completes second, so at the moment of the
+      call the caller's entry is CLOSED -- an open-entry check would refuse every kiosk
+      completion;
+    * the crew station authorizes completion with whichever badge is scanned, and the
+      endpoint's job is to auto-close the OTHER operators' open entries -- so the
+      completing badge often holds no entry of its own.
+
+    Both keep working here, because both leave labor on the operation. What it refuses is
+    an operation booked COMPLETE at full quantity that nobody ever worked.
+
+    Tenant-scoped on ``company_id``: another tenant's TimeEntry must never satisfy a
+    completion gate. Existence only -- no aggregate, no quantity threshold; a clock-in
+    with zero pieces still counts as someone having worked it.
+    """
+    return (
+        db.query(TimeEntry.id)
+        .filter(
+            TimeEntry.operation_id == operation_id,
+            TimeEntry.company_id == company_id,
+        )
+        .first()
+        is not None
     )
 
 
@@ -95,6 +134,13 @@ def operation_blocked_by_predecessors(db: Session, operation: WorkOrderOperation
     helping the moment a package's nests are spread across two lasers. The
     ``operation.work_order`` access is the relationship (already loaded at most
     call sites; otherwise one cheap lazy load).
+
+    ``allow_same_work_center=True`` is what lets operations on ONE machine be worked in
+    any order, and it is now also the READY-promotion rule, so the two cannot drift. It
+    carries one carve-out that matters here: an **ON_HOLD** predecessor still blocks, its
+    own work center included (see ``has_incomplete_predecessors``). A held operation is a
+    quality/material stop, and it would be no stop at all if it took the pool off the
+    dispatch board while a badge scan could still start the siblings around it.
     """
     if is_laser_dispatch_work_order(operation.work_order):
         return False
@@ -144,11 +190,17 @@ def report_production_blockers(db: Session, operation: WorkOrderOperation, user_
     return reasons
 
 
-def complete_blockers(db: Session, operation: WorkOrderOperation, work_order: WorkOrder) -> List[str]:
+def complete_blockers(db: Session, operation: WorkOrderOperation, work_order: WorkOrder, company_id: int) -> List[str]:
     """Reasons POST /shop-floor/operations/{id}/complete would refuse right now.
 
     State gates only -- quantity validation is input-shaped and cannot be
     evaluated without a requested quantity.
+
+    SCOPE: this mirrors the FLOOR verb only. The office twin
+    (``POST /work-orders/operations/{id}/complete``) deliberately does NOT carry the
+    labor-evidence gate below -- a supervisor or quality user closing an operation from
+    the desk, including cleanup of work that was never clocked, is a decision the owner
+    kept. Do not "align" the two; the asymmetry is the point and a test pins it.
     """
     reasons: List[str] = []
     if work_order.status in TERMINAL_WO_STATUSES:
@@ -164,6 +216,8 @@ def complete_blockers(db: Session, operation: WorkOrderOperation, work_order: Wo
             reasons.append(f"Cannot complete operation with status: {status_value}")
     if operation_blocked_by_predecessors(db, operation):
         reasons.append(MSG_PREDECESSORS_INCOMPLETE)
+    if operation.id is not None and not operation_has_labor_evidence(db, operation.id, company_id):
+        reasons.append(MSG_NO_LABOR_RECORDED)
     return reasons
 
 

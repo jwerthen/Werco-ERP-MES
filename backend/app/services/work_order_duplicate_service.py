@@ -725,9 +725,10 @@ def _copy_operations(
 
     PENDING is right even for a laser dispatch pool whose source nest ops were born
     READY: the duplicate is DRAFT, and ``release_first_ready_operation`` promotes EVERY
-    pending nest op to READY at release for a laser work order (only the lowest-sequence
-    one for a routed job). Birthing them READY here would put un-released work on the
-    kiosk queue.
+    pending nest op to READY at release for a laser work order (for a routed job it
+    promotes every pending op whose predecessor gate passes under the clock-in rule —
+    all the ops sharing one work center, but not one at a downstream work center).
+    Birthing them READY here would put un-released work on the kiosk queue.
     """
     source_operations = (
         tenant_query(db, WorkOrderOperation, company_id)
