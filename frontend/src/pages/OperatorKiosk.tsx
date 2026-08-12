@@ -7,7 +7,7 @@ import {
 } from '@heroicons/react/24/outline';
 import api from '../services/api';
 import { useAuth } from '../context/AuthContext';
-import { ActiveJob, KioskQueueWorkCenter, LaserNestInfo, MyActiveJobResponse } from '../types';
+import { ActiveJob, KioskQueueWorkCenter, LaserNestInfo, MyActiveJobResponse, ResumeOpenBlocker } from '../types';
 import {
   getKioskIdleLogoutSeconds,
   getKioskWorkCenterCode,
@@ -20,6 +20,9 @@ import { useWakeLock } from '../hooks/useWakeLock';
 import KioskBadgeLogin from '../components/kiosk/KioskBadgeLogin';
 import KioskNcrFiledScreen from '../components/kiosk/KioskNcrFiledScreen';
 import KioskQueueCard from '../components/kiosk/KioskQueueCard';
+import KioskHeldCard from '../components/kiosk/KioskHeldCard';
+import KioskResumeConfirmModal from '../components/kiosk/KioskResumeConfirmModal';
+import KioskBlockerStillOpenScreen from '../components/kiosk/KioskBlockerStillOpenScreen';
 import KioskCorrectionScreen from '../components/kiosk/KioskCorrectionScreen';
 import KioskReportModal from '../components/kiosk/KioskReportModal';
 import KioskHoldModal from '../components/kiosk/KioskHoldModal';
@@ -35,6 +38,7 @@ import {
   formatStepsChip,
   kioskErrorMessage,
 } from '../components/kiosk/kioskConstants';
+import { stillOpenBlockers } from '../components/kiosk/heldOperations';
 import {
   clockedOutStepsMessage,
   extractClockOutStepsIncomplete,
@@ -55,6 +59,12 @@ type KioskView =
   | { name: 'correct'; job: ActiveJob }
   | { name: 'complete'; job: ActiveJob }
   | { name: 'hold'; job: ActiveJob }
+  // Lifting a hold from the queue. Server-gated (400 when the op is not held)
+  // ⇒ non-optimistic: the confirm stays up until the server answers.
+  | { name: 'resumeConfirm'; item: KioskQueueItem }
+  // The resume landed but left blockers OPEN. Its own view, like ncrFiled, so
+  // the 15s queue poll can't yank the warning off the screen mid-read.
+  | { name: 'blockerStillOpen'; blockers: ResumeOpenBlocker[]; jobLabel: string }
   | { name: 'steps'; operationId: number; jobLabel: string; missing?: MissingStepInfo[] | null }
   // Full-screen drawing / nest viewer (Foundry 1h).
   | { name: 'viewer'; operationId: number; initialTab: KioskDocTab }
@@ -157,6 +167,11 @@ export default function OperatorKiosk() {
   const idleLogoutSeconds = getKioskIdleLogoutSeconds(location.search);
 
   const [queue, setQueue] = useState<KioskQueueItem[]>([]);
+  // Held work arrives on its OWN list — `queue` never contains an ON_HOLD row.
+  // The list boundary is the safety property, so these stay separate in state
+  // too: nothing that renders a startable job card can reach them.
+  const [held, setHeld] = useState<KioskQueueItem[]>([]);
+  const [heldTruncated, setHeldTruncated] = useState(false);
   const [activeJob, setActiveJob] = useState<ActiveJob | null>(null);
   const [workCenter, setWorkCenter] = useState<KioskQueueWorkCenter | null>(null);
   const [workCenterName, setWorkCenterName] = useState<string | null>(null);
@@ -203,6 +218,8 @@ export default function OperatorKiosk() {
         api.getMyActiveJob(),
       ]);
       setQueue(queueRes.queue || []);
+      setHeld(queueRes.held || []);
+      setHeldTruncated(Boolean(queueRes.held_truncated));
       if (queueRes.work_center) setWorkCenter(queueRes.work_center);
       const jobs: ActiveJob[] = activeRes.active_jobs || (activeRes.active_job ? [activeRes.active_job] : []);
       setActiveJob(jobs[0] || null);
@@ -255,6 +272,8 @@ export default function OperatorKiosk() {
     logout();
     setView({ name: 'queue' });
     setQueue([]);
+    setHeld([]);
+    setHeldTruncated(false);
     setActiveJob(null);
     setSessionNcr(null);
   }, [logout]);
@@ -273,6 +292,8 @@ export default function OperatorKiosk() {
     if (isAuthenticated) return;
     setView({ name: 'queue' });
     setQueue([]);
+    setHeld([]);
+    setHeldTruncated(false);
     setActiveJob(null);
     setSessionNcr(null);
     setCorrectError(null);
@@ -520,6 +541,44 @@ export default function OperatorKiosk() {
     [refresh, showToast]
   );
 
+  /**
+   * RESUME — lift a hold from the queue.
+   *
+   * Server-gated (400 "Operation is not on hold" when a supervisor beat us to
+   * it), so it is NON-optimistic: nothing moves in the UI until the server
+   * answers, and a refusal renders the detail verbatim and LEAVES the confirm
+   * up so the operator can read it against the job they picked.
+   *
+   * On success the still-open blockers get their own screen — resuming does not
+   * resolve them, and a toast that ages out in 3s would let a live quality stop
+   * read as cleared.
+   */
+  const handleResume = useCallback(
+    async (item: KioskQueueItem) => {
+      setBusy(true);
+      try {
+        const result = await api.resumeOperation(item.operation_id);
+        const open = stillOpenBlockers(result);
+        const label = `${item.work_order_number} · Op ${item.operation_number ?? '—'} ${
+          item.operation_name || ''
+        }`.trim();
+        if (open.length > 0) {
+          setView({ name: 'blockerStillOpen', blockers: open, jobLabel: label });
+        } else {
+          showToast('success', `${item.work_order_number} resumed`);
+          setView({ name: 'queue' });
+        }
+        await refresh();
+      } catch (err) {
+        // Verbatim, and the confirm stays open — see the non-optimistic rule.
+        showToast('error', kioskErrorMessage(err, 'Could not resume. Try again.'));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [refresh, showToast]
+  );
+
   // --- Station identity guards ----------------------------------------------
   const stationLabel = useMemo(
     () => workCenterName || workCenterCode || (workCenterId != null ? `Work center #${workCenterId}` : 'Station'),
@@ -533,7 +592,8 @@ export default function OperatorKiosk() {
   const activeQueueItem =
     activeJob?.operation_id != null ? queue.find((q) => q.operation_id === activeJob.operation_id) : undefined;
 
-  // Next queued (non-active) job on this machine, in server (run) order.
+  // Next queued (non-active) job on this machine, in server (run) order. Held
+  // work cannot appear here: the server keeps it off `queue` entirely.
   const nextQueueItem = useMemo(
     () => queue.find((q) => q.operation_id !== activeJob?.operation_id) ?? null,
     [queue, activeJob?.operation_id]
@@ -570,7 +630,13 @@ export default function OperatorKiosk() {
     return <KioskBadgeLogin stationLabel={workCenterCode || stationLabel} onLogin={loginWithEmployeeId} />;
   }
 
-  const overlayOpen = view.name === 'production' || view.name === 'complete' || view.name === 'hold';
+  const overlayOpen =
+    view.name === 'production' ||
+    view.name === 'complete' ||
+    view.name === 'hold' ||
+    // The queue must stay rendered behind the resume confirm: the operator is
+    // checking the overlay against the held card they just tapped.
+    view.name === 'resumeConfirm';
   const showChrome = view.name !== 'viewer';
 
   // --- Authenticated kiosk ----------------------------------------------------
@@ -1022,7 +1088,10 @@ export default function OperatorKiosk() {
               <section aria-label="Work queue" className="flex min-w-0 flex-1 flex-col gap-2.5">
                 <div className="flex items-center gap-2.5 px-1">
                   <h2 className="font-mono text-[11px] font-bold uppercase tracking-[0.18em] text-fd-mute">
-                    My queue <span className="font-normal text-fd-faint">· {queue.length} job{queue.length === 1 ? '' : 's'}</span>
+                    My queue{' '}
+                    <span className="font-normal text-fd-faint">
+                      · {queue.length} job{queue.length === 1 ? '' : 's'}
+                    </span>
                   </h2>
                   <div className="flex-1" />
                   <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-fd-faint">
@@ -1049,6 +1118,46 @@ export default function OperatorKiosk() {
                         onOpenPdf={(it) =>
                           setView({ name: 'viewer', operationId: it.operation_id, initialTab: 'nest' })
                         }
+                      />
+                    ))}
+                  </div>
+                )}
+
+                {/* ON HOLD — visible but NOT startable. A held operation used to
+                    disappear from every kiosk screen, so an accidental hold
+                    looked like the job was gone and only a desktop could undo
+                    it. Each card carries why it stopped and a Resume verb. */}
+                {initialLoadDone && held.length > 0 && (
+                  <div data-testid="kiosk-held-section" className="mt-4 space-y-2.5">
+                    <div className="flex items-center gap-2.5 px-1">
+                      <h3 className="font-mono text-[11px] font-bold uppercase tracking-[0.18em] text-fd-amber">
+                        On hold{' '}
+                        <span className="font-normal text-fd-amber/70">
+                          · {held.length} job{held.length === 1 ? '' : 's'}
+                        </span>
+                      </h3>
+                      <div className="flex-1" />
+                      <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-fd-faint">
+                        Resume before starting
+                      </span>
+                    </div>
+                    {/* The server caps the held list; say so rather than showing
+                        a silent subset. */}
+                    {heldTruncated && (
+                      <p
+                        data-testid="kiosk-held-truncated"
+                        className="rounded-[3px] border border-fd-line bg-fd-sunken px-2.5 py-2 font-mono text-[11px] text-fd-mute"
+                      >
+                        Showing the most recent holds only — more are on hold at this station.
+                      </p>
+                    )}
+                    {held.map((item) => (
+                      <KioskHeldCard
+                        key={item.operation_id}
+                        item={item}
+                        disabled={mutationsBlocked}
+                        offlineHintId={!online ? OFFLINE_HINT_ID : undefined}
+                        onResume={(it) => setView({ name: 'resumeConfirm', item: it })}
                       />
                     ))}
                   </div>
@@ -1182,6 +1291,17 @@ export default function OperatorKiosk() {
               />
             </div>
           )}
+
+          {view.name === 'blockerStillOpen' && (
+            <div className="px-4 py-5">
+              <KioskBlockerStillOpenScreen
+                blockers={view.blockers}
+                jobLabel={view.jobLabel}
+                doneLabel="Back to queue"
+                onDone={() => setView({ name: 'queue' })}
+              />
+            </div>
+          )}
         </main>
       )}
 
@@ -1215,6 +1335,17 @@ export default function OperatorKiosk() {
           offlineHintId={OFFLINE_HINT_ID}
           onCancel={() => setView({ name: 'queue' })}
           onConfirm={(category, note) => void handleHold(view.job, category, note)}
+        />
+      )}
+
+      {view.name === 'resumeConfirm' && (
+        <KioskResumeConfirmModal
+          item={view.item}
+          busy={busy}
+          online={online}
+          offlineHintId={OFFLINE_HINT_ID}
+          onCancel={() => setView({ name: 'queue' })}
+          onConfirm={() => void handleResume(view.item)}
         />
       )}
 

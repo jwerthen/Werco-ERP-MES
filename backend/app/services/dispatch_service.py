@@ -42,6 +42,7 @@ from sqlalchemy import and_, case, select, update
 from sqlalchemy.orm import Query, Session, joinedload
 from sqlalchemy.orm.exc import StaleDataError
 
+from app.models.laser_nest import LaserNest
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation
 from app.schemas.dispatch import DispatchBoardColumn, DispatchMaterialTie, DispatchNestInfo, DispatchQueueRow
@@ -53,6 +54,31 @@ from app.services.work_order_state_service import TERMINAL_WO_STATUSES, operatio
 # could pick up right now. PENDING (predecessors outstanding) and COMPLETE /
 # ON_HOLD are deliberately excluded.
 QUEUE_OPERATION_STATUSES = (OperationStatus.READY, OperationStatus.IN_PROGRESS)
+
+# The HELD set, and it is NOT the queue set. Held work is deliberately absent
+# from QUEUE_OPERATION_STATUSES above and must stay absent: a hold means stop,
+# so an ON_HOLD operation is not capacity, is not ranked by ``run_order``, never
+# enters :func:`display_positions`, and never counts toward the wallboard's
+# queued_count. The two tuples must never be concatenated or widened into each
+# other -- if you are here to "just add ON_HOLD to the queue", that is the
+# change this comment exists to refuse.
+#
+# What held work IS: something an operator has to be able to SEE. A hold placed
+# by accident used to make the operation vanish from every shop-floor screen,
+# recoverable only from a desk (``ShopFloorSimple`` is the app's only caller of
+# resume), so the kiosk had a one-way door on its own terminal.
+# :func:`held_operations` is the bounded, read-only feed that closes it; its one
+# consumer is the ``held`` list on ``GET /shop-floor/work-center-queue/{id}``.
+HELD_OPERATION_STATUSES = (OperationStatus.ON_HOLD,)
+
+# Upper bound on the held list for one work-center-queue read. The kiosk polls
+# that read every 10-15s per station, shop-wide, so the held feed has to be
+# bounded like everything else on it. Real queues hold 0-2 operations at a time;
+# the cap exists so a pathological tenant cannot turn a poll into an unbounded
+# scan, not to hide routine work. Most-recently-held first, so the job an
+# operator just lost is always the first row -- the cap can only ever drop the
+# oldest holds, never the one being looked for.
+MAX_HELD_OPERATIONS = 25
 
 # Upper bound on a single run-order payload, so a runaway client cannot submit
 # an unbounded list. Far above any real work center's live queue depth.
@@ -150,6 +176,102 @@ def queued_operations(
 ) -> List[WorkOrderOperation]:
     """Materialize :func:`queued_operations_query` (already in queue order)."""
     return queued_operations_query(db, company_id, work_center_ids=work_center_ids, load_options=load_options).all()
+
+
+def held_operations_query(
+    db: Session,
+    company_id: int,
+    *,
+    work_center_ids: Optional[Sequence[int]] = None,
+    load_options: Sequence = (),
+) -> Query:
+    """ON_HOLD operations at one or more work centers -- the SEE-IT feed, not the queue.
+
+    Same tenancy and same live-work-order filters as
+    :func:`queued_operations_query` (company from the joined ``WorkOrder``, never
+    client input; parent WO not terminal and not soft-deleted), and one
+    deliberate difference: it selects ``HELD_OPERATION_STATUSES`` instead of
+    ``QUEUE_OPERATION_STATUSES``. Nothing else in this module may call it. It
+    must never feed the dispatch board, the run-order rewrite,
+    :func:`display_positions`, capacity, or the wallboard -- held work is not
+    queued work, and the whole point of surfacing it is that it is STOPPED.
+
+    THE CANCELLED-NEST CARVE-OUT. ``ON_HOLD`` is overloaded:
+    ``laser_nest_service.soft_delete_laser_nest`` uses it as the tombstone for a
+    CANCELLED nest, because ``OperationStatus`` has no operation-level CANCELLED
+    and the hold status is what drops the row off the queue. Those operations are
+    not "held work an operator should resume" -- they are deleted work, and
+    offering a Resume button on one would let the floor resurrect a cancelled
+    nest to READY. So an operation carrying a SOFT-DELETED laser nest is excluded
+    here (correlated NOT EXISTS, tenant-scoped like everything else). A live nest
+    on a genuinely held operation is untouched and still surfaces.
+
+    Sorted most-recently-updated first so the operation an operator just held is
+    the first row. ``updated_at`` is nullable, and ``ORDER BY col DESC`` alone is
+    not deterministic across dialects for NULLs (Postgres sorts them first on
+    DESC, SQLite last), so the sort leads with an explicit ``IS NULL`` boolean
+    key -- the same portability trick :func:`queue_order_by` uses.
+    """
+    query = db.query(WorkOrderOperation)
+    if load_options:
+        query = query.options(*load_options)
+    # A cancelled (soft-deleted) nest's backing operation is a tombstone, not a
+    # hold -- see the docstring. Correlated against the outer operation row.
+    cancelled_nest = (
+        select(LaserNest.id)
+        .where(
+            LaserNest.work_order_operation_id == WorkOrderOperation.id,
+            LaserNest.company_id == company_id,
+            LaserNest.is_deleted == True,  # noqa: E712
+        )
+        .exists()
+    )
+    # Onclause pinned for the same reason as queued_operations_query: two FK
+    # paths exist between the two tables since migration 080.
+    query = query.join(WorkOrder, WorkOrderOperation.work_order_id == WorkOrder.id).filter(
+        and_(
+            WorkOrder.company_id == company_id,
+            WorkOrder.is_deleted == False,  # noqa: E712
+            WorkOrder.status.not_in(TERMINAL_WO_STATUSES),
+            WorkOrderOperation.status.in_(HELD_OPERATION_STATUSES),
+            ~cancelled_nest,
+        )
+    )
+    if work_center_ids is not None:
+        query = query.filter(WorkOrderOperation.work_center_id.in_(list(work_center_ids)))
+    return query.order_by(
+        WorkOrderOperation.updated_at.is_(None).asc(),
+        WorkOrderOperation.updated_at.desc(),
+        WorkOrderOperation.id.desc(),
+    )
+
+
+def held_operations(
+    db: Session,
+    company_id: int,
+    work_center_ids: Optional[Sequence[int]] = None,
+    *,
+    load_options: Sequence = (),
+    limit: Optional[int] = None,
+) -> Tuple[List[WorkOrderOperation], bool]:
+    """Materialize :func:`held_operations_query`, capped. Returns ``(rows, truncated)``.
+
+    Fetches ``limit + 1`` rows so truncation is a fact rather than a guess: the
+    caller can tell the operator "showing the 25 most recent holds" instead of
+    silently dropping the 26th.
+
+    ``limit`` defaults to :data:`MAX_HELD_OPERATIONS` resolved at CALL time, not
+    bound into the signature -- a default evaluated at import would freeze the
+    cap past any later reassignment of the constant.
+    """
+    effective_limit = MAX_HELD_OPERATIONS if limit is None else limit
+    rows = held_operations_query(db, company_id, work_center_ids=work_center_ids, load_options=load_options).limit(
+        effective_limit + 1
+    )
+    materialized = rows.all()
+    if len(materialized) > effective_limit:
+        return materialized[:effective_limit], True
+    return materialized, False
 
 
 def display_positions(operations: Iterable[WorkOrderOperation]) -> Dict[int, Optional[int]]:

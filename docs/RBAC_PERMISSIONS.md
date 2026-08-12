@@ -76,6 +76,8 @@ tier, that tier stands — this rule is a floor, never a loosening.
 | Start operation (shop-floor verb) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Complete (office verb) | ✓ | ✓ | ✓ | | ✓ | | |
 | Complete (shop-floor verb) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Hold / resume operation (shop-floor verb) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Resolve / dismiss the blocker behind a hold | ✓ | ✓ | ✓ | | | | |
 | Approve labor (TimeEntry) | ✓ | ✓ | ✓ | | ✓ | | |
 | View material ties | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Tie / edit / untie material | ✓ | ✓ | ✓ | | | | |
@@ -131,6 +133,32 @@ tier, that tier stands — this rule is a floor, never a loosening.
 > (`ShopFloorSimple`) calls the shop-floor verb — so the gate closes an API-reachable hole rather than
 > hiding a button; wire any future office Start control to `work_orders:edit` so the hidden control
 > and the refused call agree. See `docs/API.md` → Work Orders.
+
+> **Hold / resume are operator-facing; resolving the blocker behind a hold is not.** Both rows above
+> are new to this matrix; **neither gate changed**. `PUT /api/v1/shop-floor/operations/{id}/hold` and
+> `PUT /api/v1/shop-floor/operations/{id}/resume` (`app/api/endpoints/shop_floor.py`) take a bare
+> `Depends(get_current_user)` — no role gate, matching the other operator write verbs (clock-in,
+> production, complete, reduce-production) — and are tenant-scoped (a cross-tenant id → **404**) and
+> audited (`RESUME_OPERATION`, carrying the ids of any blocker still open at resume). The
+> **blocker** verbs are a tier up, and on a different router: `PUT /api/v1/work-order-blockers/{id}`
+> (acknowledge / assign / dismiss) and `POST /api/v1/work-order-blockers/{id}/resolve`
+> (`app/api/endpoints/work_order_blockers.py`) are `require_role([ADMIN, MANAGER, SUPERVISOR])` — the
+> Work Orders **Edit** row. Being mounted outside `/api/v1/shop-floor` also puts them outside the
+> kiosk path fence, so a badge-minted crew-station token is **403** there whatever badge was scanned.
+>
+> **That asymmetry is the design, and it is why resume is safe to leave role-open.** Resuming moves
+> an *operation status*; resolving a blocker closes the *quality/material finding* that stopped the
+> job, and only the second is a supervisory judgement. So resume deliberately does **not** resolve
+> the blocker — it returns the still-open ones on the response (BLK-4, warn-and-record) so operation
+> status and blocker status can be seen to diverge rather than diverging silently.
+>
+> **What changed is reach, not authorization.** The crew-station queue read now surfaces the work
+> center's `ON_HOLD` operations (`docs/API.md` → Shop Floor → "Held work"), and resume sits inside
+> the kiosk path fence on none of its deny lists, so a **badge-scanned Operator can take a job off
+> hold from the shared terminal** instead of walking to a desk. The kiosk can already *place* a hold;
+> a control with no inverse on the same terminal was the defect. Any authenticated user could always
+> call resume — no role gained anything here either. See [docs/KIOSK.md](KIOSK.md) → Held work and
+> resume.
 
 > **Release stays the authorization boundary even though a read can now promote operations.** READY
 > promotion runs from a third seam — the reconcile-on-read pass — so a work order released before the

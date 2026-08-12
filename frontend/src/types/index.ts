@@ -1407,6 +1407,96 @@ export interface KioskMaterialTie {
 }
 
 /**
+ * The still-open blocker explaining a hold, nested inside `OperationHold`.
+ *
+ * Only ever the NEWEST still-open (open|acknowledged) blocker — resolved and
+ * dismissed ones are excluded server-side, because the resolve/dismiss flow is
+ * what auto-resumes an operation, so a closed blocker on a still-held operation
+ * is stale narrative rather than the current reason. That is the same status
+ * pair the resume endpoint warns on, so the reason shown BEFORE resuming and the
+ * warning returned AFTER describe the same rows.
+ *
+ * `reported_at` is UTC ISO — render via utils/centralTime.
+ */
+export interface OperationHoldBlocker {
+  id: number;
+  /** `WorkOrderBlockerCategory` value, e.g. "machine_down". */
+  category: string | null;
+  /** `WorkOrderBlockerSeverity` value: low | medium | high | critical. */
+  severity: string | null;
+  /** open | acknowledged — the only two that reach here. */
+  status: string | null;
+  /** Server-composed, e.g. "Machine Down: OP20 Deburr". */
+  title: string | null;
+  /** The operator's free-text note, verbatim. */
+  note: string | null;
+  reported_at: string | null;
+  reported_by_user_id: number | null;
+  reported_by_name: string | null;
+}
+
+/**
+ * WHY an operation is on hold, WHO placed it and WHEN — the `hold` block on each
+ * row of the queue response's `held` list.
+ *
+ * **Every field is nullable by design, and `blocker: null` is the case this
+ * feature exists for.** There is no `held_by`/`held_at` column on
+ * `work_order_operations`; the server reconstructs provenance from whichever
+ * record the hold path happened to write, and the paths differ:
+ *
+ * - A hold WITH a note or a non-OTHER category files a `WorkOrderBlocker`, so
+ *   `blocker` is populated.
+ * - A BARE hold (no note, category OTHER) — precisely the accidental fat-finger
+ *   case — emits an `operation_hold` event and files NO blocker, so `blocker` is
+ *   null while `held_at` / `held_by_name` carry the provenance.
+ *
+ * So the reason and the attribution are INDEPENDENT: read the reason from
+ * `blocker`, and who/when from `held_by_name` / `held_at`. Never gate one on the
+ * other, or the mis-tap case renders as both anonymous and reasonless — which is
+ * the one case that most needs to read as an accident.
+ *
+ * When neither record exists (a hold placed before either was written) the fields
+ * are simply null: the server reports what was recorded and never infers a holder
+ * from `operation.updated_at`. "Held by unknown, reason not recorded" is a REAL
+ * state that must render sanely, not an error.
+ */
+export interface OperationHold {
+  /** UTC ISO. */
+  held_at: string | null;
+  held_by_user_id: number | null;
+  /** Display form, e.g. "Dana R.". */
+  held_by_name: string | null;
+  blocker: OperationHoldBlocker | null;
+}
+
+/**
+ * One STILL-OPEN blocker returned by `PUT /shop-floor/operations/{id}/resume`.
+ *
+ * Resuming deliberately does NOT resolve the blocker that caused the hold. The
+ * backend returns these precisely so operation status and blocker status cannot
+ * silently diverge — surface them, never swallow them. Exactly these five keys
+ * come back (no note, no reporter, no timestamp); the richer shape lives behind
+ * /work-order-blockers, which a badge-minted kiosk token cannot reach.
+ */
+export interface ResumeOpenBlocker {
+  id: number;
+  title: string;
+  category: string;
+  severity: string;
+  /** Only "open" or "acknowledged" ever appear here. */
+  status: string;
+}
+
+/** `PUT /shop-floor/operations/{id}/resume` response. */
+export interface ResumeOperationResult {
+  message?: string;
+  /** The operation's status AFTER the lift: "in_progress" or "ready". */
+  status?: string;
+  /** Always sent by the server; `[]` when the hold left nothing open. */
+  open_blockers?: ResumeOpenBlocker[] | null;
+}
+
+/**
  * Last production-evidence telemetry for an operation ("LAST REPORT" tile).
  * Rides work-center-queue rows AND the my-active-job job dict. `at` is UTC
  * ISO — render via utils/centralTime.

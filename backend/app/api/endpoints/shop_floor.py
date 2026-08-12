@@ -79,7 +79,7 @@ from app.schemas.process_sheet import (
 from app.schemas.time_entry import ClockIn, ClockOut, ProductionReductionRequest, TimeEntryResponse
 from app.schemas.wallboard import WallboardResponse
 from app.schemas.work_order_blocker import WorkOrderBlockerCreate
-from app.services import dispatch_service, kiosk_station_service, process_sheet_service
+from app.services import dispatch_service, kiosk_station_service, operation_hold_view, process_sheet_service
 from app.services.audit_service import AuditService
 from app.services.completion_cost_service import (
     apply_completion_cost_rollup,
@@ -111,6 +111,7 @@ from app.services.operation_action_gates import (
     operation_blocked_by_predecessors,
     operation_has_labor_evidence,
 )
+from app.services.operation_hold_view import HoldContext
 from app.services.operational_event_service import OperationalEventService
 from app.services.operator_qualification_service import evaluate_and_record_operator_qualification
 from app.services.production_reduction_service import (
@@ -747,6 +748,115 @@ def _last_report_payload(operation: Optional[WorkOrderOperation]) -> Optional[di
         "good": operation.last_reported_good,
         "scrap": operation.last_reported_scrapped,
     }
+
+
+def _kiosk_job_row(
+    operation: WorkOrderOperation,
+    *,
+    run_order: Optional[int],
+    roster: list[dict],
+    step_counts: dict,
+    ties: Optional[Sequence[MaterialTieView]],
+) -> dict:
+    """ONE job card, as the kiosk knows it -- shared by the queue and the held list.
+
+    Extracted so a held operation's identity is the SAME identity a queued one
+    has (work order, part, operation number/name, quantities, nest, ties,
+    roster, step counts). The two lists differ in WHICH operations they carry
+    and in what rides ON TOP of the row -- never in the shape of the row itself,
+    which is what would drift if the held list rebuilt these keys by hand.
+
+    ``run_order`` is passed in rather than read off the model: a queued row gets
+    its gap-free display position, and a held row gets ``None`` because it is not
+    in the ranked queue at all (``display_positions`` is computed over queued
+    operations only, and a held operation must never take a rank).
+    """
+    work_order = operation.work_order
+    return {
+        "operation_id": operation.id,
+        "work_order_id": work_order.id,
+        "work_order_number": work_order.work_order_number,
+        "part_number": work_order.part.part_number if work_order.part else None,
+        "part_name": work_order.part.name if work_order.part else None,
+        # Kiosk job card / viewer title: the part's revision letter (REV chip).
+        "part_revision": work_order.part.revision if work_order.part else None,
+        "operation_number": operation.operation_number,
+        "operation_name": operation.name,
+        "work_center_id": operation.work_center_id,
+        # Manager-dictated dispatch rank at THIS work center as the shop should
+        # SEE it -- position within the ordered queue (1..N, no gaps), null when
+        # unranked or held. Advisory: it drives the order and the kiosk's RUN
+        # chip; it never gates a start.
+        "run_order": run_order,
+        "status": operation.status,
+        "quantity_ordered": operation_target_quantity(operation, work_order),
+        "work_order_quantity_ordered": work_order.quantity_ordered,
+        "component_quantity": operation.component_quantity,
+        "quantity_complete": operation.quantity_complete,
+        # Crew tally: scrap surfaces next to quantity_complete so the kiosk tally
+        # block ("37 of 50 · 2 scrap") is server-derived.
+        "quantity_scrapped": operation.quantity_scrapped,
+        "priority": work_order.priority,
+        "due_date": work_order.due_date,
+        "setup_time_hours": operation.setup_time_hours,
+        "run_time_hours": operation.run_time_hours,
+        "laser_nest": _laser_nest_payload(operation),
+        # Open, operation-scoped material ties. [] when untied -- render nothing
+        # at all for those (see _material_ties_payload).
+        "material_ties": _material_ties_payload(ties),
+        "roster": roster,
+        "steps_total": step_counts["steps_total"],
+        "steps_recorded": step_counts["steps_recorded"],
+        # Kiosk LAST REPORT tile: the op's most recent production report.
+        "last_report": _last_report_payload(operation),
+    }
+
+
+def _held_job_row(
+    operation: WorkOrderOperation,
+    *,
+    roster: list[dict],
+    step_counts: dict,
+    ties: Optional[Sequence[MaterialTieView]],
+    hold: HoldContext,
+) -> dict:
+    """A held operation, for the kiosk's ``held`` list. Job card + why/who/when.
+
+    ``startable: False`` is stated explicitly rather than left to be inferred
+    from ``status``. It appears ONLY here and deliberately has no ``True`` twin
+    on the queue rows: whether a queued operation may actually start is decided
+    by the server gates at the moment of the action (predecessors, work center,
+    open entries), so a poll asserting ``startable: True`` would be making a
+    claim this read cannot honor. "Held work cannot be started" is a claim it
+    can.
+
+    ``hold`` carries the reason: the still-open blocker's category/severity/note
+    when one exists, plus who placed the hold and when. All of it may be
+    ``None`` -- see ``operation_hold_view`` for which hold paths record what.
+    """
+    row = _kiosk_job_row(operation, run_order=None, roster=roster, step_counts=step_counts, ties=ties)
+    row["startable"] = False
+    row["hold"] = {
+        "held_at": to_utc_iso(hold.held_at) if hold.held_at else None,
+        "held_by_user_id": hold.held_by_user_id,
+        "held_by_name": hold.held_by_name,
+        "blocker": (
+            {
+                "id": hold.blocker.id,
+                "category": hold.blocker.category,
+                "severity": hold.blocker.severity,
+                "status": hold.blocker.status,
+                "title": hold.blocker.title,
+                "note": hold.blocker.note,
+                "reported_at": to_utc_iso(hold.blocker.reported_at) if hold.blocker.reported_at else None,
+                "reported_by_user_id": hold.blocker.reported_by_user_id,
+                "reported_by_name": hold.blocker.reported_by_name,
+            }
+            if hold.blocker is not None
+            else None
+        ),
+    }
+    return row
 
 
 def _next_operation_payload(db: Session, operation: Optional[WorkOrderOperation], company_id: int) -> Optional[dict]:
@@ -2030,6 +2140,36 @@ def get_work_center_queue(
     The tie read itself writes nothing (unlike ``_laser_nest_payload``, which
     still syncs nest counters here): a poll is not an actor, has no intent and
     records no reason, so it must never move stock.
+
+    HELD WORK (``held``, plus ``held_truncated``). ON_HOLD operations at this
+    work center, on a SEPARATE list from ``queue``. An accidental hold used to
+    make an operation vanish from every screen an operator can see -- the kiosk
+    can place a hold but has no resume, so recovery needed a desk. This closes
+    that one-way door WITHOUT making held work queued work:
+    ``dispatch_service.QUEUE_OPERATION_STATUSES`` is untouched, so a hold still
+    means stop for capacity, run-order ranking, ``display_positions`` and the
+    wallboard. Each held row is a normal job card plus ``startable: false`` and a
+    ``hold`` block (the still-open blocker's category/severity/note, and who
+    placed the hold and when -- see ``services/operation_hold_view.py``).
+
+    Resume stays ``PUT /shop-floor/operations/{id}/resume``; no new endpoint. A
+    badge-minted ``scope="kiosk"`` operator token already reaches it -- that path
+    is inside the ``/api/v1/shop-floor`` fence prefix and on none of the deny
+    lists (``deps.KIOSK_TOKEN_DENIED_PREFIXES`` and the approval/run-order
+    suffix rules) -- and the endpoint carries no ``require_role``, so an OPERATOR
+    may resume. Resuming does NOT resolve the blocker; the response returns any
+    still-open ones so the UI can warn (BLK-4).
+
+    DISCLOSURE (``held``): a station principal is an unattended, PIN-unlocked
+    terminal, and the ``hold`` block adds an operator NAME (first name + last
+    initial, the same public-screen-safe form the ``roster`` on this payload
+    already uses) and the blocker's free-text note. Both describe work queued at
+    THIS station's own work center, which is the same tier of disclosure the job
+    card itself already carries -- but it is a genuine (small) widening, in the
+    same sense the material-tie note above records.
+
+    Both lists are read-only, and the ``held`` read is bounded
+    (``dispatch_service.MAX_HELD_OPERATIONS``, most-recently-held first).
     """
     company_id = principal.company_id
     if principal.kind == "station" and principal.work_center_id != work_center_id:
@@ -2053,16 +2193,30 @@ def get_work_center_queue(
     # bare ORDER BY scheduled_start that was nullable, tiebreak-less and therefore
     # dialect-dependent. run_order is ADVISORY: it sorts the queue, it never gates a
     # start (that stays with operation_action_gates / the predecessor rules).
+    queue_load_options = (
+        joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part),
+        # Eager-load the nest + its reference PDF so _laser_nest_payload below
+        # doesn't issue per-row SELECTs (N+1) for each queued laser operation.
+        joinedload(WorkOrderOperation.laser_nest).joinedload(LaserNest.document),
+    )
     operations = dispatch_service.queued_operations(
         db,
         company_id,
         [work_center_id],
-        load_options=(
-            joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part),
-            # Eager-load the nest + its reference PDF so _laser_nest_payload below
-            # doesn't issue per-row SELECTs (N+1) for each queued laser operation.
-            joinedload(WorkOrderOperation.laser_nest).joinedload(LaserNest.document),
-        ),
+        load_options=queue_load_options,
+    )
+
+    # HELD work, on its own list. dispatch_service.QUEUE_OPERATION_STATUSES is
+    # deliberately NOT widened to include ON_HOLD -- a hold means stop, so held
+    # work stays out of capacity, run-order ranking, display_positions and the
+    # wallboard's queued_count. This is a separate, bounded read whose only job
+    # is that the operator can SEE the job (see held_operations' docstring for
+    # the cancelled-nest carve-out).
+    held_ops, held_truncated = dispatch_service.held_operations(
+        db,
+        company_id,
+        [work_center_id],
+        load_options=queue_load_options,
     )
 
     # Crew roster: open labor TimeEntries for the queued operations, one bucket
@@ -2070,7 +2224,11 @@ def get_work_center_queue(
     # clock_out IS NULL, labor entry types only so an open BREAK/DOWNTIME row
     # never renders as a crew member). joinedload(User) avoids N+1 name lookups.
     roster_by_operation: dict[int, list[dict]] = defaultdict(list)
-    operation_ids = [op.id for op in operations]
+    queued_operation_ids = [op.id for op in operations]
+    held_operation_ids = [op.id for op in held_ops]
+    # One batch across BOTH lists for every per-operation enrichment below, so
+    # adding the held list costs no extra round trip at the poll cadence.
+    operation_ids = queued_operation_ids + held_operation_ids
     if operation_ids:
         open_entries = (
             db.query(TimeEntry)
@@ -2101,7 +2259,7 @@ def get_work_center_queue(
     # Steps chip (PR 3): required-process-step counts per queued operation so the
     # kiosk job card can render "Steps 2/6" without an extra round-trip. A step only
     # counts as recorded when its live conforming records cover every WO serial.
-    step_counts = process_sheet_service.step_counts_for_operations(db, company_id, operations)
+    step_counts = process_sheet_service.step_counts_for_operations(db, company_id, list(operations) + list(held_ops))
 
     # Material ties (PR 2): the sheet/stock tied to each queued operation, so the
     # kiosk job card can state what leaves inventory when the WORK ORDER finishes.
@@ -2116,53 +2274,39 @@ def get_work_center_queue(
 
     # Gap-free rank for the RUN chip: stored ranks go sparse as jobs complete or
     # move away, and "RUN 4" on a three-job queue reads as a missing job.
+    # Computed over the QUEUED operations only -- a held operation never takes a
+    # dispatch rank, so it can never shift the number an operator reads.
     run_positions = dispatch_service.display_positions(operations)
 
-    queue = []
-    for op in operations:
-        wo = op.work_order
-        target_qty = operation_target_quantity(op, wo)
-        op_step_counts = step_counts.get(op.id, {"steps_total": 0, "steps_recorded": 0})
-        queue.append(
-            {
-                "operation_id": op.id,
-                "work_order_id": wo.id,
-                "work_order_number": wo.work_order_number,
-                "part_number": wo.part.part_number if wo.part else None,
-                "part_name": wo.part.name if wo.part else None,
-                # Kiosk job card / viewer title: the part's revision letter (REV chip).
-                "part_revision": wo.part.revision if wo.part else None,
-                "operation_number": op.operation_number,
-                "operation_name": op.name,
-                "work_center_id": op.work_center_id,
-                # Manager-dictated dispatch rank at THIS work center as the shop
-                # should SEE it -- position within the ordered queue (1..N, no
-                # gaps), null when unranked. Advisory: it drives the order above
-                # and the kiosk's RUN chip; it never gates a start.
-                "run_order": run_positions.get(op.id),
-                "status": op.status,
-                "quantity_ordered": target_qty,
-                "work_order_quantity_ordered": wo.quantity_ordered,
-                "component_quantity": op.component_quantity,
-                "quantity_complete": op.quantity_complete,
-                # Crew tally: scrap surfaces next to quantity_complete so the
-                # kiosk tally block ("37 of 50 · 2 scrap") is server-derived.
-                "quantity_scrapped": op.quantity_scrapped,
-                "priority": wo.priority,
-                "due_date": wo.due_date,
-                "setup_time_hours": op.setup_time_hours,
-                "run_time_hours": op.run_time_hours,
-                "laser_nest": _laser_nest_payload(op),
-                # Open, operation-scoped material ties. [] when untied -- render
-                # nothing at all for those (see _material_ties_payload).
-                "material_ties": _material_ties_payload(material_ties.get(op.id)),
-                "roster": roster_by_operation.get(op.id, []),
-                "steps_total": op_step_counts["steps_total"],
-                "steps_recorded": op_step_counts["steps_recorded"],
-                # Kiosk LAST REPORT tile: the op's most recent production report.
-                "last_report": _last_report_payload(op),
-            }
+    # Why each held operation is held, batched (two queries for the whole list).
+    hold_contexts = operation_hold_view.hold_contexts_for_operations(
+        db, company_id=company_id, operation_ids=held_operation_ids
+    )
+
+    def _step_counts_for(op: WorkOrderOperation) -> dict:
+        return step_counts.get(op.id, {"steps_total": 0, "steps_recorded": 0})
+
+    queue = [
+        _kiosk_job_row(
+            op,
+            run_order=run_positions.get(op.id),
+            roster=roster_by_operation.get(op.id, []),
+            step_counts=_step_counts_for(op),
+            ties=material_ties.get(op.id),
         )
+        for op in operations
+    ]
+
+    held = [
+        _held_job_row(
+            op,
+            roster=roster_by_operation.get(op.id, []),
+            step_counts=_step_counts_for(op),
+            ties=material_ties.get(op.id),
+            hold=hold_contexts.get(op.id, HoldContext()),
+        )
+        for op in held_ops
+    ]
 
     # Lean Phase 1 (issue #88): active scrap reason codes ride the queue payload
     # so the crew station's scrap picker works WITHOUT widening any token scope —
@@ -2189,6 +2333,15 @@ def get_work_center_queue(
 
     return {
         "queue": queue,
+        # ON_HOLD operations at this work center, on their OWN list. Additive:
+        # `queue` is byte-identical to what it has always carried, so no existing
+        # consumer changes behavior, and no client iterating `queue` can render a
+        # held operation as a startable job card by accident -- the list boundary
+        # is the safety property, not a flag inside the rows.
+        "held": held,
+        # True when the cap (dispatch_service.MAX_HELD_OPERATIONS) dropped older
+        # holds, so the client can say so rather than silently showing a subset.
+        "held_truncated": held_truncated,
         # Kiosk top bar: machine identity for the header (code, name, mute
         # description line, status tag). Null when unknown/cross-tenant.
         "work_center": (
