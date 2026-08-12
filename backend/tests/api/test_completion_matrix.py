@@ -302,6 +302,9 @@ def test_shop_floor_complete_caps_absolute_quantity_at_target(client: TestClient
     wo, _ = make_wo(db_session, status_=WorkOrderStatus.IN_PROGRESS, quantity_ordered=10)
     wc = make_work_center(db_session)
     op = make_op(db_session, wo, wc, sequence=10, status_=OperationStatus.IN_PROGRESS, quantity_complete=15)
+    # Labor evidence the floor verb requires; zero-quantity so the cap under test is
+    # decided by the seeded 15, not by the entry.
+    make_closed_time_entry(db_session, user=admin, wo=wo, op=op, wc=wc, quantity_produced=0)
     db_session.commit()
 
     resp = client.post(
@@ -488,6 +491,10 @@ def test_wo_quantity_does_not_regress_when_earlier_op_completed_after_later(clie
     wc = make_work_center(db_session)
     op1 = make_op(db_session, wo, wc, sequence=10, status_=OperationStatus.IN_PROGRESS, quantity_complete=3)
     op2 = make_op(db_session, wo, wc, sequence=20, status_=OperationStatus.IN_PROGRESS, quantity_complete=3)
+    # Both ops are completed from the floor below, which requires labor on each.
+    # Zero-quantity closed entries: the seeded quantities are what this test measures.
+    make_closed_time_entry(db_session, user=admin, wo=wo, op=op1, wc=wc, quantity_produced=0)
+    make_closed_time_entry(db_session, user=admin, wo=wo, op=op2, wc=wc, quantity_produced=0)
     db_session.commit()
 
     # Complete the LATER op (seq 20) to full first. allow_same_work_center lets this
@@ -558,6 +565,9 @@ def test_shop_floor_complete_completion_stamps_actual_start(client: TestClient, 
     wo, _ = make_wo(db_session, status_=WorkOrderStatus.RELEASED, quantity_ordered=5)
     wc = make_work_center(db_session)
     op = make_op(db_session, wo, wc, sequence=10, status_=OperationStatus.READY)
+    # Labor evidence the floor verb requires. Closed and zero-quantity, so the
+    # actual_start stamping under test still comes from the completion itself.
+    make_closed_time_entry(db_session, user=admin, wo=wo, op=op, wc=wc, quantity_produced=0)
     db_session.commit()
 
     resp = client.post(
@@ -582,21 +592,27 @@ def test_shop_floor_complete_completion_stamps_actual_start(client: TestClient, 
 
 def test_same_work_center_completion_releases_lower_sequence_pending(client: TestClient, db_session: Session):
     """RUP-4: completing a later op out of sequence in the same work center promotes
-    the lowest-sequence still-PENDING op (whose predecessors are all complete) to
-    READY rather than stranding it PENDING.
+    the still-PENDING ops (whose predecessor gate passes) to READY rather than
+    stranding them PENDING.
 
     Three ops, all in one work center:
       seq10 PENDING (predecessor gate is empty -> eligible to be READY)
       seq20 IN_PROGRESS (completed here, out of order vs seq10, same WC allowed)
-      seq30 PENDING (still gated by seq10)
-    After completing seq20, the finalizer's release_next_ready_operation should
-    promote seq10 (no incomplete predecessors) to READY; seq30 stays PENDING."""
+      seq30 PENDING (only lower-sequence open op is seq10, SAME work center)
+    After completing seq20, the finalizer's release_next_ready_operation promotes BOTH
+    seq10 and seq30. seq30 is not "gated behind seq10": the promotion gate is the same
+    one clock-in uses (``allow_same_work_center=True``), under which an operator could
+    always have clocked into seq30 while seq10 sat open -- it was merely invisible,
+    since the dispatch board and kiosk surface READY work only."""
     admin = make_user(db_session)
     wo, _ = make_wo(db_session, status_=WorkOrderStatus.IN_PROGRESS, quantity_ordered=5)
     wc = make_work_center(db_session)
     op10 = make_op(db_session, wo, wc, sequence=10, status_=OperationStatus.PENDING)
     op20 = make_op(db_session, wo, wc, sequence=20, status_=OperationStatus.IN_PROGRESS)
     op30 = make_op(db_session, wo, wc, sequence=30, status_=OperationStatus.PENDING)
+    # op20 is completed from the floor below, which requires labor on it. Zero-quantity
+    # and closed, so only the promotion of its siblings is under test.
+    make_closed_time_entry(db_session, user=admin, wo=wo, op=op20, wc=wc, quantity_produced=0)
     db_session.commit()
 
     resp = client.post(
@@ -609,7 +625,7 @@ def test_same_work_center_completion_releases_lower_sequence_pending(client: Tes
     refreshed_op10 = _reload(db_session, WorkOrderOperation, op10.id)
     refreshed_op30 = _reload(db_session, WorkOrderOperation, op30.id)
     assert refreshed_op10.status == OperationStatus.READY, "RUP-4: lowest-seq eligible PENDING self-heals to READY"
-    assert refreshed_op30.status == OperationStatus.PENDING, "seq30 stays gated behind seq10"
+    assert refreshed_op30.status == OperationStatus.READY, "same-WC sibling is unordered -- promoted, not gated"
 
 
 # ===========================================================================
@@ -908,6 +924,10 @@ def test_shop_floor_complete_emits_completion_events(client: TestClient, db_sess
     wo, _ = make_wo(db_session, status_=WorkOrderStatus.IN_PROGRESS, quantity_ordered=10)
     wc = make_work_center(db_session)
     op = make_op(db_session, wo, wc, sequence=10, status_=OperationStatus.IN_PROGRESS)
+    # The floor verb refuses an operation with no labor recorded against it at all, so
+    # give it the closed entry every real floor flow leaves behind (the kiosk clocks out
+    # before completing). Zero quantity, so it changes nothing this test measures.
+    make_closed_time_entry(db_session, user=admin, wo=wo, op=op, wc=wc, quantity_produced=0)
     db_session.commit()
 
     resp = client.post(

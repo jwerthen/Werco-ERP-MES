@@ -742,6 +742,14 @@ Findings: PERF-1, PERF-2, PERF-3, PERF-4, PERF-5.
 > `has_incomplete_predecessors(...)` **exactly**, so the release / start / complete order gate is
 > unchanged in behavior; `has_incomplete_predecessors` itself is untouched.
 >
+> **↑ Superseded 2026-08-11 (`feat/work-center-op-pool`) — the last clause no longer holds.** The
+> one-query / in-memory-gate shape and the exact-replica discipline both survive, but
+> `has_incomplete_predecessors` *was* changed (an **ON_HOLD** predecessor now blocks even at the
+> candidate's own work center), the in-memory replica now mirrors the
+> `allow_same_work_center=True` semantics rather than the strict rule, and the helper promotes **every**
+> passing candidate rather than the first. The order gate is therefore no longer "unchanged in
+> behavior". See `docs/API.md` → Work Orders → "READY promotion is pooled by work center".
+>
 > **PERF-5 — `commit=False` atomicity fix + cache-invalidate-after-commit.** The four **live**
 > completion handlers — `clock_out` and `complete_operation` in `shop_floor.py`, `complete_work_order`
 > and `complete_operation` in `work_orders.py` — now call

@@ -257,7 +257,7 @@ def _evaluate_actions(
     gate_results: List[Tuple[ScanAction, List[str]]] = [
         ("clock_in", clock_in_blockers(db, operation, user.id, work_center_id=work_center_id)),
         ("report_production", report_production_blockers(db, operation, user.id, company_id)),
-        ("complete", complete_blockers(db, operation, work_order)),
+        ("complete", complete_blockers(db, operation, work_order, company_id)),
         ("hold", hold_blockers(operation)),
         ("resume", resume_blockers(operation)),
     ]

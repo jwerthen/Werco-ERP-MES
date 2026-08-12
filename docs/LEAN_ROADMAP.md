@@ -127,7 +127,7 @@ These definitions are the contract for every implementation above — dashboards
 | **FPY (per op)** | (complete − reworked − scrapped) ÷ (complete + scrapped) |
 | **RTY (per routing)** | Π(op FPYs) — e.g. 0.95¹⁰ ≈ 60% |
 | **Lead time (WO)** | `released_at` → last op `actual_end` → ship |
-| **Queue time** | op N `actual_end` → op N+1 `actual_start` (with `operation_ready` events as the true ready marker) |
+| **Queue time** | op N `actual_end` → op N+1 `actual_start` (with `operation_ready` events as the true ready marker). **Series break 2026-08-11 — see the note below the table.** |
 | **Throughput time** | Little's Law: WIP ÷ throughput |
 | **PCE** | Value-added (run) hours ÷ total elapsed lead time (typical shops 0.4–5% — don't be alarmed by small numbers) |
 | **OEE** | Availability × Performance × Quality; staffed-time availability convention until a shift calendar exists (Phase 4a) |
@@ -138,6 +138,34 @@ These definitions are the contract for every implementation above — dashboards
 | **Takt** | Available time ÷ demand — runners only, recalculated monthly/quarterly (Phase 3+ only) |
 | **Schedule adherence** | Planned (`scheduled_start/end`) vs actual, per WC per day |
 | **Provenance rule** | Every metric segments by capture source; **`backfill` and `import` `source` values are excluded from metric baselines** — force-complete/one-shot paths backfill `actual_*` timestamps and would poison flow numbers. The **desktop ShopFloor** now feeds this rule directly: a supervisor-gated (`work_orders:edit`) **Back-entry (offline catch-up)** toggle tags its clock-in/clock-out `source='backfill'` (previously desktop back-entry landed a NULL source and wrongly counted as live capture), so offline paper catch-up is excluded from the live baselines and audited on the tamper-evident chain. `import` is now also rejected (422) on the interactive labor endpoints — reserved for the bulk loaders — while a kiosk-scoped token forces `kiosk`. |
+
+> **Queue time — series break at 2026-08-11 (work-center operation pooling).** The ready anchor moved
+> for one class of operation, so **queue time is not comparable across this date** and any month-over-
+> month or before/after chart spanning it is misleading.
+>
+> What changed: READY promotion is now pooled by work center. Operations of a work order that share a
+> work center no longer block each other, so **all** of them are promoted to READY — and emit their
+> `operation_ready` event — at work-order **release**, instead of one at a time as each predecessor
+> completed (`docs/API.md` → Work Orders → "READY promotion is pooled by work center"). For those
+> operations the ready marker therefore means *"the job was released"*, not *"the previous step
+> finished"*, and their measured queue time **steps up** by however long the siblings ahead of them
+> took. Nothing about the shop's actual flow changed on that date; the clock simply starts earlier.
+>
+> Scope of the break, so it isn't over-read:
+> - **Affected:** operations that share a work center with a lower-sequence operation of the same work
+>   order. The motivating case is the worst case — a batch WO carrying ~18 press-brake items as one
+>   operation each on one machine, where item 18's queue time goes from "since item 17 finished" to
+>   "since release".
+> - **Unaffected:** a conventional routing whose steps each sit at a different work center. The
+>   same-work-center allowance never fires there, one operation is promoted at a time exactly as
+>   before, and the series is continuous.
+> - **Already this way:** laser dispatch-pool WOs, whose nests have always all gone READY at once.
+>
+> The `operation_ready` events themselves are still emitted per operation and `from_ready_events`
+> still counts them, so the **measurement mechanism** is unchanged — only the meaning of the anchor
+> for pooled operations. When comparing periods across 2026-08-11, either segment by whether the
+> operation had a same-work-center predecessor, or fall back to the predecessor-end → start definition
+> for both sides.
 
 ## Verification approach (when phases are built)
 

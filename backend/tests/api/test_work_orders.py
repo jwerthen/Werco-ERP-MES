@@ -1462,6 +1462,21 @@ class TestWorkOrdersAPI:
         assert shop_floor_operation["work_order_quantity_ordered"] == 3
         assert shop_floor_operation["component_quantity"] == 6
 
+        # Clock in first: the floor's completion verb (which also serves partial progress)
+        # refuses an operation with no labor recorded against it at all. A real operator
+        # reporting progress is always clocked in; this fixture used to skip that step.
+        clock_in_response = client.post(
+            "/api/v1/shop-floor/clock-in",
+            headers=auth_headers,
+            json={
+                "work_order_id": response.json()["id"],
+                "operation_id": operation["id"],
+                "work_center_id": work_center.id,
+                "entry_type": "run",
+            },
+        )
+        assert clock_in_response.status_code == status.HTTP_200_OK, clock_in_response.text
+
         partial_response = client.post(
             f"/api/v1/shop-floor/operations/{operation['id']}/complete",
             headers=auth_headers,

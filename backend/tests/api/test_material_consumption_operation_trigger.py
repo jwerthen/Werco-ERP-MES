@@ -465,7 +465,22 @@ def drive_clock_out(client: TestClient, db: Session, user: User, op: WorkOrderOp
 
 
 def drive_shop_floor_complete(client: TestClient, db: Session, user: User, op: WorkOrderOperation, *, quantity: float):
-    """Shop-floor operation complete (``shop_floor.py`` :3959)."""
+    """Shop-floor operation complete (``shop_floor.py`` :3959).
+
+    Lays down a CLOSED, zero-quantity labor record first, because the floor verb refuses
+    an operation with no ``TimeEntry`` at all (``operation_has_labor_evidence``) -- an
+    operation nobody ever worked cannot be booked complete from the floor. Every real
+    floor flow satisfies that: the kiosk clocks out before completing, and a crew's
+    entries are open when the lead completes.
+
+    CLOSED and zero-quantity on purpose, so the gate is satisfied without perturbing what
+    these tests measure: an OPEN entry would be auto-closed by the endpoint and credited
+    the completion delta, changing the labor evidence the consumption assertions read.
+    """
+    entry = clock_in_entry(db, user, op)
+    entry.clock_out = datetime.utcnow()
+    entry.duration_hours = 0.5
+    db.commit()
     return client.post(
         f"/api/v1/shop-floor/operations/{op.id}/complete",
         headers=headers_for(user),
@@ -1441,11 +1456,9 @@ def test_lock_conflict_during_consumption_surfaces_as_409_not_a_silent_skip(
 
     monkeypatch.setattr(mcs, "_consume_one_allocation", _stale)
 
-    response = client.post(
-        f"/api/v1/shop-floor/operations/{op.id}/complete",
-        headers=headers_for(user),
-        json={"quantity_complete": 2},
-    )
+    # Through the shared driver, which lays down the labor record the floor verb now
+    # requires (an operation nobody worked cannot be completed from the floor).
+    response = drive_shop_floor_complete(client, db_session, user, op, quantity=2)
     assert response.status_code == status.HTTP_409_CONFLICT, response.text
 
     # The handler raised mid-transaction; the app-wide handler only builds the
@@ -1497,11 +1510,9 @@ def test_a_lock_conflict_on_the_tie_READ_is_re_raised_too(client: TestClient, db
 
     monkeypatch.setattr(mcs, "_open_allocations_for_operation", _stale)
 
-    response = client.post(
-        f"/api/v1/shop-floor/operations/{op.id}/complete",
-        headers=headers_for(user),
-        json={"quantity_complete": 2},
-    )
+    # Through the shared driver, which lays down the labor record the floor verb now
+    # requires (an operation nobody worked cannot be completed from the floor).
+    response = drive_shop_floor_complete(client, db_session, user, op, quantity=2)
     assert response.status_code == status.HTTP_409_CONFLICT, response.text
 
     db_session.rollback()
@@ -1547,11 +1558,9 @@ def test_a_non_lock_failure_still_degrades_into_a_recorded_failure(
 
     monkeypatch.setattr(mcs, "_consume_one_allocation", _boom)
 
-    response = client.post(
-        f"/api/v1/shop-floor/operations/{op.id}/complete",
-        headers=headers_for(user),
-        json={"quantity_complete": 2},
-    )
+    # Through the shared driver, which lays down the labor record the floor verb now
+    # requires (an operation nobody worked cannot be completed from the floor).
+    response = drive_shop_floor_complete(client, db_session, user, op, quantity=2)
     assert response.status_code == status.HTTP_200_OK, response.text
     db_session.expire_all()
 

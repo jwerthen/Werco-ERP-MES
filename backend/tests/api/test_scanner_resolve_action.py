@@ -37,6 +37,7 @@ from app.models.time_entry import TimeEntry, TimeEntryType
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
+from app.services.operation_action_gates import MSG_NO_LABOR_RECORDED
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
 
@@ -190,8 +191,14 @@ def resolve(client: TestClient, user: User, code: str, work_center_id: int = Non
 
 
 def test_operation_scan_ready_op_legal_actions(client: TestClient, db_session: Session):
-    """READY op, no predecessors, user not clocked in: clock_in/complete/hold legal;
-    report_production and resume blocked with the endpoints' exact error text."""
+    """READY op, no predecessors, nobody has worked it: clock_in/hold legal;
+    report_production, resume and COMPLETE blocked with the endpoints' exact error text.
+
+    ``complete`` is blocked because the operation carries no labor at all -- the same gate
+    the floor's completion verb enforces (``operation_has_labor_evidence``). The scan card
+    for a never-worked operation therefore offers "clock in", not "complete", which is the
+    point: the resolver must not advertise an action the endpoint would refuse.
+    """
     user = make_user(db_session)
     wo, (op,), wc, part = make_wo(db_session)
 
@@ -204,7 +211,8 @@ def test_operation_scan_ready_op_legal_actions(client: TestClient, db_session: S
     assert body["operation"]["part_number"] == part.part_number
     assert body["operation"]["status"] == "ready"
     assert body["operation"]["work_center_match"] is None  # no station provided
-    assert sorted(body["legal_actions"]) == ["clock_in", "complete", "hold"]
+    assert sorted(body["legal_actions"]) == ["clock_in", "hold"]
+    assert body["blockers"]["complete"] == [MSG_NO_LABOR_RECORDED]
     assert body["blockers"]["report_production"] == [
         "Operation must be in progress to add completed quantity",
         "You must be clocked in to add completed quantity",
@@ -265,7 +273,9 @@ def test_clock_in_gate_parity_on_hold(client: TestClient, db_session: Session):
     assert "clock_in" not in body["legal_actions"]
     assert "resume" in body["legal_actions"]
     assert "Operation is not ready to start" in body["blockers"]["clock_in"]
-    assert body["blockers"]["complete"] == ["Operation is on hold and cannot be completed"]
+    # Membership, not equality: this fixture's op also carries no labor, so the
+    # labor-evidence blocker rides alongside. The hold reason is what this test is about.
+    assert "Operation is on hold and cannot be completed" in body["blockers"]["complete"]
 
     real = client.post(
         CLOCK_IN,
@@ -355,7 +365,8 @@ def test_complete_blocked_on_terminal_work_order(client: TestClient, db_session:
 
     body = resolve(client, user, f"OP:{op.id}")
     assert "complete" not in body["legal_actions"]
-    assert body["blockers"]["complete"] == ["cannot complete operation: work order is cancelled"]
+    # Membership: the never-worked fixture also trips the labor-evidence blocker.
+    assert "cannot complete operation: work order is cancelled" in body["blockers"]["complete"]
 
 
 def test_completed_operation_only_resume_and_hold_blocked(client: TestClient, db_session: Session):

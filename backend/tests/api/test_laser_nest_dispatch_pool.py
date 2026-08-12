@@ -12,13 +12,19 @@ Covers the ready-dispatch behavior on ``laser_cutting`` nest work orders:
     ``release_next_ready_operation``) promote ALL PENDING nest ops to READY
     (healing laser WOs imported before whole-package-ready), emit
     ``operation_ready`` events, and return the lowest-sequence promoted op --
-    while non-laser WOs keep one-at-a-time promotion;
+    while a conventional CROSS-work-center routing keeps one-at-a-time
+    promotion;
   - the work-center queue surfaces every READY nest of a fresh import, and
     only the nests assigned to THAT work center when a package is spread
     across two work centers.
 
-Non-laser sequential gating is pinned as a regression alongside each laser
-exemption so the dispatch-pool rule can never silently widen.
+Non-laser CROSS-work-center gating is pinned as a regression alongside each
+laser exemption so the dispatch-pool rule can never silently widen. Note what
+the pins are NOT: since the general promotion rule adopted clock-in's
+``allow_same_work_center=True`` semantics, ops sharing a work center promote
+together on EVERY work order. What still makes a laser WO special is that it
+drops cross-work-center gating too -- so every non-laser pin here uses a route
+whose steps sit at DIFFERENT work centers, or it would pin nothing.
 
 Offline by contract: CNC-file packages (filename inference) and the PDF
 confirm-and-commit path (no extractor call) only; the AI extractor is patched
@@ -28,6 +34,7 @@ to fail the test if ever invoked.
 import io
 import json
 import zipfile
+from datetime import datetime
 
 import pytest
 from fastapi import status
@@ -38,6 +45,7 @@ from app.core.security import create_access_token
 from app.models.company import Company
 from app.models.operational_event import OperationalEvent
 from app.models.part import Part
+from app.models.time_entry import TimeEntry
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import (
@@ -56,6 +64,8 @@ from app.services.work_order_state_service import (
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
 
 COMPANY_A = 1
+# Second tenant, used only to prove a foreign TimeEntry is not labor evidence.
+COMPANY_B = 2
 TEST_PASSWORD_HASH = "$2b$12$abcdefghijklmnopqrstuv"
 _seq = {"n": 0}
 
@@ -466,27 +476,402 @@ class TestDispatchPoolGating:
         db_session.expire_all()
         assert db_session.get(WorkOrderOperation, blocked_op.id).status == OperationStatus.READY
 
-    def test_non_laser_same_wc_exemption_unchanged(self, client, db_session):
-        """Regression on the OTHER side: the shop-floor same-work-center
-        exemption (allow_same_work_center=True) still applies to non-laser WOs,
-        while the office start path still blocks regardless of work center."""
+    def test_office_and_floor_agree_on_the_same_work_center_exemption(self, client, db_session):
+        """REPLACES ``test_non_laser_same_wc_exemption_unchanged``, which pinned the office
+        verbs at 400 on a same-work-center operation.
+
+        That pin was deliberately retired, not deleted: the office start/complete verbs used
+        to carry their own inline ``allow_same_work_center=False`` copy of the predecessor
+        gate while the shop-floor twins passed ``True``, so the office refused an operation
+        the floor would happily start. Both now route through the one shared predicate
+        (``operation_action_gates.operation_blocked_by_predecessors``). This test pins the
+        NEW contract -- office and floor give the same answer -- so a future divergence
+        fails here rather than surfacing as work that is visible, clock-in-able, and
+        un-completable from the office.
+        """
         admin = make_user(db_session)
         operator = make_user(db_session, role=UserRole.OPERATOR)
+        wc = make_laser_work_center(db_session)
+
+        # One work order per verb: starting an operation moves it to IN_PROGRESS, so the
+        # two calls would otherwise contend over the same row and the second would be
+        # refused for a reason that has nothing to do with the predecessor gate.
+        _, office_ops = make_routed_wo(
+            db_session,
+            work_centers=[wc, wc],
+            statuses=[OperationStatus.READY, OperationStatus.READY],
+        )
+        _, floor_ops = make_routed_wo(
+            db_session,
+            work_centers=[wc, wc],
+            statuses=[OperationStatus.READY, OperationStatus.READY],
+        )
+
+        # Office start: same work center, out of sequence -> now ALLOWED.
+        resp = client.post(f"/api/v1/work-orders/operations/{office_ops[1].id}/start", headers=headers_for(admin))
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+
+        # Shop-floor start agrees (it always did).
+        resp = client.put(f"/api/v1/shop-floor/operations/{floor_ops[1].id}/start", headers=headers_for(operator))
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+
+    def test_office_complete_allows_same_work_center_out_of_sequence(self, client, db_session):
+        """The office COMPLETE verb's half of the same contract."""
+        admin = make_user(db_session)
         wc = make_laser_work_center(db_session)
         wo, ops = make_routed_wo(
             db_session,
             work_centers=[wc, wc],
             statuses=[OperationStatus.READY, OperationStatus.READY],
         )
-        second_op = ops[1]
 
-        # Office start has no same-WC exemption: still 400.
-        resp = client.post(f"/api/v1/work-orders/operations/{second_op.id}/start", headers=headers_for(admin))
-        assert resp.status_code == status.HTTP_400_BAD_REQUEST
-
-        # Shop-floor start allows out-of-sequence WITHIN the same work center.
-        resp = client.put(f"/api/v1/shop-floor/operations/{second_op.id}/start", headers=headers_for(operator))
+        resp = client.post(
+            f"/api/v1/work-orders/operations/{ops[1].id}/complete",
+            params={"quantity_complete": 5},
+            headers=headers_for(admin),
+        )
         assert resp.status_code == status.HTTP_200_OK, resp.text
+
+        db_session.expire_all()
+        assert db_session.get(WorkOrderOperation, ops[1].id).status == OperationStatus.COMPLETE
+        assert db_session.get(WorkOrderOperation, ops[0].id).status == OperationStatus.READY
+
+    def test_office_verbs_still_block_across_work_centers(self, client, db_session):
+        """The cross-work-center gate is untouched on BOTH office verbs.
+
+        This is the half of the old pin that still means something: routing the office
+        verbs through the shared predicate widened the same-work-center case ONLY.
+        """
+        admin = make_user(db_session)
+        wc_a = make_laser_work_center(db_session)
+        wc_b = make_laser_work_center(db_session)
+        wo, ops = make_routed_wo(
+            db_session,
+            work_centers=[wc_a, wc_b],
+            statuses=[OperationStatus.READY, OperationStatus.READY],
+        )
+        blocked_op = ops[1]
+
+        resp = client.post(f"/api/v1/work-orders/operations/{blocked_op.id}/start", headers=headers_for(admin))
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST
+        assert resp.json()["detail"] == "Previous operations must be completed first"
+
+        resp = client.post(
+            f"/api/v1/work-orders/operations/{blocked_op.id}/complete",
+            params={"quantity_complete": 5},
+            headers=headers_for(admin),
+        )
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST
+        assert resp.json()["detail"] == "Previous operations must be completed first"
+
+        db_session.expire_all()
+        assert db_session.get(WorkOrderOperation, blocked_op.id).status == OperationStatus.READY
+
+    @pytest.mark.parametrize("role", [UserRole.VIEWER, UserRole.OPERATOR])
+    def test_office_start_refuses_read_only_and_operator_roles(self, client, db_session, role):
+        """The office START verb is role-gated to match its office COMPLETE twin.
+
+        It previously took ``get_current_user`` alone, so ANY authenticated tenant user --
+        a Viewer included -- could stamp actual_start / started_by, move the work order to
+        IN_PROGRESS and write the audit chain. The predecessor gate hid it: almost nothing
+        a read-only user could reach was startable. Same-work-center promotion made exactly
+        those operations reachable, so the hole had to close with it.
+
+        OPERATOR is refused here too and that is correct, not collateral: operators start
+        work through the shop-floor verb, which stays open to them (asserted above).
+        """
+        user = make_user(db_session, role=role)
+        wc = make_laser_work_center(db_session)
+        wo, ops = make_routed_wo(
+            db_session,
+            work_centers=[wc, wc],
+            statuses=[OperationStatus.READY, OperationStatus.READY],
+        )
+
+        resp = client.post(f"/api/v1/work-orders/operations/{ops[1].id}/start", headers=headers_for(user))
+        assert resp.status_code == status.HTTP_403_FORBIDDEN, resp.text
+
+        db_session.expire_all()
+        assert db_session.get(WorkOrderOperation, ops[1].id).status == OperationStatus.READY
+
+    def test_a_pending_operation_still_cannot_be_completed(self, client, db_session):
+        """Pins the OTHER side of the line promotion moves work across.
+
+        A READY operation can be completed by a single office call, at full quantity, with
+        no TimeEntry and no labor evidence behind it. Promotion means a batch work order
+        now offers 18 such operations where it offered 1. That behavior is DELIBERATE on the
+        office verb -- the owner kept supervisors/quality able to close an operation from the
+        desk, including one the floor never clocked, and the floor-only labor gate records the
+        asymmetry (see complete_blockers). What is pinned here is the refusal of the same call
+        on a PENDING operation, so both sides of the boundary are covered and any future move
+        of it has to be deliberate.
+        """
+        admin = make_user(db_session)
+        wc = make_laser_work_center(db_session)
+        wo, ops = make_routed_wo(
+            db_session,
+            work_centers=[wc, wc],
+            statuses=[OperationStatus.PENDING, OperationStatus.PENDING],
+        )
+
+        resp = client.post(
+            f"/api/v1/work-orders/operations/{ops[0].id}/complete",
+            params={"quantity_complete": 5},
+            headers=headers_for(admin),
+        )
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST, resp.text
+        assert "pending" in resp.json()["detail"].lower()
+
+        db_session.expire_all()
+        assert db_session.get(WorkOrderOperation, ops[0].id).status == OperationStatus.PENDING
+
+
+# --------------------------------------------------------------------------- #
+# Labor-evidence gate on the FLOOR completion verb
+# --------------------------------------------------------------------------- #
+class TestFloorCompletionNeedsLaborEvidence:
+    """``POST /shop-floor/operations/{id}/complete`` refuses an operation nobody worked.
+
+    The gate is ANY ``TimeEntry`` on the operation, open or closed -- deliberately not
+    "the caller is clocked in right now", which would refuse the two flows below. Both
+    are pinned here precisely because they are the reason this shape was chosen.
+    """
+
+    def test_operation_with_no_labor_cannot_be_completed_from_the_floor(self, client, db_session):
+        operator = make_user(db_session, role=UserRole.OPERATOR)
+        wc = make_laser_work_center(db_session)
+        wo, ops = make_routed_wo(
+            db_session,
+            work_centers=[wc],
+            statuses=[OperationStatus.READY],
+        )
+
+        resp = client.post(
+            f"/api/v1/shop-floor/operations/{ops[0].id}/complete",
+            headers=headers_for(operator),
+            json={"quantity_complete": 5},
+        )
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST, resp.text
+        assert resp.json()["detail"] == (
+            "Clock in to this operation before completing it — no one has clocked in to it yet."
+        )
+
+        db_session.expire_all()
+        assert db_session.get(WorkOrderOperation, ops[0].id).status == OperationStatus.READY
+
+    def test_kiosk_shaped_flow_still_completes(self, client, db_session):
+        """FLOW 1 (``OperatorKiosk.tsx::handleComplete``): clock in -> clock OUT -> complete.
+
+        The operator's entry is CLOSED by the time the completion lands, which is exactly
+        what an open-entry check would have refused. A closed entry is still labor.
+        """
+        operator = make_user(db_session, role=UserRole.OPERATOR)
+        wc = make_laser_work_center(db_session)
+        wo, ops = make_routed_wo(
+            db_session,
+            work_centers=[wc],
+            statuses=[OperationStatus.READY],
+        )
+
+        clock_in = _clock_in(client, operator, wo_id=wo.id, op=ops[0])
+        assert clock_in.status_code == status.HTTP_200_OK, clock_in.text
+        entry_id = clock_in.json()["id"]
+
+        # The kiosk books the SESSION's pieces on the clock-out, then asserts the target
+        # on the completion call. Booking the full target here would let the clock-out
+        # finish the operation on its own and the completion would never reach the gate.
+        clock_out = client.post(
+            f"/api/v1/shop-floor/clock-out/{entry_id}",
+            headers=headers_for(operator),
+            json={"quantity_produced": 2},
+        )
+        assert clock_out.status_code == status.HTTP_200_OK, clock_out.text
+
+        db_session.expire_all()
+        assert db_session.get(WorkOrderOperation, ops[0].id).status != OperationStatus.COMPLETE
+        assert db_session.get(TimeEntry, entry_id).clock_out is not None, "the caller's entry is CLOSED"
+
+        resp = client.post(
+            f"/api/v1/shop-floor/operations/{ops[0].id}/complete",
+            headers=headers_for(operator),
+            json={"quantity_complete": 5},
+        )
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+
+        db_session.expire_all()
+        assert db_session.get(WorkOrderOperation, ops[0].id).status == OperationStatus.COMPLETE
+
+    def test_crew_shaped_completion_by_an_operator_holding_no_entry(self, client, db_session):
+        """FLOW 2 (``CrewStationKiosk.tsx::handleCompleteBadge``): the completing badge
+        holds no entry of its own while the CREW's entries are open.
+
+        Closing out the crew's work is what this endpoint is for -- it auto-closes their
+        entries and reports who was clocked out -- so the completer is routinely not one
+        of them.
+        """
+        crew_member = make_user(db_session, role=UserRole.OPERATOR)
+        lead = make_user(db_session, role=UserRole.OPERATOR)
+        wc = make_laser_work_center(db_session)
+        wo, ops = make_routed_wo(
+            db_session,
+            work_centers=[wc],
+            statuses=[OperationStatus.READY],
+        )
+
+        # The crew member is clocked in; the lead never is.
+        assert _clock_in(client, crew_member, wo_id=wo.id, op=ops[0]).status_code == status.HTTP_200_OK
+
+        resp = client.post(
+            f"/api/v1/shop-floor/operations/{ops[0].id}/complete",
+            headers=headers_for(lead),
+            json={"quantity_complete": 5},
+        )
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        # The crew member was auto-clocked-out by the completion, as designed.
+        assert [entry["user_id"] for entry in resp.json()["closed_time_entries"]] == [crew_member.id]
+
+    def test_office_completion_is_deliberately_not_gated(self, client, db_session):
+        """The asymmetry is intentional: a supervisor may close an operation from the desk
+        with no labor recorded at all (cleanup). Pinned so nobody 'aligns' the two paths.
+        """
+        supervisor = make_user(db_session, role=UserRole.SUPERVISOR)
+        wc = make_laser_work_center(db_session)
+        wo, ops = make_routed_wo(
+            db_session,
+            work_centers=[wc],
+            statuses=[OperationStatus.READY],
+        )
+
+        resp = client.post(
+            f"/api/v1/work-orders/operations/{ops[0].id}/complete",
+            params={"quantity_complete": 5},
+            headers=headers_for(supervisor),
+        )
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+
+        db_session.expire_all()
+        assert db_session.get(WorkOrderOperation, ops[0].id).status == OperationStatus.COMPLETE
+
+    def test_another_tenants_time_entry_does_not_satisfy_the_gate(self, client, db_session):
+        """The evidence lookup is company-scoped: a foreign TimeEntry is not evidence."""
+        operator = make_user(db_session, role=UserRole.OPERATOR)
+        foreign = make_user(db_session, role=UserRole.OPERATOR, company_id=COMPANY_B)
+        wc = make_laser_work_center(db_session)
+        wo, ops = make_routed_wo(
+            db_session,
+            work_centers=[wc],
+            statuses=[OperationStatus.READY],
+        )
+
+        db_session.add(
+            TimeEntry(
+                company_id=COMPANY_B,
+                user_id=foreign.id,
+                work_order_id=wo.id,
+                operation_id=ops[0].id,
+                work_center_id=wc.id,
+                clock_in=datetime.utcnow(),
+            )
+        )
+        db_session.commit()
+
+        resp = client.post(
+            f"/api/v1/shop-floor/operations/{ops[0].id}/complete",
+            headers=headers_for(operator),
+            json={"quantity_complete": 5},
+        )
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST, resp.text
+        assert "Clock in to this operation" in resp.json()["detail"]
+
+        db_session.expire_all()
+        assert db_session.get(WorkOrderOperation, ops[0].id).status == OperationStatus.READY
+
+
+# --------------------------------------------------------------------------- #
+# The hold carve-out: an ON_HOLD predecessor blocks its own work center too
+# --------------------------------------------------------------------------- #
+class TestHeldPredecessorBlocksThePool:
+    """A quality/material hold outranks the same-work-center pooling exemption.
+
+    Without the carve-out, holding item 3 of an 18-item batch would leave the other 17 on
+    the dispatch board and clock-in-able -- the shop would keep building past the exact
+    problem the hold was placed to stop.
+    """
+
+    def test_a_held_op_blocks_its_same_work_center_siblings_from_promoting(self, db_session):
+        wc = make_laser_work_center(db_session)
+        wo, ops = make_routed_wo(
+            db_session,
+            work_centers=[wc, wc, wc],
+            statuses=[OperationStatus.ON_HOLD, OperationStatus.PENDING, OperationStatus.PENDING],
+        )
+
+        promoted = release_next_ready_operation(db_session, wo, ops[0])
+        db_session.commit()
+
+        assert promoted is None, "a held predecessor blocks promotion at its OWN work center"
+        db_session.expire_all()
+        for op in ops[1:]:
+            assert db_session.get(WorkOrderOperation, op.id).status == OperationStatus.PENDING
+            assert _ready_events(db_session, op.id) == []
+
+    def test_a_held_op_blocks_its_same_work_center_siblings_from_clocking_in(self, client, db_session):
+        """The carve-out reaches clock-in too -- deliberately, since the predicate is shared.
+
+        A hold that took the pool off the board but still let a badge scan start a sibling
+        would not be a stop at all.
+        """
+        operator = make_user(db_session, role=UserRole.OPERATOR)
+        wc = make_laser_work_center(db_session)
+        wo, ops = make_routed_wo(
+            db_session,
+            work_centers=[wc, wc],
+            statuses=[OperationStatus.ON_HOLD, OperationStatus.READY],
+        )
+
+        resp = _clock_in(client, operator, wo_id=wo.id, op=ops[1])
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST, resp.text
+        assert resp.json()["detail"] == "Previous operations must be completed first"
+
+    def test_clearing_the_hold_lets_the_siblings_promote(self, db_session):
+        """Once the hold is lifted the pool is startable again.
+
+        Note what this does NOT assert: resuming an operation does not itself re-run
+        promotion (neither resume path calls a release helper), so the siblings flip on the
+        next lifecycle event rather than the instant the hold clears.
+        """
+        wc = make_laser_work_center(db_session)
+        wo, ops = make_routed_wo(
+            db_session,
+            work_centers=[wc, wc, wc],
+            statuses=[OperationStatus.ON_HOLD, OperationStatus.PENDING, OperationStatus.PENDING],
+        )
+
+        ops[0].status = OperationStatus.READY  # the resume paths' "previous state"
+        db_session.commit()
+
+        promoted = release_next_ready_operation(db_session, wo, ops[0])
+        db_session.commit()
+
+        assert promoted is not None and promoted.id == ops[1].id
+        db_session.expire_all()
+        for op in ops[1:]:
+            assert db_session.get(WorkOrderOperation, op.id).status == OperationStatus.READY
+
+    def test_a_held_op_at_another_work_center_still_blocks(self, db_session):
+        """Regression: the cross-work-center block was never conditional on status."""
+        wo, ops = make_routed_wo(
+            db_session,
+            work_centers=[make_laser_work_center(db_session), make_laser_work_center(db_session)],
+            statuses=[OperationStatus.ON_HOLD, OperationStatus.PENDING],
+        )
+
+        promoted = release_next_ready_operation(db_session, wo, ops[0])
+        db_session.commit()
+
+        assert promoted is None
+        db_session.expire_all()
+        assert db_session.get(WorkOrderOperation, ops[1].id).status == OperationStatus.PENDING
 
 
 # --------------------------------------------------------------------------- #
@@ -512,11 +897,22 @@ class TestPromotionHealing:
             assert len(_ready_events(db_session, op.id)) == 1
 
     def test_release_first_ready_non_laser_promotes_only_first(self, db_session):
+        """A conventional ROUTING -- one op per work center -- still promotes exactly one.
+
+        This is the regression pin for the laser exemption's remaining edge. Since the
+        general promotion rule adopted clock-in's ``allow_same_work_center=True``
+        semantics, same-work-center ops promote together everywhere; what still separates
+        a laser WO is that it drops CROSS-work-center gating too. So the pin has to be a
+        cross-work-center route, or it pins nothing.
+        """
         admin = make_user(db_session)
-        wc = make_laser_work_center(db_session)
         wo, ops = make_routed_wo(
             db_session,
-            work_centers=[wc, wc, wc],
+            work_centers=[
+                make_laser_work_center(db_session),
+                make_laser_work_center(db_session),
+                make_laser_work_center(db_session),
+            ],
             statuses=[OperationStatus.PENDING, OperationStatus.PENDING, OperationStatus.PENDING],
         )
 
@@ -530,6 +926,58 @@ class TestPromotionHealing:
         assert db_session.get(WorkOrderOperation, ops[2].id).status == OperationStatus.PENDING
         assert len(_ready_events(db_session, ops[0].id)) == 1
         assert _ready_events(db_session, ops[1].id) == []
+
+    def test_release_first_ready_non_laser_same_work_center_promotes_all(self, db_session):
+        """The general rule: unordered items at ONE work center all become READY.
+
+        The motivating record is a batch WO carrying ~18 press-brake items as one
+        operation each on one machine. Clock-in always allowed any of them
+        (``allow_same_work_center=True``); only the promotion rule disagreed, so 17 of 18
+        never reached READY and the dispatch board / kiosk (READY-only) never showed them.
+        This is NOT the laser exemption -- see the cross-work-center pin above, which
+        still promotes exactly one.
+        """
+        admin = make_user(db_session)
+        wc = make_laser_work_center(db_session)
+        wo, ops = make_routed_wo(
+            db_session,
+            work_centers=[wc, wc, wc],
+            statuses=[OperationStatus.PENDING, OperationStatus.PENDING, OperationStatus.PENDING],
+        )
+
+        promoted = release_first_ready_operation(wo, db_session, user_id=admin.id)
+        db_session.commit()
+
+        assert promoted is not None and promoted.id == ops[0].id  # lowest sequence returned
+        db_session.expire_all()
+        for op in ops:
+            assert db_session.get(WorkOrderOperation, op.id).status == OperationStatus.READY
+            assert len(_ready_events(db_session, op.id)) == 1
+
+    def test_release_first_ready_mixed_route_promotes_only_the_first_cell(self, db_session):
+        """Mixed route: two ops share a work center, a third sits downstream elsewhere.
+
+        Cross-work-center ordering is PRESERVED -- the downstream op waits.
+        """
+        admin = make_user(db_session)
+        cell = make_laser_work_center(db_session)
+        downstream = make_laser_work_center(db_session)
+        wo, ops = make_routed_wo(
+            db_session,
+            work_centers=[cell, cell, downstream],
+            statuses=[OperationStatus.PENDING, OperationStatus.PENDING, OperationStatus.PENDING],
+        )
+
+        release_first_ready_operation(wo, db_session, user_id=admin.id)
+        db_session.commit()
+
+        db_session.expire_all()
+        assert db_session.get(WorkOrderOperation, ops[0].id).status == OperationStatus.READY
+        assert db_session.get(WorkOrderOperation, ops[1].id).status == OperationStatus.READY
+        assert (
+            db_session.get(WorkOrderOperation, ops[2].id).status == OperationStatus.PENDING
+        ), "an op at a DIFFERENT work center still waits for the lower-sequence ops"
+        assert _ready_events(db_session, ops[2].id) == []
 
     def test_release_next_ready_promotes_all_pending_on_laser_wo(self, db_session):
         """Healing path: a pre-change laser WO (nests 2-3 stranded PENDING) is
@@ -552,10 +1000,14 @@ class TestPromotionHealing:
         assert len(_ready_events(db_session, ops[2].id)) == 1
 
     def test_release_next_ready_non_laser_promotes_next_in_sequence_only(self, db_session):
-        wc = make_laser_work_center(db_session)
+        """Cross-work-center route: only the next op promotes (laser would promote all)."""
         wo, ops = make_routed_wo(
             db_session,
-            work_centers=[wc, wc, wc],
+            work_centers=[
+                make_laser_work_center(db_session),
+                make_laser_work_center(db_session),
+                make_laser_work_center(db_session),
+            ],
             statuses=[OperationStatus.COMPLETE, OperationStatus.PENDING, OperationStatus.PENDING],
         )
 
@@ -596,11 +1048,15 @@ class TestPromotionHealing:
             assert len(_ready_events(db_session, healed["id"])) == 1
 
     def test_non_laser_completion_promotes_only_next(self, client, db_session):
+        """End-to-end cross-work-center route: completing op1 promotes op2 only."""
         admin = make_user(db_session)
-        wc = make_laser_work_center(db_session)
         wo, ops = make_routed_wo(
             db_session,
-            work_centers=[wc, wc, wc],
+            work_centers=[
+                make_laser_work_center(db_session),
+                make_laser_work_center(db_session),
+                make_laser_work_center(db_session),
+            ],
             statuses=[OperationStatus.READY, OperationStatus.PENDING, OperationStatus.PENDING],
         )
 
@@ -631,6 +1087,36 @@ class TestWorkCenterQueueVisibility:
         mine = [item for item in resp.json()["queue"] if item["work_order_id"] == child["id"]]
         assert {item["operation_id"] for item in mine} == {op["id"] for op in child["operations"]}
         assert all(item["status"] == "ready" for item in mine)
+
+    def test_queue_shows_every_same_work_center_item_of_a_batch_wo(self, client, db_session):
+        """The defect this rule fixes, end to end, on an ordinary (non-laser) WO.
+
+        A batch work order carrying several unordered items as one operation each, all on
+        one machine. Every one of them was ALWAYS legal to clock into -- asserted here
+        against the real endpoint, not assumed -- but only the lowest-sequence op reached
+        READY, and the work-center queue filters to READY/IN_PROGRESS, so the rest were
+        invisible to the operator. All of them now queue.
+        """
+        admin = make_user(db_session)
+        operator = make_user(db_session, role=UserRole.OPERATOR)
+        wc = make_laser_work_center(db_session)
+        wo, ops = make_routed_wo(
+            db_session,
+            work_centers=[wc, wc, wc],
+            statuses=[OperationStatus.PENDING, OperationStatus.PENDING, OperationStatus.PENDING],
+        )
+
+        release_first_ready_operation(wo, db_session, user_id=admin.id)
+        db_session.commit()
+
+        resp = client.get(f"/api/v1/shop-floor/work-center-queue/{wc.id}", headers=headers_for(admin))
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        mine = [item for item in resp.json()["queue"] if item["work_order_id"] == wo.id]
+        assert {item["operation_id"] for item in mine} == {op.id for op in ops}
+
+        # And the gate that always allowed it: the LAST item is clock-in-able, which is
+        # why promoting it grants nothing new.
+        assert _clock_in(client, operator, wo_id=wo.id, op=ops[2]).status_code == status.HTTP_200_OK
 
     def test_queue_scoped_to_each_work_center_when_nests_spread(self, client, db_session):
         """A package spread across two lasers queues each nest ONLY at its own
