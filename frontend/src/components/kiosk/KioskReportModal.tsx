@@ -8,6 +8,7 @@ import {
   scrapReasonTiles,
 } from './scrapReasonOptions';
 import type { ScrapReasonCodeOption } from '../../types/scrapReason';
+import { applyQuickAdd, kioskQuickAdds, QUICK_ADD_BUTTON_CLASSES } from './quantityQuickAdds';
 
 export type ReportTab = 'good' | 'scrap';
 
@@ -92,14 +93,9 @@ export default function KioskReportModal({
     onConfirmScrap(scrapQty, reason, codeId, openNcr, openNcr ? scrapDetail.trim() || null : null);
   };
 
-  const quickAdds: Array<{ label: string; amount: number }> = [
-    { label: '+1', amount: 1 },
-    { label: '+5', amount: 5 },
-    { label: '+25', amount: 25 },
-    ...(fullNestQuantity != null && Number(fullNestQuantity) > 1
-      ? [{ label: `Full nest ${Number(fullNestQuantity)}`, amount: Number(fullNestQuantity) }]
-      : []),
-  ];
+  // Shared with the COMPLETE modal's good field — same amounts, order, labels
+  // and clamp (quantityQuickAdds.ts). Don't re-derive them here.
+  const quickAdds = kioskQuickAdds(fullNestQuantity);
 
   const mono = "font-mono";
 
@@ -171,8 +167,8 @@ export default function KioskReportModal({
                   key={qa.label}
                   type="button"
                   disabled={busy}
-                  onClick={() => setGoodValue(String(Math.min(99999, goodQty + qa.amount)))}
-                  className={`${mono} h-11 min-w-0 flex-1 rounded-[3px] border border-fd-line bg-fd-raised px-1 text-[13px] font-semibold uppercase tracking-[0.04em] text-fd-body transition-transform duration-150 ease-out active:scale-[0.98] disabled:opacity-40`}
+                  onClick={() => setGoodValue(String(applyQuickAdd(goodQty, qa.amount)))}
+                  className={QUICK_ADD_BUTTON_CLASSES}
                 >
                   {qa.label}
                 </button>

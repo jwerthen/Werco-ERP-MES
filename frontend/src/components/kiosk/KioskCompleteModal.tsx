@@ -6,6 +6,7 @@ import { activeScrapCodes, resolveScrapSelection, scrapReasonTiles } from './scr
 import type { ActiveJob, LaserNestInfo } from '../../types';
 import type { ScrapReasonCodeOption } from '../../types/scrapReason';
 import { KioskMaterialTie, KioskQueueItem } from './kioskConstants';
+import { applyQuickAdd, kioskQuickAdds, QUICK_ADD_BUTTON_CLASSES } from './quantityQuickAdds';
 import {
   DEDUCTION_TIMING_NOTE,
   deductionHeadline,
@@ -129,6 +130,35 @@ export default function KioskCompleteModal({
   );
   const scrapNote = prediction ? scrapNoteText(prediction, scrapQty) : null;
   const shortageNote = prediction ? shortageNoteText(prediction) : null;
+
+  // Same row the REPORT modal shows on its GOOD tab, off the same definition
+  // (quantityQuickAdds.ts) and off the same `component_quantity` the page hands
+  // Report as `fullNestQuantity` — it rides in on `job`, so nothing new is
+  // threaded through.
+  const quickAdds = kioskQuickAdds(job.component_quantity);
+
+  // The ceiling is the SERVER's, not a style choice: clock-out refuses 400
+  // "Quantity produced exceeds quantity ordered" once
+  // `operation.quantity_complete + produced` clears the operation target, and
+  // this field pre-fills at exactly `remaining` — the ceiling itself. Unbounded,
+  // every quick add from the default state would be a guaranteed refusal that
+  // takes the whole completion down with it. So the row tops out at what the
+  // server will take and goes disabled once the field is there, which is also
+  // the truth an operator needs: COMPLETE closes this operation at its target,
+  // and recording MORE than the target is an office over-count, not a tap here.
+  const quickAddCeiling = remaining;
+  const quickAddsExhausted = goodQty >= quickAddCeiling;
+
+  const handleQuickAdd = (amount: number) => {
+    setGood(String(applyQuickAdd(goodQty, amount, quickAddCeiling)));
+    // A quick add is unambiguously a GOOD entry, so point the keypad at GOOD —
+    // otherwise a scrap-bound keypad would take the operator's next digit into
+    // the field they just steered away from. The keypad is always already open
+    // by the time this runs (the row only enables once good is under its
+    // ceiling, which takes a keypad edit), so this re-points, never opens: the
+    // COMPLETE button can't grow away from a gloved finger mid-tap.
+    setActiveField('good');
+  };
 
   const handleConfirm = () => {
     if (confirmDisabled) return;
@@ -329,6 +359,35 @@ export default function KioskCompleteModal({
               <span className="block font-mono text-[10px] font-bold uppercase tracking-[0.16em]">Scrap</span>
               <span className="mt-0.5 block font-mono text-3xl font-bold tabular-nums">{scrap || '0'}</span>
             </button>
+          </div>
+
+          {/* Quick adds — GOOD only. Two fields are on screen, so the row is
+              captioned and each button names its target: a quick add must never
+              be mistaken for (or silently write to) scrap. */}
+          <div className="mt-2.5">
+            <p
+              id="kiosk-complete-quickadd-label"
+              data-testid="kiosk-complete-quickadd-label"
+              className="mb-1.5 font-mono text-[10px] uppercase tracking-[0.16em] text-fd-mute"
+            >
+              {quickAddCeiling > 0
+                ? `Quick add to good · max ${quickAddCeiling}`
+                : 'Quick add to good · operation is already at its target'}
+            </p>
+            <div className="flex gap-2" role="group" aria-labelledby="kiosk-complete-quickadd-label">
+              {quickAdds.map((qa) => (
+                <button
+                  key={qa.label}
+                  type="button"
+                  aria-label={`Add ${qa.label} to good`}
+                  disabled={busy || quickAddsExhausted}
+                  onClick={() => handleQuickAdd(qa.amount)}
+                  className={QUICK_ADD_BUTTON_CLASSES}
+                >
+                  {qa.label}
+                </button>
+              ))}
+            </div>
           </div>
 
           {activeField != null && (

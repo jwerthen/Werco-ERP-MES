@@ -739,6 +739,26 @@ export default function CrewStationKiosk() {
 
   const viewItem = 'operationId' in view ? findItem(view.operationId) : null;
 
+  /**
+   * What is left to record on an operation: its target less what is already
+   * recorded — which is also the most GOOD quantity the server will accept for
+   * one more entry. COMPLETE pre-fills its final-entry field with it and all
+   * three quantity screens bound their quick-add row by it, off this one
+   * expression so a pre-fill and a ceiling can never disagree.
+   *
+   * `quantity_ordered` on a queue row is already the OPERATION target — the
+   * server sends `operation_target_quantity(op, wo)`, i.e. `component_quantity`
+   * when the operation carries one, else the work order's quantity — so this is
+   * the same number both writers behind the quantity screen measure their
+   * refusal against (`/production` 400 "Quantity (N) cannot exceed quantity
+   * ordered (T)"; clock-out 400 "Quantity produced exceeds quantity ordered").
+   * It bounds the quick-add row only; the keypad and the confirm are unchanged,
+   * and the server stays the enforcement — the queue is polled, so this figure
+   * can be one crewmate's report out of date.
+   */
+  const remainingOnOperation = (item: KioskCrewQueueItem): number =>
+    Math.max(0, Number(item.quantity_ordered || 0) - Number(item.quantity_complete || 0));
+
   // --- Guard: no station id in the URL -----------------------------------------
   if (stationId == null) {
     return (
@@ -1169,7 +1189,15 @@ export default function CrewStationKiosk() {
         {/* LEAVE — quantities (0/0 allowed). scrapCodes come off the queue
             payload (the scoped tokens can't reach /quality, so the server
             rides the active codes on the station-authed poll); [] falls back
-            to the legacy SCRAP_REASONS grid. */}
+            to the legacy SCRAP_REASONS grid.
+
+            Good counts up from zero here and clock-out measures its refusal
+            against the same operation target /production does, so the quick-add
+            row is offered — but ONLY when the queue row resolves. LEAVE is also
+            reachable from the operator sheet for a job outside this station's
+            queue, where there is no row and so no ceiling to bound the taps
+            with (the tally banner is absent for exactly the same reason). No
+            ceiling, no row. */}
         {view.name === 'leaveQty' && (
           <KioskQuantityScreen
             title={`Clock out — ${view.operator.user.full_name}`}
@@ -1182,6 +1210,8 @@ export default function CrewStationKiosk() {
                 : undefined
             }
             scrapCodes={scrapCodes}
+            quickAddCeiling={viewItem ? remainingOnOperation(viewItem) : undefined}
+            fullNestQuantity={viewItem?.component_quantity}
             busy={mutationsBlocked}
             onConfirm={(good, scrap, reason, codeId) => void handleLeaveConfirm(good, scrap, reason, codeId)}
             onCancel={() =>
@@ -1190,7 +1220,11 @@ export default function CrewStationKiosk() {
           />
         )}
 
-        {/* REPORT PRODUCTION — quantities, then badge signature */}
+        {/* REPORT PRODUCTION — quantities, then badge signature.
+            The in-shift good count starts at zero and runs up to the operation
+            target, so this is where the quick-add row has the most room and does
+            the most work: it is the screen an operator taps every time a nest or
+            a batch of parts comes off the machine. */}
         {view.name === 'productionQty' && viewItem && (
           <KioskQuantityScreen
             title="Report production"
@@ -1199,6 +1233,8 @@ export default function CrewStationKiosk() {
             requireTotalPositive
             tallyBanner={`CREW TOTAL SO FAR: ${formatCrewTally(viewItem)} — enter only NEW pieces`}
             scrapCodes={scrapCodes}
+            quickAddCeiling={remainingOnOperation(viewItem)}
+            fullNestQuantity={viewItem.component_quantity}
             busy={mutationsBlocked}
             onConfirm={(good, scrap, reason, codeId) => {
               setBadgeError(null);
@@ -1268,16 +1304,24 @@ export default function CrewStationKiosk() {
           </section>
         )}
 
-        {/* COMPLETE — final quantities, then the crew-wide confirm modal */}
+        {/* COMPLETE — final quantities, then the crew-wide confirm modal.
+            Final-entry good PRE-FILLS at the ceiling (the same expression, so
+            the two can't disagree), which means the row arrives disabled on a
+            normal complete and comes alive only after an operator clears the
+            field to rebuild a partial count — exactly as it behaves on the
+            single-operator kiosk's COMPLETE overlay. Recording MORE than the
+            operation target is an office over-count, not a tap here. */}
         {view.name === 'completeQty' && viewItem && (
           <KioskQuantityScreen
             title="Complete job"
             jobLabel={crewJobLabel(viewItem)}
             confirmLabel="Continue"
-            initialGood={Math.max(0, Number(viewItem.quantity_ordered || 0) - Number(viewItem.quantity_complete || 0))}
+            initialGood={remainingOnOperation(viewItem)}
             requireTotalPositive={false}
             tallyBanner={`CREW TOTAL SO FAR: ${formatCrewTally(viewItem)} — enter only NEW pieces`}
             scrapCodes={scrapCodes}
+            quickAddCeiling={remainingOnOperation(viewItem)}
+            fullNestQuantity={viewItem.component_quantity}
             busy={mutationsBlocked}
             onConfirm={(good, scrap, reason, codeId) => {
               setBadgeError(null);

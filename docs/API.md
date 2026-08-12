@@ -253,11 +253,13 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > `StaleDataError` handler instead of silently losing the write.
 >
 > **READY promotion is pooled by work center.** Promotion no longer stops at the lowest-sequence
-> PENDING operation. Both release helpers — one at `POST /work-orders/{id}/release`, the other inside
-> the shared finalizer after each operation completion that leaves work remaining (so it also runs on
-> the shop-floor and reconcile-on-read completion paths) — promote **every** PENDING operation whose
-> predecessor gate passes, and that gate is the one clock-in has always enforced: a predecessor at the
-> **same work center** as the candidate does not block it.
+> PENDING operation. **Three seams** promote — one at `POST /work-orders/{id}/release`, one inside the
+> shared finalizer after each operation completion that leaves work remaining (so it also runs on the
+> shop-floor and reconcile-on-read completion paths), and one on the **read path** (see "A read heals
+> a stranded work order" below) — and all three run one shared implementation, so the rule cannot
+> differ by seam. They promote **every** PENDING operation whose predecessor gate passes, and that
+> gate is the one clock-in has always enforced: a predecessor at the **same work center** as the
+> candidate does not block it.
 > - A conventional routing whose steps each sit at a **different** work center is **unchanged**. The
 >   same-work-center allowance never fires, at most one operation can pass, and one operation goes
 >   READY — byte-identical to the old lowest-sequence-only rule.
@@ -277,12 +279,52 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > verbs, which were **stricter** than the floor and are relaxed to match it, and the **ON_HOLD**
 > carve-out, which is the one place this work makes a previously-accepted request **refused**.
 >
-> Two deliberate non-changes: the **laser** dispatch pool keeps its own, strictly fuller exemption
-> (see "Laser WOs are dispatch pools" under Laser Nests), and the bulk loader
-> `POST /work-orders/import` still promotes **exactly one** operation per imported WO — it carries its
-> own inline release rule and was deliberately left alone, so an imported open WO with several
-> same-work-center items shows only the first on the dispatch board until a lifecycle event runs the
-> shared helper.
+> One deliberate non-change, and one that no longer holds: the **laser** dispatch pool keeps its own,
+> strictly fuller exemption (see "Laser WOs are dispatch pools" under Laser Nests), while the bulk loader
+> `POST /work-orders/import` still promotes **exactly one** operation *at import time* — it carries
+> its own inline release rule and was deliberately left alone. That difference no longer persists,
+> though: the loader lands the WO RELEASED / IN_PROGRESS, so the read-path seam below promotes the
+> rest of the pool on the **first reconciling read** of that work order.
+>
+> **A read heals a stranded work order.** The two lifecycle seams above cannot reach a work order
+> that was **already RELEASED** before the pooled rule shipped: `POST /work-orders/{id}/release`
+> refuses anything that is not DRAFT, so such a WO kept the one-at-a-time promotion it was released
+> under and its operations 2..N sat PENDING indefinitely — invisible to the kiosk and the dispatch
+> board, which surface READY work only. The reconcile-on-read pass
+> (`reconcile_work_orders_from_completion_evidence`) now re-runs the **same** promotion last, after
+> the completion evidence has landed, so a stranded work order repairs itself the next time anyone
+> loads it. No new endpoint, no data migration, no owner action.
+> - **Which reads heal.** `GET /work-orders`, `GET /work-orders/{id}`, `GET /shop-floor/dashboard`
+>   (bounded to the most-recently-touched open WOs by `SHOP_FLOOR_DASHBOARD_RECONCILE_LIMIT`),
+>   `GET /shop-floor/operations`, and `GET /shop-floor/operations/{id}`.
+> - **Which do not.** The **kiosk queue and the dispatch-board / work-center-queue endpoints do not
+>   reconcile.** Polling a board will not repair a stranded WO — **opening the work order, or a
+>   shop-floor operations/dashboard read, is what repairs it**, after which the board shows the pool.
+>   Because the operations list filters status in SQL, the load that heals is the one *before* the
+>   rows appear: the operator's next poll shows them.
+> - **DRAFT is never promoted by a read.** Release remains the authorization step and the record of
+>   who authorized production, so a GET must not put unreleased work on the floor's board. A DRAFT WO
+>   promotes at `POST /work-orders/{id}/release` exactly as before — the carve-out delays promotion
+>   to the authorized moment, it does not lose it. Terminal WOs (COMPLETE / CLOSED / CANCELLED) are
+>   likewise skipped, including one this same pass just drove to COMPLETE. Every other non-terminal
+>   status promotes — a work order whose **header** is ON_HOLD included, matching what the completion
+>   seam already does; the **operation**-level ON_HOLD carve-out is the one that stops a pool.
+> - **The heal runs the rule, it does not relax it.** Cross-work-center ordering still holds, the
+>   ON_HOLD carve-out below still blocks (a page load is not a way around a quality stop), only
+>   PENDING rows are touched, and the write set is scoped to the work order's own company. It is
+>   idempotent — a second read promotes nothing and emits no duplicate `operation_ready` event — and
+>   best-effort per work order, so a failure on one cannot 500 a board load for the rest.
+> - **Still unaudited, as at the other two seams.** PENDING → READY writes no `audit_log` row (READY
+>   is queue state, not a production record); traceability for the flip is the tenant-scoped
+>   `operation_ready` OperationalEvent, which is what the Lean queue-time metric reads.
+>
+> **`PUT /scheduling/work-orders/{id}/unschedule` no longer demotes durably.** That endpoint clears
+> the schedule and flips each non-COMPLETE READY operation back to PENDING. On a released work order
+> that demotion is now **transient**: the next reconciling read re-promotes every operation whose
+> predecessor gate passes, because promotion keys off the predecessor gate and not off whether the
+> operation is scheduled. Unscheduling clears `scheduled_start` / `scheduled_end` durably; treat the
+> status flip as incidental, not as a way to take work off the dispatch board. (Use ON_HOLD for that
+> — it survives the read.)
 >
 > **An ON_HOLD predecessor blocks its own work center too.** The same-work-center allowance carries
 > one carve-out: a predecessor whose status is **ON_HOLD** blocks from **any** work center, its own
@@ -1357,9 +1399,11 @@ mixed**:
 > gates) — so operators run nests in **any order**, including across **different work centers**
 > when a package's nests are spread over multiple lasers. The exemption keys off the WO type
 > through one shared predicate (`is_laser_dispatch_work_order` in `work_order_state_service`), and
-> the release helpers promote **all** PENDING laser ops to READY (not just the lowest sequence) —
-> a pre-existing laser WO imported before whole-package-ready self-heals (its stranded PENDING
-> nests go READY) on its next release/lifecycle event.
+> all three promotion seams promote **all** PENDING laser ops to READY (not just the lowest
+> sequence) — a pre-existing laser WO imported before whole-package-ready self-heals (its stranded
+> PENDING nests go READY) on its next release/lifecycle event, or, if it was already released and
+> so can never be released again, on its next **reconciling read** (see "A read heals a stranded
+> work order" under Work Orders).
 >
 > **The laser exemption is strictly fuller than the work-center pooling that now applies to every
 > WO, and the two are not the same rule.** Non-laser WOs also promote every startable PENDING
@@ -5449,7 +5493,9 @@ every created row):
 > `customer_po`, `priority` (1–10, default 5), `completed_through_seq`. The part must exist **with a
 > released routing** (operations are generated through the same path as `POST /work-orders/`, never
 > raw inserts); the WO is released on import (first pending op promoted to READY) so it lands in
-> floor queues. **Paper-complete seeding:** operations with `sequence <= completed_through_seq` are
+> floor queues — and because the imported WO lands RELEASED / IN_PROGRESS, the read-path promotion
+> seam brings the rest of a same-work-center pool to READY on its first reconciling read (see
+> Work Orders → "READY promotion is pooled by work center"). **Paper-complete seeding:** operations with `sequence <= completed_through_seq` are
 > set COMPLETE at target quantity with **no fabricated `actual_start`/`actual_end`, operators, or
 > TimeEntry labor** (that evidence doesn't exist; inventing it would corrupt cycle-time/labor
 > analytics and the AS9100D story). Each paper-completed op emits an `operation_completed`

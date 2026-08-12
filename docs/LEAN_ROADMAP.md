@@ -72,7 +72,7 @@ Zero new floor behavior; surfaces data already captured. Lean terms served: OTD,
 
 - **1a. Scrap reason codes** — new `scrap_reason_codes` table mirroring `DowntimeReasonCode` ([models/downtime.py:66-78](../backend/app/models/downtime.py)) **but with `UniqueConstraint("company_id", "code")`** — the downtime template's `unique=True` on `code` (line 72) is a globally-unique-across-tenants bug; do not copy it. Nullable `scrap_reason_code_id` FK on `TimeEntry`/`WorkOrderOperation`/`WorkOrder` beside the existing free text (free text becomes narrative detail — AS9100D). Wire the 3 write paths: shop-floor clock-out (`ClockOut` schema), `/operations/{id}/production`, work_orders `/complete`. CRUD endpoints mirror downtime's (list/create/update, deactivate-not-delete); kiosk + desktop pickers. Extends the already-approved scrap-reason enforcement work.
 - **1b. Ship-based OTD/OTIF** — new analytics calc joining `Shipment.ship_date` ([models/shipping.py:60](../backend/app/models/shipping.py); partials = multiple shipments with `quantity_shipped`) against the promise with precedence **`must_ship_by || due_date`** ([models/work_order.py:64](../backend/app/models/work_order.py)); OTIF = full qty shipped by promise; per-customer breakdown. Replaces/parallels the completion-based `_calculate_otd_kpi` ([analytics_service.py:505](../backend/app/services/analytics_service.py)). Prereq: a promise-field hygiene pass (report of WOs missing both fields) before publishing the KPI.
-- **1c. Measured lead time & WIP aging** — emit an `operation_ready` `OperationalEvent` in `release_first_ready_operation` / `release_next_ready_operation` ([work_order_state_service.py:173/189](../backend/app/services/work_order_state_service.py)) — zero-migration; a `ready_at` column is the fallback. Queue time = op N `actual_end` → op N+1 `actual_start`; WO lead time = `released_at` → last op `actual_end` → ship; throughput time via Little's Law; PCE = run-hours ÷ elapsed. New flow report endpoint + WIP-aging view (reuse the wallboard elapsed-time helpers).
+- **1c. Measured lead time & WIP aging** — emit an `operation_ready` `OperationalEvent` from the shared promotion helper `promote_ready_operations` ([work_order_state_service.py](../backend/app/services/work_order_state_service.py)), which all three promotion seams route through — zero-migration; a `ready_at` column is the fallback. Queue time = op N `actual_end` → op N+1 `actual_start`; WO lead time = `released_at` → last op `actual_end` → ship; throughput time via Little's Law; PCE = run-hours ÷ elapsed. New flow report endpoint + WIP-aging view (reuse the wallboard elapsed-time helpers).
 - **1d. FPY/RTY** — add `quantity_reworked` to `WorkOrderOperation`, incremented where REWORK TimeEntries book quantity (today rework qty is conflated into `quantity_complete`). FPY per op = (complete − reworked − scrapped) ÷ (complete + scrapped); RTY = Π(op FPYs) per routing. Scrap/defect Pareto by reason code (needs 1a), with a weight-by-cost option.
 - **1e. Auto-OEE** — extract the ~220-line calculation already inside `POST /oee/calculate/{work_center_id}` ([endpoints/oee.py:439](../backend/app/api/endpoints/oee.py)) into a new `services/oee_service.py` (thin-router invariant); add `OEERecord.calculation_source` (auto|manual) + unique `(company_id, work_center_id, record_date, shift)`; nightly ARQ cron per tenant (worker.py cron pattern), manual records win. The staffed-time availability convention stands (no shift-calendar dependency). MTBF/MTTR per work center from `DowntimeEvent` + maintenance records.
 - **1f. Adoption + hidden-factory dashboard** — `GET /analytics/adoption`: digital-completion %, clock-in coverage, backfill rate from `OperationalEvent` + `TimeEntry.source` (captured since A0.1, never surfaced). Hidden factory: rework hours % (REWORK entries), planned-vs-reactive maintenance ratio.
@@ -127,7 +127,7 @@ These definitions are the contract for every implementation above — dashboards
 | **FPY (per op)** | (complete − reworked − scrapped) ÷ (complete + scrapped) |
 | **RTY (per routing)** | Π(op FPYs) — e.g. 0.95¹⁰ ≈ 60% |
 | **Lead time (WO)** | `released_at` → last op `actual_end` → ship |
-| **Queue time** | op N `actual_end` → op N+1 `actual_start` (with `operation_ready` events as the true ready marker). **Series break 2026-08-11 — see the note below the table.** |
+| **Queue time** | op N `actual_end` → op N+1 `actual_start` (with `operation_ready` events as the true ready marker). **Series breaks 2026-08-11 and 2026-08-12 — see the note below the table.** |
 | **Throughput time** | Little's Law: WIP ÷ throughput |
 | **PCE** | Value-added (run) hours ÷ total elapsed lead time (typical shops 0.4–5% — don't be alarmed by small numbers) |
 | **OEE** | Availability × Performance × Quality; staffed-time availability convention until a shift calendar exists (Phase 4a) |
@@ -160,6 +160,27 @@ These definitions are the contract for every implementation above — dashboards
 >   same-work-center allowance never fires there, one operation is promoted at a time exactly as
 >   before, and the series is continuous.
 > - **Already this way:** laser dispatch-pool WOs, whose nests have always all gone READY at once.
+>
+> **Second anchor shift, 2026-08-12 — work orders healed by a read.** The pooled rule originally ran
+> only at WO release and at operation completion, so a work order **already released before it
+> shipped** could not be re-promoted and its operations stayed PENDING. A third promotion seam on the
+> **read path** now heals those. For a healed operation the `operation_ready` anchor is therefore
+> **the first reconciling read after the deploy** — not its work order's release, and not the moment
+> the previous step finished. Consequences for the metric:
+> - Queue time for a healed operation is measured from an **arbitrary clock-start** (whenever someone
+>   first loaded that work order or a shop-floor list), so it **understates** the true wait by
+>   however long the WO had already been stranded. This is the opposite direction from the
+>   2026-08-11 break, and it lands on a bounded, one-time backlog rather than on new work.
+> - **Identify the affected rows** by an `operation_ready` event whose timestamp is later than its
+>   work order's `released_at` by more than the release transaction (the 08-11 pooled case anchors
+>   *at* release; the healed case anchors well after it). Exclude them from before/after comparisons
+>   rather than trying to reconstruct the real wait — the evidence for it does not exist.
+> - **New work is unaffected.** A work order released after the deploy promotes at release exactly as
+>   the 08-11 note describes, and the read seam finds nothing PENDING to promote.
+> - **Ongoing, not one-time:** `PUT /scheduling/work-orders/{id}/unschedule` demotes READY → PENDING,
+>   and the next reconciling read re-promotes and emits a **fresh** `operation_ready`. An
+>   unschedule/reschedule cycle therefore **resets** that operation's queue-time clock. Segment on it
+>   if unscheduling becomes common.
 >
 > The `operation_ready` events themselves are still emitted per operation and `from_ready_events`
 > still counts them, so the **measurement mechanism** is unchanged — only the meaning of the anchor

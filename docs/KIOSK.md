@@ -124,7 +124,20 @@ URL is all the station setup there is.
      run time, a steps banner, a **ROUTES TO** row from the new `next_operation` payload
      (the next routing step; omitted on the last operation), and — when the operation has
      tied material — the [material deduction notice](#material-deduction-notice). Final-entry
-     good defaults to the remaining quantity. When the queue holds a next job the CTA chains it — after a
+     good defaults to the remaining quantity and carries the same **`+1 +5 +25`** (plus **FULL
+     NEST n**) quick-add row as the report overlay — `components/kiosk/quantityQuickAdds.ts` is
+     the single definition behind both, so the two rows can't drift. Two differences are
+     load-bearing rather than cosmetic: the row applies to **GOOD only** (never scrap — it is
+     captioned, each button names its target, and a tap re-points an open scrap numpad at good
+     so the next digit can't land in the field the operator just left), and it is bounded by
+     what clock-out will accept. Clock-out refuses **400 "Quantity produced exceeds quantity
+     ordered"** once `operation.quantity_complete + quantity_produced` clears the operation
+     target, so the row tops out at the remaining quantity and goes **disabled** once the field
+     is there. Because good pre-fills at exactly that ceiling, the row arrives disabled on a
+     normal complete (captioned `QUICK ADD TO GOOD · MAX n`, or `· OPERATION IS ALREADY AT ITS
+     TARGET` when nothing remains): it is there for rebuilding a partial count after clearing
+     the field, and recording MORE than the target is an office over-count, not a tap here.
+     When the queue holds a next job the CTA chains it — after a
      successful complete the kiosk attempts clock-in to that job, and a refusal is surfaced
      verbatim (non-optimistic) with the operator landing on the queue. If the clock-out
      lands but the completion is refused, the kiosk says so — labor is closed either way.
@@ -223,6 +236,15 @@ where the queue previously showed one and hid the rest (the queue surfaces READY
 about what an operator may clock into changed: the floor's gate has always allowed same-work-center
 operations in any order, so this makes already-legal work visible rather than granting anything.
 Operations at a **different, downstream** work center still wait for their predecessors as before.
+
+**If a job still shows one item of many, open the work order in the office app once.** Promotion runs
+at work-order release, at each operation completion, and on the reconciling office/shop-floor reads —
+**not** on the kiosk queue read. A work order that was released *before* this rule shipped can no
+longer be released again, so it keeps the old one-at-a-time promotion until something reconciles it:
+loading it on the Work Orders page (list or detail) or on the desktop `/shop-floor` dashboard /
+operations list repairs it permanently, and the kiosk shows the full pool on the operator's next poll.
+Refreshing the kiosk alone will not fix it. Nothing else is needed — no re-release, no re-import, no
+admin action — and it only ever has to be done once per work order.
 
 One consequence worth knowing on the floor: **holding one item stops its siblings being started.**
 An **ON_HOLD** operation blocks from any work center, its own included, so while item 3 of a batch is
@@ -643,6 +665,40 @@ kiosk tokens are path-fenced to `/shop-floor` and cannot call
 `GET /quality/scrap-reason-codes`, and the station token stays honored by exactly the same two
 things (its own queue read + the badge mint) — the two-capability invariant is intact and no
 token scope was widened. An empty array means no active codes → the legacy grid.
+
+**Quantity entry on the crew station** is one shared screen (`components/kiosk/KioskQuantityScreen.tsx`)
+with a GOOD field, a SCRAP field and one big keypad between them, used by all three quantity flows
+below. Alongside the keypad it carries the same **`+1 +5 +25`** (plus **FULL NEST n**) quick-add row
+as the single-operator overlays — `components/kiosk/quantityQuickAdds.ts` is the single definition
+behind every copy, so the amounts, order, labels and clamp cannot drift between the two terminals.
+Four things about it are load-bearing rather than cosmetic:
+
+- It applies to **GOOD only**, on all three flows. There is no scrap quick-add — scrap takes a
+  reason and a deliberate entry — and because both fields are on screen at once the row is
+  captioned, each button names its target, and a tap **re-points an open scrap keypad at good** so
+  the operator's next digit can't land in the field they just steered away from.
+- It is bounded by what the **server** will take: the operation target less what is already
+  recorded (`quantity_ordered - quantity_complete` on the queue row, and that `quantity_ordered`
+  is already the operation target — `component_quantity` when the operation carries one). Both
+  writers behind this screen refuse over-target good quantity before any mutation —
+  `POST /shop-floor/operations/{id}/production` with 400 *"Quantity (N) cannot exceed quantity
+  ordered (T)"* and `POST /shop-floor/clock-out/{id}` with 400 *"Quantity produced exceeds quantity
+  ordered"* — so the row clamps at that ceiling and goes **disabled** once the field reaches it
+  (captioned `QUICK ADD TO GOOD · MAX n`, or `· OPERATION IS ALREADY AT ITS TARGET` when nothing
+  remains). The **keypad is not bounded**: an operator can still key any figure and take the
+  server's answer. Only the convenience is clamped.
+- It is **opt-in per screen, and the opt-in is the ceiling itself**. LEAVE reached from the
+  operator sheet for a job **outside this station's queue** has no queue row, so no ceiling, so
+  **no row** (the crew tally banner is absent there for the same reason) — never an unbounded one.
+  On COMPLETE the good field pre-fills at exactly that ceiling, so the row arrives disabled and
+  exists for rebuilding a cleared count; recording more than the operation target is an office
+  over-count, not a tap here. The over-count **CORRECTION** screen has no quick adds at all — it
+  removes pieces.
+- It sits **below the keypad** here, where the narrow single-operator overlays stack it above
+  theirs. Measured, not styled: this screen's stack is taller, and at **1024x768** (landscape iPad)
+  a row above the keypad pushed the keypad's CLEAR / 0 / backspace row 49px under the fold. Below
+  it, the keypad stays whole at both tablet orientations. Anything added above the keypad on this
+  screen owes the same measurement.
 
 - **JOIN / LEAVE (badge decides).** Tap a job → "scan badge to join or leave". If the badge's
   user is already on the roster, it's a **LEAVE**: the quantity screen closes their own entry
