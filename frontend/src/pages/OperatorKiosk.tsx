@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 import {
   ArrowLeftIcon,
@@ -26,6 +26,8 @@ import KioskHoldModal from '../components/kiosk/KioskHoldModal';
 import KioskCompleteModal from '../components/kiosk/KioskCompleteModal';
 import KioskDocViewer, { KioskDocTab, KioskDocTransport } from '../components/kiosk/KioskDocViewer';
 import KioskStepsPanel, { StepsTransport } from '../components/kiosk/KioskStepsPanel';
+import KioskOneTapLane from '../components/kiosk/KioskOneTapLane';
+import { useOneTapPieces } from '../components/kiosk/useOneTapPieces';
 import LaserNestOperatorPanel from '../components/laser/LaserNestOperatorPanel';
 import {
   KIOSK_SOURCE,
@@ -250,14 +252,90 @@ export default function OperatorKiosk() {
     return () => window.clearInterval(interval);
   }, [isAuthenticated]);
 
+  // --- One-tap +1 on REPORT PRODUCTION ---------------------------------------
+  // The hook lives HERE, at page level, and not inside KioskReportModal: the
+  // modal unmounts the moment it closes, and a tapped-but-unposted delta sitting
+  // inside an unmounting subtree is lost production. Owned here, every teardown
+  // the modal has is a flush instead of a loss.
+  //
+  // The operation a queued flush posts against lives in a ref rather than being
+  // read off `view`, because a flush fires from paths where the view is already
+  // gone or going (Cancel, a confirmed report, the idle logout).
+  const oneTapOperationRef = useRef<number | null>(null);
+  const reportOperationId = view.name === 'production' ? view.job.operation_id ?? null : null;
+  useEffect(() => {
+    // Only ever set, never cleared: the view leaving `production` is exactly the
+    // moment the exit flush below needs the ref to still name its target.
+    if (reportOperationId != null) oneTapOperationRef.current = reportOperationId;
+  }, [reportOperationId]);
+
+  const oneTap = useOneTapPieces({
+    canPost: online,
+    // NO `keepalive` on this surface, and that is a deliberate limitation, not
+    // an oversight: this kiosk runs on a normal session through the shared Axios
+    // client (ETag caching + the refresh-token interceptor), and axios cannot
+    // set `keepalive` on its request. Reaching around the client with a raw
+    // `fetch` to get it would post outside the interceptor that keeps this
+    // station's session alive, so we don't. The consequence, stated plainly:
+    // the PAGE-UNLOAD flush is BEST-EFFORT here — a tablet closed mid-window may
+    // lose the request. The guarantees are carried by the flush paths that run
+    // while the document is still alive — the modal closing (below) and the idle
+    // logout, both of which change `view` and bank the delta.
+    post: (pieces) => {
+      const operationId = oneTapOperationRef.current;
+      if (operationId == null) {
+        return Promise.reject(new Error('No job open — reopen the job to save these pieces.'));
+      }
+      return api
+        .reportOperationProduction(operationId, {
+          quantity_complete_delta: pieces,
+          quantity_scrapped_delta: 0,
+          source: KIOSK_SOURCE,
+        })
+        .then(() => undefined);
+    },
+    toMessage: (err) => kioskErrorMessage(err, 'Could not save production. Try again.'),
+    onRecorded: async (pieces) => {
+      showToast('success', `${pieces} pc${pieces === 1 ? '' : 's'} recorded`);
+      await refresh();
+    },
+    // No 401 re-scan path on this surface: there is no badge token to re-mint —
+    // a dead session is the axios interceptor's business, and the count stays
+    // pending and retryable in the lane either way.
+    onFailed: (pieces, message) =>
+      showToast('error', `${pieces} pc${pieces === 1 ? '' : 's'} NOT saved — ${message}`),
+  });
+
+  const { flush: flushOneTap } = oneTap;
+
+  // Leaving the report screen BANKS whatever is still inside the undo window.
+  // The tap was the commit; the window is only a way out of it, and closing the
+  // modal is not one — so Cancel, a keyed confirm, and the idle logout (all of
+  // which funnel through a view change) post rather than discard.
+  const onReportScreen = view.name === 'production';
+  const wasOnReportScreen = useRef(false);
+  useEffect(() => {
+    if (wasOnReportScreen.current && !onReportScreen) flushOneTap();
+    wasOnReportScreen.current = onReportScreen;
+  }, [onReportScreen, flushOneTap]);
+
   // --- Idle auto-logout -----------------------------------------------------
   const handleIdleLogout = useCallback(() => {
-    logout();
+    // Clear the SCREEN first, then bank any one-tap delta, and only then drop
+    // the credential.
+    //
+    // The order is load-bearing. `logout()` used to run first, which meant the
+    // exit flush the view change triggers went out against a cleared session and
+    // 401'd — an idle timeout would quietly destroy pieces the operator had
+    // already tapped and committed to. Nothing an operator can act through is on
+    // screen once the state below is reset, so holding the token for the length
+    // of one bounded request costs nothing an idle logout was protecting.
     setView({ name: 'queue' });
     setQueue([]);
     setActiveJob(null);
     setSessionNcr(null);
-  }, [logout]);
+    void flushOneTap().finally(() => logout());
+  }, [logout, flushOneTap]);
 
   const { countdownSeconds } = useKioskIdleLogout({
     enabled: isAuthenticated,
@@ -572,6 +650,35 @@ export default function OperatorKiosk() {
 
   const overlayOpen = view.name === 'production' || view.name === 'complete' || view.name === 'hold';
   const showChrome = view.name !== 'viewer';
+
+  /**
+   * The one-tap lane renders ONLY when a real server ceiling can be worked out,
+   * which here means `activeQueueItem` resolved: its `quantity_ordered` is the
+   * OPERATION target (`operation_target_quantity(op, wo)`) — the very number the
+   * server measures its 400 "Quantity (N) cannot exceed quantity ordered (T)"
+   * against. An operator clocked onto a job at ANOTHER work center resolves it
+   * undefined; then there is no ceiling, so no lane, and the modal renders
+   * exactly as it does today. That is the `quantityQuickAdds.ts` convention —
+   * the opt-in IS the ceiling: a caller that cannot bound the field gets no
+   * self-posting control rather than an unbounded one.
+   *
+   * `unbanked` comes out of the remaining because the pending taps are already
+   * promised to the server; leaving them in would let the lane count past the
+   * target and key a guaranteed refusal.
+   */
+  const oneTapRemaining = activeQueueItem
+    ? Math.max(0, Number(activeQueueItem.quantity_ordered || 0) - Number(activeQueueItem.quantity_complete || 0))
+    : null;
+  const oneTapLane =
+    oneTapRemaining == null ? undefined : (
+      <KioskOneTapLane
+        oneTap={oneTap}
+        atCeiling={oneTapRemaining - oneTap.unbanked <= 0}
+        blocked={busy}
+        online={online}
+        offlineHintId={OFFLINE_HINT_ID}
+      />
+    );
 
   // --- Authenticated kiosk ----------------------------------------------------
   return (
@@ -1194,6 +1301,11 @@ export default function OperatorKiosk() {
           quantityOrdered={Number(view.job.quantity_ordered || 0)}
           fullNestQuantity={view.job.component_quantity}
           scrapCodes={scrapCodes}
+          oneTapLane={oneTapLane}
+          // The lane always commits first, so exactly one mechanism owns the
+          // count at a time and CONFIRM can never race a pending auto-post into
+          // two reports for one run of parts.
+          confirmLockedLabel={oneTap.unbanked > 0 ? `Recording ${oneTap.unbanked} pcs…` : null}
           busy={mutationsBlocked}
           online={online}
           offlineHintId={OFFLINE_HINT_ID}

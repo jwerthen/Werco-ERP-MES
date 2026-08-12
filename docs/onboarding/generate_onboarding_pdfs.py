@@ -211,15 +211,21 @@ ROLE_CARDS = [
                 "First person in unlocks the station with the shared PIN. The unlock lasts up to ~24 hours — "
                 "unless someone taps LOCK STATION, after which anyone re-enters the PIN.",
                 "Tap <b>LOCK STATION</b> when leaving it unattended — idle never locks it by itself.",
-                "After 90 seconds idle, a half-entered screen resets back to the crew board. Nothing partial is saved — "
-                "just start the action again.",
+                "After 90 seconds idle, a half-entered screen resets back to the crew board. Nothing you typed but "
+                "did not confirm is saved — just start the action again. The one exception: pieces already tapped "
+                "on <b>+1 PIECE</b> ARE saved, so do not re-tap them.",
             ]),
             ("Join, work, leave", "steps", [
                 "Tap a job, then scan <b>your</b> badge — the station decides: not on the roster = JOIN (clock-in); "
                 "already on it = LEAVE (clock-out).",
-                "Badge sessions last 5 minutes. A mid-task “scan badge again” prompt is normal — scan and keep going.",
-                "REPORT PRODUCTION, HOLD, and COMPLETE all finish with a badge-signature scan; STEPS asks for "
-                "your badge up front and records everything as “Recording as {your name}.”",
+                "Badge sessions last 5 minutes. A mid-task “scan badge again” prompt is normal — scan and keep "
+                "going. When reporting production it is also safe: the count you keyed or tapped is carried "
+                "across and saved by that scan, so never re-enter it.",
+                "REPORT PRODUCTION and STEPS ask for your badge <b>up front</b> and then record everything under "
+                "that name (“Recording as {your name}”); HOLD and COMPLETE finish with a badge-signature scan instead.",
+                "Reporting production: tap <b>+1 PIECE</b> as each part comes off — it saves itself after about "
+                "5 seconds, and there is an <b>UNDO −1</b> button until it does. Keying a count and tapping RECORD "
+                "still works for a batch. Once the lane says recorded, the fix is CORRECT OVER-COUNT, not an undo.",
                 "<b>COMPLETE</b> clocks out the <b>whole crew</b> — the dialog names everyone it is closing out. "
                 "Enter final pieces first if prompted.",
             ]),

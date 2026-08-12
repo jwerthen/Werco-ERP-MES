@@ -44,6 +44,8 @@ import KioskNcrFiledScreen from '../components/kiosk/KioskNcrFiledScreen';
 import KioskStepsPanel, { StepsTransport } from '../components/kiosk/KioskStepsPanel';
 import KioskDocViewer, { KioskDocTransport } from '../components/kiosk/KioskDocViewer';
 import { useBadgeCapture } from '../components/kiosk/useBadgeCapture';
+import KioskOneTapLane from '../components/kiosk/KioskOneTapLane';
+import { useOneTapPieces } from '../components/kiosk/useOneTapPieces';
 import LaserNestOperatorPanel from '../components/laser/LaserNestOperatorPanel';
 import {
   HOLD_REASONS,
@@ -100,8 +102,26 @@ type CrewView =
       operationId: number | null;
       operator: OperatorSession;
     }
-  | { name: 'productionQty'; operationId: number }
-  | { name: 'productionSign'; operationId: number; good: number; scrap: number; reason: string | null; reasonCodeId: number | null }
+  // REPORT PRODUCTION is BADGE-FIRST: the scan gates entry to the quantity
+  // screen, and every report made there posts under that operator's token.
+  //
+  // It used to be the other way round (quantities, then a scan to sign them),
+  // which cannot deliver one tap per finished part — a signature after the fact
+  // is a second action per piece by construction. The precedent for the flip is
+  // already in this file: `stepsSign`→`steps` and `docsSign`→`docs` both
+  // badge-gate ENTRY and then write N records under the token, and process-step
+  // records are quality records. Attribution is unchanged (nothing is written
+  // without a badge-minted operator token); what changes is that the operator
+  // learns who they are recording as BEFORE they enter numbers, not after.
+  //
+  // `resume` carries an entry whose post was refused for a dead token, so the
+  // re-scan saves it rather than making the operator key it again.
+  | { name: 'productionQty'; operationId: number; operator: OperatorSession }
+  | {
+      name: 'productionSign';
+      operationId: number;
+      resume?: { good: number; scrap: number; reason: string | null; reasonCodeId: number | null };
+    }
   // Over-count correction (reduce-production): quantity + reason, then a badge
   // signature. The signing operator must have an open clock-in on the op — the
   // server bounds the walk-back to THEIR own recorded evidence (crew-safe).
@@ -309,6 +329,82 @@ export default function CrewStationKiosk() {
 
   const mutationsBlocked = busy || !online;
 
+  // --- One-tap +1 on REPORT PRODUCTION -----------------------------------------
+  // The credential and the target a queued flush needs live in refs, not in
+  // `view`: a flush fires from teardown paths — Cancel, the 90s idle flow-reset,
+  // the ghost-guard, page unload — where the view is already gone or going.
+  const oneTapOperatorRef = useRef<OperatorSession | null>(null);
+  const oneTapOperationRef = useRef<number | null>(null);
+  // A badge token is good for 5 minutes; a long run outlives it. The first 401
+  // PARKS the lane and asks for a re-scan rather than burning the operator's
+  // count against a dead credential.
+  const [operatorStale, setOperatorStale] = useState(false);
+
+  const oneTap = useOneTapPieces({
+    canPost: online && !operatorStale,
+    post: (pieces, { keepalive }) => {
+      const operator = oneTapOperatorRef.current;
+      const operationId = oneTapOperationRef.current;
+      if (!operator || operationId == null) {
+        return Promise.reject(
+          new KioskApiError(401, null, 'Badge session ended — scan your badge to save these pieces.')
+        );
+      }
+      return kioskClient
+        .reportProduction(
+          operator.token,
+          operationId,
+          { quantity_complete_delta: pieces, quantity_scrapped_delta: 0, source: KIOSK_SOURCE },
+          { keepalive }
+        )
+        .then(() => undefined);
+    },
+    toMessage: (err) => kioskErrorMessage(err, 'Could not save production. Try again.'),
+    onRecorded: (pieces) => {
+      showToast(
+        'success',
+        `${pieces} pc${pieces === 1 ? '' : 's'} recorded${
+          oneTapOperatorRef.current ? ` by ${oneTapOperatorRef.current.user.full_name}` : ''
+        }`
+      );
+      void bumpAndRefresh();
+    },
+    onFailed: (pieces, message, err) => {
+      if (err instanceof KioskApiError && err.status === 401) {
+        // The badge token died mid-run. RETRY on the lane cannot fix this — it
+        // would post against the same expired credential — so take the operator
+        // to the one screen that CAN, carrying the count with them (the scan
+        // screen shows what is still waiting). Parking without moving them would
+        // leave a count on screen with no working way to bank it.
+        setOperatorStale(true);
+        const operationId = oneTapOperationRef.current;
+        if (operationId != null) {
+          setBadgeError(null);
+          setView({ name: 'productionSign', operationId });
+        }
+        showToast('error', `Badge session timed out — scan again to save ${pieces} pc${pieces === 1 ? '' : 's'}`);
+        return;
+      }
+      showToast('error', `${pieces} pc${pieces === 1 ? '' : 's'} NOT saved — ${message}`);
+    },
+    blockedMessage: online
+      ? 'Scan your badge again to save these pieces.'
+      : 'Not saved yet — waiting for the connection.',
+  });
+
+  const { flush: flushOneTap, unbanked: oneTapUnbanked } = oneTap;
+
+  // Leaving the report screen BANKS whatever is still inside the undo window.
+  // The tap was the commit; the window is only a way out of it, and walking away
+  // is not one — so Cancel, the idle flow-reset, the ghost-guard and the station
+  // lock (which all funnel through a view change) post rather than discard.
+  const onReportScreen = view.name === 'productionQty';
+  const wasOnReportScreen = useRef(false);
+  useEffect(() => {
+    if (wasOnReportScreen.current && !onReportScreen) flushOneTap();
+    wasOnReportScreen.current = onReportScreen;
+  }, [onReportScreen, flushOneTap]);
+
   // --- PIN login ----------------------------------------------------------------
   const submitPin = useCallback(async () => {
     if (stationId == null || pinSubmitting) return;
@@ -505,17 +601,73 @@ export default function CrewStationKiosk() {
     [view, mutationsBlocked, showToast, bumpAndRefresh]
   );
 
-  /** REPORT PRODUCTION — badge-signature scan saves the entered deltas. */
+  /**
+   * REPORT PRODUCTION — the badge scan that OPENS the quantity screen (and, on a
+   * `resume`, saves the entry whose post found the previous token expired).
+   *
+   * Binding the operator here rather than at the end is what makes one tap per
+   * finished part possible at all: the screen behind this scan can post on its
+   * own, so `+1` records a piece instead of filling a field that still needs a
+   * signature. Every write it makes still carries a badge-minted operator token.
+   */
   const handleProductionBadge = useCallback(
     async (badgeId: string) => {
       const item = view.name === 'productionSign' ? findItem(view.operationId) : null;
       if (view.name !== 'productionSign' || !item || mutationsBlocked) return;
-      const { good, scrap, reason, reasonCodeId } = view;
+      const { operationId, resume } = view;
       setBusy(true);
       setBadgeError(null);
       try {
         const minted = await kioskClient.mintBadgeToken(badgeId);
-        await kioskClient.reportProduction(minted.access_token, item.operation_id, {
+        const operator: OperatorSession = { token: minted.access_token, user: minted.user };
+        if (resume) {
+          const { good, scrap, reason, reasonCodeId } = resume;
+          await kioskClient.reportProduction(operator.token, operationId, {
+            quantity_complete_delta: good,
+            quantity_scrapped_delta: scrap,
+            scrap_reason: scrap > 0 && reason ? reason : undefined,
+            scrap_reason_code_id: scrap > 0 && reasonCodeId != null ? reasonCodeId : undefined,
+            source: KIOSK_SOURCE,
+          });
+          const newTally = formatCrewTally({
+            quantity_complete: Number(item.quantity_complete || 0) + good,
+            quantity_ordered: item.quantity_ordered,
+            quantity_scrapped: Number(item.quantity_scrapped || 0) + scrap,
+          });
+          showToast('success', `Saved by ${minted.user.full_name} — crew total now ${newTally}`);
+        }
+        // Bind the lane LAST, and only once the token has proved itself on the
+        // resume post: a parked one-tap delta un-parks the moment `operatorStale`
+        // clears, and it must not do that against a credential that just failed.
+        oneTapOperatorRef.current = operator;
+        oneTapOperationRef.current = operationId;
+        setOperatorStale(false);
+        setView({ name: 'productionQty', operationId, operator });
+        if (resume) await bumpAndRefresh();
+      } catch (err) {
+        // Verbatim rejection; a `resume` entry stays in the view state for
+        // another scan, and any parked one-tap delta stays parked.
+        setBadgeError(kioskErrorMessage(err, 'Could not save production. Try again.'));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [view, findItem, mutationsBlocked, showToast, bumpAndRefresh]
+  );
+
+  /**
+   * REPORT PRODUCTION — the KEYED entry (keypad / `+5` / `+25` / full nest),
+   * posted directly under the screen's already-scanned operator. No second
+   * signature screen: the badge that opened the screen is the signature.
+   */
+  const handleProductionConfirm = useCallback(
+    async (good: number, scrap: number, reason: string | null, reasonCodeId: number | null) => {
+      const item = view.name === 'productionQty' ? findItem(view.operationId) : null;
+      if (view.name !== 'productionQty' || !item || mutationsBlocked) return;
+      const { operator, operationId } = view;
+      setBusy(true);
+      try {
+        await kioskClient.reportProduction(operator.token, operationId, {
           quantity_complete_delta: good,
           quantity_scrapped_delta: scrap,
           scrap_reason: scrap > 0 && reason ? reason : undefined,
@@ -527,12 +679,25 @@ export default function CrewStationKiosk() {
           quantity_ordered: item.quantity_ordered,
           quantity_scrapped: Number(item.quantity_scrapped || 0) + scrap,
         });
-        showToast('success', `Saved by ${minted.user.full_name} — crew total now ${newTally}`);
-        setView({ name: 'job', operationId: item.operation_id });
+        showToast('success', `Saved by ${operator.user.full_name} — crew total now ${newTally}`);
+        setView({ name: 'job', operationId });
         await bumpAndRefresh();
       } catch (err) {
-        // Verbatim rejection; quantities stay in the view state for a re-scan.
-        setBadgeError(kioskErrorMessage(err, 'Could not save production. Try again.'));
+        if (err instanceof KioskApiError && err.status === 401) {
+          // The 5-minute badge token expired mid-shift. Carry the entry to the
+          // re-scan rather than making the operator key it a second time.
+          setBadgeError(null);
+          setOperatorStale(true);
+          showToast('info', 'Badge session timed out — scan again to save this entry.');
+          setView({
+            name: 'productionSign',
+            operationId,
+            resume: { good, scrap, reason, reasonCodeId },
+          });
+          return;
+        }
+        // Everything entered stays on screen for another attempt.
+        showToast('error', kioskErrorMessage(err, 'Could not save production. Try again.'));
       } finally {
         setBusy(false);
       }
@@ -1064,7 +1229,10 @@ export default function CrewStationKiosk() {
                 type="button"
                 disabled={mutationsBlocked}
                 aria-describedby={!online ? OFFLINE_HINT_ID : undefined}
-                onClick={() => setView({ name: 'productionQty', operationId: viewItem.operation_id })}
+                onClick={() => {
+                  setBadgeError(null);
+                  setView({ name: 'productionSign', operationId: viewItem.operation_id });
+                }}
                 className="min-h-20 rounded border border-fd-blue bg-fd-blue/15 px-4 text-xl font-bold uppercase tracking-wide text-fd-blue transition-colors hover:bg-fd-blue/25 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 Report production
@@ -1220,37 +1388,35 @@ export default function CrewStationKiosk() {
           />
         )}
 
-        {/* REPORT PRODUCTION — quantities, then badge signature.
-            The in-shift good count starts at zero and runs up to the operation
-            target, so this is where the quick-add row has the most room and does
-            the most work: it is the screen an operator taps every time a nest or
-            a batch of parts comes off the machine. */}
-        {view.name === 'productionQty' && viewItem && (
-          <KioskQuantityScreen
-            title="Report production"
-            jobLabel={crewJobLabel(viewItem)}
-            confirmLabel="Continue"
-            requireTotalPositive
-            tallyBanner={`CREW TOTAL SO FAR: ${formatCrewTally(viewItem)} — enter only NEW pieces`}
-            scrapCodes={scrapCodes}
-            quickAddCeiling={remainingOnOperation(viewItem)}
-            fullNestQuantity={viewItem.component_quantity}
-            busy={mutationsBlocked}
-            onConfirm={(good, scrap, reason, codeId) => {
-              setBadgeError(null);
-              setView({ name: 'productionSign', operationId: viewItem.operation_id, good, scrap, reason, reasonCodeId: codeId });
-            }}
-            onCancel={() => setView({ name: 'job', operationId: viewItem.operation_id })}
-          />
-        )}
-
+        {/* REPORT PRODUCTION, step 1 — the badge that opens the screen.
+            Also the recovery point: a `resume` entry is one whose post found the
+            5-minute token expired, and a parked one-tap delta un-parks here. */}
         {view.name === 'productionSign' && viewItem && (
-          <section aria-label="Sign production report" className="mx-auto w-full max-w-2xl">
-            <h2 className="text-3xl font-bold text-fd-ink">Scan badge to save</h2>
+          <section aria-label="Scan badge to report production" className="mx-auto w-full max-w-2xl">
+            <h2 className="text-3xl font-bold text-fd-ink">
+              {view.resume || oneTapUnbanked > 0 ? 'Scan badge to save' : 'Scan badge to report'}
+            </h2>
             <p className="mt-1 font-mono text-lg text-fd-mute">{crewJobLabel(viewItem)}</p>
-            <p className="mt-4 rounded border border-fd-blue/50 bg-fd-blue/10 px-4 py-3 font-mono text-xl font-bold text-fd-blue">
-              Saving: {view.good} good{view.scrap > 0 ? ` · ${view.scrap} scrap (${view.reason})` : ''}
-            </p>
+            {view.resume && (
+              <p className="mt-4 rounded border border-fd-blue/50 bg-fd-blue/10 px-4 py-3 font-mono text-xl font-bold text-fd-blue">
+                Saving: {view.resume.good} good
+                {view.resume.scrap > 0 ? ` · ${view.resume.scrap} scrap (${view.resume.reason})` : ''}
+              </p>
+            )}
+            {oneTapUnbanked > 0 && (
+              <p
+                data-testid="crew-production-parked"
+                className="mt-4 rounded border border-fd-amber/60 bg-fd-amber/10 px-4 py-3 font-mono text-xl font-bold text-fd-amber"
+              >
+                {oneTapUnbanked} tapped pc{oneTapUnbanked === 1 ? '' : 's'} still waiting to be saved
+              </p>
+            )}
+            {!view.resume && oneTapUnbanked === 0 && (
+              <p className="mt-3 text-base text-fd-body">
+                Every piece you report is recorded in your name. Scan once, then tap <b>+1 piece</b> as each part comes
+                off.
+              </p>
+            )}
             <BadgeScanPanel
               busy={busy}
               blocked={mutationsBlocked}
@@ -1258,11 +1424,49 @@ export default function CrewStationKiosk() {
               error={badgeError}
               idPrefix="crew-production"
               onBadge={(id) => void handleProductionBadge(id)}
-              onCancel={() =>
-                setView({ name: 'productionQty', operationId: viewItem.operation_id })
-              }
+              onCancel={() => setView({ name: 'job', operationId: viewItem.operation_id })}
             />
           </section>
+        )}
+
+        {/* REPORT PRODUCTION, step 2 — the quantity screen, bound to the operator
+            who just scanned. Two ways to record, deliberately unalike:
+
+              +1 PIECE  posts itself after a short undo window (one tap per
+                        finished part — the whole point of the screen).
+              keypad /  fills the GOOD field and posts on RECORD, exactly as
+              +5 / +25  before.
+
+            The ceiling both of them clamp to is the operation target less what is
+            recorded less what this lane has tapped but not yet banked — otherwise
+            a pending delta plus a keyed entry could together key a 400. */}
+        {view.name === 'productionQty' && viewItem && (
+          <KioskQuantityScreen
+            title={`Report production — ${view.operator.user.full_name}`}
+            jobLabel={crewJobLabel(viewItem)}
+            confirmLabel="Record"
+            requireTotalPositive
+            tallyBanner={`CREW TOTAL SO FAR: ${formatCrewTally(viewItem)} — enter only NEW pieces`}
+            scrapCodes={scrapCodes}
+            quickAddCeiling={Math.max(0, remainingOnOperation(viewItem) - oneTapUnbanked)}
+            fullNestQuantity={viewItem.component_quantity}
+            oneTapLane={
+              <KioskOneTapLane
+                oneTap={oneTap}
+                atCeiling={remainingOnOperation(viewItem) - oneTapUnbanked <= 0}
+                blocked={busy}
+                online={online}
+                offlineHintId={OFFLINE_HINT_ID}
+              />
+            }
+            // The lane always commits first, so exactly one mechanism owns the
+            // count at a time and RECORD can never race a pending auto-post into
+            // two reports for one run of parts.
+            confirmLockedLabel={oneTapUnbanked > 0 ? `Recording ${oneTapUnbanked} pcs…` : null}
+            busy={mutationsBlocked}
+            onConfirm={(good, scrap, reason, codeId) => void handleProductionConfirm(good, scrap, reason, codeId)}
+            onCancel={() => setView({ name: 'job', operationId: viewItem.operation_id })}
+          />
         )}
 
         {/* CORRECT OVER-COUNT — quantity + reason, then badge signature. The

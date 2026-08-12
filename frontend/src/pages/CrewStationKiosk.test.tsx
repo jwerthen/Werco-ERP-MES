@@ -230,7 +230,11 @@ describe('CrewStationKiosk', () => {
     expect(mocked.clockIn).not.toHaveBeenCalled();
   });
 
-  it('REPORT PRODUCTION: tally banner guards double counting; badge signature saves; failure preserves quantities', async () => {
+  it('REPORT PRODUCTION: badge scan gates entry; tally banner guards double counting; failure preserves quantities', async () => {
+    // BADGE-FIRST: the scan opens the quantity screen and every report made
+    // behind it posts under that operator's token — there is no second
+    // signature screen, because a signature after the fact is a second action
+    // per piece and that cannot deliver one tap per finished part.
     unlockedStation();
     mocked.mintBadgeToken.mockResolvedValue(ALICE_MINT);
     mocked.reportProduction.mockRejectedValueOnce(new KioskApiError(400, 'Operation is on hold', 'Operation is on hold'));
@@ -240,25 +244,29 @@ describe('CrewStationKiosk', () => {
     await openJobDetail();
     fireEvent.click(screen.getByRole('button', { name: /report production/i }));
 
-    // The crew tally banner is the double-count guard.
-    expect(await screen.findByTestId('kiosk-tally-banner')).toHaveTextContent(
+    // Step 1 is the scan, and it names what it buys.
+    expect(await screen.findByText(/scan badge to report/i)).toBeInTheDocument();
+    scanBadge('E013');
+
+    // Step 2 is the quantity screen, in the scanned operator's name. The crew
+    // tally banner is still the double-count guard.
+    expect(await screen.findByRole('heading', { name: /report production — alice w/i })).toBeInTheDocument();
+    expect(screen.getByTestId('kiosk-tally-banner')).toHaveTextContent(
       'CREW TOTAL SO FAR: 37 of 50 · 2 scrap — enter only NEW pieces'
     );
 
     fireEvent.click(screen.getByTestId('kiosk-key-3'));
     fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
 
-    // Badge-signature screen shows what is about to be saved.
-    expect(await screen.findByText(/scan badge to save/i)).toBeInTheDocument();
-    expect(screen.getByText(/saving: 3 good/i)).toBeInTheDocument();
-
-    // First attempt: server refuses — verbatim error, quantities preserved.
-    scanBadge('E013');
+    // First attempt: server refuses — verbatim error, quantities preserved on
+    // the screen the operator is still standing in front of.
     expect(await screen.findByRole('alert')).toHaveTextContent('Operation is on hold');
-    expect(screen.getByText(/saving: 3 good/i)).toBeInTheDocument();
+    expect(screen.getByTestId('kiosk-qty-good')).toHaveTextContent('3');
+    expect(screen.getByRole('heading', { name: /report production — alice w/i })).toBeInTheDocument();
 
-    // Second attempt succeeds and quotes the NEW tally in the toast.
-    scanBadge('E013');
+    // Second attempt succeeds and quotes the NEW tally in the toast — with no
+    // re-scan in between: one badge, one flow.
+    fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
     await waitFor(() =>
       expect(mocked.reportProduction).toHaveBeenLastCalledWith('op-token-alice', 31, {
         quantity_complete_delta: 3,
@@ -268,6 +276,7 @@ describe('CrewStationKiosk', () => {
       })
     );
     expect(await screen.findByText(/saved by alice w — crew total now 40 of 50 · 2 scrap/i)).toBeInTheDocument();
+    expect(mocked.mintBadgeToken).toHaveBeenCalledTimes(1);
   });
 
   it('CORRECT OVER-COUNT: quantity + reason then a badge signature walks back the count', async () => {
@@ -656,7 +665,7 @@ describe('CrewStationKiosk', () => {
       );
     });
 
-    it('REPORT PRODUCTION threads the code id through the badge-signature step (code-only, no text)', async () => {
+    it('REPORT PRODUCTION threads the code id straight through the badge-first entry (code-only, no text)', async () => {
       unlockedStation();
       mocked.getQueue.mockResolvedValue({ ...QUEUE_RES, scrap_reason_codes: SCRAP_CODES });
       mocked.mintBadgeToken.mockResolvedValue(ALICE_MINT);
@@ -665,6 +674,9 @@ describe('CrewStationKiosk', () => {
 
       await openJobDetail();
       fireEvent.click(screen.getByRole('button', { name: /report production/i }));
+      // Badge-first: the scan opens the quantity screen.
+      await screen.findByText(/scan badge to report/i);
+      scanBadge('E013');
       await screen.findByTestId('kiosk-tally-banner');
 
       fireEvent.click(screen.getByTestId('kiosk-key-3'));
@@ -673,10 +685,8 @@ describe('CrewStationKiosk', () => {
       fireEvent.click(screen.getByRole('button', { name: 'MAT — Material defect' }));
       fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
 
-      await screen.findByText(/scan badge to save/i);
-      scanBadge('E013');
-
-      // Code alone satisfies the scrap-requires-a-reason rule (no typed detail).
+      // Code alone satisfies the scrap-requires-a-reason rule (no typed detail),
+      // and it reaches the server on the entry's own post — no second scan.
       await waitFor(() =>
         expect(mocked.reportProduction).toHaveBeenCalledWith('op-token-alice', 31, {
           quantity_complete_delta: 3,
@@ -686,6 +696,7 @@ describe('CrewStationKiosk', () => {
           source: 'kiosk',
         })
       );
+      expect(mocked.mintBadgeToken).toHaveBeenCalledTimes(1);
     });
 
     it('empty scrap_reason_codes falls back to the legacy grid: text reason, no detail input, no code id', async () => {

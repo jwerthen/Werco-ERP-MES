@@ -120,12 +120,21 @@ describe('CrewStationKiosk quantity quick adds', () => {
   it('REPORT PRODUCTION offers the row, bounded by what is left of the operation target', async () => {
     // The owner's screen: an iPad at the machine, reporting pieces as they come
     // off. Good counts up from zero, so the row does real work here.
+    //
+    // REPORT PRODUCTION is badge-first now — the scan gates entry to the
+    // quantity screen — so the row is reached through it. And because the
+    // committing `+1 PIECE` lane renders on this screen, `+1` has LEFT the row
+    // (quantityQuickAdds.ts → omitSingle): one `+1`, one meaning.
+    mocked.mintBadgeToken.mockResolvedValue(BOB_MINT);
     renderKiosk();
     await openJobDetail();
     fireEvent.click(screen.getByRole('button', { name: /report production/i }));
+    await screen.findByRole('region', { name: /scan badge to report production/i });
+    scanBadge('E011');
 
     expect(await screen.findByTestId('kiosk-qty-quickadds')).toBeInTheDocument();
     expect(screen.getByTestId('kiosk-qty-quickadd-label')).toHaveTextContent('Quick add to good · max 13');
+    expect(screen.queryByRole('button', { name: 'Add +1 to good' })).not.toBeInTheDocument();
 
     fireEvent.click(quickAdd('+5'));
     expect(within(goodWell()).getByText('5')).toBeInTheDocument();
@@ -133,7 +142,9 @@ describe('CrewStationKiosk quantity quick adds', () => {
     // …and it stops where the server would: 5 + 25 clamps to the 13 remaining.
     fireEvent.click(quickAdd('+25'));
     expect(within(goodWell()).getByText('13')).toBeInTheDocument();
-    expect(quickAdd('+1')).toBeDisabled();
+    // At the ceiling the whole row goes disabled rather than keying a refusal.
+    expect(quickAdd('+5')).toBeDisabled();
+    expect(quickAdd('+25')).toBeDisabled();
   });
 
   it('COMPLETE offers the row at the same ceiling its good field pre-fills to', async () => {

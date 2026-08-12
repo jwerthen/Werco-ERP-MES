@@ -31,15 +31,38 @@ export interface KioskQuickAdd {
  */
 export const QUICK_ADD_MAX = 99999;
 
+export interface KioskQuickAddOptions {
+  /**
+   * Drop `+1` from the row because a ONE-TAP `+1 PIECE` lane
+   * (`KioskOneTapLane`) is rendering on the same screen.
+   *
+   * This is the one sanctioned divergence from "one row, every screen", and it
+   * exists to protect the rule rather than break it. The lane's `+1` COMMITS
+   * (it posts itself after a short undo window); a row `+1` only FILLS the good
+   * field for a later confirm. Two controls reading `+1`, side by side, meaning
+   * those two different things is precisely how an operator stops knowing
+   * whether their part was counted — so where the lane renders, the row's `+1`
+   * goes away and `+1` on that screen has exactly one meaning.
+   *
+   * The invariant this module actually protects is therefore: SAME APPEARANCE ⇒
+   * SAME BEHAVIOUR. A screen may move a tap to a different-looking control with
+   * different semantics; it may never keep the old chrome over new semantics.
+   */
+  omitSingle?: boolean;
+}
+
 /**
  * `+1 / +5 / +25`, plus a `Full nest {n}` tap when the active operation carries
  * a per-item target worth one (`component_quantity`). Only when it is > 1 — a
  * target of 1 is already the `+1` button (Foundry decision 4).
  */
-export function kioskQuickAdds(fullNestQuantity?: number | null): KioskQuickAdd[] {
+export function kioskQuickAdds(
+  fullNestQuantity?: number | null,
+  options?: KioskQuickAddOptions
+): KioskQuickAdd[] {
   const full = Number(fullNestQuantity);
   return [
-    { label: '+1', amount: 1 },
+    ...(options?.omitSingle ? [] : [{ label: '+1', amount: 1 }]),
     { label: '+5', amount: 5 },
     { label: '+25', amount: 25 },
     ...(fullNestQuantity != null && full > 1 ? [{ label: `Full nest ${full}`, amount: full }] : []),

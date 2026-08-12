@@ -21,6 +21,31 @@ interface KioskReportModalProps {
   /** Active op's component_quantity — renders `FULL NEST {n}` only when > 1 (decision 4). */
   fullNestQuantity?: number | null;
   scrapCodes?: ScrapReasonCodeOption[] | null;
+  /**
+   * The one-tap `+1 PIECE` lane (`KioskOneTapLane`), when the host can post a
+   * report on its own — i.e. it has worked out the operation's server ceiling.
+   *
+   * It renders in the GOOD tab only, above the number well, and never in the
+   * SCRAP tab: scrap requires an explicit reason and a deliberate entry, so a
+   * control that commits on a timer has no business there.
+   *
+   * Passing it also drops `+1` from the quick-add row below (see
+   * `quantityQuickAdds.ts` → `omitSingle`). Two controls reading `+1` with
+   * different commit semantics on one screen — one that posts itself, one that
+   * only fills the field — is exactly what leaves an operator unsure whether
+   * their part was counted.
+   */
+  oneTapLane?: React.ReactNode;
+  /**
+   * Non-null ⇒ the footer confirm is disabled and reads this instead of its
+   * normal text. The one-tap lane sets it while a tapped delta is still
+   * un-banked: the lane always commits first, so exactly ONE mechanism owns the
+   * operator's count at any moment and a confirm can never race a pending
+   * auto-post into two reports for one run of parts. It locks BOTH tabs — a
+   * scrap confirm writes the same operation row as the lane's good report, so
+   * letting it through would race the same record from the other tab.
+   */
+  confirmLockedLabel?: string | null;
   busy: boolean;
   online: boolean;
   offlineHintId?: string;
@@ -52,6 +77,8 @@ export default function KioskReportModal({
   quantityOrdered,
   fullNestQuantity,
   scrapCodes,
+  oneTapLane,
+  confirmLockedLabel,
   busy,
   online,
   offlineHintId,
@@ -79,8 +106,9 @@ export default function KioskReportModal({
 
   const openNcr = ncrOverride ?? isQualityRelatedScrapSelection(codes, scrapReason);
 
+  const confirmLocked = confirmLockedLabel != null;
   const confirmDisabled =
-    busy || (tab === 'good' ? goodQty <= 0 : scrapQty <= 0 || !scrapReason);
+    busy || confirmLocked || (tab === 'good' ? goodQty <= 0 : scrapQty <= 0 || !scrapReason);
 
   const handleConfirm = () => {
     if (confirmDisabled) return;
@@ -95,7 +123,8 @@ export default function KioskReportModal({
 
   // Shared with the COMPLETE modal's good field — same amounts, order, labels
   // and clamp (quantityQuickAdds.ts). Don't re-derive them here.
-  const quickAdds = kioskQuickAdds(fullNestQuantity);
+  // `+1` leaves the row wherever the one-tap lane renders — one `+1`, one meaning.
+  const quickAdds = kioskQuickAdds(fullNestQuantity, { omitSingle: oneTapLane != null });
 
   const mono = "font-mono";
 
@@ -155,6 +184,11 @@ export default function KioskReportModal({
       <div className="flex flex-col gap-4 p-5 sm:flex-row">
         {tab === 'good' ? (
           <div className="flex min-w-0 flex-1 flex-col gap-2.5">
+            {/* One-tap lane above the well, on purpose: it is the control an
+                operator uses once per finished part, so it takes the top of the
+                entry column, while the well + keypad below are the "key a
+                batch" path used a handful of times a shift. */}
+            {oneTapLane}
             <div
               data-testid="kiosk-report-qty"
               className={`${mono} flex h-[88px] items-center justify-end rounded-[4px] border border-fd-line-bright bg-fd-sunken px-4 text-[52px] font-bold tabular-nums text-fd-green [text-shadow:0_0_16px_rgba(63,185,80,0.3)]`}
@@ -312,13 +346,18 @@ export default function KioskReportModal({
             tab === 'good' ? 'bg-fd-green text-[#04140b]' : 'bg-fd-red text-[#1a0505]'
           }`}
         >
-          {!online
-            ? 'Offline'
-            : busy
-              ? 'Saving…'
-              : tab === 'good'
-                ? `Confirm +${goodQty} good`
-                : `Confirm ${scrapQty} scrap${openNcr ? ' + open NCR' : ''}`}
+          {/* The lock outranks OFFLINE and SAVING: while the lane still holds
+              un-banked pieces, what the operator needs to read is why confirm
+              will not fire, not the station's connection state. */}
+          {confirmLocked
+            ? confirmLockedLabel
+            : !online
+              ? 'Offline'
+              : busy
+                ? 'Saving…'
+                : tab === 'good'
+                  ? `Confirm +${goodQty} good`
+                  : `Confirm ${scrapQty} scrap${openNcr ? ' + open NCR' : ''}`}
         </button>
       </div>
       {tab === 'scrap' && scrapQty > 0 && !scrapReason && (
