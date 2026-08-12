@@ -785,10 +785,28 @@ class TestDesktopOperationsRunOrder:
     def test_not_queued_operation_carries_no_run_order(self, client: TestClient, db_session: Session):
         """A PENDING op is on the desktop list (it excludes only COMPLETE by default)
         but NOT on the kiosk queue — its run_order must be null even when a stale
-        stored rank exists, and it must not steal a position from queued work."""
+        stored rank exists, and it must not steal a position from queued work.
+
+        The pending op is held back by an incomplete predecessor at ANOTHER work center,
+        which is what keeps it PENDING *through the read*: this endpoint runs the
+        reconcile, and the reconcile re-runs the READY promotion. A released work order
+        whose op sits PENDING for no reason is precisely what that heal repairs, so it
+        would no longer be a not-queued row by the time the response is built.
+        """
         manager = make_user(db_session, role=UserRole.MANAGER)
         wc = make_work_center(db_session)
         _, pending = make_wo_with_operation(db_session, work_center=wc, op_status=OperationStatus.PENDING)
+        db_session.add(
+            WorkOrderOperation(
+                work_order_id=pending.work_order_id,
+                work_center_id=make_work_center(db_session).id,
+                sequence=pending.sequence - 5,
+                operation_number="OP05",
+                name="Upstream step",
+                status=OperationStatus.READY,
+                company_id=COMPANY_A,
+            )
+        )
         _, ready = make_wo_with_operation(db_session, work_center=wc)
         pending.run_order = 1  # stale rank left behind by a status change
         ready.run_order = 2
