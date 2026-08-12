@@ -26,7 +26,16 @@
  *    is what lets the single-operator kiosk bank a delta BEFORE `logout()` takes
  *    the credential away, instead of 401'ing its own flush.
  *  - TEARDOWN IS A FLUSH, NOT A LOSS. Unmount and `pagehide` both post, with
- *    `keepalive` so the request outlives the document.
+ *    `keepalive` so the request outlives the document — and anything they CANNOT
+ *    post is handed back rather than dropped.
+ *  - A DELTA ONLY EVER POSTS UNDER THE PAIR THAT MADE IT. The station outlives
+ *    both the badge token and the screen, so a count that could not be sent when
+ *    it was tapped must never go out under whoever scanned next, on whatever job
+ *    they opened. That is not a mis-labelled row: it credits another operator's
+ *    TimeEntry and moves stock on another work order's operation.
+ *  - AN AMBIGUOUS FAILURE IS NEVER RE-SENT AUTOMATICALLY. The endpoint is
+ *    additive with no idempotency key, so a request that may already have landed
+ *    is counted twice by anything that re-sends it without a human deciding.
  */
 
 import { renderHook, act } from '@testing-library/react';
@@ -52,6 +61,13 @@ const makePost = () => jest.fn((_pieces: number, _opts: { keepalive: boolean }):
 
 const toMessage = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
+/**
+ * The (operator, operation) pair for the tests that are not ABOUT the binding.
+ * It never changes in those, so every delta stays with the pair that made it —
+ * which is the only condition under which any of them may post at all.
+ */
+const BINDING = { key: 'user:7|op:31', label: 'Alice Reed · WO-2026-0142 Op 20' };
+
 /** Advance fake timers AND drain the promise chain the timer kicks off. */
 const advance = (ms: number) =>
   act(async () => {
@@ -72,7 +88,7 @@ describe('useOneTapPieces', () => {
       // The whole promise of the control: the tap is the commit, the window is
       // the way out of it, and taking that way out reaches the server never.
       const post = makePost();
-      const { result } = renderHook(() => useOneTapPieces({ post, toMessage }));
+      const { result } = renderHook(() => useOneTapPieces({ post, toMessage, binding: BINDING }));
 
       act(() => result.current.tap());
       expect(result.current.phase).toBe('pending');
@@ -91,7 +107,7 @@ describe('useOneTapPieces', () => {
     it('records a tap left alone, once, when the window elapses', async () => {
       const post = makePost();
       const onRecorded = jest.fn();
-      const { result } = renderHook(() => useOneTapPieces({ post, toMessage, onRecorded }));
+      const { result } = renderHook(() => useOneTapPieces({ post, toMessage, binding: BINDING, onRecorded }));
 
       act(() => result.current.tap());
 
@@ -119,7 +135,7 @@ describe('useOneTapPieces', () => {
       // Five parts coming off a machine 400ms apart. Five requests would race
       // each other and make the undo meaningless; one report is the point.
       const post = makePost();
-      const { result } = renderHook(() => useOneTapPieces({ post, toMessage }));
+      const { result } = renderHook(() => useOneTapPieces({ post, toMessage, binding: BINDING }));
 
       act(() => result.current.tap());
       for (let i = 0; i < 4; i += 1) {
@@ -143,7 +159,7 @@ describe('useOneTapPieces', () => {
 
     it('takes back exactly ONE tap and re-arms, so 5 taps and an undo report 4', async () => {
       const post = makePost();
-      const { result } = renderHook(() => useOneTapPieces({ post, toMessage }));
+      const { result } = renderHook(() => useOneTapPieces({ post, toMessage, binding: BINDING }));
 
       act(() => {
         for (let i = 0; i < 5; i += 1) result.current.tap();
@@ -173,7 +189,7 @@ describe('useOneTapPieces', () => {
       const post = makePost();
       const onFailed = jest.fn();
       post.mockRejectedValueOnce(new Error('Operation is on hold'));
-      const { result } = renderHook(() => useOneTapPieces({ post, toMessage, onFailed }));
+      const { result } = renderHook(() => useOneTapPieces({ post, toMessage, binding: BINDING, onFailed }));
 
       act(() => result.current.tap());
       await advance(ONE_TAP_WINDOW_MS);
@@ -208,7 +224,7 @@ describe('useOneTapPieces', () => {
     it('parks an armed window rather than burning the delta on a doomed request', async () => {
       const post = makePost();
       const { result, rerender } = renderHook(
-        ({ canPost }: { canPost: boolean }) => useOneTapPieces({ post, toMessage, canPost }),
+        ({ canPost }: { canPost: boolean }) => useOneTapPieces({ post, toMessage, binding: BINDING, canPost }),
         { initialProps: { canPost: false } }
       );
 
@@ -242,7 +258,7 @@ describe('useOneTapPieces', () => {
       const post = makePost();
       const first = deferred();
       post.mockReturnValueOnce(first.promise);
-      const { result } = renderHook(() => useOneTapPieces({ post, toMessage }));
+      const { result } = renderHook(() => useOneTapPieces({ post, toMessage, binding: BINDING }));
 
       act(() => result.current.tap());
       await advance(ONE_TAP_WINDOW_MS);
@@ -287,7 +303,7 @@ describe('useOneTapPieces', () => {
       const post = makePost();
       const slow = deferred();
       post.mockReturnValueOnce(slow.promise);
-      const { result } = renderHook(() => useOneTapPieces({ post, toMessage }));
+      const { result } = renderHook(() => useOneTapPieces({ post, toMessage, binding: BINDING }));
 
       act(() => result.current.tap());
       await advance(ONE_TAP_WINDOW_MS);
@@ -331,7 +347,7 @@ describe('useOneTapPieces', () => {
       const post = makePost();
       const inFlight = deferred();
       post.mockReturnValueOnce(inFlight.promise);
-      const { result } = renderHook(() => useOneTapPieces({ post, toMessage }));
+      const { result } = renderHook(() => useOneTapPieces({ post, toMessage, binding: BINDING }));
 
       act(() => {
         result.current.tap();
@@ -367,7 +383,7 @@ describe('useOneTapPieces', () => {
       const post = makePost();
       const inFlight = deferred();
       post.mockReturnValueOnce(inFlight.promise);
-      const { result } = renderHook(() => useOneTapPieces({ post, toMessage }));
+      const { result } = renderHook(() => useOneTapPieces({ post, toMessage, binding: BINDING }));
 
       act(() => result.current.tap());
 
@@ -397,7 +413,7 @@ describe('useOneTapPieces', () => {
 
     it('is safe with nothing pending', async () => {
       const post = makePost();
-      const { result } = renderHook(() => useOneTapPieces({ post, toMessage }));
+      const { result } = renderHook(() => useOneTapPieces({ post, toMessage, binding: BINDING }));
 
       await act(async () => {
         await result.current.flush();
@@ -412,7 +428,7 @@ describe('useOneTapPieces', () => {
       // A delta sitting in a setTimeout inside an unmounting subtree is silently
       // lost production. Unmount is a flush.
       const post = makePost();
-      const { result, unmount } = renderHook(() => useOneTapPieces({ post, toMessage }));
+      const { result, unmount } = renderHook(() => useOneTapPieces({ post, toMessage, binding: BINDING }));
 
       act(() => {
         result.current.tap();
@@ -429,7 +445,7 @@ describe('useOneTapPieces', () => {
 
     it('posts a pending delta on pagehide, with keepalive so it outlives the document', async () => {
       const post = makePost();
-      const { result } = renderHook(() => useOneTapPieces({ post, toMessage }));
+      const { result } = renderHook(() => useOneTapPieces({ post, toMessage, binding: BINDING }));
 
       act(() => {
         result.current.tap();
@@ -446,10 +462,179 @@ describe('useOneTapPieces', () => {
 
     it('does not post on unmount when there is nothing pending', () => {
       const post = makePost();
-      const { unmount } = renderHook(() => useOneTapPieces({ post, toMessage }));
+      const { unmount } = renderHook(() => useOneTapPieces({ post, toMessage, binding: BINDING }));
 
       unmount();
       expect(post).not.toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * WHO the pieces belong to, and WHICH operation they were made on.
+   *
+   * A tapped delta is a claim about a specific operator working a specific
+   * operation. The station outlives both: badge tokens die after five minutes,
+   * the idle flow-reset returns to the crew board, and the next person to walk
+   * up scans their own badge on their own job. If a delta that could not be
+   * posted under the pair that produced it is allowed to go out under whatever
+   * pair happens to be bound when it finally can, the row is not merely
+   * mis-attributed — it credits another operator's TimeEntry, lands on another
+   * work order's part and lot, and moves stock against the wrong operation
+   * (invariant 6). It is permanent and indistinguishable from a real report.
+   *
+   * So the pair is stamped AT TAP TIME and the delta may only ever post under
+   * that same pair. Anything else is held, named, and left for a human.
+   */
+  describe('binding — the delta belongs to the pair that produced it', () => {
+    const ALICE_OP20 = { key: 'user:7|op:31', label: 'Alice Reed · WO-2026-0142 Op 20' };
+    const BOB_OP10 = { key: 'user:9|op:44', label: 'Bob Tran · WO-2026-0199 Op 10' };
+
+    /** Renders with controllable binding + canPost, as the pages drive them. */
+    const renderBound = (post: ReturnType<typeof makePost>, onStranded?: jest.Mock) =>
+      renderHook(
+        ({ binding, canPost }: { binding: typeof ALICE_OP20 | null; canPost: boolean }) =>
+          useOneTapPieces({ post, toMessage, binding, canPost, onStranded }),
+        { initialProps: { binding: ALICE_OP20 as typeof ALICE_OP20 | null, canPost: false } }
+      );
+
+    it('never posts a parked delta under a different operator on a different operation', async () => {
+      // The reachable sequence: Alice taps past her 5-minute token, the 401
+      // parks the count, the 90s idle flow-reset takes the screen away, and Bob
+      // walks up to a DIFFERENT job and scans. Nothing about that scan says the
+      // parked pieces are his.
+      const post = makePost();
+      const { result, rerender } = renderBound(post);
+
+      act(() => {
+        result.current.tap();
+        result.current.tap();
+      });
+      await advance(ONE_TAP_WINDOW_MS);
+      expect(post).not.toHaveBeenCalled();
+
+      rerender({ binding: BOB_OP10, canPost: true });
+      await advance(ONE_TAP_WINDOW_MS * 3);
+
+      expect(post).not.toHaveBeenCalled();
+      expect(result.current.phase).toBe('orphaned');
+      // Held, and it still says whose they are and where they came from.
+      expect(result.current.pending).toBe(2);
+      expect(result.current.pendingLabel).toBe(ALICE_OP20.label);
+    });
+
+    it('banks it the moment the ORIGINAL pair is bound again', async () => {
+      // The recovery that IS legitimate: Alice re-scans, on the same job.
+      const post = makePost();
+      const { result, rerender } = renderBound(post);
+
+      act(() => result.current.tap());
+      await advance(ONE_TAP_WINDOW_MS);
+      expect(post).not.toHaveBeenCalled();
+
+      rerender({ binding: ALICE_OP20, canPost: true });
+      await advance(ONE_TAP_WINDOW_MS);
+
+      expect(post).toHaveBeenCalledTimes(1);
+      expect(post).toHaveBeenCalledWith(1, { keepalive: false });
+      expect(result.current.unbanked).toBe(0);
+    });
+
+    it('will not merge a new operator’s taps into the held count', async () => {
+      // Two operators' pieces must never end up in one report — whoever it
+      // posted as, it would be wrong for the other.
+      const post = makePost();
+      const { result, rerender } = renderBound(post);
+
+      act(() => result.current.tap());
+      await advance(ONE_TAP_WINDOW_MS);
+
+      rerender({ binding: BOB_OP10, canPost: true });
+      act(() => result.current.tap());
+
+      expect(result.current.pending).toBe(1);
+      expect(result.current.pendingLabel).toBe(ALICE_OP20.label);
+      expect(post).not.toHaveBeenCalled();
+    });
+
+    it('hands a delta it cannot post to onStranded rather than dropping it on unmount', async () => {
+      // The teardown post is gated on being able to post at all, so a parked
+      // count used to vanish here with no row, no notice and no record — while
+      // the runbook told operators it is always banked. If it cannot be sent it
+      // must at least be handed back, named, for the caller to persist.
+      const post = makePost();
+      const onStranded = jest.fn();
+      const { result, unmount } = renderBound(post, onStranded);
+
+      act(() => {
+        result.current.tap();
+        result.current.tap();
+        result.current.tap();
+      });
+      await advance(ONE_TAP_WINDOW_MS);
+
+      unmount();
+
+      expect(post).not.toHaveBeenCalled();
+      expect(onStranded).toHaveBeenCalledWith({ pieces: 3, key: ALICE_OP20.key, label: ALICE_OP20.label });
+    });
+  });
+
+  describe('an AMBIGUOUS failure is never re-posted on its own', () => {
+    it('holds a delta whose request may already have reached the server', async () => {
+      // "Never auto-retries" only ever covered the in-lane timer. A network
+      // error or a timeout leaves it UNKNOWN whether the row was written — and
+      // the endpoint is purely additive with no idempotency key, so a second
+      // send counts the pieces twice. Every automatic path (screen exit, idle,
+      // lock, pagehide, reconnect) must therefore leave it alone; only a human
+      // tapping RETRY may send it again.
+      const post = makePost();
+      post.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+      const { result } = renderHook(() => useOneTapPieces({ post, toMessage, binding: BINDING }));
+
+      act(() => {
+        result.current.tap();
+        result.current.tap();
+      });
+      await advance(ONE_TAP_WINDOW_MS);
+
+      expect(post).toHaveBeenCalledTimes(1);
+      expect(result.current.phase).toBe('failed');
+      expect(result.current.pending).toBe(2);
+
+      // An automatic flush — this is Cancel, the idle reset, the ghost-guard,
+      // Lock station and pagehide, all of which call flush() with no human
+      // deciding anything.
+      await act(async () => {
+        void result.current.flush();
+      });
+      await advance(ONE_TAP_WINDOW_MS * 2);
+      expect(post).toHaveBeenCalledTimes(1);
+
+      // The operator, who can see the lane, decides.
+      act(() => result.current.retry());
+      await advance(ONE_TAP_WINDOW_MS);
+      expect(post).toHaveBeenCalledTimes(2);
+      expect(post).toHaveBeenNthCalledWith(2, 2, { keepalive: false });
+    });
+
+    it('still lets an explicit server refusal take the automatic path', async () => {
+      // A 4xx is definitive: the server refused BEFORE writing anything, so
+      // re-sending cannot double-count. Only the unknowable case is barred.
+      const post = makePost();
+      const refusal = Object.assign(new Error('Quantity (9) cannot exceed quantity ordered (8)'), { status: 400 });
+      post.mockRejectedValueOnce(refusal);
+      const { result } = renderHook(() =>
+        useOneTapPieces({ post, toMessage, binding: BINDING, isAmbiguousFailure: (err) => !(err as { status?: number }).status })
+      );
+
+      act(() => result.current.tap());
+      await advance(ONE_TAP_WINDOW_MS);
+      expect(post).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        void result.current.flush();
+      });
+      expect(post).toHaveBeenCalledTimes(2);
     });
   });
 });

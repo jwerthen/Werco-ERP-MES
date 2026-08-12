@@ -317,7 +317,8 @@ further tap re-arms it, so a run of parts coming off a machine posts as **one** 
 (`+3`) rather than three racing requests, which is also what keeps the undo honest: whatever is
 still on screen is still undoable. When the window elapses, the accumulated taps post.
 
-**The pending count is banked, never discarded.** It posts on the window elapsing, on leaving the
+**The pending count is banked whenever it CAN be, and never silently dropped when it cannot.** It
+posts on the window elapsing, on leaving the
 report screen (Cancel, the crew station's idle flow-reset, its ghost-guard, **Lock station**), on
 the single-operator kiosk's idle auto-logout, and on page unload. The unload flush differs by
 surface, deliberately: the crew station posts through its isolated fetch helper and sets
@@ -327,6 +328,21 @@ set `keepalive`, and reaching around the client with a raw `fetch` would post ou
 interceptor that keeps the station's session alive. So on **that** surface the unload flush is
 **best-effort** — a tablet closed mid-window may lose it. The guarantees there are carried by the
 flushes that run while the document is still alive (the overlay closing, and the idle logout).
+
+Two cases cannot be banked at all, and neither is allowed to vanish quietly:
+
+- **It may already have landed.** A rejection with no HTTP status — a dropped connection, an aborted
+  `keepalive`, a timeout — leaves it unknown whether the row was written, and this endpoint is
+  purely additive with **no idempotency key**, so anything that re-sends it on its own counts the
+  pieces twice. Every automatic path therefore refuses an ambiguous failure; only a human tapping
+  **RETRY** may send it again. An explicit HTTP refusal is definitive (nothing was written) and keeps
+  the automatic path.
+- **Nobody can post it truthfully.** A delta whose `(operator, operation)` pair is gone — the badge
+  expired and the operator never came back, or the tab closed while offline — is written to a
+  sessionStorage **notice** and surfaced on the crew board on the next load: the count, the operator,
+  the job, and a plain statement that the pieces are *not* on the job and must be recorded in the
+  office. Nothing about that notice posts; dismissing it is an explicit decision to write the pieces
+  off. It is deliberately **not** a retry queue, for the same two reasons the paragraph above gives.
 
 **Three states an operator must be able to tell apart without reading a word**, because they commit
 differently:
@@ -855,9 +871,19 @@ measurement.
     entry refused **401** carries its good/scrap/reason back to the scan screen (*"Saving: 7
     good…"*), and the re-scan saves it and returns the operator to the quantity screen. A one-tap
     delta refused the same way **parks**: the lane stops posting against the dead credential, the
-    scan screen states what is held (*"N tapped pcs still waiting to be saved"*), and the re-scan
-    un-parks it. The new token is bound to the lane **only after** it has proved itself on any
-    resumed entry, so a parked count can never un-park against a credential that just failed.
+    scan screen states what is held (*"N tapped pcs still waiting to be saved"*), and a re-scan **by
+    the same operator, on the same operation** un-parks it.
+
+    A scan proves a credential is **valid**. It says nothing about **whose** the held pieces are, and
+    the two must not be confused: every delta is stamped with its `(operator, operation)` pair at tap
+    time and may only ever post while that same pair is bound. A scan by anyone else, or on any other
+    job, does **not** adopt the held count — it goes to **ORPHANED**, which names the operator and
+    the job on the lane, refuses further taps, and offers no "save anyway". Only the original pair
+    returning can bank it; otherwise the pieces belong in an office entry. This is not tidiness: the
+    endpoint credits the posting token's **TimeEntry** and moves stock against the operation in the
+    URL, so a count posted under the wrong pair mis-attributes labour *and* consumes material on
+    another work order's part and lot (invariant 6), permanently and indistinguishably from a real
+    report.
 - **CORRECT OVER-COUNT.** The same `KioskCorrectionScreen` as the single-operator mode (quantity to
   remove + a **required** correction-reason tile, distinct from the scrap grid), then a
   **badge-signature scan** saves the walk-back as that operator

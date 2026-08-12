@@ -29,6 +29,8 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { MemoryRouter } from 'react-router-dom';
 import CrewStationKiosk from './CrewStationKiosk';
 import * as kioskClient from '../services/kioskStationClient';
+import { KioskApiError } from '../services/kioskStationClient';
+import { addStranded, readStranded } from '../components/kiosk/oneTapStrandedStore';
 
 jest.mock('../services/kioskStationClient', () => {
   const actual = jest.requireActual('../services/kioskStationClient');
@@ -90,7 +92,39 @@ const ITEM = {
   roster: [BOB_ROSTER],
 };
 
+const ANN_ROSTER = {
+  time_entry_id: 502,
+  user_id: 12,
+  operator_name: 'Ann R',
+  employee_id: 'E022',
+  entry_type: 'run',
+  clock_in: '2026-07-02T15:10:00Z',
+};
+
+/** A DIFFERENT operation, on a DIFFERENT work order — job "Y" in the tests below. */
+const ITEM_Y = {
+  operation_id: 32,
+  work_order_id: 14,
+  work_order_number: 'WO-2026-0199',
+  part_number: 'PN-8802',
+  part_name: 'Bracket, hinge',
+  operation_number: '30',
+  operation_name: 'Grind',
+  work_center_id: 7,
+  status: 'in_progress',
+  quantity_ordered: 40,
+  quantity_complete: 0,
+  quantity_scrapped: 0,
+  priority: 5,
+  due_date: null,
+  roster: [ANN_ROSTER],
+};
+
 const BOB_MINT = { access_token: 'op-token-bob', user: { id: 11, full_name: 'Bob T', employee_id: 'E011' } };
+const ANN_MINT = { access_token: 'op-token-ann', user: { id: 12, full_name: 'Ann R', employee_id: 'E022' } };
+
+/** How the lane labels Bob's held pieces: who, AND which job. */
+const BOB_ON_X_LABEL = 'Bob T · WO-2026-0142 · Op 20 Weld';
 
 function renderKiosk() {
   return render(
@@ -120,12 +154,36 @@ async function openReportScreenAsBob() {
   await screen.findByTestId('kiosk-onetap');
 }
 
+/** Board → the named job → REPORT PRODUCTION → badge scan → the quantity screen. */
+async function openReportScreenOn(workOrderNumber: string, badgeId: string) {
+  fireEvent.click(await screen.findByRole('button', { name: new RegExp(`work order ${workOrderNumber}`, 'i') }));
+  await screen.findByRole('region', { name: /job detail/i });
+  fireEvent.click(screen.getByRole('button', { name: /report production/i }));
+  await screen.findByRole('region', { name: /scan badge to report production/i });
+  scanBadge(badgeId);
+  await screen.findByTestId('kiosk-onetap');
+}
+
+/** Quantity screen (or job detail) → the crew board, the way an operator walks away. */
+async function backToBoard() {
+  if (screen.queryByRole('region', { name: /job detail/i }) == null) {
+    fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }));
+    await screen.findByRole('region', { name: /job detail/i });
+  }
+  fireEvent.click(screen.getByRole('button', { name: /back to jobs/i }));
+  await screen.findByRole('button', { name: /work order WO-2026-0142/i });
+}
+
 const lane = () => screen.getByTestId('kiosk-onetap');
 const tapAdd = () => fireEvent.click(screen.getByTestId('kiosk-onetap-add'));
 const goodWell = () => screen.getByTestId('kiosk-qty-good');
 
+/** Every (token, operationId) pair the page has actually reported production under. */
+const productionCallTargets = () => mocked.reportProduction.mock.calls.map(([token, operationId]) => [token, operationId]);
+
 beforeEach(() => {
   jest.clearAllMocks();
+  sessionStorage.clear();
   mocked.getStationToken.mockReturnValue('station-token');
   mocked.getStoredStation.mockReturnValue(STATION);
   mocked.getQueue.mockResolvedValue({ queue: [ITEM], server_time: new Date().toISOString(), station: STATION });

@@ -36,6 +36,17 @@ import type { OneTapPieces } from './useOneTapPieces';
 interface KioskOneTapLaneProps {
   oneTap: OneTapPieces;
   /**
+   * Who every tap on this lane is being recorded as, named ON the control.
+   *
+   * The screen heading says it too, but the heading is not where an operator
+   * looks while tapping, and the failure it guards is quiet: one person scans,
+   * walks away, and the next person taps twenty parts that all record under the
+   * first name — with every tap resetting the 90-second idle timer, so
+   * inactivity never bounds it either. The name sits on the lane so the wrong
+   * one is visible at the moment of the tap.
+   */
+  operatorName: string;
+  /**
    * False once `posted + unbanked` reaches the operation target. The server
    * refuses an over-target report before any mutation, so the tap goes away
    * rather than keying a guaranteed 400 (the repo's non-optimistic rule).
@@ -52,12 +63,13 @@ const LABEL_CLASSES = 'font-mono text-[11px] font-bold uppercase tracking-[0.18e
 
 export default function KioskOneTapLane({
   oneTap,
+  operatorName,
   atCeiling,
   blocked,
   offlineHintId,
   online,
 }: KioskOneTapLaneProps) {
-  const { phase, pending, inFlight, lastRecorded, remainingMs, windowMs, error } = oneTap;
+  const { phase, pending, inFlight, lastRecorded, pendingLabel, remainingMs, windowMs, error } = oneTap;
   const secondsLeft = Math.ceil(remainingMs / 1000);
   const barPct = windowMs > 0 ? Math.max(0, Math.min(100, (remainingMs / windowMs) * 100)) : 0;
 
@@ -66,10 +78,15 @@ export default function KioskOneTapLane({
   // previous batch is still on the wire. Offline is the exception — every other
   // mutation control on this kiosk goes dark offline, and a tap that cannot
   // reach the server must not look like one that did.
-  const tapDisabled = atCeiling || !online || blocked;
+  // An orphaned delta belongs to somebody else. Taking more taps would either
+  // merge two operators' pieces into one report or bury the notice, so the lane
+  // stops until it is resolved.
+  const tapDisabled = atCeiling || !online || blocked || phase === 'orphaned';
 
   const statusTone =
-    phase === 'failed'
+    phase === 'orphaned'
+      ? 'border-fd-amber bg-fd-amber/10'
+      : phase === 'failed'
       ? 'border-fd-red bg-fd-red/10'
       : phase === 'recorded'
         ? 'border-fd-green bg-fd-green/10'
@@ -154,6 +171,27 @@ export default function KioskOneTapLane({
           </div>
         )}
 
+        {/* ORPHANED — the delta outlived the pair that made it. It names whose
+            pieces they are and where they came from, because nobody standing at
+            the kiosk can consent on that operator's behalf: the ONLY thing that
+            banks these is that same operator scanning back onto that same job.
+            There is deliberately no "save anyway" here. */}
+        {phase === 'orphaned' && (
+          <div className="flex items-start gap-3">
+            <ExclamationTriangleIcon className="h-8 w-8 shrink-0 text-fd-amber" aria-hidden="true" />
+            <div className="min-w-0">
+              <p className={`${LABEL_CLASSES} text-fd-amber`}>
+                <span className="font-mono text-3xl font-bold tabular-nums">{pending}</span>
+                <span className="ml-2">pcs not saved · another operator&apos;s count</span>
+              </p>
+              <p className="mt-1 text-sm text-fd-body">
+                Tapped by {pendingLabel ?? 'another operator'}. Only they can save these, on that job — ask them to
+                scan, or have a supervisor record the pieces in the office.
+              </p>
+            </div>
+          </div>
+        )}
+
         {phase === 'idle' && (
           <p className={`${LABEL_CLASSES} text-fd-mute`}>
             {atCeiling
@@ -162,6 +200,11 @@ export default function KioskOneTapLane({
           </p>
         )}
       </div>
+
+      {/* Who this records as, on the control itself. */}
+      <p className={`${LABEL_CLASSES} mt-2 text-fd-mute`} data-testid="kiosk-onetap-operator">
+        recording as <span className="text-fd-body">{operatorName}</span>
+      </p>
 
       {/* FIXED GEOMETRY, and it is a safety property rather than tidiness.
           Measured on the tablet: when UNDO was rendered only while something was
@@ -199,7 +242,7 @@ export default function KioskOneTapLane({
           type="button"
           data-testid="kiosk-onetap-undo"
           aria-label="Undo one piece"
-          disabled={pending <= 0}
+          disabled={pending <= 0 || phase === 'orphaned'}
           onClick={oneTap.undoOne}
           className="min-h-[76px] w-[150px] shrink-0 whitespace-nowrap rounded-[4px] border border-fd-line-bright bg-fd-sunken font-mono text-lg font-bold uppercase tracking-[0.08em] text-fd-body transition-transform duration-150 ease-out active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-30"
         >

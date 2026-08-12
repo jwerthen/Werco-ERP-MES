@@ -14,6 +14,23 @@ import { useCallback, useEffect, useRef, useState } from 'react';
  * level and hand the lane its props, so every one of those teardowns is a
  * `flush()`, not a loss.
  *
+ * WHY THE DELTA CARRIES A BINDING. Outliving the screen is exactly what makes a
+ * bare count dangerous. A tapped delta is a claim that a SPECIFIC operator made
+ * pieces on a SPECIFIC operation, and the station outlives both: badge tokens
+ * expire after five minutes, the idle reset returns to the crew board, and the
+ * next person to walk up scans their own badge on their own job. A delta that
+ * could not be posted when it was made, and is then allowed to go out under
+ * whatever pair happens to be bound when it finally can, does not merely name
+ * the wrong person: it credits another operator's TimeEntry, lands against
+ * another work order's part and lot, and moves stock on the wrong operation
+ * (invariant 6). The row is permanent and reads exactly like a real report.
+ *
+ * So every delta is stamped with its `binding` AT TAP TIME and may only ever
+ * post while that same pair is bound. A mismatch is never resolved by guessing —
+ * it goes to `orphaned`, keeps the label naming who and where, and waits for the
+ * original pair to come back or for a human to deal with it. Callers must not
+ * treat `binding` as cosmetic: it is the whole attribution guarantee.
+ *
  * THE THREE QUANTITIES, and why they are three:
  *  - `pending`  — tapped, not yet sent. UNDOABLE. This is the grace period.
  *  - `inFlight` — handed to the server, answer not back yet. NOT undoable: the
@@ -32,11 +49,36 @@ import { useCallback, useEffect, useRef, useState } from 'react';
  * is fine and deliberate: the flush seams below (confirm, screen exit, idle,
  * page unload) all bank it, and the ceiling clamp stops the count running away.
  *
- * FAILURE. A refused post moves `inFlight` BACK into `pending` and stops — it
- * never auto-retries, because a retry loop against a server that is saying no is
- * how you get four reports for one part. The count stays on screen, undoable and
- * retryable, until the operator resolves it.
+ * FAILURE, and the two kinds of it. A refused post moves `inFlight` BACK into
+ * `pending` and stops — it never auto-retries, because a retry loop against a
+ * server saying no is how you get four reports for one part. Beyond that, an
+ * AMBIGUOUS failure (a network error or a timeout — anything that leaves it
+ * unknown whether the row was written) is barred from every AUTOMATIC path as
+ * well: the endpoint is purely additive with no idempotency key, so a request
+ * that reached the server but whose answer was never seen is counted twice if
+ * anything re-sends it on its own. Only a human tapping RETRY may send it again.
+ * An explicit HTTP refusal is definitive — nothing was written — so it keeps the
+ * automatic path.
  */
+
+/**
+ * The (operator, operation) pair a delta belongs to.
+ *
+ * `key` must change whenever EITHER changes — it is compared, not parsed.
+ * `label` is shown to a human when a delta outlives its pair, so it has to name
+ * both ("Alice Reed · WO-2026-0142 Op 20"), not just the count.
+ */
+export interface OneTapBinding {
+  key: string;
+  label: string;
+}
+
+/** A delta the hook could not post and is handing back rather than dropping. */
+export interface StrandedOneTapDelta {
+  pieces: number;
+  key: string;
+  label: string;
+}
 
 /**
  * The grace period. 5s: long enough for a gloved operator to register what they
@@ -60,9 +102,22 @@ export type OneTapPhase =
   /** The server said yes. Final. */
   | 'recorded'
   /** The server said no (or the network did). Count preserved, retryable. */
-  | 'failed';
+  | 'failed'
+  /**
+   * The delta outlived the pair that produced it. It is HELD: no automatic path
+   * will post it, because posting it now would attribute one operator's pieces
+   * to another, on another operation. Only the original pair returning can bank
+   * it.
+   */
+  | 'orphaned';
 
 export interface OneTapPiecesOptions {
+  /**
+   * The (operator, operation) pair currently bound. Stamped onto a delta at tap
+   * time; a delta only posts while its stamp still matches. `null` means nothing
+   * is bound — taps are refused and any held delta stays held.
+   */
+  binding: OneTapBinding | null;
   /**
    * Post `pieces` as ONE additive production report. Must reject on refusal —
    * the hook reads a resolved promise as "the ledger has it".
@@ -73,6 +128,13 @@ export interface OneTapPiecesOptions {
   post: (pieces: number, opts: { keepalive: boolean }) => Promise<void>;
   /** Render a rejection as operator-readable text (server `detail`, verbatim). */
   toMessage: (err: unknown) => string;
+  /**
+   * True when a rejection leaves it UNKNOWN whether the server wrote the row —
+   * a network error, an aborted request, a timeout. Those are barred from every
+   * automatic re-post. The default treats anything carrying a numeric `status`
+   * as a definitive refusal and everything else as ambiguous.
+   */
+  isAmbiguousFailure?: (err: unknown) => boolean;
   /** The server accepted `pieces`. Refresh the tally here. */
   onRecorded?: (pieces: number) => void;
   /**
@@ -80,6 +142,12 @@ export interface OneTapPiecesOptions {
    * this is for the toast, not for recovery (the lane owns recovery).
    */
   onFailed?: (pieces: number, message: string, err: unknown) => void;
+  /**
+   * The hook is going away with a delta it cannot post. Persist it — this is the
+   * last chance the pieces have to exist anywhere, and dropping them here is the
+   * silent loss the runbook promises does not happen.
+   */
+  onStranded?: (delta: StrandedOneTapDelta) => void;
   /**
    * False while the post cannot succeed at all (offline, no operator session).
    * An armed window does not fire while false and re-arms when it flips true,
@@ -104,6 +172,8 @@ export interface OneTapPieces {
   inFlight: number;
   /** What the server last accepted, while `phase === 'recorded'`. */
   lastRecorded: number;
+  /** Names the pair the held pieces belong to, whenever any are un-banked. */
+  pendingLabel: string | null;
   /** Milliseconds left in the grace period (0 unless `phase === 'pending'`). */
   remainingMs: number;
   windowMs: number;
@@ -115,23 +185,22 @@ export interface OneTapPieces {
   tap: () => void;
   /** −1 from `pending` only. Re-arms the window; disarms entirely at zero. */
   undoOne: () => void;
-  /**
-   * Send now, cancelling the countdown. Safe to call with nothing pending.
-   *
-   * Resolves once the post has SETTLED, so a caller that is about to invalidate
-   * the credential — the single-operator kiosk's idle auto-logout — can bank the
-   * delta before taking the token away rather than 401 its own flush.
-   */
+  /** Send now, cancelling the countdown. Safe to call with nothing pending. */
   flush: (opts?: { keepalive?: boolean }) => Promise<void>;
-  /** Re-send after a refusal. */
+  /** Re-send after a refusal. The only path an ambiguous failure may take. */
   retry: () => void;
+  /** Give up on a held delta. The caller must have shown what is being lost. */
+  discard: () => void;
 }
 
 export function useOneTapPieces({
+  binding,
   post,
   toMessage,
+  isAmbiguousFailure = (err) => typeof (err as { status?: unknown } | null)?.status !== 'number',
   onRecorded,
   onFailed,
+  onStranded,
   canPost = true,
   blockedMessage = 'Not saved yet — waiting for the connection.',
   windowMs = ONE_TAP_WINDOW_MS,
@@ -140,6 +209,7 @@ export function useOneTapPieces({
   const [pending, setPending] = useState(0);
   const [inFlight, setInFlight] = useState(0);
   const [lastRecorded, setLastRecorded] = useState(0);
+  const [pendingLabel, setPendingLabel] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [remainingMs, setRemainingMs] = useState(0);
   const [armedAt, setArmedAt] = useState<number | null>(null);
@@ -148,12 +218,19 @@ export function useOneTapPieces({
   // rather than whatever was closed over when they were scheduled.
   const pendingRef = useRef(0);
   const inFlightRef = useRef(0);
+  // The stamp. Set on the first tap of a batch, cleared only when the batch is
+  // banked or discarded — never rewritten by a new binding arriving.
+  const pendingBindingRef = useRef<OneTapBinding | null>(null);
+  const bindingRef = useRef<OneTapBinding | null>(binding);
   const canPostRef = useRef(canPost);
   const blockedMessageRef = useRef(blockedMessage);
+  const ambiguousRef = useRef(false);
   const postRef = useRef(post);
   const toMessageRef = useRef(toMessage);
+  const isAmbiguousRef = useRef(isAmbiguousFailure);
   const onRecordedRef = useRef(onRecorded);
   const onFailedRef = useRef(onFailed);
+  const onStrandedRef = useRef(onStranded);
   const timerRef = useRef<number | null>(null);
   const recordedTimerRef = useRef<number | null>(null);
   // `arm` is defined below because it schedules `flush`, but `flush` also has to
@@ -161,12 +238,15 @@ export function useOneTapPieces({
   // the cycle without making either of them depend on the other's identity.
   const armRef = useRef<(() => void) | null>(null);
 
+  bindingRef.current = binding;
   canPostRef.current = canPost;
   blockedMessageRef.current = blockedMessage;
   postRef.current = post;
   toMessageRef.current = toMessage;
+  isAmbiguousRef.current = isAmbiguousFailure;
   onRecordedRef.current = onRecorded;
   onFailedRef.current = onFailed;
+  onStrandedRef.current = onStranded;
 
   const clearTimer = useCallback(() => {
     if (timerRef.current != null) {
@@ -180,11 +260,22 @@ export function useOneTapPieces({
   const setPendingBoth = useCallback((next: number) => {
     pendingRef.current = next;
     setPending(next);
+    if (next <= 0) {
+      pendingBindingRef.current = null;
+      setPendingLabel(null);
+    }
   }, []);
 
   const setInFlightBoth = useCallback((next: number) => {
     inFlightRef.current = next;
     setInFlight(next);
+  }, []);
+
+  /** True while the held delta still belongs to the pair that is bound now. */
+  const bindingMatches = useCallback(() => {
+    const stamped = pendingBindingRef.current;
+    if (stamped == null) return true; // nothing stamped yet — a fresh batch
+    return bindingRef.current != null && bindingRef.current.key === stamped.key;
   }, []);
 
   /**
@@ -208,6 +299,19 @@ export function useOneTapPieces({
         armRef.current?.();
         return Promise.resolve();
       }
+      if (!bindingMatches()) {
+        // These pieces belong to somebody else, on some other operation. There
+        // is no credential that can post them truthfully right now, and posting
+        // them untruthfully is the whole hazard — hold them, named.
+        setPhase('orphaned');
+        return Promise.resolve();
+      }
+      if (ambiguousRef.current) {
+        // The last attempt may already have been written. No automatic path
+        // gets to gamble on that; RETRY clears this flag, nothing else does.
+        setPhase('failed');
+        return Promise.resolve();
+      }
       if (!canPostRef.current) {
         // Nothing can land right now (offline, or a dead credential). Hold the
         // count and SAY SO — the `canPost` effect below re-arms the moment it
@@ -225,6 +329,7 @@ export function useOneTapPieces({
         .then(() => {
           setInFlightBoth(0);
           setLastRecorded(pieces);
+          ambiguousRef.current = false;
           onRecordedRef.current?.(pieces);
           if (pendingRef.current > 0) {
             // Taps landed while this request was on the wire. They are NOT
@@ -243,14 +348,17 @@ export function useOneTapPieces({
           // Not recorded ⇒ back onto the undoable pile, exactly where the
           // operator left them. Never an auto-retry.
           const message = toMessageRef.current(err);
+          ambiguousRef.current = isAmbiguousRef.current(err);
           setInFlightBoth(0);
+          if (pendingBindingRef.current == null) pendingBindingRef.current = bindingRef.current;
           setPendingBoth(pendingRef.current + pieces);
+          setPendingLabel(pendingBindingRef.current?.label ?? null);
           setError(message);
           setPhase('failed');
           onFailedRef.current?.(pieces, message, err);
         });
     },
-    [clearTimer, setPendingBoth, setInFlightBoth]
+    [bindingMatches, clearTimer, setPendingBoth, setInFlightBoth]
   );
 
   /** (Re)start the grace period. */
@@ -268,15 +376,27 @@ export function useOneTapPieces({
   armRef.current = arm;
 
   const tap = useCallback(() => {
+    const current = bindingRef.current;
+    if (current == null) return; // nothing bound — the lane's button is disabled too
+    if (pendingRef.current > 0 && !bindingMatches()) {
+      // Somebody else's pieces are still held. Merging this tap into them would
+      // produce one report that is wrong for whoever it posted as, so the lane
+      // stops here and the held delta has to be resolved first.
+      setPhase('orphaned');
+      return;
+    }
     if (recordedTimerRef.current != null) {
       window.clearTimeout(recordedTimerRef.current);
       recordedTimerRef.current = null;
     }
+    if (pendingRef.current <= 0) pendingBindingRef.current = current;
+    setPendingLabel(pendingBindingRef.current?.label ?? null);
     setPendingBoth(pendingRef.current + 1);
+    ambiguousRef.current = false;
     setError(null);
     setPhase('pending');
     arm();
-  }, [arm, setPendingBoth]);
+  }, [arm, bindingMatches, setPendingBoth]);
 
   const undoOne = useCallback(() => {
     const next = Math.max(0, pendingRef.current - 1);
@@ -284,20 +404,42 @@ export function useOneTapPieces({
     setError(null);
     if (next <= 0) {
       clearTimer();
+      ambiguousRef.current = false;
       // Nothing pending and nothing in flight ⇒ no request was ever made.
       setPhase(inFlightRef.current > 0 ? 'saving' : 'idle');
       return;
     }
+    if (!bindingMatches()) {
+      setPhase('orphaned');
+      return;
+    }
     setPhase('pending');
     arm();
-  }, [arm, clearTimer, setPendingBoth]);
+  }, [arm, bindingMatches, clearTimer, setPendingBoth]);
 
   const retry = useCallback(() => {
     if (pendingRef.current <= 0) return;
+    // RETRY is a human deciding to send again, which is the ONLY thing allowed
+    // to clear the ambiguity bar — but it can never override the binding, since
+    // whoever is standing at the kiosk cannot consent on another operator's
+    // behalf.
+    if (!bindingMatches()) {
+      setPhase('orphaned');
+      return;
+    }
+    ambiguousRef.current = false;
     setError(null);
     setPhase('pending');
     arm();
-  }, [arm]);
+  }, [arm, bindingMatches]);
+
+  const discard = useCallback(() => {
+    clearTimer();
+    ambiguousRef.current = false;
+    setPendingBoth(0);
+    setError(null);
+    setPhase('idle');
+  }, [clearTimer, setPendingBoth]);
 
   // Countdown repaint. Only runs while a window is armed.
   useEffect(() => {
@@ -326,15 +468,21 @@ export function useOneTapPieces({
   }, [phase]);
 
   // Reconnect (or an operator session arriving) re-arms a window that could not
-  // fire, so a delta stranded by a dropped connection lands on its own.
+  // fire, so a delta stranded by a dropped connection lands on its own — but
+  // only when it is still THIS pair's delta and the last failure was definitive.
+  const bindingKey = binding?.key ?? null;
   useEffect(() => {
     if (!canPost) return;
-    if (pendingRef.current > 0 && timerRef.current == null && inFlightRef.current === 0) {
-      setError(null);
-      setPhase('pending');
-      arm();
+    if (pendingRef.current <= 0 || timerRef.current != null || inFlightRef.current > 0) return;
+    if (ambiguousRef.current) return;
+    if (!bindingMatches()) {
+      setPhase('orphaned');
+      return;
     }
-  }, [canPost, arm]);
+    setError(null);
+    setPhase('pending');
+    arm();
+  }, [canPost, bindingKey, arm, bindingMatches]);
 
   // Page unload — the one teardown that outlives React. `keepalive` lets the
   // request finish after the document is gone; without it a tab closed inside
@@ -347,18 +495,30 @@ export function useOneTapPieces({
 
   // Hook teardown (the page itself unmounting). Fire and forget: the request
   // does not need the component tree, and there is nothing left to render the
-  // answer into.
+  // answer into. What it must NOT do is drop a delta it cannot send — that is
+  // production disappearing with no row, no notice and no record — so anything
+  // unsendable is handed to `onStranded` for the caller to persist.
   useEffect(
     () => () => {
       if (timerRef.current != null) window.clearTimeout(timerRef.current);
       if (recordedTimerRef.current != null) window.clearTimeout(recordedTimerRef.current);
-      if (pendingRef.current > 0 && inFlightRef.current === 0 && canPostRef.current) {
-        const pieces = pendingRef.current;
-        pendingRef.current = 0;
+      const pieces = pendingRef.current;
+      if (pieces <= 0 || inFlightRef.current > 0) return;
+      const stamped = pendingBindingRef.current ?? bindingRef.current;
+      const sendable =
+        canPostRef.current &&
+        !ambiguousRef.current &&
+        stamped != null &&
+        bindingRef.current != null &&
+        bindingRef.current.key === stamped.key;
+      pendingRef.current = 0;
+      if (sendable) {
         void postRef.current(pieces, { keepalive: true }).catch(() => {
-          /* nothing is mounted to show it — the pagehide/keepalive path is the net */
+          /* nothing is mounted to show it — onStranded cannot run post-teardown */
         });
+        return;
       }
+      onStrandedRef.current?.({ pieces, key: stamped?.key ?? '', label: stamped?.label ?? '' });
     },
     []
   );
@@ -368,6 +528,7 @@ export function useOneTapPieces({
     pending,
     inFlight,
     lastRecorded,
+    pendingLabel,
     remainingMs,
     windowMs,
     error,
@@ -376,5 +537,6 @@ export function useOneTapPieces({
     undoOne,
     flush,
     retry,
+    discard,
   };
 }

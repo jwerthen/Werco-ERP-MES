@@ -46,6 +46,9 @@ import KioskDocViewer, { KioskDocTransport } from '../components/kiosk/KioskDocV
 import { useBadgeCapture } from '../components/kiosk/useBadgeCapture';
 import KioskOneTapLane from '../components/kiosk/KioskOneTapLane';
 import { useOneTapPieces } from '../components/kiosk/useOneTapPieces';
+import type { OneTapBinding } from '../components/kiosk/useOneTapPieces';
+import { addStranded, clearStranded, readStranded } from '../components/kiosk/oneTapStrandedStore';
+import type { StrandedOneTapRecord } from '../components/kiosk/oneTapStrandedStore';
 import LaserNestOperatorPanel from '../components/laser/LaserNestOperatorPanel';
 import {
   HOLD_REASONS,
@@ -63,6 +66,7 @@ import {
   extractStepsIncomplete,
   stepsIncompleteMessage,
 } from '../utils/processSheetErrors';
+import { formatCentralTime } from '../utils/centralTime';
 import type { KioskStationSummary } from '../types/kioskStation';
 import type { ScrapReasonCodeOption } from '../types/scrapReason';
 import type { MissingStepInfo, QualityHoldResult } from '../types/processSheet';
@@ -330,41 +334,60 @@ export default function CrewStationKiosk() {
   const mutationsBlocked = busy || !online;
 
   // --- One-tap +1 on REPORT PRODUCTION -----------------------------------------
-  // The credential and the target a queued flush needs live in refs, not in
-  // `view`: a flush fires from teardown paths — Cancel, the 90s idle flow-reset,
-  // the ghost-guard, page unload — where the view is already gone or going.
-  const oneTapOperatorRef = useRef<OperatorSession | null>(null);
-  const oneTapOperationRef = useRef<number | null>(null);
+  // TWO refs, and the split is the whole attribution guarantee.
+  //
+  // The CREDENTIAL is a live 5-minute `scope="kiosk"` bearer. It is cleared
+  // aggressively — on Lock station and on every flow reset — so an unattended
+  // terminal is never sitting on one, and clearing it only ever PARKS a delta
+  // (the pieces stay, they just cannot be sent until that operator scans again).
+  //
+  // The BINDING is who + which operation, and it is NOT a credential. It has to
+  // outlive the token, because it is what a queued flush is checked against: the
+  // hook stamps it onto the delta at tap time and refuses to post under any
+  // other pair. Without that check, a count parked by a 401 and hidden by the
+  // 90s idle reset would post under whoever scanned next, on whatever job they
+  // opened — crediting another operator's TimeEntry and moving stock on another
+  // work order's operation. Both live in refs rather than `view` because a flush
+  // fires from teardown paths where the view is already gone.
+  const oneTapCredentialRef = useRef<string | null>(null);
+  const oneTapBindingRef = useRef<{ operationId: number; binding: OneTapBinding } | null>(null);
+  const [oneTapBinding, setOneTapBinding] = useState<OneTapBinding | null>(null);
   // A badge token is good for 5 minutes; a long run outlives it. The first 401
   // PARKS the lane and asks for a re-scan rather than burning the operator's
   // count against a dead credential.
   const [operatorStale, setOperatorStale] = useState(false);
 
   const oneTap = useOneTapPieces({
+    binding: oneTapBinding,
     canPost: online && !operatorStale,
     post: (pieces, { keepalive }) => {
-      const operator = oneTapOperatorRef.current;
-      const operationId = oneTapOperationRef.current;
-      if (!operator || operationId == null) {
+      const token = oneTapCredentialRef.current;
+      const bound = oneTapBindingRef.current;
+      if (!token || !bound) {
         return Promise.reject(
           new KioskApiError(401, null, 'Badge session ended — scan your badge to save these pieces.')
         );
       }
       return kioskClient
         .reportProduction(
-          operator.token,
-          operationId,
+          token,
+          bound.operationId,
           { quantity_complete_delta: pieces, quantity_scrapped_delta: 0, source: KIOSK_SOURCE },
           { keepalive }
         )
         .then(() => undefined);
     },
     toMessage: (err) => kioskErrorMessage(err, 'Could not save production. Try again.'),
+    // A KioskApiError carries the HTTP status, so the server answered and
+    // nothing was written. Anything else — a dropped connection, an aborted
+    // keepalive — leaves it unknown whether the row landed, and this endpoint
+    // is additive with no idempotency key, so no automatic path may re-send it.
+    isAmbiguousFailure: (err) => !(err instanceof KioskApiError),
     onRecorded: (pieces) => {
       showToast(
         'success',
         `${pieces} pc${pieces === 1 ? '' : 's'} recorded${
-          oneTapOperatorRef.current ? ` by ${oneTapOperatorRef.current.user.full_name}` : ''
+          oneTapBindingRef.current ? ` by ${oneTapBindingRef.current.binding.label}` : ''
         }`
       );
       void bumpAndRefresh();
@@ -377,22 +400,47 @@ export default function CrewStationKiosk() {
         // screen shows what is still waiting). Parking without moving them would
         // leave a count on screen with no working way to bank it.
         setOperatorStale(true);
-        const operationId = oneTapOperationRef.current;
-        if (operationId != null) {
+        const bound = oneTapBindingRef.current;
+        if (bound) {
           setBadgeError(null);
-          setView({ name: 'productionSign', operationId });
+          setView({ name: 'productionSign', operationId: bound.operationId });
         }
         showToast('error', `Badge session timed out — scan again to save ${pieces} pc${pieces === 1 ? '' : 's'}`);
         return;
       }
       showToast('error', `${pieces} pc${pieces === 1 ? '' : 's'} NOT saved — ${message}`);
     },
+    // The kiosk is going away holding pieces it can never send. Write them down
+    // — this is their last chance to exist anywhere at all.
+    onStranded: (delta) => addStranded('crew', delta),
     blockedMessage: online
       ? 'Scan your badge again to save these pieces.'
       : 'Not saved yet — waiting for the connection.',
   });
 
   const { flush: flushOneTap, unbanked: oneTapUnbanked } = oneTap;
+  const oneTapUnbankedRef = useRef(0);
+  oneTapUnbankedRef.current = oneTapUnbanked;
+
+  /**
+   * Drop the live bearer token, keeping the binding so a parked delta can still
+   * be named and still be banked by the operator it belongs to. Never called
+   * with an un-banked delta before a flush has been attempted.
+   */
+  const releaseOneTapCredential = useCallback(() => {
+    oneTapCredentialRef.current = null;
+    setOperatorStale(true);
+  }, []);
+
+  // Pieces a previous session tapped and could never send. Read once on mount:
+  // this is a NOTICE, not a retry queue — nothing here posts, because the
+  // operator who made them is usually gone and the endpoint cannot dedupe a
+  // request that may already have landed.
+  const [stranded, setStranded] = useState<StrandedOneTapRecord[]>(() => readStranded('crew'));
+  const dismissStranded = useCallback((key: string) => {
+    clearStranded('crew', key);
+    setStranded(readStranded('crew'));
+  }, []);
 
   // Leaving the report screen BANKS whatever is still inside the undo window.
   // The tap was the commit; the window is only a way out of it, and walking away
@@ -401,9 +449,18 @@ export default function CrewStationKiosk() {
   const onReportScreen = view.name === 'productionQty';
   const wasOnReportScreen = useRef(false);
   useEffect(() => {
-    if (wasOnReportScreen.current && !onReportScreen) flushOneTap();
+    if (wasOnReportScreen.current && !onReportScreen) {
+      // Bank first, then drop the live bearer. Releasing on EVERY exit — Cancel,
+      // the idle flow-reset, the ghost-guard, Lock station — is safe precisely
+      // because the flow is badge-first: the screen cannot be re-entered without
+      // another scan, so the credential has no reason to outlive it, and an
+      // unattended terminal is never holding one. A delta the flush could not
+      // send simply parks, still named, still its operator's to come back for.
+      void flushOneTap();
+      releaseOneTapCredential();
+    }
     wasOnReportScreen.current = onReportScreen;
-  }, [onReportScreen, flushOneTap]);
+  }, [onReportScreen, flushOneTap, releaseOneTapCredential]);
 
   // --- PIN login ----------------------------------------------------------------
   const submitPin = useCallback(async () => {
@@ -639,8 +696,19 @@ export default function CrewStationKiosk() {
         // Bind the lane LAST, and only once the token has proved itself on the
         // resume post: a parked one-tap delta un-parks the moment `operatorStale`
         // clears, and it must not do that against a credential that just failed.
-        oneTapOperatorRef.current = operator;
-        oneTapOperationRef.current = operationId;
+        //
+        // NOTE what this scan does and does not authorise. It proves the
+        // credential is VALID; it says nothing about whose the held pieces are.
+        // A delta already stamped with a different (operator, operation) pair is
+        // refused by the hook and goes to `orphaned` — un-parking is not
+        // adoption, and this scan cannot consent on another operator's behalf.
+        const nextBinding: OneTapBinding = {
+          key: `user:${minted.user.id}|op:${operationId}`,
+          label: `${minted.user.full_name} · ${crewJobLabel(item)}`,
+        };
+        oneTapCredentialRef.current = operator.token;
+        oneTapBindingRef.current = { operationId, binding: nextBinding };
+        setOneTapBinding(nextBinding);
         setOperatorStale(false);
         setView({ name: 'productionQty', operationId, operator });
         if (resume) await bumpAndRefresh();
@@ -1038,6 +1106,38 @@ export default function CrewStationKiosk() {
           className="border-b border-fd-red bg-fd-red/15 px-5 py-4 text-center text-xl font-bold text-fd-red"
         >
           OFFLINE — actions are disabled until the connection is restored. Reconnecting…
+        </div>
+      )}
+
+      {/* Pieces a previous session could never save. Persistent and on the BOARD,
+          not tucked inside the report flow: the parked-count banner only ever
+          rendered on the scan screen, so the 90-second idle reset used to hide
+          the very thing someone needed to act on. Nothing here posts — it names
+          the operator and the job so the pieces can be recorded properly, and
+          dismissing is an explicit decision about production that is being
+          written off. */}
+      {stranded.length > 0 && (
+        <div className="border-b border-fd-amber bg-fd-amber/10 px-5 py-4" role="alert">
+          <div className="mx-auto max-w-5xl space-y-3">
+            {stranded.map((record) => (
+              <div key={record.key} className="flex flex-wrap items-center justify-between gap-3">
+                <p className="min-w-0 font-mono text-lg font-bold text-fd-amber">
+                  {record.pieces} pc{record.pieces === 1 ? '' : 's'} were never saved
+                  <span className="ml-2 font-semibold text-fd-body">
+                    — tapped by {record.label || 'an operator'} at {formatCentralTime(record.at)}. Record them in the
+                    office; they are not on the job.
+                  </span>
+                </p>
+                <button
+                  type="button"
+                  onClick={() => dismissStranded(record.key)}
+                  className="min-h-12 shrink-0 rounded border border-fd-line bg-fd-sunken px-4 font-mono text-sm font-bold uppercase tracking-wide text-fd-body transition-colors hover:border-fd-line-bright"
+                >
+                  Dismiss
+                </button>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
@@ -1453,6 +1553,7 @@ export default function CrewStationKiosk() {
             oneTapLane={
               <KioskOneTapLane
                 oneTap={oneTap}
+                operatorName={view.operator.user.full_name}
                 atCeiling={remainingOnOperation(viewItem) - oneTapUnbanked <= 0}
                 blocked={busy}
                 online={online}

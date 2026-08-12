@@ -13,7 +13,7 @@ import {
   getKioskWorkCenterCode,
   getKioskWorkCenterId,
 } from '../utils/kiosk';
-import { formatCentralTime } from '../utils/centralTime';
+import { formatCentralDateTime, formatCentralTime } from '../utils/centralTime';
 import { useKioskIdleLogout } from '../hooks/useKioskIdleLogout';
 import { usePageTitle } from '../hooks/usePageTitle';
 import { useWakeLock } from '../hooks/useWakeLock';
@@ -28,6 +28,9 @@ import KioskDocViewer, { KioskDocTab, KioskDocTransport } from '../components/ki
 import KioskStepsPanel, { StepsTransport } from '../components/kiosk/KioskStepsPanel';
 import KioskOneTapLane from '../components/kiosk/KioskOneTapLane';
 import { useOneTapPieces } from '../components/kiosk/useOneTapPieces';
+import type { OneTapBinding } from '../components/kiosk/useOneTapPieces';
+import { addStranded, clearStranded, readStranded } from '../components/kiosk/oneTapStrandedStore';
+import type { StrandedOneTapRecord } from '../components/kiosk/oneTapStrandedStore';
 import LaserNestOperatorPanel from '../components/laser/LaserNestOperatorPanel';
 import {
   KIOSK_SOURCE,
@@ -110,6 +113,16 @@ let toastSeq = 0;
 function jobLabel(job: ActiveJob): string {
   return `${job.work_order_number || '—'} · Op ${job.operation_number ?? '—'} ${job.operation_name || ''}`.trim();
 }
+
+/**
+ * A one-tap post refused HERE, before anything reached the wire.
+ *
+ * It exists so the ambiguity test can tell it apart from a network failure: no
+ * request was made, so nothing can have been written, so the delta is safe on
+ * every automatic path. Rejecting with a bare `Error` would read as "unknowable"
+ * and pin pieces behind a RETRY nobody needs to tap.
+ */
+class OneTapNotSentError extends Error {}
 
 /** "00:05" — blocker downtime as H:MM/HH:MM from minutes. */
 function formatDowntime(minutes: number): string {
@@ -257,20 +270,80 @@ export default function OperatorKiosk() {
   // modal unmounts the moment it closes, and a tapped-but-unposted delta sitting
   // inside an unmounting subtree is lost production. Owned here, every teardown
   // the modal has is a flush instead of a loss.
-  //
-  // The operation a queued flush posts against lives in a ref rather than being
-  // read off `view`, because a flush fires from paths where the view is already
-  // gone or going (Cancel, a confirmed report, the idle logout).
-  const oneTapOperationRef = useRef<number | null>(null);
-  const reportOperationId = view.name === 'production' ? view.job.operation_id ?? null : null;
-  useEffect(() => {
-    // Only ever set, never cleared: the view leaving `production` is exactly the
-    // moment the exit flush below needs the ref to still name its target.
-    if (reportOperationId != null) oneTapOperationRef.current = reportOperationId;
-  }, [reportOperationId]);
+
+  const operatorName =
+    `${user?.first_name || ''} ${user?.last_name || ''}`.trim() || user?.employee_id || 'Operator';
+
+  /**
+   * WHO the pieces belong to and WHICH operation they were made on — stamped
+   * onto every tap, re-checked before every post.
+   *
+   * This is the attribution guarantee, not a caption. The station outlives the
+   * screen: the modal closes, the 15s poll swaps the active job, the idle logout
+   * hands the tablet to whoever walks up next. A delta that could not be posted
+   * when it was tapped and is then allowed out under whatever pair happens to be
+   * bound when it finally can does not merely carry the wrong label — it credits
+   * another operator's TimeEntry, lands on another work order's part and lot, and
+   * moves stock on the wrong operation (invariant 6). That row is permanent and
+   * reads exactly like a real report.
+   *
+   * One logged-in user per station here, so the operator half is just `user.id` —
+   * but it still has to be IN the key: a parked delta can outlive the session
+   * that made it (idle logout, an expired token), and the next badge scan on this
+   * same tablet is a different person.
+   */
+  const userId = user?.id ?? null;
+  const activeOperationId = activeJob?.operation_id ?? null;
+  const liveBinding = useMemo<OneTapBinding | null>(() => {
+    if (userId == null || activeOperationId == null) return null;
+    return {
+      key: `user:${userId}|op:${activeOperationId}`,
+      label: `${operatorName} · ${activeJob?.work_order_number || '—'} Op ${activeJob?.operation_number ?? '—'}`,
+    };
+  }, [userId, activeOperationId, activeJob?.work_order_number, activeJob?.operation_number, operatorName]);
+
+  /**
+   * The bound pair is HELD for as long as anything is un-banked, even once the
+   * active job is gone.
+   *
+   * `activeJob` is null between jobs, after a completion, and for a beat after
+   * every reset — and the ordinary exit flushes (modal close, idle logout) fire
+   * in exactly that window. Letting the binding blink to null there would orphan
+   * a delta this station could still have banked truthfully, which is a loss
+   * dressed up as a safety check. Holding it is only ever safe in one direction,
+   * and this is that direction: a NEW job wins immediately (`liveBinding` is
+   * assigned first), so the hook still refuses to post the old operator's pieces
+   * under the new pair — it never posts them, it just stops throwing away the
+   * ones it could have saved.
+   */
+  const unbankedRef = useRef(0);
+  const boundPairRef = useRef<OneTapBinding | null>(null);
+  if (liveBinding != null) {
+    boundPairRef.current = liveBinding;
+  } else if (unbankedRef.current <= 0) {
+    boundPairRef.current = null;
+  }
+  const binding = boundPairRef.current;
+
+  /**
+   * The operation a queued flush posts against. A ref rather than `view.job`,
+   * because a flush fires from paths where the view is already gone or going
+   * (Cancel, a confirmed report, the idle logout) — and it is PINNED while
+   * anything is un-banked.
+   *
+   * Pinning is the defect fix. This ref used to be set from whatever REPORT
+   * overlay was last opened and never cleared, so opening a different job
+   * re-aimed a delta that had already been tapped: the actor was right and the
+   * work order, part, lot and operation were all wrong.
+   */
+  const oneTapTargetRef = useRef<{ operationId: number; key: string } | null>(null);
 
   const oneTap = useOneTapPieces({
-    canPost: online,
+    binding,
+    // No session ⇒ no post can land, so an armed window parks instead of burning
+    // the delta on a request that would 401. The idle logout depends on this
+    // NOT being false yet when it flushes — see handleIdleLogout.
+    canPost: online && isAuthenticated,
     // NO `keepalive` on this surface, and that is a deliberate limitation, not
     // an oversight: this kiosk runs on a normal session through the shared Axios
     // client (ETag caching + the refresh-token interceptor), and axios cannot
@@ -282,12 +355,19 @@ export default function OperatorKiosk() {
     // while the document is still alive — the modal closing (below) and the idle
     // logout, both of which change `view` and bank the delta.
     post: (pieces) => {
-      const operationId = oneTapOperationRef.current;
-      if (operationId == null) {
-        return Promise.reject(new Error('No job open — reopen the job to save these pieces.'));
+      const target = oneTapTargetRef.current;
+      // The hook has already refused any delta whose stamp differs from the pair
+      // bound right now, so checking the pinned target against that SAME binding
+      // is what proves these pieces are going to the operation they were tapped
+      // on. Mismatch refuses rather than guessing: there is no operation this
+      // could truthfully post to, and the wrong one is worse than none.
+      if (target == null || binding == null || target.key !== binding.key) {
+        return Promise.reject(
+          new OneTapNotSentError('No job open — clock back into that job on this station to save these pieces.')
+        );
       }
       return api
-        .reportOperationProduction(operationId, {
+        .reportOperationProduction(target.operationId, {
           quantity_complete_delta: pieces,
           quantity_scrapped_delta: 0,
           source: KIOSK_SOURCE,
@@ -295,6 +375,19 @@ export default function OperatorKiosk() {
         .then(() => undefined);
     },
     toMessage: (err) => kioskErrorMessage(err, 'Could not save production. Try again.'),
+    /**
+     * AMBIGUOUS means the row may already exist. This kiosk posts through the
+     * shared Axios client, so the rejection carries an HTTP status exactly when
+     * the server answered: that is a definitive refusal — nothing was written,
+     * re-sending cannot double-count, and the automatic paths may have it.
+     * Everything else (a dropped connection, a timeout, an aborted request)
+     * never learned the answer, and this endpoint is purely additive with no
+     * idempotency key, so only a human tapping RETRY may send it again.
+     */
+    isAmbiguousFailure: (err) => {
+      if (err instanceof OneTapNotSentError) return false; // never reached the wire
+      return typeof (err as { response?: { status?: unknown } } | null)?.response?.status !== 'number';
+    },
     onRecorded: async (pieces) => {
       showToast('success', `${pieces} pc${pieces === 1 ? '' : 's'} recorded`);
       await refresh();
@@ -304,9 +397,63 @@ export default function OperatorKiosk() {
     // pending and retryable in the lane either way.
     onFailed: (pieces, message) =>
       showToast('error', `${pieces} pc${pieces === 1 ? '' : 's'} NOT saved — ${message}`),
+    /**
+     * The page is going away holding pieces it cannot send. Persist the notice —
+     * these were MADE, and dropping them here is the silent loss the whole
+     * feature exists to prevent. It is a NOTICE, never a queue: nothing re-posts
+     * it, because the delta failed under unknown circumstances and the operator
+     * who made it is by then usually gone.
+     *
+     * The toast is the live-path half. Today the hook only strands at teardown,
+     * where nothing is left to render it, so what the operator actually reads is
+     * the stored notice surfaced on the next mount — but wiring both means a
+     * future stranding from a live path is never silent.
+     */
+    onStranded: (delta) => {
+      addStranded('operator', delta);
+      showToast(
+        'error',
+        `${delta.pieces} pc${delta.pieces === 1 ? '' : 's'} NOT saved — ${delta.label}. Held for review; nothing was posted.`
+      );
+    },
   });
 
   const { flush: flushOneTap } = oneTap;
+
+  // Re-aim the target ONLY when nothing is un-banked. While a delta is held the
+  // pieces own the ref: it still names the operation they were tapped on, so the
+  // operator coming back to that job banks them where they belong, and every
+  // other job leaves them alone. `unbanked` is a dependency on purpose — without
+  // it the ref would stay pinned to a job that is long finished.
+  useEffect(() => {
+    if (oneTap.unbanked > 0) return;
+    if (liveBinding == null || activeOperationId == null) return;
+    oneTapTargetRef.current = { operationId: activeOperationId, key: liveBinding.key };
+  }, [liveBinding, activeOperationId, oneTap.unbanked]);
+
+  // Mirror for the binding hold above, which runs earlier in this render and so
+  // reads the PREVIOUS value. That lag can only ever hold the pair a beat longer
+  // than needed, never release it early: the render that first makes `unbanked`
+  // positive is a tap, and a tap can only happen while a job is open.
+  unbankedRef.current = oneTap.unbanked;
+
+  /**
+   * Notices for deltas that could never be sent, read once on mount.
+   *
+   * Read-only and inert by design: it names the pieces, the operator and the job
+   * so a human can enter them in the office, and DISMISS is the only action.
+   * Auto-posting them is what this whole change refuses to do — the pieces are
+   * un-attributable by then, and the request that carried them may already have
+   * landed.
+   */
+  const [strandedNotices, setStrandedNotices] = useState<StrandedOneTapRecord[]>([]);
+  useEffect(() => {
+    setStrandedNotices(readStranded('operator'));
+  }, []);
+  const dismissStranded = useCallback((key: string) => {
+    clearStranded('operator', key);
+    setStrandedNotices((prev) => prev.filter((notice) => notice.key !== key));
+  }, []);
 
   // Leaving the report screen BANKS whatever is still inside the undo window.
   // The tap was the commit; the window is only a way out of it, and closing the
@@ -330,6 +477,12 @@ export default function OperatorKiosk() {
     // already tapped and committed to. Nothing an operator can act through is on
     // screen once the state below is reset, so holding the token for the length
     // of one bounded request costs nothing an idle logout was protecting.
+    //
+    // Clearing `activeJob` below does NOT pull the binding out from under the
+    // flush: it is held while anything is un-banked, and `canPost` still sees a
+    // live session because `logout()` has not run yet. Both are what let this
+    // flush BANK the delta rather than strand it — which is the difference
+    // between the operator's pieces existing and a notice saying they did.
     setView({ name: 'queue' });
     setQueue([]);
     setActiveJob(null);
@@ -673,6 +826,7 @@ export default function OperatorKiosk() {
     oneTapRemaining == null ? undefined : (
       <KioskOneTapLane
         oneTap={oneTap}
+        operatorName={operatorName}
         atCeiling={oneTapRemaining - oneTap.unbanked <= 0}
         blocked={busy}
         online={online}
@@ -754,6 +908,55 @@ export default function OperatorKiosk() {
           className="border-b border-fd-red bg-fd-red/15 px-5 py-3.5 text-center font-mono text-base font-bold uppercase tracking-[0.06em] text-fd-red"
         >
           Offline — actions are disabled until the connection is restored. Reconnecting…
+        </div>
+      )}
+
+      {/* Pieces that were tapped but could never be sent (page torn down while a
+          delta was un-bankable). Surfaced here, on the signed-in station, because
+          this is where a person who can act about them stands — and the store
+          lives in sessionStorage beside the token, so a notice and the session
+          that made it die together.
+
+          It POSTS NOTHING. The count, the operator and the job are named so the
+          pieces can be entered in the office under the right operator; DISMISS is
+          the only control, because re-sending a delta whose request may already
+          have landed is how one part becomes two rows. */}
+      {strandedNotices.length > 0 && (
+        <div
+          role="alert"
+          data-testid="kiosk-onetap-stranded"
+          className="border-b border-fd-amber bg-fd-amber/10 px-4 py-3 min-[1100px]:px-6"
+        >
+          <p className="font-mono text-[11px] font-bold uppercase tracking-[0.14em] text-fd-amber">
+            Tapped pieces that were never recorded
+          </p>
+          <ul className="mt-2 space-y-2.5">
+            {strandedNotices.map((notice) => (
+              <li
+                key={notice.key}
+                className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-[3px] border border-fd-amber/40 bg-fd-panel px-3.5 py-2.5"
+              >
+                <span className="font-mono text-3xl font-bold tabular-nums text-fd-amber">{notice.pieces}</span>
+                <span className="min-w-0 flex-1 text-base text-fd-body">
+                  <span className="font-mono text-[11px] font-bold uppercase tracking-[0.14em] text-fd-amber">
+                    pcs not saved
+                  </span>{' '}
+                  · tapped by{' '}
+                  <span className="font-semibold text-fd-ink">{notice.label || 'an unrecorded operator'}</span> ·{' '}
+                  {formatCentralDateTime(notice.at)}. Nothing was posted — have these entered in the office under that
+                  operator.
+                </span>
+                <button
+                  type="button"
+                  aria-label={`Dismiss unsaved-pieces notice for ${notice.label || 'an unrecorded operator'}`}
+                  onClick={() => dismissStranded(notice.key)}
+                  className="min-h-11 shrink-0 rounded-[3px] border border-fd-line px-4 font-mono text-xs font-semibold uppercase tracking-[0.08em] text-fd-body transition-transform duration-150 ease-out active:scale-[0.98]"
+                >
+                  Dismiss
+                </button>
+              </li>
+            ))}
+          </ul>
         </div>
       )}
 

@@ -17,10 +17,18 @@
  *    UNDO landed on `+1` and RECORDED A PIECE instead of removing one — the
  *    precise accident the grace period exists to prevent. A test that only ever
  *    looks for UNDO while pending would not notice it coming back.
+ *
+ * 3. ORPHANED IS A DEAD END ON PURPOSE. When a delta outlives the (operator,
+ *    operation) pair that made it, the lane holds it, NAMES that pair, and
+ *    offers no way to send it anyway. Nobody standing at the kiosk can consent
+ *    on the absent operator's behalf, so a "save anyway" control would be a
+ *    one-tap route to crediting one person's pieces to another — the exact
+ *    outcome the stamp exists to prevent. The absence of that control is
+ *    therefore asserted, not assumed.
  */
 
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import KioskOneTapLane from './KioskOneTapLane';
 import { ONE_TAP_WINDOW_MS, type OneTapPieces } from './useOneTapPieces';
@@ -36,6 +44,9 @@ function oneTapState(over: Partial<OneTapPieces> = {}): OneTapPieces {
     pending: 0,
     inFlight: 0,
     lastRecorded: 0,
+    // Names the pair whenever anything is un-banked. `null` at rest, because
+    // nothing is being held on anyone's behalf.
+    pendingLabel: null as string | null,
     remainingMs: 0,
     windowMs: ONE_TAP_WINDOW_MS,
     error: null,
@@ -43,6 +54,7 @@ function oneTapState(over: Partial<OneTapPieces> = {}): OneTapPieces {
     undoOne: jest.fn(),
     flush: jest.fn(() => Promise.resolve()),
     retry: jest.fn(),
+    discard: jest.fn(),
     ...over,
   };
   return { ...base, unbanked: base.pending + base.inFlight };
@@ -52,6 +64,7 @@ const renderLane = (props: Partial<React.ComponentProps<typeof KioskOneTapLane>>
   render(
     <KioskOneTapLane
       oneTap={oneTapState()}
+      operatorName="Bob T"
       atCeiling={false}
       blocked={false}
       online
@@ -132,6 +145,112 @@ describe('KioskOneTapLane', () => {
       expect(status).toHaveTextContent('3');
       expect(status).toHaveTextContent(/recording/i);
       expect(status).toHaveTextContent(/\+2 more pending/i);
+    });
+  });
+
+  describe('ORPHANED — the delta outlived the pair that made it', () => {
+    /**
+     * The compliance case, rendered. These pieces are a claim that a SPECIFIC
+     * operator made parts on a SPECIFIC operation; the station has since moved
+     * on. The lane's job here is to hold the count, say whose it is, and offer
+     * nobody a way to launder it into the current pair's name.
+     */
+    const ORPHAN_LABEL = 'Alice Reed · WO-2026-0142 · Op 20 Weld';
+    const orphaned = () =>
+      oneTapState({ phase: 'orphaned', pending: 2, pendingLabel: ORPHAN_LABEL });
+
+    it('holds the count on screen — the pieces were made, so they are never hidden', () => {
+      renderLane({ oneTap: orphaned() });
+
+      expect(lane()).toHaveAttribute('data-phase', 'orphaned');
+      const status = screen.getByTestId('kiosk-onetap-status');
+      expect(status).toHaveTextContent('2');
+      expect(status).toHaveTextContent(/not saved/i);
+    });
+
+    it('names the pair the pieces belong to, not just the count', () => {
+      // A bare "2 pcs held" is unactionable — the whole recovery is "that
+      // operator scans back onto that job", so both halves have to be legible.
+      renderLane({ oneTap: orphaned() });
+
+      const status = screen.getByTestId('kiosk-onetap-status');
+      expect(status).toHaveTextContent(ORPHAN_LABEL);
+      expect(status).toHaveTextContent(/another operator/i);
+    });
+
+    it('falls back to a neutral phrase rather than an empty name when the label is gone', () => {
+      renderLane({ oneTap: oneTapState({ phase: 'orphaned', pending: 2, pendingLabel: null }) });
+
+      expect(screen.getByTestId('kiosk-onetap-status')).toHaveTextContent(/tapped by another operator/i);
+    });
+
+    it('refuses another tap — merging two operators into one report is the hazard', () => {
+      renderLane({ oneTap: orphaned() });
+
+      expect(addButton()).toBeDisabled();
+    });
+
+    it('refuses UNDO — nobody here may edit down an absent operator\'s count', () => {
+      renderLane({ oneTap: orphaned() });
+
+      expect(undoButton()).toBeInTheDocument();
+      expect(undoButton()).toBeDisabled();
+    });
+
+    it('offers NO "save anyway" — the lane holds exactly two controls, both dark', async () => {
+      // The property, stated as a count rather than as an absence of one string:
+      // any newly-added escape hatch (SAVE ANYWAY / RECORD / POST / DISCARD)
+      // fails this, whatever it ends up being called.
+      const user = userEvent.setup();
+      const state = orphaned();
+      renderLane({ oneTap: state });
+
+      const controls = within(lane()).getAllByRole('button');
+      expect(controls).toHaveLength(2);
+      expect(controls).toEqual([addButton(), undoButton()]);
+      expect(screen.queryByTestId('kiosk-onetap-retry')).not.toBeInTheDocument();
+
+      // …and the two that ARE there cannot be coaxed into sending it.
+      await user.click(addButton());
+      await user.click(undoButton());
+      expect(state.tap).not.toHaveBeenCalled();
+      expect(state.undoOne).not.toHaveBeenCalled();
+      expect(state.flush).not.toHaveBeenCalled();
+      expect(state.retry).not.toHaveBeenCalled();
+      expect(state.discard).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('who the lane is recording as', () => {
+    // The heading says it too, but the heading is not where a thumb is looking.
+    // The quiet failure is one person scanning, walking off, and the next person
+    // tapping twenty parts under the first name — with every tap resetting the
+    // idle timer, so inactivity never bounds it either.
+    it.each([
+      ['idle', oneTapState()],
+      ['pending', oneTapState({ phase: 'pending', pending: 1, remainingMs: 5000 })],
+      ['saving', oneTapState({ phase: 'saving', inFlight: 2 })],
+      ['recorded', oneTapState({ phase: 'recorded', lastRecorded: 2 })],
+      ['failed', oneTapState({ phase: 'failed', pending: 2, error: 'Operation is on hold' })],
+      ['orphaned', oneTapState({ phase: 'orphaned', pending: 2, pendingLabel: 'Alice Reed · Op 20' })],
+    ] as const)('names the operator in the %s phase', (_phase, state) => {
+      renderLane({ oneTap: state, operatorName: 'Bob T' });
+
+      expect(screen.getByTestId('kiosk-onetap-operator')).toHaveTextContent(/recording as\s*Bob T/i);
+    });
+
+    it('names the pair holding the pieces SEPARATELY from who is standing there', () => {
+      // Both names on screen at once, and they disagree — that disagreement is
+      // the notice. Collapsing them to one line is how a held count starts
+      // reading as the current operator's.
+      renderLane({
+        oneTap: oneTapState({ phase: 'orphaned', pending: 2, pendingLabel: 'Alice Reed · Op 20' }),
+        operatorName: 'Bob T',
+      });
+
+      expect(screen.getByTestId('kiosk-onetap-operator')).toHaveTextContent(/Bob T/);
+      expect(screen.getByTestId('kiosk-onetap-operator')).not.toHaveTextContent(/Alice Reed/);
+      expect(screen.getByTestId('kiosk-onetap-status')).toHaveTextContent(/Alice Reed/);
     });
   });
 
