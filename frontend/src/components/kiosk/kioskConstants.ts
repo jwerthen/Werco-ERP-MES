@@ -96,6 +96,12 @@ export interface KioskQueueItem {
   // (shop_floor.py) — the interface simply never declared it. Optional so
   // pre-feature payloads still typecheck.
   quantity_scrapped?: number | null;
+  // The operation's per-item target (a laser nest's pieces, a pooled batch item's
+  // count). When set it IS `quantity_ordered` above — the server derives the
+  // operation target from it (`operation_target_quantity`) — and it names the
+  // "Full nest n" quick add. Sent by shop_floor.py's queue builder all along;
+  // optional here so pre-feature payloads still typecheck.
+  component_quantity?: number | null;
   priority: number | null;
   due_date: string | null;
   // Laser cutting: the active nest for this operation (CNC#, runs, optional PDF)

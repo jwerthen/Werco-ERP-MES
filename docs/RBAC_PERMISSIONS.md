@@ -132,6 +132,20 @@ tier, that tier stands — this rule is a floor, never a loosening.
 > hiding a button; wire any future office Start control to `work_orders:edit` so the hidden control
 > and the refused call agree. See `docs/API.md` → Work Orders.
 
+> **Release stays the authorization boundary even though a read can now promote operations.** READY
+> promotion runs from a third seam — the reconcile-on-read pass — so a work order released before the
+> pooling rule shipped repairs itself when anyone loads it (`docs/API.md` → Work Orders → "A read
+> heals a stranded work order"). That read is performed under the **reader's** own token, and the
+> **View** row above is ticked for every role, so a Viewer's `GET /work-orders/{id}` can flip
+> operations PENDING → READY. Two things keep this off the **Release** row: the promotion **never
+> touches a DRAFT work order**, so no read by any role can put unreleased work on the floor's board —
+> `POST /work-orders/{id}/release` (Admin / Manager / Supervisor) remains the only way work reaches
+> the board the first time, and it remains the record of *who* authorized production — and promotion
+> grants no capability the predecessor gate did not already allow, so the reachable-operation
+> observation in the note above is unchanged in kind by it. Reconcile-on-read already performed
+> reader-triggered writes (completion rollups, audited to the requesting user); this adds no new role,
+> no new endpoint, and no new gate.
+
 > **Operator-qualification gate is record-only (Batch 11C / G5-B).** `POST /api/v1/shop-floor/clock-in`
 > and `PUT /api/v1/shop-floor/operations/{id}/start` stay **operator-facing** — open to **any
 > authenticated user** (`get_current_user`), no new role gate. The G5-B qualification gate (no active

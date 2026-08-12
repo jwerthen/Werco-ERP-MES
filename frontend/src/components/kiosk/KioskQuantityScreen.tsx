@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import KioskKeypad from './KioskKeypad';
 import KioskReasonGrid from './KioskReasonGrid';
 import { activeScrapCodes, resolveScrapSelection, scrapReasonTiles } from './scrapReasonOptions';
+import { applyQuickAdd, kioskQuickAdds, QUICK_ADD_BUTTON_CLASSES } from './quantityQuickAdds';
 import { ScrapReasonCodeOption } from '../../types/scrapReason';
 
 interface KioskQuantityScreenProps {
@@ -27,6 +28,31 @@ interface KioskQuantityScreenProps {
    * operator kiosk from GET /quality/scrap-reason-codes.
    */
   scrapCodes?: ScrapReasonCodeOption[] | null;
+  /**
+   * OPT-IN quick-add row (`+1 / +5 / +25`, plus `Full nest n`) over the GOOD
+   * field — omit it and the screen renders exactly as before.
+   *
+   * The opt-in IS the ceiling, deliberately: this number is the largest good
+   * quantity the SERVER will take from this screen, so a caller that cannot work
+   * one out cannot accidentally ship an unbounded row. Both writers behind this
+   * screen refuse over-target good quantity before any mutation —
+   * `POST /shop-floor/operations/{id}/production` with 400 "Quantity (N) cannot
+   * exceed quantity ordered (T)" and `POST /shop-floor/clock-out/{id}` with 400
+   * "Quantity produced exceeds quantity ordered" — both measured as
+   * `operation.quantity_complete + delta > operation_target_quantity(...)`, so
+   * the ceiling is the operation target less what is already recorded. Per the
+   * repo's non-optimistic convention for server-gated actions, the row clamps
+   * there and goes disabled rather than keying a guaranteed refusal.
+   *
+   * The keypad is never bounded by this — an operator can still key any figure
+   * and take the server's answer. This bounds the CONVENIENCE only.
+   */
+  quickAddCeiling?: number | null;
+  /**
+   * The operation's per-item target (`component_quantity`) — adds a `Full nest n`
+   * tap to the row. Ignored unless `quickAddCeiling` is given.
+   */
+  fullNestQuantity?: number | null;
   busy: boolean;
   /**
    * scrapReason: free text stored in TimeEntry.scrap_reason (legacy tile value,
@@ -39,7 +65,8 @@ interface KioskQuantityScreenProps {
 
 /**
  * Shared quantity-entry screen for REPORT PRODUCTION and COMPLETE.
- * Numbers come ONLY from the big keypad (no native inputs/spinners).
+ * Numbers come from the big keypad, plus — when the caller passes a
+ * `quickAddCeiling` — a GOOD-only quick-add row (no native inputs/spinners).
  * Any scrap quantity REQUIRES an explicit reason — the confirm button stays
  * disabled until one is chosen. With company scrap codes the choice is a code
  * tile (+ optional typed detail); without them it is the legacy reason tile.
@@ -52,6 +79,8 @@ export default function KioskQuantityScreen({
   requireTotalPositive,
   tallyBanner,
   scrapCodes,
+  quickAddCeiling,
+  fullNestQuantity,
   busy,
   onConfirm,
   onCancel,
@@ -79,6 +108,24 @@ export default function KioskQuantityScreen({
   const needsReason = scrapQty > 0 && !scrapReason;
   const totalInvalid = requireTotalPositive && goodQty <= 0 && scrapQty <= 0;
   const confirmDisabled = busy || needsReason || totalInvalid;
+
+  // Quick adds: the same row, off the same definition (quantityQuickAdds.ts), as
+  // the single-operator kiosk's REPORT and COMPLETE overlays — an operator who
+  // learns `+25` on one station must find it in the same place, in the same
+  // order, meaning the same thing, on the other.
+  const quickAddsEnabled = quickAddCeiling != null && Number.isFinite(Number(quickAddCeiling));
+  const quickAddCap = Math.max(0, Number(quickAddCeiling ?? 0));
+  const quickAdds = kioskQuickAdds(fullNestQuantity);
+  const quickAddsExhausted = goodQty >= quickAddCap;
+
+  const handleQuickAdd = (amount: number) => {
+    setGood(String(applyQuickAdd(goodQty, amount, quickAddCap)));
+    // A quick add is unambiguously a GOOD entry, so point the shared keypad at
+    // GOOD — otherwise a scrap-bound keypad would take the operator's next digit
+    // into the field they just steered away from. Both quantity fields are on
+    // screen at once here, so that is a real mis-post, not a theoretical one.
+    setActiveField('good');
+  };
 
   const handleConfirm = () => {
     if (scrapQty <= 0) {
@@ -142,6 +189,53 @@ export default function KioskQuantityScreen({
           disabled={busy}
         />
       </div>
+
+      {/* Quick adds — GOOD only. Two quantity fields sit side by side on this
+          screen, so the row is captioned and every button names its target: a
+          quick add must never be mistaken for (or silently write to) scrap.
+          There is deliberately no scrap quick-add — scrap takes a reason and a
+          deliberate entry.
+
+          BELOW the keypad, unlike the narrow modal overlays that stack it above
+          one. This screen is a full page on a shared iPad and its stack is
+          taller: measured at 1024x768 (landscape iPad), the row above the keypad
+          pushed the keypad's bottom row — CLEAR / 0 / backspace — 49px under the
+          fold, and a convenience that hides part of the primary input is a bad
+          trade. Here the keypad stays whole at both tablet orientations and the
+          quick adds are what falls to a scroll in landscape, on a screen whose
+          CONFIRM already sat below the fold. Anything added above the keypad on
+          this screen owes the same measurement. */}
+      {quickAddsEnabled && (
+        // `mt-2.5` is the keypad's own inter-key gap, so the row reads as one
+        // more pad row rather than as part of the CANCEL/CONFIRM action band it
+        // now sits above — a gloved thumb reaching for CONFIRM must not land on
+        // a quick add on the way.
+        <div className="mt-2.5" data-testid="kiosk-qty-quickadds">
+          <p
+            id="kiosk-qty-quickadd-label"
+            data-testid="kiosk-qty-quickadd-label"
+            className="mb-1.5 font-mono text-xs font-bold uppercase tracking-[0.16em] text-fd-mute"
+          >
+            {quickAddCap > 0
+              ? `Quick add to good · max ${quickAddCap}`
+              : 'Quick add to good · operation is already at its target'}
+          </p>
+          <div className="flex gap-2" role="group" aria-labelledby="kiosk-qty-quickadd-label">
+            {quickAdds.map((qa) => (
+              <button
+                key={qa.label}
+                type="button"
+                aria-label={`Add ${qa.label} to good`}
+                disabled={busy || quickAddsExhausted}
+                onClick={() => handleQuickAdd(qa.amount)}
+                className={QUICK_ADD_BUTTON_CLASSES}
+              >
+                {qa.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {scrapQty > 0 && (
         <div className="mt-5">

@@ -1,5 +1,6 @@
 """Shared work-order state rules used by office and shop-floor flows."""
 
+import logging
 import math
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -17,6 +18,8 @@ from app.models.work_order import (
     WorkOrderStatus,
     WorkOrderType,
 )
+
+logger = logging.getLogger(__name__)
 
 # G6-A: the set of work-order statuses that are *terminal* -- a WO in any of
 # these states has finished its lifecycle and must never be reopened or
@@ -276,59 +279,96 @@ def has_incomplete_predecessors(
     return query.count() > 0
 
 
-def release_first_ready_operation(
+def promote_ready_operations(
     work_order: WorkOrder,
+    operations: Iterable[WorkOrderOperation],
     db: Optional[Session] = None,
     user_id: Optional[int] = None,
-) -> Optional[WorkOrderOperation]:
-    """Promote every startable PENDING op to READY at WO release.
+) -> list[WorkOrderOperation]:
+    """THE PENDING -> READY promotion. One implementation; three seams call it.
 
-    Lean Phase 1 (flow metrics): when ``db`` is provided, the flip also emits a
-    best-effort ``operation_ready`` OperationalEvent so queue time can be measured
-    as ready -> actual_start. ``db`` stays optional so the function remains usable
-    as a pure in-memory rule (and existing call sites/tests without a session keep
-    working); the emit helper lives in ``completion_signal_service`` (the
-    side-effects module) and is imported locally to preserve that layering.
+    Flips every startable PENDING operation of ``work_order`` to READY and returns
+    them in ascending sequence order (empty list when nothing was startable). The
+    three seams that promote -- WO release (``release_first_ready_operation``),
+    operation completion (``release_next_ready_operation``) and the read-path heal
+    (``_promote_stranded_ready_operations``, from
+    ``reconcile_work_orders_from_completion_evidence``) -- differ ONLY in how they
+    obtain ``operations``; the rule itself lives here exactly once. Three copies of
+    this rule is how the office and floor gates drifted apart in the first place, so
+    resist re-inlining it.
 
     "Startable" is ``operation_blocked_by_incomplete_predecessors`` -- the SAME rule
     clock-in enforces, in which operations sharing a work center do not block each other
     while cross-work-center ordering still holds. So a routing whose steps each sit at a
-    different work center still promotes exactly one op (byte-identical to the old
+    different work center promotes exactly one op (byte-identical to the old
     lowest-sequence-only rule), while a work order carrying N unordered items at ONE work
     center promotes all N instead of stranding N-1 in PENDING where no dispatch surface
-    can show them. Returns the lowest-sequence promoted op.
+    can show them (the board and kiosk surface READY work only).
 
     Laser-nest WOs (``is_laser_dispatch_work_order``) keep their own, STRICTLY FULLER
     exemption: they drop predecessor gating ENTIRELY, so every PENDING nest op promotes
     even across work centers (a package's nests get spread over two lasers, which the
-    same-work-center allowance above would not cover). It also heals pre-existing laser
-    WOs (imported before whole-package-ready) whose nests 2+ are still PENDING. The two
-    rules must not be collapsed into one.
-    """
-    if not work_order.operations:
-        return None
+    same-work-center allowance above would not cover), and a HELD nest does not block its
+    siblings. It also heals pre-existing laser WOs (imported before whole-package-ready)
+    whose nests 2+ are still PENDING. The two rules must not be collapsed into one.
 
+    ``operations`` MUST be every operation of the work order (not just the PENDING
+    ones): it supplies both the write set and the predecessor snapshot. It is
+    materialized ONCE by the caller and the gate runs in memory over it, which is what
+    keeps promotion free of the PERF-4 N+1 -- promoting N ops costs the caller the same
+    single query as promoting one. The snapshot stays correct as promotions land: an op
+    flipped to READY is still not COMPLETE, so it keeps blocking its cross-work-center
+    successors exactly as the query-backed gate would.
+
+    Invariant 1: rows whose ``company_id`` disagrees with the work order's are dropped
+    up front, from the write set AND the predecessor snapshot -- the in-memory
+    equivalent of the ``tenant_query`` scoping ``release_next_ready_operation`` applies
+    to its own load, so a caller that hands over a relationship rather than a scoped
+    query cannot widen a mis-parented row into a write.
+
+    Lean Phase 1 (flow metrics): when ``db`` is provided, each flip also emits a
+    best-effort ``operation_ready`` OperationalEvent so queue time can be measured as
+    ready -> actual_start. ``db`` stays optional so this remains usable as a pure
+    in-memory rule (existing call sites/tests without a session keep working); the emit
+    helper lives in ``completion_signal_service`` (the side-effects module) and is
+    imported locally, once per call, to preserve that layering.
+    """
+    company_id = work_order.company_id
+    scoped_ops = [
+        op
+        for op in operations
+        if op is not None and (company_id is None or op.company_id is None or op.company_id == company_id)
+    ]
     pending_ops = sorted(
-        (op for op in work_order.operations if op.status == OperationStatus.PENDING),
+        (op for op in scoped_ops if op.status == OperationStatus.PENDING),
         key=lambda op: op.sequence,
     )
     if not pending_ops:
-        return None
+        return []
 
     if is_laser_dispatch_work_order(work_order):
         to_promote = pending_ops
     else:
-        # No query: the WO's operations are already loaded here (``pending_ops`` came from
-        # the same relationship), so the gate runs over the in-memory snapshot. Promoted
-        # ops stay READY (not COMPLETE) and therefore keep blocking their cross-work-center
-        # successors, exactly as the query-backed gate would.
-        incomplete = [op for op in work_order.operations if op.status != OperationStatus.COMPLETE]
+        incomplete = [op for op in scoped_ops if op.status != OperationStatus.COMPLETE]
         to_promote = [op for op in pending_ops if not operation_blocked_by_incomplete_predecessors(op, incomplete)]
+    if not to_promote:
+        # The promotion list can legitimately be EMPTY (every PENDING op still blocked by
+        # an incomplete lower-sequence op at another work center).
+        return []
+
+    if db is None:
+        # Pure in-memory rule: flip the statuses, emit nothing (no session to emit on).
+        for op in to_promote:
+            op.status = OperationStatus.READY
+        return to_promote
+
+    # Function-local import (the side-effects module imports back into this layer),
+    # hoisted out of the loop so it is bound once per call rather than per promoted op.
+    from app.services.completion_signal_service import emit_operation_ready_event
+
     for op in to_promote:
         op.status = OperationStatus.READY
-        if db is not None and op.id is not None:
-            from app.services.completion_signal_service import emit_operation_ready_event
-
+        if op.id is not None:
             emit_operation_ready_event(
                 db,
                 company_id=work_order.company_id,
@@ -336,9 +376,26 @@ def release_first_ready_operation(
                 operation=op,
                 user_id=user_id,
             )
-    # The promotion list can legitimately be EMPTY (every PENDING op still blocked by an
-    # incomplete lower-sequence op at another work center), so this cannot index blindly.
-    return to_promote[0] if to_promote else None
+    return to_promote
+
+
+def release_first_ready_operation(
+    work_order: WorkOrder,
+    db: Optional[Session] = None,
+    user_id: Optional[int] = None,
+) -> Optional[WorkOrderOperation]:
+    """Promote every startable PENDING op to READY at WO release. Returns the lowest one.
+
+    Thin seam over ``promote_ready_operations`` (which owns the rule and documents it):
+    the operation set is the already-loaded ``work_order.operations`` relationship, so
+    this issues no query of its own.
+
+    ``user_id`` is the releasing user -- this is the one promotion seam with a human
+    actor behind it, so its ``operation_ready`` events carry attribution; the completion
+    and reconcile seams are rule-driven and pass None.
+    """
+    promoted = promote_ready_operations(work_order, work_order.operations or [], db=db, user_id=user_id)
+    return promoted[0] if promoted else None
 
 
 def release_next_ready_operation(
@@ -357,38 +414,26 @@ def release_next_ready_operation(
     so single-op completions advance the route without depending on a read-time
     reconcile or a manual clock-in.
 
-    The gate is ``operation_blocked_by_incomplete_predecessors`` -- the SAME rule
-    clock-in enforces (``allow_same_work_center=True`` semantics), so an operation can no
-    longer be legal to clock into yet stuck in PENDING where no dispatch surface shows it.
-    It promotes ALL passing candidates, not just the first: on a work order carrying
-    several unordered items at ONE work center they are mutually non-blocking, so stopping
-    at the first would leave the rest invisible until something else completed. On a
-    conventional routing whose steps sit at DIFFERENT work centers the same-work-center
-    allowance never fires and at most one op can pass, so the behavior is unchanged.
+    The rule itself lives in ``promote_ready_operations`` (one implementation, three
+    seams) -- including the same-work-center allowance, the ON_HOLD carve-out and the
+    strictly-fuller laser exemption. This function owns only the LOAD.
 
     The session runs with ``autoflush=False``, so flush the just-completed
-    operation's status first -- otherwise the predecessor gate below would query
-    its stale (pre-COMPLETE) row and refuse to release the successor.
+    operation's status first -- otherwise the load below would read its stale
+    (pre-COMPLETE) row and the predecessor gate would refuse to release the successor.
 
-    PERF-4: load every operation of this WO ONCE and run the predecessor gate
-    in memory, instead of calling ``has_incomplete_predecessors`` (one COUNT(*)
+    PERF-4: load every operation of this WO ONCE and let the gate run in memory over
+    that snapshot, instead of calling ``has_incomplete_predecessors`` (one COUNT(*)
     query) per PENDING candidate. The old shape was an N+1 that turned quadratic
     inside ``complete_work_order``'s force-complete loop (each force-completed op
-    re-walks the route). The in-memory gate is an EXACT replica of the query (see its
-    docstring), and it is still evaluated over the single ``all_ops`` snapshot loaded
-    here -- promoting N ops costs the same one query as promoting one.
+    re-walks the route). Promoting N ops costs the same one query as promoting one.
 
-    Laser-nest WOs (``is_laser_dispatch_work_order``) keep their own, STRICTLY FULLER
-    exemption and must not be collapsed into the rule above: nests carry no process
-    ordering AT ALL, so every PENDING nest op is promoted even when the package is spread
-    across two lasers -- a cross-work-center case the same-work-center allowance would
-    still block. Besides keeping the whole package startable, that self-heals laser WOs
-    imported before whole-package-ready (nests 2+ stranded in PENDING).
+    ``user_id`` is None: this promotion is rule-driven, not a user action.
     """
     db.flush()
     # Invariant 1: scoped to the work order's OWN company_id -- taken off the WO row that
     # the caller already resolved tenant-scoped, never from client input. This query both
-    # selects the rows to WRITE and supplies the predecessor snapshot, and the rule now
+    # selects the rows to WRITE and supplies the predecessor snapshot, and the rule
     # promotes N operations rather than one, so an unscoped read here would widen from a
     # single mis-written row to a whole route.
     all_ops = (
@@ -397,44 +442,7 @@ def release_next_ready_operation(
         .order_by(WorkOrderOperation.sequence)
         .all()
     )
-    incomplete = [op for op in all_ops if op.status != OperationStatus.COMPLETE]
-    pending_ops = [op for op in all_ops if op.status == OperationStatus.PENDING]
-
-    # Function-local import (the side-effects module imports back into this layer), hoisted
-    # out of the loops below so it is bound once per call rather than per promoted op.
-    from app.services.completion_signal_service import emit_operation_ready_event
-
-    if is_laser_dispatch_work_order(work_order):
-        for candidate in pending_ops:
-            candidate.status = OperationStatus.READY
-            emit_operation_ready_event(
-                db,
-                company_id=work_order.company_id,
-                work_order=work_order,
-                operation=candidate,
-                user_id=None,
-            )
-        return pending_ops[0] if pending_ops else None
-
-    # ``incomplete`` is a fixed snapshot taken BEFORE any promotion below, and it stays
-    # correct: an op promoted to READY is still not COMPLETE, so it keeps blocking its
-    # cross-work-center successors exactly as the query-backed gate would.
-    promoted: list[WorkOrderOperation] = []
-    for candidate in pending_ops:
-        if operation_blocked_by_incomplete_predecessors(candidate, incomplete):
-            continue
-        candidate.status = OperationStatus.READY
-        # Lean Phase 1 (flow metrics): record WHEN the op became ready so queue
-        # time = ready -> actual_start. Best-effort (never fails the completion);
-        # user_id is None -- this promotion is rule-driven, not a user action.
-        emit_operation_ready_event(
-            db,
-            company_id=work_order.company_id,
-            work_order=work_order,
-            operation=candidate,
-            user_id=None,
-        )
-        promoted.append(candidate)
+    promoted = promote_ready_operations(work_order, all_ops, db=db, user_id=None)
     return promoted[0] if promoted else None
 
 
@@ -997,6 +1005,72 @@ def work_order_operation_progress(work_order: WorkOrder) -> dict:
     }
 
 
+def _promote_stranded_ready_operations(db: Session, work_orders: Iterable[WorkOrder]) -> bool:
+    """Read-path heal: re-run the READY promotion over already-released work orders.
+
+    THE GAP THIS CLOSES. Promotion runs at WO release (``release_first_ready_operation``)
+    and at operation completion (``release_next_ready_operation``) and nowhere else, and
+    ``POST /work-orders/{id}/release`` refuses anything that is not DRAFT. So a work order
+    RELEASED under an older, stricter promotion rule has no way to be re-promoted: its
+    operations 2..N sit PENDING forever, invisible to the kiosk and the dispatch board
+    (both surface READY work ONLY -- ``dispatch_service.QUEUE_OPERATION_STATUSES``). An
+    18-item press-brake batch showed 1 of 18. Running the same rule from the read path
+    means every stranded work order repairs itself the next time anyone loads a board,
+    with no new endpoint, no data migration and no owner action.
+
+    NEVER PROMOTES A DRAFT WORK ORDER. Standing owner decision: Release is the
+    authorization step and the record of WHO authorized production, so a read must not be
+    able to put unreleased work on the floor's board. The completion-evidence reconcile
+    around this one still processes DRAFT WOs exactly as before -- this carve-out is
+    scoped to the promotion, and it is the reason this loop re-filters instead of reusing
+    the caller's ``non_terminal_work_orders`` list as-is.
+
+    Terminal WOs are likewise skipped, and the status is re-read HERE rather than trusted
+    from the caller's earlier filter: the WO-level loop above may have just driven this
+    work order to COMPLETE from completion evidence, and a WO that finished one statement
+    ago must not have operations promoted onto the board. Every other non-terminal status
+    promotes, which is exactly the set ``release_next_ready_operation`` already promotes
+    on at operation completion (ON_HOLD included -- a held work order is not a terminal
+    one, and the operation-level ON_HOLD carve-out inside the gate still stops a held op's
+    successors from going anywhere).
+
+    READ-SAFE. This runs from GET handlers whose reconcile guard catches only
+    ``SQLAlchemyError``, so a stray exception here would 500 a board load. Each work order
+    is promoted inside its own guard: a failure is logged and skipped, the remaining work
+    orders still heal, and a partially-promoted work order is harmless because every op
+    that did flip had independently passed the gate. IDEMPOTENT: the promotion only reads
+    and writes PENDING rows, so a second read finds nothing PENDING, promotes nothing and
+    emits no duplicate ``operation_ready`` event. The ``any(... PENDING ...)`` pre-check
+    makes a fully-promoted work order -- the common case -- cost one in-memory scan and no
+    allocation.
+
+    Returns True when anything was promoted, so the caller's ``changed`` flag reaches the
+    read handler and the flips are actually COMMITTED (``_reconcile_and_commit`` commits
+    only on a truthy reconcile).
+
+    No query: ``work_order.operations`` is already materialized by the reconcile above,
+    so the promotion's in-memory gate adds no load per work order (PERF-4).
+    """
+    changed = False
+    for work_order in work_orders:
+        try:
+            status = work_order.status
+            if status in TERMINAL_WO_STATUSES or status == WorkOrderStatus.DRAFT:
+                continue
+            operations = work_order.operations or []
+            if not any(op.status == OperationStatus.PENDING for op in operations):
+                continue
+            if promote_ready_operations(work_order, operations, db=db, user_id=None):
+                changed = True
+        except Exception:  # pragma: no cover - a read must never 500 on the promotion heal
+            logger.exception(
+                "READY-promotion heal failed for work order %s (company %s)",
+                getattr(work_order, "id", None),
+                getattr(work_order, "company_id", None),
+            )
+    return changed
+
+
 def reconcile_work_orders_from_completion_evidence(
     db: Session,
     work_orders: list[WorkOrder],
@@ -1012,6 +1086,16 @@ def reconcile_work_orders_from_completion_evidence(
     writes the audit chain. Passing ``None`` preserves the legacy unaudited
     behavior for callers that have no actor (e.g. a brand-new WO POST where this is
     a documented no-op).
+
+    It ALSO re-runs the PENDING -> READY promotion (``_promote_stranded_ready_operations``,
+    last -- after the completion evidence has landed, so a freshly-completed operation
+    unblocks its successors in the same pass). That heals work orders released before the
+    current promotion rule existed, which no other seam can reach. Deliberately NOT
+    reported through ``transitions``: PENDING -> READY is unaudited at all three promotion
+    seams (READY is queue state, not a production record), and ``transitions`` carries
+    completion semantics its consumers act on -- audit rows, completion events, FG
+    receipt/backflush, cost rollup, scheduling refresh. A READY entry there would be a
+    fourth policy AND a wrong signal to five consumers.
     """
     # G6-A: skip the OPERATION-level reconcile for any TERMINAL parent WO
     # (CANCELLED/CLOSED/COMPLETE). The WO-level _sync_work_order_status_from_operations
@@ -1138,6 +1222,13 @@ def reconcile_work_orders_from_completion_evidence(
             or changed
         )
         changed = _sync_work_order_status_from_operations(work_order, transitions, entry_ids_by_operation) or changed
+
+    # LAST: re-run the READY promotion over the same non-terminal work orders (minus
+    # DRAFT -- see the helper). It runs after the loops above so it sees the operations
+    # this reconcile just drove to COMPLETE and can release their successors in the same
+    # pass, and after the WO-level sync so a work order that just went COMPLETE is
+    # skipped. Read-safe and idempotent; never touches ``transitions``.
+    changed = _promote_stranded_ready_operations(db, non_terminal_work_orders) or changed
 
     return changed
 
