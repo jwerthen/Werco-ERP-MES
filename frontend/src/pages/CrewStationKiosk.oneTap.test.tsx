@@ -385,3 +385,180 @@ describe('CrewStationKiosk — leaving the report screen BANKS the pending delta
     expect(mocked.reportProduction).not.toHaveBeenCalled();
   });
 });
+
+describe('CrewStationKiosk — a parked delta may NEVER post under the next operator', () => {
+  /**
+   * THE MIS-ATTRIBUTION SEQUENCE, end to end on the real page. Every step of it
+   * is ordinary shop behaviour, which is exactly why it had to be closed:
+   *
+   *   Bob scans onto WO-2026-0142 Op 20 and taps two finished pieces. His
+   *   5-minute badge token has already expired, so the post 401s and the count
+   *   parks. He walks off. The 90-second idle reset (or the Cancel he taps on
+   *   his way past) returns the station to the crew board, where nothing on
+   *   screen mentions the two pieces. Ann walks up, scans onto a DIFFERENT job —
+   *   WO-2026-0199 Op 30 — and the station now has a live, valid credential and
+   *   a live binding for the first time since the failure.
+   *
+   * Without the stamp, that is the moment Bob's two pieces go out: under ANN's
+   * token, against ANN's operation. The row is permanent and indistinguishable
+   * from a real report — it credits her TimeEntry, lands on another work order's
+   * part and lot, and moves stock on the wrong operation (invariant 6).
+   *
+   * So the assertions below are not "the lane shows an amber box". They are:
+   * `reportProduction` is never invoked with Ann's token, and never with Ann's
+   * operation id, for Bob's pieces — and the only thing that ever banks them is
+   * Bob returning to the same job.
+   */
+  beforeEach(() => {
+    mocked.getQueue.mockResolvedValue({
+      queue: [ITEM, ITEM_Y],
+      server_time: new Date().toISOString(),
+      station: STATION,
+    });
+    // The badge decides who is minted, the way the server would.
+    mocked.mintBadgeToken.mockImplementation((employeeId: string) =>
+      Promise.resolve(employeeId === 'E022' ? ANN_MINT : BOB_MINT)
+    );
+  });
+
+  /** Bob taps 2 pieces on X; the post 401s; the station returns to the board. */
+  async function parkBobsTwoPiecesOnX() {
+    await openReportScreenOn('WO-2026-0142', 'E011');
+    tapAdd();
+    tapAdd();
+    expect(mocked.reportProduction).not.toHaveBeenCalled();
+
+    // The badge token died during the undo window. Leaving the screen banks —
+    // and the bank is refused.
+    mocked.reportProduction.mockRejectedValueOnce(
+      new KioskApiError(401, null, 'Badge session ended — scan your badge to save these pieces.')
+    );
+    fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }));
+
+    // The 401 routes to the scan screen, still carrying the count.
+    expect(await screen.findByTestId('crew-production-parked')).toHaveTextContent(
+      '2 tapped pcs still waiting to be saved'
+    );
+    await backToBoard();
+  }
+
+  it('holds Bob\'s pieces when ANN scans onto another job, and posts nothing in her name', async () => {
+    renderKiosk();
+    await parkBobsTwoPiecesOnX();
+
+    // The next person to walk up. Valid credential, live binding, wrong pair.
+    await openReportScreenOn('WO-2026-0199', 'E022');
+
+    // THE ASSERTION. Not one report has gone out under Ann's token, and not one
+    // has named her operation — the only call on record is Bob's own 401.
+    await waitFor(() => expect(lane()).toHaveAttribute('data-phase', 'orphaned'));
+    expect(productionCallTargets()).toEqual([['op-token-bob', 31]]);
+    expect(mocked.mintBadgeToken).toHaveBeenCalledWith('E022');
+
+    // The lane says whose pieces are being held, and on which job — and says it
+    // beside the name it is currently recording as, so the two cannot be read as
+    // one person.
+    expect(screen.getByTestId('kiosk-onetap-status')).toHaveTextContent(BOB_ON_X_LABEL);
+    expect(screen.getByTestId('kiosk-onetap-operator')).toHaveTextContent(/recording as\s*Ann R/i);
+
+    // Nothing on this screen can send them: no tap, no undo, and no third way.
+    expect(screen.getByTestId('kiosk-onetap-add')).toBeDisabled();
+    expect(screen.getByTestId('kiosk-onetap-undo')).toBeDisabled();
+    expect(within(lane()).getAllByRole('button')).toHaveLength(2);
+  });
+
+  it('still posts nothing in her name when she leaves the screen — the exit flush is not a loophole', async () => {
+    // Leaving the report screen BANKS, and that seam runs on every teardown the
+    // screen has. It must not become the thing that launders the held delta.
+    renderKiosk();
+    await parkBobsTwoPiecesOnX();
+    await openReportScreenOn('WO-2026-0199', 'E022');
+
+    fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }));
+    await screen.findByRole('region', { name: /job detail/i });
+
+    expect(productionCallTargets()).toEqual([['op-token-bob', 31]]);
+  });
+
+  it('BANKS them when BOB scans back onto the same job — held, not lost', async () => {
+    // The other half of the property. A guard that only ever refuses would have
+    // turned a mis-attribution into silent lost production; the pieces are
+    // recoverable, by exactly one pair.
+    renderKiosk();
+    await parkBobsTwoPiecesOnX();
+
+    // Ann comes and goes without touching them.
+    await openReportScreenOn('WO-2026-0199', 'E022');
+    await waitFor(() => expect(lane()).toHaveAttribute('data-phase', 'orphaned'));
+    await backToBoard();
+
+    // Bob returns to HIS job.
+    await openReportScreenOn('WO-2026-0142', 'E011');
+    await waitFor(() => expect(lane()).toHaveAttribute('data-phase', 'pending'));
+    expect(screen.getByTestId('kiosk-onetap-status')).toHaveTextContent('2');
+
+    fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }));
+
+    await waitFor(() =>
+      expect(mocked.reportProduction).toHaveBeenCalledWith(
+        'op-token-bob',
+        31,
+        { quantity_complete_delta: 2, quantity_scrapped_delta: 0, source: 'kiosk' },
+        { keepalive: false }
+      )
+    );
+    // Two calls in the whole run: Bob's 401 and Bob's successful re-bank. Ann's
+    // token and her operation appear in neither.
+    expect(productionCallTargets()).toEqual([
+      ['op-token-bob', 31],
+      ['op-token-bob', 31],
+    ]);
+    expect(await screen.findByText(new RegExp(`2 pcs recorded by ${BOB_ON_X_LABEL}`, 'i'))).toBeInTheDocument();
+  });
+});
+
+describe('CrewStationKiosk — the stranded-pieces notice on the board', () => {
+  /**
+   * Pieces a previous session tapped and could never send. This is a NOTICE and
+   * not a retry queue: the operator who made them is gone, the endpoint is
+   * additive with no idempotency key, and the request that carried them may
+   * already have landed. So it names them, names who made them, and offers
+   * exactly one action — a human deciding to write them off.
+   *
+   * It lives on the BOARD rather than inside the report flow because the 90s
+   * idle reset used to hide the very thing somebody needed to act on.
+   */
+  it('names the pieces and the operator, posts nothing, and clears on Dismiss', async () => {
+    addStranded('crew', { pieces: 3, key: 'user:11|op:31', label: BOB_ON_X_LABEL });
+
+    renderKiosk();
+    // On the board — the screen an unattended station is sitting on.
+    await screen.findByRole('button', { name: /work order WO-2026-0142/i });
+
+    const dismiss = await screen.findByRole('button', { name: /dismiss/i });
+    const notice = dismiss.parentElement as HTMLElement;
+    expect(notice).toHaveTextContent('3 pcs were never saved');
+    expect(notice).toHaveTextContent(BOB_ON_X_LABEL);
+    // …and it is explicit that these are NOT on the job.
+    expect(notice).toHaveTextContent(/they are not on the job/i);
+    expect(mocked.reportProduction).not.toHaveBeenCalled();
+
+    fireEvent.click(dismiss);
+
+    await waitFor(() => expect(screen.queryByRole('button', { name: /dismiss/i })).not.toBeInTheDocument());
+    // Dismiss is a decision about production being written off, so it clears the
+    // record rather than merely hiding it — and it still posts nothing.
+    expect(readStranded('crew')).toEqual([]);
+    expect(mocked.reportProduction).not.toHaveBeenCalled();
+  });
+
+  it('does not read the single-operator kiosk\'s notices — the two surfaces are separate', async () => {
+    addStranded('operator', { pieces: 4, key: 'user:3|op:77', label: 'Rosa Vega · WO-2026-0300 Op 10' });
+
+    renderKiosk();
+    await screen.findByRole('button', { name: /work order WO-2026-0142/i });
+
+    expect(screen.queryByRole('button', { name: /dismiss/i })).not.toBeInTheDocument();
+    expect(screen.queryByText(/Rosa Vega/)).not.toBeInTheDocument();
+  });
+});
