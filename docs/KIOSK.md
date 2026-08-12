@@ -93,8 +93,10 @@ URL is all the station setup there is.
   [one-tap `+1 PIECE`](#one-tap-1-piece) count, and drops the credential only once that request has
   settled. The order is load-bearing: clearing the session first sends the flush out against a dead
   token, so an idle timeout would quietly destroy pieces the operator had already tapped and
-  committed to. Nothing an operator can act through is on screen by then, so holding the token for
-  one bounded request costs nothing the logout was protecting.
+  committed to. Nothing an operator can act through is on screen by then, so holding the token for one
+  request costs nothing the logout was protecting — and the wait is **explicitly bounded** by a short
+  timeout in the page, because the shared axios client sets no default one and an unanswered request
+  would otherwise hold the session open indefinitely on an unattended tablet.
 
 ## What operators can do
 
@@ -331,18 +333,31 @@ flushes that run while the document is still alive (the overlay closing, and the
 
 Two cases cannot be banked at all, and neither is allowed to vanish quietly:
 
-- **It may already have landed.** A rejection with no HTTP status — a dropped connection, an aborted
-  `keepalive`, a timeout — leaves it unknown whether the row was written, and this endpoint is
-  purely additive with **no idempotency key**, so anything that re-sends it on its own counts the
-  pieces twice. Every automatic path therefore refuses an ambiguous failure; only a human tapping
-  **RETRY** may send it again. An explicit HTTP refusal is definitive (nothing was written) and keeps
-  the automatic path.
+- **It may already have landed.** This endpoint is purely additive with **no idempotency key**, so
+  anything that re-sends a request whose fate is unknown counts the pieces twice — on a quality
+  record, and through to FPY/OTD and tied-material consumption at completion. Only a **4xx, excluding
+  408 and 425**, is treated as definitive: the server decided and wrote nothing. Everything else is
+  ambiguous — no status at all (a dropped connection, an aborted `keepalive`), and **every 5xx**. A
+  502/503 can come from a proxy that never reached the app, and a **504 is the canonical case where
+  the write may well have committed and only the answer was lost**. Ambiguous failures are barred
+  from every automatic path; only a human tapping **RETRY** may send one again.
 - **Nobody can post it truthfully.** A delta whose `(operator, operation)` pair is gone — the badge
   expired and the operator never came back, or the tab closed while offline — is written to a
-  sessionStorage **notice** and surfaced on the crew board on the next load: the count, the operator,
-  the job, and a plain statement that the pieces are *not* on the job and must be recorded in the
-  office. Nothing about that notice posts; dismissing it is an explicit decision to write the pieces
-  off. It is deliberately **not** a retry queue, for the same two reasons the paragraph above gives.
+  sessionStorage **notice**: the count, the operator, the job, and a plain statement that the pieces
+  are *not* on the job and must be recorded in the office. It is written from `pagehide` and from
+  `visibilitychange`, **not only from an unmount** — React does not run effect cleanups on page
+  unload, and a locked shop tablet never navigates in-SPA, so an unmount-only write would miss the
+  reload that is the floor's usual recovery. A notice written defensively is reconciled away if the
+  pieces are later banked under their own pair.
+
+  A count still **held in memory** — parked by a dead token or a dropped connection — is surfaced the
+  same way, on the **board**, naming whose it is. Both are visible off the report screen precisely
+  because the 90-second idle reset used to hide the one thing somebody needed to act on.
+
+  Nothing about either notice posts. **Writing pieces off is confirmed**, restating the count and who
+  made them, on both routes (the lane's WRITE OFF and the board notice's DISMISS) — a single
+  unconfirmed tap destroying the only remaining record of real production is the silent drop with a
+  button on it. This is deliberately **not** a retry queue, for the same two reasons above.
 
 **Three states an operator must be able to tell apart without reading a word**, because they commit
 differently:

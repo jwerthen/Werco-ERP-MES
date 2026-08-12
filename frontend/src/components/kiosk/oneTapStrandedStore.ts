@@ -36,6 +36,8 @@ export type OneTapSurface = 'crew' | 'operator';
 
 export interface StrandedOneTapRecord extends StrandedOneTapDelta {
   surface: OneTapSurface;
+  /** Distinguishes stampless records, which never merge and so need their own id. */
+  id: string;
   /** ISO-8601 UTC. Rendered through `centralTime` like every other timestamp. */
   at: string;
 }
@@ -48,7 +50,8 @@ function readAll(): StrandedOneTapRecord[] {
     if (!Array.isArray(parsed)) return [];
     return parsed.filter(
       (r): r is StrandedOneTapRecord =>
-        typeof r === 'object' && r != null && typeof (r as StrandedOneTapRecord).pieces === 'number'
+        typeof r === 'object' && r != null && typeof (r as StrandedOneTapRecord).pieces === 'number' &&
+        typeof (r as StrandedOneTapRecord).id === 'string'
     );
   } catch {
     // sessionStorage unavailable, or a corrupt value: a missing notice must not
@@ -78,14 +81,18 @@ export function readStranded(surface: OneTapSurface): StrandedOneTapRecord[] {
 export function addStranded(surface: OneTapSurface, delta: StrandedOneTapDelta): void {
   if (delta.pieces <= 0) return;
   const all = readAll();
-  const existing = all.find((r) => r.surface === surface && r.key === delta.key);
+  // A stampless delta (`key: ''`) is one whose pair could not be recovered at
+  // all. Those must NOT merge: collapsing unrelated drops into a single notice
+  // labelled "an operator" invents a batch nobody made and hides how many
+  // separate incidents there were. Only a real key merges.
+  const existing = delta.key ? all.find((r) => r.surface === surface && r.key === delta.key) : undefined;
   if (existing) {
     existing.pieces += delta.pieces;
     existing.at = new Date().toISOString();
     writeAll(all);
     return;
   }
-  all.push({ ...delta, surface, at: new Date().toISOString() });
+  all.push({ ...delta, surface, id: `${delta.key || 'unstamped'}:${Date.now()}:${all.length}`, at: new Date().toISOString() });
   writeAll(all);
 }
 
@@ -93,6 +100,16 @@ export function addStranded(surface: OneTapSurface, delta: StrandedOneTapDelta):
  * Drop a notice — either because the pieces were finally banked under their own
  * pair, or because a human read what was being lost and dismissed it.
  */
-export function clearStranded(surface: OneTapSurface, key: string): void {
+export function clearStranded(surface: OneTapSurface, id: string): void {
+  writeAll(readAll().filter((r) => !(r.surface === surface && r.id === id)));
+}
+
+/**
+ * Drop notices for a pair whose pieces have since been banked under their own
+ * binding — the reconcile the `pagehide` write needs, since that write happens
+ * defensively while the delta may still be recoverable in memory.
+ */
+export function clearStrandedByKey(surface: OneTapSurface, key: string): void {
+  if (!key) return;
   writeAll(readAll().filter((r) => !(r.surface === surface && r.key === key)));
 }

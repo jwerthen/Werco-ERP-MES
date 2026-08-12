@@ -68,9 +68,38 @@ import { useCallback, useEffect, useRef, useState } from 'react';
  * `label` is shown to a human when a delta outlives its pair, so it has to name
  * both ("Alice Reed · WO-2026-0142 Op 20"), not just the count.
  */
-export interface OneTapBinding {
+export interface OneTapBinding<T = unknown> {
   key: string;
   label: string;
+  /**
+   * Everything the caller needs to POST this delta — the credential and the
+   * operation id. It travels WITH the stamp and is handed back to `post`, so
+   * the request is addressed by the same object the binding check just
+   * validated. Callers must not read a live page ref inside `post`: between a
+   * ref assignment and the re-render that follows it, a due timer can flush
+   * with the old key satisfying the guard while the new token and operation do
+   * the sending.
+   */
+  target: T;
+}
+
+/**
+ * Is an HTTP status a DEFINITIVE refusal — the server decided, and wrote
+ * nothing — or does it leave the write in doubt?
+ *
+ * Only a client error qualifies, and not all of those. A 5xx is not a refusal:
+ * a 502/503 can come from a proxy that never got an answer from the app, and a
+ * **504 is the canonical case where the write may well have committed** and only
+ * the response was lost. 408 and 425 say the same thing about a request that may
+ * or may not have been processed. Everything else — including no status at all —
+ * is unknowable. This matters because the production endpoint is purely additive
+ * with no idempotency key, so re-sending a delta that already landed counts the
+ * pieces twice on a quality record.
+ */
+export function isDefinitiveHttpRefusal(status: number | null | undefined): boolean {
+  if (typeof status !== 'number') return false;
+  if (status === 408 || status === 425) return false;
+  return status >= 400 && status < 500;
 }
 
 /** A delta the hook could not post and is handing back rather than dropping. */
@@ -111,13 +140,13 @@ export type OneTapPhase =
    */
   | 'orphaned';
 
-export interface OneTapPiecesOptions {
+export interface OneTapPiecesOptions<T = unknown> {
   /**
    * The (operator, operation) pair currently bound. Stamped onto a delta at tap
    * time; a delta only posts while its stamp still matches. `null` means nothing
    * is bound — taps are refused and any held delta stays held.
    */
-  binding: OneTapBinding | null;
+  binding: OneTapBinding<T> | null;
   /**
    * Post `pieces` as ONE additive production report. Must reject on refusal —
    * the hook reads a resolved promise as "the ledger has it".
@@ -125,7 +154,7 @@ export interface OneTapPiecesOptions {
    * `keepalive` is set only on the page-unload flush, where the caller should
    * hand it to `fetch` so the request outlives the document.
    */
-  post: (pieces: number, opts: { keepalive: boolean }) => Promise<void>;
+  post: (pieces: number, opts: { keepalive: boolean; binding: OneTapBinding<T> }) => Promise<void>;
   /** Render a rejection as operator-readable text (server `detail`, verbatim). */
   toMessage: (err: unknown) => string;
   /**
@@ -193,18 +222,18 @@ export interface OneTapPieces {
   discard: () => void;
 }
 
-export function useOneTapPieces({
+export function useOneTapPieces<T = unknown>({
   binding,
   post,
   toMessage,
-  isAmbiguousFailure = (err) => typeof (err as { status?: unknown } | null)?.status !== 'number',
+  isAmbiguousFailure = (err) => !isDefinitiveHttpRefusal((err as { status?: number } | null)?.status),
   onRecorded,
   onFailed,
   onStranded,
   canPost = true,
   blockedMessage = 'Not saved yet — waiting for the connection.',
   windowMs = ONE_TAP_WINDOW_MS,
-}: OneTapPiecesOptions): OneTapPieces {
+}: OneTapPiecesOptions<T>): OneTapPieces {
   const [phase, setPhase] = useState<OneTapPhase>('idle');
   const [pending, setPending] = useState(0);
   const [inFlight, setInFlight] = useState(0);
@@ -220,8 +249,14 @@ export function useOneTapPieces({
   const inFlightRef = useRef(0);
   // The stamp. Set on the first tap of a batch, cleared only when the batch is
   // banked or discarded — never rewritten by a new binding arriving.
-  const pendingBindingRef = useRef<OneTapBinding | null>(null);
-  const bindingRef = useRef<OneTapBinding | null>(binding);
+  const pendingBindingRef = useRef<OneTapBinding<T> | null>(null);
+  // The stamp of the delta CURRENTLY ON THE WIRE. `setPendingBoth(0)` clears
+  // `pendingBindingRef` when the delta leaves, so without this the flight is a
+  // window in which the delta carries no stamp at all — and a failure landing
+  // inside it used to be re-stamped from whatever was bound by then, which made
+  // the binding check compare the delta against itself and always pass.
+  const inFlightBindingRef = useRef<OneTapBinding<T> | null>(null);
+  const bindingRef = useRef<OneTapBinding<T> | null>(binding);
   const canPostRef = useRef(canPost);
   const blockedMessageRef = useRef(blockedMessage);
   const ambiguousRef = useRef(false);
@@ -299,7 +334,9 @@ export function useOneTapPieces({
         armRef.current?.();
         return Promise.resolve();
       }
-      if (!bindingMatches()) {
+      const stamp = pendingBindingRef.current;
+      const live = bindingRef.current;
+      if (stamp == null || live == null || live.key !== stamp.key) {
         // These pieces belong to somebody else, on some other operation. There
         // is no credential that can post them truthfully right now, and posting
         // them untruthfully is the whole hazard — hold them, named.
@@ -321,12 +358,21 @@ export function useOneTapPieces({
         setPhase('failed');
         return Promise.resolve();
       }
+      // `live` has just been proven to carry the stamped key, so it is the same
+      // pair the guard checked — and it is what addresses the request. Taking
+      // the LIVE object rather than the stored stamp is deliberate and narrow:
+      // it lets a re-scan by the SAME operator on the SAME operation refresh an
+      // expired token without the key ever changing. The key is immutable; only
+      // the credential behind it may be renewed.
+      const sending = live;
+      inFlightBindingRef.current = sending;
       setPendingBoth(0);
       setInFlightBoth(pieces);
       setError(null);
       setPhase('saving');
-      return postRef.current(pieces, { keepalive: opts?.keepalive === true })
+      return postRef.current(pieces, { keepalive: opts?.keepalive === true, binding: sending })
         .then(() => {
+          inFlightBindingRef.current = null;
           setInFlightBoth(0);
           setLastRecorded(pieces);
           ambiguousRef.current = false;
@@ -348,17 +394,46 @@ export function useOneTapPieces({
           // Not recorded ⇒ back onto the undoable pile, exactly where the
           // operator left them. Never an auto-retry.
           const message = toMessageRef.current(err);
+          const sentUnder = inFlightBindingRef.current;
+          inFlightBindingRef.current = null;
           ambiguousRef.current = isAmbiguousRef.current(err);
           setInFlightBoth(0);
-          if (pendingBindingRef.current == null) pendingBindingRef.current = bindingRef.current;
+
+          const buffered = pendingBindingRef.current;
+          if (buffered != null && sentUnder != null && buffered.key !== sentUnder.key) {
+            // Taps arrived mid-flight under a DIFFERENT pair, so there is no
+            // honest pile to put these back on: merging would produce one report
+            // that is wrong for whoever it posted as. Write the failed batch off
+            // as its own record and leave the new batch untouched.
+            onStrandedRef.current?.({ pieces, key: sentUnder.key, label: sentUnder.label });
+            setError(message);
+            setPhase('failed');
+            onFailedRef.current?.(pieces, message, err);
+            return;
+          }
+
+          // RESTORE the original stamp rather than re-deriving one. Re-deriving
+          // from whatever is bound now is how a delta gets silently re-labelled
+          // to the operator and job that happen to be on screen when a hung
+          // request finally gives up — after which the binding check compares
+          // the delta against itself and waves it through.
+          pendingBindingRef.current = sentUnder ?? buffered;
           setPendingBoth(pendingRef.current + pieces);
           setPendingLabel(pendingBindingRef.current?.label ?? null);
           setError(message);
-          setPhase('failed');
+
+          // The world may have moved while this was on the wire.
+          const liveNow = bindingRef.current;
+          const stampNow = pendingBindingRef.current;
+          if (stampNow == null || liveNow == null || liveNow.key !== stampNow.key) {
+            setPhase('orphaned');
+          } else {
+            setPhase('failed');
+          }
           onFailedRef.current?.(pieces, message, err);
         });
     },
-    [bindingMatches, clearTimer, setPendingBoth, setInFlightBoth]
+    [clearTimer, setPendingBoth, setInFlightBoth]
   );
 
   /** (Re)start the grace period. */
@@ -433,13 +508,56 @@ export function useOneTapPieces({
     arm();
   }, [arm, bindingMatches]);
 
+  /**
+   * Write the held delta off. Giving up on it is a decision about real pieces
+   * somebody made, so it leaves the SAME record any other way of losing them
+   * would — the caller's `onStranded`. Zeroing it in silence here would just be
+   * the original defect with a button on it.
+   */
   const discard = useCallback(() => {
     clearTimer();
+    const pieces = pendingRef.current;
+    const stamp = pendingBindingRef.current;
+    if (pieces > 0) {
+      onStrandedRef.current?.({ pieces, key: stamp?.key ?? '', label: stamp?.label ?? '' });
+    }
     ambiguousRef.current = false;
     setPendingBoth(0);
     setError(null);
     setPhase('idle');
   }, [clearTimer, setPendingBoth]);
+
+  /**
+   * Bank the delta if it can go, and write it down if it cannot.
+   *
+   * This is the teardown seam, and it exists because `flush` alone is not one:
+   * every un-bankable branch of `flush` sets a phase and returns, which is right
+   * while a screen is there to render it and useless when the document is going
+   * away. A React effect cleanup does NOT run on page unload, so on a locked
+   * shop tablet — which never navigates in-SPA and is recovered by reloading —
+   * the unmount path never fires at all. Without this, a reload silently
+   * destroys the count.
+   *
+   * It deliberately does NOT clear `pending`: the page may come back (a hidden
+   * tab, a `pagehide` that never becomes an unload), and the caller reconciles
+   * the notice against what is still held on the next mount.
+   */
+  const bankOrRecord = useCallback(
+    (opts?: { keepalive?: boolean }) => {
+      const pieces = pendingRef.current;
+      if (pieces <= 0 || inFlightRef.current > 0) return;
+      const stamp = pendingBindingRef.current;
+      const live = bindingRef.current;
+      const sendable =
+        canPostRef.current && !ambiguousRef.current && stamp != null && live != null && live.key === stamp.key;
+      if (sendable) {
+        void flush(opts);
+        return;
+      }
+      onStrandedRef.current?.({ pieces, key: stamp?.key ?? '', label: stamp?.label ?? '' });
+    },
+    [flush]
+  );
 
   // Countdown repaint. Only runs while a window is armed.
   useEffect(() => {
@@ -484,14 +602,22 @@ export function useOneTapPieces({
     arm();
   }, [canPost, bindingKey, arm, bindingMatches]);
 
-  // Page unload — the one teardown that outlives React. `keepalive` lets the
-  // request finish after the document is gone; without it a tab closed inside
-  // the grace period is lost production.
+  // Page unload and backgrounding — the teardowns that outlive React. `keepalive`
+  // lets a sendable request finish after the document is gone; anything NOT
+  // sendable is written down here rather than waiting for an unmount cleanup
+  // that a closing or reloading tab never runs.
   useEffect(() => {
-    const onPageHide = () => flush({ keepalive: true });
+    const onPageHide = () => bankOrRecord({ keepalive: true });
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') bankOrRecord({ keepalive: true });
+    };
     window.addEventListener('pagehide', onPageHide);
-    return () => window.removeEventListener('pagehide', onPageHide);
-  }, [flush]);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('pagehide', onPageHide);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [bankOrRecord]);
 
   // Hook teardown (the page itself unmounting). Fire and forget: the request
   // does not need the component tree, and there is nothing left to render the
@@ -502,18 +628,26 @@ export function useOneTapPieces({
     () => () => {
       if (timerRef.current != null) window.clearTimeout(timerRef.current);
       if (recordedTimerRef.current != null) window.clearTimeout(recordedTimerRef.current);
+      // A delta still ON THE WIRE at teardown has an unknowable outcome and
+      // nothing left to render the answer into, so it gets a record too — it is
+      // exactly the case where an operator would otherwise never learn.
+      if (inFlightRef.current > 0) {
+        const flying = inFlightBindingRef.current;
+        onStrandedRef.current?.({
+          pieces: inFlightRef.current,
+          key: flying?.key ?? '',
+          label: flying?.label ?? '',
+        });
+      }
       const pieces = pendingRef.current;
-      if (pieces <= 0 || inFlightRef.current > 0) return;
-      const stamped = pendingBindingRef.current ?? bindingRef.current;
+      if (pieces <= 0) return;
+      const stamped = pendingBindingRef.current;
+      const live = bindingRef.current;
       const sendable =
-        canPostRef.current &&
-        !ambiguousRef.current &&
-        stamped != null &&
-        bindingRef.current != null &&
-        bindingRef.current.key === stamped.key;
+        canPostRef.current && !ambiguousRef.current && stamped != null && live != null && live.key === stamped.key;
       pendingRef.current = 0;
-      if (sendable) {
-        void postRef.current(pieces, { keepalive: true }).catch(() => {
+      if (sendable && live != null) {
+        void postRef.current(pieces, { keepalive: true, binding: live }).catch(() => {
           /* nothing is mounted to show it — onStranded cannot run post-teardown */
         });
         return;

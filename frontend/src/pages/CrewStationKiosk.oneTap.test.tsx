@@ -435,11 +435,12 @@ describe('CrewStationKiosk — a parked delta may NEVER post under the next oper
     );
     fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }));
 
-    // The 401 routes to the scan screen, still carrying the count.
-    expect(await screen.findByTestId('crew-production-parked')).toHaveTextContent(
-      '2 tapped pcs still waiting to be saved'
-    );
+    // A 401 on an EXIT flush deliberately does NOT hijack the screen — that
+    // would drop a scan prompt in front of whoever came next. The count is held
+    // and surfaced on the BOARD instead, naming whose it is.
     await backToBoard();
+    expect(await screen.findByTestId('crew-held-delta')).toHaveTextContent(BOB_ON_X_LABEL);
+    expect(screen.getByTestId('crew-held-delta')).toHaveTextContent('2 pcs tapped but not saved');
   }
 
   it('holds Bob\'s pieces when ANN scans onto another job, and posts nothing in her name', async () => {
@@ -461,10 +462,25 @@ describe('CrewStationKiosk — a parked delta may NEVER post under the next oper
     expect(screen.getByTestId('kiosk-onetap-status')).toHaveTextContent(BOB_ON_X_LABEL);
     expect(screen.getByTestId('kiosk-onetap-operator')).toHaveTextContent(/recording as\s*Ann R/i);
 
-    // Nothing on this screen can send them: no tap, no undo, and no third way.
+    // Nothing on this screen can SEND them: no tap, no undo, and no third way.
     expect(screen.getByTestId('kiosk-onetap-add')).toBeDisabled();
     expect(screen.getByTestId('kiosk-onetap-undo')).toBeDisabled();
-    expect(within(lane()).getAllByRole('button')).toHaveLength(2);
+    expect(screen.queryByTestId('kiosk-onetap-retry')).not.toBeInTheDocument();
+    // The ONLY enabled control is the write-off — an exit that records the loss
+    // rather than one that launders the pieces into Ann's name. Without it the
+    // sole way off this state is reloading the tablet, which is the very
+    // teardown that used to destroy the count.
+    const enabled = within(lane())
+      .getAllByRole('button')
+      .filter((b) => !(b as HTMLButtonElement).disabled);
+    expect(enabled).toHaveLength(1);
+    expect(enabled[0]).toHaveAttribute('data-testid', 'kiosk-onetap-writeoff');
+    // …and it cannot fire on one tap: writing production off is confirmed,
+    // restating the count and whose it is, and it never posts.
+    const postsBefore = mocked.reportProduction.mock.calls.length;
+    fireEvent.click(enabled[0]);
+    expect(await screen.findByTestId('crew-writeoff-confirm')).toBeInTheDocument();
+    expect(mocked.reportProduction).toHaveBeenCalledTimes(postsBefore);
   });
 
   it('still posts nothing in her name when she leaves the screen — the exit flush is not a loophole', async () => {
@@ -545,9 +561,19 @@ describe('CrewStationKiosk — the stranded-pieces notice on the board', () => {
 
     fireEvent.click(dismiss);
 
+    // Dismissing destroys the only remaining record that these pieces exist, so
+    // it is NOT a one-tap action: the confirmation restates the count and who
+    // made them before anything is cleared.
+    const confirm = await screen.findByTestId('crew-dismiss-confirm');
+    const dialog = confirm.closest('div[class*="p-6"]') as HTMLElement;
+    expect(dialog).toHaveTextContent('3 pcs');
+    expect(dialog).toHaveTextContent(BOB_ON_X_LABEL);
+    expect(readStranded('crew')).toHaveLength(1);
+
+    fireEvent.click(confirm);
+
     await waitFor(() => expect(screen.queryByRole('button', { name: /dismiss/i })).not.toBeInTheDocument());
-    // Dismiss is a decision about production being written off, so it clears the
-    // record rather than merely hiding it — and it still posts nothing.
+    // Only then does it clear the record — and it still posts nothing.
     expect(readStranded('crew')).toEqual([]);
     expect(mocked.reportProduction).not.toHaveBeenCalled();
   });

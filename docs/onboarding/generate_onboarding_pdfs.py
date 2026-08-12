@@ -212,9 +212,10 @@ ROLE_CARDS = [
                 "unless someone taps LOCK STATION, after which anyone re-enters the PIN.",
                 "Tap <b>LOCK STATION</b> when leaving it unattended — idle never locks it by itself.",
                 "After 90 seconds idle, a half-entered screen resets back to the crew board. Nothing you typed but "
-                "did not confirm is saved — just start the action again. The one exception: pieces already tapped "
-                "on <b>+1 PIECE</b> are saved for you, so do not re-tap them. If the board later shows a notice "
-                "that pieces were never saved, they are <b>not</b> on the job — tell your supervisor.",
+                "did not confirm is saved — just start the action again. Pieces already tapped on <b>+1 PIECE</b> "
+                "are saved for you whenever the station can reach the server — so do not re-tap them. If the board "
+                "shows a notice that pieces were <b>not saved</b>, believe it: those pieces are not on the job, and "
+                "a supervisor has to enter them in the office.",
             ]),
             ("Join, work, leave", "steps", [
                 "Tap a job, then scan <b>your</b> badge — the station decides: not on the roster = JOIN (clock-in); "

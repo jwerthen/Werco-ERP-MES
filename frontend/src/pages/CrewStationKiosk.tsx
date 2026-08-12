@@ -38,6 +38,7 @@ import KioskKeypad from '../components/kiosk/KioskKeypad';
 import KioskCrewJobCard from '../components/kiosk/KioskCrewJobCard';
 import KioskQuantityScreen from '../components/kiosk/KioskQuantityScreen';
 import KioskCorrectionScreen from '../components/kiosk/KioskCorrectionScreen';
+import KioskModal from '../components/kiosk/KioskModal';
 import KioskReasonGrid from '../components/kiosk/KioskReasonGrid';
 import KioskCompleteConfirmModal from '../components/kiosk/KioskCompleteConfirmModal';
 import KioskNcrFiledScreen from '../components/kiosk/KioskNcrFiledScreen';
@@ -46,8 +47,9 @@ import KioskDocViewer, { KioskDocTransport } from '../components/kiosk/KioskDocV
 import { useBadgeCapture } from '../components/kiosk/useBadgeCapture';
 import KioskOneTapLane from '../components/kiosk/KioskOneTapLane';
 import { useOneTapPieces } from '../components/kiosk/useOneTapPieces';
+import { isDefinitiveHttpRefusal } from '../components/kiosk/useOneTapPieces';
 import type { OneTapBinding } from '../components/kiosk/useOneTapPieces';
-import { addStranded, clearStranded, readStranded } from '../components/kiosk/oneTapStrandedStore';
+import { addStranded, clearStranded, clearStrandedByKey, readStranded } from '../components/kiosk/oneTapStrandedStore';
 import type { StrandedOneTapRecord } from '../components/kiosk/oneTapStrandedStore';
 import LaserNestOperatorPanel from '../components/laser/LaserNestOperatorPanel';
 import {
@@ -78,6 +80,13 @@ const PIN_MAX = 8;
 // station logout) — short because a walked-away verb screen blocks the crew.
 const IDLE_FLOW_RESET_S = 90;
 const OFFLINE_HINT_ID = 'crew-kiosk-offline-hint';
+
+/** What a crew one-tap delta needs to address its own request. */
+interface CrewOneTapTarget {
+  /** null once the credential has been released; the pair survives it. */
+  token: string | null;
+  operationId: number;
+}
 
 interface OperatorSession {
   /** 5-minute scope:"kiosk" access token — memory only. */
@@ -349,9 +358,11 @@ export default function CrewStationKiosk() {
   // opened — crediting another operator's TimeEntry and moving stock on another
   // work order's operation. Both live in refs rather than `view` because a flush
   // fires from teardown paths where the view is already gone.
-  const oneTapCredentialRef = useRef<string | null>(null);
-  const oneTapBindingRef = useRef<{ operationId: number; binding: OneTapBinding } | null>(null);
-  const [oneTapBinding, setOneTapBinding] = useState<OneTapBinding | null>(null);
+  const [oneTapBinding, setOneTapBinding] = useState<OneTapBinding<CrewOneTapTarget> | null>(null);
+  // Read ONLY for labelling a toast and for routing a 401 — never to address a
+  // request. The request is addressed by the binding the hook hands to `post`.
+  const oneTapBindingRef = useRef<OneTapBinding<CrewOneTapTarget> | null>(null);
+  oneTapBindingRef.current = oneTapBinding;
   // A badge token is good for 5 minutes; a long run outlives it. The first 401
   // PARKS the lane and asks for a re-scan rather than burning the operator's
   // count against a dead credential.
@@ -360,10 +371,14 @@ export default function CrewStationKiosk() {
   const oneTap = useOneTapPieces({
     binding: oneTapBinding,
     canPost: online && !operatorStale,
-    post: (pieces, { keepalive }) => {
-      const token = oneTapCredentialRef.current;
-      const bound = oneTapBindingRef.current;
-      if (!token || !bound) {
+    // Addressed by the delta's OWN binding — the object the hook's guard just
+    // validated — never by a page ref. Reading a live ref here reopens the whole
+    // defect from the other side: between a ref assignment and the render that
+    // follows it, a due timer can flush with the old key satisfying the guard
+    // while the new token and operation do the sending.
+    post: (pieces, { keepalive, binding: sending }) => {
+      const { token, operationId } = sending.target;
+      if (!token) {
         return Promise.reject(
           new KioskApiError(401, null, 'Badge session ended — scan your badge to save these pieces.')
         );
@@ -371,25 +386,34 @@ export default function CrewStationKiosk() {
       return kioskClient
         .reportProduction(
           token,
-          bound.operationId,
+          operationId,
           { quantity_complete_delta: pieces, quantity_scrapped_delta: 0, source: KIOSK_SOURCE },
           { keepalive }
         )
         .then(() => undefined);
     },
     toMessage: (err) => kioskErrorMessage(err, 'Could not save production. Try again.'),
-    // A KioskApiError carries the HTTP status, so the server answered and
-    // nothing was written. Anything else — a dropped connection, an aborted
-    // keepalive — leaves it unknown whether the row landed, and this endpoint
-    // is additive with no idempotency key, so no automatic path may re-send it.
-    isAmbiguousFailure: (err) => !(err instanceof KioskApiError),
+    // NOT "it has a status, so the server refused". The kiosk client wraps EVERY
+    // non-OK response in a KioskApiError, and a 502/503/504 from a proxy means
+    // the app may never have been reached — or, for a 504, may have committed
+    // the row and only lost the answer. Definitive means 4xx, excluding the two
+    // that describe a request of unknown fate.
+    isAmbiguousFailure: (err) =>
+      !isDefinitiveHttpRefusal(err instanceof KioskApiError ? err.status : undefined),
     onRecorded: (pieces) => {
       showToast(
         'success',
         `${pieces} pc${pieces === 1 ? '' : 's'} recorded${
-          oneTapBindingRef.current ? ` by ${oneTapBindingRef.current.binding.label}` : ''
+          oneTapBindingRef.current ? ` by ${oneTapBindingRef.current.label}` : ''
         }`
       );
+      // `pagehide` writes a notice defensively while the delta may still be
+      // recoverable in memory. Banking it under its own pair is the reconcile.
+      const banked = oneTapBindingRef.current;
+      if (banked) {
+        clearStrandedByKey('crew', banked.key);
+        setStranded(readStranded('crew'));
+      }
       void bumpAndRefresh();
     },
     onFailed: (pieces, message, err) => {
@@ -401,9 +425,12 @@ export default function CrewStationKiosk() {
         // leave a count on screen with no working way to bank it.
         setOperatorStale(true);
         const bound = oneTapBindingRef.current;
-        if (bound) {
+        // Only steer the screen when the operator is still ON it. A 401 from an
+        // EXIT flush would otherwise drop a fresh PIN session onto somebody
+        // else's scan screen; the board notice is the right channel there.
+        if (bound && onReportScreenRef.current) {
           setBadgeError(null);
-          setView({ name: 'productionSign', operationId: bound.operationId });
+          setView({ name: 'productionSign', operationId: bound.target.operationId });
         }
         showToast('error', `Badge session timed out — scan again to save ${pieces} pc${pieces === 1 ? '' : 's'}`);
         return;
@@ -412,7 +439,10 @@ export default function CrewStationKiosk() {
     },
     // The kiosk is going away holding pieces it can never send. Write them down
     // — this is their last chance to exist anywhere at all.
-    onStranded: (delta) => addStranded('crew', delta),
+    onStranded: (delta) => {
+      addStranded('crew', delta);
+      setStranded(readStranded('crew'));
+    },
     blockedMessage: online
       ? 'Scan your badge again to save these pieces.'
       : 'Not saved yet — waiting for the connection.',
@@ -428,7 +458,10 @@ export default function CrewStationKiosk() {
    * with an un-banked delta before a flush has been attempted.
    */
   const releaseOneTapCredential = useCallback(() => {
-    oneTapCredentialRef.current = null;
+    // Drop the bearer, KEEP the key and label. The pair is what a held delta is
+    // checked and named by; the token is only what would let it be sent, and an
+    // unattended terminal has no business holding one.
+    setOneTapBinding((current) => (current ? { ...current, target: { ...current.target, token: null } } : current));
     setOperatorStale(true);
   }, []);
 
@@ -437,16 +470,27 @@ export default function CrewStationKiosk() {
   // operator who made them is usually gone and the endpoint cannot dedupe a
   // request that may already have landed.
   const [stranded, setStranded] = useState<StrandedOneTapRecord[]>(() => readStranded('crew'));
-  const dismissStranded = useCallback((key: string) => {
-    clearStranded('crew', key);
+  const dismissStranded = useCallback((id: string) => {
+    clearStranded('crew', id);
     setStranded(readStranded('crew'));
   }, []);
+
+  /**
+   * Pending confirmation for writing pieces off. Losing production is allowed to
+   * happen; losing it on ONE tap, with nothing restated and nothing recorded, is
+   * the silent drop again with a button attached. `null` = no dialog open.
+   */
+  const [writeOff, setWriteOff] = useState<{ pieces: number; label: string | null } | null>(null);
+  const [dismissing, setDismissing] = useState<StrandedOneTapRecord | null>(null);
 
   // Leaving the report screen BANKS whatever is still inside the undo window.
   // The tap was the commit; the window is only a way out of it, and walking away
   // is not one — so Cancel, the idle flow-reset, the ghost-guard and the station
   // lock (which all funnel through a view change) post rather than discard.
   const onReportScreen = view.name === 'productionQty';
+  // Read inside the hook's callbacks, which outlive the screen.
+  const onReportScreenRef = useRef(false);
+  onReportScreenRef.current = onReportScreen;
   const wasOnReportScreen = useRef(false);
   useEffect(() => {
     if (wasOnReportScreen.current && !onReportScreen) {
@@ -702,13 +746,11 @@ export default function CrewStationKiosk() {
         // A delta already stamped with a different (operator, operation) pair is
         // refused by the hook and goes to `orphaned` — un-parking is not
         // adoption, and this scan cannot consent on another operator's behalf.
-        const nextBinding: OneTapBinding = {
+        setOneTapBinding({
           key: `user:${minted.user.id}|op:${operationId}`,
           label: `${minted.user.full_name} · ${crewJobLabel(item)}`,
-        };
-        oneTapCredentialRef.current = operator.token;
-        oneTapBindingRef.current = { operationId, binding: nextBinding };
-        setOneTapBinding(nextBinding);
+          target: { token: operator.token, operationId },
+        });
         setOperatorStale(false);
         setView({ name: 'productionQty', operationId, operator });
         if (resume) await bumpAndRefresh();
@@ -1116,9 +1158,32 @@ export default function CrewStationKiosk() {
           the operator and the job so the pieces can be recorded properly, and
           dismissing is an explicit decision about production that is being
           written off. */}
-      {stranded.length > 0 && (
+      {(stranded.length > 0 || (oneTapUnbanked > 0 && !onReportScreen)) && (
         <div className="border-b border-fd-amber bg-fd-amber/10 px-5 py-4" role="alert">
           <div className="mx-auto max-w-5xl space-y-3">
+            {/* A delta still HELD IN MEMORY — parked by a dead badge token or a
+                dropped connection — is surfaced here too, not only on the report
+                screen it was tapped on. Leaving it visible solely inside that
+                flow is what let the 90-second idle reset hide the one thing
+                somebody needed to act on. */}
+            {oneTapUnbanked > 0 && !onReportScreen && (
+              <div className="flex flex-wrap items-center justify-between gap-3" data-testid="crew-held-delta">
+                <p className="min-w-0 font-mono text-lg font-bold text-fd-amber">
+                  {oneTapUnbanked} pc{oneTapUnbanked === 1 ? '' : 's'} tapped but not saved
+                  <span className="ml-2 font-semibold text-fd-body">
+                    — {oneTap.pendingLabel || 'an operator'}. Only that operator, on that job, can save them.
+                  </span>
+                </p>
+                <button
+                  type="button"
+                  data-testid="crew-held-writeoff"
+                  onClick={() => setWriteOff({ pieces: oneTap.pending, label: oneTap.pendingLabel })}
+                  className="min-h-12 shrink-0 rounded border border-fd-line bg-fd-sunken px-4 font-mono text-sm font-bold uppercase tracking-wide text-fd-body transition-colors hover:border-fd-line-bright"
+                >
+                  Write off
+                </button>
+              </div>
+            )}
             {stranded.map((record) => (
               <div key={record.key} className="flex flex-wrap items-center justify-between gap-3">
                 <p className="min-w-0 font-mono text-lg font-bold text-fd-amber">
@@ -1130,7 +1195,7 @@ export default function CrewStationKiosk() {
                 </p>
                 <button
                   type="button"
-                  onClick={() => dismissStranded(record.key)}
+                  onClick={() => setDismissing(record)}
                   className="min-h-12 shrink-0 rounded border border-fd-line bg-fd-sunken px-4 font-mono text-sm font-bold uppercase tracking-wide text-fd-body transition-colors hover:border-fd-line-bright"
                 >
                   Dismiss
@@ -1139,6 +1204,84 @@ export default function CrewStationKiosk() {
             ))}
           </div>
         </div>
+      )}
+
+      {/* Writing pieces off is a decision about production that was actually
+          made, so both routes to it restate exactly what is being lost first.
+          Built on KioskModal rather than the app's shared <ConfirmDialog>: that
+          one portals to document.body, OUTSIDE `.fd-scope-kiosk`, so its fd-*
+          tokens would resolve to the office palette and it would render as app
+          chrome floating over a shop tablet. */}
+      {writeOff && (
+        <KioskModal onClose={() => setWriteOff(null)} widthClassName="max-w-[560px]" ariaLabelledBy="crew-writeoff-title">
+          <div className="p-6">
+            <h2 id="crew-writeoff-title" className="font-mono text-xl font-bold uppercase tracking-[0.1em] text-fd-amber">
+              Write off {writeOff.pieces} pc{writeOff.pieces === 1 ? '' : 's'}?
+            </h2>
+            <p className="mt-3 text-lg text-fd-body">
+              These pieces were tapped by <b>{writeOff.label || 'an operator'}</b> and have never been saved to the
+              job. Writing them off does <b>not</b> record them — a supervisor must enter them in the office, or they
+              are lost.
+            </p>
+            <div className="mt-6 grid grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={() => setWriteOff(null)}
+                className="min-h-16 rounded border border-fd-line bg-fd-sunken text-lg font-bold uppercase tracking-wide text-fd-body"
+              >
+                Keep waiting
+              </button>
+              <button
+                type="button"
+                data-testid="crew-writeoff-confirm"
+                onClick={() => {
+                  oneTap.discard();
+                  setWriteOff(null);
+                }}
+                className="min-h-16 rounded border border-fd-amber bg-fd-amber/15 text-lg font-bold uppercase tracking-wide text-fd-amber"
+              >
+                Write off
+              </button>
+            </div>
+          </div>
+        </KioskModal>
+      )}
+
+      {dismissing && (
+        <KioskModal onClose={() => setDismissing(null)} widthClassName="max-w-[560px]" ariaLabelledBy="crew-dismiss-title">
+          <div className="p-6">
+            <h2 id="crew-dismiss-title" className="font-mono text-xl font-bold uppercase tracking-[0.1em] text-fd-amber">
+              Clear this notice?
+            </h2>
+            <p className="mt-3 text-lg text-fd-body">
+              <b>
+                {dismissing.pieces} pc{dismissing.pieces === 1 ? '' : 's'}
+              </b>{' '}
+              tapped by <b>{dismissing.label || 'an operator'}</b> were never saved to the job. Clearing this removes
+              the only remaining record that they exist.
+            </p>
+            <div className="mt-6 grid grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={() => setDismissing(null)}
+                className="min-h-16 rounded border border-fd-line bg-fd-sunken text-lg font-bold uppercase tracking-wide text-fd-body"
+              >
+                Keep it
+              </button>
+              <button
+                type="button"
+                data-testid="crew-dismiss-confirm"
+                onClick={() => {
+                  dismissStranded(dismissing.id);
+                  setDismissing(null);
+                }}
+                className="min-h-16 rounded border border-fd-amber bg-fd-amber/15 text-lg font-bold uppercase tracking-wide text-fd-amber"
+              >
+                Clear notice
+              </button>
+            </div>
+          </div>
+        </KioskModal>
       )}
 
       {/* Toasts — full width, plain language */}
@@ -1494,7 +1637,7 @@ export default function CrewStationKiosk() {
         {view.name === 'productionSign' && viewItem && (
           <section aria-label="Scan badge to report production" className="mx-auto w-full max-w-2xl">
             <h2 className="text-3xl font-bold text-fd-ink">
-              {view.resume || oneTapUnbanked > 0 ? 'Scan badge to save' : 'Scan badge to report'}
+              {view.resume ? 'Scan badge to save' : 'Scan badge to report'}
             </h2>
             <p className="mt-1 font-mono text-lg text-fd-mute">{crewJobLabel(viewItem)}</p>
             {view.resume && (
@@ -1503,12 +1646,20 @@ export default function CrewStationKiosk() {
                 {view.resume.scrap > 0 ? ` · ${view.resume.scrap} scrap (${view.resume.reason})` : ''}
               </p>
             )}
+            {/* NAME the pair. An unlabelled "N pcs still waiting to be saved"
+                under a heading reading "Scan badge to save" invites whoever is
+                standing there to absorb someone else's pieces — and only that
+                operator, on that job, can actually bank them. */}
             {oneTapUnbanked > 0 && (
               <p
                 data-testid="crew-production-parked"
-                className="mt-4 rounded border border-fd-amber/60 bg-fd-amber/10 px-4 py-3 font-mono text-xl font-bold text-fd-amber"
+                className="mt-4 rounded border border-fd-amber/60 bg-fd-amber/10 px-4 py-3 font-mono text-lg font-bold text-fd-amber"
               >
-                {oneTapUnbanked} tapped pc{oneTapUnbanked === 1 ? '' : 's'} still waiting to be saved
+                {oneTapUnbanked} tapped pc{oneTapUnbanked === 1 ? '' : 's'} not yet saved
+                {oneTap.pendingLabel ? ` — ${oneTap.pendingLabel}` : ''}.
+                <span className="mt-1 block font-sans text-base font-normal text-fd-body">
+                  Only that operator, on that job, can save them.
+                </span>
               </p>
             )}
             {!view.resume && oneTapUnbanked === 0 && (
@@ -1554,16 +1705,23 @@ export default function CrewStationKiosk() {
               <KioskOneTapLane
                 oneTap={oneTap}
                 operatorName={view.operator.user.full_name}
+                onWriteOff={() => setWriteOff({ pieces: oneTap.pending, label: oneTap.pendingLabel })}
                 atCeiling={remainingOnOperation(viewItem) - oneTapUnbanked <= 0}
                 blocked={busy}
                 online={online}
                 offlineHintId={OFFLINE_HINT_ID}
               />
             }
-            // The lane always commits first, so exactly one mechanism owns the
-            // count at a time and RECORD can never race a pending auto-post into
-            // two reports for one run of parts.
-            confirmLockedLabel={oneTapUnbanked > 0 ? `Recording ${oneTapUnbanked} pcs…` : null}
+            // Locked only while the lane is actually mid-commit, so exactly one
+            // mechanism owns the count at a time. NOT while it is `failed` or
+            // `orphaned`: nothing is racing then, the label would be a lie, and
+            // locking there takes the keypad — and with it SCRAP, which is a
+            // quality record — off the whole station until someone reloads.
+            confirmLockedLabel={
+              oneTap.phase === 'pending' || oneTap.phase === 'saving'
+                ? `Recording ${oneTapUnbanked} pcs…`
+                : null
+            }
             busy={mutationsBlocked}
             onConfirm={(good, scrap, reason, codeId) => void handleProductionConfirm(good, scrap, reason, codeId)}
             onCancel={() => setView({ name: 'job', operationId: viewItem.operation_id })}

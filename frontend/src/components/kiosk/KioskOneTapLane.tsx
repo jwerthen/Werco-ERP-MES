@@ -57,6 +57,14 @@ interface KioskOneTapLaneProps {
   /** id of the offline banner, for aria-describedby, when offline. */
   offlineHintId?: string;
   online: boolean;
+  /**
+   * Write the held delta off. Required whenever the lane can reach `orphaned` or
+   * `failed`: without it the only way off those states is reloading the tablet,
+   * which is precisely the teardown that used to destroy the count. The caller
+   * MUST confirm, restating what is being lost — this is production being
+   * written off, not a dismissible notice.
+   */
+  onWriteOff?: () => void;
 }
 
 const LABEL_CLASSES = 'font-mono text-[11px] font-bold uppercase tracking-[0.18em]';
@@ -68,6 +76,7 @@ export default function KioskOneTapLane({
   blocked,
   offlineHintId,
   online,
+  onWriteOff,
 }: KioskOneTapLaneProps) {
   const { phase, pending, inFlight, lastRecorded, pendingLabel, remainingMs, windowMs, error } = oneTap;
   const secondsLeft = Math.ceil(remainingMs / 1000);
@@ -189,6 +198,16 @@ export default function KioskOneTapLane({
                 scan, or have a supervisor record the pieces in the office.
               </p>
             </div>
+            {onWriteOff && (
+              <button
+                type="button"
+                data-testid="kiosk-onetap-writeoff"
+                onClick={onWriteOff}
+                className="ml-auto min-h-[44px] shrink-0 self-center rounded-[3px] border border-fd-line-bright bg-fd-sunken px-5 font-mono text-sm font-bold uppercase tracking-[0.08em] text-fd-body transition-transform duration-150 ease-out active:scale-[0.98]"
+              >
+                Write off
+              </button>
+            )}
           </div>
         )}
 

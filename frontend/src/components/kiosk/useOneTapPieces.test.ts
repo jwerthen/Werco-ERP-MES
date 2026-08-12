@@ -40,6 +40,7 @@
 
 import { renderHook, act } from '@testing-library/react';
 import { useOneTapPieces, ONE_TAP_WINDOW_MS, ONE_TAP_RECORDED_MS } from './useOneTapPieces';
+import type { OneTapBinding } from './useOneTapPieces';
 
 /** A promise the test resolves/rejects by hand, to hold a post "on the wire". */
 function deferred() {
@@ -57,7 +58,12 @@ function deferred() {
  * Typed exactly like `OneTapPiecesOptions['post']`, so a body that contradicts
  * the real contract is a compile error rather than a passing test.
  */
-const makePost = () => jest.fn((_pieces: number, _opts: { keepalive: boolean }): Promise<void> => Promise.resolve());
+type TestTarget = { operationId: number };
+const makePost = () =>
+  jest.fn(
+    (_pieces: number, _opts: { keepalive: boolean; binding: OneTapBinding<TestTarget> }): Promise<void> =>
+      Promise.resolve()
+  );
 
 const toMessage = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
@@ -66,7 +72,7 @@ const toMessage = (err: unknown) => (err instanceof Error ? err.message : String
  * It never changes in those, so every delta stays with the pair that made it —
  * which is the only condition under which any of them may post at all.
  */
-const BINDING = { key: 'user:7|op:31', label: 'Alice Reed · WO-2026-0142 Op 20' };
+const BINDING = { key: 'user:7|op:31', label: 'Alice Reed · WO-2026-0142 Op 20', target: { operationId: 31 } };
 
 /** Advance fake timers AND drain the promise chain the timer kicks off. */
 const advance = (ms: number) =>
@@ -117,7 +123,7 @@ describe('useOneTapPieces', () => {
 
       await advance(100);
       expect(post).toHaveBeenCalledTimes(1);
-      expect(post).toHaveBeenCalledWith(1, { keepalive: false });
+      expect(post).toHaveBeenCalledWith(1, expect.objectContaining({ keepalive: false }));
       expect(result.current.phase).toBe('recorded');
       expect(result.current.lastRecorded).toBe(1);
       expect(result.current.pending).toBe(0);
@@ -154,7 +160,7 @@ describe('useOneTapPieces', () => {
       // …and the whole run banks together, a full window after the LAST tap.
       await advance(ONE_TAP_WINDOW_MS);
       expect(post).toHaveBeenCalledTimes(1);
-      expect(post).toHaveBeenCalledWith(5, { keepalive: false });
+      expect(post).toHaveBeenCalledWith(5, expect.objectContaining({ keepalive: false }));
     });
 
     it('takes back exactly ONE tap and re-arms, so 5 taps and an undo report 4', async () => {
@@ -180,7 +186,7 @@ describe('useOneTapPieces', () => {
 
       await advance(ONE_TAP_WINDOW_MS);
       expect(post).toHaveBeenCalledTimes(1);
-      expect(post).toHaveBeenCalledWith(4, { keepalive: false });
+      expect(post).toHaveBeenCalledWith(4, expect.objectContaining({ keepalive: false }));
     });
   });
 
@@ -215,7 +221,7 @@ describe('useOneTapPieces', () => {
 
       await advance(ONE_TAP_WINDOW_MS);
       expect(post).toHaveBeenCalledTimes(2);
-      expect(post).toHaveBeenLastCalledWith(1, { keepalive: false });
+      expect(post).toHaveBeenLastCalledWith(1, expect.objectContaining({ keepalive: false }));
       expect(result.current.phase).toBe('recorded');
     });
   });
@@ -244,7 +250,7 @@ describe('useOneTapPieces', () => {
       // …and the delta lands whole — nothing was dropped in between.
       await advance(ONE_TAP_WINDOW_MS);
       expect(post).toHaveBeenCalledTimes(1);
-      expect(post).toHaveBeenCalledWith(2, { keepalive: false });
+      expect(post).toHaveBeenCalledWith(2, expect.objectContaining({ keepalive: false }));
       expect(result.current.phase).toBe('recorded');
     });
   });
@@ -264,7 +270,7 @@ describe('useOneTapPieces', () => {
       await advance(ONE_TAP_WINDOW_MS);
 
       expect(post).toHaveBeenCalledTimes(1);
-      expect(post).toHaveBeenNthCalledWith(1, 1, { keepalive: false });
+      expect(post).toHaveBeenNthCalledWith(1, 1, expect.objectContaining({ keepalive: false }));
       expect(result.current.phase).toBe('saving');
       expect(result.current.inFlight).toBe(1);
 
@@ -277,7 +283,7 @@ describe('useOneTapPieces', () => {
       expect(result.current.inFlight).toBe(1);
       // The first request still carries ONE — it was not amended in place.
       expect(post).toHaveBeenCalledTimes(1);
-      expect(post).toHaveBeenNthCalledWith(1, 1, { keepalive: false });
+      expect(post).toHaveBeenNthCalledWith(1, 1, expect.objectContaining({ keepalive: false }));
 
       await act(async () => {
         first.resolve();
@@ -287,7 +293,7 @@ describe('useOneTapPieces', () => {
       // The buffered pair goes out as its own report.
       await advance(ONE_TAP_WINDOW_MS);
       expect(post).toHaveBeenCalledTimes(2);
-      expect(post).toHaveBeenNthCalledWith(2, 2, { keepalive: false });
+      expect(post).toHaveBeenNthCalledWith(2, 2, expect.objectContaining({ keepalive: false }));
       expect(result.current.unbanked).toBe(0);
     });
 
@@ -332,7 +338,7 @@ describe('useOneTapPieces', () => {
       expect(result.current.phase).toBe('pending');
       await advance(ONE_TAP_WINDOW_MS);
       expect(post).toHaveBeenCalledTimes(2);
-      expect(post).toHaveBeenNthCalledWith(2, 2, { keepalive: false });
+      expect(post).toHaveBeenNthCalledWith(2, 2, expect.objectContaining({ keepalive: false }));
       expect(result.current.unbanked).toBe(0);
       expect(result.current.phase).toBe('recorded');
     });
@@ -364,7 +370,7 @@ describe('useOneTapPieces', () => {
 
       // It went out immediately — flush cancels the countdown.
       expect(post).toHaveBeenCalledTimes(1);
-      expect(post).toHaveBeenCalledWith(2, { keepalive: false });
+      expect(post).toHaveBeenCalledWith(2, expect.objectContaining({ keepalive: false }));
 
       await act(async () => {
         await Promise.resolve();
@@ -440,7 +446,7 @@ describe('useOneTapPieces', () => {
       unmount();
 
       expect(post).toHaveBeenCalledTimes(1);
-      expect(post).toHaveBeenCalledWith(3, { keepalive: true });
+      expect(post).toHaveBeenCalledWith(3, expect.objectContaining({ keepalive: true }));
     });
 
     it('posts a pending delta on pagehide, with keepalive so it outlives the document', async () => {
@@ -457,7 +463,7 @@ describe('useOneTapPieces', () => {
       });
 
       expect(post).toHaveBeenCalledTimes(1);
-      expect(post).toHaveBeenCalledWith(2, { keepalive: true });
+      expect(post).toHaveBeenCalledWith(2, expect.objectContaining({ keepalive: true }));
     });
 
     it('does not post on unmount when there is nothing pending', () => {
@@ -486,8 +492,8 @@ describe('useOneTapPieces', () => {
    * that same pair. Anything else is held, named, and left for a human.
    */
   describe('binding — the delta belongs to the pair that produced it', () => {
-    const ALICE_OP20 = { key: 'user:7|op:31', label: 'Alice Reed · WO-2026-0142 Op 20' };
-    const BOB_OP10 = { key: 'user:9|op:44', label: 'Bob Tran · WO-2026-0199 Op 10' };
+    const ALICE_OP20 = { key: 'user:7|op:31', label: 'Alice Reed · WO-2026-0142 Op 20', target: { operationId: 31 } };
+    const BOB_OP10 = { key: 'user:9|op:44', label: 'Bob Tran · WO-2026-0199 Op 10', target: { operationId: 44 } };
 
     /** Renders with controllable binding + canPost, as the pages drive them. */
     const renderBound = (post: ReturnType<typeof makePost>, onStranded?: jest.Mock) =>
@@ -535,7 +541,7 @@ describe('useOneTapPieces', () => {
       await advance(ONE_TAP_WINDOW_MS);
 
       expect(post).toHaveBeenCalledTimes(1);
-      expect(post).toHaveBeenCalledWith(1, { keepalive: false });
+      expect(post).toHaveBeenCalledWith(1, expect.objectContaining({ keepalive: false }));
       expect(result.current.unbanked).toBe(0);
     });
 
@@ -579,7 +585,99 @@ describe('useOneTapPieces', () => {
     });
   });
 
+  /**
+   * The stamp has to survive the REQUEST, not just the tap.
+   *
+   * A delta handed to the server is the most exposed it ever is: the operator
+   * has moved on, the screen may be gone, and the answer can take longer than
+   * anything on the kiosk waits for. If the stamp is dropped for the duration of
+   * the flight and re-derived when the request finally fails, the delta is
+   * re-labelled with whoever is bound at THAT moment — and the binding check
+   * then compares the delta against itself and passes. No second operator is
+   * even required: one person, one hung request, and a move to another job is
+   * enough to post their pieces against a work order they never touched.
+   */
+  describe('a binding change INSIDE the in-flight window', () => {
+    const ANN_WO_A = { key: 'user:7|op:31', label: 'Ann Diaz · WO-A Op 20', target: { token: 'tok-A', operationId: 31 } };
+    const ANN_WO_B = { key: 'user:7|op:55', label: 'Ann Diaz · WO-B Op 30', target: { token: 'tok-B', operationId: 55 } };
+
+    const renderMoving = (post: ReturnType<typeof makePost>) =>
+      renderHook(
+        ({ binding }: { binding: typeof ANN_WO_A }) => useOneTapPieces({ post, toMessage, binding }),
+        { initialProps: { binding: ANN_WO_A } }
+      );
+
+    it('orphans a delta whose request fails after the operator moved to another job', async () => {
+      const post = makePost();
+      const hung = deferred();
+      post.mockReturnValueOnce(hung.promise);
+      const { result, rerender } = renderMoving(post);
+
+      act(() => {
+        result.current.tap();
+        result.current.tap();
+      });
+      await advance(ONE_TAP_WINDOW_MS);
+      expect(post).toHaveBeenCalledTimes(1);
+
+      // Ann gives up waiting, goes back to the board and scans onto WO-B.
+      rerender({ binding: ANN_WO_B });
+
+      // ...and only THEN does the original request finally fail.
+      await act(async () => {
+        hung.reject(new TypeError('Failed to fetch'));
+      });
+
+      // The two pieces are WO-A's. Nothing may send them to WO-B.
+      expect(result.current.phase).toBe('orphaned');
+      expect(result.current.pendingLabel).toBe(ANN_WO_A.label);
+
+      await act(async () => {
+        void result.current.flush();
+      });
+      await advance(ONE_TAP_WINDOW_MS * 3);
+      expect(post).toHaveBeenCalledTimes(1);
+    });
+
+    it('posts with the stamped pair, never with whatever is bound at send time', async () => {
+      // The credential and the operation must come from the same object the
+      // guard checked, so a page ref that moved on cannot steer the request.
+      const post = makePost();
+      const { result } = renderMoving(post);
+
+      act(() => result.current.tap());
+      await advance(ONE_TAP_WINDOW_MS);
+
+      expect(post).toHaveBeenCalledWith(1, expect.objectContaining({ binding: ANN_WO_A }));
+    });
+  });
+
   describe('an AMBIGUOUS failure is never re-posted on its own', () => {
+    it.each([
+      ['502 from a proxy', 502],
+      ['503 while the API restarts', 503],
+      ['504 — the canonical write-may-have-committed case', 504],
+      ['408 request timeout', 408],
+    ])('treats %s as ambiguous, so no automatic path re-sends it', async (_name, status) => {
+      // Every non-OK response is wrapped in an error carrying a status, so
+      // "there is a status" cannot mean "the server refused before writing".
+      // A 504 in particular is the case where the row most likely DID commit,
+      // and this endpoint is additive with no idempotency key.
+      const post = makePost();
+      post.mockRejectedValueOnce(Object.assign(new Error(`HTTP ${status}`), { status }));
+      const { result } = renderHook(() => useOneTapPieces({ post, toMessage, binding: BINDING }));
+
+      act(() => result.current.tap());
+      await advance(ONE_TAP_WINDOW_MS);
+      expect(post).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        void result.current.flush();
+      });
+      await advance(ONE_TAP_WINDOW_MS * 2);
+      expect(post).toHaveBeenCalledTimes(1);
+    });
+
     it('holds a delta whose request may already have reached the server', async () => {
       // "Never auto-retries" only ever covered the in-lane timer. A network
       // error or a timeout leaves it UNKNOWN whether the row was written — and
@@ -614,7 +712,7 @@ describe('useOneTapPieces', () => {
       act(() => result.current.retry());
       await advance(ONE_TAP_WINDOW_MS);
       expect(post).toHaveBeenCalledTimes(2);
-      expect(post).toHaveBeenNthCalledWith(2, 2, { keepalive: false });
+      expect(post).toHaveBeenNthCalledWith(2, 2, expect.objectContaining({ keepalive: false }));
     });
 
     it('still lets an explicit server refusal take the automatic path', async () => {
@@ -635,6 +733,75 @@ describe('useOneTapPieces', () => {
         void result.current.flush();
       });
       expect(post).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  /**
+   * Losing the pieces is allowed to happen. Losing them QUIETLY is not.
+   *
+   * The runbook and the operator role card both promise that tapped pieces are
+   * either banked or written down. A teardown that drops an un-bankable delta
+   * with no request and no record breaks that promise in the one situation an
+   * operator cannot see — and a React effect cleanup does not run on page
+   * unload, which is exactly how a locked shop tablet ends its session.
+   */
+  describe('an un-bankable delta is written down, not dropped', () => {
+    const HELD = { key: 'user:7|op:31', label: 'Alice Reed · WO-2026-0142 Op 20', target: { operationId: 31 } };
+
+    const renderUnbankable = (onStranded: jest.Mock) =>
+      renderHook(() =>
+        useOneTapPieces({ post: makePost(), toMessage, binding: HELD, canPost: false, onStranded })
+      );
+
+    it('records it on pagehide — the path a closed or reloaded tablet actually takes', async () => {
+      const onStranded = jest.fn();
+      const { result } = renderUnbankable(onStranded);
+
+      act(() => {
+        result.current.tap();
+        result.current.tap();
+      });
+      await advance(ONE_TAP_WINDOW_MS);
+
+      await act(async () => {
+        window.dispatchEvent(new Event('pagehide'));
+      });
+
+      expect(onStranded).toHaveBeenCalledWith({ pieces: 2, key: HELD.key, label: HELD.label });
+    });
+
+    it('records it when the tab is hidden', async () => {
+      const onStranded = jest.fn();
+      const { result } = renderUnbankable(onStranded);
+
+      act(() => result.current.tap());
+      await advance(ONE_TAP_WINDOW_MS);
+
+      await act(async () => {
+        Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true });
+        document.dispatchEvent(new Event('visibilitychange'));
+      });
+
+      expect(onStranded).toHaveBeenCalledWith({ pieces: 1, key: HELD.key, label: HELD.label });
+    });
+
+    it('records what DISCARD writes off, rather than zeroing it in silence', async () => {
+      // Giving up on a held delta is a decision about real production. It needs
+      // to leave the same trace as any other way of losing it.
+      const onStranded = jest.fn();
+      const { result } = renderUnbankable(onStranded);
+
+      act(() => {
+        result.current.tap();
+        result.current.tap();
+        result.current.tap();
+      });
+      await advance(ONE_TAP_WINDOW_MS);
+
+      act(() => result.current.discard());
+
+      expect(onStranded).toHaveBeenCalledWith({ pieces: 3, key: HELD.key, label: HELD.label });
+      expect(result.current.unbanked).toBe(0);
     });
   });
 });
