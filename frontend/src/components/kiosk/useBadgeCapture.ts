@@ -45,6 +45,17 @@ export function useBadgeCapture({
       // Keyboard shortcuts (Ctrl/Cmd/Alt chords) and in-progress IME composition
       // are not badge input — don't let them pollute the buffer.
       if (event.ctrlKey || event.metaKey || event.altKey || event.isComposing) return;
+      // Neither is typing into a real field. No consumer feeds this buffer from
+      // an <input> today — every badge screen keys through the on-screen
+      // KioskKeypad — so this changes nothing for them; it is here so that
+      // arming a capture on a screen that also carries a text field (a
+      // scrap-detail line, a note) cannot silently turn the operator's typing
+      // into a badge buffer and their Enter into a token mint.
+      const target = event.target as HTMLElement | null;
+      if (target) {
+        const tag = target.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable) return;
+      }
       if (event.key === 'Enter') {
         event.preventDefault();
         onSubmit(value);

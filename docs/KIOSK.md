@@ -68,7 +68,12 @@ URL is all the station setup there is.
   `EMPLOYEE_LOGIN_BLOCKED`); a locked or disabled account gets a 403.
 - A keyboard-wedge badge scanner "types" the employee id and sends Enter — captured at the
   window level, so no input field has to be focused first (gloved operators never tap a
-  field). Manual entry uses the on-screen number pad.
+  field). Manual entry uses the on-screen number pad. The capture ignores keystrokes aimed at a
+  real `<input>` / `<textarea>` / `<select>` / contenteditable, along with modifier chords and
+  in-progress IME composition. No badge screen carries a text field today (they all key through the
+  on-screen pad), so this changes nothing on them — it is there so that arming a capture on a screen
+  that *does* carry one can never turn the operator's typing into a badge buffer and their Enter
+  into a token mint.
 - Badge = identity: one operator per login, no shared accounts. Backend error details
   (invalid ID, locked account, ambiguous badge → 409) are shown verbatim on the badge screen.
 - Rate limit: **10/minute per IP** (raised from 3/minute for the Foundry redesign — a shift
@@ -84,6 +89,14 @@ URL is all the station setup there is.
 - A countdown banner appears for the final 30 s; any touch resets the timer.
 - Logout is a **client-side token clear** (same as tapping LOG OUT). A server-side audit
   event for the idle logout itself is a known gap, tracked separately.
+- **The timeout banks before it clears.** It blanks the screen state, then posts any pending
+  [one-tap `+1 PIECE`](#one-tap-1-piece) count, and drops the credential only once that request has
+  settled. The order is load-bearing: clearing the session first sends the flush out against a dead
+  token, so an idle timeout would quietly destroy pieces the operator had already tapped and
+  committed to. Nothing an operator can act through is on screen by then, so holding the token for one
+  request costs nothing the logout was protecting — and the wait is **explicitly bounded** by a short
+  timeout in the page, because the shared axios client sets no default one and an unanswered request
+  would otherwise hold the session open indefinitely on an unattended tablet.
 
 ## What operators can do
 
@@ -103,9 +116,14 @@ URL is all the station setup there is.
    average; "—" when unknowable), and **DOWNTIME** (the operation's blocker minutes, from
    `downtime_minutes`; amber when > 0). Its three verbs:
    - **REPORT PRODUCTION** — `POST /shop-floor/operations/{id}/production` with good/scrap
-     deltas, entered in a tabbed **GOOD PCS | SCRAP / NCR** overlay (numpad, quick-adds
-     `+1 +5 +25` plus **FULL NEST n** when the operation's `component_quantity` is > 1, and a
-     reported-so-far totals bar). Any scrap quantity **requires** an explicit reason picked
+     deltas, entered in a tabbed **GOOD PCS | SCRAP / NCR** overlay. The GOOD tab leads with the
+     [one-tap **+1 PIECE** lane](#one-tap-1-piece) — tap once per finished part and the piece
+     records itself — above the numpad, the quick-adds `+5 +25` plus **FULL NEST n** when the
+     operation's `component_quantity` is > 1, and a reported-so-far totals bar. `+1` is absent from
+     that quick-add row wherever the lane renders and present where it does not (the lane's section
+     explains why one `+1` may mean only one thing on a screen). The lane is GOOD-tab only — scrap
+     takes an explicit reason and a deliberate entry, so a control that commits on a timer has no
+     business there. Any scrap quantity **requires** an explicit reason picked
      from the scrap grid (no default; see "Scrap reason picker" below for what the grid
      contains and what is sent). This is no longer a kiosk-only guardrail: the server rejects
      a positive scrap delta with no reason (and the same rule on clock-out) with **422**, so
@@ -487,6 +505,117 @@ and not what the rule guards. The rule's actual subject is the fixed-height **ba
 the keypad's bottom row must be reachable without scrolling — those sit at +149px / +405px. If the
 held card grows another line, re-measure before shipping it.
 
+## One-tap `+1 PIECE`
+
+Both REPORT PRODUCTION surfaces — the single-operator kiosk's overlay and the crew station's
+quantity screen — lead with a **one-tap lane**: a `+1 PIECE` button tapped once per finished part,
+which records itself. One implementation serves both
+(`components/kiosk/useOneTapPieces.ts` + `components/kiosk/KioskOneTapLane.tsx`), and the state
+machine is owned at **page** level rather than inside the screen that renders the lane — a tapped
+count sitting in a subtree that Cancel, the crew station's 90 s idle flow-reset, its ghost-guard or
+the single-operator idle logout is about to unmount would be silently lost production. Owned a level
+up, every one of those teardowns banks the count instead.
+
+Nothing about the write changed: it is the same
+`POST /shop-floor/operations/{id}/production`, the same body, the same `source: "kiosk"` telemetry,
+the same audit row, made under the same credential the surface already held.
+
+**The tap is the commit; the window is only a way out of it.** A tap adds to a pending count and
+(re-)arms a **5-second** window — a depleting bar, a seconds digit, and an **UNDO −1** control. Each
+further tap re-arms it, so a run of parts coming off a machine posts as **one** additive report
+(`+3`) rather than three racing requests, which is also what keeps the undo honest: whatever is
+still on screen is still undoable. When the window elapses, the accumulated taps post.
+
+**The pending count is banked whenever it CAN be, and never silently dropped when it cannot.** It
+posts on the window elapsing, on leaving the
+report screen (Cancel, the crew station's idle flow-reset, its ghost-guard, **Lock station**), on
+the single-operator kiosk's idle auto-logout, and on page unload. The unload flush differs by
+surface, deliberately: the crew station posts through its isolated fetch helper and sets
+`keepalive`, so the request outlives the document; the single-operator kiosk runs on a normal
+session through the shared axios client (ETag caching + the refresh-token interceptor), which cannot
+set `keepalive`, and reaching around the client with a raw `fetch` would post outside the
+interceptor that keeps the station's session alive. So on **that** surface the unload flush is
+**best-effort** — a tablet closed mid-window may lose it. The guarantees there are carried by the
+flushes that run while the document is still alive (the overlay closing, and the idle logout).
+
+Two cases cannot be banked at all, and neither is allowed to vanish quietly:
+
+- **It may already have landed.** This endpoint is purely additive with **no idempotency key**, so
+  anything that re-sends a request whose fate is unknown counts the pieces twice — on a quality
+  record, and through to FPY/OTD and tied-material consumption at completion. Only a **4xx, excluding
+  408 and 425**, is treated as definitive: the server decided and wrote nothing. Everything else is
+  ambiguous — no status at all (a dropped connection, an aborted `keepalive`), and **every 5xx**. A
+  502/503 can come from a proxy that never reached the app, and a **504 is the canonical case where
+  the write may well have committed and only the answer was lost**. Ambiguous failures are barred
+  from every automatic path; only a human tapping **RETRY** may send one again.
+- **Nobody can post it truthfully.** A delta whose `(operator, operation)` pair is gone — the badge
+  expired and the operator never came back, or the tab closed while offline — is written to a
+  sessionStorage **notice**: the count, the operator, the job, and a plain statement that the pieces
+  are *not* on the job and must be recorded in the office. It is written from `pagehide` and from
+  `visibilitychange`, **not only from an unmount** — React does not run effect cleanups on page
+  unload, and a locked shop tablet never navigates in-SPA, so an unmount-only write would miss the
+  reload that is the floor's usual recovery. A notice written defensively is reconciled away if the
+  pieces are later banked under their own pair.
+
+  A count still **held in memory** — parked by a dead token or a dropped connection — is surfaced the
+  same way, on the **board**, naming whose it is. Both are visible off the report screen precisely
+  because the 90-second idle reset used to hide the one thing somebody needed to act on.
+
+  Nothing about either notice posts. **Writing pieces off is confirmed**, restating the count and who
+  made them, on both routes (the lane's WRITE OFF and the board notice's DISMISS) — a single
+  unconfirmed tap destroying the only remaining record of real production is the silent drop with a
+  button on it. This is deliberately **not** a retry queue, for the same two reasons above.
+
+**Three states an operator must be able to tell apart without reading a word**, because they commit
+differently:
+
+- **PENDING** — amber, dashed border, depleting bar, UNDO available. Tapped, not sent.
+- **RECORDED** — green, solid, a check, and **no undo control anywhere**. The kiosk has no undo for
+  a posted report; CORRECT OVER-COUNT (its own screen, its own reason, its own signature) is the
+  only path after a post, so nothing in this state may imply otherwise.
+- **NOT SAVED** — red, `role="alert"`, the server's `detail` verbatim, and a **RETRY**. A refused
+  post puts the pieces back on the undoable pile exactly where the operator left them and **stops**;
+  it is never auto-retried, because a retry loop against a server saying no is how one part becomes
+  four reports.
+
+Both controls in the lane are always present at the same size, `+1 PIECE` beside a dimmed `UNDO −1`
+when there is nothing to take back. That is a safety property, not tidiness: measured on the tablet,
+rendering UNDO only while something was pending let `+1 PIECE` grow back to full width the instant
+the window closed, so a thumb already travelling toward UNDO landed on `+1` and recorded a piece
+instead of removing one — the precise accident the window exists to prevent.
+
+**`+1` leaves the quick-add row wherever the lane renders.** The two controls commit differently —
+the lane's `+1` posts itself after the window, while a row `+1 / +5 / +25 / FULL NEST n` only fills
+the GOOD field for a later confirm — and two controls reading `+1` side by side with those two
+meanings is exactly how an operator stops knowing whether their part was counted. So
+`components/kiosk/quantityQuickAdds.ts` takes an `omitSingle` option and the row drops its `+1`
+there. The rule the module protects is **same appearance ⇒ same behaviour**: a screen may move a tap
+to a different-looking control with different semantics; it may never keep the old chrome over new
+semantics. Screens with no lane (the COMPLETE modals, the crew station's LEAVE and COMPLETE
+quantity screens) keep the row exactly as documented under
+[Quantity entry on the crew station](#crew-station-mode-kioskkiosk1stationid).
+
+**The lane is opt-in per screen, and the opt-in is the ceiling** — the same convention as the
+quick-add row. It renders only where the surface can work out what the server will accept: the
+operation target, less what is recorded, less what the lane has tapped but not yet banked (leaving
+the pending taps in would let it count past the target and key a guaranteed refusal). At the ceiling
+the tap goes **disabled** (the lane says *"operation is already at its target"*) rather than posting
+a guaranteed `400 "Quantity (N) cannot exceed quantity ordered (T)"` — the repo's non-optimistic
+rule. On the single-operator kiosk that means an operator clocked onto a
+job at **another** work center resolves no queue row, so no ceiling, so **no lane**, and the overlay
+renders exactly as it did before (`+1` back in the row).
+
+**Exactly one mechanism owns the count at a time.** While the lane holds un-banked pieces the
+screen's confirm is disabled and reads *"Recording N pcs…"* — on **both** tabs of the single-operator
+overlay, since a scrap confirm writes the same operation row. The lane always commits first, so a
+confirm can never race a pending auto-post into two reports for one run of parts.
+
+**Offline, the tap goes dark** like every other kiosk mutation control, and an armed window does not
+fire while the post cannot land — it re-arms when the connection returns, so a delta stranded by a
+dropped connection banks itself rather than burning on a request that was never going to arrive.
+A window that reaches zero while blocked says so (*"Not saved yet — waiting for the connection"*)
+rather than stalling at a countdown that did nothing.
+
 ## Material deduction notice
 
 When the operation carries tied material, both completion screens — the single-operator COMPLETE
@@ -773,6 +902,12 @@ Either way, kiosk step records count as `kiosk` on the adoption dashboard.
 - There is **no offline write queue**: because mutations are disabled rather than queued, the
   operator retries them once the banner clears. Error toasts linger 12 s so they are readable
   from arm's length.
+- The [one-tap **+1 PIECE**](#one-tap-1-piece) lane obeys that rule rather than excepting itself
+  from it: the tap is hard-disabled offline, so nothing can be entered against a dead connection.
+  What it does hold is a delta tapped while **online** whose window elapsed after the connection
+  dropped — it stays on screen saying it is not saved, and posts when the connection returns. That
+  is one in-memory delta on one screen, not a queue: it survives no reload and accumulates no
+  backlog.
 - The [drawing / nest viewer](#drawing--nest-viewer) is a pure read surface and follows the
   same posture: a failed document load renders an **inline** error with a retry (never a
   navigation, never a toastless blank), and nothing is queued.
@@ -878,7 +1013,7 @@ with a GOOD field, a SCRAP field and one big keypad between them, used by all th
 below. Alongside the keypad it carries the same **`+1 +5 +25`** (plus **FULL NEST n**) quick-add row
 as the single-operator overlays — `components/kiosk/quantityQuickAdds.ts` is the single definition
 behind every copy, so the amounts, order, labels and clamp cannot drift between the two terminals.
-Four things about it are load-bearing rather than cosmetic:
+Five things about it are load-bearing rather than cosmetic:
 
 - It applies to **GOOD only**, on all three flows. There is no scrap quick-add — scrap takes a
   reason and a deliberate entry — and because both fields are on screen at once the row is
@@ -906,6 +1041,32 @@ Four things about it are load-bearing rather than cosmetic:
   a row above the keypad pushed the keypad's CLEAR / 0 / backspace row 49px under the fold. Below
   it, the keypad stays whole at both tablet orientations. Anything added above the keypad on this
   screen owes the same measurement.
+- On **REPORT PRODUCTION** the row is `+5 +25` (plus **FULL NEST n**): `+1` moves to the
+  [one-tap **+1 PIECE** lane](#one-tap-1-piece) that renders beside the fields on that flow, so `+1`
+  on a screen means exactly one thing. LEAVE and COMPLETE carry no lane and keep the full
+  `+1 +5 +25` row. The lane's tapped-but-unbanked count also comes **out of** this row's ceiling, so
+  a pending delta plus a keyed entry can't together key a refusal.
+
+#### The fold measurement the one-tap lane owed
+
+The lane is the control an operator taps once per finished part, so it has to be reachable without
+a scroll — but stacked above the fields and the pad it pushed the keypad's CLEAR / 0 / backspace
+row to **y=941 on a 768px-tall viewport, 173px under the fold**, against the 49px that got the
+quick-add row moved below the pad in the first place. Margins cannot recover a ~190px block, so the
+lane **moves sideways rather than shrinking**: on REPORT PRODUCTION the screen widens to `max-w-4xl`
+and splits into two columns at the `lg` breakpoint — lane + fields on the left, keypad + quick adds
+on the right — spending the ~350px of horizontal room a 1024px-wide landscape iPad was leaving
+unused at `max-w-2xl`.
+
+Measured after the change, keypad bottom row:
+
+| Orientation | Layout | Keypad bottom row | Clearance | Page |
+| --- | --- | --- | --- | --- |
+| 1024x768 landscape | two-column | y=519 | **249px** | fits entirely, `scrollHeight` 768, **no scroll**; CONFIRM ends at y=699, above the fold — which it never was before |
+| 768x1024 portrait | single column (below `lg`) | y=875 | **149px** | CONFIRM ends at y=1055, the same ~30px under the fold portrait has always had |
+
+No horizontal overflow at either size. Anything added to **either column** owes the same
+measurement.
 
 - **JOIN / LEAVE (badge decides).** Tap a job → "scan badge to join or leave". If the badge's
   user is already on the roster, it's a **LEAVE**: the quantity screen closes their own entry
@@ -916,8 +1077,35 @@ Four things about it are load-bearing rather than cosmetic:
   server's 400 ("already clocked in") as an info toast plus a refresh. **Badge-first** also
   works: scanning a badge at the board opens that operator's sheet — their open entries (tap to
   clock out) and the joinable jobs at this station.
-- **REPORT PRODUCTION.** Quantities first, then a **badge-signature scan** saves the report as
-  that operator (`POST /shop-floor/operations/{id}/production`).
+- **REPORT PRODUCTION (badge-first).** The verb opens a **badge scan**, and the scan opens a
+  quantity screen bound to that operator; everything recorded there posts under that badge's token
+  (`POST /shop-floor/operations/{id}/production`) with no second signature screen. This is the shape
+  **STEPS** and **DOCS** already had on this station — badge-gate *entry*, then write N records under
+  the token — and process-step records are quality records, so the precedent is not a lesser one.
+  **Attribution is unchanged**: nothing is written without a badge-minted operator token, and the
+  audit actor is still the scanned operator, never the station. What changed is *when* the operator
+  learns whose name they are recording under — before entering numbers rather than after — which is
+  also what makes one tap per finished part possible at all: a signature after the fact is, by
+  construction, a second action per piece. Two ways to record on that screen, deliberately unalike:
+  the [one-tap **+1 PIECE** lane](#one-tap-1-piece) posts itself after its window, while the keypad
+  and the `+5 / +25 / FULL NEST n` row fill the GOOD field and post on **RECORD**.
+  - **The 5-minute badge token can expire mid-run, and nothing is re-keyed when it does.** A keyed
+    entry refused **401** carries its good/scrap/reason back to the scan screen (*"Saving: 7
+    good…"*), and the re-scan saves it and returns the operator to the quantity screen. A one-tap
+    delta refused the same way **parks**: the lane stops posting against the dead credential, the
+    scan screen states what is held (*"N tapped pcs still waiting to be saved"*), and a re-scan **by
+    the same operator, on the same operation** un-parks it.
+
+    A scan proves a credential is **valid**. It says nothing about **whose** the held pieces are, and
+    the two must not be confused: every delta is stamped with its `(operator, operation)` pair at tap
+    time and may only ever post while that same pair is bound. A scan by anyone else, or on any other
+    job, does **not** adopt the held count — it goes to **ORPHANED**, which names the operator and
+    the job on the lane, refuses further taps, and offers no "save anyway". Only the original pair
+    returning can bank it; otherwise the pieces belong in an office entry. This is not tidiness: the
+    endpoint credits the posting token's **TimeEntry** and moves stock against the operation in the
+    URL, so a count posted under the wrong pair mis-attributes labour *and* consumes material on
+    another work order's part and lot (invariant 6), permanently and indistinguishably from a real
+    report.
 - **CORRECT OVER-COUNT.** The same `KioskCorrectionScreen` as the single-operator mode (quantity to
   remove + a **required** correction-reason tile, distinct from the scrap grid), then a
   **badge-signature scan** saves the walk-back as that operator
@@ -980,7 +1168,11 @@ row) is server-derived, so all terminals and desktop views agree.
 
 After **90 s** of inactivity on any screen other than the crew board, a half-entered flow
 (quantities, badge prompt, hold reason) is abandoned back to the board so a walked-away operator
-can't block the crew — but the **station stays unlocked**. There is no idle station logout: the
+can't block the crew — but the **station stays unlocked**. There is one deliberate exception to
+"abandoned": a [one-tap **+1 PIECE**](#one-tap-1-piece) count that is still inside its undo window
+is **posted**, not dropped. Those pieces are not a half-entered flow — the tap was the commit, and
+the window only ever offered a way out of it that walking away is not. The same holds for Cancel,
+the ghost-guard, and **Lock station**. There is no idle station logout: the
 station locks only via the explicit **Lock station** button or when a station-authed read gets a
 **401** (revoked/expired), which drops the token and returns to the PIN screen. The reset never
 fires mid-request. This differs deliberately from the single-operator mode's idle **logout**:

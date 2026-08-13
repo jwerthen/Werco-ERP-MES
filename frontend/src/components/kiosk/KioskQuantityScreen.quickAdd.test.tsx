@@ -249,4 +249,45 @@ describe('KioskQuantityScreen — quantity quick adds', () => {
     await user.click(screen.getByRole('button', { name: '+1' }));
     expect(screen.getByTestId('kiosk-report-qty')).toHaveTextContent('1');
   });
+
+  it('offers the same row as the single-operator kiosk with the one-tap lane on both', async () => {
+    // The drift guard again, on the surface where the row CHANGES. Both screens
+    // drop `+1` when the committing `+1 PIECE` lane renders beside them
+    // (quantityQuickAdds.ts → omitSingle) — and they have to drop it TOGETHER.
+    // A lane wired to one screen and not the other would leave `+1` meaning
+    // "fill the field" on one station and "record a piece" on the other, for the
+    // same operators on the same shift, which is worse than either alone.
+    const lane = <div data-testid="onetap-lane-stub" />;
+
+    renderScreen({ quickAddCeiling: 25, fullNestQuantity: 40, oneTapLane: lane });
+    const crewRow = quickAddLabels();
+    expect(crewRow).toEqual(['+5', '+25', 'Full nest 40']);
+    expect(screen.getByTestId('onetap-lane-stub')).toBeInTheDocument();
+    cleanup();
+
+    render(
+      <KioskReportModal
+        workOrderNumber="WO-2026-0142"
+        operationNumber="10"
+        reportedGood={0}
+        quantityOrdered={25}
+        fullNestQuantity={40}
+        oneTapLane={lane}
+        busy={false}
+        online
+        initialTab="good"
+        onCancel={jest.fn()}
+        onConfirmGood={jest.fn()}
+        onConfirmScrap={jest.fn()}
+      />
+    );
+
+    expect(crewRow).toEqual(quickAddLabels());
+    expect(screen.getByTestId('onetap-lane-stub')).toBeInTheDocument();
+
+    // The amounts the row KEPT still behave identically on both.
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: '+5' }));
+    expect(screen.getByTestId('kiosk-report-qty')).toHaveTextContent('5');
+  });
 });

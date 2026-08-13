@@ -221,11 +221,24 @@ export async function mintBadgeToken(employeeId: string): Promise<KioskBadgeToke
 // Every mutation body must carry source:"kiosk" (A0.1 adoption telemetry).
 // ---------------------------------------------------------------------------
 
-async function operatorFetch<T>(operatorToken: string, method: string, path: string, body?: unknown): Promise<T> {
+async function operatorFetch<T>(
+  operatorToken: string,
+  method: string,
+  path: string,
+  body?: unknown,
+  /**
+   * `keepalive` lets the request outlive the document. Only the one-tap lane's
+   * unload flush sets it: a tapped piece sitting inside its undo window when the
+   * tab closes or the tablet sleeps is production the operator already committed
+   * to, and a plain fetch is cancelled with the page.
+   */
+  init?: { keepalive?: boolean }
+): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     method,
     headers: bearerHeaders(operatorToken),
     body: body === undefined ? undefined : JSON.stringify(body),
+    ...(init?.keepalive ? { keepalive: true } : {}),
   });
   if (!response.ok) await throwOnError(response);
   return (await response.json()) as T;
@@ -278,9 +291,10 @@ export async function reportProduction(
     scrap_reason?: string;
     scrap_reason_code_id?: number;
     source: string;
-  }
+  },
+  init?: { keepalive?: boolean }
 ): Promise<unknown> {
-  return operatorFetch(operatorToken, 'POST', `/shop-floor/operations/${operationId}/production`, data);
+  return operatorFetch(operatorToken, 'POST', `/shop-floor/operations/${operationId}/production`, data, init);
 }
 
 /**
