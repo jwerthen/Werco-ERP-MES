@@ -19,12 +19,25 @@ Triggered on: Pull requests to `main` or `develop`
 | Stage | Description | Required |
 |-------|-------------|----------|
 | Detect Changes | Only runs checks for changed files | - |
-| Backend Checks | Linting, security scan, tests | If backend changed |
 | Frontend Checks | Linting, type check, tests, build | If frontend changed |
+
+> **There is no backend job here, deliberately.** Until 2026-08-13 this workflow
+> carried a `Backend Checks` job that ran the whole backend pytest suite (5516
+> tests, ~38 min) on every PR touching `backend/**` — concurrently with
+> `ci-cd.yml`'s `Backend Tests` running the identical suite — and a lint half that
+> was a strict subset of `ci-cd.yml`'s `Backend Linting` (same Black/isort/Flake8/
+> Bandit, minus MyPy). Nothing in `pr-check.yml` is a required status check, so
+> that ~38 minutes per backend PR could not change whether the PR could merge.
+> The backend gate is unchanged and still blocking — it just lives in `ci-cd.yml`
+> only. `backend/tests/test_ci_workflow_gates.py::TestPrCheckDoesNotDuplicateTheBackendSuite`
+> stops the duplicate growing back **and** asserts the `ci-cd.yml` gate still exists.
 
 ### Main CI/CD Pipeline (ci-cd.yml)
 
-Triggered on: Push to `main` or `develop`
+Triggered on: **Pull requests to `main`/`develop`, and pushes to `main`/`develop`.**
+The PR run is where all five required status checks come from — including the backend
+gate, since `pr-check.yml` deliberately has no backend job (see above). The deploy
+stages are separately branch-gated to pushes, so a PR run does the full CI and no deploy.
 
 | Stage | Description | Requires |
 |-------|-------------|----------|
@@ -169,7 +182,8 @@ PR-gated for non-admins.
 
 | Event | Workflow | Action |
 |-------|----------|--------|
-| PR to main/develop | pr-check.yml | Run checks on changed files |
+| PR to main/develop | ci-cd.yml | Full CI — the five required checks (Backend Linting, Backend Tests, Frontend Linting, Frontend Tests, Security Scanning); no deploy |
+| PR to main/develop | pr-check.yml | Frontend checks on changed files (backend is gated by ci-cd.yml) |
 | PR to main/develop (backend/frontend paths) | e2e.yml | Playwright E2E against seeded full stack (non-blocking) |
 | Push to develop | ci-cd.yml | Full CI + deploy to staging |
 | Push to main | ci-cd.yml | Full CI + deploy to production |
@@ -275,16 +289,15 @@ The backend floor lives in **`backend/pytest.ini`** (`addopts` → `--cov-fail-u
 currently **78**, against ~81% actual). That file is the source of truth: `ci-cd.yml`'s
 required `backend-test` job passes no threshold of its own and inherits `addopts`.
 
-`pr-check.yml` also passes the number explicitly, and a CLI `--cov-fail-under`
-**overrides** `addopts` — so change both together, or that job silently keeps the older,
-laxer floor:
+No workflow passes `--cov-fail-under` on the command line any more. `pr-check.yml`
+used to — and because a CLI `--cov-fail-under` **overrides** `addopts`, that copy had to
+be kept in lockstep or the job would silently hold an older, laxer floor. That job was
+removed on 2026-08-13 (see above), so `backend/pytest.ini` is now the single place the
+floor is written.
 
-```yaml
-run: pytest tests/ -v --cov=app --cov-report=term --cov-fail-under=78
-```
-
-`backend/tests/test_ci_workflow_gates.py` asserts the two agree and that neither is
-lowered. The frontend equivalent is `frontend/jest.config.js` →
+If you ever re-add an explicit `--cov-fail-under=N` to a workflow, it must equal
+`pytest.ini`'s value: `backend/tests/test_ci_workflow_gates.py` asserts no workflow
+diverges from it, and that the floor is never lowered. The frontend equivalent is `frontend/jest.config.js` →
 `coverageThreshold.global` (statements 52 / branches 43 / functions 38 / lines 52),
 pinned by the same test file.
 
