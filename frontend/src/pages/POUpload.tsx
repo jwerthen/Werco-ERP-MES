@@ -27,6 +27,7 @@ import { formatCurrency, formatPercent } from '../utils/numberFormat';
 // if the entry is ever removed there, the crumb visibly disappears rather
 // than silently keeping a duplicate.
 const poUploadParent = getBreadcrumbParent('/po-upload');
+const PART_SEARCH_DEBOUNCE_MS = 300;
 
 interface VendorMatch {
   matched: boolean;
@@ -42,6 +43,14 @@ interface PartMatch {
   match_name: string;
   confidence: number;
   suggestions: Array<{ id: number; part_number: string; name: string; score: number }>;
+}
+
+interface PartSearchHit {
+  id: number;
+  part_number: string;
+  name: string;
+  description?: string | null;
+  score?: number;
 }
 
 interface LineItem {
@@ -206,7 +215,9 @@ export default function POUpload() {
   const [vendorSearch, setVendorSearch] = useState('');
   const [vendorResults, setVendorResults] = useState<any[]>([]);
   const [partSearches, setPartSearches] = useState<{ [key: number]: string }>({});
-  const [partResults, setPartResults] = useState<{ [key: number]: any[] }>({});
+  const [partResults, setPartResults] = useState<{ [key: number]: PartSearchHit[] }>({});
+  const partSearchTimersRef = useRef<{ [key: number]: ReturnType<typeof setTimeout> }>({});
+  const partSearchReqRef = useRef<{ [key: number]: number }>({});
 
   const currentDoc = currentDocUid !== null ? (documents.find(d => d.uid === currentDocUid) ?? null) : null;
   const extractionResult = currentDoc?.extractionResult ?? null;
@@ -496,27 +507,46 @@ export default function POUpload() {
     }
   }, [vendorSearch]);
 
+  useEffect(() => {
+    const timers = partSearchTimersRef.current;
+    return () => {
+      Object.values(timers).forEach(clearTimeout);
+    };
+  }, []);
+
   // Search parts for a specific line. Keyed by the line's stable uid — unique
   // across the whole batch, not just this document — so an in-flight response
   // can never land on a different line after a removal re-indexes the list or
   // after the review advances to the next document. The generation check
   // drops stale responses outright rather than storing them under dead uids.
-  const searchParts = async (lineUid: number, query: string) => {
+  // Debounced like vendor search so each keystroke does not hit the API;
+  // similar-word ranking lives on the server (name / description / number).
+  const searchParts = (lineUid: number, query: string) => {
     setPartSearches(prev => ({ ...prev, [lineUid]: query }));
+    const pending = partSearchTimersRef.current[lineUid];
+    if (pending) clearTimeout(pending);
 
-    if (query.length >= 2) {
-      const gen = reviewGenRef.current;
+    // Drop previous hits immediately and bump the per-line request id so Enter
+    // cannot commit a result from an earlier query while this one is in flight.
+    partSearchReqRef.current[lineUid] = (partSearchReqRef.current[lineUid] || 0) + 1;
+    const reqId = partSearchReqRef.current[lineUid];
+    setPartResults(prev => ({ ...prev, [lineUid]: [] }));
+
+    if (query.trim().length < 2) {
+      return;
+    }
+
+    const gen = reviewGenRef.current;
+    partSearchTimersRef.current[lineUid] = setTimeout(async () => {
       try {
-        const results = await api.searchPartsForPO(query);
-        if (reviewGenRef.current === gen) {
+        const results = await api.searchPartsForPO(query.trim());
+        if (reviewGenRef.current === gen && partSearchReqRef.current[lineUid] === reqId) {
           setPartResults(prev => ({ ...prev, [lineUid]: results }));
         }
       } catch (err) {
         console.error('Part search failed:', err);
       }
-    } else {
-      setPartResults(prev => ({ ...prev, [lineUid]: [] }));
-    }
+    }, PART_SEARCH_DEBOUNCE_MS);
   };
 
   const selectPartForLine = (lineUid: number, partId: number, partNumber: string) => {
@@ -529,6 +559,11 @@ export default function POUpload() {
     );
     setPartResults(prev => ({ ...prev, [lineUid]: [] }));
     setPartSearches(prev => ({ ...prev, [lineUid]: '' }));
+  };
+
+  const selectFirstPartHit = (lineUid: number) => {
+    const hit = partResults[lineUid]?.[0];
+    if (hit) selectPartForLine(lineUid, hit.id, hit.part_number);
   };
 
   const toggleCreatePart = (lineUid: number) => {
@@ -549,6 +584,9 @@ export default function POUpload() {
 
   const removeLine = (lineUid: number) => {
     setLineItems(prev => prev.filter(item => item.uid !== lineUid));
+    const pending = partSearchTimersRef.current[lineUid];
+    if (pending) clearTimeout(pending);
+    delete partSearchTimersRef.current[lineUid];
     // Search state is uid-keyed, so only this line's entries need to go;
     // other lines keep their in-progress searches.
     setPartSearches(prev => {
@@ -1300,12 +1338,30 @@ export default function POUpload() {
                           {...field}
                           type="text"
                           value={item.part_number}
-                          onChange={e =>
-                            setLineItems(prev =>
-                              prev.map((it, i) => (i === idx ? { ...it, part_number: e.target.value } : it))
-                            )
-                          }
+                          onChange={e => {
+                            const value = e.target.value;
+                            setLineItems(prev => prev.map((it, i) => (i === idx ? { ...it, part_number: value } : it)));
+                            if (!item.selected_part_id && !item.create_new_part) {
+                              searchParts(item.uid, value);
+                            }
+                          }}
+                          onFocus={() => {
+                            if (
+                              !item.selected_part_id &&
+                              !item.create_new_part &&
+                              item.part_number.trim().length >= 2
+                            ) {
+                              searchParts(item.uid, item.part_number);
+                            }
+                          }}
+                          onKeyDown={e => {
+                            if (e.key === 'Enter' && !item.selected_part_id && !item.create_new_part) {
+                              e.preventDefault();
+                              selectFirstPartHit(item.uid);
+                            }
+                          }}
                           className="input w-full text-sm"
+                          autoComplete="off"
                         />
                       )}
                     </FormField>
@@ -1353,12 +1409,30 @@ export default function POUpload() {
                           {...field}
                           type="text"
                           value={item.description}
-                          onChange={e =>
-                            setLineItems(prev =>
-                              prev.map((it, i) => (i === idx ? { ...it, description: e.target.value } : it))
-                            )
-                          }
+                          onChange={e => {
+                            const value = e.target.value;
+                            setLineItems(prev => prev.map((it, i) => (i === idx ? { ...it, description: value } : it)));
+                            if (!item.selected_part_id && !item.create_new_part) {
+                              searchParts(item.uid, value);
+                            }
+                          }}
+                          onFocus={() => {
+                            if (
+                              !item.selected_part_id &&
+                              !item.create_new_part &&
+                              item.description.trim().length >= 2
+                            ) {
+                              searchParts(item.uid, item.description);
+                            }
+                          }}
+                          onKeyDown={e => {
+                            if (e.key === 'Enter' && !item.selected_part_id && !item.create_new_part) {
+                              e.preventDefault();
+                              selectFirstPartHit(item.uid);
+                            }
+                          }}
                           className="input w-full text-sm"
+                          autoComplete="off"
                         />
                       )}
                     </FormField>
@@ -1500,25 +1574,56 @@ export default function POUpload() {
                           </div>
                         )}
 
-                        {/* Search */}
+                        {/* Search — number, name, or similar words */}
                         <div className="relative">
                           <input
                             type="text"
+                            role="combobox"
                             aria-label="Search parts"
+                            aria-autocomplete="list"
+                            aria-expanded={Boolean(partResults[item.uid]?.length)}
+                            aria-controls={`part-search-results-${item.uid}`}
                             value={partSearches[item.uid] || ''}
                             onChange={e => searchParts(item.uid, e.target.value)}
-                            placeholder="Search parts..."
+                            onFocus={() => {
+                              const current = (partSearches[item.uid] || '').trim();
+                              const seed = (item.description || item.part_number || '').trim();
+                              if (current.length >= 2) {
+                                searchParts(item.uid, current);
+                              } else if (seed.length >= 2) {
+                                searchParts(item.uid, seed);
+                              }
+                            }}
+                            onKeyDown={e => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault();
+                                selectFirstPartHit(item.uid);
+                              }
+                            }}
+                            placeholder="Type a part number or name…"
                             className="input w-full text-sm"
+                            autoComplete="off"
                           />
                           {partResults[item.uid]?.length > 0 && (
-                            <div className="absolute z-10 w-full mt-1 bg-fd-panel border rounded-lg shadow-lg max-h-32 overflow-y-auto">
-                              {partResults[item.uid].map((p: any) => (
+                            <div
+                              id={`part-search-results-${item.uid}`}
+                              role="listbox"
+                              className="absolute z-10 w-full mt-1 bg-fd-panel border rounded-lg shadow-lg max-h-48 overflow-y-auto"
+                            >
+                              {partResults[item.uid].map(p => (
                                 <button
                                   key={p.id}
+                                  type="button"
+                                  role="option"
+                                  aria-selected={false}
                                   onClick={() => selectPartForLine(item.uid, p.id, p.part_number)}
                                   className="block w-full text-left px-3 py-2 text-sm hover:bg-slate-800"
                                 >
-                                  {p.part_number} - {p.name}
+                                  <span className="block text-fd-body">{p.name}</span>
+                                  <span className="block text-xs text-slate-400">
+                                    {p.part_number}
+                                    {p.description ? ` — ${p.description}` : ''}
+                                  </span>
                                 </button>
                               ))}
                             </div>

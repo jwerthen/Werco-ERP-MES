@@ -183,6 +183,23 @@ def test_search_parts_foreign_only_part_yields_empty(client: TestClient, db_sess
     assert resp.json() == []
 
 
+def test_search_parts_by_name_returns_only_own_company_row(client: TestClient, db_session: Session):
+    """A shared material name existing in BOTH companies yields only company A's row."""
+    name = "A36 Raw Material Sheet"
+    part_a = make_part(db_session, company_id=COMPANY_A, part_number=f"RM-A-{_next():05d}")
+    part_b = make_part(db_session, company_id=COMPANY_B, part_number=f"RM-B-{_next():05d}")
+    part_a.name = name
+    part_b.name = name
+    db_session.commit()
+    user_a = make_user(db_session, role=UserRole.OPERATOR, company_id=COMPANY_A)
+
+    resp = client.get("/api/v1/po-upload/search-parts", params={"q": "raw material"}, headers=headers_for(user_a))
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    ids = [r["id"] for r in resp.json()]
+    assert part_a.id in ids
+    assert part_b.id not in ids
+
+
 # ---------------------------------------------------------------------------
 # 2. GET /po-upload/search-vendors is scoped to the active company
 # ---------------------------------------------------------------------------

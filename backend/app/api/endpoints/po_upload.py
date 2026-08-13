@@ -28,7 +28,13 @@ from app.schemas.po_upload import (
 )
 from app.services.audit_service import AuditService
 from app.services.llm_service import extract_po_data_with_llm, validate_extracted_data
-from app.services.matching_service import check_po_number_exists, match_po_line_items, match_vendor, suggest_part_type
+from app.services.matching_service import (
+    check_po_number_exists,
+    match_po_line_items,
+    match_vendor,
+    search_parts_for_typeahead,
+    suggest_part_type,
+)
 from app.services.part_number_service import generate_werco_part_number, normalize_description
 from app.services.pdf_service import (
     SUPPORTED_EXTENSIONS,
@@ -670,15 +676,8 @@ def search_parts(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Search parts for matching during PO review."""
-    parts = (
-        tenant_query(db, Part, company_id)
-        .filter(Part.is_active == True, Part.part_number.ilike(f"%{q}%"))
-        .limit(limit)
-        .all()
-    )
-
-    return [{"id": p.id, "part_number": p.part_number, "name": p.name, "description": p.description} for p in parts]
+    """Search parts by number, name, or description for PO-review matching."""
+    return search_parts_for_typeahead(q, db, company_id, limit=limit)
 
 
 @router.get("/search-vendors")

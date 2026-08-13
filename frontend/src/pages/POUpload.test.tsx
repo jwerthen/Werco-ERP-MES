@@ -11,7 +11,7 @@
  */
 
 import React from 'react';
-import { render, screen, fireEvent, act } from '@testing-library/react';
+import { render, screen, fireEvent, act, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import api from '../services/api';
 import POUpload from './POUpload';
@@ -422,7 +422,7 @@ describe('POUpload cancellation and stale-response guards', () => {
 
     await screen.findByText(/Document 1 of 2/);
     fireEvent.change(screen.getByLabelText('Search parts'), { target: { value: 'AN9' } });
-    expect(mockedApi.searchPartsForPO).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(mockedApi.searchPartsForPO).toHaveBeenCalledTimes(1));
 
     // Advance to doc 2 while doc 1's part search is still in flight.
     fireEvent.click(screen.getByRole('button', { name: /skip document/i }));
@@ -605,5 +605,70 @@ describe('POUpload single-file happy path', () => {
     // Still on review — the doc was not marked created.
     expect(screen.getByText('Review Extracted Data')).toBeInTheDocument();
     expect(screen.queryByText('Purchase Order Created!')).not.toBeInTheDocument();
+  });
+});
+
+describe('POUpload part name typeahead', () => {
+  async function renderUnmatchedReview() {
+    mockedApi.uploadPOPdf.mockResolvedValue(
+      makeExtraction({
+        line_items: [
+          makeLineItem({
+            part_number: 'RAW MATERIAL',
+            description: 'A36 sheet 4x8',
+            part_match: { matched: false, match_id: null, match_name: '', confidence: 0, suggestions: [] },
+            matched_part_id: null,
+          }),
+        ],
+      })
+    );
+    mockedApi.searchPartsForPO.mockResolvedValue([
+      {
+        id: 11,
+        part_number: 'RM-A36-48',
+        name: 'A36 Raw Material Sheet',
+        description: '4x8 hot rolled',
+        score: 95,
+      },
+    ]);
+    renderPOUpload();
+    chooseFiles([pdfFile('po.pdf')]);
+    fireEvent.click(extractButton());
+    await screen.findByText(/Part not matched/);
+  }
+
+  it('suggests existing parts whose names share the typed words', async () => {
+    await renderUnmatchedReview();
+    fireEvent.change(screen.getByLabelText('Search parts'), { target: { value: 'raw material' } });
+    expect(await screen.findByRole('option', { name: /A36 Raw Material Sheet/ })).toBeInTheDocument();
+    expect(mockedApi.searchPartsForPO).toHaveBeenCalledWith('raw material');
+  });
+
+  it('starts the same search when the extracted part number is focused', async () => {
+    await renderUnmatchedReview();
+    fireEvent.focus(screen.getByLabelText('Part Number'));
+    expect(await screen.findByRole('option', { name: /A36 Raw Material Sheet/ })).toBeInTheDocument();
+    expect(mockedApi.searchPartsForPO).toHaveBeenCalledWith('RAW MATERIAL');
+  });
+
+  it('starts the same search as the user types in the part number field', async () => {
+    await renderUnmatchedReview();
+    fireEvent.change(screen.getByLabelText('Part Number'), { target: { value: 'raw material' } });
+    expect(await screen.findByRole('option', { name: /A36 Raw Material Sheet/ })).toBeInTheDocument();
+    expect(mockedApi.searchPartsForPO).toHaveBeenCalledWith('raw material');
+  });
+
+  it('does not commit a stale first hit when Enter is pressed after the query changes', async () => {
+    await renderUnmatchedReview();
+    const search = screen.getByLabelText('Search parts');
+    fireEvent.change(search, { target: { value: 'raw material' } });
+    expect(await screen.findByRole('option', { name: /A36 Raw Material Sheet/ })).toBeInTheDocument();
+
+    mockedApi.searchPartsForPO.mockImplementation(() => new Promise(() => {}));
+    fireEvent.change(search, { target: { value: 'bolt' } });
+    expect(screen.queryByRole('option', { name: /A36 Raw Material Sheet/ })).not.toBeInTheDocument();
+    fireEvent.keyDown(search, { key: 'Enter' });
+    expect(screen.getByText(/Part not matched/)).toBeInTheDocument();
+    expect(screen.queryByText(/Matched to part ID: 11/)).not.toBeInTheDocument();
   });
 });
