@@ -28,15 +28,18 @@
  *    somebody else's?) and the still-open list is a screen AFTER it, not a toast
  *    that ages out.
  *
- * 4. **The blocker's free text does not reach a crew station.** `title` and
- *    `note` are absent from a station-token response — an unattended,
+ * 4. **The blocker's free text does not reach a crew station — on BOTH the
+ *    read and the write.** `title` and `note` are absent from a station-token
+ *    queue response, and `title` is absent from the resume response a
+ *    badge-minted station token gets back. An unattended,
  *    PIN-unlocked tablet with no idle logout is a public screen, and this system
  *    already withholds NCR titles and descriptions from that audience on the
  *    wallboard. Category, severity and the attribution stay, which is what tells
- *    a deliberate hold from a mis-tap. `holdFreeTextWithheld` below is how the
- *    card says "a note exists, you just cannot read it here" rather than
- *    implying none was given. The single-operator kiosk runs on the operator's
- *    OWN session and keeps the full text.
+ *    a deliberate hold from a mis-tap. `holdFreeTextWithheld` (the card) and
+ *    `openBlockersFreeTextWithheld` (the post-resume screen) are how each surface
+ *    says "a note exists, you just cannot read it here" rather than implying none
+ *    was given. The single-operator kiosk runs on the operator's OWN session and
+ *    keeps the full text on both.
  *
  * **Reason and attribution are INDEPENDENT.** `hold.blocker` carries the reason
  * and is null for a BARE hold (no note, category OTHER) — which is exactly the
@@ -191,12 +194,52 @@ export function resumeToast(
 
 /**
  * One line per still-open blocker, built from the server's own `title` VERBATIM
- * (it is server-composed, e.g. "Machine Down: OP20 Deburr"). The category is
- * used only when the title is missing, so the kiosk never rewords what the
- * server said about a quality record.
+ * (e.g. "Machine Down: OP20 Deburr") — the kiosk never rewords what the system
+ * recorded about a quality record.
+ *
+ * The title is ABSENT on a crew-station response (it is caller-supplied free
+ * text; see `ResumeOpenBlocker`), so the category label is the fallback and
+ * "Open blocker" the floor under that. `openBlockerMeta` below is what keeps the
+ * fallback from reading as a stutter.
  */
 export function openBlockerLine(blocker: ResumeOpenBlocker): string {
   const title = (blocker.title || '').trim();
   if (title) return title;
   return holdReasonLabel(blocker.category) || 'Open blocker';
+}
+
+/**
+ * The category · severity line UNDER `openBlockerLine`, and the reason it is a
+ * function rather than a template.
+ *
+ * With a title present the two lines say different things ("Machine Down: OP20
+ * Deburr" / "Machine down · High"). With the title WITHHELD — every crew-station
+ * response — `openBlockerLine` already IS the category, so repeating it below
+ * renders "Machine down / Machine down · High": a stutter that reads like a
+ * rendering bug on the one screen that has to be believed. So the category drops
+ * out of the meta line whenever it is doing duty as the headline.
+ *
+ * Null when there is nothing left to say (no severity on a title-less blocker).
+ */
+export function openBlockerMeta(blocker: ResumeOpenBlocker): string | null {
+  const titled = Boolean((blocker.title || '').trim());
+  const category = titled ? holdReasonLabel(blocker.category) : null;
+  const severity = holdSeverityLabel(blocker.severity);
+  const parts = [category, severity].filter(Boolean) as string[];
+  return parts.length ? parts.join(' · ') : null;
+}
+
+/**
+ * True when ANY of these blockers had free text the server deliberately did not
+ * send — i.e. this is a crew station and somebody wrote a reason.
+ *
+ * Same job as `holdFreeTextWithheld` on the held card, one screen later: without
+ * it the resumed-with-holds screen shows a bare category, and silence there
+ * reads as "nobody wrote anything", which is the one way withholding could
+ * actively mislead. Aggregated over the list because the copy is one line for
+ * the panel, not one per row — the operator's action (ask a supervisor) is the
+ * same either way.
+ */
+export function openBlockersFreeTextWithheld(blockers: ResumeOpenBlocker[]): boolean {
+  return blockers.some((blocker) => Boolean(blocker.free_text_withheld && blocker.has_note));
 }

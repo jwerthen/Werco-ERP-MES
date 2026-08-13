@@ -333,17 +333,43 @@ someone else; without it, RESUME is a control that silently clears another perso
 >
 > **It costs the feature nothing, and the card says so rather than going quiet.** The motivating
 > accident is a **bare** hold that carries no note at all, and a deliberate categorized hold is
-> still identifiable from category + severity + who placed it. Where a note *does* exist, the crew
-> card and the confirm overlay render *"A written note was recorded — not shown on a shared station.
-> Ask a supervisor before resuming."* (`has_note` is a boolean, never the text; it keys on `note`
-> alone because `work_order_blockers.title` is `nullable=False` and is therefore always present).
-> Silence there would read as "no reason given" and invite a Resume over somebody's real stop.
+> still identifiable from category + severity + who placed it. Where free text *does* exist, the
+> crew card and the confirm overlay render *"A written note was recorded — not shown on a shared
+> station. Ask a supervisor before resuming."* Silence there would read as "no reason given" and
+> invite a Resume over somebody's real stop.
+>
+> **`has_note` covers BOTH withheld fields, not just `note`.** It is a boolean, never the text, and
+> it is true when a human wrote *either* a note **or** a title that differs from what
+> `blocker_default_title` would compose. It used to key on `note` alone, reasoning that
+> `work_order_blockers.title` is `nullable=False` and therefore always server-composed. That was
+> wrong in the one direction that matters: the title is composed only when the **caller supplies
+> none**, and an office-filed blocker routinely carries its whole explanation there with an empty
+> note. Those reported `has_note: false`, the card drew a bare category, and the silence read as
+> "nobody gave a reason" over a hold somebody had deliberately written up. A caller who types the
+> exact composed string still reads as server-composed — the safe way to be wrong, since the
+> withheld text would then say nothing the category does not.
 >
 > The note is not fetched back post-badge either: the crew confirm overlay renders **before** the
 > badge scan, and adding a post-badge re-read for one line of text would buy an extra round trip on
-> the floor for something the desktop and the single-operator kiosk already show. What the crew
-> station *does* get after the badge is the resume response's `open_blockers`, whose server-composed
-> titles render on `KioskBlockerStillOpenScreen`.
+> the floor for something the desktop and the single-operator kiosk already show.
+>
+> **The resume RESPONSE is gated the same way — the device, not just the poll.** `PUT
+> /shop-floor/operations/{id}/resume` returns the blockers it did not resolve, and
+> `KioskBlockerStillOpenScreen` renders them on a view built to persist (an explicit tap to leave,
+> bounded only by the 90s idle reset). Those titles are **not** "server-composed": `title` is the
+> same caller-supplied free text withheld above, so it is omitted from `open_blockers` whenever the
+> caller presents a badge-minted crew-station token (`_token_scope == "kiosk"`), with `has_note` /
+> `free_text_withheld` in its place and the category as the rendered fallback. The single-operator
+> kiosk runs on a normal session (no `scope` claim) and keeps the title, as does the desktop.
+>
+> **One seam holds by client convention rather than server construction.** A crew station holds two
+> credentials at once — the 24h station token and, briefly, a badge-minted operator token — and an
+> operator token on the *queue read* resolves to `principal.kind == "user"`, which would return the
+> free text. The server cannot tell that request from the single-operator kiosk's. So the queue read
+> must always be sent with the **station** token; `kioskStationClient.getQueue` takes no token
+> parameter and reads it from storage itself, and `kioskStationClient.queueToken.test.ts` pins that
+> it still does so while an operator token is live. The resume *write* has no such exposure: it must
+> carry the operator token for audit attribution, and that token is exactly what the gate keys on.
 
 > **Reason and attribution are INDEPENDENT — never gate one on the other.** There is no
 > `held_by` / `held_at` column on `work_order_operations`; the server reconstructs provenance from
@@ -420,7 +446,10 @@ a shop-wide floor verb.
 **Resuming does not resolve the blocker.** The endpoint returns `open_blockers` precisely so
 operation status and blocker status cannot silently diverge, and the kiosk gives that list its own
 screen with an explicit exit (like the OOT `KioskNcrFiledScreen`) rather than a toast the 15s poll
-would yank away. The server's blocker `title` is rendered verbatim.
+would yank away. The server's blocker `title` is rendered verbatim **where it is sent** — on a
+crew-station response it is withheld (see the disclosure box above) and each row falls back to its
+category label, with the category dropped from the line underneath so the panel does not stutter it
+twice, plus one line saying a written reason exists.
 
 > **Known gap — the kiosk cannot CLEAR a blocker, only resume past one.** For an accidental hold
 > the better outcome is resolving the blocker: that resumes the operation as a side effect

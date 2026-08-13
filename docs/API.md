@@ -2805,7 +2805,7 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 | POST | `/shop-floor/operations/{id}/reduce-production` | Correct (walk back) good-count an operator OVER-reported on their **own unapproved** labor (open clock-in first, then their own earlier unapproved sessions), **before** the operation/WO is complete — a miscount fix, **not** scrap (see note + schema below) | Yes |
 | POST | `/shop-floor/operations/{id}/complete` | Complete / report progress on an operation | Yes |
 | PUT | `/shop-floor/operations/{id}/hold` | Put an operation on hold (closes open time entries; body optional — category/severity/note file a structured blocker) | Yes |
-| PUT | `/shop-floor/operations/{id}/resume` | Take an operation **off** hold. **Restores, never promotes**: `IN_PROGRESS` if it ever started, else `PENDING` — lifted to `READY` only where the shared promotion rule would grant it (parent WO released and non-terminal, no incomplete cross-work-center predecessor), so `pending` is a normal success status. **409** if the operation backs a **cancelled (soft-deleted) laser nest** — that is a tombstone, not a hold; **400** if it is not `ON_HOLD`; cross-tenant id → **404**. Deliberately does **not** resolve the blocker that caused the hold (that stays with the blocker resolve/dismiss flow); the response carries `open_blockers` so the caller can warn (BLK-4). Audited **`STATUS_CHANGE`** (old→new status; `extra_data.transition = "resume_operation"`). Reachable by a badge-minted kiosk token — see "Held work" below | Yes |
+| PUT | `/shop-floor/operations/{id}/resume` | Take an operation **off** hold. **Restores, never promotes**: `IN_PROGRESS` if it ever started, else `PENDING` — lifted to `READY` only where the shared promotion rule would grant it (parent WO released and non-terminal, no incomplete cross-work-center predecessor), so `pending` is a normal success status. **409** if the operation backs a **cancelled (soft-deleted) laser nest** — that is a tombstone, not a hold; **400** if it is not `ON_HOLD`; cross-tenant id → **404**. Deliberately does **not** resolve the blocker that caused the hold (that stays with the blocker resolve/dismiss flow); the response carries `open_blockers` so the caller can warn (BLK-4) — each `{ id, category, severity, status, has_note, free_text_withheld }`, plus the caller-supplied `title` **only** for a non-station caller (withheld from a badge-minted crew-station token, same rule as `held`). Each `PENDING → READY` flip it does cause emits `operation_ready` (`user_id: null`). Audited **`STATUS_CHANGE`** (old→new status; `extra_data.transition = "resume_operation"`). Reachable by a badge-minted kiosk token — see "Held work" below | Yes |
 | POST | `/shop-floor/operations/{id}/inspection` | Record operation inspection complete (sets `inspection_complete`) | Admin / Manager / Supervisor / Quality |
 | POST | `/shop-floor/time-entries/{id}/approve` | Approve a TimeEntry (sets `approved` / `approved_by`) | Admin / Manager / Supervisor / Quality |
 | POST | `/shop-floor/time-entries/{id}/unapprove` | Clear approval on a TimeEntry | Admin / Manager / Supervisor / Quality |
@@ -3177,6 +3177,20 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > and still returns `open_blockers` — it deliberately does **not** resolve the blocker, so operation
 > status and blocker status diverge on purpose and the caller is told (BLK-4, warn-and-record).
 >
+> **`open_blockers[].title` is withheld from a crew station**, on the same rule as `held` below and
+> for the same reason: it is caller-supplied free text, and the screen it drives
+> (`KioskBlockerStillOpenScreen`) persists until an explicit tap, on a shared unattended tablet. Each
+> row is `{ id, category, severity, status, has_note, free_text_withheld }`, plus `title` **only**
+> when the caller is not a badge-minted crew-station token (`_token_scope == "kiosk"`). `note` never
+> rides this shape at all. The single-operator kiosk runs on a normal session and keeps the title;
+> so does the desktop.
+>
+> **The promotion emits.** When the restore lands `READY`, the flip emits its `operation_ready`
+> OperationalEvent (`user_id: null` — rule-driven, exactly like the completion and read-path-heal
+> seams), so queue time stays measurable. This includes **sibling** operations the shared promotion
+> rule flips in the same call, for which that event is their *first* and only — the read-path heal
+> never emits for a row that is already `READY`. A resume that promotes nothing emits nothing.
+>
 > Two refusals guard it, both on the **write**, so every caller inherits them — the desktop
 > `ShopFloorSimple` page and both kiosks. A **cancelled (soft-deleted) laser nest**'s operation is
 > parked in `ON_HOLD` as a tombstone (`OperationStatus` has no operation-level CANCELLED), and
@@ -3204,14 +3218,20 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > rail holds `title` and `note` in hand and emits only `wo_number` / `category` / `age_hours`. A
 > `held` row that carried the note would disclose to that audience exactly what the wallboard
 > withholds. `title` travels with `note` because it is equally unconstrained — `POST
-> /work-order-blockers` takes a caller-supplied `title`, and `_blocker_default_title` is only the
+> /work-order-blockers` takes a caller-supplied `title`, and `blocker_default_title` is only the
 > fallback for a kiosk-placed hold.
 >
 > The keys are **absent, not blanked**: a render-side gate would still put the text on the tablet,
-> where a devtools console or a proxy reads it. `has_note` is a boolean (keyed on `note` alone —
-> `work_order_blockers.title` is `nullable=False`, so a title-inclusive flag would be constant-true)
-> so the card can say *"a written note was recorded — not shown on a shared station"* rather than
-> letting silence read as "no reason given" and invite a Resume over somebody's real quality stop.
+> where a devtools console or a proxy reads it. `has_note` is a boolean so the card can say *"a
+> written note was recorded — not shown on a shared station"* rather than letting silence read as
+> "no reason given" and invite a Resume over somebody's real quality stop. It is true when a human
+> wrote **either** field: a non-empty `note`, **or** a `title` differing from what
+> `blocker_default_title` composes. (It keyed on `note` alone until 2026-08-12, on the reasoning that
+> `title` is `nullable=False` and therefore always server-composed — wrong, because it is composed
+> only when the caller supplies none, and an office-filed blocker routinely carries its explanation
+> in the title with an empty note. Those reported `has_note: false` and the station drew a bare
+> category: exactly the mis-read the flag exists to prevent. A caller who types the composed string
+> verbatim still reads as server-composed.)
 >
 > The feature loses nothing: the motivating accident is a **bare** hold with no note at all, and a
 > deliberate categorized hold is still identifiable from category + severity + who placed it. The

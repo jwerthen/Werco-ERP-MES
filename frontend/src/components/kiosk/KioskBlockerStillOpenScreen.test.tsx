@@ -31,6 +31,20 @@ const MATERIAL: ResumeOpenBlocker = {
   status: 'acknowledged',
 };
 
+/**
+ * The crew-station shape of MACHINE: `title` is ABSENT (the key is missing, not
+ * blanked) because it is caller-supplied free text and this view persists on a
+ * shared, unattended tablet. `has_note` says a written reason exists.
+ */
+const MACHINE_STATION: ResumeOpenBlocker = {
+  id: 5,
+  category: 'machine_down',
+  severity: 'high',
+  status: 'open',
+  has_note: true,
+  free_text_withheld: true,
+};
+
 describe('KioskBlockerStillOpenScreen', () => {
   it('confirms the job resumed while naming the problem that did NOT close', () => {
     render(
@@ -62,6 +76,76 @@ describe('KioskBlockerStillOpenScreen', () => {
     // Category + severity ride alongside, they do not replace the title.
     expect(list).toHaveTextContent('Machine down');
     expect(list).toHaveTextContent('High');
+  });
+
+  describe('on a crew station, where the server withholds the title', () => {
+    it('falls back to the category WITHOUT stuttering it twice', () => {
+      render(
+        <KioskBlockerStillOpenScreen
+          blockers={[MACHINE_STATION]}
+          jobLabel="job"
+          doneLabel="Back to board"
+          onDone={jest.fn()}
+        />
+      );
+
+      const list = screen.getByTestId('kiosk-open-blockers');
+      // Headline is the category; the meta line underneath must NOT repeat it,
+      // or the panel reads "Machine down / Machine down · High".
+      expect(within(list).getByText('Machine down')).toBeInTheDocument();
+      expect(within(list).getAllByText(/machine down/i)).toHaveLength(1);
+      expect(within(list).getByText('High')).toBeInTheDocument();
+    });
+
+    it('never puts the withheld free text on the device', () => {
+      render(
+        <KioskBlockerStillOpenScreen
+          blockers={[MACHINE_STATION]}
+          jobLabel="job"
+          doneLabel="Back to board"
+          onDone={jest.fn()}
+        />
+      );
+      expect(screen.queryByText(/OP20 Deburr/)).not.toBeInTheDocument();
+    });
+
+    it('says a written reason EXISTS, so silence cannot read as "none was given"', () => {
+      render(
+        <KioskBlockerStillOpenScreen
+          blockers={[MACHINE_STATION]}
+          jobLabel="job"
+          doneLabel="Back to board"
+          onDone={jest.fn()}
+        />
+      );
+      expect(screen.getByTestId('kiosk-blocker-open-withheld')).toHaveTextContent(
+        /written reason was recorded/i
+      );
+    });
+
+    it('stays silent about a withheld note when nobody wrote one', () => {
+      render(
+        <KioskBlockerStillOpenScreen
+          blockers={[{ ...MACHINE_STATION, has_note: false }]}
+          jobLabel="job"
+          doneLabel="Back to board"
+          onDone={jest.fn()}
+        />
+      );
+      expect(screen.queryByTestId('kiosk-blocker-open-withheld')).not.toBeInTheDocument();
+    });
+  });
+
+  it('shows no withheld notice on an identified session — the text is right there', () => {
+    render(
+      <KioskBlockerStillOpenScreen
+        blockers={[MACHINE]}
+        jobLabel="job"
+        doneLabel="Back to queue"
+        onDone={jest.fn()}
+      />
+    );
+    expect(screen.queryByTestId('kiosk-blocker-open-withheld')).not.toBeInTheDocument();
   });
 
   it('lists every still-open blocker and pluralises the heading', () => {

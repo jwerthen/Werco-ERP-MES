@@ -48,6 +48,7 @@ from app.models.work_order_blocker import (
     WorkOrderBlockerStatus,
 )
 from app.services import dispatch_service
+from app.services.work_order_blocker_service import blocker_default_title
 from tests.api.kiosk_test_helpers import (
     COMPANY_A,
     COMPANY_B,
@@ -102,6 +103,11 @@ def _blocker(
     severity: str = WorkOrderBlockerSeverity.HIGH.value,
     blocker_status: str = WorkOrderBlockerStatus.OPEN.value,
     note: str = "Wrong sheet on the rack",
+    # Caller-supplied by default -- "nest 3" is not what blocker_default_title()
+    # would compose, which makes this a human-authored title, which is what
+    # ``has_note`` now (correctly) reports. Pass ``title=composed_title(...)`` for
+    # the server-composed case.
+    title: str = "Material Missing: nest 3",
     reported_at: datetime = None,
 ) -> WorkOrderBlocker:
     blocker = WorkOrderBlocker(
@@ -111,7 +117,7 @@ def _blocker(
         category=category,
         severity=severity,
         status=blocker_status,
-        title="Material Missing: nest 3",
+        title=title,
         note=note,
         reported_by=reported_by,
         reported_at=reported_at or datetime.utcnow(),
@@ -364,16 +370,22 @@ def test_station_reports_no_free_text_when_the_blocker_has_none(client: TestClie
     """``has_note`` describes the RECORD, not the policy.
 
     Announcing a note that does not exist would send an operator chasing a
-    supervisor over a categorized hold nobody wrote anything on. It keys on the
-    NOTE alone because ``work_order_blockers.title`` is ``nullable=False`` and
-    ``_blocker_default_title`` always composes one -- a title-inclusive flag
-    would be constant-true and carry no information.
+    supervisor over a categorized hold nobody wrote anything on. A blocker whose
+    title is exactly what ``blocker_default_title`` composes carries no human
+    text in EITHER field: the title is the category and the operation name, both
+    of which the station is already showing.
     """
     wc = make_work_center(db_session, company_id=COMPANY_A)
     station = make_kiosk_station(db_session, company_id=COMPANY_A, work_center=wc)
     reporter = make_user(db_session, company_id=COMPANY_A)
-    _, held_op = make_wo_with_operation(db_session, work_center=wc, op_status=OperationStatus.ON_HOLD)
-    _blocker(db_session, operation=held_op, reported_by=reporter.id, note="")
+    work_order, held_op = make_wo_with_operation(db_session, work_center=wc, op_status=OperationStatus.ON_HOLD)
+    _blocker(
+        db_session,
+        operation=held_op,
+        reported_by=reporter.id,
+        note="",
+        title=blocker_default_title(WorkOrderBlockerCategory.MATERIAL_MISSING.value, work_order, held_op),
+    )
 
     blocker_payload = client.get(queue_url(wc.id), headers=bearer(kiosk_token_for(station))).json()["held"][0]["hold"][
         "blocker"
@@ -381,6 +393,39 @@ def test_station_reports_no_free_text_when_the_blocker_has_none(client: TestClie
 
     assert blocker_payload["has_note"] is False
     assert blocker_payload["free_text_withheld"] is True
+
+
+def test_station_reports_free_text_that_lives_only_in_the_title(client: TestClient, db_session: Session):
+    """The gap that made withholding actively misleading, on the READ side.
+
+    ``has_note`` used to key on ``note`` alone, on the reasoning that
+    ``work_order_blockers.title`` is ``nullable=False`` and therefore always
+    server-composed. It is not: ``POST /work-order-blockers`` takes a
+    caller-supplied title, and an office-filed blocker routinely puts its whole
+    explanation there with an empty note. Those reported ``has_note: false``, the
+    card drew a bare category, and the silence read as "nobody gave a reason" --
+    inviting a Resume over somebody's real stop.
+    """
+    wc = make_work_center(db_session, company_id=COMPANY_A)
+    station = make_kiosk_station(db_session, company_id=COMPANY_A, work_center=wc)
+    reporter = make_user(db_session, company_id=COMPANY_A)
+    _, held_op = make_wo_with_operation(db_session, work_center=wc, op_status=OperationStatus.ON_HOLD)
+    _blocker(
+        db_session,
+        operation=held_op,
+        reported_by=reporter.id,
+        note=None,
+        title="NCR-1042 cracked welds - ACME rejected lot",
+    )
+
+    body = client.get(queue_url(wc.id), headers=bearer(kiosk_token_for(station))).json()
+    blocker_payload = body["held"][0]["hold"]["blocker"]
+
+    assert blocker_payload["has_note"] is True
+    assert blocker_payload["free_text_withheld"] is True
+    # Still withheld -- the flag says a reason EXISTS, never what it says.
+    assert "title" not in blocker_payload
+    assert "ACME" not in json.dumps(body)
 
 
 def test_identified_user_session_keeps_the_full_blocker_text(client: TestClient, db_session: Session):

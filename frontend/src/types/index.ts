@@ -1490,17 +1490,30 @@ export interface OperationHold {
  *
  * Resuming deliberately does NOT resolve the blocker that caused the hold. The
  * backend returns these precisely so operation status and blocker status cannot
- * silently diverge — surface them, never swallow them. Exactly these five keys
- * come back (no note, no reporter, no timestamp); the richer shape lives behind
+ * silently diverge — surface them, never swallow them. `note`, the reporter and
+ * the timestamps never ride this shape; the richer one lives behind
  * /work-order-blockers, which a badge-minted kiosk token cannot reach.
+ *
+ * **`title` is ABSENT on a crew-station response**, exactly as it is on the
+ * queue read's `OperationHoldBlocker`. It is caller-supplied free text (the
+ * server composes one only when the caller supplies none), so an office-created
+ * blocker can carry a customer name or an NCR description in it — and the screen
+ * this drives persists until somebody taps it away on a shared, unattended
+ * tablet. `has_note` / `free_text_withheld` come back in its place. An
+ * identified session (single-operator kiosk, desktop) gets the title.
  */
 export interface ResumeOpenBlocker {
   id: number;
-  title: string;
+  /** Free text. Absent on a crew-station response — render `category` instead. */
+  title?: string | null;
   category: string;
   severity: string;
   /** Only "open" or "acknowledged" ever appear here. */
   status: string;
+  /** Whether free text was recorded at all — a boolean, never the text. */
+  has_note?: boolean;
+  /** True when this response deliberately omitted `title` (station audience). */
+  free_text_withheld?: boolean;
 }
 
 /** `PUT /shop-floor/operations/{id}/resume` response. */

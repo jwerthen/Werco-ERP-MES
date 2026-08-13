@@ -5,7 +5,7 @@ import math
 import os
 from collections import defaultdict
 from datetime import date, datetime, timezone
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Union
 
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
@@ -134,7 +134,7 @@ from app.services.wallboard_service import (
     operation_counts_by_work_center,
     operator_display_name,
 )
-from app.services.work_order_blocker_service import WorkOrderBlockerService
+from app.services.work_order_blocker_service import WorkOrderBlockerService, blocker_default_title
 from app.services.work_order_state_service import (
     TERMINAL_WO_STATUSES,
     StatusTransition,
@@ -813,7 +813,53 @@ def _kiosk_job_row(
     }
 
 
-def _hold_blocker_payload(blocker: Optional[HoldBlockerView], *, include_free_text: bool) -> Optional[dict]:
+def _blocker_free_text_recorded(
+    blocker: Union[HoldBlockerView, WorkOrderBlocker],
+    operation: WorkOrderOperation,
+) -> bool:
+    """Did a HUMAN write free text about this hold? Backs every ``has_note`` flag here.
+
+    Two fields can carry it and BOTH have to be consulted:
+
+    * ``note`` -- always human-authored, ``NULL`` when nobody typed one.
+    * ``title`` -- ``nullable=False``, so it is never empty, but it is only
+      SOMETIMES human-authored. ``POST /work-order-blockers`` takes a
+      caller-supplied ``title``; ``blocker_default_title`` composes one from the
+      category and the operation name only when the caller supplied none.
+
+    So a title that differs from the composed default is text somebody typed, and
+    it is the field an office-created blocker most often carries -- "NCR-1042
+    cracked welds, ACME rejected lot" in the title with an empty note is an
+    ordinary shape. Keying the flag on ``note`` alone reported *False* for exactly
+    that blocker, and a station then rendered a bare category with nothing under
+    it: the "silence reads as no reason given" mis-read this flag exists to
+    prevent, on the case that most needs preventing.
+
+    Comparing against ``blocker_default_title`` -- imported rather than
+    re-derived, so the two formats cannot drift -- is a HEURISTIC in one
+    direction only: a caller who types the exact default string reads as
+    server-composed and the flag says False. That is the safe way to be wrong
+    (the withheld text is identical to what the category already tells the
+    operator), and there is no column recording authorship to do better.
+    """
+    if (blocker.note or "").strip():
+        return True
+    title = (blocker.title or "").strip()
+    if not title:
+        return False
+    work_order = operation.work_order
+    if work_order is None:
+        # No default to compare against -- treat the non-empty title as written.
+        return True
+    return title != blocker_default_title(str(blocker.category or ""), work_order, operation)
+
+
+def _hold_blocker_payload(
+    blocker: Optional[HoldBlockerView],
+    *,
+    include_free_text: bool,
+    operation: WorkOrderOperation,
+) -> Optional[dict]:
     """The still-open blocker on a ``held`` row -- with its FREE TEXT gated by audience.
 
     ``title`` and ``note`` are the only unconstrained, human-authored strings in
@@ -847,12 +893,15 @@ def _hold_blocker_payload(blocker: Optional[HoldBlockerView], *, include_free_te
     the one way withholding could actively mislead. ``free_text_withheld`` states
     the policy so the client does not have to infer it from a missing key.
 
-    It keys on ``note`` ALONE even though ``title`` is withheld alongside it.
-    ``work_order_blockers.title`` is ``nullable=False`` and
-    ``_blocker_default_title`` composes one from the category and operation
-    whenever the caller supplies none, so a title-inclusive flag would be
-    constant-true and tell an operator nothing. The note is the field somebody
-    actually typed, and its presence is the fact worth reporting.
+    It covers BOTH withheld fields -- see :func:`_blocker_free_text_recorded`.
+    It used to key on ``note`` alone, on the reasoning that
+    ``work_order_blockers.title`` is ``nullable=False`` and always composed, so a
+    title-inclusive flag would be constant-true. That reasoning was wrong in the
+    one direction that matters: ``title`` is only composed when the CALLER
+    supplied none, and an office-created blocker routinely puts its free text
+    there with an empty note. Those reported ``has_note: false``, the station
+    rendered a bare category, and the silence read as "no reason given" -- the
+    exact mis-read the flag exists to prevent.
 
     NOT SENT, rather than sent-and-hidden: a render gate would still put the text
     on the device, where a devtools console or a proxy reads it. The keys are
@@ -871,12 +920,50 @@ def _hold_blocker_payload(blocker: Optional[HoldBlockerView], *, include_free_te
         "reported_at": to_utc_iso(blocker.reported_at) if blocker.reported_at else None,
         "reported_by_user_id": blocker.reported_by_user_id,
         "reported_by_name": blocker.reported_by_name,
-        "has_note": bool((blocker.note or "").strip()),
+        "has_note": _blocker_free_text_recorded(blocker, operation),
         "free_text_withheld": not include_free_text,
     }
     if include_free_text:
         payload["title"] = blocker.title
         payload["note"] = blocker.note
+    return payload
+
+
+def _resume_open_blocker_payload(
+    blocker: WorkOrderBlocker,
+    *,
+    operation: WorkOrderOperation,
+    include_free_text: bool,
+) -> dict:
+    """One still-open blocker on the RESUME response -- same disclosure gate as the read.
+
+    ``PUT /shop-floor/operations/{id}/resume`` returns the blockers it did NOT
+    resolve, and the kiosk renders them on a screen built to persist (an explicit
+    tap to leave, bounded only by the 90s idle reset). That is the same audience
+    problem the queue payload has, arriving through a different verb: a crew
+    station's badge-minted token is a tap on a shared, unattended tablet, so
+    ``title`` -- caller-supplied free text, see :func:`_blocker_free_text_recorded`
+    -- must not ride the response to one.
+
+    Withholding is done HERE, in the payload builder, rather than by blanking the
+    field at the call site, so both directions of the gate live next to
+    :func:`_hold_blocker_payload` and cannot drift apart. ``note`` never rides
+    this shape at all (it never did) -- there is no audience that gets it here.
+
+    ``has_note`` / ``free_text_withheld`` mirror the read's contract exactly, so
+    the station can say a written reason exists instead of rendering a bare
+    category that reads as "no reason given".
+    """
+    payload: dict = {
+        "id": blocker.id,
+        "category": blocker.category,
+        "severity": blocker.severity,
+        "status": blocker.status,
+        "has_note": _blocker_free_text_recorded(blocker, operation),
+        "free_text_withheld": not include_free_text,
+    }
+    if include_free_text:
+        payload["title"] = blocker.title
     return payload
 
 
@@ -914,7 +1001,11 @@ def _held_job_row(
         "held_at": to_utc_iso(hold.held_at) if hold.held_at else None,
         "held_by_user_id": hold.held_by_user_id,
         "held_by_name": hold.held_by_name,
-        "blocker": _hold_blocker_payload(hold.blocker, include_free_text=include_hold_free_text),
+        "blocker": _hold_blocker_payload(
+            hold.blocker,
+            include_free_text=include_hold_free_text,
+            operation=operation,
+        ),
     }
     return row
 
@@ -4784,6 +4875,14 @@ def resume_operation(
     event, the blocker) are both best-effort emits, so neither is a state source a
     transition may depend on. Recomputing from the promotion authority needs no
     schema change and cannot reach a state a subsequent board poll would not.
+
+    RESPONSE DISCLOSURE. ``open_blockers`` carries the blockers this resume did
+    NOT resolve, and their ``title`` is caller-supplied free text. It is WITHHELD
+    from a crew-station caller (a badge-minted ``scope="kiosk"`` token, i.e. a tap
+    on the shared unattended tablet) exactly as the queue read withholds it, with
+    ``has_note`` / ``free_text_withheld`` in its place -- see
+    :func:`_resume_open_blocker_payload`. The single-operator kiosk and the
+    desktop are identified sessions and keep it.
     """
     operation = (
         db.query(WorkOrderOperation)
@@ -4826,6 +4925,7 @@ def resume_operation(
     previous_status = operation.status.value
     if operation.actual_start:
         operation.status = OperationStatus.IN_PROGRESS
+        operation.updated_at = datetime.utcnow()
     else:
         # A DRAFT parent is never promoted from here, for the same reason the
         # read-path heal refuses it: Release is the authorization step, so neither
@@ -4850,18 +4950,43 @@ def resume_operation(
                 .all()
             )
         operation.status = OperationStatus.PENDING
+        # Stamped BEFORE the promotion below, not after it: the promotion's event
+        # emit flushes, and a row that is already fully written flushes as ONE
+        # UPDATE -- which is what keeps a single resume worth a single
+        # optimistic-lock version bump, the same property the sibling load above
+        # is ordered to preserve.
+        operation.updated_at = datetime.utcnow()
         if promotable and parent is not None:
-            # db=None on purpose: the in-memory form applies the rule and emits
-            # nothing. An `operation_ready` event here would restart the Lean
-            # queue-time clock (ready -> actual_start) on every hold/resume cycle,
-            # which is a metric change this fix has no business making.
+            # `db` is passed so each PENDING -> READY flip emits its
+            # `operation_ready` event, exactly as the other three promotion seams
+            # (WO release, operation completion, the read-path heal) do.
             #
-            # It promotes every startable PENDING sibling, not just this one --
-            # that is the rule's contract, and it reaches no new state: the
-            # read-path heal runs the identical promotion on every dispatch-board
-            # and kiosk load, so a sibling this flips was already one poll away.
-            promote_ready_operations(parent, siblings, db=None)
-    operation.updated_at = datetime.utcnow()
+            # This used to pass db=None to "avoid restarting the Lean queue-time
+            # clock". That reason was false: `flow_metrics_service` reads
+            # `func.min(occurred_at)` per operation, so a later event on an op that
+            # already has one is ignored and the original ready time still anchors
+            # queue time. Suppressing the emit was therefore not protective -- it
+            # was the opposite. It promotes every startable PENDING SIBLING too
+            # (the rule's contract), and for those the suppressed event was their
+            # FIRST: the read-path heal only emits when it flips a PENDING row, and
+            # these are already READY, so nothing would ever emit it. Their queue
+            # time became permanently unmeasurable and `op.ready` never fired for
+            # them. The cost of emitting is one duplicate `operation_ready` on the
+            # resumed op per hold/resume cycle -- metrically inert (min), and
+            # `op.ready` ships with no default channels, so it notifies only a user
+            # who opted in, for whom "ready again" is true.
+            #
+            # user_id=None deliberately, matching the completion and reconcile
+            # seams: the operator tapped RESUME, they did not authorize production.
+            # Release is the authorization step, and attributing a READY flip
+            # (least of all a sibling's) to the resuming operator would record an
+            # act they did not perform. Only `release_first_ready_operation` has a
+            # human behind its promotion.
+            #
+            # The promotion reaches no new state either way: the read-path heal
+            # runs the identical rule on every dispatch-board and kiosk load, so a
+            # sibling this flips was already one poll away.
+            promote_ready_operations(parent, siblings, db=db, user_id=None)
 
     # Audit as a STATUS CHANGE, not a prose row: resume went from one desktop call
     # site to a shop-wide floor verb on both kiosks, so the row has to carry the
@@ -4938,18 +5063,26 @@ def resume_operation(
             company_id=company_id,
         )
 
+    # DISCLOSURE GATE, the write-path twin of the one on the queue read. A
+    # badge-minted crew-station operator token (scope == "kiosk") is a tap on the
+    # SHARED, unattended tablet, and the screen this response drives
+    # (KioskBlockerStillOpenScreen) is built to persist -- it takes an explicit tap
+    # to leave, bounded only by the 90s idle reset. `title` is caller-supplied free
+    # text (`WorkOrderBlockerCreate.title`; the server composes one only when the
+    # caller supplies none), so an office-created blocker reading "NCR-1042 cracked
+    # welds -- ACME rejected lot" would sit on a public screen. Withheld here for
+    # exactly the reason it is withheld from the queue payload.
+    #
+    # `_token_scope` identifies the crew station EXACTLY: the single-operator kiosk
+    # runs on the operator's own session (scope unset) and legitimately keeps the
+    # text, as does the desktop.
+    resume_free_text = getattr(current_user, "_token_scope", None) != "kiosk"
     return {
         "message": "Operation resumed",
         "status": operation.status.value,
         # BLK-4: warn that these blockers are still open even though the op resumed.
         "open_blockers": [
-            {
-                "id": b.id,
-                "title": b.title,
-                "category": b.category,
-                "severity": b.severity,
-                "status": b.status,
-            }
+            _resume_open_blocker_payload(b, operation=operation, include_free_text=resume_free_text)
             for b in open_blockers
         ],
     }

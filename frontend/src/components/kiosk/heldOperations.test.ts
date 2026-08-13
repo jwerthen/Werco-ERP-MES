@@ -20,10 +20,37 @@ import {
   holdReasonLabel,
   holdSeverityLabel,
   openBlockerLine,
+  openBlockerMeta,
+  openBlockersFreeTextWithheld,
   resumeToast,
   stillOpenBlockers,
 } from './heldOperations';
 import type { OperationHold, ResumeOpenBlocker } from '../../types';
+
+/** A still-open blocker as an IDENTIFIED session gets it back from resume. */
+const TITLED_BLOCKER: ResumeOpenBlocker = {
+  id: 5,
+  title: 'Machine Down: OP20 Deburr',
+  category: 'machine_down',
+  severity: 'high',
+  status: 'open',
+  has_note: true,
+  free_text_withheld: false,
+};
+
+/**
+ * The SAME blocker as a CREW STATION gets it: `title` ABSENT (the key is
+ * missing, not blanked), `free_text_withheld` true and `has_note` saying a
+ * written reason exists.
+ */
+const STATION_BLOCKER: ResumeOpenBlocker = {
+  id: 5,
+  category: 'machine_down',
+  severity: 'high',
+  status: 'open',
+  has_note: true,
+  free_text_withheld: true,
+};
 
 /** A hold that filed a blocker: note or non-OTHER category. */
 const HOLD_WITH_BLOCKER: OperationHold = {
@@ -289,5 +316,57 @@ describe('openBlockerLine', () => {
 
   it('never renders an empty line', () => {
     expect(openBlockerLine({ id: 1, title: '', category: '', severity: '', status: 'open' })).toBe('Open blocker');
+  });
+
+  it('falls back to the category when the STATION response omits the title key entirely', () => {
+    // The crew-station shape: `title` is absent, not blank — the server does not
+    // send the key at all, so a devtools console on the tablet has nothing to read.
+    expect(openBlockerLine(STATION_BLOCKER)).toBe('Machine down');
+  });
+});
+
+describe('openBlockerMeta', () => {
+  it('carries category · severity under a titled line — they say different things', () => {
+    expect(openBlockerMeta(TITLED_BLOCKER)).toBe('Machine down · High');
+  });
+
+  it('DROPS the category when the withheld title left it doing duty as the headline', () => {
+    // Without this the station renders "Machine down" over "Machine down · High"
+    // — a stutter that reads as a rendering bug on a screen that has to be believed.
+    expect(openBlockerLine(STATION_BLOCKER)).toBe('Machine down');
+    expect(openBlockerMeta(STATION_BLOCKER)).toBe('High');
+  });
+
+  it('is null when nothing is left to say', () => {
+    expect(openBlockerMeta({ id: 1, category: 'machine_down', severity: '', status: 'open' })).toBeNull();
+  });
+});
+
+describe('openBlockersFreeTextWithheld', () => {
+  it('is true when a station response withheld text somebody actually wrote', () => {
+    expect(openBlockersFreeTextWithheld([STATION_BLOCKER])).toBe(true);
+  });
+
+  it('is false on an identified session — the text is present and gets rendered', () => {
+    expect(openBlockersFreeTextWithheld([TITLED_BLOCKER])).toBe(false);
+  });
+
+  it('is false when the station withheld nothing anybody wrote', () => {
+    // free_text_withheld is true on EVERY station row; `has_note` is what says a
+    // human wrote something. Announcing a withheld note that does not exist would
+    // send an operator chasing a supervisor for a server-composed title.
+    expect(
+      openBlockersFreeTextWithheld([{ ...STATION_BLOCKER, has_note: false }])
+    ).toBe(false);
+  });
+
+  it('is true when ANY row in the list withheld one', () => {
+    expect(openBlockersFreeTextWithheld([{ ...STATION_BLOCKER, has_note: false }, STATION_BLOCKER])).toBe(true);
+  });
+
+  it('tolerates an older backend that sends neither flag', () => {
+    expect(openBlockersFreeTextWithheld([{ id: 9, title: 'x', category: 'other', severity: 'low', status: 'open' }])).toBe(
+      false
+    );
   });
 });
