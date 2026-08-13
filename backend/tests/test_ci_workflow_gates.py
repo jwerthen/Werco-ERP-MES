@@ -57,14 +57,25 @@ def _frontend_script(name: str) -> str:
 GATE_WORKFLOWS = ("pr-check.yml", "ci-cd.yml")
 
 # Every job that exists to say "no" to a bad change. The four ci-cd.yml ones are
-# REQUIRED status checks in the main ruleset; pr-check.yml's two are not, but
-# they are the PR-facing signal and are kept at parity on purpose.
+# REQUIRED status checks in the main ruleset; pr-check.yml's frontend-checks is
+# not, but it is the PR-facing signal and is kept at parity on purpose.
+#
+# pr-check.yml's `backend-checks` was REMOVED from this list on 2026-08-13, along
+# with the job itself. That is not a loosened guard. The job ran the ENTIRE
+# backend pytest suite (5516 tests, ~38 min) a second time, concurrently with
+# ci-cd.yml's REQUIRED `backend-test` doing the identical run, and its lint half
+# was a strict SUBSET of ci-cd.yml's REQUIRED `backend-lint` (same black / isort
+# / flake8 / bandit, minus mypy). Nothing in pr-check.yml is a required context,
+# so ~38 runner-minutes per backend PR bought a verdict that could not change a
+# merge outcome. The property that made deleting it safe is now pinned by
+# TestPrCheckDoesNotDuplicateTheBackendSuite below, which asserts BOTH halves:
+# that pr-check.yml does not re-grow a backend suite run, and that ci-cd.yml
+# still carries the real backend gate.
 GATE_JOBS = (
     ("ci-cd.yml", "backend-lint"),
     ("ci-cd.yml", "backend-test"),
     ("ci-cd.yml", "frontend-lint"),
     ("ci-cd.yml", "frontend-test"),
-    ("pr-check.yml", "backend-checks"),
     ("pr-check.yml", "frontend-checks"),
 )
 
@@ -137,6 +148,99 @@ class TestGateStepsAreBlocking:
             f"{workflow_name} job {job_key} has continue-on-error on: {advisory}. "
             "These jobs exist to block a bad merge; a step that cannot fail reports green. "
             "If the check is genuinely advisory, move it out of this job."
+        )
+
+
+class TestPrCheckDoesNotDuplicateTheBackendSuite:
+    """The backend gate must live in exactly ONE place, and it must still exist.
+
+    Until 2026-08-13 pr-check.yml carried a ``backend-checks`` job that ran the
+    whole backend pytest suite -- 5516 tests, ~38 minutes -- on every PR touching
+    ``backend/**``, at the same time as ci-cd.yml's ``backend-test`` ran the
+    identical suite. Its lint half was a strict subset of ci-cd.yml's
+    ``backend-lint``. Neither pr-check.yml job is a required status check (the
+    main ruleset requires Backend Tests, Backend Linting, Frontend Tests,
+    Frontend Linting, Security Scanning -- all from ci-cd.yml), so the duplicate
+    could never change a merge outcome; it only doubled the wait.
+
+    Deleting a gate job is exactly the kind of change this file exists to catch,
+    so the deletion is not simply trusted -- it is replaced by the three
+    assertions below. The first two stop the duplicate growing back. The third is
+    the load-bearing one: it asserts the reason the deletion was safe, so that
+    "backend is checked somewhere required" can never quietly become false.
+
+    On how these were validated, since a guard that cannot fail is the exact bug
+    this file was written for: the first two were run against the PRE-CHANGE
+    pr-check.yml and both failed as intended. The third reads only ci-cd.yml,
+    which the removal commit does not touch, so it is green on both sides by
+    construction and a pre/post comparison would prove nothing about it -- it was
+    instead validated by MUTATION, against a copy of ci-cd.yml whose backend-test
+    pytest command had been replaced, and it failed as intended.
+    """
+
+    # The four linters pr-check.yml's removed job shared with ci-cd.yml's
+    # backend-lint. mypy is deliberately absent -- pr-check never ran it, which
+    # is precisely why its job was a subset and not a peer.
+    _SHARED_LINTERS = ("black", "isort", "flake8", "bandit")
+
+    def test_pr_check_does_not_run_the_backend_suite(self) -> None:
+        workflow = _load_workflow("pr-check.yml")
+        offenders = [
+            f"job={job_key} step={step.get('name', '?')!r}"
+            for job_key, step in _iter_steps(workflow)
+            if "pytest" in (step.get("run") or "")
+        ]
+        assert not offenders, (
+            "pr-check.yml runs pytest again: "
+            + "; ".join(offenders)
+            + ".\nci-cd.yml's REQUIRED 'Backend Tests' job already runs the full suite, and nothing "
+            "in pr-check.yml is a required context -- so this is ~38 minutes per PR that cannot "
+            "change whether the PR can merge. Put backend work in ci-cd.yml's backend-test instead."
+        )
+
+    def test_pr_check_declares_no_backend_scoped_job(self) -> None:
+        """A backend job here would re-create the duplicate even without pytest.
+
+        Checks the job key, the job-level ``defaults.run.working-directory``, AND
+        every step-level ``working-directory``. The last one is not redundant: a
+        job can leave ``defaults`` unset and scope each step individually, which
+        is a perfectly ordinary way to write the same job and would otherwise
+        walk straight past a defaults-only check.
+        """
+        workflow = _load_workflow("pr-check.yml")
+        offenders = []
+        for job_key, job in (workflow.get("jobs") or {}).items():
+            if "backend" in job_key.lower():
+                offenders.append(f"job key {job_key!r}")
+            job_dir = ((job.get("defaults") or {}).get("run") or {}).get("working-directory", "")
+            if "backend" in str(job_dir):
+                offenders.append(f"{job_key} (job working-directory: {job_dir})")
+            for step in job.get("steps") or []:
+                step_dir = step.get("working-directory", "")
+                if "backend" in str(step_dir):
+                    offenders.append(f"{job_key} step {step.get('name', '?')!r} (working-directory: {step_dir})")
+        assert not offenders, (
+            f"pr-check.yml grew a backend-scoped job again: {offenders}. "
+            "The backend gate belongs to ci-cd.yml's required backend-lint / backend-test jobs."
+        )
+
+    def test_the_real_backend_gate_still_exists_in_ci_cd(self) -> None:
+        """The half that makes the deletion above safe rather than a hole."""
+        workflow = _load_workflow("ci-cd.yml")
+
+        test_scripts = [step.get("run") or "" for job_key, step in _iter_steps(workflow) if job_key == "backend-test"]
+        assert any("pytest" in script for script in test_scripts), (
+            "ci-cd.yml's backend-test job no longer runs pytest. pr-check.yml's duplicate copy was "
+            "deleted on the strength of this job existing -- the backend suite would now run NOWHERE."
+        )
+
+        lint_scripts = " ".join(
+            step.get("run") or "" for job_key, step in _iter_steps(workflow) if job_key == "backend-lint"
+        )
+        missing = [tool for tool in self._SHARED_LINTERS if tool not in lint_scripts]
+        assert not missing, (
+            f"ci-cd.yml's backend-lint job no longer runs: {missing}. pr-check.yml's copy of these "
+            "linters was deleted because this job ran them too; dropping them here loses them entirely."
         )
 
 

@@ -6,15 +6,32 @@ on:
     types: [opened, synchronize, reopened]
 
 env:
-  PYTHON_VERSION: '3.11'
+  # No PYTHON_VERSION here any more -- the removed backend-checks job's setup-python
+  # step was its only consumer. This workflow is frontend-only now.
   NODE_VERSION: '22'
 
 jobs:
+  # There is deliberately NO `backend` filter here any more, and no backend job
+  # below. Until 2026-08-13 this workflow carried a `backend-checks` job that ran
+  # the ENTIRE backend pytest suite -- the same 5516 tests, ~38 minutes -- on
+  # every PR touching backend/**, concurrently with ci-cd.yml's `backend-test`
+  # job doing exactly the same work. Its lint half (black/isort/flake8/bandit)
+  # was likewise a strict SUBSET of ci-cd.yml's `backend-lint`, which runs the
+  # same four commands plus mypy.
+  #
+  # It gated nothing: the main ruleset requires exactly five contexts -- Backend
+  # Tests, Backend Linting, Frontend Tests, Frontend Linting, Security Scanning
+  # -- and all five come from ci-cd.yml. Nothing in this workflow is a required
+  # check. So the job spent ~38 runner-minutes per backend PR duplicating a
+  # verdict that could not change the merge outcome.
+  #
+  # The backend gate is unchanged and still blocking; it just lives in exactly
+  # one place now. Do not re-add a backend job here -- pinned by
+  # backend/tests/test_ci_workflow_gates.py::TestPrCheckDoesNotDuplicateTheBackendSuite.
   changes:
     name: Detect Changes
     runs-on: ubuntu-latest
     outputs:
-      backend: ${{ steps.filter.outputs.backend }}
       frontend: ${{ steps.filter.outputs.frontend }}
     steps:
       - uses: actions/checkout@v7
@@ -22,75 +39,8 @@ jobs:
         id: filter
         with:
           filters: |
-            backend:
-              - 'backend/**'
             frontend:
               - 'frontend/**'
-
-  backend-checks:
-    name: Backend Checks
-    runs-on: ubuntu-latest
-    needs: changes
-    if: needs.changes.outputs.backend == 'true'
-    defaults:
-      run:
-        working-directory: ./backend
-    services:
-      postgres:
-        image: postgres:15-alpine
-        env:
-          POSTGRES_USER: werco_user
-          POSTGRES_PASSWORD: test_password
-          POSTGRES_DB: werco_erp_test
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 5432:5432
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
-
-      - name: Install dependencies
-        run: |
-          pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install -r requirements-dev.txt
-
-      - name: Run Black (formatting)
-        run: black --check --diff --config=.black app tests
-
-      - name: Run isort (imports)
-        run: isort --check-only --diff --settings-path=.isort.cfg app tests
-
-      - name: Run Flake8 (linting)
-        run: flake8 app --max-line-length=120
-
-      - name: Run Bandit (security)
-        run: bandit -r app -s B101 -ll
-
-      - name: Run Tests
-        env:
-          DATABASE_URL: postgresql://werco_user:test_password@localhost:5432/werco_erp_test
-          SECRET_KEY: test-secret-key-for-ci-only
-          ENVIRONMENT: test
-        # A CLI --cov-fail-under overrides backend/pytest.ini's addopts, so this
-        # number must track pytest.ini's or pr-check silently keeps an older,
-        # laxer floor. test_ci_workflow_gates.py asserts the two agree.
-        run: pytest tests/ -v --cov=app --cov-report=term --cov-fail-under=78
-
-      - name: Upload Coverage
-        uses: codecov/codecov-action@v7
-        with:
-          flags: backend
-          fail_ci_if_error: false
 
   frontend-checks:
     name: Frontend Checks
@@ -150,26 +100,28 @@ jobs:
   pr-summary:
     name: PR Summary
     runs-on: ubuntu-latest
-    needs: [backend-checks, frontend-checks]
+    needs: [frontend-checks]
     if: always()
     steps:
       - name: Check Results
         run: |
           echo "## PR Check Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          
-          if [ "${{ needs.backend-checks.result }}" == "success" ] || [ "${{ needs.backend-checks.result }}" == "skipped" ]; then
-            echo "✅ Backend: ${{ needs.backend-checks.result }}" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "❌ Backend: ${{ needs.backend-checks.result }}" >> $GITHUB_STEP_SUMMARY
-          fi
-          
-          if [ "${{ needs.frontend-checks.result }}" == "success" ] || [ "${{ needs.frontend-checks.result }}" == "skipped" ]; then
+
+          if [ "${{ needs.frontend-checks.result }}" == "skipped" ]; then
+            # Distinct from ✅ on purpose: a backend-only PR skips this job, and a green
+            # tick against work that never ran is the fail-open APPEARANCE this repo's
+            # gate tests exist to prevent -- even where, as here, nothing was gated.
+            echo "⏭️ Frontend: skipped (no frontend changes)" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ needs.frontend-checks.result }}" == "success" ]; then
             echo "✅ Frontend: ${{ needs.frontend-checks.result }}" >> $GITHUB_STEP_SUMMARY
           else
             echo "❌ Frontend: ${{ needs.frontend-checks.result }}" >> $GITHUB_STEP_SUMMARY
           fi
 
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Backend is gated by ci-cd.yml (Backend Linting / Backend Tests), not by this workflow." >> $GITHUB_STEP_SUMMARY
+
       - name: Fail if checks failed
-        if: needs.backend-checks.result == 'failure' || needs.frontend-checks.result == 'failure'
+        if: needs.frontend-checks.result == 'failure'
         run: exit 1
