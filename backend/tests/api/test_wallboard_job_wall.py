@@ -8,7 +8,9 @@ machine tiles, and the trailing-30d kpi_strip is gone. Locks:
     holds), DRAFT and terminal statuses off the wall,
   * current-op precedence — lowest-sequence IN_PROGRESS, else lowest READY,
     else lowest PENDING, None when all complete,
-  * tile facts — WO-level qty, promise/is_late/days_late via the shared
+  * tile facts — order qty (the WO header on a conventional routing; the SUM of
+    the per-item operation targets on a POOL WO — see the pool tests at the
+    bottom), promise/is_late/days_late via the shared
     promise precedence (must_ship_by || due_date vs Central today), blocked /
     down / running flags, ops_completed "n of N", crew on the current op,
   * deterministic priority sort — blocked/down first, then late worst-first,
@@ -26,7 +28,9 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from app.core.time_utils import CENTRAL_TIME_ZONE
+from app.models.bom import BOM
 from app.models.downtime import DowntimeCategory, DowntimeEvent
+from app.models.laser_nest import LaserNest, LaserNestPackage
 from app.models.user import UserRole
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderStatus
 from app.models.work_order_blocker import WorkOrderBlocker, WorkOrderBlockerCategory, WorkOrderBlockerStatus
@@ -159,7 +163,8 @@ def test_current_op_prefers_in_progress_op_with_open_labor(client: TestClient, d
 
 
 def test_job_tile_facts_crew_flags_and_late_precedence(client: TestClient, db_session: Session):
-    """One fully-dressed tile: WO-level qty, op-level qty via
+    """One fully-dressed tile: header qty (no per-item line ops here, so the
+    header IS the total), op-level qty via
     operation_target_quantity, crew (deduped, First L.) + elapsed on the
     current op, blocked (WO-level blocker) / down / running flags, and
     lateness via must_ship_by || due_date against Central today."""
@@ -403,3 +408,258 @@ def test_kpi_strip_is_deprecated_and_machinery_deleted(client: TestClient, db_se
 
     for zombie in ("get_kpi_strip", "_compute_kpi_strip", "reset_kpi_strip_cache", "_kpi_strip_cache"):
         assert not hasattr(wallboard_service, zombie), f"kpi_strip machinery {zombie!r} survived the deletion"
+
+
+def _nest_for(db: Session, operation, *, is_deleted: bool) -> LaserNest:
+    """Back an operation with a laser nest — live, or a soft-deleted tombstone."""
+    package = LaserNestPackage(
+        company_id=operation.company_id,
+        child_work_order_id=operation.work_order_id,
+        package_name=f"PKG-{operation.id}",
+    )
+    db.add(package)
+    db.flush()
+    nest = LaserNest(
+        company_id=operation.company_id,
+        package_id=package.id,
+        work_order_operation_id=operation.id,
+        nest_name=f"NEST-{operation.id}",
+        planned_runs=int(operation.component_quantity or 0),
+        material="0.250 A36",
+        is_deleted=is_deleted,
+    )
+    db.add(nest)
+    db.commit()
+    return nest
+
+
+def _set_line_target(op, target: float, *, component_part_id: int | None = None):
+    """Make an operation a PER-ITEM line: its own qty target, no component part."""
+    op.component_quantity = target
+    op.component_part_id = component_part_id
+    return op
+
+
+def test_pool_wo_tile_sums_per_item_operation_totals(client: TestClient, db_session: Session):
+    """A POOL work order reports PIECES across all its line items, not the header.
+
+    The prod bug (TV photo 2026-08-13): an 18-item press-brake batch WO sat on
+    item 2 while its tile read "8/8 — 100%", because the non-pool header rollup
+    takes MAX over ops capped at ``quantity_ordered`` (= 8 here, the set count).
+    The tile must read the SUM of the per-item targets and progress, exactly as
+    the laser-nest cards beside it already do.
+    """
+    viewer = make_user(db_session)
+    part = make_part(db_session)
+    wc = make_work_center(db_session)
+
+    wo = make_wo(db_session, part, status_=WorkOrderStatus.IN_PROGRESS, quantity_ordered=8)
+    wo.quantity_complete = 8  # what the header rollup froze at — the misleading 8/8
+    _set_line_target(make_op(db_session, wo, wc, sequence=10, status_=OperationStatus.COMPLETE, quantity_complete=8), 8)
+    _set_line_target(
+        make_op(db_session, wo, wc, sequence=20, status_=OperationStatus.IN_PROGRESS, quantity_complete=3), 18
+    )
+    _set_line_target(make_op(db_session, wo, wc, sequence=30, status_=OperationStatus.READY), 4)
+    db_session.commit()
+
+    tile = _job(_payload(client, headers_for(viewer)), wo)
+    assert tile["qty_ordered"] == 30.0  # 8 + 18 + 4 pieces across the three items
+    assert tile["qty_complete"] == 11.0  # 8 + 3 + 0 — NOT the header's 8
+    assert tile["ops_completed"] == 1 and tile["ops_total"] == 3  # op chip unchanged
+
+
+def test_pool_wo_tile_caps_each_line_at_its_own_target(client: TestClient, db_session: Session):
+    """Per-line cap (the ``pooled_quantity_complete`` rule): one over-posted item
+    cannot inflate the pool total past what the line actually ordered."""
+    viewer = make_user(db_session)
+    part = make_part(db_session)
+    wc = make_work_center(db_session)
+
+    wo = make_wo(db_session, part, status_=WorkOrderStatus.IN_PROGRESS, quantity_ordered=1)
+    _set_line_target(make_op(db_session, wo, wc, sequence=10, status_=OperationStatus.COMPLETE, quantity_complete=9), 4)
+    _set_line_target(make_op(db_session, wo, wc, sequence=20, status_=OperationStatus.READY), 6)
+    db_session.commit()
+
+    tile = _job(_payload(client, headers_for(viewer)), wo)
+    assert tile["qty_ordered"] == 10.0
+    assert tile["qty_complete"] == 4.0  # 9 posted on a 4-piece line still counts 4
+    assert tile["qty_complete"] <= tile["qty_ordered"]  # the bar can never exceed 100%
+
+
+def test_conventional_routing_tile_keeps_header_totals(client: TestClient, db_session: Session):
+    """The fence: a normal routing's ops each process the WHOLE order, so summing
+    them would multiply the order by its op count. Header stays the truth."""
+    viewer = make_user(db_session)
+    part = make_part(db_session)
+    wc = make_work_center(db_session)
+
+    wo = make_wo(db_session, part, status_=WorkOrderStatus.IN_PROGRESS, quantity_ordered=50)
+    wo.quantity_complete = 12
+    make_op(db_session, wo, wc, sequence=10, status_=OperationStatus.COMPLETE, quantity_complete=50)
+    make_op(db_session, wo, wc, sequence=20, status_=OperationStatus.IN_PROGRESS, quantity_complete=12)
+    make_op(db_session, wo, wc, sequence=30, status_=OperationStatus.PENDING)
+    db_session.commit()
+
+    tile = _job(_payload(client, headers_for(viewer)), wo)
+    assert tile["qty_ordered"] == 50.0  # not 150
+    assert tile["qty_complete"] == 12.0  # not 62
+
+
+def test_assembly_component_operations_do_not_sum_into_tile_totals(client: TestClient, db_session: Session):
+    """BOM-driven component ops carry a ``component_part_id`` AND a
+    ``qty_per_assembly x order qty`` target (``_reconcile_operation_component_quantities``).
+    Those are components, not units of the order — summing them with the
+    assembly's own operations would add unlike things, so the header wins."""
+    viewer = make_user(db_session)
+    part = make_part(db_session)
+    component = make_part(db_session)
+    wc = make_work_center(db_session)
+
+    wo = make_wo(db_session, part, status_=WorkOrderStatus.IN_PROGRESS, quantity_ordered=10)
+    wo.quantity_complete = 4
+    _set_line_target(
+        make_op(db_session, wo, wc, sequence=10, status_=OperationStatus.COMPLETE, quantity_complete=40),
+        40,
+        component_part_id=component.id,
+    )
+    # The assembly's OWN op carries a target too, so only the ``component_part_id`` half
+    # of the filter can refuse this WO — without it the card would read 4/50.
+    _set_line_target(
+        make_op(db_session, wo, wc, sequence=20, status_=OperationStatus.IN_PROGRESS, quantity_complete=4), 10
+    )
+    db_session.commit()
+
+    tile = _job(_payload(client, headers_for(viewer)), wo)
+    assert tile["qty_ordered"] == 10.0
+    assert tile["qty_complete"] == 4.0
+
+
+def test_pool_wo_tile_is_not_capped_by_a_lagging_header_quantity(client: TestClient, db_session: Session):
+    """No header cap, deliberately — the divergence from ``pooled_quantity_complete``.
+
+    That helper caps its SUM at ``work_order.quantity_ordered`` before STORING it.
+    The tile does not: where a header was hand-edited below the sum of its lines,
+    the lines are what the floor still has to make, so the board shows them.
+    """
+    viewer = make_user(db_session)
+    part = make_part(db_session)
+    wc = make_work_center(db_session)
+
+    wo = make_wo(db_session, part, status_=WorkOrderStatus.IN_PROGRESS, quantity_ordered=4)
+    wo.quantity_complete = 4
+    _set_line_target(make_op(db_session, wo, wc, sequence=10, status_=OperationStatus.COMPLETE, quantity_complete=2), 2)
+    _set_line_target(make_op(db_session, wo, wc, sequence=20, status_=OperationStatus.COMPLETE, quantity_complete=3), 3)
+    db_session.commit()
+
+    tile = _job(_payload(client, headers_for(viewer)), wo)
+    assert tile["qty_ordered"] == 5.0  # the lines, not the header's 4
+    assert tile["qty_complete"] == 5.0
+
+
+def test_restated_order_quantity_on_every_op_keeps_header_totals(client: TestClient, db_session: Session):
+    """Guard 4 in isolation — the impostor whose part no longer has a BOM.
+
+    ``GET /work-orders/preview-operations`` emits the ASSEMBLY's own routing ops with
+    ``component_part_id: None`` and ``component_quantity`` = the WHOLE ORDER QUANTITY,
+    restated once per op; the New Work Order wizard posts that verbatim and create
+    persists it raw. Summing them would render a 10-piece job as ``0/50`` then
+    ``50/50``. Guard 1 catches it while the BOM exists — so this WO deliberately has
+    NO BOM, leaving "every target equals quantity_ordered" as the only thing standing
+    between the card and 50.
+    """
+    viewer = make_user(db_session)
+    part = make_part(db_session)
+    wc = make_work_center(db_session)
+
+    wo = make_wo(db_session, part, status_=WorkOrderStatus.IN_PROGRESS, quantity_ordered=10)
+    wo.quantity_complete = 4
+    for index in range(5):
+        _set_line_target(
+            make_op(
+                db_session,
+                wo,
+                wc,
+                sequence=(index + 1) * 10,
+                status_=OperationStatus.COMPLETE if index < 2 else OperationStatus.READY,
+                quantity_complete=10 if index < 2 else 0,
+            ),
+            10,  # the restated order quantity, on every op
+        )
+    db_session.commit()
+
+    tile = _job(_payload(client, headers_for(viewer)), wo)
+    assert tile["qty_ordered"] == 10.0  # not 50
+    assert tile["qty_complete"] == 4.0  # not 20
+
+
+def test_bom_backed_part_keeps_header_totals_even_with_mixed_targets(client: TestClient, db_session: Session):
+    """Guard 1 alone, with the all-equal signature deliberately broken.
+
+    Editing one previewed op and THEN raising the quantity rescales only the
+    still-from-routing ops (``WorkOrderNew.handleQuantityChange``), leaving one stale
+    target behind — so "every target equals the header" no longer catches it. The
+    part's BOM does: a BOM-backed part's operations are a routing, by construction.
+    """
+    viewer = make_user(db_session)
+    part = make_part(db_session)
+    db_session.add(BOM(part_id=part.id, revision="A", is_active=True, company_id=1))
+    wc = make_work_center(db_session)
+
+    wo = make_wo(db_session, part, status_=WorkOrderStatus.IN_PROGRESS, quantity_ordered=100)
+    wo.quantity_complete = 0
+    for index, target in enumerate([100, 10, 100, 100, 100]):  # one stale op
+        _set_line_target(make_op(db_session, wo, wc, sequence=(index + 1) * 10), target)
+    db_session.commit()
+
+    tile = _job(_payload(client, headers_for(viewer)), wo)
+    assert tile["qty_ordered"] == 100.0  # not 410
+    assert tile["qty_complete"] == 0.0
+
+
+def test_pool_wo_with_an_untargeted_operation_falls_back_to_the_header(client: TestClient, db_session: Session):
+    """All-or-nothing. A batch WO whose lines are only PARTLY targeted must not
+    render the targeted subset as the whole order — that reports "100%" with items
+    still open, which is the very failure this rule exists to remove. The shortfall
+    is unrepairable in-app (``WorkOrderOperationUpdate`` exposes neither field), so
+    silently dropping the untargeted lines would be permanent and invisible."""
+    viewer = make_user(db_session)
+    part = make_part(db_session)
+    wc = make_work_center(db_session)
+
+    wo = make_wo(db_session, part, status_=WorkOrderStatus.IN_PROGRESS, quantity_ordered=8)
+    wo.quantity_complete = 8
+    _set_line_target(make_op(db_session, wo, wc, sequence=10, status_=OperationStatus.COMPLETE, quantity_complete=8), 8)
+    _set_line_target(make_op(db_session, wo, wc, sequence=20, status_=OperationStatus.COMPLETE, quantity_complete=4), 4)
+    make_op(db_session, wo, wc, sequence=30, status_=OperationStatus.READY)  # no target
+    db_session.commit()
+
+    tile = _job(_payload(client, headers_for(viewer)), wo)
+    assert tile["qty_ordered"] == 8.0  # the header, NOT 12 (which would read 100%)
+    assert tile["qty_complete"] == 8.0
+
+
+def test_cancelled_nest_tombstone_is_excluded_from_pool_totals(client: TestClient, db_session: Session):
+    """A soft-deleted nest's operation survives at ON_HOLD with its
+    ``component_quantity`` intact (``soft_delete_laser_nest``), while the WO header is
+    recomputed over LIVE nests only. Counting it would put sheets on the board that
+    nobody will cut."""
+    viewer = make_user(db_session)
+    part = make_part(db_session)
+    wc = make_work_center(db_session)
+
+    wo = make_wo(db_session, part, status_=WorkOrderStatus.IN_PROGRESS, quantity_ordered=9)
+    live_a = _set_line_target(
+        make_op(db_session, wo, wc, sequence=10, status_=OperationStatus.COMPLETE, quantity_complete=2), 2
+    )
+    live_b = _set_line_target(
+        make_op(db_session, wo, wc, sequence=20, status_=OperationStatus.IN_PROGRESS, quantity_complete=1), 3
+    )
+    dead = _set_line_target(make_op(db_session, wo, wc, sequence=30, status_=OperationStatus.ON_HOLD), 4)
+    db_session.commit()
+    _nest_for(db_session, live_a, is_deleted=False)
+    _nest_for(db_session, live_b, is_deleted=False)
+    _nest_for(db_session, dead, is_deleted=True)
+
+    tile = _job(_payload(client, headers_for(viewer)), wo)
+    assert tile["qty_ordered"] == 5.0  # 2 + 3 — the cancelled nest's 4 sheets are gone
+    assert tile["qty_complete"] == 3.0

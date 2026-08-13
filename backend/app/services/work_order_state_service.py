@@ -555,6 +555,133 @@ def pooled_quantity_complete(
     return total
 
 
+def per_item_operation_totals(
+    work_order: Optional[WorkOrder],
+    operations: Iterable[WorkOrderOperation],
+    *,
+    part_has_bom: bool,
+) -> Optional[tuple[float, float]]:
+    """(ordered, complete) summed across a POOL WO's per-item operations -- or None.
+
+    A pool work order's operations are independent LINE ITEMS, each declaring its own
+    quantity target in ``component_quantity`` with ``component_part_id`` NULL:
+
+      * laser dispatch pools -- one op per nest, target = that nest's planned_runs;
+      * batch/pool work orders -- one op per fabricated line item (the Miratech brake
+        and weld-subassembly WOs), target = that item's piece count.
+
+    ``None`` means "do not sum -- the WORK-ORDER header is the truth here". Callers
+    fall back to the header on None; they must not treat it as zero.
+
+    THE HARD PART IS TELLING A POOL FROM A ROUTING, because ``component_quantity``
+    with a NULL ``component_part_id`` is OVERLOADED. ``GET /work-orders/preview-
+    operations`` (api/endpoints/work_orders.py) emits, for the assembly's OWN routing
+    operations, ``component_part_id: None`` with ``component_quantity`` = THE WHOLE
+    ORDER QUANTITY, restated once per operation; the New Work Order wizard posts that
+    verbatim and ``POST /work-orders/`` persists it raw. Those ops are stages of one
+    order, not line items, and summing them multiplies the order by its operation
+    count -- the same trap ``completion_inventory_service`` documents having fallen
+    into ("tripled the demand"). Four guards separate the two, in order:
+
+      1. PART HAS A BOM -> never sum. The impostor shape above is emitted only under
+         the preview endpoint's ``if has_bom:`` branch, so a BOM'd part's operations
+         are a routing by construction. It cuts the other way too: a pool WO's
+         hand-set per-item targets only SURVIVE on a part with no BOM, because
+         ``_reconcile_operation_component_quantities`` runs on every work-order GET
+         and force-overwrites ``component_quantity`` from the BOM. The caller decides
+         this (one batched query); the rule stays DB-free here.
+      2. DEAD NEST TOMBSTONES are dropped. ``soft_delete_laser_nest`` parks a
+         cancelled nest's op at ON_HOLD and leaves its ``component_quantity`` intact,
+         while the WO header is recomputed over LIVE nests only -- counting the
+         tombstone would put sheets on the board that nobody will cut.
+      3. ALL OR NOTHING. Every remaining operation must be a line item; one op
+         without a target sends the whole WO back to the header. This fails SAFE in
+         both directions: it drops mixed assembly/component routings, and it refuses
+         the batch WO whose 3 untargeted lines would otherwise render "120/120 --
+         100%" with 15 of 18 items done. (``WorkOrderOperationUpdate`` exposes
+         neither field, so a missing target cannot be repaired in-app -- the shortfall
+         would be permanent and invisible.)
+      4. NOT ALL EQUAL TO THE HEADER. When every line's target is exactly
+         ``quantity_ordered``, that is the restated-order-quantity signature, not a
+         pool -- the backstop for an impostor whose part LOST its BOM (delete the BOM
+         and guard 1 switches off, while ``_reconcile_operation_component_quantities``
+         stops rewriting the ops, so the restated targets sit there forever).
+
+    Guards 3 and 4 both fail toward the header, and each has a KNOWN COST -- state
+    them plainly rather than calling the rule complete:
+
+      * a pool whose every line happens to carry the SAME target as the header (8
+        sets x 1 piece per line, or a 3-line WO at ``quantity_ordered = 1``) is
+        indistinguishable from the impostor without a positive pool marker, so it
+        keeps reading "8/8 -- 100%". One line with a different count is enough to
+        make the rule work.
+      * adding a whole-order operation to a pool WO (a final QC, a PACK step) leaves
+        it untargeted, which trips guard 3 and reverts the whole card to the header.
+
+    Both disappear the day a pool WORK-ORDER TYPE exists: the marker replaces all
+    four guards with one positive test. Until then this rule refuses rather than
+    guesses, in the direction that never invents a bigger order than the header.
+
+    ONE OPERATION PER LINE ITEM is assumed, as on a laser pool: two operations
+    carrying the same item's piece count (a second brake setup for one item) count it
+    twice, exactly as ``pooled_quantity_complete`` would.
+
+    Each line's completion is capped at its own target before summing (the per-op cap
+    in ``pooled_quantity_complete``), so complete can never exceed ordered and needs
+    no second cap. Targets come from ``operation_target_quantity`` so the per-op
+    target rule stays ONE rule. The unit is whatever the line declares -- sheet runs
+    on a nest, pieces on a batch line.
+
+    NO HEADER CAP, deliberately -- unlike ``pooled_quantity_complete``, which caps its
+    sum at ``work_order.quantity_ordered`` before storing it. The two agree wherever
+    the header was derived from the lines (every imported nest WO); where they drift
+    -- a header hand-edited below the sum of its lines, or a stored rollup that has
+    not caught up -- the lines are what the floor still has to make, so the summed
+    number is the honest one. Callers must not re-apply the header cap.
+
+    PURE READ: no writes, no header mutation. This is a display rollup for surfaces
+    that must show pool progress honestly; the stored header rollup stays
+    ``sync_work_order_quantity_complete``'s business. It issues no queries OF ITS OWN,
+    but guard 2 reads ``operation.laser_nest`` -- so it is query-free only for a caller
+    that eager-loads that relationship (the wallboard does). A new adopter reading
+    operations off a plain query gets one SELECT per operation.
+    """
+    if part_has_bom:
+        return None
+
+    live_ops = [op for op in (operations or []) if not _operation_nest_is_deleted(op)]
+    if not live_ops:
+        return None
+
+    line_ops = [op for op in live_ops if not op.component_part_id and float(op.component_quantity or 0) > 0]
+    if len(line_ops) != len(live_ops):
+        return None
+
+    targets = [operation_target_quantity(op, work_order) for op in line_ops]
+    header_ordered = float(work_order.quantity_ordered or 0) if work_order is not None else 0.0
+    if header_ordered > 0 and all(target == header_ordered for target in targets):
+        return None
+
+    ordered = 0.0
+    complete = 0.0
+    for op, target in zip(line_ops, targets):
+        ordered += target
+        complete += min(float(op.quantity_complete or 0), target)
+    return ordered, complete
+
+
+def _operation_nest_is_deleted(operation: WorkOrderOperation) -> bool:
+    """True when this op backs a SOFT-DELETED laser nest (a cancelled-nest tombstone).
+
+    Mirrors ``laser_nest_service.active_laser_nest``'s predicate without importing it
+    (that module imports this one). Reads the already-loaded relationship attribute --
+    callers that pass operations from a bulk query should ``joinedload`` ``laser_nest``
+    or this walks into an N+1.
+    """
+    nest = getattr(operation, "laser_nest", None)
+    return nest is not None and bool(getattr(nest, "is_deleted", False))
+
+
 def sync_work_order_quantity_complete(
     work_order: WorkOrder,
     operation: WorkOrderOperation,
