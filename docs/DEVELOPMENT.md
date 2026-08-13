@@ -233,6 +233,55 @@ pytest tests/ -m api   # API tests only
 pytest tests/ -m integration  # Integration tests only
 ```
 
+#### Why the tests run on SQLite
+
+**Production is Supabase Postgres. The test suite runs on in-memory SQLite, and that is
+a deliberate owner decision (2026-08-13), not an accident of configuration.** Write it
+down here rather than discover it again: this was ambiguous for a long time, and the
+ambiguity was expensive.
+
+`backend/tests/conftest.py` gives every xdist worker its own in-memory SQLite database
+(`sqlite:///file:werco_test_<worker>?mode=memory&cache=shared&uri=true`) and sets
+`DATABASE_URL` / `TEST_DATABASE_URL` to it **before** `app.main` is imported. Since
+`pytest.ini` carries `-n auto` unconditionally, there is always at least one worker, so
+the `master` branch of that selection — the only one that reads an inherited
+`TEST_DATABASE_URL` — never runs in practice.
+
+Until 2026-08-13 the CI job also provisioned a `postgres:15-alpine` service and exported
+a Postgres `DATABASE_URL`, which **no test ever connected to** (`create_engine` is lazy,
+so nothing even dialed the socket). It cost ~21s per run and, worse, read as though the
+backend were tested against Postgres. Both the service and those env vars are gone from
+that job.
+
+**`e2e.yml` still provisions Postgres, and should.** The Playwright suite boots the real
+application against a real database, so it is the one place in CI where this system is
+exercised on the engine it actually deploys to. Nothing above applies to it.
+
+Two consequences worth knowing before writing a test:
+
+- **SQLite is not Postgres.** Server-side defaults, `JSONB`, arrays, partial-index
+  predicates and some `CHECK` semantics differ or are unenforced. Fidelity to production
+  is bought deliberately elsewhere: migration tests compile against a `postgresql`
+  dialect (see `tests/test_migration_*.py`), and the Alembic migrations themselves run
+  against real Postgres. If a behavior you are testing depends on the database engine,
+  assert it by dialect-compiling the SQL, not by executing it.
+- **Two concurrent pytest runs in `backend/` no longer collide on disk** — the databases
+  are per-process and in memory, so there are no `test_gw*.db` files to stomp. (This was
+  a genuine hazard when they were files; a stray parallel run produced thousands of bogus
+  "table X already exists" errors on a healthy branch.)
+
+The in-memory URI's **shared cache is load-bearing** and must not be simplified to a bare
+`sqlite://`. Three things open a second engine against that URL — the app's own
+`app/db/database.py` engine, `tests/api/export_audit_helpers.py` (which reads through a
+separate engine *precisely* so it sees only committed rows, per the audit invariant), and
+the duplicate `tests.conftest` copy imported by two completion tests. Under a bare
+in-memory URL each would get its own empty database.
+
+`tests/conftest.py`'s `db_session` fixture is the **single owner of the schema**: it runs
+`create_all`/`drop_all` around every test. `app/main.py`'s lifespan deliberately skips its
+own `create_all` when `ENVIRONMENT=test` so there is never a second connection issuing
+schema DDL concurrently.
+
 ### Frontend Testing
 
 **Run all tests**

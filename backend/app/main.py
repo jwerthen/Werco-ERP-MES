@@ -388,10 +388,26 @@ def seed_quote_config_if_needed():
 async def lifespan(app: FastAPI):
     # Startup
     logger.info(f"Starting {settings.APP_NAME}...")
-    # Create tables in non-production environments only (production uses Alembic)
-    if settings.ENVIRONMENT != "production":
+    # Create tables in non-production environments only (production uses Alembic).
+    #
+    # Skipped under ENVIRONMENT=test, like seed_quote_config_if_needed below, and for a
+    # stronger reason than startup speed: tests/conftest.py's ``db_session`` fixture owns
+    # the schema outright, running create_all/drop_all around every test. Doing it here
+    # too means a SECOND connection issuing schema DDL against the same database while
+    # the fixture is doing the same -- the same class of race that
+    # tests/api/test_completion_perf_batch9.py documents at :690 and :731, where a second
+    # engine's reads intermittently saw "no such table" or empty results. Leaving conftest
+    # as the single, unambiguous schema owner removes the race rather than working around
+    # it. (It is also ~2.8 ms of no-op DDL per TestClient construction, over the ~2673
+    # tests that take the `client` fixture.)
+    if settings.ENVIRONMENT not in ("production", "test"):
         Base.metadata.create_all(bind=engine)
         logger.info("Database tables created/verified (non-production)")
+    elif settings.ENVIRONMENT == "test":
+        # Say so rather than start silently: anything that boots the app with
+        # ENVIRONMENT=test outside pytest gets an empty schema, and an unexplained
+        # "no such table" is a bad way to find that out.
+        logger.info("Skipping create_all (ENVIRONMENT=test); the test fixture owns the schema")
     # Initialize Redis cache
     init_cache(settings.REDIS_URL)
     if cache.enabled:

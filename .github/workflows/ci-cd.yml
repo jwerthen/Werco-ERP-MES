@@ -58,26 +58,29 @@ jobs:
       - name: Run Bandit security check
         run: bandit -r app -s B101 -ll
 
+  # NO postgres service, deliberately. This suite runs on SQLite by design -- an
+  # explicit owner decision (2026-08-13), now written down in docs/DEVELOPMENT.md
+  # under "Why the tests run on SQLite".
+  #
+  # A postgres:15-alpine service used to be provisioned here and DATABASE_URL /
+  # TEST_DATABASE_URL exported to the pytest step. No test ever connected to it:
+  # pytest.ini carries `-n auto` unconditionally, and tests/conftest.py gives every
+  # xdist worker its own SQLite database, so the `master` branch of that selection --
+  # the only one that reads TEST_DATABASE_URL -- never ran. `create_engine` is lazy,
+  # so nothing dialed the socket either. It cost ~21s of container startup per run to
+  # provision a database the suite could not reach, while reading as though the
+  # backend were tested on Postgres.
+  #
+  # Fidelity to production (Supabase Postgres) is bought elsewhere, on purpose: the
+  # migration tests compile against a postgresql dialect, and the Alembic migrations
+  # themselves run against real Postgres at DEPLOY time -- no CI job exercises them, so
+  # do not read this as a CI safety net.
   backend-test:
     name: Backend Tests
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: ./backend
-    services:
-      postgres:
-        image: postgres:15-alpine
-        env:
-          POSTGRES_USER: werco_user
-          POSTGRES_PASSWORD: test_password
-          POSTGRES_DB: werco_erp_test
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 5432:5432
     steps:
       - uses: actions/checkout@v7
 
@@ -93,10 +96,10 @@ jobs:
           pip install -r requirements.txt
           pip install -r requirements-dev.txt
 
+      # No DATABASE_URL / TEST_DATABASE_URL here: tests/conftest.py sets both, per
+      # xdist worker, before app.main is imported. Exporting a Postgres URL that
+      # conftest immediately overwrites is how the misreading above survived so long.
       - name: Run pytest with coverage
-        env:
-          DATABASE_URL: postgresql://werco_user:test_password@localhost:5432/werco_erp_test
-          TEST_DATABASE_URL: postgresql://werco_user:test_password@localhost:5432/werco_erp_test
         run: |
           pytest tests/ -v --cov=app --cov-report=xml --cov-report=term
 
