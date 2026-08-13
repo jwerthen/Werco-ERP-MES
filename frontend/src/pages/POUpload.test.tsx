@@ -657,4 +657,18 @@ describe('POUpload part name typeahead', () => {
     expect(await screen.findByRole('option', { name: /A36 Raw Material Sheet/ })).toBeInTheDocument();
     expect(mockedApi.searchPartsForPO).toHaveBeenCalledWith('raw material');
   });
+
+  it('does not commit a stale first hit when Enter is pressed after the query changes', async () => {
+    await renderUnmatchedReview();
+    const search = screen.getByLabelText('Search parts');
+    fireEvent.change(search, { target: { value: 'raw material' } });
+    expect(await screen.findByRole('option', { name: /A36 Raw Material Sheet/ })).toBeInTheDocument();
+
+    mockedApi.searchPartsForPO.mockImplementation(() => new Promise(() => {}));
+    fireEvent.change(search, { target: { value: 'bolt' } });
+    expect(screen.queryByRole('option', { name: /A36 Raw Material Sheet/ })).not.toBeInTheDocument();
+    fireEvent.keyDown(search, { key: 'Enter' });
+    expect(screen.getByText(/Part not matched/)).toBeInTheDocument();
+    expect(screen.queryByText(/Matched to part ID: 11/)).not.toBeInTheDocument();
+  });
 });

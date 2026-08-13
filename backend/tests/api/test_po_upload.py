@@ -188,6 +188,15 @@ class TestMatchingService:
         hits = search_parts_for_typeahead("raw material", db_session, company_id=1, limit=10)
         assert part.id not in [h["id"] for h in hits]
 
+    def test_search_parts_for_typeahead_exact_survives_candidate_cap(self, db_session, part_factory, monkeypatch):
+        """An exact name/number is returned even when the SQL prefilter cap would drop it."""
+        monkeypatch.setattr("app.services.matching_service.TYPEAHEAD_SQL_CANDIDATE_CAP", 1)
+        part_factory("AA-SHEET-FILLER", name="Sheet Filler One")
+        exact = part_factory("ZZ-SHEET-EXACT", name="Sheet")
+
+        hits = search_parts_for_typeahead("Sheet", db_session, company_id=1, limit=10)
+        assert hits[0]["id"] == exact.id
+
     def test_match_po_line_items(self, db_session, part_factory):
         """Test matching multiple PO line items."""
         part1 = part_factory("LINE-ITEM-001")

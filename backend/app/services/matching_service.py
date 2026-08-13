@@ -7,7 +7,7 @@ import logging
 import re
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.db.tenant_filter import tenant_query
@@ -329,6 +329,22 @@ def search_parts_for_typeahead(query: str, db: Session, company_id: int, limit: 
     if not tokens:
         return []
 
+    # Exact number/name first so a catalog hit cannot be dropped by the
+    # unordered SQL candidate cap (a tenant with >200 "sheet" parts would
+    # otherwise never see the part whose number or name is the query).
+    q_lower = q.lower()
+    exact_hits = (
+        tenant_query(db, Part, company_id)
+        .filter(
+            Part.is_active == True,
+            Part.is_deleted == False,
+            or_(func.lower(Part.part_number) == q_lower, func.lower(Part.name) == q_lower),
+        )
+        .all()
+    )
+    ranked_parts = list(exact_hits)
+    seen_ids = {p.id for p in ranked_parts}
+
     # Two independent queries: Query.filter() mutates in place in SA 1.4, so
     # chaining tokens onto a shared `active` object would also constrain the
     # fuzzy pool (and `.limit()` on one would leak onto the other).
@@ -343,9 +359,11 @@ def search_parts_for_typeahead(query: str, db: Session, company_id: int, limit: 
                 Part.customer_part_number.ilike(like, escape="\\"),
             )
         )
+    if seen_ids:
+        sql_query = sql_query.filter(~Part.id.in_(seen_ids))
     sql_hits = sql_query.limit(TYPEAHEAD_SQL_CANDIDATE_CAP).all()
-    ranked_parts = list(sql_hits)
-    seen_ids = {p.id for p in ranked_parts}
+    ranked_parts.extend(sql_hits)
+    seen_ids.update(p.id for p in sql_hits)
 
     if len(ranked_parts) < limit and FUZZY_LIB:
         pool = (

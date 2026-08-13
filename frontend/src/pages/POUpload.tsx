@@ -217,6 +217,7 @@ export default function POUpload() {
   const [partSearches, setPartSearches] = useState<{ [key: number]: string }>({});
   const [partResults, setPartResults] = useState<{ [key: number]: PartSearchHit[] }>({});
   const partSearchTimersRef = useRef<{ [key: number]: ReturnType<typeof setTimeout> }>({});
+  const partSearchReqRef = useRef<{ [key: number]: number }>({});
 
   const currentDoc = currentDocUid !== null ? (documents.find(d => d.uid === currentDocUid) ?? null) : null;
   const extractionResult = currentDoc?.extractionResult ?? null;
@@ -525,8 +526,13 @@ export default function POUpload() {
     const pending = partSearchTimersRef.current[lineUid];
     if (pending) clearTimeout(pending);
 
+    // Drop previous hits immediately and bump the per-line request id so Enter
+    // cannot commit a result from an earlier query while this one is in flight.
+    partSearchReqRef.current[lineUid] = (partSearchReqRef.current[lineUid] || 0) + 1;
+    const reqId = partSearchReqRef.current[lineUid];
+    setPartResults(prev => ({ ...prev, [lineUid]: [] }));
+
     if (query.trim().length < 2) {
-      setPartResults(prev => ({ ...prev, [lineUid]: [] }));
       return;
     }
 
@@ -534,7 +540,7 @@ export default function POUpload() {
     partSearchTimersRef.current[lineUid] = setTimeout(async () => {
       try {
         const results = await api.searchPartsForPO(query.trim());
-        if (reviewGenRef.current === gen) {
+        if (reviewGenRef.current === gen && partSearchReqRef.current[lineUid] === reqId) {
           setPartResults(prev => ({ ...prev, [lineUid]: results }));
         }
       } catch (err) {
