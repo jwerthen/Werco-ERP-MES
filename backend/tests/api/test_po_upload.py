@@ -11,6 +11,7 @@ from app.services.matching_service import (
     match_part,
     match_po_line_items,
     match_vendor,
+    search_parts_for_typeahead,
 )
 
 
@@ -43,6 +44,29 @@ class TestPOUploadSearchEndpoints:
         """Test searching parts without authentication."""
         response = client.get("/api/v1/po-upload/search-parts?q=test")
         assert response.status_code == 401
+
+    def test_search_parts_matches_similar_name_words(
+        self, client: TestClient, auth_headers: dict, part_factory, db_session
+    ):
+        """Typing a name like 'raw material' returns parts whose names share those words."""
+        hit = part_factory("RM-A36-TYPEAHEAD", name="A36 Raw Material Sheet")
+        hit.description = "4x8 hot rolled"
+        miss = part_factory("HW-BOLT-TYPEAHEAD", name="Hex Head Cap Screw")
+        miss.description = "grade 8 fastener"
+        db_session.commit()
+
+        response = client.get(
+            "/api/v1/po-upload/search-parts",
+            params={"q": "raw material"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+        rows = response.json()
+        ids = [row["id"] for row in rows]
+        assert hit.id in ids
+        assert miss.id not in ids
+        assert rows[0]["name"] == "A36 Raw Material Sheet"
+        assert "score" in rows[0]
 
     def test_search_vendors_unauthorized(self, client: TestClient):
         """Test searching vendors without authentication."""
@@ -135,6 +159,34 @@ class TestMatchingService:
         """Test part match with empty number."""
         result = match_part("", db_session, company_id=1)
         assert result.matched is False
+
+    def test_search_parts_for_typeahead_ranks_exact_name_first(self, db_session, part_factory):
+        close = part_factory("RM-A36-TA", name="A36 Raw Material Sheet")
+        exact = part_factory("RM-EXACT-TA", name="Raw Material")
+        other = part_factory("HW-SCREW-TA", name="Socket Cap Screw")
+
+        hits = search_parts_for_typeahead("raw material", db_session, company_id=1, limit=10)
+        ids = [h["id"] for h in hits]
+
+        assert ids[0] == exact.id
+        assert close.id in ids
+        assert other.id not in ids
+
+    def test_search_parts_for_typeahead_matches_description_tokens(self, db_session, part_factory):
+        part = part_factory("PN-DESC-TA", name="Widget")
+        part.description = "hot rolled steel plate 4x8"
+        db_session.commit()
+
+        hits = search_parts_for_typeahead("steel plate", db_session, company_id=1, limit=10)
+        assert part.id in [h["id"] for h in hits]
+
+    def test_search_parts_for_typeahead_skips_inactive(self, db_session, part_factory):
+        part = part_factory("RM-DEAD-TA", name="Raw Material Obsolete")
+        part.is_active = False
+        db_session.commit()
+
+        hits = search_parts_for_typeahead("raw material", db_session, company_id=1, limit=10)
+        assert part.id not in [h["id"] for h in hits]
 
     def test_match_po_line_items(self, db_session, part_factory):
         """Test matching multiple PO line items."""

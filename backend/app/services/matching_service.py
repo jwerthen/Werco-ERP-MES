@@ -244,6 +244,137 @@ def match_part_by_description(description: str, db: Session, company_id: int, th
     return MatchResult(matched=False, suggestions=suggestions)
 
 
+# Review-time typeahead (GET /po-upload/search-parts). SQL token-AND is the
+# fast path; a fuzzy fill covers typos and similar wording the LIKE prefilter
+# missed. Caps keep a keystroke off a full table scan.
+TYPEAHEAD_SQL_CANDIDATE_CAP = 200
+TYPEAHEAD_FUZZY_POOL_CAP = 1000
+TYPEAHEAD_FUZZY_MIN_SCORE = 70.0
+
+
+def _escape_like(term: str) -> str:
+    """Backslash-escape SQL LIKE wildcards so user input cannot widen the match."""
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _part_typeahead_haystack(part: Any) -> str:
+    return " ".join(
+        piece
+        for piece in (
+            part.part_number,
+            part.name,
+            part.description or "",
+            part.customer_part_number or "",
+        )
+        if piece
+    )
+
+
+def _typeahead_similarity(query: str, haystack: str) -> float:
+    if FUZZY_LIB:
+        return float(fuzz.token_set_ratio(query, haystack))
+    q = query.upper()
+    h = haystack.upper()
+    if q == h:
+        return 100.0
+    if q in h:
+        return 90.0
+    tokens = [t for t in q.split() if t]
+    if tokens and all(t in h for t in tokens):
+        return 80.0
+    return 0.0
+
+
+def _typeahead_rank_key(query: str, part: Any) -> tuple:
+    """Exact part-number, exact name, then phrase-in-name, then fuzzy score."""
+    q = query.strip().upper()
+    name = (part.name or "").strip().upper()
+    pn = (part.part_number or "").strip().upper()
+    score = _typeahead_similarity(query.strip(), _part_typeahead_haystack(part))
+    return (
+        0 if q == pn else 1,
+        0 if q == name else 1,
+        0 if q and q in name else 1,
+        -score,
+        pn,
+    )
+
+
+def _serialize_typeahead_part(part: Any, score: float) -> Dict[str, Any]:
+    return {
+        "id": part.id,
+        "part_number": part.part_number,
+        "name": part.name,
+        "description": part.description,
+        "score": round(float(score), 1),
+    }
+
+
+def search_parts_for_typeahead(query: str, db: Session, company_id: int, limit: int = 10) -> List[Dict[str, Any]]:
+    """
+    Ranked part typeahead for PO-upload review.
+
+    Every whitespace-separated term must appear in part number, name,
+    description, or customer part number (same rule as the frontend ComboBox).
+    Remaining slots are filled from a fuzzy similar-word pass so a query like
+    "raw material" surfaces "A36 Raw Material Sheet" ahead of unrelated hits.
+    """
+    from app.models.part import Part
+
+    q = (query or "").strip()
+    if not q:
+        return []
+
+    tokens = [t for t in re.split(r"\s+", q) if t]
+    if not tokens:
+        return []
+
+    # Two independent queries: Query.filter() mutates in place in SA 1.4, so
+    # chaining tokens onto a shared `active` object would also constrain the
+    # fuzzy pool (and `.limit()` on one would leak onto the other).
+    sql_query = tenant_query(db, Part, company_id).filter(Part.is_active == True, Part.is_deleted == False)
+    for token in tokens:
+        like = f"%{_escape_like(token)}%"
+        sql_query = sql_query.filter(
+            or_(
+                Part.part_number.ilike(like, escape="\\"),
+                Part.name.ilike(like, escape="\\"),
+                Part.description.ilike(like, escape="\\"),
+                Part.customer_part_number.ilike(like, escape="\\"),
+            )
+        )
+    sql_hits = sql_query.limit(TYPEAHEAD_SQL_CANDIDATE_CAP).all()
+    ranked_parts = list(sql_hits)
+    seen_ids = {p.id for p in ranked_parts}
+
+    if len(ranked_parts) < limit and FUZZY_LIB:
+        pool = (
+            tenant_query(db, Part, company_id)
+            .filter(Part.is_active == True, Part.is_deleted == False)
+            .limit(TYPEAHEAD_FUZZY_POOL_CAP)
+            .all()
+        )
+        choices = {p.id: _part_typeahead_haystack(p) for p in pool if p.id not in seen_ids}
+        if choices:
+            extras = process.extract(q, choices, scorer=fuzz.token_set_ratio, limit=limit)
+            by_id = {p.id: p for p in pool}
+            for match in extras:
+                score = match[1]
+                if score < TYPEAHEAD_FUZZY_MIN_SCORE:
+                    continue
+                part = by_id.get(match[2])
+                if part is not None and part.id not in seen_ids:
+                    ranked_parts.append(part)
+                    seen_ids.add(part.id)
+
+    ranked_parts.sort(key=lambda p: _typeahead_rank_key(q, p))
+    out: List[Dict[str, Any]] = []
+    for part in ranked_parts[:limit]:
+        score = _typeahead_similarity(q, _part_typeahead_haystack(part))
+        out.append(_serialize_typeahead_part(part, score))
+    return out
+
+
 def match_po_line_items(line_items: List[Dict[str, Any]], db: Session, company_id: int) -> List[Dict[str, Any]]:
     """
     Match all line items to existing parts.
