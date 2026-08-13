@@ -12,10 +12,40 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 WORKER_ID = os.getenv("PYTEST_XDIST_WORKER", "master")
+
+# Per-process IN-MEMORY sqlite. SQLite is this suite's intentional backend (production
+# is Supabase Postgres); see docs/DEVELOPMENT.md -> "Why the tests run on SQLite".
+#
+# This used to be a FILE: sqlite:///./test_{worker}.db. ``db_session`` runs
+# ``create_all`` + ``drop_all`` over 136 tables for EVERY test, so on a durable
+# filesystem the suite spent its time in fsync, not in Python -- measured at 288.8 ms
+# per fixture cycle on disk versus ~3 ms here, with kernel time across the run
+# collapsing from 391.8s to ~13s. Per-test create/drop semantics are deliberately
+# UNCHANGED; only the storage moves.
+#
+# The shared-cache URI is load-bearing and must not be simplified to "sqlite://".
+# A bare in-memory URL gives every new engine its own EMPTY database, and three
+# things here open a second engine against this URL: app/db/database.py's own
+# QueuePool engine, tests/api/export_audit_helpers.py (which reads through a separate
+# engine precisely so it sees only COMMITTED rows -- invariant 2), and the duplicate
+# ``tests.conftest`` module copy imported by test_completion_concurrency.py and
+# test_completion_perf_batch9.py. Under a bare URL all three would silently address
+# different databases. The shared cache keeps them addressing one, exactly as the
+# single file did.
+#
+# Lifetime: a shared-cache in-memory database exists only while at least one
+# connection to it is open. The engine below uses StaticPool, which holds its single
+# connection open for the life of the process, so the database survives between tests.
+# Consequence: NEVER call engine.dispose() on this engine. Under the old file-backed DB
+# that was harmless; here it closes the last connection and discards the schema and every
+# row in it. (Nothing does today -- every dispose() in the suite belongs to a migration
+# test's scratch-file engine or to export_audit_helpers.py's own short-lived engine.)
+_MEMORY_DB_URL = f"sqlite:///file:werco_test_{WORKER_ID}?mode=memory&cache=shared&uri=true"
+
 if WORKER_ID == "master":
-    TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL", "sqlite:///./test.db")
+    TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL", _MEMORY_DB_URL)
 else:
-    TEST_DATABASE_URL = f"sqlite:///./test_{WORKER_ID}.db"
+    TEST_DATABASE_URL = _MEMORY_DB_URL
 
 os.environ["TEST_DATABASE_URL"] = TEST_DATABASE_URL
 os.environ["DATABASE_URL"] = TEST_DATABASE_URL

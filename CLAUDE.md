@@ -47,6 +47,21 @@ Invoke these two after the implementing agent finishes, as a matter of course �
 # CI's required "Backend Tests" job. A CLI --cov-fail-under OVERRIDES addopts, so never
 # pass a laxer one. Subset runs (a single file, or -m evals) measure only what they
 # import and will fail the floor rather than the tests — use --no-cov for those.
+#
+# **Tests run on in-memory SQLite; production is Supabase Postgres. That split is a
+# deliberate owner decision (2026-08-13), not drift** — conftest.py hands every xdist
+# worker its own shared-cache in-memory DB and sets DATABASE_URL before app.main is
+# imported, so ci-cd.yml's "Backend Tests" job provisions no Postgres service and passes
+# no `TEST_DATABASE_URL` — there is nothing for one to point at. (e2e.yml DOES run a real
+# Postgres, correctly: it boots the actual app against it. That is the one place in CI
+# where this system is exercised on Postgres.)
+#
+# Consequence for test authors: SQLite does not enforce everything Postgres does (JSONB,
+# arrays, partial-index predicates, some CHECKs), so assert engine-specific behavior by
+# DIALECT-COMPILING the SQL, never by executing it and trusting the result.
+# The in-memory URI's `cache=shared` is load-bearing — three places open a second engine
+# against that URL and a bare `sqlite://` would give each its own empty database.
+# See docs/DEVELOPMENT.md → Testing → "Why the tests run on SQLite".
 pytest                                  # full suite
 pytest tests/test_work_orders.py        # single file
 pytest tests/test_work_orders.py::test_create_work_order   # single test

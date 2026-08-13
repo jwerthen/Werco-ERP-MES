@@ -10,9 +10,27 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+# SQLite needs one connect arg that Postgres neither needs nor accepts.
+#
+# Production is Supabase Postgres and is completely unaffected by this branch -- it is
+# guarded on the URL scheme, and for Postgres `_connect_args` stays empty, so the engine
+# is constructed exactly as before.
+#
+# Why it is needed at all: sqlite3 refuses to use a connection from any thread other
+# than the one that created it. QueuePool hands a pooled connection to whichever thread
+# checks it out, so under the TestClient -- where requests are served on anyio worker
+# threads -- a request can pick up a connection another thread opened and raise
+# ProgrammingError, typically surfacing from pool_pre_ping rather than from app code.
+# The test suite's own engine has always passed this arg for the same reason; the app
+# engine needs it too now that both address one in-memory database.
+_connect_args: dict = {}
+if settings.is_sqlite_database:
+    _connect_args["check_same_thread"] = False
+
 # Create engine with connection pooling
 engine = create_engine(
     settings.SQLALCHEMY_DATABASE_URL,
+    connect_args=_connect_args,
     poolclass=QueuePool,
     pool_size=settings.DB_POOL_SIZE,
     max_overflow=settings.DB_MAX_OVERFLOW,
