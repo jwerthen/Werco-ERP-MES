@@ -93,9 +93,6 @@ jobs:
           pip install -r requirements.txt
           pip install -r requirements-dev.txt
 
-      - name: Wait for PostgreSQL
-        run: python -c "import time; time.sleep(10)"
-
       - name: Run pytest with coverage
         env:
           DATABASE_URL: postgresql://werco_user:test_password@localhost:5432/werco_erp_test
