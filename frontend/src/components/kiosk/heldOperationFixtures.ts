@@ -16,7 +16,11 @@
 import type { KioskCrewQueueItem, KioskQueueItem } from './kioskConstants';
 import type { OperationHold } from '../../types';
 
-/** A hold that filed a blocker (note present, or a non-OTHER category). */
+/**
+ * A hold that filed a blocker (note present, or a non-OTHER category), as an
+ * IDENTIFIED SESSION sees it — the single-operator kiosk or the desktop. The
+ * free text is present and `free_text_withheld` is false.
+ */
 export const HOLD_WITH_BLOCKER: OperationHold = {
   held_at: '2026-08-11T19:14:00Z',
   held_by_user_id: 12,
@@ -28,6 +32,34 @@ export const HOLD_WITH_BLOCKER: OperationHold = {
     status: 'open',
     title: 'Machine Down: Deburr',
     note: 'Z-axis alarm 4012',
+    has_note: true,
+    free_text_withheld: false,
+    reported_at: '2026-08-11T19:14:00Z',
+    reported_by_user_id: 12,
+    reported_by_name: 'Dana R.',
+  },
+};
+
+/**
+ * The SAME hold as a CREW STATION receives it: `title` and `note` are ABSENT
+ * (the keys are missing, not blanked), `free_text_withheld` is true and
+ * `has_note` says a written reason exists.
+ *
+ * A station is an unattended, PIN-unlocked tablet with no operator identity and
+ * no idle logout — the audience the wallboard already withholds NCR titles and
+ * descriptions from. This fixture is the shape the crew station actually gets,
+ * so the crew rows below use it; a crew test asserting `Z-axis alarm 4012` would
+ * be asserting a payload the server does not send.
+ */
+export const HOLD_WITH_BLOCKER_STATION: OperationHold = {
+  ...HOLD_WITH_BLOCKER,
+  blocker: {
+    id: 5,
+    category: 'machine_down',
+    severity: 'high',
+    status: 'open',
+    has_note: true,
+    free_text_withheld: true,
     reported_at: '2026-08-11T19:14:00Z',
     reported_by_user_id: 12,
     reported_by_name: 'Dana R.',
@@ -96,9 +128,17 @@ export const HELD_ROW: KioskQueueItem = {
   hold: HOLD_WITH_BLOCKER,
 };
 
-/** Crew rows carry the roster alongside everything above. */
+/**
+ * Crew rows carry the roster alongside everything above — and the STATION hold
+ * shape, because that is what a station token is served (see
+ * `HOLD_WITH_BLOCKER_STATION`).
+ */
 export const CREW_QUEUE_ROW: KioskCrewQueueItem = { ...QUEUE_ROW, roster: [] };
-export const CREW_HELD_ROW: KioskCrewQueueItem = { ...HELD_ROW, roster: [] };
+export const CREW_HELD_ROW: KioskCrewQueueItem = {
+  ...HELD_ROW,
+  hold: HOLD_WITH_BLOCKER_STATION,
+  roster: [],
+};
 
 /** Swap in a different hold block (bare, unrecorded, custom) on a held row. */
 export function heldRowWith(hold: OperationHold | null): KioskQueueItem {

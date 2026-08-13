@@ -15,10 +15,12 @@
 import {
   formatHoldAttribution,
   hasHoldReason,
+  holdFreeTextWithheld,
   holdIsUnexplained,
   holdReasonLabel,
   holdSeverityLabel,
   openBlockerLine,
+  resumeToast,
   stillOpenBlockers,
 } from './heldOperations';
 import type { OperationHold, ResumeOpenBlocker } from '../../types';
@@ -159,6 +161,85 @@ describe('holdIsUnexplained', () => {
 
   it('is false when a blocker explains it', () => {
     expect(holdIsUnexplained(HOLD_WITH_BLOCKER)).toBe(false);
+  });
+});
+
+describe('holdFreeTextWithheld', () => {
+  /**
+   * The crew-station shape: a station token is served the blocker WITHOUT
+   * `title`/`note` (the keys are absent, not blanked) plus the two booleans that
+   * describe what happened.
+   */
+  const STATION_HOLD: OperationHold = {
+    ...HOLD_WITH_BLOCKER,
+    blocker: {
+      id: 5,
+      category: 'machine_down',
+      severity: 'high',
+      status: 'open',
+      has_note: true,
+      free_text_withheld: true,
+      reported_at: '2026-08-11T19:14:00Z',
+      reported_by_user_id: 12,
+      reported_by_name: 'Dana R.',
+    },
+  };
+
+  it('is true when a note EXISTS but this response withheld it', () => {
+    expect(holdFreeTextWithheld(STATION_HOLD)).toBe(true);
+  });
+
+  it('is false on an identified session, where the text is actually present', () => {
+    expect(holdFreeTextWithheld(HOLD_WITH_BLOCKER)).toBe(false);
+  });
+
+  it('is false when the station withheld nothing because there was nothing to withhold', () => {
+    // Both flags matter: announcing a note that does not exist would send an
+    // operator chasing a supervisor over a categorized hold with no text.
+    expect(
+      holdFreeTextWithheld({
+        ...STATION_HOLD,
+        blocker: { ...STATION_HOLD.blocker!, has_note: false },
+      })
+    ).toBe(false);
+  });
+
+  it('is false for a bare hold and for an absent hold — there is no blocker at all', () => {
+    expect(holdFreeTextWithheld(BARE_HOLD)).toBe(false);
+    expect(holdFreeTextWithheld(UNRECORDED_HOLD)).toBe(false);
+    expect(holdFreeTextWithheld(null)).toBe(false);
+    expect(holdFreeTextWithheld(undefined)).toBe(false);
+  });
+
+  it('is false on a payload predating the flags rather than guessing', () => {
+    expect(holdFreeTextWithheld({ ...HOLD_WITH_BLOCKER, blocker: { ...HOLD_WITH_BLOCKER.blocker! } })).toBe(false);
+  });
+});
+
+describe('resumeToast', () => {
+  it('claims success only when the operation actually rejoined the queue', () => {
+    expect(resumeToast({ status: 'ready' }, 'WO-1001')).toEqual({
+      type: 'success',
+      message: 'WO-1001 resumed',
+    });
+    expect(resumeToast({ status: 'in_progress' }, 'WO-1001').type).toBe('success');
+  });
+
+  it('does NOT claim success when the resume landed back on PENDING', () => {
+    // Resume restores, it never releases: a hold lifted off a PENDING operation
+    // (or one whose WO is still DRAFT, or whose predecessor is incomplete)
+    // stays off the board. A green "resumed" would send the operator looking
+    // for a card that is not going to appear.
+    const toast = resumeToast({ status: 'pending' }, 'WO-1001');
+    expect(toast.type).toBe('info');
+    expect(toast.message).toMatch(/hold lifted/i);
+    expect(toast.message).not.toMatch(/^WO-1001 resumed$/);
+  });
+
+  it('never renders a blank subject line', () => {
+    expect(resumeToast({ status: 'ready' }, '  ').message).toBe('Operation resumed');
+    expect(resumeToast(null, null).message).toBe('Operation resumed');
+    expect(resumeToast(undefined, undefined).type).toBe('success');
   });
 });
 

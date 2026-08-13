@@ -58,7 +58,7 @@ import {
   formatStepsChip,
   kioskErrorMessage,
 } from '../components/kiosk/kioskConstants';
-import { stillOpenBlockers } from '../components/kiosk/heldOperations';
+import { resumeToast, stillOpenBlockers } from '../components/kiosk/heldOperations';
 import {
   clockedOutStepsMessage,
   extractClockOutStepsIncomplete,
@@ -800,7 +800,11 @@ export default function CrewStationKiosk() {
         if (open.length > 0) {
           setView({ name: 'blockerStillOpen', blockers: open, jobLabel: crewJobLabel(item) });
         } else {
-          showToast('success', `${item.work_order_number} resumed`);
+          // Not always "resumed": a hold lifted off a PENDING operation lands
+          // back on PENDING and the job does not rejoin the queue. resumeToast
+          // says which happened rather than claiming a card that will not appear.
+          const toast = resumeToast(result, item.work_order_number);
+          showToast(toast.type, toast.message);
           resetToBoard();
         }
         await bumpAndRefresh();

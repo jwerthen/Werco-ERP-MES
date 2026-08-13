@@ -178,6 +178,64 @@ def queued_operations(
     return queued_operations_query(db, company_id, work_center_ids=work_center_ids, load_options=load_options).all()
 
 
+def cancelled_nest_exists(company_id: int, operation_id_expr=None):
+    """SQL predicate: this operation is a CANCELLED-nest tombstone, not held work.
+
+    ``ON_HOLD`` is overloaded. ``laser_nest_service.soft_delete_laser_nest`` uses
+    it as the tombstone for a CANCELLED nest, because ``OperationStatus`` has no
+    operation-level CANCELLED and the hold status is what drops the row off the
+    queue. The nest itself is never hard-deleted -- it is soft-deleted precisely
+    so traceability and the package's run history survive -- and the child work
+    order's ``quantity_ordered`` is recomputed to exclude it on the way out.
+
+    So resuming one is not "lifting a hold": it undoes a soft delete from the
+    front end. The operation would go back to READY/IN_PROGRESS, re-enter
+    :func:`queued_operations_query` (which has no nest filter) and reach the
+    dispatch board and the kiosk as a laser operation with ``laser_nest: null``,
+    no CNC file, and a quantity its parent no longer counts. Invariant 3 breach
+    with an invariant 5 consequence.
+
+    THIS PREDICATE IS THE GUARD, AND IT BELONGS ON THE WRITE. It started life
+    inline in :func:`held_operations_query`, where it protected one read while
+    ``PUT /shop-floor/operations/{id}/resume`` -- reachable from ``ShopFloorSimple``
+    and now from both kiosks -- checked only ``status != ON_HOLD``. Named and
+    shared so every caller inherits the same rule:
+
+    * :func:`held_operations_query` -- keep the tombstone off the kiosk's held list.
+    * ``shop_floor.resume_operation`` -- REFUSE (409) rather than resurrect.
+    * ``shop_floor.get_all_operations`` -- keep it off the desktop list that
+      offers the Resume button in the first place.
+
+    ``operation_id_expr`` defaults to ``WorkOrderOperation.id``, which makes the
+    subquery CORRELATED for use inside a query over operations. Pass a literal id
+    for a standalone check (see :func:`operation_has_cancelled_nest`). Tenant
+    scope is the caller's active company on both sides of the join, so a
+    cross-tenant nest can neither hide nor condemn another company's operation.
+    """
+    if operation_id_expr is None:
+        operation_id_expr = WorkOrderOperation.id
+    return (
+        select(LaserNest.id)
+        .where(
+            LaserNest.work_order_operation_id == operation_id_expr,
+            LaserNest.company_id == company_id,
+            LaserNest.is_deleted == True,  # noqa: E712
+        )
+        .exists()
+    )
+
+
+def operation_has_cancelled_nest(db: Session, company_id: int, operation_id: int) -> bool:
+    """Scalar form of :func:`cancelled_nest_exists`, for the WRITE paths.
+
+    One boolean round trip, tenant-scoped. Deliberately queried rather than read
+    off ``operation.laser_nest``: that relationship carries no ``is_deleted``
+    filter and no company filter, so a caller that already has the operation
+    loaded could just as easily read a stale or mis-parented row through it.
+    """
+    return bool(db.query(cancelled_nest_exists(company_id, operation_id)).scalar())
+
+
 def held_operations_query(
     db: Session,
     company_id: int,
@@ -196,15 +254,12 @@ def held_operations_query(
     :func:`display_positions`, capacity, or the wallboard -- held work is not
     queued work, and the whole point of surfacing it is that it is STOPPED.
 
-    THE CANCELLED-NEST CARVE-OUT. ``ON_HOLD`` is overloaded:
-    ``laser_nest_service.soft_delete_laser_nest`` uses it as the tombstone for a
-    CANCELLED nest, because ``OperationStatus`` has no operation-level CANCELLED
-    and the hold status is what drops the row off the queue. Those operations are
-    not "held work an operator should resume" -- they are deleted work, and
-    offering a Resume button on one would let the floor resurrect a cancelled
-    nest to READY. So an operation carrying a SOFT-DELETED laser nest is excluded
-    here (correlated NOT EXISTS, tenant-scoped like everything else). A live nest
-    on a genuinely held operation is untouched and still surfaces.
+    THE CANCELLED-NEST CARVE-OUT. An operation carrying a SOFT-DELETED laser
+    nest is a tombstone, not held work, and is excluded here via
+    :func:`cancelled_nest_exists` -- the SAME predicate the resume WRITE and the
+    desktop operations list now apply, so this read is no longer the only place
+    the rule holds. A live nest on a genuinely held operation is untouched and
+    still surfaces.
 
     Sorted most-recently-updated first so the operation an operator just held is
     the first row. ``updated_at`` is nullable, and ``ORDER BY col DESC`` alone is
@@ -217,15 +272,7 @@ def held_operations_query(
         query = query.options(*load_options)
     # A cancelled (soft-deleted) nest's backing operation is a tombstone, not a
     # hold -- see the docstring. Correlated against the outer operation row.
-    cancelled_nest = (
-        select(LaserNest.id)
-        .where(
-            LaserNest.work_order_operation_id == WorkOrderOperation.id,
-            LaserNest.company_id == company_id,
-            LaserNest.is_deleted == True,  # noqa: E712
-        )
-        .exists()
-    )
+    cancelled_nest = cancelled_nest_exists(company_id)
     # Onclause pinned for the same reason as queued_operations_query: two FK
     # paths exist between the two tables since migration 080.
     query = query.join(WorkOrder, WorkOrderOperation.work_order_id == WorkOrder.id).filter(

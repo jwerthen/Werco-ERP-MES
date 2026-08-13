@@ -28,6 +28,16 @@
  *    somebody else's?) and the still-open list is a screen AFTER it, not a toast
  *    that ages out.
  *
+ * 4. **The blocker's free text does not reach a crew station.** `title` and
+ *    `note` are absent from a station-token response — an unattended,
+ *    PIN-unlocked tablet with no idle logout is a public screen, and this system
+ *    already withholds NCR titles and descriptions from that audience on the
+ *    wallboard. Category, severity and the attribution stay, which is what tells
+ *    a deliberate hold from a mis-tap. `holdFreeTextWithheld` below is how the
+ *    card says "a note exists, you just cannot read it here" rather than
+ *    implying none was given. The single-operator kiosk runs on the operator's
+ *    OWN session and keeps the full text.
+ *
  * **Reason and attribution are INDEPENDENT.** `hold.blocker` carries the reason
  * and is null for a BARE hold (no note, category OTHER) — which is exactly the
  * accidental fat-finger case this feature exists for — while `hold.held_by_name`
@@ -113,6 +123,27 @@ export function hasHoldReason(hold: OperationHold | null | undefined): boolean {
 }
 
 /**
+ * True when a written reason EXISTS but this response deliberately did not carry
+ * it — a crew-station (shared, unattended, PIN-unlocked) payload.
+ *
+ * The server withholds `title` / `note` from a station principal, for the same
+ * reason the wallboard withholds NCR titles and descriptions: an unattended
+ * tablet is a public screen. Without this the card would show a categorized hold
+ * with nothing under it, and an operator could read "Machine Down · Held by Dana
+ * R." as a mis-tap when Dana actually wrote "spindle bearing failed — do not
+ * run". So the card says the note exists and where to get it, rather than
+ * implying none was given.
+ *
+ * False on a user session (the single-operator kiosk, the desktop): the text is
+ * there and gets rendered.
+ */
+export function holdFreeTextWithheld(hold: OperationHold | null | undefined): boolean {
+  const blocker = hold?.blocker;
+  if (!blocker) return false;
+  return Boolean(blocker.free_text_withheld && blocker.has_note);
+}
+
+/**
  * True when the payload says nothing at all about the hold — no reason AND no
  * attribution. This is a REAL state (a hold placed before either record was
  * written; the server never infers a holder from `operation.updated_at`), so it
@@ -130,6 +161,32 @@ export function holdIsUnexplained(hold: OperationHold | null | undefined): boole
 export function stillOpenBlockers(result: ResumeOperationResult | null | undefined): ResumeOpenBlocker[] {
   const blockers = result?.open_blockers;
   return Array.isArray(blockers) ? blockers : [];
+}
+
+/**
+ * The toast a successful resume earns — and it is not always "success".
+ *
+ * Resume RESTORES, it does not release. An operation with no labor evidence is
+ * floored at PENDING and lifted to READY only by the server's own promotion
+ * rule, so resuming a hold that was placed on a PENDING operation — or one whose
+ * work order is still DRAFT, or whose predecessor is incomplete — lands PENDING
+ * and the job does NOT come back to the queue. A green "resumed" toast there
+ * would send the operator looking for a card that is not going to appear.
+ *
+ * `info` rather than the shared Toast's `warning` variant on purpose: these two
+ * station screens carry their own local success/error/info toast, and widening
+ * that vocabulary is a styling change this does not need. What matters is that
+ * the copy states the shortfall instead of hiding it.
+ */
+export function resumeToast(
+  result: ResumeOperationResult | null | undefined,
+  workOrderNumber: string | null | undefined
+): { type: 'success' | 'info'; message: string } {
+  const wo = (workOrderNumber || 'Operation').trim() || 'Operation';
+  if ((result?.status || '').trim() === 'pending') {
+    return { type: 'info', message: `${wo} hold lifted — still waiting on release or an earlier step.` };
+  }
+  return { type: 'success', message: `${wo} resumed` };
 }
 
 /**

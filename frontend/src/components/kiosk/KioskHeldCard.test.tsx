@@ -13,7 +13,13 @@ import React from 'react';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import KioskHeldCard from './KioskHeldCard';
-import { BARE_HOLD, HELD_ROW, UNRECORDED_HOLD, heldRowWith } from './heldOperationFixtures';
+import {
+  BARE_HOLD,
+  HELD_ROW,
+  HOLD_WITH_BLOCKER_STATION,
+  UNRECORDED_HOLD,
+  heldRowWith,
+} from './heldOperationFixtures';
 
 describe('KioskHeldCard', () => {
   it('marks the job as on hold and shows its progress', () => {
@@ -122,5 +128,43 @@ describe('KioskHeldCard', () => {
     expect(screen.getByTestId('kiosk-held-note')).toHaveTextContent('Z-axis alarm 4012');
     expect(screen.getByTestId('kiosk-held-attribution')).toHaveTextContent('Held by Dana R.');
     expect(screen.getAllByRole('button')).toHaveLength(1);
+  });
+
+  describe('when the server withheld the blocker free text (station payload)', () => {
+    const stationRow = heldRowWith(HOLD_WITH_BLOCKER_STATION);
+
+    it('renders no note, because the payload carries none to render', () => {
+      render(<KioskHeldCard item={stationRow} onResume={jest.fn()} size="crew" />);
+
+      expect(screen.queryByTestId('kiosk-held-note')).not.toBeInTheDocument();
+      expect(screen.getByTestId('kiosk-held-card')).not.toHaveTextContent('Z-axis alarm 4012');
+      expect(screen.getByTestId('kiosk-held-card')).not.toHaveTextContent('Machine Down: Deburr');
+    });
+
+    it('says a note EXISTS rather than letting silence read as "no reason given"', () => {
+      render(<KioskHeldCard item={stationRow} onResume={jest.fn()} size="crew" />);
+
+      expect(screen.getByTestId('kiosk-held-note-withheld')).toHaveTextContent(/written note was recorded/i);
+      expect(screen.queryByTestId('kiosk-held-no-blocker')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('kiosk-held-no-reason')).not.toBeInTheDocument();
+    });
+
+    it('keeps category, severity and attribution — what tells a real hold from a mis-tap', () => {
+      render(<KioskHeldCard item={stationRow} onResume={jest.fn()} size="crew" />);
+
+      expect(screen.getByTestId('kiosk-held-reason')).toHaveTextContent('Machine down');
+      expect(screen.getByTestId('kiosk-held-severity')).toHaveTextContent('High');
+      expect(screen.getByTestId('kiosk-held-attribution')).toHaveTextContent('Held by Dana R.');
+    });
+
+    it('stays silent when there was no free text to withhold in the first place', () => {
+      const noText = heldRowWith({
+        ...HOLD_WITH_BLOCKER_STATION,
+        blocker: { ...HOLD_WITH_BLOCKER_STATION.blocker!, has_note: false },
+      });
+      render(<KioskHeldCard item={noText} onResume={jest.fn()} size="crew" />);
+
+      expect(screen.queryByTestId('kiosk-held-note-withheld')).not.toBeInTheDocument();
+    });
   });
 });

@@ -5,6 +5,7 @@ import { KioskRunOrderChip } from './KioskQueueCard';
 import {
   formatHoldAttribution,
   hasHoldReason,
+  holdFreeTextWithheld,
   holdIsUnexplained,
   holdReasonLabel,
   holdSeverityLabel,
@@ -37,10 +38,13 @@ interface KioskHeldCardProps {
  *   div that clocks you in), this is inert markup with exactly one interactive
  *   element: RESUME. A held job must not be startable — the operator has to
  *   lift the hold first, which is also what the server enforces.
- * - **The reason is shown before the verb, not after.** Category, severity, the
- *   operator's note verbatim, and who placed it when. Without that, Resume is a
- *   control that silently clears somebody else's genuine quality stop; with it,
- *   an operator can tell their own mis-tap from a real one.
+ * - **The reason is shown before the verb, not after.** Category, severity, who
+ *   placed it when, and — on an identified session — the operator's note
+ *   verbatim. Without that, Resume is a control that silently clears somebody
+ *   else's genuine quality stop; with it, an operator can tell their own mis-tap
+ *   from a real one. On a CREW STATION the server withholds the free text (a
+ *   shared, unattended tablet is a public screen), so the card says a note
+ *   exists instead of showing it — see `holdFreeTextWithheld`.
  * - **Reason and attribution render INDEPENDENTLY.** A bare hold (no note,
  *   category OTHER — the accidental case) files no blocker at all, so it has no
  *   reason text but usually still names who pressed it. Gating the attribution
@@ -66,6 +70,7 @@ export default function KioskHeldCard({
   const attribution = formatHoldAttribution(hold);
   const reasonKnown = hasHoldReason(hold);
   const unexplained = holdIsUnexplained(hold);
+  const noteWithheld = holdFreeTextWithheld(hold);
   const crew = size === 'crew';
 
   const done = Number(item.quantity_complete || 0);
@@ -137,6 +142,18 @@ export default function KioskHeldCard({
             {note && (
               <p data-testid="kiosk-held-note" className={`mt-1 text-fd-body ${crew ? 'text-lg' : 'text-[13px]'}`}>
                 {note}
+              </p>
+            )}
+            {/* A note was written but this screen is shared and unattended, so
+                the server did not send it. Saying so is the point: silence here
+                would read as "no reason given" and invite a Resume over
+                somebody's real stop. */}
+            {noteWithheld && (
+              <p
+                data-testid="kiosk-held-note-withheld"
+                className={`mt-1 text-fd-mute ${crew ? 'text-lg' : 'text-[13px]'}`}
+              >
+                A written note was recorded — not shown on a shared station. Ask a supervisor before resuming.
               </p>
             )}
           </>

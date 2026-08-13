@@ -14,7 +14,13 @@ import React from 'react';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import KioskResumeConfirmModal from './KioskResumeConfirmModal';
-import { BARE_HOLD, HELD_ROW, UNRECORDED_HOLD, heldRowWith } from './heldOperationFixtures';
+import {
+  BARE_HOLD,
+  HELD_ROW,
+  HOLD_WITH_BLOCKER_STATION,
+  UNRECORDED_HOLD,
+  heldRowWith,
+} from './heldOperationFixtures';
 
 
 function renderModal(overrides: Partial<React.ComponentProps<typeof KioskResumeConfirmModal>> = {}) {
@@ -53,6 +59,21 @@ describe('KioskResumeConfirmModal', () => {
     expect(warning).toHaveTextContent('Held by Dana R.');
     // The consequence, in floor language: it lands on someone's list.
     expect(warning).toHaveTextContent(/supervisor/i);
+  });
+
+  it('withholds the note at the decision point too, and says one was recorded', () => {
+    // The crew station reaches this modal BEFORE the badge scan, on a shared,
+    // unattended tablet — so the server never sent the text and the modal must
+    // not imply the hold was reasonless.
+    renderModal({ item: heldRowWith(HOLD_WITH_BLOCKER_STATION) });
+
+    const warning = screen.getByTestId('kiosk-resume-blocker-warning');
+    expect(warning).not.toHaveTextContent('Z-axis alarm 4012');
+    expect(warning).not.toHaveTextContent('Machine Down: Deburr');
+    expect(screen.getByTestId('kiosk-resume-note-withheld')).toHaveTextContent(/written note was recorded/i);
+    // Still enough to tell a deliberate hold from a mis-tap.
+    expect(warning).toHaveTextContent('Machine down');
+    expect(warning).toHaveTextContent('Held by Dana R.');
   });
 
   it('tells a BARE-hold operator that nothing is left open, and does NOT send them to a supervisor', () => {

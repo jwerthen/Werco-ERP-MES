@@ -18,12 +18,19 @@ a held operation takes no ``run_order`` and cannot shift the gap-free RUN chip
 numbers of the jobs around it. Widening the queue constant instead of adding
 this list is the change these assertions exist to fail.
 
+DISCLOSURE -- and an unattended tablet is not an identified caller. The blocker's
+free text (``note`` / ``title``) is NOT SENT to a station principal; category,
+severity and the attribution are. A user session gets everything. The rule is
+``wallboard_service``'s, applied to the same class of screen.
+
 Plus the two traps: a CANCELLED nest (soft-deleted, whose operation is parked in
 ON_HOLD as a tombstone because ``OperationStatus`` has no operation-level
-CANCELLED) must NOT be offered back to the floor as resumable work, and the whole
+CANCELLED) must NOT be offered back to the floor as resumable work -- pinned on
+the READ here and on the WRITE in ``test_kiosk_resume_fence.py`` -- and the whole
 read stays tenant-scoped to the station's own company.
 """
 
+import json
 from datetime import datetime, timedelta
 
 import pytest
@@ -283,12 +290,118 @@ def test_hold_reason_comes_from_the_open_blocker(client: TestClient, db_session:
     assert hold["blocker"]["category"] == WorkOrderBlockerCategory.MATERIAL_MISSING.value
     assert hold["blocker"]["severity"] == WorkOrderBlockerSeverity.HIGH.value
     assert hold["blocker"]["status"] == WorkOrderBlockerStatus.OPEN.value
-    assert hold["blocker"]["note"] == "Wrong sheet on the rack"
     assert hold["blocker"]["reported_by_name"] == "Dana R."
     # Blocker path emits no operation_hold event, so who/when come from it.
     assert hold["held_by_user_id"] == reporter.id
     assert hold["held_by_name"] == "Dana R."
     assert hold["held_at"] is not None and hold["held_at"].endswith("Z")
+
+
+# ---------------------------------------------------------------------------
+# DISCLOSURE: the blocker's FREE TEXT does not reach an unattended station.
+# ---------------------------------------------------------------------------
+
+
+def test_station_never_receives_the_blockers_free_text(client: TestClient, db_session: Session):
+    """A crew station is a public screen, so `note`/`title` are NOT SENT to it.
+
+    A station token authenticates a 10-15s poll on a PIN-unlocked tablet that has
+    no operator identity and no idle logout -- anything the board renders is
+    readable by whoever walks past. ``wallboard_service`` already wrote the rule
+    for that audience ("no customer names, no ship-to addresses, no dollar
+    figures, no NCR titles/descriptions"), and its own blocked-work rail holds
+    ``title`` and ``note`` and emits only wo_number / category / age_hours.
+
+    The keys are ABSENT, not blanked: a render-side gate would still put the text
+    on the device, where a devtools console or a proxy reads it.
+    """
+    wc = make_work_center(db_session, company_id=COMPANY_A)
+    station = make_kiosk_station(db_session, company_id=COMPANY_A, work_center=wc)
+    reporter = make_user(db_session, company_id=COMPANY_A, first_name="Dana", last_name="Ruiz")
+    _, held_op = make_wo_with_operation(db_session, work_center=wc, op_status=OperationStatus.ON_HOLD)
+    _blocker(db_session, operation=held_op, reported_by=reporter.id, note="Wrong sheet on the rack")
+
+    body = client.get(queue_url(wc.id), headers=bearer(kiosk_token_for(station))).json()
+    blocker_payload = body["held"][0]["hold"]["blocker"]
+
+    assert "note" not in blocker_payload
+    assert "title" not in blocker_payload
+    # Belt and braces: the strings must not survive anywhere else on the payload.
+    serialized = json.dumps(body)
+    assert "Wrong sheet on the rack" not in serialized
+    assert "Material Missing: nest 3" not in serialized
+    # The policy is stated, and the EXISTENCE of a note is a boolean -- so the
+    # card can say "a note was recorded" instead of implying none was given.
+    assert blocker_payload["free_text_withheld"] is True
+    assert blocker_payload["has_note"] is True
+
+
+def test_station_still_gets_category_severity_and_attribution(client: TestClient, db_session: Session):
+    """What is withheld is the free text, NOT the ability to read the hold.
+
+    Category + severity + who/when is what separates a deliberate, categorized
+    stop from a mis-tap, which is the entire job of the held card. The motivating
+    accident is a BARE hold carrying no note at all, so the feature loses nothing.
+    """
+    wc = make_work_center(db_session, company_id=COMPANY_A)
+    station = make_kiosk_station(db_session, company_id=COMPANY_A, work_center=wc)
+    reporter = make_user(db_session, company_id=COMPANY_A, first_name="Dana", last_name="Ruiz")
+    _, held_op = make_wo_with_operation(db_session, work_center=wc, op_status=OperationStatus.ON_HOLD)
+    _blocker(db_session, operation=held_op, reported_by=reporter.id)
+
+    blocker_payload = client.get(queue_url(wc.id), headers=bearer(kiosk_token_for(station))).json()["held"][0]["hold"][
+        "blocker"
+    ]
+
+    assert blocker_payload["category"] == WorkOrderBlockerCategory.MATERIAL_MISSING.value
+    assert blocker_payload["severity"] == WorkOrderBlockerSeverity.HIGH.value
+    assert blocker_payload["status"] == WorkOrderBlockerStatus.OPEN.value
+    assert blocker_payload["reported_by_name"] == "Dana R."
+    assert blocker_payload["reported_at"] is not None
+
+
+def test_station_reports_no_free_text_when_the_blocker_has_none(client: TestClient, db_session: Session):
+    """``has_note`` describes the RECORD, not the policy.
+
+    Announcing a note that does not exist would send an operator chasing a
+    supervisor over a categorized hold nobody wrote anything on. It keys on the
+    NOTE alone because ``work_order_blockers.title`` is ``nullable=False`` and
+    ``_blocker_default_title`` always composes one -- a title-inclusive flag
+    would be constant-true and carry no information.
+    """
+    wc = make_work_center(db_session, company_id=COMPANY_A)
+    station = make_kiosk_station(db_session, company_id=COMPANY_A, work_center=wc)
+    reporter = make_user(db_session, company_id=COMPANY_A)
+    _, held_op = make_wo_with_operation(db_session, work_center=wc, op_status=OperationStatus.ON_HOLD)
+    _blocker(db_session, operation=held_op, reported_by=reporter.id, note="")
+
+    blocker_payload = client.get(queue_url(wc.id), headers=bearer(kiosk_token_for(station))).json()["held"][0]["hold"][
+        "blocker"
+    ]
+
+    assert blocker_payload["has_note"] is False
+    assert blocker_payload["free_text_withheld"] is True
+
+
+def test_identified_user_session_keeps_the_full_blocker_text(client: TestClient, db_session: Session):
+    """The single-operator kiosk and the desktop run on a REAL user session.
+
+    An identified caller is not an unattended screen, so nothing is withheld --
+    the split is by audience, not a blanket redaction that would leave the note
+    unreadable everywhere.
+    """
+    wc = make_work_center(db_session, company_id=COMPANY_A)
+    operator = make_user(db_session, company_id=COMPANY_A)
+    reporter = make_user(db_session, company_id=COMPANY_A, first_name="Dana", last_name="Ruiz")
+    _, held_op = make_wo_with_operation(db_session, work_center=wc, op_status=OperationStatus.ON_HOLD)
+    _blocker(db_session, operation=held_op, reported_by=reporter.id, note="Wrong sheet on the rack")
+
+    blocker_payload = client.get(queue_url(wc.id), headers=user_headers(operator)).json()["held"][0]["hold"]["blocker"]
+
+    assert blocker_payload["note"] == "Wrong sheet on the rack"
+    assert blocker_payload["title"] == "Material Missing: nest 3"
+    assert blocker_payload["free_text_withheld"] is False
+    assert blocker_payload["has_note"] is True
 
 
 def test_bare_hold_reports_who_and_when_from_the_operation_hold_event(client: TestClient, db_session: Session):

@@ -2805,7 +2805,7 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 | POST | `/shop-floor/operations/{id}/reduce-production` | Correct (walk back) good-count an operator OVER-reported on their **own unapproved** labor (open clock-in first, then their own earlier unapproved sessions), **before** the operation/WO is complete — a miscount fix, **not** scrap (see note + schema below) | Yes |
 | POST | `/shop-floor/operations/{id}/complete` | Complete / report progress on an operation | Yes |
 | PUT | `/shop-floor/operations/{id}/hold` | Put an operation on hold (closes open time entries; body optional — category/severity/note file a structured blocker) | Yes |
-| PUT | `/shop-floor/operations/{id}/resume` | Take an operation **off** hold — back to `IN_PROGRESS` if it ever started, else `READY`. **400** if it is not `ON_HOLD`; cross-tenant id → **404**. Deliberately does **not** resolve the blocker that caused the hold (that stays with the blocker resolve/dismiss flow); the response carries `open_blockers` so the caller can warn (BLK-4). Audited `RESUME_OPERATION`. Reachable by a badge-minted kiosk token — see "Held work" below | Yes |
+| PUT | `/shop-floor/operations/{id}/resume` | Take an operation **off** hold. **Restores, never promotes**: `IN_PROGRESS` if it ever started, else `PENDING` — lifted to `READY` only where the shared promotion rule would grant it (parent WO released and non-terminal, no incomplete cross-work-center predecessor), so `pending` is a normal success status. **409** if the operation backs a **cancelled (soft-deleted) laser nest** — that is a tombstone, not a hold; **400** if it is not `ON_HOLD`; cross-tenant id → **404**. Deliberately does **not** resolve the blocker that caused the hold (that stays with the blocker resolve/dismiss flow); the response carries `open_blockers` so the caller can warn (BLK-4). Audited **`STATUS_CHANGE`** (old→new status; `extra_data.transition = "resume_operation"`). Reachable by a badge-minted kiosk token — see "Held work" below | Yes |
 | POST | `/shop-floor/operations/{id}/inspection` | Record operation inspection complete (sets `inspection_complete`) | Admin / Manager / Supervisor / Quality |
 | POST | `/shop-floor/time-entries/{id}/approve` | Approve a TimeEntry (sets `approved` / `approved_by`) | Admin / Manager / Supervisor / Quality |
 | POST | `/shop-floor/time-entries/{id}/unapprove` | Clear approval on a TimeEntry | Admin / Manager / Supervisor / Quality |
@@ -3139,7 +3139,10 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > what drops the row off the queue. Those operations are **excluded** from `held` — they are deleted
 > work, not held work, and offering Resume on one would let the floor resurrect a cancelled nest to
 > `READY`. The exclusion is a tenant-scoped correlated `NOT EXISTS` on a soft-deleted `LaserNest`; a
-> **live** nest on a genuinely held operation is untouched and still surfaces.
+> **live** nest on a genuinely held operation is untouched and still surfaces. The predicate is
+> `dispatch_service.cancelled_nest_exists`, shared with `PUT …/resume` (409) and
+> `GET /shop-floor/operations` — the guard is on the **write**, not only on this read, so no caller
+> can reach the tombstone by a different door.
 >
 > **Hold provenance is reconstructed, never inferred** (`services/operation_hold_view.py`). There is
 > no `held_by` / `held_at` column on `work_order_operations`, so who/when is assembled from the two
@@ -3169,15 +3172,53 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > **Resume is the existing endpoint, not a new one** — `PUT /shop-floor/operations/{id}/resume` (see
 > the table above). A badge-minted `scope="kiosk"` operator token already reaches it, so an
 > **Operator** can resume from the crew terminal that placed the hold; the fence reasoning is under
-> Authentication → Path fence. Resuming still audits (`RESUME_OPERATION`) and still returns
-> `open_blockers` — it deliberately does **not** resolve the blocker, so operation status and blocker
-> status diverge on purpose and the caller is told (BLK-4, warn-and-record).
+> Authentication → Path fence. Resuming audits as a **`STATUS_CHANGE`** (old→new status, with
+> `extra_data.transition = "resume_operation"` carrying the verb the generic action no longer names)
+> and still returns `open_blockers` — it deliberately does **not** resolve the blocker, so operation
+> status and blocker status diverge on purpose and the caller is told (BLK-4, warn-and-record).
 >
-> **Disclosure (`held`).** A station principal is an unattended, PIN-unlocked terminal, and the
-> `hold` block adds an operator **name** and the blocker's free-text **note** to what it can read.
-> Both describe work at *that station's own* work center — the same tier of disclosure the job card
-> and `roster` on this payload already carry — but it is a genuine, if small, widening, recorded in
-> the same sense as the material-tie note below.
+> Two refusals guard it, both on the **write**, so every caller inherits them — the desktop
+> `ShopFloorSimple` page and both kiosks. A **cancelled (soft-deleted) laser nest**'s operation is
+> parked in `ON_HOLD` as a tombstone (`OperationStatus` has no operation-level CANCELLED), and
+> resuming one would undo a soft delete from the front end: **409**. And resume **restores, never
+> promotes** — it floors at `PENDING` and delegates the lift to the shared promotion rule, so a hold
+> placed on a `PENDING` operation, or on one whose work order is still `DRAFT`, comes back `PENDING`
+> and stays off the board. Release is the authorization step; a resume does not get to perform one.
+> `GET /shop-floor/operations` applies the same cancelled-nest exclusion, since that list is where
+> the desktop Resume button is offered.
+>
+> **Disclosure (`held`).** A station principal is an unattended, PIN-unlocked terminal with **no
+> operator identity and no idle logout**, so whatever the board renders is readable by anyone walking
+> past it. The `hold` block therefore splits by audience:
+>
+> | field | station token | user session |
+> |---|---|---|
+> | `category`, `severity`, `status`, `reported_at`, `reported_by_*` | sent | sent |
+> | `held_at`, `held_by_user_id`, `held_by_name` | sent | sent |
+> | `has_note` (boolean), `free_text_withheld` (boolean) | sent | sent |
+> | `title`, `note` (**free text**) | **keys absent** | sent |
+>
+> That split is the rule this system already wrote for unattended shop screens, applied to the same
+> class of screen: `wallboard_service`'s module docstring says *no customer names, no ship-to
+> addresses, no dollar figures, **no NCR titles/descriptions***, and the wallboard's own blocked-work
+> rail holds `title` and `note` in hand and emits only `wo_number` / `category` / `age_hours`. A
+> `held` row that carried the note would disclose to that audience exactly what the wallboard
+> withholds. `title` travels with `note` because it is equally unconstrained — `POST
+> /work-order-blockers` takes a caller-supplied `title`, and `_blocker_default_title` is only the
+> fallback for a kiosk-placed hold.
+>
+> The keys are **absent, not blanked**: a render-side gate would still put the text on the tablet,
+> where a devtools console or a proxy reads it. `has_note` is a boolean (keyed on `note` alone —
+> `work_order_blockers.title` is `nullable=False`, so a title-inclusive flag would be constant-true)
+> so the card can say *"a written note was recorded — not shown on a shared station"* rather than
+> letting silence read as "no reason given" and invite a Resume over somebody's real quality stop.
+>
+> The feature loses nothing: the motivating accident is a **bare** hold with no note at all, and a
+> deliberate categorized hold is still identifiable from category + severity + who placed it. The
+> single-operator kiosk runs on the operator's **own session**, so it is an identified caller and
+> keeps the full block. The operator **name** (first initial form, e.g. "Jon W.", as `roster` on this
+> payload already carries) and the material-tie fields stay a genuine, if small, widening of the
+> station's disclosure surface, recorded in the same sense as the material-tie note below.
 
 > **Kiosk telemetry / routing payload additions (Foundry redesign, 2026-07-23).** Read-only field
 > additions feeding the redesigned kiosk's top bar, telemetry tiles, and complete modal — old

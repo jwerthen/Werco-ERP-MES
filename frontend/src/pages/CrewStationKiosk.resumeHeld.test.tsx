@@ -120,8 +120,26 @@ describe('CrewStationKiosk — held operations', () => {
 
     const held = await screen.findByTestId('kiosk-held-card');
     expect(held).toHaveTextContent('Machine down');
-    expect(within(held).getByTestId('kiosk-held-note')).toHaveTextContent('Z-axis alarm 4012');
     expect(within(held).getByTestId('kiosk-held-attribution')).toHaveTextContent('Held by Dana R.');
+  });
+
+  it('never renders the blocker free text on the shared board, and says a note exists', async () => {
+    // A crew station is an unattended, PIN-unlocked tablet with no operator
+    // identity and no idle logout, so the server withholds `note`/`title` from
+    // it — the same rule the wallboard applies to NCR titles and descriptions.
+    // Silence would read as "no reason given" and invite a Resume over somebody
+    // else's real stop, so the card states that a note exists instead.
+    mocked.getQueue.mockResolvedValue(queuePayload([], [CREW_HELD_ROW]));
+    renderKiosk();
+
+    const held = await screen.findByTestId('kiosk-held-card');
+    expect(within(held).queryByTestId('kiosk-held-note')).not.toBeInTheDocument();
+    expect(held).not.toHaveTextContent('Z-axis alarm 4012');
+    expect(within(held).getByTestId('kiosk-held-note-withheld')).toHaveTextContent(/written note was recorded/i);
+    // Category, severity and attribution DO stay — they are what tells a
+    // deliberate categorized hold from a mis-tap.
+    expect(held).toHaveTextContent('Machine down');
+    expect(within(held).getByTestId('kiosk-held-severity')).toBeInTheDocument();
   });
 
   it('names who stopped a BARE hold — the accidental case, which files no blocker', async () => {
@@ -212,6 +230,27 @@ describe('CrewStationKiosk — held operations', () => {
 
     expect(await screen.findByText('Machine Down: OP20 Deburr')).toBeInTheDocument();
     expect(screen.getByTestId('kiosk-blocker-open-done')).toHaveTextContent('Back to board');
+  });
+
+  it('does not claim "resumed" when the lift landed back on PENDING', async () => {
+    // Resume restores, it never releases: a hold placed on a PENDING operation
+    // comes back PENDING and the job does NOT rejoin the queue. A green
+    // "WO-HELD-0001 resumed" would send the operator hunting a card that is
+    // never going to appear.
+    mocked.getQueue.mockResolvedValue(queuePayload([], []));
+    mocked.resumeOperation.mockResolvedValue({
+      message: 'Operation resumed',
+      status: 'pending',
+      open_blockers: [],
+    });
+    mocked.getQueue.mockResolvedValueOnce(queuePayload([], [CREW_HELD_ROW]));
+    renderKiosk();
+
+    await resumeWithBadge();
+
+    const toast = await screen.findByText(/hold lifted/i);
+    expect(toast).toBeInTheDocument();
+    expect(screen.queryByText('WO-HELD-0001 resumed')).not.toBeInTheDocument();
   });
 
   it('renders a server refusal VERBATIM and inline on the sign screen', async () => {

@@ -1,7 +1,7 @@
 import React from 'react';
 import KioskModal, { KioskModalClose } from './KioskModal';
 import { KioskQueueItem } from './kioskConstants';
-import { formatHoldAttribution, hasHoldReason, holdReasonLabel } from './heldOperations';
+import { formatHoldAttribution, hasHoldReason, holdFreeTextWithheld, holdReasonLabel } from './heldOperations';
 
 interface KioskResumeConfirmModalProps {
   item: KioskQueueItem;
@@ -53,6 +53,7 @@ export default function KioskResumeConfirmModal({
   const note = (blocker?.note || '').trim();
   const attribution = formatHoldAttribution(hold);
   const reasonKnown = hasHoldReason(hold);
+  const noteWithheld = holdFreeTextWithheld(hold);
   // A bare hold carries an attribution but no blocker, and that still earns the
   // warning panel: WHO stopped this job is exactly what separates a mis-tap from
   // a real stop somebody else placed.
@@ -104,6 +105,13 @@ export default function KioskResumeConfirmModal({
             </p>
             {reason && <p className="mt-1.5 text-lg font-semibold text-fd-ink">{reason}</p>}
             {note && <p className="mt-1 text-base text-fd-body">{note}</p>}
+            {/* Crew station: the note exists but a shared, unattended screen does
+                not receive it. Say so at the decision point, not just on the card. */}
+            {noteWithheld && (
+              <p data-testid="kiosk-resume-note-withheld" className="mt-1 text-base text-fd-mute">
+                A written note was recorded — not shown on a shared station. Ask a supervisor before resuming.
+              </p>
+            )}
             {attribution && <p className="mt-1 font-mono text-sm text-fd-mute">{attribution}</p>}
             {reasonKnown ? (
               <>

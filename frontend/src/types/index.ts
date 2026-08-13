@@ -1417,19 +1417,35 @@ export interface KioskMaterialTie {
  * warning returned AFTER describe the same rows.
  *
  * `reported_at` is UTC ISO — render via utils/centralTime.
+ *
+ * **`title` and `note` are ABSENT on a crew-station response.** They are the only
+ * unconstrained human-authored strings here, and a crew station is an unattended,
+ * PIN-unlocked tablet with no operator identity and no idle logout — the same
+ * audience the wallboard already withholds NCR titles and descriptions from. The
+ * server does not send them (the keys are missing, not blanked, so a devtools
+ * console on the tablet has nothing to read), and sets `free_text_withheld`. An
+ * identified user session — the single-operator kiosk, the desktop — gets both.
+ *
+ * So render the note defensively: `has_note` says whether one EXISTS, which
+ * is what lets a station say "a written reason was recorded" instead of implying
+ * none was given.
  */
 export interface OperationHoldBlocker {
   id: number;
-  /** `WorkOrderBlockerCategory` value, e.g. "machine_down". */
+  /** `WorkOrderBlockerCategory` value, e.g. "machine_down". Always sent. */
   category: string | null;
-  /** `WorkOrderBlockerSeverity` value: low | medium | high | critical. */
+  /** `WorkOrderBlockerSeverity` value: low | medium | high | critical. Always sent. */
   severity: string | null;
   /** open | acknowledged — the only two that reach here. */
   status: string | null;
-  /** Server-composed, e.g. "Machine Down: OP20 Deburr". */
-  title: string | null;
-  /** The operator's free-text note, verbatim. */
-  note: string | null;
+  /** Free text. Caller-supplied via the blocker API; server-composed only for a kiosk hold. Absent on a station. */
+  title?: string | null;
+  /** The operator's free-text note, verbatim. Absent on a station. */
+  note?: string | null;
+  /** Whether a `title`/`note` exists at all — a boolean, never the text. */
+  has_note?: boolean;
+  /** True when this response deliberately omitted `title`/`note` (station audience). */
+  free_text_withheld?: boolean;
   reported_at: string | null;
   reported_by_user_id: number | null;
   reported_by_name: string | null;
@@ -1490,7 +1506,16 @@ export interface ResumeOpenBlocker {
 /** `PUT /shop-floor/operations/{id}/resume` response. */
 export interface ResumeOperationResult {
   message?: string;
-  /** The operation's status AFTER the lift: "in_progress" or "ready". */
+  /**
+   * The operation's status AFTER the lift: "in_progress", "ready" — or **"pending"**.
+   *
+   * Resume RESTORES, it does not release. An operation with no labor evidence is
+   * floored at PENDING and only lifted to READY by the server's own promotion
+   * rule, so a hold placed on a PENDING op (or on one whose parent is still
+   * DRAFT, or whose predecessor is incomplete) resumes to PENDING and stays off
+   * the board. Treat "pending" as a success that did NOT put the job back in the
+   * queue, and say so — a `warning` toast, not `success`.
+   */
   status?: string;
   /** Always sent by the server; `[]` when the hold left nothing open. */
   open_blockers?: ResumeOpenBlocker[] | null;
