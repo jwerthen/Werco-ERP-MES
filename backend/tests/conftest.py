@@ -6,6 +6,7 @@ from typing import Generator
 import pytest
 from faker import Faker
 from fastapi.testclient import TestClient
+from passlib.context import CryptContext
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -23,6 +24,7 @@ os.environ["REFRESH_TOKEN_SECRET_KEY"] = "test-refresh-secret-key-abcdefghijklmn
 os.environ["ENVIRONMENT"] = "test"
 os.environ["SENTRY_DSN"] = ""
 
+import app.core.security as _security
 from app.core.security import create_access_token, get_password_hash
 from app.db.database import Base, get_db
 from app.main import app
@@ -81,6 +83,27 @@ def _seed_random_fixture_data():
     random.seed(0)
     yield
 
+
+# TEST-ONLY bcrypt work factor. Must stay ABOVE the TEST_PASSWORD_HASH line below,
+# which is the suite's first hash.
+#
+# bcrypt is deliberately slow, and at the production cost factor (passlib's default,
+# rounds=12) one hash or verify measures ~208 ms on this hardware. That is correct in
+# production and pure waste in a test suite that re-hashes the same fixture password
+# and re-verifies it on every password-carrying endpoint.
+#
+# rounds=4 is bcrypt's documented minimum. It changes only HOW LONG the KDF takes --
+# not the algorithm, not the salt, not the ``$2b$`` format, not what
+# ``verify_password`` accepts -- so every hash/verify assertion in the suite means
+# exactly what it meant before.
+#
+# PRODUCTION IS NOT AFFECTED. ``app/core/security.py`` is untouched and still builds
+# its context with no rounds argument; this rebinds the module global only, inside
+# the test process. ``get_password_hash``/``verify_password`` resolve ``pwd_context``
+# at CALL time, and nothing imports the object itself by value (checked), so the
+# rebind reaches every caller. ``tests/test_bcrypt_cost_factor_is_test_only.py``
+# fails if anyone ever promotes this into the app package.
+_security.pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__rounds=4)
 
 # The shared fixture password, and its bcrypt hash for seeding user rows.
 #
