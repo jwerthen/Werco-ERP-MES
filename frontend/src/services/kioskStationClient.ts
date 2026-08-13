@@ -21,7 +21,7 @@
  *    the station token really is dead the next 10s queue poll 401s and locks.
  */
 
-import type { OperationDocumentsResponse } from '../types';
+import type { OperationDocumentsResponse, ResumeOperationResult } from '../types';
 import type {
   KioskBadgeTokenResponse,
   KioskClosedTimeEntry,
@@ -348,6 +348,28 @@ export async function holdOperation(
   data: { category: string; severity: string; note?: string; source: string }
 ): Promise<unknown> {
   return operatorFetch(operatorToken, 'PUT', `/shop-floor/operations/${operationId}/hold`, data);
+}
+
+/**
+ * PUT /shop-floor/operations/{id}/resume — the twin of holdOperation above, so
+ * a hold placed at this station can be lifted here too. Until this existed the
+ * crew station could stop a job but not restart it, and an accidental hold
+ * needed a desktop to undo.
+ *
+ * Takes no body. Operator (badge) token, like every other mutation here: the
+ * station token is honored only by the queue read + badge mint, so the
+ * badge-identified operator — never the station — is the audit actor. Refuses
+ * 400 "Operation is not on hold" as a KioskApiError carrying the detail
+ * verbatim, which is what a stale board racing a supervisor looks like.
+ *
+ * Returns the blockers the resume did NOT resolve; resume and blocker
+ * resolution are decoupled on purpose. Surface them, never swallow them.
+ */
+export async function resumeOperation(
+  operatorToken: string,
+  operationId: number
+): Promise<ResumeOperationResult> {
+  return operatorFetch(operatorToken, 'PUT', `/shop-floor/operations/${operationId}/resume`);
 }
 
 // ---------------------------------------------------------------------------

@@ -45,6 +45,21 @@ export interface KioskStationLoginResponse {
  */
 export interface KioskCrewQueueResponse {
   queue: KioskCrewQueueItem[];
+  /**
+   * ON_HOLD operations at this work center, on their OWN list (same endpoint and
+   * same row shape as the single-operator kiosk's `held`).
+   *
+   * Additive and separate BY DESIGN: `queue` stays byte-identical, so no client
+   * iterating it can render a held operation as a joinable job card by accident.
+   * **The list boundary is the safety property, not a flag inside the rows** —
+   * never merge these into `queue`. Most-recently-held first.
+   */
+  held?: KioskCrewQueueItem[];
+  /**
+   * True when the server's cap (`MAX_HELD_OPERATIONS`, 25) dropped older holds,
+   * so the board can say so rather than silently showing a subset.
+   */
+  held_truncated?: boolean;
   /** UTC ISO server clock at response time — anchor for honest elapsed timers. */
   server_time: string;
   station: KioskStationSummary;

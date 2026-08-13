@@ -76,6 +76,8 @@ tier, that tier stands — this rule is a floor, never a loosening.
 | Start operation (shop-floor verb) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Complete (office verb) | ✓ | ✓ | ✓ | | ✓ | | |
 | Complete (shop-floor verb) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Hold / resume operation (shop-floor verb) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Resolve / dismiss the blocker behind a hold | ✓ | ✓ | ✓ | | | | |
 | Approve labor (TimeEntry) | ✓ | ✓ | ✓ | | ✓ | | |
 | View material ties | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Tie / edit / untie material | ✓ | ✓ | ✓ | | | | |
@@ -131,6 +133,48 @@ tier, that tier stands — this rule is a floor, never a loosening.
 > (`ShopFloorSimple`) calls the shop-floor verb — so the gate closes an API-reachable hole rather than
 > hiding a button; wire any future office Start control to `work_orders:edit` so the hidden control
 > and the refused call agree. See `docs/API.md` → Work Orders.
+
+> **Hold / resume are operator-facing; resolving the blocker behind a hold is not.** Both rows above
+> are new to this matrix; **neither gate changed**. `PUT /api/v1/shop-floor/operations/{id}/hold` and
+> `PUT /api/v1/shop-floor/operations/{id}/resume` (`app/api/endpoints/shop_floor.py`) take a bare
+> `Depends(get_current_user)` — no role gate, matching the other operator write verbs (clock-in,
+> production, complete, reduce-production) — and are tenant-scoped (a cross-tenant id → **404**) and
+> audited (resume writes a **`STATUS_CHANGE`** row carrying old→new status,
+> `extra_data.transition = "resume_operation"`, and the ids of any blocker still open at resume). The
+> **blocker** verbs are a tier up, and on a different router: `PUT /api/v1/work-order-blockers/{id}`
+> (acknowledge / assign / dismiss) and `POST /api/v1/work-order-blockers/{id}/resolve`
+> (`app/api/endpoints/work_order_blockers.py`) are `require_role([ADMIN, MANAGER, SUPERVISOR])` — the
+> Work Orders **Edit** row. Being mounted outside `/api/v1/shop-floor` also puts them outside the
+> kiosk path fence, so a badge-minted crew-station token is **403** there whatever badge was scanned.
+>
+> **That asymmetry is the design, and it is why resume is safe to leave role-open.** Resuming moves
+> an *operation status*; resolving a blocker closes the *quality/material finding* that stopped the
+> job, and only the second is a supervisory judgement. So resume deliberately does **not** resolve
+> the blocker — it returns the still-open ones on the response (BLK-4, warn-and-record) so operation
+> status and blocker status can be seen to diverge rather than diverging silently.
+>
+> **What changed is reach, not authorization.** The crew-station queue read now surfaces the work
+> center's `ON_HOLD` operations (`docs/API.md` → Shop Floor → "Held work"), and resume sits inside
+> the kiosk path fence on none of its deny lists, so a **badge-scanned Operator can take a job off
+> hold from the shared terminal** instead of walking to a desk. The kiosk can already *place* a hold;
+> a control with no inverse on the same terminal was the defect. Any authenticated user could always
+> call resume — no role gained anything here either. See [docs/KIOSK.md](KIOSK.md) → Held work and
+> resume.
+>
+> **Reach is bounded by two write-side refusals, not by a role.** Because resume is role-open, the
+> limits on what it can do have to live in the endpoint: it **409**s on a cancelled (soft-deleted)
+> laser nest's tombstone operation (resuming one would undo a soft delete — invariant 3), and it
+> **restores rather than promotes**, flooring at `PENDING` and delegating any lift to `READY` to the
+> shared promotion rule. So a role-open verb still cannot perform the **release** that
+> `POST /work-orders/{id}/release` owns — a hold placed on a `PENDING` operation, or on one whose work
+> order is still `DRAFT`, resumes to `PENDING` and stays off the board.
+>
+> **A shared crew station is not an identified caller, and the held payload reflects that.** The
+> station token is a 24-hour shared-PIN credential on an unattended tablet with no idle logout, so
+> the blocker's free text (`note`, `title`) is **not sent** to it — only `category`, `severity`, the
+> attribution and two booleans. The same read over a **user session** returns the full block. This
+> mirrors the wallboard's standing rule for unattended shop screens (no NCR titles/descriptions);
+> see `docs/API.md` → Shop Floor → "Disclosure (`held`)".
 
 > **Release stays the authorization boundary even though a read can now promote operations.** READY
 > promotion runs from a third seam — the reconcile-on-read pass — so a work order released before the

@@ -874,6 +874,102 @@ class TestHeldPredecessorBlocksThePool:
         assert db_session.get(WorkOrderOperation, ops[1].id).status == OperationStatus.PENDING
 
 
+class TestHeldNestDoesNotBlockItsSiblings:
+    """The LASER mirror of the class above -- and the answer to a production question.
+
+    An operator held one nest of a live laser job by accident and it disappeared
+    from every shop-floor screen (ON_HOLD is not a queue status). The question
+    that mattered next was whether the REST of the package stalled with it: on a
+    conventional routing it would, because the hold carve-out in
+    ``has_incomplete_predecessors`` makes a held predecessor block its own work
+    center too.
+
+    It does NOT stall, and the reason is ordering:
+    ``operation_action_gates.operation_blocked_by_predecessors`` returns False
+    for a laser WO BEFORE ``has_incomplete_predecessors`` (and therefore the hold
+    carve-out) is ever reached, and ``promote_ready_operations`` takes the laser
+    branch before the predecessor filter. The exemption is strictly fuller than
+    the same-work-center allowance and must not be collapsed into it; these tests
+    pin the consequence so a future "simplification" of either branch shows up as
+    a failure here rather than as a stalled package on the floor.
+    """
+
+    def test_a_held_nest_does_not_block_its_siblings_from_promoting(self, db_session):
+        wc = make_laser_work_center(db_session)
+        wo, ops = make_laser_pool_wo(
+            db_session,
+            work_center=wc,
+            statuses=[OperationStatus.ON_HOLD, OperationStatus.PENDING, OperationStatus.PENDING],
+        )
+
+        promoted = release_next_ready_operation(db_session, wo, ops[0])
+        db_session.commit()
+
+        assert promoted is not None and promoted.id == ops[1].id
+        db_session.expire_all()
+        for op in ops[1:]:
+            assert db_session.get(WorkOrderOperation, op.id).status == OperationStatus.READY
+        # The held nest itself is untouched -- promotion never lifts a hold.
+        assert db_session.get(WorkOrderOperation, ops[0].id).status == OperationStatus.ON_HOLD
+
+    def test_a_held_nest_does_not_block_its_siblings_from_clocking_in(self, client, db_session):
+        """The floor keeps cutting the rest of the package while one nest is held."""
+        operator = make_user(db_session, role=UserRole.OPERATOR)
+        wc = make_laser_work_center(db_session)
+        wo, ops = make_laser_pool_wo(
+            db_session,
+            work_center=wc,
+            statuses=[OperationStatus.ON_HOLD, OperationStatus.READY],
+        )
+
+        resp = _clock_in(client, operator, wo_id=wo.id, op=ops[1])
+
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+
+    def test_a_held_nest_at_another_laser_does_not_block_either(self, db_session):
+        """A package spread across two lasers: still no stall.
+
+        The same-work-center allowance would not cover this case even without the
+        hold; the laser exemption is what does.
+        """
+        wo, ops = make_laser_pool_wo(
+            db_session,
+            work_center=make_laser_work_center(db_session),
+            statuses=[OperationStatus.ON_HOLD, OperationStatus.PENDING],
+        )
+        ops[1].work_center_id = make_laser_work_center(db_session).id
+        db_session.commit()
+
+        promoted = release_next_ready_operation(db_session, wo, ops[0])
+        db_session.commit()
+
+        assert promoted is not None and promoted.id == ops[1].id
+        db_session.expire_all()
+        assert db_session.get(WorkOrderOperation, ops[1].id).status == OperationStatus.READY
+
+    def test_the_held_nest_still_leaves_the_queue_while_its_siblings_stay_on_it(self, client, db_session):
+        """The whole shape of the incident, end to end.
+
+        The held nest drops off ``queue`` (and onto ``held``, so the operator can
+        find it again); the siblings stay queued and keep running.
+        """
+        operator = make_user(db_session, role=UserRole.OPERATOR)
+        wc = make_laser_work_center(db_session)
+        _, ops = make_laser_pool_wo(
+            db_session,
+            work_center=wc,
+            statuses=[OperationStatus.ON_HOLD, OperationStatus.READY, OperationStatus.READY],
+        )
+
+        body = client.get(
+            f"/api/v1/shop-floor/work-center-queue/{wc.id}",
+            headers=headers_for(operator),
+        ).json()
+
+        assert [row["operation_id"] for row in body["queue"]] == [ops[1].id, ops[2].id]
+        assert [row["operation_id"] for row in body["held"]] == [ops[0].id]
+
+
 # --------------------------------------------------------------------------- #
 # Promotion healing: PENDING nest ops all promote to READY
 # --------------------------------------------------------------------------- #

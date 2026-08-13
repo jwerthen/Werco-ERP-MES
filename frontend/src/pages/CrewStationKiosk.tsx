@@ -36,6 +36,9 @@ import { usePageTitle } from '../hooks/usePageTitle';
 import { useWakeLock } from '../hooks/useWakeLock';
 import KioskKeypad from '../components/kiosk/KioskKeypad';
 import KioskCrewJobCard from '../components/kiosk/KioskCrewJobCard';
+import KioskHeldCard from '../components/kiosk/KioskHeldCard';
+import KioskResumeConfirmModal from '../components/kiosk/KioskResumeConfirmModal';
+import KioskBlockerStillOpenScreen from '../components/kiosk/KioskBlockerStillOpenScreen';
 import KioskQuantityScreen from '../components/kiosk/KioskQuantityScreen';
 import KioskCorrectionScreen from '../components/kiosk/KioskCorrectionScreen';
 import KioskReasonGrid from '../components/kiosk/KioskReasonGrid';
@@ -55,12 +58,14 @@ import {
   formatStepsChip,
   kioskErrorMessage,
 } from '../components/kiosk/kioskConstants';
+import { resumeToast, stillOpenBlockers } from '../components/kiosk/heldOperations';
 import {
   clockedOutStepsMessage,
   extractClockOutStepsIncomplete,
   extractStepsIncomplete,
   stepsIncompleteMessage,
 } from '../utils/processSheetErrors';
+import type { ResumeOpenBlocker } from '../types';
 import type { KioskStationSummary } from '../types/kioskStation';
 import type { ScrapReasonCodeOption } from '../types/scrapReason';
 import type { MissingStepInfo, QualityHoldResult } from '../types/processSheet';
@@ -110,6 +115,15 @@ type CrewView =
   | { name: 'completeQty'; operationId: number }
   | { name: 'completeConfirm'; operationId: number; good: number; scrap: number; reason: string | null; reasonCodeId: number | null }
   | { name: 'hold'; operationId: number }
+  // RESUME — lifting a hold placed here (or anywhere). Two steps, matching the
+  // correctQty→correctSign shape: a short confirm modal that restates the job
+  // and warns the blocker stays open, then the badge signature that makes the
+  // resuming operator the audit actor (the station token cannot mutate).
+  | { name: 'resumeConfirm'; operationId: number }
+  | { name: 'resumeSign'; operationId: number }
+  // Resume landed but left blockers OPEN. NO operationId on purpose — same as
+  // ncrFiled: the ghost-guard must not yank this off the screen mid-read.
+  | { name: 'blockerStillOpen'; blockers: ResumeOpenBlocker[]; jobLabel: string }
   | { name: 'operatorSheet'; operator: OperatorSession; openJobs: OperatorOpenJob[] }
   // Process steps: a badge scan gates entry so every record is attributed to
   // the badge-identified operator (5-minute token; a 401 mid-flow re-scans).
@@ -184,6 +198,11 @@ export default function CrewStationKiosk() {
 
   // --- Live queue state ---------------------------------------------------------
   const [queue, setQueue] = useState<KioskCrewQueueItem[]>([]);
+  // Held work arrives on its OWN list — `queue` never contains an ON_HOLD row.
+  // The list boundary is the safety property, so these stay separate in state
+  // too: nothing that renders a joinable job card can reach them.
+  const [held, setHeld] = useState<KioskCrewQueueItem[]>([]);
+  const [heldTruncated, setHeldTruncated] = useState(false);
   // Lean Phase 1: ACTIVE scrap reason codes, delivered ON the queue payload
   // (the station/badge tokens cannot reach /quality/scrap-reason-codes — path
   // fence). [] -> the legacy SCRAP_REASONS fallback inside KioskQuantityScreen.
@@ -218,6 +237,8 @@ export default function CrewStationKiosk() {
     setHasToken(false);
     setStation(null);
     setQueue([]);
+    setHeld([]);
+    setHeldTruncated(false);
     setScrapCodes([]);
     setInitialLoadDone(false);
     setView({ name: 'board' });
@@ -239,6 +260,8 @@ export default function CrewStationKiosk() {
       const res = await kioskClient.getQueue(workCenterId);
       if (gen !== generationRef.current) return; // stale poll — a mutation superseded it
       setQueue(res.queue || []);
+      setHeld(res.held || []);
+      setHeldTruncated(Boolean(res.held_truncated));
       // Active scrap codes ride every poll (absent on a pre-Lean backend -> []
       // -> the legacy fallback grid, never a crash).
       setScrapCodes(Array.isArray(res.scrap_reason_codes) ? res.scrap_reason_codes : []);
@@ -297,15 +320,21 @@ export default function CrewStationKiosk() {
     onTimeout: resetToBoard,
   });
 
-  // If the operation a sub-view points at leaves the queue (completed/held from
-  // elsewhere), fall back to the board rather than acting on a ghost.
+  // If the operation a sub-view points at leaves BOTH lists (completed, or moved
+  // off this work center), fall back to the board rather than acting on a ghost.
+  // Held counts as present: the resume views legitimately point at a held row,
+  // and an operation moving queue<->held is a state change, not a disappearance.
   useEffect(() => {
     if (!initialLoadDone || busy) return;
     const opId = 'operationId' in view ? view.operationId : null;
-    if (opId != null && !queue.some((q) => q.operation_id === opId)) {
+    if (
+      opId != null &&
+      !queue.some((q) => q.operation_id === opId) &&
+      !held.some((q) => q.operation_id === opId)
+    ) {
       resetToBoard();
     }
-  }, [queue, view, busy, initialLoadDone, resetToBoard]);
+  }, [queue, held, view, busy, initialLoadDone, resetToBoard]);
 
   const mutationsBlocked = busy || !online;
 
@@ -335,10 +364,23 @@ export default function CrewStationKiosk() {
   }, [stationId, pin, pinSubmitting]);
 
   // --- Badge flows ----------------------------------------------------------------
+  /**
+   * Resolve a view's operation across BOTH lists.
+   *
+   * The resume views point at a HELD operation, which the server keeps off
+   * `queue` entirely. Searching only `queue` would leave every resume view
+   * itemless — and the ghost-guard below would bounce it straight to the board.
+   */
   const findItem = useCallback(
-    (operationId: number | null): KioskCrewQueueItem | null =>
-      operationId == null ? null : queue.find((q) => q.operation_id === operationId) || null,
-    [queue]
+    (operationId: number | null): KioskCrewQueueItem | null => {
+      if (operationId == null) return null;
+      return (
+        queue.find((q) => q.operation_id === operationId) ||
+        held.find((q) => q.operation_id === operationId) ||
+        null
+      );
+    },
+    [queue, held]
   );
 
   /** JOIN as the freshly badge-identified operator (informational elsewhere-check first). */
@@ -728,6 +770,53 @@ export default function CrewStationKiosk() {
     [view, findItem, holdReason, mutationsBlocked, showToast, bumpAndRefresh, resetToBoard]
   );
 
+  /**
+   * RESUME — badge signature lifts the hold.
+   *
+   * The badge is not ceremony: the station token is honored only by the queue
+   * read and the badge mint, so the resuming OPERATOR has to be the credential
+   * behind the mutation, and that is who the audit row names.
+   *
+   * Server-gated ⇒ non-optimistic. A refusal ("Operation is not on hold", i.e.
+   * a supervisor got there first) renders VERBATIM and inline on the sign
+   * screen — the crew station's badgeError pattern, because a toast alone
+   * proved unreadable on the floor.
+   *
+   * Success with still-open blockers hands off to a queue-INDEPENDENT view
+   * BEFORE refreshing, the same way the OOT hold hands off the NCR number:
+   * resume does not resolve the blocker, and the ghost-guard would otherwise
+   * bounce the warning back to the board on the next poll.
+   */
+  const handleResumeBadge = useCallback(
+    async (badgeId: string) => {
+      const item = view.name === 'resumeSign' ? findItem(view.operationId) : null;
+      if (!item || mutationsBlocked) return;
+      setBusy(true);
+      setBadgeError(null);
+      try {
+        const minted = await kioskClient.mintBadgeToken(badgeId);
+        const result = await kioskClient.resumeOperation(minted.access_token, item.operation_id);
+        const open = stillOpenBlockers(result);
+        if (open.length > 0) {
+          setView({ name: 'blockerStillOpen', blockers: open, jobLabel: crewJobLabel(item) });
+        } else {
+          // Not always "resumed": a hold lifted off a PENDING operation lands
+          // back on PENDING and the job does not rejoin the queue. resumeToast
+          // says which happened rather than claiming a card that will not appear.
+          const toast = resumeToast(result, item.work_order_number);
+          showToast(toast.type, toast.message);
+          resetToBoard();
+        }
+        await bumpAndRefresh();
+      } catch (err) {
+        setBadgeError(kioskErrorMessage(err, 'Could not resume. Try again.'));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [view, findItem, mutationsBlocked, showToast, bumpAndRefresh, resetToBoard]
+  );
+
   // --- Derived render state ---------------------------------------------------
   const stationLabel = useMemo(() => {
     if (station) {
@@ -738,6 +827,7 @@ export default function CrewStationKiosk() {
   }, [station, stationId]);
 
   const viewItem = 'operationId' in view ? findItem(view.operationId) : null;
+
 
   /**
    * What is left to record on an operation: its target less what is already
@@ -912,12 +1002,14 @@ export default function CrewStationKiosk() {
         />
       ) : (
       <main className="mx-auto w-full max-w-5xl flex-1 space-y-5 px-4 py-5">
-        {/* CREW BOARD */}
-        {view.name === 'board' && (
+        {/* CREW BOARD — kept mounted behind the resume confirm so the operator
+            can check the overlay against the held card they just tapped. */}
+        {(view.name === 'board' || view.name === 'resumeConfirm') && (
           <>
             <div className="flex flex-wrap items-center justify-between gap-3">
               <h2 className="font-mono text-sm font-bold uppercase tracking-[0.25em] text-fd-mute">
-                {station.work_center_name || station.work_center_code || 'Work center'} queue · {queue.length} job
+                {station.work_center_name || station.work_center_code || 'Work center'} queue ·{' '}
+                {queue.length} job
                 {queue.length === 1 ? '' : 's'}
               </h2>
               <button
@@ -956,6 +1048,42 @@ export default function CrewStationKiosk() {
                 ))}
               </div>
             )}
+
+            {/* ON HOLD — visible but NOT joinable. A held operation used to drop
+                off the board entirely, so a mis-tapped hold looked like the job
+                had vanished and only a desktop could put it back. */}
+            {initialLoadDone && held.length > 0 && (
+              <div data-testid="crew-held-section" className="space-y-3">
+                <h3 className="font-mono text-sm font-bold uppercase tracking-[0.25em] text-fd-amber">
+                  On hold · {held.length} job{held.length === 1 ? '' : 's'}
+                  <span className="ml-3 font-normal tracking-[0.1em] text-fd-faint">Resume before starting</span>
+                </h3>
+                {/* The server caps the held list; say so rather than showing a
+                    silent subset. */}
+                {heldTruncated && (
+                  <p
+                    data-testid="crew-held-truncated"
+                    className="rounded border border-fd-line bg-fd-sunken px-4 py-3 text-lg text-fd-mute"
+                  >
+                    Showing the most recent holds only — more are on hold at this station.
+                  </p>
+                )}
+                {held.map((item) => (
+                  <KioskHeldCard
+                    key={item.operation_id}
+                    item={item}
+                    size="crew"
+                    disabled={mutationsBlocked}
+                    offlineHintId={!online ? OFFLINE_HINT_ID : undefined}
+                    onResume={(it) => {
+                      setBadgeError(null);
+                      setView({ name: 'resumeConfirm', operationId: it.operation_id });
+                    }}
+                  />
+                ))}
+              </div>
+            )}
+
             <p className="text-center text-sm text-fd-faint">
               Tip: scan your badge from this screen at any time to see your jobs.
             </p>
@@ -1435,10 +1563,39 @@ export default function CrewStationKiosk() {
           />
         )}
 
+        {/* RESUME — badge signature lifts the hold (the station token cannot
+            mutate, so the badge is what names the actor on the audit row). */}
+        {view.name === 'resumeSign' && viewItem && (
+          <section aria-label="Resume job" className="mx-auto w-full max-w-2xl">
+            <h2 className="text-3xl font-bold text-fd-ink">Resume job</h2>
+            <p className="mt-1 font-mono text-lg text-fd-mute">{crewJobLabel(viewItem)}</p>
+            <BadgeScanPanel
+              busy={busy}
+              blocked={mutationsBlocked}
+              offlineHintId={!online ? OFFLINE_HINT_ID : undefined}
+              error={badgeError}
+              idPrefix="crew-resume"
+              prompt="Scan badge to resume — or type ID"
+              onBadge={(id) => void handleResumeBadge(id)}
+              onCancel={() => setView({ name: 'resumeConfirm', operationId: viewItem.operation_id })}
+            />
+          </section>
+        )}
+
         {/* NCR FILED — one-tap OOT hold confirmation; Done follows the HOLD exit (board) */}
         {view.name === 'ncrFiled' && (
           <KioskNcrFiledScreen
             result={view.result}
+            jobLabel={view.jobLabel}
+            doneLabel="Back to board"
+            onDone={resetToBoard}
+          />
+        )}
+
+        {/* RESUMED, HOLD STILL OPEN — resume does not resolve the blocker. */}
+        {view.name === 'blockerStillOpen' && (
+          <KioskBlockerStillOpenScreen
+            blockers={view.blockers}
             jobLabel={view.jobLabel}
             doneLabel="Back to board"
             onDone={resetToBoard}
@@ -1532,7 +1689,14 @@ export default function CrewStationKiosk() {
               <p className="mb-2 font-mono text-xs font-bold uppercase tracking-[0.25em] text-fd-mute">
                 Join a job at this station
               </p>
-              {queue.filter((q) => !(q.roster || []).some((r) => r.user_id === view.operator.user.id)).length === 0 ? (
+              {/* `queue` only — never `held`. A held operation is not joinable:
+                  the server refuses the clock-in, and offering it here would put
+                  back the "tap it and get a refusal" hole the ON HOLD section
+                  exists to close. Resume it from the board first. The server
+                  keeps held rows off `queue`, so this holds by construction —
+                  but the invariant is worth stating where it could be broken. */}
+              {queue.filter((q) => !(q.roster || []).some((r) => r.user_id === view.operator.user.id))
+                .length === 0 ? (
                 <p className="rounded border border-fd-line bg-fd-sunken px-4 py-3 text-lg text-fd-mute">
                   No other jobs to join here.
                 </p>
@@ -1613,6 +1777,27 @@ export default function CrewStationKiosk() {
             setView({ name: 'job', operationId: viewItem.operation_id });
           }}
           onBadge={(id) => void handleCompleteBadge(id)}
+        />
+      )}
+
+      {/* RESUME confirm — restates the job and warns the hold stays recorded,
+          then hands off to the badge signature (the station token cannot
+          mutate). Two steps rather than a badge-in-modal like COMPLETE above:
+          a keypad inside the overlay pushes its own bottom row under the fold
+          at 768x1024, and the full-screen BadgeScanPanel is already sized for
+          both tablet orientations. */}
+      {view.name === 'resumeConfirm' && viewItem && (
+        <KioskResumeConfirmModal
+          item={viewItem}
+          busy={busy}
+          online={online}
+          offlineHintId={OFFLINE_HINT_ID}
+          confirmLabel="Continue — scan badge"
+          onCancel={resetToBoard}
+          onConfirm={() => {
+            setBadgeError(null);
+            setView({ name: 'resumeSign', operationId: viewItem.operation_id });
+          }}
         />
       )}
     </div>

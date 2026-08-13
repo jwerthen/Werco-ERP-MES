@@ -23,7 +23,19 @@ def _enum_value(value) -> str:
     return value.value if hasattr(value, "value") else str(value)
 
 
-def _blocker_default_title(category: str, work_order: WorkOrder, operation: Optional[WorkOrderOperation]) -> str:
+def blocker_default_title(category: str, work_order: WorkOrder, operation: Optional[WorkOrderOperation]) -> str:
+    """The title this service composes when the caller supplies none.
+
+    PUBLIC on purpose. ``work_order_blockers.title`` is ``nullable=False`` but
+    caller-settable free text (``WorkOrderBlockerCreate.title``, an optional
+    255-char string), so "did a human write this title, or did the server compose
+    it?" cannot be answered from the column alone -- and the kiosk's free-text
+    disclosure gate (``shop_floor._blocker_free_text_recorded``) has to answer
+    exactly that before it can say whether a written reason EXISTS. Re-deriving
+    this format at that call site would let the two drift, and the drift would be
+    silent: the flag would simply start lying about whether somebody wrote
+    something.
+    """
     label = category.replace("_", " ").title()
     target = operation.name if operation else work_order.work_order_number
     return f"{label}: {target}"
@@ -124,7 +136,7 @@ class WorkOrderBlockerService:
             category=category,
             severity=severity,
             status=WorkOrderBlockerStatus.OPEN.value,
-            title=data.title or _blocker_default_title(category, work_order, operation),
+            title=data.title or blocker_default_title(category, work_order, operation),
             note=redact_event_payload(data.note),
             reported_by=user.id,
             assigned_to=data.assigned_to,

@@ -285,17 +285,19 @@ def promote_ready_operations(
     db: Optional[Session] = None,
     user_id: Optional[int] = None,
 ) -> list[WorkOrderOperation]:
-    """THE PENDING -> READY promotion. One implementation; three seams call it.
+    """THE PENDING -> READY promotion. One implementation; four seams call it.
 
     Flips every startable PENDING operation of ``work_order`` to READY and returns
     them in ascending sequence order (empty list when nothing was startable). The
-    three seams that promote -- WO release (``release_first_ready_operation``),
-    operation completion (``release_next_ready_operation``) and the read-path heal
+    four seams that promote -- WO release (``release_first_ready_operation``),
+    operation completion (``release_next_ready_operation``), the read-path heal
     (``_promote_stranded_ready_operations``, from
-    ``reconcile_work_orders_from_completion_evidence``) -- differ ONLY in how they
-    obtain ``operations``; the rule itself lives here exactly once. Three copies of
-    this rule is how the office and floor gates drifted apart in the first place, so
-    resist re-inlining it.
+    ``reconcile_work_orders_from_completion_evidence``) and the kiosk/desktop
+    resume (``shop_floor.resume_operation``, which floors at PENDING and delegates
+    the lift here precisely so a resume can never perform a release) -- differ ONLY
+    in how they obtain ``operations``; the rule itself lives here exactly once.
+    Four copies of this rule is how the office and floor gates drifted apart in the
+    first place, so resist re-inlining it.
 
     "Startable" is ``operation_blocked_by_incomplete_predecessors`` -- the SAME rule
     clock-in enforces, in which operations sharing a work center do not block each other
@@ -331,7 +333,16 @@ def promote_ready_operations(
     ready -> actual_start. ``db`` stays optional so this remains usable as a pure
     in-memory rule (existing call sites/tests without a session keep working); the emit
     helper lives in ``completion_signal_service`` (the side-effects module) and is
-    imported locally, once per call, to preserve that layering.
+    imported locally, once per call, to preserve that layering. All four production
+    seams pass ``db``.
+
+    "One ``operation_ready`` per operation" is NOT an invariant. The other three
+    seams only ever see a given operation flip once, but resume can put an already
+    -READY operation back through PENDING, so a hold/resume cycle adds a second
+    event. That is harmless by construction and must stay so: every consumer
+    anchors on the EARLIEST event (``flow_metrics_service._ready_times_by_operation``
+    is ``func.min(occurred_at)``). Do not rewrite a consumer to last-wins without
+    dealing with this -- it would silently erase queue time on every held job.
     """
     company_id = work_order.company_id
     scoped_ops = [
