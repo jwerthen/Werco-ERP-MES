@@ -2853,7 +2853,13 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 >   holds) — priority-sorted server-side (blocked/down → most-late → running → promise date asc),
 >   capped at **24**, with `jobs_total` the true uncapped count for `+N more`; **dept-scoped**
 >   via each WO's **current** operation's work-center type when `?dept=` is passed. Each job:
->   `{wo_number, part_number, customer_name` (**gated** — see below)`, status, qty_complete, qty_ordered` (WO-level)`, promise_date,
+>   `{wo_number, part_number, customer_name` (**gated** — see below)`, status, qty_complete, qty_ordered`
+>   (**order totals**: the WO header on a conventional routing; on a **pool** WO — laser nests, or a batch WO
+>   carrying one operation per line item — the **SUM** of the per-item operation targets/progress, because the
+>   header rollup caps at the header quantity and would hide the other items. Summing is guarded: never for a
+>   part with an active BOM, never counting a soft-deleted nest's operation, only when EVERY operation carries
+>   its own target, and never when every target equals `quantity_ordered` — see `docs/WALLBOARD.md` → "Order
+>   totals on a pool WO")`, promise_date,
 >   is_late, days_late` (the same shared lateness predicate)`, blocked` (any unresolved blocker
 >   on the WO)`, down` (current op's work center has an open downtime event)`, running` (current
 >   op has ≥1 open labor entry)`, ops_completed, ops_total, current_op}`; `current_op` — the

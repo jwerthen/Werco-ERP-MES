@@ -173,7 +173,12 @@ class WallboardJob(BaseModel):
     # public boards. See the class docstring and build_wallboard_payload.
     customer_name: Optional[str] = None
     status: str  # released | in_progress
-    qty_complete: float = 0  # WO-level
+    # Order totals. A conventional routing reports the WO header; a POOL work
+    # order (laser nests, or a batch WO with one op per line item) reports the
+    # SUM of its per-item operation targets/progress, because its header rollup
+    # caps at the header quantity and hides the other items -- see
+    # ``per_item_operation_totals``.
+    qty_complete: float = 0
     qty_ordered: float = 0
     promise_date: Optional[date] = None  # coalesce(must_ship_by, due_date)
     is_late: bool = False  # via the shared _late_wo_filters predicate
