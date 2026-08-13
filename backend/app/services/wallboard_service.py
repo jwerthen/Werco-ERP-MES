@@ -40,6 +40,7 @@ from sqlalchemy import case, func, or_
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.time_utils import CENTRAL_TIME_ZONE
+from app.models.bom import BOM
 from app.models.downtime import DowntimeEvent
 from app.models.purchasing import POReceipt
 from app.models.quality import NCRStatus, NonConformanceReport
@@ -61,7 +62,7 @@ from app.schemas.wallboard import (
     WallboardToday,
     WallboardWorkCenter,
 )
-from app.services.work_order_state_service import operation_target_quantity
+from app.services.work_order_state_service import operation_target_quantity, per_item_operation_totals
 
 logger = logging.getLogger(__name__)
 
@@ -205,6 +206,7 @@ def _build_job_wall(
     dept_norm: Optional[str],
     central_today: date,
     now: datetime,
+    bom_part_ids: set[int],
     include_customer: bool = False,
 ) -> tuple[list[WallboardJob], int]:
     """Assemble the job wall from pre-fetched rows — pure Python, ZERO queries.
@@ -251,6 +253,24 @@ def _build_job_wall(
                 elapsed_minutes=elapsed,
             )
 
+        # PIECE TOTALS: a pool WO (laser nests, or a batch WO with one op per
+        # line item) carries its real total in the OPERATIONS, not the header --
+        # the header's non-pool rollup takes MAX over ops capped at
+        # quantity_ordered, so an 18-item brake batch read "8/8, 100%" on the TV
+        # while sitting on item 2. ``per_item_operation_totals`` sums the per-item
+        # targets and progress the way the laser cards already read; None means
+        # "don't sum" (a conventional routing, or any shape its guards refuse),
+        # where the header IS the truth. ``bom_part_ids`` is guard 1 — read once
+        # for the whole wall, never per tile.
+        piece_totals = per_item_operation_totals(
+            wo, operations, part_has_bom=wo.part_id is not None and wo.part_id in bom_part_ids
+        )
+        qty_ordered, qty_complete = (
+            piece_totals
+            if piece_totals is not None
+            else (float(wo.quantity_ordered or 0), float(wo.quantity_complete or 0))
+        )
+
         # Lateness comes from the SAME predicate as the late rail (the ids in
         # ``late_wo_ids`` were selected via _late_wo_filters); days_late via
         # the shared promise helper so the tile and rail can never disagree.
@@ -267,8 +287,8 @@ def _build_job_wall(
                 # free-text customer to None so tiles render an empty cell.
                 customer_name=((wo.customer_name or None) if include_customer else None),
                 status=wo.status.value if hasattr(wo.status, "value") else str(wo.status),
-                qty_complete=float(wo.quantity_complete or 0),
-                qty_ordered=float(wo.quantity_ordered or 0),
+                qty_complete=qty_complete,
+                qty_ordered=qty_ordered,
                 promise_date=promise,
                 is_late=is_late,
                 days_late=days_late,
@@ -740,10 +760,15 @@ def build_wallboard_payload(
         .all()
     )
     ops_by_wo: dict[int, list[WorkOrderOperation]] = defaultdict(list)
+    # Guard 1 of the pool-vs-routing rule (``per_item_operation_totals``): the parts
+    # whose operations are a ROUTING because the part builds from a BOM. ONE query for
+    # the whole wall — the helper itself stays DB-free. Same predicate as
+    # ``_get_active_bom``: active, not soft-deleted, this company.
+    bom_part_ids: set[int] = set()
     if wall_wos:
         wall_ops = (
             db.query(WorkOrderOperation)
-            .options(joinedload(WorkOrderOperation.work_center))
+            .options(joinedload(WorkOrderOperation.work_center), joinedload(WorkOrderOperation.laser_nest))
             .filter(
                 WorkOrderOperation.company_id == company_id,
                 WorkOrderOperation.work_order_id.in_([wo.id for wo in wall_wos]),
@@ -753,6 +778,18 @@ def build_wallboard_payload(
         )
         for op in wall_ops:
             ops_by_wo[op.work_order_id].append(op)
+
+        wall_part_ids = {wo.part_id for wo in wall_wos if wo.part_id is not None}
+        if wall_part_ids:
+            bom_part_ids = {
+                part_id
+                for (part_id,) in db.query(BOM.part_id).filter(
+                    BOM.company_id == company_id,
+                    BOM.part_id.in_(wall_part_ids),
+                    BOM.is_active == True,  # noqa: E712
+                    BOM.is_deleted == False,  # noqa: E712
+                )
+            }
 
     # Per-job lateness comes from the SAME predicate as the late rail (ONE
     # id-scoped query serving both the machine wall's active-job flags and
@@ -871,6 +908,7 @@ def build_wallboard_payload(
         dept_norm,
         central_today,
         now,
+        bom_part_ids,
         include_customer=include_customer,
     )
 

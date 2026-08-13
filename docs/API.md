@@ -186,6 +186,15 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > `PUT /shop-floor/work-centers/{id}/run-order` (a shared crew terminal must not read the whole
 > shop's board or dictate what every machine runs next). Operators keep **reading** their `RUN`
 > chips: the work-center-queue endpoint is a different path and stays allowed.
+>
+> **`PUT /shop-floor/operations/{id}/resume` is allowed, and that now matters.** It is inside the
+> fence prefix, matches none of the deny rules (the `kiosk-stations` / `dispatch-board` prefixes, the
+> `/time-entries/…/approve|unapprove` suffixes, the `/work-centers/…/run-order` suffix), and the
+> endpoint carries no `require_role` — so a badge-scanned **Operator** can take a job off hold from
+> the shared terminal. That was incidental until the queue read began surfacing held work (see Shop
+> Floor → "Held work"): the kiosk can *place* a hold and had no way back, so an accidental hold had
+> to be recoverable from the terminal that made it rather than only from a desk. Pinned by
+> `backend/tests/api/test_kiosk_resume_fence.py`, which also asserts the fence did not otherwise open.
 > Tokens without a `scope` claim are
 > unaffected. On the allowed paths the operator IS `current_user`, so audit attribution, tenant
 > isolation, and RBAC apply unchanged. Known residual: the WebSocket auth path
@@ -1836,7 +1845,10 @@ mixed**:
 > **Soft delete (`DELETE /laser-nests/{id}`).** Soft-deletes the nest (`SoftDeleteMixin`; never a
 > hard delete) and sets its operation to **`ON_HOLD`**, which removes it from the operator/work-center
 > queue and the laser WO's quantity rollup. Soft-deleted nests are filtered out of `WorkOrderResponse`
-> operations, the operator queue, and the quantity rollup.
+> operations, the operator queue, and the quantity rollup. The hold here is a **tombstone, not a
+> stop** — `OperationStatus` has no operation-level CANCELLED — so the operation is also excluded
+> from the kiosk's `held` list (Shop Floor → "Held work"): offering Resume on it would put a
+> cancelled nest back on the board as `READY`.
 >
 > **Compliance.** All of these writes are **tenant-scoped** by `company_id` (a cross-tenant or
 > soft-deleted id returns **404**) and recorded in the tamper-evident audit trail (`GET /audit/`)
@@ -2793,10 +2805,11 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 | POST | `/shop-floor/operations/{id}/reduce-production` | Correct (walk back) good-count an operator OVER-reported on their **own unapproved** labor (open clock-in first, then their own earlier unapproved sessions), **before** the operation/WO is complete — a miscount fix, **not** scrap (see note + schema below) | Yes |
 | POST | `/shop-floor/operations/{id}/complete` | Complete / report progress on an operation | Yes |
 | PUT | `/shop-floor/operations/{id}/hold` | Put an operation on hold (closes open time entries; body optional — category/severity/note file a structured blocker) | Yes |
+| PUT | `/shop-floor/operations/{id}/resume` | Take an operation **off** hold. **Restores, never promotes**: `IN_PROGRESS` if it ever started, else `PENDING` — lifted to `READY` only where the shared promotion rule would grant it (parent WO released and non-terminal, no incomplete cross-work-center predecessor), so `pending` is a normal success status. **409** if the operation backs a **cancelled (soft-deleted) laser nest** — that is a tombstone, not a hold; **400** if it is not `ON_HOLD`; cross-tenant id → **404**. Deliberately does **not** resolve the blocker that caused the hold (that stays with the blocker resolve/dismiss flow); the response carries `open_blockers` so the caller can warn (BLK-4) — each `{ id, category, severity, status, has_note, free_text_withheld }`, plus the caller-supplied `title` **only** for a non-station caller (withheld from a badge-minted crew-station token, same rule as `held`). Each `PENDING → READY` flip it does cause emits `operation_ready` (`user_id: null`). Audited **`STATUS_CHANGE`** (old→new status; `extra_data.transition = "resume_operation"`). Reachable by a badge-minted kiosk token — see "Held work" below | Yes |
 | POST | `/shop-floor/operations/{id}/inspection` | Record operation inspection complete (sets `inspection_complete`) | Admin / Manager / Supervisor / Quality |
 | POST | `/shop-floor/time-entries/{id}/approve` | Approve a TimeEntry (sets `approved` / `approved_by`) | Admin / Manager / Supervisor / Quality |
 | POST | `/shop-floor/time-entries/{id}/unapprove` | Clear approval on a TimeEntry | Admin / Manager / Supervisor / Quality |
-| GET | `/shop-floor/work-center-queue/{id}` | Get work center queue, each row carrying the live crew `roster` and the manager-set `run_order` (see notes below) | User **or** kiosk station token |
+| GET | `/shop-floor/work-center-queue/{id}` | Get work center queue, each row carrying the live crew `roster` and the manager-set `run_order`, **plus a separate `held` list** of the work center's `ON_HOLD` operations (`held_truncated` when capped) (see notes below) | User **or** kiosk station token |
 | GET | `/shop-floor/dispatch-board` | Manager dispatch board — every **active** work center with its live queue, including work centers with an **empty** queue, plus any **deactivated** work center still holding queued work, flagged `is_active: false` (see note below) | Admin / Manager / Supervisor |
 | PUT | `/shop-floor/work-centers/{id}/run-order` | Rewrite one work center's manual run order (dense 1..N; omitted operations become unranked) → that work center's refreshed column (see note below) | Admin / Manager / Supervisor |
 | GET | `/shop-floor/wallboard` | Read-only TV wallboard snapshot (`?dept=` narrows to one work-center type, case-insensitive — scopes the work centers, the `jobs` grid (by each WO's **current** operation's work center), **and** the late/blocked lists + totals; ship/today/quality stay plant-wide) | User **or** display token |
@@ -2840,7 +2853,13 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 >   holds) — priority-sorted server-side (blocked/down → most-late → running → promise date asc),
 >   capped at **24**, with `jobs_total` the true uncapped count for `+N more`; **dept-scoped**
 >   via each WO's **current** operation's work-center type when `?dept=` is passed. Each job:
->   `{wo_number, part_number, customer_name` (**gated** — see below)`, status, qty_complete, qty_ordered` (WO-level)`, promise_date,
+>   `{wo_number, part_number, customer_name` (**gated** — see below)`, status, qty_complete, qty_ordered`
+>   (**order totals**: the WO header on a conventional routing; on a **pool** WO — laser nests, or a batch WO
+>   carrying one operation per line item — the **SUM** of the per-item operation targets/progress, because the
+>   header rollup caps at the header quantity and would hide the other items. Summing is guarded: never for a
+>   part with an active BOM, never counting a soft-deleted nest's operation, only when EVERY operation carries
+>   its own target, and never when every target equals `quantity_ordered` — see `docs/WALLBOARD.md` → "Order
+>   totals on a pool WO")`, promise_date,
 >   is_late, days_late` (the same shared lateness predicate)`, blocked` (any unresolved blocker
 >   on the WO)`, down` (current op's work center has an open downtime event)`, running` (current
 >   op has ≥1 open labor entry)`, ops_completed, ops_total, current_op}`; `current_op` — the
@@ -2957,7 +2976,10 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > and the run-order `PUT` below still **404s** an inactive work center. A deactivated work center
 > whose *queue* is empty emits no column — the column subquery mirrors the shared queue filter set
 > (`READY`/`IN_PROGRESS` on live WOs), so a machine holding only `PENDING`/`ON_HOLD` work shows no
-> column (matching the kiosk) even though that work still blocks deactivation (see Work Centers).
+> column (matching the kiosk's `queue` — the kiosk serves its `ON_HOLD` work on a **separate `held`
+> list**, which the board has no equivalent of and deliberately does not grow: the board sequences
+> work, and held work is not sequenced) even though that work still blocks deactivation (see Work
+> Centers).
 > Deactivation now **refuses (409)** while live work references the machine, so flagged columns
 > surface pre-guard strays rather than being a normal state; the operator kiosk queue
 > (`GET /shop-floor/work-center-queue/{id}`) deliberately keeps serving a deactivated work
@@ -3078,6 +3100,151 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > `closed_time_entries: [{time_entry_id, user_id, operator_name}]`, empty on a partial/progress
 > update — so the crew kiosk can toast who was auto-clocked-out. Read-only addition; the
 > auto-close mutation is unchanged.
+
+> **Held work on `GET /shop-floor/work-center-queue/{id}` (`held` + `held_truncated`).** The payload
+> gained a **second list**: the `ON_HOLD` operations at that work center, alongside the unchanged
+> `queue`. Both keys are additive — `queue` is byte-identical to what it always carried, because
+> `dispatch_service.QUEUE_OPERATION_STATUSES` is still `(READY, IN_PROGRESS)` and was deliberately
+> **not** widened. A hold therefore still means stop everywhere it meant stop before: held work is
+> not capacity, takes no `run_order`, never enters `display_positions`, and never counts toward the
+> wallboard's `queued_count`. **The list boundary is the safety property**, not a flag inside the
+> rows — no client iterating `queue` can render a held operation as a startable job card by accident.
+>
+> Why it exists: an operation put on hold by mistake vanished from every screen an operator can see
+> (`ON_HOLD` is not a queue status), and the kiosk can *place* a hold but carries no resume — the
+> app's only Resume control is the desktop `ShopFloorSimple` page — so recovery required desk access.
+> That was a one-way door on the shop floor's own terminal.
+>
+> Each `held` row is the **same job card a `queue` row is**, built by the same helper so the two
+> cannot drift: `operation_id`, `work_order_id` / `work_order_number`, `part_number` / `part_name` /
+> `part_revision`, `operation_number` / `operation_name`, `work_center_id`, `status`, the quantity
+> block (`quantity_ordered`, `work_order_quantity_ordered`, `component_quantity`,
+> `quantity_complete`, `quantity_scrapped`), `priority`, `due_date`, `setup_time_hours` /
+> `run_time_hours`, `laser_nest`, `material_ties`, `roster`, `steps_total` / `steps_recorded`,
+> `last_report` — plus exactly **two** held-only keys:
+>
+> - **`startable: false`** — stated explicitly rather than inferred from `status`, and it has **no
+>   `true` twin on `queue` rows** on purpose. Whether a queued operation may actually start is
+>   decided by the server gates at the moment of the action (predecessors, ON_HOLD siblings, open
+>   entries), so a poll asserting `startable: true` would make a claim this read cannot honor. "Held
+>   work cannot be started" is one it can.
+> - **`hold`** — `{held_at, held_by_user_id, held_by_name, blocker}`, where `blocker` is `null` or
+>   `{id, category, severity, status, title, note, reported_at, reported_by_user_id,
+>   reported_by_name}`. Names are the public-screen-safe **"First L."** form
+>   (`wallboard_service.operator_display_name`), the same form the `roster` on this payload already
+>   uses; timestamps are UTC ISO-8601 with a trailing `Z`.
+>
+> **`run_order` is always `null` on a held row.** `display_positions` is computed over the **queued**
+> operations only, so a held operation takes no dispatch rank and can never shift the gap-free
+> `RUN n` numbers an operator reads. (Whatever rank it *stored* is untouched — clearing those is the
+> run-order rewrite's un-ranking half; see "A rewrite is authoritative for the whole column" above.)
+>
+> **The cancelled-nest carve-out.** `ON_HOLD` is overloaded:
+> `laser_nest_service.soft_delete_laser_nest` parks a cancelled nest's operation in `ON_HOLD` as a
+> **tombstone**, because `OperationStatus` has no operation-level CANCELLED and the hold status is
+> what drops the row off the queue. Those operations are **excluded** from `held` — they are deleted
+> work, not held work, and offering Resume on one would let the floor resurrect a cancelled nest to
+> `READY`. The exclusion is a tenant-scoped correlated `NOT EXISTS` on a soft-deleted `LaserNest`; a
+> **live** nest on a genuinely held operation is untouched and still surfaces. The predicate is
+> `dispatch_service.cancelled_nest_exists`, shared with `PUT …/resume` (409) and
+> `GET /shop-floor/operations` — the guard is on the **write**, not only on this read, so no caller
+> can reach the tombstone by a different door.
+>
+> **Hold provenance is reconstructed, never inferred** (`services/operation_hold_view.py`). There is
+> no `held_by` / `held_at` column on `work_order_operations`, so who/when is assembled from the two
+> records the hold paths do write: the still-open (`OPEN` / `ACKNOWLEDGED`) `WorkOrderBlocker` when
+> the hold filed one, else the `operation_hold` OperationalEvent that a **bare** hold — no note,
+> category `OTHER`, which is exactly the accidental fat-finger case — emits. When both exist the
+> **more recent** record supplies the actor and timestamp (a blocker opened days ago does not get
+> credit for an hour-old bare hold), while the **open blocker is always the reason shown**, whoever
+> pressed hold last. `RESOLVED` / `DISMISSED` blockers are excluded: the resolve/dismiss flow is what
+> auto-resumes an operation, so a closed blocker on a still-held operation is stale narrative, not
+> the current reason — the same status pair `resume` warns on, so the reason shown *before* resuming
+> and the warning returned *after* describe the same rows. When neither record exists the fields are
+> `null`; the module reports what was recorded and never guesses a holder from
+> `operation.updated_at`, which any later write moves. The `audit_log` records every hold too and is
+> deliberately **not** read here — it is the tamper-evident chain, not a display source.
+>
+> **Bounded, ordered, and a pure read.** Capped at `dispatch_service.MAX_HELD_OPERATIONS` (**25**),
+> ordered by `updated_at` descending — the hold is the last write, so the job an operator just lost
+> is the first row and the cap can only ever drop the *oldest* holds, never the one being looked for.
+> **`held_truncated: true`** when the cap dropped any, so a client can say "showing the 25 most
+> recent holds" instead of silently serving a subset. Tenancy, the live-work-order filter (parent WO
+> not terminal and not soft-deleted) and the station principal's own-work-center **403** are the same
+> as `queue`'s. Every per-operation enrichment (roster, steps, ties) is batched across **both** lists
+> in one pass, and hold provenance is two more batched queries, so the held list costs no extra round
+> trip at the 10–15 s poll cadence. The read writes nothing: no ledger row, no audit row, no event.
+>
+> **Resume is the existing endpoint, not a new one** — `PUT /shop-floor/operations/{id}/resume` (see
+> the table above). A badge-minted `scope="kiosk"` operator token already reaches it, so an
+> **Operator** can resume from the crew terminal that placed the hold; the fence reasoning is under
+> Authentication → Path fence. Resuming audits as a **`STATUS_CHANGE`** (old→new status, with
+> `extra_data.transition = "resume_operation"` carrying the verb the generic action no longer names)
+> and still returns `open_blockers` — it deliberately does **not** resolve the blocker, so operation
+> status and blocker status diverge on purpose and the caller is told (BLK-4, warn-and-record).
+>
+> **`open_blockers[].title` is withheld from a crew station**, on the same rule as `held` below and
+> for the same reason: it is caller-supplied free text, and the screen it drives
+> (`KioskBlockerStillOpenScreen`) persists until an explicit tap, on a shared unattended tablet. Each
+> row is `{ id, category, severity, status, has_note, free_text_withheld }`, plus `title` **only**
+> when the caller is not a badge-minted crew-station token (`_token_scope == "kiosk"`). `note` never
+> rides this shape at all. The single-operator kiosk runs on a normal session and keeps the title;
+> so does the desktop.
+>
+> **The promotion emits.** When the restore lands `READY`, the flip emits its `operation_ready`
+> OperationalEvent (`user_id: null` — rule-driven, exactly like the completion and read-path-heal
+> seams), so queue time stays measurable. This includes **sibling** operations the shared promotion
+> rule flips in the same call, for which that event is their *first* and only — the read-path heal
+> never emits for a row that is already `READY`. A resume that promotes nothing emits nothing.
+>
+> Two refusals guard it, both on the **write**, so every caller inherits them — the desktop
+> `ShopFloorSimple` page and both kiosks. A **cancelled (soft-deleted) laser nest**'s operation is
+> parked in `ON_HOLD` as a tombstone (`OperationStatus` has no operation-level CANCELLED), and
+> resuming one would undo a soft delete from the front end: **409**. And resume **restores, never
+> promotes** — it floors at `PENDING` and delegates the lift to the shared promotion rule, so a hold
+> placed on a `PENDING` operation, or on one whose work order is still `DRAFT`, comes back `PENDING`
+> and stays off the board. Release is the authorization step; a resume does not get to perform one.
+> `GET /shop-floor/operations` applies the same cancelled-nest exclusion, since that list is where
+> the desktop Resume button is offered.
+>
+> **Disclosure (`held`).** A station principal is an unattended, PIN-unlocked terminal with **no
+> operator identity and no idle logout**, so whatever the board renders is readable by anyone walking
+> past it. The `hold` block therefore splits by audience:
+>
+> | field | station token | user session |
+> |---|---|---|
+> | `category`, `severity`, `status`, `reported_at`, `reported_by_*` | sent | sent |
+> | `held_at`, `held_by_user_id`, `held_by_name` | sent | sent |
+> | `has_note` (boolean), `free_text_withheld` (boolean) | sent | sent |
+> | `title`, `note` (**free text**) | **keys absent** | sent |
+>
+> That split is the rule this system already wrote for unattended shop screens, applied to the same
+> class of screen: `wallboard_service`'s module docstring says *no customer names, no ship-to
+> addresses, no dollar figures, **no NCR titles/descriptions***, and the wallboard's own blocked-work
+> rail holds `title` and `note` in hand and emits only `wo_number` / `category` / `age_hours`. A
+> `held` row that carried the note would disclose to that audience exactly what the wallboard
+> withholds. `title` travels with `note` because it is equally unconstrained — `POST
+> /work-order-blockers` takes a caller-supplied `title`, and `blocker_default_title` is only the
+> fallback for a kiosk-placed hold.
+>
+> The keys are **absent, not blanked**: a render-side gate would still put the text on the tablet,
+> where a devtools console or a proxy reads it. `has_note` is a boolean so the card can say *"a
+> written note was recorded — not shown on a shared station"* rather than letting silence read as
+> "no reason given" and invite a Resume over somebody's real quality stop. It is true when a human
+> wrote **either** field: a non-empty `note`, **or** a `title` differing from what
+> `blocker_default_title` composes. (It keyed on `note` alone until 2026-08-12, on the reasoning that
+> `title` is `nullable=False` and therefore always server-composed — wrong, because it is composed
+> only when the caller supplies none, and an office-filed blocker routinely carries its explanation
+> in the title with an empty note. Those reported `has_note: false` and the station drew a bare
+> category: exactly the mis-read the flag exists to prevent. A caller who types the composed string
+> verbatim still reads as server-composed.)
+>
+> The feature loses nothing: the motivating accident is a **bare** hold with no note at all, and a
+> deliberate categorized hold is still identifiable from category + severity + who placed it. The
+> single-operator kiosk runs on the operator's **own session**, so it is an identified caller and
+> keeps the full block. The operator **name** (first initial form, e.g. "Jon W.", as `roster` on this
+> payload already carries) and the material-tie fields stay a genuine, if small, widening of the
+> station's disclosure surface, recorded in the same sense as the material-tie note below.
 
 > **Kiosk telemetry / routing payload additions (Foundry redesign, 2026-07-23).** Read-only field
 > additions feeding the redesigned kiosk's top bar, telemetry tiles, and complete modal — old

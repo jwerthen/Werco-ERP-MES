@@ -1407,6 +1407,134 @@ export interface KioskMaterialTie {
 }
 
 /**
+ * The still-open blocker explaining a hold, nested inside `OperationHold`.
+ *
+ * Only ever the NEWEST still-open (open|acknowledged) blocker — resolved and
+ * dismissed ones are excluded server-side, because the resolve/dismiss flow is
+ * what auto-resumes an operation, so a closed blocker on a still-held operation
+ * is stale narrative rather than the current reason. That is the same status
+ * pair the resume endpoint warns on, so the reason shown BEFORE resuming and the
+ * warning returned AFTER describe the same rows.
+ *
+ * `reported_at` is UTC ISO — render via utils/centralTime.
+ *
+ * **`title` and `note` are ABSENT on a crew-station response.** They are the only
+ * unconstrained human-authored strings here, and a crew station is an unattended,
+ * PIN-unlocked tablet with no operator identity and no idle logout — the same
+ * audience the wallboard already withholds NCR titles and descriptions from. The
+ * server does not send them (the keys are missing, not blanked, so a devtools
+ * console on the tablet has nothing to read), and sets `free_text_withheld`. An
+ * identified user session — the single-operator kiosk, the desktop — gets both.
+ *
+ * So render the note defensively: `has_note` says whether one EXISTS, which
+ * is what lets a station say "a written reason was recorded" instead of implying
+ * none was given.
+ */
+export interface OperationHoldBlocker {
+  id: number;
+  /** `WorkOrderBlockerCategory` value, e.g. "machine_down". Always sent. */
+  category: string | null;
+  /** `WorkOrderBlockerSeverity` value: low | medium | high | critical. Always sent. */
+  severity: string | null;
+  /** open | acknowledged — the only two that reach here. */
+  status: string | null;
+  /** Free text. Caller-supplied via the blocker API; server-composed only for a kiosk hold. Absent on a station. */
+  title?: string | null;
+  /** The operator's free-text note, verbatim. Absent on a station. */
+  note?: string | null;
+  /** Whether a `title`/`note` exists at all — a boolean, never the text. */
+  has_note?: boolean;
+  /** True when this response deliberately omitted `title`/`note` (station audience). */
+  free_text_withheld?: boolean;
+  reported_at: string | null;
+  reported_by_user_id: number | null;
+  reported_by_name: string | null;
+}
+
+/**
+ * WHY an operation is on hold, WHO placed it and WHEN — the `hold` block on each
+ * row of the queue response's `held` list.
+ *
+ * **Every field is nullable by design, and `blocker: null` is the case this
+ * feature exists for.** There is no `held_by`/`held_at` column on
+ * `work_order_operations`; the server reconstructs provenance from whichever
+ * record the hold path happened to write, and the paths differ:
+ *
+ * - A hold WITH a note or a non-OTHER category files a `WorkOrderBlocker`, so
+ *   `blocker` is populated.
+ * - A BARE hold (no note, category OTHER) — precisely the accidental fat-finger
+ *   case — emits an `operation_hold` event and files NO blocker, so `blocker` is
+ *   null while `held_at` / `held_by_name` carry the provenance.
+ *
+ * So the reason and the attribution are INDEPENDENT: read the reason from
+ * `blocker`, and who/when from `held_by_name` / `held_at`. Never gate one on the
+ * other, or the mis-tap case renders as both anonymous and reasonless — which is
+ * the one case that most needs to read as an accident.
+ *
+ * When neither record exists (a hold placed before either was written) the fields
+ * are simply null: the server reports what was recorded and never infers a holder
+ * from `operation.updated_at`. "Held by unknown, reason not recorded" is a REAL
+ * state that must render sanely, not an error.
+ */
+export interface OperationHold {
+  /** UTC ISO. */
+  held_at: string | null;
+  held_by_user_id: number | null;
+  /** Display form, e.g. "Dana R.". */
+  held_by_name: string | null;
+  blocker: OperationHoldBlocker | null;
+}
+
+/**
+ * One STILL-OPEN blocker returned by `PUT /shop-floor/operations/{id}/resume`.
+ *
+ * Resuming deliberately does NOT resolve the blocker that caused the hold. The
+ * backend returns these precisely so operation status and blocker status cannot
+ * silently diverge — surface them, never swallow them. `note`, the reporter and
+ * the timestamps never ride this shape; the richer one lives behind
+ * /work-order-blockers, which a badge-minted kiosk token cannot reach.
+ *
+ * **`title` is ABSENT on a crew-station response**, exactly as it is on the
+ * queue read's `OperationHoldBlocker`. It is caller-supplied free text (the
+ * server composes one only when the caller supplies none), so an office-created
+ * blocker can carry a customer name or an NCR description in it — and the screen
+ * this drives persists until somebody taps it away on a shared, unattended
+ * tablet. `has_note` / `free_text_withheld` come back in its place. An
+ * identified session (single-operator kiosk, desktop) gets the title.
+ */
+export interface ResumeOpenBlocker {
+  id: number;
+  /** Free text. Absent on a crew-station response — render `category` instead. */
+  title?: string | null;
+  category: string;
+  severity: string;
+  /** Only "open" or "acknowledged" ever appear here. */
+  status: string;
+  /** Whether free text was recorded at all — a boolean, never the text. */
+  has_note?: boolean;
+  /** True when this response deliberately omitted `title` (station audience). */
+  free_text_withheld?: boolean;
+}
+
+/** `PUT /shop-floor/operations/{id}/resume` response. */
+export interface ResumeOperationResult {
+  message?: string;
+  /**
+   * The operation's status AFTER the lift: "in_progress", "ready" — or **"pending"**.
+   *
+   * Resume RESTORES, it does not release. An operation with no labor evidence is
+   * floored at PENDING and only lifted to READY by the server's own promotion
+   * rule, so a hold placed on a PENDING op (or on one whose parent is still
+   * DRAFT, or whose predecessor is incomplete) resumes to PENDING and stays off
+   * the board. Treat "pending" as a success that did NOT put the job back in the
+   * queue, and say so — a `warning` toast, not `success`.
+   */
+  status?: string;
+  /** Always sent by the server; `[]` when the hold left nothing open. */
+  open_blockers?: ResumeOpenBlocker[] | null;
+}
+
+/**
  * Last production-evidence telemetry for an operation ("LAST REPORT" tile).
  * Rides work-center-queue rows AND the my-active-job job dict. `at` is UTC
  * ISO — render via utils/centralTime.

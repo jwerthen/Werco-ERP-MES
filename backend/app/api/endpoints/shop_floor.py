@@ -5,7 +5,7 @@ import math
 import os
 from collections import defaultdict
 from datetime import date, datetime, timezone
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Union
 
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
@@ -79,7 +79,7 @@ from app.schemas.process_sheet import (
 from app.schemas.time_entry import ClockIn, ClockOut, ProductionReductionRequest, TimeEntryResponse
 from app.schemas.wallboard import WallboardResponse
 from app.schemas.work_order_blocker import WorkOrderBlockerCreate
-from app.services import dispatch_service, kiosk_station_service, process_sheet_service
+from app.services import dispatch_service, kiosk_station_service, operation_hold_view, process_sheet_service
 from app.services.audit_service import AuditService
 from app.services.completion_cost_service import (
     apply_completion_cost_rollup,
@@ -111,6 +111,7 @@ from app.services.operation_action_gates import (
     operation_blocked_by_predecessors,
     operation_has_labor_evidence,
 )
+from app.services.operation_hold_view import HoldBlockerView, HoldContext
 from app.services.operational_event_service import OperationalEventService
 from app.services.operator_qualification_service import evaluate_and_record_operator_qualification
 from app.services.production_reduction_service import (
@@ -133,7 +134,7 @@ from app.services.wallboard_service import (
     operation_counts_by_work_center,
     operator_display_name,
 )
-from app.services.work_order_blocker_service import WorkOrderBlockerService
+from app.services.work_order_blocker_service import WorkOrderBlockerService, blocker_default_title
 from app.services.work_order_state_service import (
     TERMINAL_WO_STATUSES,
     StatusTransition,
@@ -145,6 +146,7 @@ from app.services.work_order_state_service import (
     has_incomplete_predecessors,
     is_laser_dispatch_work_order,
     operation_target_quantity,
+    promote_ready_operations,
     reconcile_work_orders_from_completion_evidence,
     resolve_absolute_operation_quantity,
     sync_work_order_quantity_complete,
@@ -747,6 +749,265 @@ def _last_report_payload(operation: Optional[WorkOrderOperation]) -> Optional[di
         "good": operation.last_reported_good,
         "scrap": operation.last_reported_scrapped,
     }
+
+
+def _kiosk_job_row(
+    operation: WorkOrderOperation,
+    *,
+    run_order: Optional[int],
+    roster: list[dict],
+    step_counts: dict,
+    ties: Optional[Sequence[MaterialTieView]],
+) -> dict:
+    """ONE job card, as the kiosk knows it -- shared by the queue and the held list.
+
+    Extracted so a held operation's identity is the SAME identity a queued one
+    has (work order, part, operation number/name, quantities, nest, ties,
+    roster, step counts). The two lists differ in WHICH operations they carry
+    and in what rides ON TOP of the row -- never in the shape of the row itself,
+    which is what would drift if the held list rebuilt these keys by hand.
+
+    ``run_order`` is passed in rather than read off the model: a queued row gets
+    its gap-free display position, and a held row gets ``None`` because it is not
+    in the ranked queue at all (``display_positions`` is computed over queued
+    operations only, and a held operation must never take a rank).
+    """
+    work_order = operation.work_order
+    return {
+        "operation_id": operation.id,
+        "work_order_id": work_order.id,
+        "work_order_number": work_order.work_order_number,
+        "part_number": work_order.part.part_number if work_order.part else None,
+        "part_name": work_order.part.name if work_order.part else None,
+        # Kiosk job card / viewer title: the part's revision letter (REV chip).
+        "part_revision": work_order.part.revision if work_order.part else None,
+        "operation_number": operation.operation_number,
+        "operation_name": operation.name,
+        "work_center_id": operation.work_center_id,
+        # Manager-dictated dispatch rank at THIS work center as the shop should
+        # SEE it -- position within the ordered queue (1..N, no gaps), null when
+        # unranked or held. Advisory: it drives the order and the kiosk's RUN
+        # chip; it never gates a start.
+        "run_order": run_order,
+        "status": operation.status,
+        "quantity_ordered": operation_target_quantity(operation, work_order),
+        "work_order_quantity_ordered": work_order.quantity_ordered,
+        "component_quantity": operation.component_quantity,
+        "quantity_complete": operation.quantity_complete,
+        # Crew tally: scrap surfaces next to quantity_complete so the kiosk tally
+        # block ("37 of 50 · 2 scrap") is server-derived.
+        "quantity_scrapped": operation.quantity_scrapped,
+        "priority": work_order.priority,
+        "due_date": work_order.due_date,
+        "setup_time_hours": operation.setup_time_hours,
+        "run_time_hours": operation.run_time_hours,
+        "laser_nest": _laser_nest_payload(operation),
+        # Open, operation-scoped material ties. [] when untied -- render nothing
+        # at all for those (see _material_ties_payload).
+        "material_ties": _material_ties_payload(ties),
+        "roster": roster,
+        "steps_total": step_counts["steps_total"],
+        "steps_recorded": step_counts["steps_recorded"],
+        # Kiosk LAST REPORT tile: the op's most recent production report.
+        "last_report": _last_report_payload(operation),
+    }
+
+
+def _blocker_free_text_recorded(
+    blocker: Union[HoldBlockerView, WorkOrderBlocker],
+    operation: WorkOrderOperation,
+) -> bool:
+    """Did a HUMAN write free text about this hold? Backs every ``has_note`` flag here.
+
+    Two fields can carry it and BOTH have to be consulted:
+
+    * ``note`` -- always human-authored, ``NULL`` when nobody typed one.
+    * ``title`` -- ``nullable=False``, so it is never empty, but it is only
+      SOMETIMES human-authored. ``POST /work-order-blockers`` takes a
+      caller-supplied ``title``; ``blocker_default_title`` composes one from the
+      category and the operation name only when the caller supplied none.
+
+    So a title that differs from the composed default is text somebody typed, and
+    it is the field an office-created blocker most often carries -- "NCR-1042
+    cracked welds, ACME rejected lot" in the title with an empty note is an
+    ordinary shape. Keying the flag on ``note`` alone reported *False* for exactly
+    that blocker, and a station then rendered a bare category with nothing under
+    it: the "silence reads as no reason given" mis-read this flag exists to
+    prevent, on the case that most needs preventing.
+
+    Comparing against ``blocker_default_title`` -- imported rather than
+    re-derived, so the two formats cannot drift -- is a HEURISTIC in one
+    direction only: a caller who types the exact default string reads as
+    server-composed and the flag says False. That is the safe way to be wrong
+    (the withheld text is identical to what the category already tells the
+    operator), and there is no column recording authorship to do better.
+    """
+    if (blocker.note or "").strip():
+        return True
+    title = (blocker.title or "").strip()
+    if not title:
+        return False
+    work_order = operation.work_order
+    if work_order is None:
+        # No default to compare against -- treat the non-empty title as written.
+        return True
+    return title != blocker_default_title(str(blocker.category or ""), work_order, operation)
+
+
+def _hold_blocker_payload(
+    blocker: Optional[HoldBlockerView],
+    *,
+    include_free_text: bool,
+    operation: WorkOrderOperation,
+) -> Optional[dict]:
+    """The still-open blocker on a ``held`` row -- with its FREE TEXT gated by audience.
+
+    ``title`` and ``note`` are the only unconstrained, human-authored strings in
+    this payload. ``note`` is whatever the operator typed; ``title`` is only
+    server-composed when the blocker came from a kiosk hold -- ``POST
+    /work-order-blockers`` takes a caller-supplied ``title`` and
+    ``_blocker_default_title`` is just the fallback -- so the two are equally
+    unconstrained and travel together.
+
+    WHY THEY ARE WITHHELD FROM A STATION. A crew-station principal is an
+    unattended tablet on the shop floor: it authenticates a 10-15s poll with a
+    24-hour shared-PIN token, has no operator identity and no idle logout, so
+    whatever the board renders is readable by anyone walking past. This system
+    already has a rule for that audience, written for the wallboard
+    (``wallboard_service``, module docstring): "no customer names, no ship-to
+    addresses, no dollar figures, no NCR titles/descriptions" -- and its
+    blocked-work rail has ``title`` and ``note`` in hand and deliberately emits
+    only ``wo_number`` / ``category`` / ``age_hours``. Shipping a blocker note to
+    the same class of screen would disclose exactly what the wallboard withholds,
+    so it does not.
+
+    WHAT THE STATION STILL GETS, and why that is enough: ``category``,
+    ``severity`` and the attribution (``held_by_name``, "Jon W." -- the same
+    public-screen-safe form the ``roster`` on this payload already carries).
+    Those identify a deliberate, categorized hold well enough to tell it from a
+    mis-tap, which is the whole job of the card. The motivating accident is a
+    BARE hold that has no note at all, so the feature loses nothing.
+
+    ``has_note`` is a BOOLEAN, never the text: it lets the station say "a written
+    reason exists, ask a supervisor" instead of implying none was given, which is
+    the one way withholding could actively mislead. ``free_text_withheld`` states
+    the policy so the client does not have to infer it from a missing key.
+
+    It covers BOTH withheld fields -- see :func:`_blocker_free_text_recorded`.
+    It used to key on ``note`` alone, on the reasoning that
+    ``work_order_blockers.title`` is ``nullable=False`` and always composed, so a
+    title-inclusive flag would be constant-true. That reasoning was wrong in the
+    one direction that matters: ``title`` is only composed when the CALLER
+    supplied none, and an office-created blocker routinely puts its free text
+    there with an empty note. Those reported ``has_note: false``, the station
+    rendered a bare category, and the silence read as "no reason given" -- the
+    exact mis-read the flag exists to prevent.
+
+    NOT SENT, rather than sent-and-hidden: a render gate would still put the text
+    on the device, where a devtools console or a proxy reads it. The keys are
+    absent from the response entirely.
+
+    A real user session (the single-operator kiosk, the desktop) is an identified
+    caller and keeps the full block, unchanged.
+    """
+    if blocker is None:
+        return None
+    payload = {
+        "id": blocker.id,
+        "category": blocker.category,
+        "severity": blocker.severity,
+        "status": blocker.status,
+        "reported_at": to_utc_iso(blocker.reported_at) if blocker.reported_at else None,
+        "reported_by_user_id": blocker.reported_by_user_id,
+        "reported_by_name": blocker.reported_by_name,
+        "has_note": _blocker_free_text_recorded(blocker, operation),
+        "free_text_withheld": not include_free_text,
+    }
+    if include_free_text:
+        payload["title"] = blocker.title
+        payload["note"] = blocker.note
+    return payload
+
+
+def _resume_open_blocker_payload(
+    blocker: WorkOrderBlocker,
+    *,
+    operation: WorkOrderOperation,
+    include_free_text: bool,
+) -> dict:
+    """One still-open blocker on the RESUME response -- same disclosure gate as the read.
+
+    ``PUT /shop-floor/operations/{id}/resume`` returns the blockers it did NOT
+    resolve, and the kiosk renders them on a screen built to persist (an explicit
+    tap to leave, bounded only by the 90s idle reset). That is the same audience
+    problem the queue payload has, arriving through a different verb: a crew
+    station's badge-minted token is a tap on a shared, unattended tablet, so
+    ``title`` -- caller-supplied free text, see :func:`_blocker_free_text_recorded`
+    -- must not ride the response to one.
+
+    Withholding is done HERE, in the payload builder, rather than by blanking the
+    field at the call site, so both directions of the gate live next to
+    :func:`_hold_blocker_payload` and cannot drift apart. ``note`` never rides
+    this shape at all (it never did) -- there is no audience that gets it here.
+
+    ``has_note`` / ``free_text_withheld`` mirror the read's contract exactly, so
+    the station can say a written reason exists instead of rendering a bare
+    category that reads as "no reason given".
+    """
+    payload: dict = {
+        "id": blocker.id,
+        "category": blocker.category,
+        "severity": blocker.severity,
+        "status": blocker.status,
+        "has_note": _blocker_free_text_recorded(blocker, operation),
+        "free_text_withheld": not include_free_text,
+    }
+    if include_free_text:
+        payload["title"] = blocker.title
+    return payload
+
+
+def _held_job_row(
+    operation: WorkOrderOperation,
+    *,
+    roster: list[dict],
+    step_counts: dict,
+    ties: Optional[Sequence[MaterialTieView]],
+    hold: HoldContext,
+    include_hold_free_text: bool,
+) -> dict:
+    """A held operation, for the kiosk's ``held`` list. Job card + why/who/when.
+
+    ``startable: False`` is stated explicitly rather than left to be inferred
+    from ``status``. It appears ONLY here and deliberately has no ``True`` twin
+    on the queue rows: whether a queued operation may actually start is decided
+    by the server gates at the moment of the action (predecessors, work center,
+    open entries), so a poll asserting ``startable: True`` would be making a
+    claim this read cannot honor. "Held work cannot be started" is a claim it
+    can.
+
+    ``hold`` carries the reason: the still-open blocker's category/severity/note
+    when one exists, plus who placed the hold and when. All of it may be
+    ``None`` -- see ``operation_hold_view`` for which hold paths record what.
+
+    ``include_hold_free_text`` is the disclosure gate -- see
+    :func:`_hold_blocker_payload`. It is a REQUIRED keyword on purpose: a new
+    caller has to state which audience it is building for rather than inherit
+    the permissive default.
+    """
+    row = _kiosk_job_row(operation, run_order=None, roster=roster, step_counts=step_counts, ties=ties)
+    row["startable"] = False
+    row["hold"] = {
+        "held_at": to_utc_iso(hold.held_at) if hold.held_at else None,
+        "held_by_user_id": hold.held_by_user_id,
+        "held_by_name": hold.held_by_name,
+        "blocker": _hold_blocker_payload(
+            hold.blocker,
+            include_free_text=include_hold_free_text,
+            operation=operation,
+        ),
+    }
+    return row
 
 
 def _next_operation_payload(db: Session, operation: Optional[WorkOrderOperation], company_id: int) -> Optional[dict]:
@@ -2030,6 +2291,51 @@ def get_work_center_queue(
     The tie read itself writes nothing (unlike ``_laser_nest_payload``, which
     still syncs nest counters here): a poll is not an actor, has no intent and
     records no reason, so it must never move stock.
+
+    HELD WORK (``held``, plus ``held_truncated``). ON_HOLD operations at this
+    work center, on a SEPARATE list from ``queue``. An accidental hold used to
+    make an operation vanish from every screen an operator can see -- the kiosk
+    can place a hold but has no resume, so recovery needed a desk. This closes
+    that one-way door WITHOUT making held work queued work:
+    ``dispatch_service.QUEUE_OPERATION_STATUSES`` is untouched, so a hold still
+    means stop for capacity, run-order ranking, ``display_positions`` and the
+    wallboard. Each held row is a normal job card plus ``startable: false`` and a
+    ``hold`` block (the still-open blocker's category/severity/note, and who
+    placed the hold and when -- see ``services/operation_hold_view.py``).
+
+    Resume stays ``PUT /shop-floor/operations/{id}/resume``; no new endpoint. A
+    badge-minted ``scope="kiosk"`` operator token already reaches it -- that path
+    is inside the ``/api/v1/shop-floor`` fence prefix and on none of the deny
+    lists (``deps.KIOSK_TOKEN_DENIED_PREFIXES`` and the approval/run-order
+    suffix rules) -- and the endpoint carries no ``require_role``, so an OPERATOR
+    may resume. Resuming does NOT resolve the blocker; the response returns any
+    still-open ones so the UI can warn (BLK-4).
+
+    DISCLOSURE (``held``): a station principal is an unattended, PIN-unlocked
+    terminal with no operator identity and no idle logout, so anything the board
+    renders is readable by whoever walks past. The ``hold`` block therefore
+    splits by audience:
+
+    * A STATION gets ``category``, ``severity``, ``status``, the timestamps and
+      the operator NAME (first name + last initial -- the same public-screen-safe
+      form the ``roster`` on this payload already uses), plus the booleans
+      ``has_note`` / ``free_text_withheld``. The blocker's free text
+      (``note`` and ``title``) is NOT SENT -- the keys are absent, not blanked,
+      because a render-side gate would still put the text on the device.
+    * A USER session (the single-operator kiosk, the desktop) is an identified
+      caller and gets the full block including ``note`` and ``title``.
+
+    That split follows the rule this system already wrote for unattended shop
+    screens in ``wallboard_service`` ("no customer names, no ship-to addresses,
+    no dollar figures, no NCR titles/descriptions"), whose own blocked-work rail
+    has ``title`` and ``note`` in hand and emits only ``wo_number`` /
+    ``category`` / ``age_hours``. See :func:`_hold_blocker_payload`.
+
+    The operator name and the material-tie fields above remain a genuine (small)
+    widening of the station's disclosure surface, in the sense that note records.
+
+    Both lists are read-only, and the ``held`` read is bounded
+    (``dispatch_service.MAX_HELD_OPERATIONS``, most-recently-held first).
     """
     company_id = principal.company_id
     if principal.kind == "station" and principal.work_center_id != work_center_id:
@@ -2053,16 +2359,30 @@ def get_work_center_queue(
     # bare ORDER BY scheduled_start that was nullable, tiebreak-less and therefore
     # dialect-dependent. run_order is ADVISORY: it sorts the queue, it never gates a
     # start (that stays with operation_action_gates / the predecessor rules).
+    queue_load_options = (
+        joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part),
+        # Eager-load the nest + its reference PDF so _laser_nest_payload below
+        # doesn't issue per-row SELECTs (N+1) for each queued laser operation.
+        joinedload(WorkOrderOperation.laser_nest).joinedload(LaserNest.document),
+    )
     operations = dispatch_service.queued_operations(
         db,
         company_id,
         [work_center_id],
-        load_options=(
-            joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part),
-            # Eager-load the nest + its reference PDF so _laser_nest_payload below
-            # doesn't issue per-row SELECTs (N+1) for each queued laser operation.
-            joinedload(WorkOrderOperation.laser_nest).joinedload(LaserNest.document),
-        ),
+        load_options=queue_load_options,
+    )
+
+    # HELD work, on its own list. dispatch_service.QUEUE_OPERATION_STATUSES is
+    # deliberately NOT widened to include ON_HOLD -- a hold means stop, so held
+    # work stays out of capacity, run-order ranking, display_positions and the
+    # wallboard's queued_count. This is a separate, bounded read whose only job
+    # is that the operator can SEE the job (see held_operations' docstring for
+    # the cancelled-nest carve-out).
+    held_ops, held_truncated = dispatch_service.held_operations(
+        db,
+        company_id,
+        [work_center_id],
+        load_options=queue_load_options,
     )
 
     # Crew roster: open labor TimeEntries for the queued operations, one bucket
@@ -2070,7 +2390,11 @@ def get_work_center_queue(
     # clock_out IS NULL, labor entry types only so an open BREAK/DOWNTIME row
     # never renders as a crew member). joinedload(User) avoids N+1 name lookups.
     roster_by_operation: dict[int, list[dict]] = defaultdict(list)
-    operation_ids = [op.id for op in operations]
+    queued_operation_ids = [op.id for op in operations]
+    held_operation_ids = [op.id for op in held_ops]
+    # One batch across BOTH lists for every per-operation enrichment below, so
+    # adding the held list costs no extra round trip at the poll cadence.
+    operation_ids = queued_operation_ids + held_operation_ids
     if operation_ids:
         open_entries = (
             db.query(TimeEntry)
@@ -2101,7 +2425,7 @@ def get_work_center_queue(
     # Steps chip (PR 3): required-process-step counts per queued operation so the
     # kiosk job card can render "Steps 2/6" without an extra round-trip. A step only
     # counts as recorded when its live conforming records cover every WO serial.
-    step_counts = process_sheet_service.step_counts_for_operations(db, company_id, operations)
+    step_counts = process_sheet_service.step_counts_for_operations(db, company_id, list(operations) + list(held_ops))
 
     # Material ties (PR 2): the sheet/stock tied to each queued operation, so the
     # kiosk job card can state what leaves inventory when the WORK ORDER finishes.
@@ -2116,53 +2440,45 @@ def get_work_center_queue(
 
     # Gap-free rank for the RUN chip: stored ranks go sparse as jobs complete or
     # move away, and "RUN 4" on a three-job queue reads as a missing job.
+    # Computed over the QUEUED operations only -- a held operation never takes a
+    # dispatch rank, so it can never shift the number an operator reads.
     run_positions = dispatch_service.display_positions(operations)
 
-    queue = []
-    for op in operations:
-        wo = op.work_order
-        target_qty = operation_target_quantity(op, wo)
-        op_step_counts = step_counts.get(op.id, {"steps_total": 0, "steps_recorded": 0})
-        queue.append(
-            {
-                "operation_id": op.id,
-                "work_order_id": wo.id,
-                "work_order_number": wo.work_order_number,
-                "part_number": wo.part.part_number if wo.part else None,
-                "part_name": wo.part.name if wo.part else None,
-                # Kiosk job card / viewer title: the part's revision letter (REV chip).
-                "part_revision": wo.part.revision if wo.part else None,
-                "operation_number": op.operation_number,
-                "operation_name": op.name,
-                "work_center_id": op.work_center_id,
-                # Manager-dictated dispatch rank at THIS work center as the shop
-                # should SEE it -- position within the ordered queue (1..N, no
-                # gaps), null when unranked. Advisory: it drives the order above
-                # and the kiosk's RUN chip; it never gates a start.
-                "run_order": run_positions.get(op.id),
-                "status": op.status,
-                "quantity_ordered": target_qty,
-                "work_order_quantity_ordered": wo.quantity_ordered,
-                "component_quantity": op.component_quantity,
-                "quantity_complete": op.quantity_complete,
-                # Crew tally: scrap surfaces next to quantity_complete so the
-                # kiosk tally block ("37 of 50 · 2 scrap") is server-derived.
-                "quantity_scrapped": op.quantity_scrapped,
-                "priority": wo.priority,
-                "due_date": wo.due_date,
-                "setup_time_hours": op.setup_time_hours,
-                "run_time_hours": op.run_time_hours,
-                "laser_nest": _laser_nest_payload(op),
-                # Open, operation-scoped material ties. [] when untied -- render
-                # nothing at all for those (see _material_ties_payload).
-                "material_ties": _material_ties_payload(material_ties.get(op.id)),
-                "roster": roster_by_operation.get(op.id, []),
-                "steps_total": op_step_counts["steps_total"],
-                "steps_recorded": op_step_counts["steps_recorded"],
-                # Kiosk LAST REPORT tile: the op's most recent production report.
-                "last_report": _last_report_payload(op),
-            }
+    # Why each held operation is held, batched (two queries for the whole list).
+    hold_contexts = operation_hold_view.hold_contexts_for_operations(
+        db, company_id=company_id, operation_ids=held_operation_ids
+    )
+
+    def _step_counts_for(op: WorkOrderOperation) -> dict:
+        return step_counts.get(op.id, {"steps_total": 0, "steps_recorded": 0})
+
+    queue = [
+        _kiosk_job_row(
+            op,
+            run_order=run_positions.get(op.id),
+            roster=roster_by_operation.get(op.id, []),
+            step_counts=_step_counts_for(op),
+            ties=material_ties.get(op.id),
         )
+        for op in operations
+    ]
+
+    # DISCLOSURE GATE: a station principal is an unattended, PIN-unlocked tablet
+    # with no operator identity and no idle logout, so the blocker's free text
+    # (note/title) is withheld from it -- see _hold_blocker_payload. An identified
+    # user session (single-operator kiosk, desktop) gets the full block.
+    include_hold_free_text = principal.kind != "station"
+    held = [
+        _held_job_row(
+            op,
+            roster=roster_by_operation.get(op.id, []),
+            step_counts=_step_counts_for(op),
+            ties=material_ties.get(op.id),
+            hold=hold_contexts.get(op.id, HoldContext()),
+            include_hold_free_text=include_hold_free_text,
+        )
+        for op in held_ops
+    ]
 
     # Lean Phase 1 (issue #88): active scrap reason codes ride the queue payload
     # so the crew station's scrap picker works WITHOUT widening any token scope —
@@ -2189,6 +2505,15 @@ def get_work_center_queue(
 
     return {
         "queue": queue,
+        # ON_HOLD operations at this work center, on their OWN list. Additive:
+        # `queue` is byte-identical to what it has always carried, so no existing
+        # consumer changes behavior, and no client iterating `queue` can render a
+        # held operation as a startable job card by accident -- the list boundary
+        # is the safety property, not a flag inside the rows.
+        "held": held,
+        # True when the cap (dispatch_service.MAX_HELD_OPERATIONS) dropped older
+        # holds, so the client can say so rather than silently showing a subset.
+        "held_truncated": held_truncated,
         # Kiosk top bar: machine identity for the header (code, name, mute
         # description line, status tag). Null when unknown/cross-tenant.
         "work_center": (
@@ -2877,6 +3202,10 @@ def get_all_operations(
     Returns paginated operations that are not complete or cancelled.
     Default: 50 items per page, max 200.
 
+    Operations backing a CANCELLED (soft-deleted) laser nest are excluded: they
+    sit in ON_HOLD as a tombstone, and this is the page that offers Resume --
+    see ``dispatch_service.cancelled_nest_exists``.
+
     Rows come back in the canonical dispatch order: work centers in code order
     (the Dispatch Board's column order; operations without a work center last),
     and within each work center the dispatch-queue sort (manager-dictated
@@ -2910,6 +3239,12 @@ def get_all_operations(
         WorkOrder.company_id == company_id,
         WorkOrder.is_deleted == False,  # noqa: E712
         WorkOrder.status.not_in([WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED, WorkOrderStatus.CANCELLED]),
+        # A CANCELLED nest's operation is parked in ON_HOLD as a tombstone, not
+        # held work. It was listed here as an ordinary on-hold row, and this page
+        # (ShopFloorSimple) is where Resume is offered -- one tap resurrected a
+        # soft-deleted nest to READY. Same predicate the kiosk's held list and the
+        # resume write use, so the three can no longer disagree.
+        ~dispatch_service.cancelled_nest_exists(company_id),
     )
 
     # Filter by work center
@@ -4507,7 +4842,48 @@ def resume_operation(
     # Request-scoped (B8): the chain row must carry the caller's ip/user_agent.
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Resume an operation that was on hold"""
+    """Resume an operation that was on hold.
+
+    TWO REFUSALS, then a restore that cannot promote.
+
+    1. ``ON_HOLD`` is overloaded: a CANCELLED (soft-deleted) laser nest parks its
+       operation there as a tombstone. Resuming one would undo a soft delete from
+       the front end -- see ``dispatch_service.cancelled_nest_exists``. 409.
+    2. The op has to actually be on hold. 400, as before.
+
+    RESTORE, NOT PROMOTE. This used to set ``IN_PROGRESS if actual_start else
+    READY``, but the hold path refuses only COMPLETE -- a PENDING operation can
+    be held -- so that derivation turned Resume into a release: one tap moved an
+    unstarted, unreleased operation to READY and onto the dispatch board and the
+    kiosk queue. Release is the authorization step and the record of WHO
+    authorized production (the standing owner decision written into
+    ``_promote_stranded_ready_operations``), so a resume must not perform one.
+    The floor is now PENDING, and the lift back to READY is delegated to
+    ``promote_ready_operations`` -- THE promotion rule, the same one WO release,
+    operation completion and the read-path heal all run -- which grants READY
+    only where a board read would have granted it anyway. So:
+
+    * started before the hold (``actual_start``) -> IN_PROGRESS, as before;
+    * READY before the hold on a live, released WO -> PENDING then straight back
+      to READY, net zero;
+    * PENDING before the hold, or a DRAFT/terminal parent, or a predecessor that
+      is still incomplete -> PENDING. It stays off the board, which is where an
+      unreleased or blocked operation belongs.
+
+    An exact pre-hold status is NOT recoverable today: no ``held_from_status``
+    column exists, and the two records the hold paths write (the ``operation_hold``
+    event, the blocker) are both best-effort emits, so neither is a state source a
+    transition may depend on. Recomputing from the promotion authority needs no
+    schema change and cannot reach a state a subsequent board poll would not.
+
+    RESPONSE DISCLOSURE. ``open_blockers`` carries the blockers this resume did
+    NOT resolve, and their ``title`` is caller-supplied free text. It is WITHHELD
+    from a crew-station caller (a badge-minted ``scope="kiosk"`` token, i.e. a tap
+    on the shared unattended tablet) exactly as the queue read withholds it, with
+    ``has_note`` / ``free_text_withheld`` in its place -- see
+    :func:`_resume_open_blocker_payload`. The single-operator kiosk and the
+    desktop are identified sessions and keep it.
+    """
     operation = (
         db.query(WorkOrderOperation)
         .options(joinedload(WorkOrderOperation.work_order))
@@ -4517,6 +4893,15 @@ def resume_operation(
 
     if not operation:
         raise HTTPException(status_code=404, detail="Operation not found")
+
+    # Refusal 1: a cancelled-nest tombstone is deleted work, not held work. Checked
+    # BEFORE the status check so the caller gets the accurate reason (both look
+    # like ON_HOLD from outside) and before any mutation.
+    if dispatch_service.operation_has_cancelled_nest(db, company_id, operation.id):
+        raise HTTPException(
+            status_code=409,
+            detail="This nest was cancelled; its operation cannot be resumed.",
+        )
 
     if operation.status != OperationStatus.ON_HOLD:
         raise HTTPException(status_code=400, detail="Operation is not on hold")
@@ -4535,19 +4920,96 @@ def resume_operation(
         .all()
     )
 
-    # Resume to previous state
-    operation.status = OperationStatus.IN_PROGRESS if operation.actual_start else OperationStatus.READY
-    operation.updated_at = datetime.utcnow()
+    # Restore, never promote (see the docstring). Labor evidence wins outright:
+    # an operation that was already running goes back to running.
+    previous_status = operation.status.value
+    if operation.actual_start:
+        operation.status = OperationStatus.IN_PROGRESS
+        operation.updated_at = datetime.utcnow()
+    else:
+        # A DRAFT parent is never promoted from here, for the same reason the
+        # read-path heal refuses it: Release is the authorization step, so neither
+        # a poll nor a resume may put unreleased work on the board. A terminal
+        # parent likewise stays off it.
+        parent = operation.work_order
+        promotable = (
+            parent is not None and parent.status not in TERMINAL_WO_STATUSES and parent.status != WorkOrderStatus.DRAFT
+        )
+        # promote_ready_operations needs EVERY operation of the work order -- it is
+        # both the write set and the predecessor snapshot. Loaded before the write
+        # below so autoflush cannot bump this row's optimistic-lock version twice
+        # for one resume.
+        siblings: list[WorkOrderOperation] = []
+        if promotable:
+            siblings = (
+                db.query(WorkOrderOperation)
+                .filter(
+                    WorkOrderOperation.work_order_id == operation.work_order_id,
+                    WorkOrderOperation.company_id == company_id,
+                )
+                .all()
+            )
+        operation.status = OperationStatus.PENDING
+        # Stamped BEFORE the promotion below, not after it: the promotion's event
+        # emit flushes, and a row that is already fully written flushes as ONE
+        # UPDATE -- which is what keeps a single resume worth a single
+        # optimistic-lock version bump, the same property the sibling load above
+        # is ordered to preserve.
+        operation.updated_at = datetime.utcnow()
+        if promotable and parent is not None:
+            # `db` is passed so each PENDING -> READY flip emits its
+            # `operation_ready` event, exactly as the other three promotion seams
+            # (WO release, operation completion, the read-path heal) do.
+            #
+            # This used to pass db=None to "avoid restarting the Lean queue-time
+            # clock". That reason was false: `flow_metrics_service` reads
+            # `func.min(occurred_at)` per operation, so a later event on an op that
+            # already has one is ignored and the original ready time still anchors
+            # queue time. Suppressing the emit was therefore not protective -- it
+            # was the opposite. It promotes every startable PENDING SIBLING too
+            # (the rule's contract), and for those the suppressed event was their
+            # FIRST: the read-path heal only emits when it flips a PENDING row, and
+            # these are already READY, so nothing would ever emit it. Their queue
+            # time became permanently unmeasurable and `op.ready` never fired for
+            # them. The cost of emitting is one duplicate `operation_ready` on the
+            # resumed op per hold/resume cycle -- metrically inert (min), and
+            # `op.ready` ships with no default channels, so it notifies only a user
+            # who opted in, for whom "ready again" is true.
+            #
+            # user_id=None deliberately, matching the completion and reconcile
+            # seams: the operator tapped RESUME, they did not authorize production.
+            # Release is the authorization step, and attributing a READY flip
+            # (least of all a sibling's) to the resuming operator would record an
+            # act they did not perform. Only `release_first_ready_operation` has a
+            # human behind its promotion.
+            #
+            # The promotion reaches no new state either way: the read-path heal
+            # runs the identical rule on every dispatch-board and kiosk load, so a
+            # sibling this flips was already one poll away.
+            promote_ready_operations(parent, siblings, db=db, user_id=None)
 
-    # Create audit log (request-scoped service -- carries ip/user_agent). BLK-4: note
-    # any still-open blocker so the audit row records that the op was resumed while
-    # its blocker(s) remained open.
-    audit.log(
-        action="RESUME_OPERATION",
+    # Audit as a STATUS CHANGE, not a prose row: resume went from one desktop call
+    # site to a shop-wide floor verb on both kiosks, so the row has to carry the
+    # before -> after states in old_values/new_values rather than a description
+    # that omits them -- which also makes the "restore, never promote" rule above
+    # auditable after the fact.
+    #
+    # ``transition`` replaces the discriminating power the old bespoke
+    # "RESUME_OPERATION" action carried: the action is now the generic
+    # STATUS_CHANGE, so the verb has to live somewhere queryable.
+    # BLK-4: any still-open blocker rides alongside it, recording that the op was
+    # resumed while its blocker(s) remained open.
+    resume_extra: dict = {"transition": "resume_operation"}
+    if open_blockers:
+        resume_extra["open_blocker_ids"] = [b.id for b in open_blockers]
+    audit.log_status_change(
         resource_type="work_order_operation",
         resource_id=operation_id,
+        resource_identifier=str(operation.operation_number or operation_id),
+        old_status=previous_status,
+        new_status=operation.status.value,
         description=f"Resumed operation {operation.operation_number}",
-        extra_data=({"open_blocker_ids": [b.id for b in open_blockers]} if open_blockers else None),
+        extra_data=resume_extra,
     )
     if operation.work_order:
         OperationalEventService(db).emit_best_effort(
@@ -4601,18 +5063,26 @@ def resume_operation(
             company_id=company_id,
         )
 
+    # DISCLOSURE GATE, the write-path twin of the one on the queue read. A
+    # badge-minted crew-station operator token (scope == "kiosk") is a tap on the
+    # SHARED, unattended tablet, and the screen this response drives
+    # (KioskBlockerStillOpenScreen) is built to persist -- it takes an explicit tap
+    # to leave, bounded only by the 90s idle reset. `title` is caller-supplied free
+    # text (`WorkOrderBlockerCreate.title`; the server composes one only when the
+    # caller supplies none), so an office-created blocker reading "NCR-1042 cracked
+    # welds -- ACME rejected lot" would sit on a public screen. Withheld here for
+    # exactly the reason it is withheld from the queue payload.
+    #
+    # `_token_scope` identifies the crew station EXACTLY: the single-operator kiosk
+    # runs on the operator's own session (scope unset) and legitimately keeps the
+    # text, as does the desktop.
+    resume_free_text = getattr(current_user, "_token_scope", None) != "kiosk"
     return {
         "message": "Operation resumed",
         "status": operation.status.value,
         # BLK-4: warn that these blockers are still open even though the op resumed.
         "open_blockers": [
-            {
-                "id": b.id,
-                "title": b.title,
-                "category": b.category,
-                "severity": b.severity,
-                "status": b.status,
-            }
+            _resume_open_blocker_payload(b, operation=operation, include_free_text=resume_free_text)
             for b in open_blockers
         ],
     }

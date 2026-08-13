@@ -183,7 +183,12 @@ def test_resume_audit_row_carries_ip_and_user_agent(client: TestClient, db_sessi
 
     resp = client.put(f"/api/v1/shop-floor/operations/{op.id}/resume", headers=headers_for(user))
     assert resp.status_code == status.HTTP_200_OK, resp.text
-    assert_attributed(audit_row(db_session, "RESUME_OPERATION"))
+    # Resume audits as a STATUS_CHANGE (carrying before -> after), not the old
+    # bespoke RESUME_OPERATION action; the verb lives in extra_data.transition.
+    row = audit_row(db_session, "STATUS_CHANGE")
+    assert row.resource_type == "work_order_operation"
+    assert row.extra_data["transition"] == "resume_operation"
+    assert_attributed(row)
 
 
 def test_inspection_audit_row_carries_ip_and_user_agent(client: TestClient, db_session: Session):

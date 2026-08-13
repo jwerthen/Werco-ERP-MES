@@ -167,6 +167,7 @@ URL is all the station setup there is.
      as the blocker note whenever non-empty, any category), then
      `PUT /shop-floor/operations/{id}/hold` at `medium`
      severity. A kiosk hold files the same structured `WorkOrderBlocker` a supervisor would.
+     What lifts it again is the **ON HOLD** queue section below.
 
    Below the three primary verbs the panel carries a **lower-emphasis** fourth action —
    deliberately styled apart so it can't be tapped by mistake:
@@ -297,6 +298,212 @@ appears (see `docs/API.md` → Shop Floor → "Laser-nest payload on operator re
 shape). The optional reference PDF is fetched **inline** through the fence-safe
 `GET /shop-floor/documents/{id}/inline` on kiosk surfaces (the old `GET /laser-nests/{id}/document`
 route remains for desktop callers); there is no approval workflow, and it never gates clock-in.
+
+## Held work and RESUME
+
+A held operation **stays visible on both kiosks**, in its own **ON HOLD** section below the
+startable jobs. Before this it was invisible: the queue renders `QUEUE_OPERATION_STATUSES`
+(READY/IN_PROGRESS) only, so an operator who mis-tapped HOLD watched the job disappear from every
+screen the kiosk offers, and `resumeOperation` had exactly one call site in the whole app — a
+desktop page. Recovery meant leaving the machine.
+
+**Held work arrives on its own list.** `GET /shop-floor/work-center-queue/{id}` returns `held`
+beside `queue`, plus `held_truncated` when the server's cap (`MAX_HELD_OPERATIONS`, 25) dropped
+older holds — both kiosks say so rather than showing a silent subset. `queue` stays byte-identical
+to what it always carried. **The list boundary is the safety property, not a flag inside the
+rows**, so nothing client-side re-merges them and no code path that renders a startable job card
+can reach a held row. Held rows additionally carry `startable: false` (stated, with no `true` twin
+on queue rows — whether a *queued* operation may actually start is decided by the server gates at
+the moment of the action, which a poll cannot honestly predict) and `run_order: null`.
+
+The held card is deliberately **not** a `KioskQueueCard`: it is inert markup with exactly one
+interactive element, **RESUME**. A held job must never be startable, and the operator has to lift
+the hold first — which is also what the server enforces.
+
+**It shows why it stopped**, from the row's nested `hold` block:
+
+```
+hold: { held_at, held_by_user_id, held_by_name, blocker: {…} | null }
+```
+
+`hold.blocker` carries the reason — category (labelled from the same `HOLD_REASONS` vocabulary the
+hold tiles use), severity, and — **on the single-operator kiosk only** — the title and the
+operator's note verbatim. `hold.held_by_name` / `hold.held_at` carry who stopped the job and when.
+That is what lets somebody tell their own mis-tap from a real quality or material stop placed by
+someone else; without it, RESUME is a control that silently clears another person's genuine hold.
+
+> **The blocker's free text does NOT reach the crew station.** A crew station authenticates its
+> 10–15s poll with a 24-hour shared-PIN **station** token: an unattended, PIN-unlocked tablet with
+> no operator identity and **no idle station logout**, so whatever the board renders is readable by
+> anyone walking past it. On a station response the server omits `title` and `note` **entirely** —
+> the keys are absent, not blanked, because a render-side gate would still ship the text to the
+> device — and sets `free_text_withheld: true` alongside `has_note`. The single-operator kiosk runs
+> on the operator's **own user session**, so it is an identified caller and keeps the full block.
+>
+> **This is the wallboard's rule, applied to the same class of screen.** `wallboard_service`'s
+> module docstring already states it for unattended shop displays — *no customer names, no ship-to
+> addresses, no dollar figures, **no NCR titles/descriptions*** — and the wallboard's blocked-work
+> rail has `title` and `note` in hand and deliberately emits only `wo_number` / `category` /
+> `age_hours`. A held card carrying the note would disclose to that audience exactly what the
+> wallboard withholds. `title` travels with `note` because it is equally unconstrained: `POST
+> /work-order-blockers` takes a caller-supplied title, and the server-composed
+> `_blocker_default_title` is only the fallback for a kiosk-placed hold.
+>
+> **It costs the feature nothing, and the card says so rather than going quiet.** The motivating
+> accident is a **bare** hold that carries no note at all, and a deliberate categorized hold is
+> still identifiable from category + severity + who placed it. Where free text *does* exist, the
+> crew card and the confirm overlay render *"A written note was recorded — not shown on a shared
+> station. Ask a supervisor before resuming."* Silence there would read as "no reason given" and
+> invite a Resume over somebody's real stop.
+>
+> **`has_note` covers BOTH withheld fields, not just `note`.** It is a boolean, never the text, and
+> it is true when a human wrote *either* a note **or** a title that differs from what
+> `blocker_default_title` would compose. It used to key on `note` alone, reasoning that
+> `work_order_blockers.title` is `nullable=False` and therefore always server-composed. That was
+> wrong in the one direction that matters: the title is composed only when the **caller supplies
+> none**, and an office-filed blocker routinely carries its whole explanation there with an empty
+> note. Those reported `has_note: false`, the card drew a bare category, and the silence read as
+> "nobody gave a reason" over a hold somebody had deliberately written up. A caller who types the
+> exact composed string still reads as server-composed — the safe way to be wrong, since the
+> withheld text would then say nothing the category does not.
+>
+> The note is not fetched back post-badge either: the crew confirm overlay renders **before** the
+> badge scan, and adding a post-badge re-read for one line of text would buy an extra round trip on
+> the floor for something the desktop and the single-operator kiosk already show.
+>
+> **The resume RESPONSE is gated the same way — the device, not just the poll.** `PUT
+> /shop-floor/operations/{id}/resume` returns the blockers it did not resolve, and
+> `KioskBlockerStillOpenScreen` renders them on a view built to persist (an explicit tap to leave,
+> bounded only by the 90s idle reset). Those titles are **not** "server-composed": `title` is the
+> same caller-supplied free text withheld above, so it is omitted from `open_blockers` whenever the
+> caller presents a badge-minted crew-station token (`_token_scope == "kiosk"`), with `has_note` /
+> `free_text_withheld` in its place and the category as the rendered fallback. The single-operator
+> kiosk runs on a normal session (no `scope` claim) and keeps the title, as does the desktop.
+>
+> **One seam holds by client convention rather than server construction.** A crew station holds two
+> credentials at once — the 24h station token and, briefly, a badge-minted operator token — and an
+> operator token on the *queue read* resolves to `principal.kind == "user"`, which would return the
+> free text. The server cannot tell that request from the single-operator kiosk's. So the queue read
+> must always be sent with the **station** token; `kioskStationClient.getQueue` takes no token
+> parameter and reads it from storage itself, and `kioskStationClient.queueToken.test.ts` pins that
+> it still does so while an operator token is live. The resume *write* has no such exposure: it must
+> carry the operator token for audit attribution, and that token is exactly what the gate keys on.
+
+> **Reason and attribution are INDEPENDENT — never gate one on the other.** There is no
+> `held_by` / `held_at` column on `work_order_operations`; the server reconstructs provenance from
+> whichever record the hold path wrote, and the paths differ. A hold **with** a note or a non-OTHER
+> category files a `WorkOrderBlocker`, so `blocker` is populated. A **bare** hold — no note,
+> category OTHER, which is exactly the accidental fat-finger case this feature exists for — emits
+> an `operation_hold` event and files **no blocker at all**, so `blocker` is null while
+> `held_by_name` / `held_at` still name who pressed it. Reading the attribution off the blocker
+> would leave precisely that case anonymous *and* reasonless — the one case that most needs to read
+> as an accident. When both records are absent the card says "no hold reason recorded": a real
+> state, since the server reports what was recorded and never infers a holder from
+> `operation.updated_at`.
+>
+> The confirm overlay's copy forks on the same fact. With a blocker it warns the hold stays
+> recorded and to ask a supervisor to clear it; for a **bare** hold it says there is nothing left
+> open, because there genuinely is not — sending that operator after a record that does not exist
+> would be its own small betrayal.
+
+Both surfaces confirm first, in a `KioskModal` (**not** the shared `<ConfirmDialog>`, which portals
+outside `.fd-scope-kiosk` and would paint office chrome on a shop tablet). The overlay restates the
+job and states that the hold stays recorded. Then:
+
+- **Single-operator kiosk** — confirm fires `PUT /shop-floor/operations/{id}/resume` on the
+  operator's own session.
+- **Crew station** — confirm hands off to a full-screen **badge signature** (`crew-resume`
+  `BadgeScanPanel`), then `kioskStationClient.resumeOperation(operatorToken, id)`. The station
+  token is honored only by the queue read and the badge mint, so the badge-identified operator is
+  the audit actor. Two steps rather than a badge-in-modal like COMPLETE: a keypad inside the
+  overlay pushes its own bottom row under the fold at 768x1024.
+
+Server-gated ⇒ **non-optimistic**. A refusal renders **verbatim**: a toast on the single-operator
+kiosk, inline on the crew sign screen, and nothing in the UI moves. Three refusals exist —
+400 *"Operation is not on hold"* (a supervisor got there first), 404 on a cross-tenant id, and
+**409 *"This nest was cancelled; its operation cannot be resumed."*** (below).
+
+> **RESUME restores; it does not release, and it does not resurrect.** Both guards live on the
+> **write**, so the desktop `ShopFloorSimple` page inherits them too — they are not kiosk-only UI
+> rules.
+>
+> **A cancelled nest's operation is a tombstone, not a hold → 409.**
+> `laser_nest_service.soft_delete_laser_nest` parks a soft-deleted nest's operation in `ON_HOLD`
+> (`OperationStatus` has no operation-level CANCELLED) and never hard-deletes the nest, precisely so
+> traceability and the package's run history survive. Resuming one would undo a soft delete from the
+> front end and put a laser operation with no live nest, no CNC file and a quantity its parent no
+> longer counts back on the board. `dispatch_service.cancelled_nest_exists` is the shared predicate:
+> it keeps the tombstone off the kiosk's `held` list, off `GET /shop-floor/operations` (the desktop
+> list where Resume is offered), and refuses the resume itself.
+>
+> **A resume never performs a release.** `PUT …/hold` refuses only COMPLETE, so a `PENDING`
+> operation can be held — and the old *"`IN_PROGRESS` if `actual_start` else `READY`"* rule then let
+> one tap promote it onto the dispatch board and the kiosk queue, on a `DRAFT` work order included.
+> Release is the authorization step and the record of who authorized production. Resume now floors
+> at `PENDING` and delegates any lift to `promote_ready_operations` — the one promotion rule shared
+> by WO release, operation completion and the read-path heal — so it can only reach a state the next
+> board poll would have reached anyway. In practice: started before the hold → `IN_PROGRESS`;
+> `READY` before the hold on a live released WO → straight back to `READY`, net zero; `PENDING`
+> before the hold, or a `DRAFT`/terminal parent, or an incomplete cross-work-center predecessor →
+> `PENDING`, and the job does **not** rejoin the queue. Both kiosks then show an *info* toast
+> (*"… hold lifted — still waiting on release or an earlier step."*) rather than a green *resumed*
+> that would send the operator hunting a card that is never going to appear.
+>
+> An exact pre-hold status is not recoverable today: there is no `held_from_status` column, and the
+> two records the hold paths write (the `operation_hold` event, the blocker) are **best-effort**
+> emits — not a state source a transition may depend on. Recomputing from the promotion authority
+> needs no schema change; a column that records the pre-hold status exactly would be a separate,
+> scoped migration.
+
+**Resume audits as a `STATUS_CHANGE`**, carrying old→new status plus
+`extra_data.transition = "resume_operation"` (the verb the generic action no longer names) and the
+ids of any blocker still open. It was a prose `audit.log` row with no before/after states, which was
+tolerable while one desktop page was the only caller and stopped being tolerable when resume became
+a shop-wide floor verb.
+
+**Resuming does not resolve the blocker.** The endpoint returns `open_blockers` precisely so
+operation status and blocker status cannot silently diverge, and the kiosk gives that list its own
+screen with an explicit exit (like the OOT `KioskNcrFiledScreen`) rather than a toast the 15s poll
+would yank away. The server's blocker `title` is rendered verbatim **where it is sent** — on a
+crew-station response it is withheld (see the disclosure box above) and each row falls back to its
+category label, with the category dropped from the line underneath so the panel does not stutter it
+twice, plus one line saying a written reason exists.
+
+> **Known gap — the kiosk cannot CLEAR a blocker, only resume past one.** For an accidental hold
+> the better outcome is resolving the blocker: that resumes the operation as a side effect
+> (`_resume_operation_if_no_open_blockers`) **and** closes the record, leaving nothing diverging —
+> which is how the owner actually recovered from the incident that motivated this feature. Resuming
+> alone leaves a phantom blocker on the dashboard and the WO Blockers panel for someone to chase.
+> The kiosk ships resume-only because `POST /work-order-blockers/{id}/resolve` is unreachable from
+> **both** surfaces behind two independent gates: it requires **ADMIN/MANAGER/SUPERVISOR** (an
+> OPERATOR on the single-operator kiosk, which runs on their own session, gets 403), and
+> `/api/v1/work-order-blockers` sits **outside `KIOSK_TOKEN_PATH_PREFIXES`**, so a badge-minted
+> crew-station token is 403 there *whatever role the badge holds*. Widening either is an RBAC /
+> security decision, not a frontend one. Until then the copy tells the operator the record stays
+> open and to ask a supervisor to clear it. Revisit if a shop-floor-fenced resolve ever lands.
+
+**Fold (2026-08-12, measured on the real pages; worst case — long blocker note AND the truncation
+banner showing):** every control clears both tablet orientations. The **crew** rows are now
+conservative rather than worst-case: a station never receives the note, so its card renders the
+one-line *"a written note was recorded"* replacement instead of a long free-text block. Re-measure
+only if a crew card grows a line.
+
+| Control | 1024x768 | 768x1024 |
+|---|---|---|
+| Crew keypad bottom row (the standing rule's subject) | 619px, **+149px** | 619px, **+405px** |
+| Crew resume-confirm CTA | 662px, **+106px** | 790px, **+234px** |
+| Crew held-card RESUME | 740px, **+28px** | 740px, **+284px** |
+| Crew held card (bottom edge) | 761px, **+7px** | 761px, **+263px** |
+| Operator held-card RESUME | 642px, **+126px** | 642px, **+382px** |
+| Operator resume-confirm CTA | 662px, **+106px** | 790px, **+234px** |
+
+The **+7px** is worth understanding rather than treating as pass/fail. It is the bottom of the
+*first* held card at landscape, with the truncation banner above it — i.e. one startable job plus a
+banner that only appears past 25 concurrent holds. The board is a scrolling list, so a second held
+card is below the fold the same way a fifth queue card always has been; that is inherent to a list
+and not what the rule guards. The rule's actual subject is the fixed-height **badge screens**, where
+the keypad's bottom row must be reachable without scrolling — those sit at +149px / +405px. If the
+held card grows another line, re-measure before shipping it.
 
 ## One-tap `+1 PIECE`
 
@@ -920,6 +1127,16 @@ measurement.
   names everyone auto-clocked-out (the complete response's `closed_time_entries`).
 - **HOLD.** The same required blocker-category grid as the single-operator kiosk, then a
   badge-signature scan (`PUT /shop-floor/operations/{id}/hold`).
+- **RESUME.** Held jobs sit in an **ON HOLD** section under the joinable board, each card
+  carrying why it stopped — category, severity and who held it, but **not** the blocker's
+  free-text note, which the server does not send to a shared station — and a single RESUME
+  verb (never a join target). Confirm overlay → badge signature →
+  `PUT /shop-floor/operations/{id}/resume`. Until this existed the station
+  could place a hold but not lift one — `kioskStationClient` carried `holdOperation` and no
+  twin — so a mis-tap on the floor needed a desktop to undo. See
+  [Held work and RESUME](#held-work-and-resume), including why the kiosk resumes past a
+  blocker but cannot clear it, why the note stops at the station boundary, and why a resume
+  restores rather than releases.
 - **STEPS (badge-gated).** The job screen's steps verb ("Steps 2/6", present when the
   operation carries process-sheet steps) opens a badge scan — step records are made in the
   scanned operator's name — then the shared steps panel bound to that badge-minted token

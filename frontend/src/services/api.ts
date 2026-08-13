@@ -41,6 +41,7 @@ import {
   WorkOrderDuplicateResult,
   InventoryTransaction,
   InventoryTransactionParams,
+  ResumeOperationResult,
 } from '../types';
 import { ScanResolveRequest, ScanResolveResult } from '../types/scan';
 import {
@@ -1886,9 +1887,20 @@ class ApiService {
     return response.data;
   }
 
-  async resumeOperation(operationId: number) {
+  /**
+   * Lifts an ON_HOLD operation. Refuses 400 "Operation is not on hold"
+   * otherwise, so callers stay NON-optimistic.
+   *
+   * The response carries `open_blockers` — the blockers this resume did NOT
+   * resolve. Resume and blocker resolution are decoupled on purpose; surface
+   * that list rather than discarding it, or a still-open quality stop reads as
+   * cleared. Mirrors holdOperation in invalidating the dashboard cache: the
+   * operation's status just changed.
+   */
+  async resumeOperation(operationId: number): Promise<ResumeOperationResult> {
     const response = await this.api.put(`/shop-floor/operations/${operationId}/resume`);
-    return response.data;
+    this.invalidateDashboardCache();
+    return response.data as ResumeOperationResult;
   }
 
   // MRP (Material Requirements Planning)

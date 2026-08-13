@@ -197,7 +197,7 @@ statuses are off the board as everywhere else.
   COMPLETE`).
 - **Card anatomy — five fixed rows:**
   1. WO number ←→ status chip (glowing dot + state word; only DOWN dots pulse);
-  2. part number ←→ WO-level `done/ordered` qty;
+  2. part number ←→ `done/ordered` qty (see **Order totals on a pool WO** below);
   3. `OP n/total · <op name>` — **or the WO's customer name on an authorized (executive) board**
      (see "Customer names — gated"; public boards keep the op line, and an authorized board falls
      back to it for a WO with no customer) ←→ the state's **time value** — red downtime duration on
@@ -205,7 +205,46 @@ statuses are off the board as everywhere else.
      card that is also running (minutes tick client-side between polls);
   4. work center ←→ the **stop reason** — the downtime category on DOWN, the blocker category on
      BLOCKED, `IN QUEUE` on WAITING;
-  5. a thin WO-level progress bar (`qty_complete / qty_ordered`) + percent.
+  5. a thin progress bar (`qty_complete / qty_ordered`) + percent.
+- **Order totals on a pool WO:** rows 2 and 5 normally show the **work-order header**
+  (`quantity_complete / quantity_ordered`) — correct for a conventional routing, where every
+  operation processes the whole order. A **pool** work order is different: its operations are
+  independent line items, each carrying its own target in `component_quantity` (a laser nest's
+  planned_runs; a batch WO's piece count for that item). There the card shows the **SUM across
+  those line operations** — total pieces done / total pieces on the order — because the header's
+  non-pool rollup takes MAX over operations capped at `quantity_ordered`, which read `8/8 —
+  100%` on an 18-item press-brake batch that was on item 2 (fixed 2026-08-13; laser cards were
+  already right, since a laser WO's header IS the pooled SUM). One server-side helper:
+  `per_item_operation_totals` (`work_order_state_service.py`) — a pure read that issues no
+  queries of its own (guard 2 below reads the operation's nest, which the wallboard eager-loads).
+  The `OP n/total` row and the ship panel's `N LEFT` (which counts shippable units, not line
+  pieces) are unaffected, so a pool card can read `8/79` beside a rail reading `8 LEFT`.
+  - **Telling a pool from a routing is the hard part**, because `component_quantity` with a NULL
+    `component_part_id` is **overloaded**: `GET /work-orders/preview-operations` emits the
+    *assembly's own* routing operations with exactly that shape, carrying the **whole order
+    quantity restated once per operation**, and the New Work Order wizard posts it verbatim.
+    Summing those would render a 10-piece job as `0/50` then `50/50`. Four guards, in order:
+    **(1)** the WO's part has an active **BOM** → never sum (that impostor is emitted only for
+    BOM'd parts, and conversely a pool WO's hand-set targets only survive on a part with no BOM,
+    since `_reconcile_operation_component_quantities` overwrites them on every WO GET);
+    **(2)** operations backing a **soft-deleted laser nest** are dropped (the tombstone keeps its
+    `component_quantity` while the header is recomputed over live nests);
+    **(3)** **all or nothing** — one operation without a target sends the whole WO back to the
+    header, so a partly-targeted batch can never render "100%" with items still open;
+    **(4)** if **every** line target equals `quantity_ordered`, that's the restated-order-quantity
+    signature, not a pool — the backstop for an impostor whose part later *lost* its BOM.
+    A WO that fails any guard shows the header, exactly as before.
+  - **Two known costs, not oversights.** A pool whose every line carries the *same* target as the
+    header (8 sets × 1 piece per line; a 3-line WO at `quantity_ordered = 1`) is indistinguishable
+    from the impostor, so guard 4 leaves it reading `8/8 — 100%` — **one line with a different
+    piece count is enough to make the card work**. And adding a whole-order operation to a pool WO
+    (a final QC, a PACK step) leaves that op untargeted, which trips guard 3 and reverts the whole
+    card to the header — so **don't add an untargeted operation to a pool WO** (nothing in the
+    product explains the reversion). Both disappear the day work orders carry a **pool type**: one
+    positive marker would replace all four guards. Until then the rule refuses rather than guesses,
+    in the direction that never invents a bigger order than the header. It also assumes **one
+    operation per line item** — two operations carrying the same item's count sum it twice, exactly
+    as the laser pool rollup does.
 - **Stoppage detail is joined client-side:** DOWN duration + category come from
   `work_centers[].down` via the current op's work-center code; BLOCKED age + category come from
   `blocked_wos[]` by WO number. When a join misses (e.g. a blocked WO that fell outside the
@@ -275,8 +314,10 @@ principal and redacted on every public board.
   capped at **24**; `jobs_total` is the true uncapped count for `+N more`. Both are
   **dept-scoped** when `dept` is passed — a job belongs to a dept via its **current op's**
   work-center type. Each job carries `wo_number`, `part_number`, the **gated** `customer_name`
-  (see the privacy note below), `status`, WO-level
-  `qty_complete` / `qty_ordered`, `promise_date` (`must_ship_by || due_date`), `is_late` /
+  (see the privacy note below), `status`,
+  `qty_complete` / `qty_ordered` (order totals — WO header on a conventional routing, the SUM of
+  per-item operation targets/progress on a pool WO; see "Order totals on a pool WO"),
+  `promise_date` (`must_ship_by || due_date`), `is_late` /
   `days_late` (the same shared lateness predicate as the rail — the card and the LATE panel
   cannot disagree), `blocked` (any unresolved blocker on the WO), `down` (current op's work
   center has an open downtime event), `running` (current op has ≥1 open labor entry),

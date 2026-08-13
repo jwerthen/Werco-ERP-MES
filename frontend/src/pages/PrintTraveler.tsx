@@ -4,6 +4,7 @@ import api from '../services/api';
 import { Part, WorkOrder } from '../types';
 import QRCode from 'qrcode';
 import { formatCentralDate, formatCentralDateTime, getCentralTodayISODate } from '../utils/centralTime';
+import { operationTargetQuantity } from '../utils/operationQuantity';
 import { useAuth } from '../context/AuthContext';
 import { ErrorState } from '../components/ui';
 
@@ -329,17 +330,13 @@ export default function PrintTraveler() {
               </td>
               <td className="border p-2">{op.work_center_name || op.work_center_id}</td>
               <td className="border p-2">
-                {op.component_part_number ? (
+                {op.component_part_number && (
                   <div>
                     <div className="font-medium">{op.component_part_number}</div>
                     <div className="text-gray-600">{op.component_part_name || '-'}</div>
-                    <div className="text-gray-600">Qty: {op.component_quantity ?? '-'}</div>
-                  </div>
-                ) : (
-                  <div>
-                    <div className="text-gray-600">Qty: {workOrder.quantity_ordered}</div>
                   </div>
                 )}
+                <div className="text-gray-600">Qty: {operationTargetQuantity(op, workOrder.quantity_ordered)}</div>
               </td>
               <td className="border p-2 text-center">{formatHours(op.setup_time_hours)}</td>
               <td className="border p-2 text-center">{formatHours(op.run_time_hours)}</td>

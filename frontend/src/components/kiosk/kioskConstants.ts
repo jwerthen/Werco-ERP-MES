@@ -19,7 +19,13 @@
  *   kiosk hold files a blocker.
  */
 
-import { KioskLastReport, KioskMaterialTie, KioskQueueWorkCenter, LaserNestInfo } from '../../types';
+import {
+  KioskLastReport,
+  KioskMaterialTie,
+  KioskQueueWorkCenter,
+  LaserNestInfo,
+  OperationHold,
+} from '../../types';
 
 // Re-exported so the kiosk components keep importing their tie shape from the
 // kiosk barrel. The interface itself lives in ../../types because
@@ -123,6 +129,18 @@ export interface KioskQueueItem {
   // render nothing at all (no placeholder, no "not tied" nag): an untied work
   // order must look byte-identical to its pre-feature self.
   material_ties?: KioskMaterialTie[] | null;
+  // --- `held` rows only (never `queue`) -------------------------------------
+  // Stated explicitly by the server on held rows, with no `true` twin on queue
+  // rows on purpose: whether a QUEUED operation may actually start is decided by
+  // the server gates at the moment of the action (predecessors, work center,
+  // open entries), so a poll asserting `startable: true` would make a claim this
+  // read cannot honor. "Held work cannot be started" is a claim it can.
+  startable?: false;
+  // WHY it is held, WHO placed it and WHEN. Every field inside is nullable, and
+  // `hold.blocker` is null for a BARE hold — exactly the accidental case. Read
+  // the reason from `hold.blocker` and the attribution from `hold.held_by_name`
+  // / `hold.held_at`: they are INDEPENDENT, never gate one on the other.
+  hold?: OperationHold | null;
 }
 
 /**
@@ -133,6 +151,21 @@ export interface KioskQueueItem {
  */
 export interface KioskWorkCenterQueueResponse {
   queue: KioskQueueItem[];
+  /**
+   * ON_HOLD operations at this work center, on their OWN list.
+   *
+   * Additive and separate BY DESIGN: `queue` stays byte-identical to what it has
+   * always carried, so no client iterating it can render a held operation as a
+   * startable job card by accident. **The list boundary is the safety property,
+   * not a flag inside the rows** — so never merge these into `queue`.
+   * Most-recently-held first.
+   */
+  held?: KioskQueueItem[];
+  /**
+   * True when the server's cap (`MAX_HELD_OPERATIONS`, 25) dropped older holds.
+   * Say so rather than silently showing a subset.
+   */
+  held_truncated?: boolean;
   /** UTC ISO server clock at response time — timer skew anchor. */
   server_time?: string;
   /** The queue's work center (backend B3) — feeds the kiosk top bar. */
