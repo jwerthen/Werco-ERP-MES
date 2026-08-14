@@ -10,6 +10,7 @@ from app.core.validation import (
     DescriptionLong,
     Money,
     MoneySmall,
+    OperationNumber,
 )
 from app.models.work_order import OperationStatus, WorkOrderStatus, WorkOrderType
 from app.schemas.base import UTCModel
@@ -54,7 +55,7 @@ class WorkOrderOperationBase(UTCModel):
         multiple_of=10,
         description="Sequence (10-990, multiples of 10)",
     )
-    operation_number: Optional[str] = Field(None, max_length=50)
+    operation_number: Optional[OperationNumber] = None
     name: str = Field(..., min_length=2, max_length=255, description="Operation name")
     description: Optional[DescriptionLong] = None
     setup_instructions: Optional[str] = Field(None, max_length=5000)

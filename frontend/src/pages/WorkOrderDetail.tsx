@@ -41,6 +41,7 @@ import {
 } from '../components/ui';
 import { useUnsavedChanges } from '../hooks/useUnsavedChanges';
 import { formatCentralDate, formatCentralDateTime, getCentralDateStamp } from '../utils/centralTime';
+import { formatOperationLabel, hasOperationNumber } from '../utils/operationLabel';
 import { sortWorkCentersForLaserDispatch } from '../utils/laserWorkCenters';
 import {
   ArrowLeftIcon,
@@ -2382,7 +2383,11 @@ export default function WorkOrderDetail() {
                 <option value="">Whole work order</option>
                 {workOrder.operations.map((op) => (
                   <option key={op.id} value={op.id}>
-                    {op.operation_number || `Op ${op.sequence}`} - {op.name}
+                    {`${
+                      hasOperationNumber(op.operation_number)
+                        ? formatOperationLabel(op.operation_number)
+                        : `Op ${op.sequence}`
+                    } - ${op.name}`}
                   </option>
                 ))}
               </select>

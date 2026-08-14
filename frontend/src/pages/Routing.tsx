@@ -6,6 +6,7 @@ import { FormField } from '../components/ui/FormField';
 import { RoutingImportWizard } from '../components/routing/RoutingImportWizard';
 import { useAuth } from '../context/AuthContext';
 import { hasPermission } from '../utils/permissions';
+import { formatOperationLabel, operationNumberText } from '../utils/operationLabel';
 import { Link, useSearchParams } from 'react-router-dom';
 import { ProcessSheetListItem } from '../types/processSheet';
 import {
@@ -899,7 +900,7 @@ export default function RoutingPage() {
                       .sort((a, b) => a.sequence - b.sequence)
                       .map((op) => (
                         <tr key={op.id} className="hover:bg-slate-800/50">
-                          <td className="px-4 py-3 font-medium">{op.operation_number}</td>
+                          <td className="px-4 py-3 font-medium">{operationNumberText(op.operation_number)}</td>
                           <td className="px-4 py-3">
                             <div>{op.name}</div>
                             {op.description && (
@@ -1540,8 +1541,11 @@ export default function RoutingPage() {
                 <div className="grid grid-cols-2 gap-4 text-sm">
                   <div>
                     <div className="text-xs uppercase tracking-wide text-slate-500">Operation</div>
+                    {/* The FULL label here, not the bare text: this value stands
+                        alone rather than under an "Op #" header, and a blank number
+                        would otherwise print a dangling "— Deburr". */}
                     <div className="font-medium">
-                      {editingOperation.operation_number} — {editingOperation.name}
+                      {formatOperationLabel(editingOperation.operation_number)} — {editingOperation.name}
                     </div>
                   </div>
                   <div>

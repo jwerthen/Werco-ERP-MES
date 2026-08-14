@@ -3,12 +3,13 @@ from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
+from app.core.validation import OperationNumber
 from app.schemas.base import UTCModel
 
 
 class RoutingOperationBase(UTCModel):
     sequence: int
-    operation_number: Optional[str] = None
+    operation_number: Optional[OperationNumber] = None
     name: str
     description: Optional[str] = None
     work_center_id: int
@@ -47,7 +48,7 @@ class RoutingOperationCreate(RoutingOperationBase):
 
 class RoutingOperationUpdate(BaseModel):
     sequence: Optional[int] = None
-    operation_number: Optional[str] = None
+    operation_number: Optional[OperationNumber] = None
     name: Optional[str] = None
     description: Optional[str] = None
     work_center_id: Optional[int] = None
@@ -71,6 +72,26 @@ class RoutingOperationUpdate(BaseModel):
     outside_lead_days: Optional[int] = None
     is_active: Optional[bool] = None
     process_sheet_id: Optional[int] = None
+
+
+class RoutingOperationReorderItem(BaseModel):
+    """One (operation, new sequence) pair for ``POST /routing/{id}/operations/reorder``.
+
+    The endpoint took a bare ``List[dict]`` and wrote ``str(item["sequence"])`` straight into
+    the ``String(20)`` ``operation_number`` column -- the one path where a caller-controlled
+    NON-INT reaches that column. Untyped, a float ``10.0`` persisted the string ``"10.0"``,
+    ``None`` persisted ``"None"`` before the ``nullable=False`` IntegrityError fired, and a
+    missing ``"id"`` key was a ``KeyError`` (500). Typing the body makes each of those a 422,
+    and Pydantic's lax int coercion still accepts the ``10.0`` a JS client sends for a whole
+    number while refusing a fractional ``10.5`` that no sequence can be.
+
+    ``sequence`` deliberately carries NO upper bound: ``RoutingOperationBase.sequence`` -- the
+    CREATE path for the same column -- declares none either, so a ceiling here would refuse
+    reorders of rows this same API happily creates.
+    """
+
+    id: int = Field(..., gt=0, description="Id of the routing operation to move")
+    sequence: int = Field(..., ge=0, description="Its new sequence")
 
 
 class WorkCenterSummary(BaseModel):

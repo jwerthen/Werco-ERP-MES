@@ -7,6 +7,7 @@ import {
   formatCrewTally,
   formatElapsed,
   formatOperationLabel,
+  operationNumberText,
 } from './kioskConstants';
 import { KioskRunOrderChip, KioskStepsChip } from './KioskQueueCard';
 
@@ -36,7 +37,11 @@ export default function KioskCrewJobCard({ item, nowMs, onSelect, disabled = fal
       type="button"
       disabled={disabled}
       onClick={() => onSelect(item)}
-      aria-label={`Work order ${item.work_order_number}, operation ${item.operation_name || item.operation_number || ''}, ${roster.length} clocked in`}
+      // Normalized for the same reason the visible label below is: raw, a legacy
+      // row announced "operation Op 10" beside a new row's "operation 10".
+      aria-label={`Work order ${item.work_order_number}, operation ${
+        item.operation_name || operationNumberText(item.operation_number) || ''
+      }, ${roster.length} clocked in`}
       className={`grid w-full grid-cols-[1fr_auto] items-center gap-4 rounded border px-5 py-5 text-left transition-colors active:translate-y-px disabled:opacity-40 ${
         pastDue
           ? 'border-fd-red/60 bg-fd-red/5 hover:border-fd-red'

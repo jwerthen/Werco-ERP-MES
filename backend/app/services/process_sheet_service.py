@@ -628,7 +628,10 @@ def snapshot_steps_for_work_order(
     resolved_by_number: Dict[str, Optional[ProcessSheet]] = {}
     summary: List[Dict[str, Any]] = []
     for op, sheet_id in sorted(pairs, key=lambda pair: (pair[0].sequence or 0, pair[0].id or 0)):
-        identifier = op.operation_number or f"Op {op.sequence}"
+        # Bare identifier, never a display label -- this reaches the 409
+        # PROCESS_SHEET_UNAVAILABLE ``operation`` field and detail string, and the UI adds
+        # its own "Op " prefix. See models/work_order.py::WorkOrderOperation.operation_number.
+        identifier = str(op.operation_number or op.sequence)
         attached = attached_by_id.get(sheet_id)
         if attached is None:
             # FK integrity makes this a cross-tenant attach or a vanished row —

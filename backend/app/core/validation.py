@@ -29,6 +29,16 @@ DescriptionLong = Annotated[
     str, Field(min_length=20, max_length=5000, description="Long description: 20-5000 characters")
 ]
 
+# Operation IDENTIFIER (WorkOrderOperation.operation_number / RoutingOperation.operation_number).
+# The 20 is the COLUMN WIDTH -- both are String(20) -- not a style preference. Declared once here
+# because it was previously declared three times and disagreed each time (50 on the work-order
+# schema, unbounded on both routing schemas), so a 21-50 char value validated at the API boundary
+# and then raised StringDataRightTruncation on Postgres: a 500 for what is a caller input error.
+# Widening this REQUIRES widening both columns in the same migration.
+OperationNumber = Annotated[
+    str, Field(max_length=20, description="Operation identifier: max 20 chars (the String(20) column width)")
+]
+
 Money = Annotated[Decimal, Field(ge=0, description="Currency: non-negative decimal")]
 
 OptionalMoney = Annotated[Decimal, Field(ge=0, default=None, description="Optional currency: non-negative decimal")]

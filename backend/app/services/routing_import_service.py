@@ -406,7 +406,9 @@ def import_routings(
                         routing_id=routing.id,
                         company_id=company_id,
                         sequence=op.line.sequence,
-                        operation_number=f"Op {op.line.sequence}",
+                        # Bare identifier, not a display label -- see
+                        # work_orders.create_routing_operations_for_work_order.
+                        operation_number=str(op.line.sequence),
                         name=op.line.operation_name,
                         description=op.line.description,
                         work_center_id=op.work_center_id,

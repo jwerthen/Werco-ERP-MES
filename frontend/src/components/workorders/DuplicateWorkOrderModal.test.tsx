@@ -677,9 +677,36 @@ describe('DuplicateWorkOrderModal: a PARTIAL copy stops the flow', () => {
 
     const rows = within(screen.getByTestId('duplicate-wo-skipped-operations')).getAllByRole('listitem');
     expect(rows).toHaveLength(2);
-    expect(rows[0]).toHaveTextContent('OP20');
+    // Stored legacy spellings ('OP20'), named with the one shared label so the
+    // row reads in the same vocabulary as its `Seq 20` / `Operation #72` siblings.
+    expect(rows[0]).toHaveTextContent('Op 20');
     expect(rows[0]).toHaveTextContent('its laser nest was deleted');
-    expect(rows[1]).toHaveTextContent('OP30');
+    expect(rows[1]).toHaveTextContent('Op 30');
+  });
+
+  it('names a NEST operation as a nest — the only shape this notice actually carries', async () => {
+    // This notice is emitted for exactly one reason (`laser_nest_deleted`), and the
+    // operations it names are the ones `laser_nest_service` created, whose
+    // operation_number is `Nest {index}`. The `OP20`/`OP30` fixtures above are the
+    // legacy-office spelling and are what let a blanket `Op ` prefix ship here
+    // reading "Op Nest 3 — its laser nest was deleted".
+    await submitPartialCopy(
+      partial({
+        skipped_operations: [
+          skippedOperation({ source_operation_id: 81, operation_number: 'Nest 3', sequence: 30 }),
+          skippedOperation({ source_operation_id: 82, operation_number: 'Nest 12', sequence: 120 }),
+        ],
+        skipped_material_allocations: [],
+      })
+    );
+
+    const rows = within(screen.getByTestId('duplicate-wo-skipped-operations')).getAllByRole('listitem');
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toHaveTextContent('Nest 3');
+    expect(rows[0]).not.toHaveTextContent('Op Nest 3');
+    expect(rows[0]).toHaveTextContent('its laser nest was deleted');
+    expect(rows[1]).toHaveTextContent('Nest 12');
+    expect(rows[1]).not.toHaveTextContent('Op Nest 12');
   });
 
   it('falls back through the ids when an operation carries no number', async () => {

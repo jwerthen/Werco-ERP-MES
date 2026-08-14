@@ -167,7 +167,10 @@ export const workOrderOperationSchema = z.object({
     .min(10, 'Sequence must be 10-990')
     .max(990, 'Sequence must be 10-990')
     .multipleOf(10, 'Sequence must be a multiple of 10'),
-  operation_number: z.string().max(50).optional(),
+  // 20, not 50: matches the String(20) column and the backend's OperationNumber
+  // annotated type. A wider client bound just turns an inline field error into a
+  // server 422 the user reads later.
+  operation_number: z.string().max(20).optional(),
   name: nameSchema,
   description: descriptionLongSchema,
   setup_instructions: z.string().max(5000, 'Must be at most 5000 characters').optional(),

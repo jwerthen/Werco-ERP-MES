@@ -472,7 +472,7 @@ class TestForceCompleteEvidenceOverride:
 
         # ...but the bypass is deliberate and visible on the response...
         expected_entry = {
-            "operation": operation.operation_number or f"Op {operation.sequence}",
+            "operation": str(operation.operation_number or operation.sequence),
             "step_id": step.id,
             "label": "Final inspect",
             "serials": [],

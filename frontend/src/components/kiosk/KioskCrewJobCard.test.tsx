@@ -115,3 +115,36 @@ describe('KioskCrewJobCard', () => {
     expect(onSelect).toHaveBeenCalledWith(ITEM);
   });
 });
+
+/**
+ * The crew card's ACCESSIBLE NAME — same defect and same fix as the queue and
+ * held cards: the visible label was normalized, the aria-label was not, so a
+ * legacy `Op 20` row and a new `20` row announced differently.
+ */
+describe('KioskCrewJobCard accessible name', () => {
+  const nameFor = (operationNumber: string, operationName = '') => {
+    const { unmount } = render(
+      <KioskCrewJobCard
+        item={{ ...ITEM, operation_number: operationNumber, operation_name: operationName }}
+        nowMs={NOW_MS}
+        onSelect={jest.fn()}
+      />
+    );
+    const label = screen.getByRole('button', { name: /Work order WO-2026-0142/ }).getAttribute('aria-label') || '';
+    unmount();
+    return label;
+  };
+
+  it('announces the same operation identically for both stored spellings', () => {
+    const legacy = nameFor('Op 20');
+    const current = nameFor('20');
+
+    expect(legacy).toBe('Work order WO-2026-0142, operation 20, 2 clocked in');
+    expect(legacy).toBe(current);
+    expect(legacy).not.toMatch(/Op\s*20/);
+  });
+
+  it('still prefers the operation NAME when the server sends one', () => {
+    expect(nameFor('Op 20', 'Weld')).toBe('Work order WO-2026-0142, operation Weld, 2 clocked in');
+  });
+});

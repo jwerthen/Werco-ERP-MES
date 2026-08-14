@@ -1,7 +1,7 @@
 import React from 'react';
 import { ArrowUpRightIcon } from '@heroicons/react/24/outline';
 import { formatCentralDate, isDateBeforeTodayInCentral, isDateTodayInCentral } from '../../utils/centralTime';
-import { KioskQueueItem, formatOperationLabel, formatStepsChip } from './kioskConstants';
+import { KioskQueueItem, formatOperationLabel, formatStepsChip, operationNumberText } from './kioskConstants';
 
 /**
  * "Steps 2/6" — required process-step progress for the operation. Hidden when
@@ -112,7 +112,13 @@ export default function KioskQueueCard({ item, onSelect, active = false, disable
           select();
         }
       }}
-      aria-label={`Work order ${item.work_order_number}, operation ${item.operation_name || item.operation_number || ''}`}
+      // `operationNumberText`, not the raw column: the visible line below runs the
+      // same value through `formatOperationLabel`, so interpolating it raw made a
+      // screen reader announce "operation Op 10" for a legacy row and "operation 10"
+      // for a new one -- the same operation, named two ways, in the same card.
+      aria-label={`Work order ${item.work_order_number}, operation ${
+        item.operation_name || operationNumberText(item.operation_number) || ''
+      }`}
       className={`w-full rounded-[4px] border bg-fd-panel px-4 py-3.5 text-left transition-transform duration-150 ease-out active:scale-[0.99] ${
         active
           ? 'border-fd-line-bright border-l-2 border-l-fd-green'

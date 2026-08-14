@@ -69,6 +69,7 @@ import React, { useEffect, useId, useRef, useState } from 'react';
 import api from '../../services/api';
 import { Button, FormField, LoadingButton, Modal, useToast } from '../ui';
 import { toDisplayString } from '../../utils/apiError';
+import { formatOperationLabel, hasOperationNumber } from '../../utils/operationLabel';
 import type {
   WorkOrder,
   WorkOrderDuplicateResult,
@@ -187,8 +188,17 @@ function skipSummary(result: WorkOrderDuplicateResult): string | null {
 
 /** How a skipped operation is named. Falls back through the ids the envelope carries. */
 function operationLabel(operation: WorkOrderDuplicateSkippedOperation): string {
-  const number = operation.operation_number?.trim();
-  if (number) return number;
+  // The FULL label, matching the `Seq 20` / `Operation #72` fallbacks below --
+  // these three are one vocabulary, and a bare "20" among them names nothing.
+  //
+  // `formatOperationLabel` and not the bare text, even though this notice is
+  // emitted ONLY for nest-backed operations (`laser_nest_deleted`), whose stored
+  // number is `Nest 3`: the helper leaves a self-labeled value alone, so a nest
+  // reads `Nest 3` and a legacy office row still reads `Op 20`. Both spellings
+  // reach here -- a nest task can carry either -- and only the label names both.
+  if (hasOperationNumber(operation.operation_number)) {
+    return formatOperationLabel(operation.operation_number);
+  }
   if (operation.sequence != null) return `Seq ${operation.sequence}`;
   return `Operation #${operation.source_operation_id}`;
 }

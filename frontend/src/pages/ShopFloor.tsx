@@ -26,7 +26,7 @@ import {
 } from '@heroicons/react/24/solid';
 import { QueueListIcon, DocumentTextIcon, ArrowTopRightOnSquareIcon } from '@heroicons/react/24/outline';
 import { getKioskDept, getKioskWorkCenterCode, getKioskWorkCenterId, isKioskMode } from '../utils/kiosk';
-import { formatOperationLabel } from '../utils/operationLabel';
+import { formatOperationLabel, operationNumberText } from '../utils/operationLabel';
 import { Modal } from '../components/ui/Modal';
 
 interface WorkOrderDetails {
@@ -930,7 +930,7 @@ export default function ShopFloor() {
                                               key={op.id}
                                               className={`border-t border-fd-line ${op.id === item.operation_id ? 'bg-werco-50' : ''}`}
                                             >
-                                              <td className="px-3 py-2 font-medium tabular-nums">{op.operation_number}</td>
+                                              <td className="px-3 py-2 font-medium tabular-nums">{operationNumberText(op.operation_number)}</td>
                                               <td className="px-3 py-2">{op.name}</td>
                                               <td className="px-3 py-2">{op.work_center_name}</td>
                                               <td className="px-3 py-2">
