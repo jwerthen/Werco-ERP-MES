@@ -38,6 +38,7 @@ import {
 } from '../components/quality/ScrapReasonFields';
 import { useScrapReasonCodes } from '../hooks/useScrapReasonCodes';
 import { getKioskDept, getKioskWorkCenterCode, getKioskWorkCenterId } from '../utils/kiosk';
+import { formatOperationLabel } from '../utils/operationLabel';
 import { ScanResolveResult } from '../types/scan';
 
 interface Operation {
@@ -1545,7 +1546,7 @@ export default function ShopFloorSimple() {
                       <p className="text-lg font-bold text-white">{op.work_order_number}</p>
                     </div>
                     <p className="text-sm text-slate-300">
-                      {op.operation_number} - {op.operation_name}
+                      {formatOperationLabel(op.operation_number)} - {op.operation_name}
                     </p>
                   </div>
                   <span className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold ${getPriorityClasses(op.priority)}`}>
@@ -1660,7 +1661,7 @@ export default function ShopFloorSimple() {
                 <div className="bg-slate-800/50 rounded-lg p-3 mb-3">
                   <div className="flex items-center gap-2 mb-1">
                     <span className="font-semibold text-white">
-                      {op.operation_number} - {op.operation_name}
+                      {formatOperationLabel(op.operation_number)} - {op.operation_name}
                     </span>
                   </div>
                   <p className="text-sm text-slate-400">{op.part_name}</p>
@@ -1909,7 +1910,7 @@ export default function ShopFloorSimple() {
               <div className="bg-slate-800/50 rounded-lg p-4">
                 <p className="text-sm text-slate-400">Operation</p>
                 <p className="font-semibold text-white">
-                  {productionModal.operation.operation_number} - {productionModal.operation.operation_name}
+                  {formatOperationLabel(productionModal.operation.operation_number)} - {productionModal.operation.operation_name}
                 </p>
                 <p className="text-sm text-slate-400 mt-1">
                   {productionModal.operation.work_order_number} &middot; {productionModal.operation.part_number}
@@ -2182,7 +2183,7 @@ export default function ShopFloorSimple() {
               <div className="bg-slate-800/50 rounded-lg p-4">
                 <p className="text-sm text-slate-400">Operation</p>
                 <p className="font-semibold text-white">
-                  {checkOutModal.operation.operation_number} - {checkOutModal.operation.operation_name}
+                  {formatOperationLabel(checkOutModal.operation.operation_number)} - {checkOutModal.operation.operation_name}
                 </p>
                 <p className="text-sm text-slate-400 mt-1">
                   {checkOutModal.operation.work_order_number} &middot; {checkOutModal.operation.part_number}
@@ -2325,7 +2326,7 @@ export default function ShopFloorSimple() {
               <div className="bg-slate-800/50 rounded-lg p-4">
                 <p className="text-sm text-slate-400">Operation</p>
                 <p className="font-semibold text-white">
-                  {holdModal.operation_number} - {holdModal.operation_name}
+                  {formatOperationLabel(holdModal.operation_number)} - {holdModal.operation_name}
                 </p>
                 <p className="text-sm text-slate-400 mt-1">
                   {holdModal.work_order_number} &middot; {holdModal.part_number}
@@ -2430,7 +2431,7 @@ export default function ShopFloorSimple() {
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <p className="text-sm text-slate-400">Operation</p>
-                    <p className="font-medium">{detailsModal.operation.operation_number} - {detailsModal.operation.name}</p>
+                    <p className="font-medium">{formatOperationLabel(detailsModal.operation.operation_number)} - {detailsModal.operation.name}</p>
                   </div>
                   <div>
                     <p className="text-sm text-slate-400">Work Center</p>
@@ -2482,7 +2483,7 @@ export default function ShopFloorSimple() {
                       >
                         <div className="flex min-w-0 items-center gap-3">
                           <span className={`text-sm font-medium w-12 flex-shrink-0 ${op.is_current ? 'text-blue-200' : 'text-slate-400'}`}>
-                            {op.operation_number}
+                            {formatOperationLabel(op.operation_number)}
                           </span>
                           <span className="font-medium text-slate-100 truncate">{op.name}</span>
                           <span className="text-xs text-slate-400 tabular-nums flex-shrink-0">

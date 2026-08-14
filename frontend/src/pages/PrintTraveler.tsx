@@ -5,6 +5,7 @@ import { Part, WorkOrder } from '../types';
 import QRCode from 'qrcode';
 import { formatCentralDate, formatCentralDateTime, getCentralTodayISODate } from '../utils/centralTime';
 import { operationTargetQuantity } from '../utils/operationQuantity';
+import { operationNumberText } from '../utils/operationLabel';
 import { useAuth } from '../context/AuthContext';
 import { ErrorState } from '../components/ui';
 
@@ -321,7 +322,11 @@ export default function PrintTraveler() {
                   </>
                 )}
               </td>
-              <td className="border p-2 font-mono">{op.operation_number || op.sequence}</td>
+              {/* Bare identifier: the column header already says "Seq", so a stored
+                  legacy "Op 10" would print the word twice. The numeric-sequence
+                  fallback is unchanged -- `operationNumberText` returns '' for a
+                  blank, which keeps the `||` chain behaving exactly as before. */}
+              <td className="border p-2 font-mono">{operationNumberText(op.operation_number) || op.sequence}</td>
               <td className="border p-2">
                 <div className="font-medium">{op.name}</div>
                 {op.description && <div className="text-gray-600">{op.description}</div>}

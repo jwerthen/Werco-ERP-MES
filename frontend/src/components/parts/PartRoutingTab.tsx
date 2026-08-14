@@ -9,6 +9,7 @@ import { StatusBadge } from '../ui/StatusBadge';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { Modal } from '../ui/Modal';
 import { FormField } from '../ui/FormField';
+import { operationNumberText } from '../../utils/operationLabel';
 import {
   PlusIcon,
   PencilIcon,
@@ -287,7 +288,7 @@ export function PartRoutingTab({ part, routing, onRoutingChanged }: Props) {
             <tbody className="bg-fd-panel divide-y divide-slate-700">
               {ops.length > 0 ? ops.map(op => (
                 <tr key={op.id} className="hover:bg-slate-800">
-                  <td className="px-4 py-3 text-sm font-medium">{op.operation_number}</td>
+                  <td className="px-4 py-3 text-sm font-medium">{operationNumberText(op.operation_number)}</td>
                   <td className="px-4 py-3">
                     <div className="text-sm font-medium">{op.name}</div>
                     {op.description && <div className="text-xs text-slate-500">{op.description}</div>}

@@ -242,7 +242,12 @@ class WorkOrderOperation(Base, TenantMixin):
 
     # Operation details
     sequence = Column(Integer, nullable=False)  # 10, 20, 30...
-    operation_number = Column(String(20))  # OP10, OP20...
+    # Operation IDENTIFIER, not a display label: the mint sites store the bare
+    # sequence ("10"); the UI adds the "Op " prefix at render time
+    # (frontend/src/utils/operationLabel.ts). Free text -- the office may type
+    # "OP10" -- and rows written before that change still hold "Op 10", which is
+    # deliberately not backfilled. Read it with the digits, never by slicing.
+    operation_number = Column(String(20))
     name = Column(String(255), nullable=False)
     description = Column(Text)
 

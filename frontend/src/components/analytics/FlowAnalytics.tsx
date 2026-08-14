@@ -58,6 +58,7 @@ import {
   statusVariantClass,
 } from '../ui';
 import { formatCentralDate } from '../../utils/centralTime';
+import { operationNumberText } from '../../utils/operationLabel';
 import type {
   AdoptionMetricsResponse,
   FlowMetricsResponse,
@@ -201,15 +202,19 @@ export default function FlowAnalytics({ period }: FlowAnalyticsProps) {
         key: 'current_operation',
         header: 'Current Op',
         className: 'text-sm',
-        accessor: (item) => item.current_operation_number ?? '',
+        // `current_operation_number` IS `WorkOrderOperation.operation_number`
+        // (flow_metrics_service reads it straight off the operation), so it carries
+        // the same legacy `Op 10` spellings. Normalized on all three paths -- sort,
+        // CSV and render -- or a legacy row sorts and exports apart from its twin.
+        accessor: (item) => operationNumberText(item.current_operation_number),
         csv: (item) =>
           item.current_operation_number
-            ? `${item.current_operation_number} ${item.current_operation_name ?? ''}`.trim()
+            ? `${operationNumberText(item.current_operation_number)} ${item.current_operation_name ?? ''}`.trim()
             : '',
         render: (item) =>
           item.current_operation_number ? (
             <span>
-              <span className="font-mono">{item.current_operation_number}</span>{' '}
+              <span className="font-mono">{operationNumberText(item.current_operation_number)}</span>{' '}
               {item.current_operation_name || ''}
               {item.current_work_center_name && (
                 <span className="text-slate-500"> · {item.current_work_center_name}</span>

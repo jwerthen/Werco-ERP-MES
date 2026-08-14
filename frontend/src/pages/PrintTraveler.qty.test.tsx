@@ -127,11 +127,24 @@ function renderTraveler() {
   );
 }
 
-/** The routing row for an operation, by its printed operation number. */
-function routingRow(operationNumber: string): HTMLElement {
-  const cell = screen.getByText(operationNumber);
+/**
+ * The routing row for an operation, looked up by the number the traveler PRINTS.
+ *
+ * The fixtures above store the LEGACY spelling (`OP10`) that the create form used
+ * to mint; the traveler's Seq column now prints the bare identifier (`10`), so the
+ * argument here is deliberately the bare form. Passing the stored string through
+ * `operationNumberText` inside this helper would make the lookup circular -- it
+ * would find the row whatever the page rendered.
+ */
+function routingRow(printedNumber: string): HTMLElement {
+  // Scoped to the routing table (the one carrying the "Seq" header): the traveler
+  // also prints the ORDER QUANTITY, which collides with a bare "10" now that the
+  // Seq column no longer prints the "OP" prefix.
+  const routingTable = screen.getByRole('columnheader', { name: 'Seq' }).closest('table');
+  if (!routingTable) throw new Error('no routing table');
+  const cell = within(routingTable as HTMLElement).getByText(printedNumber);
   const row = cell.closest('tr');
-  if (!row) throw new Error(`no routing row for ${operationNumber}`);
+  if (!row) throw new Error(`no routing row for ${printedNumber}`);
   return row as HTMLElement;
 }
 
@@ -156,10 +169,10 @@ describe('PrintTraveler — per-operation required quantity', () => {
     await waitFor(() => expect(screen.getByText('WORK ORDER TRAVELER')).toBeInTheDocument());
 
     // Each line item builds to its own count — these ops carry no component part number.
-    expect(within(routingRow('OP10')).getByText('Qty: 8')).toBeInTheDocument();
-    expect(within(routingRow('OP20')).getByText('Qty: 18')).toBeInTheDocument();
+    expect(within(routingRow('10')).getByText('Qty: 8')).toBeInTheDocument();
+    expect(within(routingRow('20')).getByText('Qty: 18')).toBeInTheDocument();
     // The whole-order QC step has no target of its own, so it inherits the WO quantity.
-    expect(within(routingRow('OP30')).getByText('Qty: 8')).toBeInTheDocument();
+    expect(within(routingRow('30')).getByText('Qty: 8')).toBeInTheDocument();
   });
 
   it('still prints the component identity for a BOM component operation, with its target', async () => {
@@ -180,7 +193,7 @@ describe('PrintTraveler — per-operation required quantity', () => {
 
     await waitFor(() => expect(screen.getByText('WORK ORDER TRAVELER')).toBeInTheDocument());
 
-    const row = routingRow('OP10');
+    const row = routingRow('10');
     expect(within(row).getByText('BRK-100')).toBeInTheDocument();
     expect(within(row).getByText('Bracket')).toBeInTheDocument();
     expect(within(row).getByText('Qty: 40')).toBeInTheDocument();

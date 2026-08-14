@@ -540,7 +540,11 @@ export default function WorkOrderNew() {
           const ops: OperationPreview[] = previewRes.operations_preview.map((op: any, index: number) => ({
             quantity_per_assembly: (op.component_quantity || form.quantity_ordered) / form.quantity_ordered,
             sequence: (index + 1) * 10,
-            operation_number: `Op ${(index + 1) * 10}`,
+            // IDENTIFIER, not a label. This used to mint `Op ${seq}`, so every
+            // screen that renders the column under its own `Op #` header printed
+            // the prefix twice ("Op Op 10" on the kiosk). The prefix belongs to
+            // the view (`formatOperationLabel`), never to the stored value.
+            operation_number: String((index + 1) * 10),
             name: op.name,
             work_center_id: op.work_center_id,
             work_center_name: op.work_center_name || '',
@@ -571,7 +575,11 @@ export default function WorkOrderNew() {
             .filter((op: RoutingOperation) => op.work_center)
             .map((op: RoutingOperation) => ({
               sequence: op.sequence,
-              operation_number: op.operation_number || `Op ${op.sequence}`,
+              // The routing's own value is copied VERBATIM -- a routing
+              // operation and the work-order operation derived from it must
+              // agree, and normalizing here would silently rewrite a number the
+              // office typed by hand. Only the MINTED fallback drops the prefix.
+              operation_number: op.operation_number || String(op.sequence),
               name: op.name,
               work_center_id: op.work_center_id,
               work_center_name: op.work_center?.name || '',
@@ -683,7 +691,7 @@ export default function WorkOrderNew() {
       : 10;
     setOperations([...operations, {
       sequence: nextSeq,
-      operation_number: `Op ${nextSeq}`,
+      operation_number: String(nextSeq),
       name: '',
       work_center_id: workCenters[0]?.id || 0,
       work_center_name: workCenters[0]?.name || '',

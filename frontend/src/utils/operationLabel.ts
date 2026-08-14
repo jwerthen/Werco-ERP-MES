@@ -33,6 +33,13 @@
  */
 export const OPERATION_LABEL_FALLBACK = 'Op —';
 
+/**
+ * The literal the label carries in front of the identifier. Named because
+ * `operationNumberText` peels it back off — a hard-coded `'Op '.length` in two
+ * places is the same drift this module exists to prevent.
+ */
+const OPERATION_LABEL_PREFIX = 'Op ';
+
 export function formatOperationLabel(operationNumber: string | number | null | undefined): string {
   if (operationNumber == null) return OPERATION_LABEL_FALLBACK;
   const raw = String(operationNumber).trim();
@@ -44,7 +51,7 @@ export function formatOperationLabel(operationNumber: string | number | null | u
   // number, because that is what this value amounts to.
   if (/^op(?:eration)?[\s._\-#:]*$/i.test(raw)) return OPERATION_LABEL_FALLBACK;
   const stripped = raw.replace(/^op(?:eration)?(?:[\s._\-#:]+(?=\S)|(?=\d))/i, '').trim();
-  return `Op ${stripped}`;
+  return `${OPERATION_LABEL_PREFIX}${stripped}`;
 }
 
 /**
@@ -65,4 +72,38 @@ export function formatOperationLabel(operationNumber: string | number | null | u
  */
 export function hasOperationNumber(operationNumber: string | number | null | undefined): boolean {
   return formatOperationLabel(operationNumber) !== OPERATION_LABEL_FALLBACK;
+}
+
+/**
+ * The BARE identifier — `10` — with any legacy `Op`/`OP`/`Operation` prefix and
+ * separator stripped. The column-cell twin of `formatOperationLabel`.
+ *
+ * Why it exists: `operation_number` is an IDENTIFIER column, but the create form
+ * used to mint a display LABEL into it (`Op 10`), so a screen that renders the
+ * raw value under its own `Op #` / `Seq` header showed the prefix twice — once in
+ * the header, once in every cell. The mint is fixed forward (WorkOrderNew now
+ * stores `10`), and there is deliberately NO backfill, so the table is
+ * permanently mixed: rows written before the fix hold `Op 10`, rows written after
+ * hold `10`. Without this helper those two render as different strings in the
+ * same column, which is the same defect wearing a different hat.
+ *
+ * Blank in, EMPTY STRING out — not an em-dash. The call sites do not share an
+ * empty-state (the traveler falls back to the numeric `sequence`, the routing
+ * tables to an empty cell), so returning `''` lets each keep its own via a plain
+ * `||` chain instead of string-matching a sentinel. `hasOperationNumber` is still
+ * the gate for anything richer.
+ *
+ * Defined by PEELING `formatOperationLabel`'s output rather than re-running its
+ * regexes. That is the point: one definition of "what counts as a prefix" for the
+ * label and the bare text both, so they cannot drift the way the office and floor
+ * spellings did. The invariant the tests pin is
+ * `formatOperationLabel(x) === 'Op ' + operationNumberText(x)` for every value
+ * that names an operation at all.
+ *
+ * NOT for a numeric `sequence`/counter — same caveat as `formatOperationLabel`.
+ */
+export function operationNumberText(operationNumber: string | number | null | undefined): string {
+  const label = formatOperationLabel(operationNumber);
+  if (label === OPERATION_LABEL_FALLBACK) return '';
+  return label.slice(OPERATION_LABEL_PREFIX.length);
 }

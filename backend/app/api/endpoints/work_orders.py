@@ -2096,7 +2096,9 @@ def _create_assembly_routing_operations(
                 wo_op = WorkOrderOperation(
                     work_order_id=work_order.id,
                     sequence=sequence,
-                    operation_number=f"Op {sequence}",
+                    # Bare identifier, never a display label -- see the note in
+                    # create_routing_operations_for_work_order below.
+                    operation_number=str(sequence),
                     name=f"{component.part_number} - {rop.name}",
                     description=" | ".join(description_parts),
                     work_center_id=rop.work_center_id,
@@ -2140,7 +2142,9 @@ def _create_assembly_routing_operations(
         wo_op = WorkOrderOperation(
             work_order_id=work_order.id,
             sequence=sequence,
-            operation_number=f"Op {sequence}",
+            # Bare identifier, never a display label -- see the note in
+            # create_routing_operations_for_work_order below.
+            operation_number=str(sequence),
             name=rop.name,
             description=rop.description,
             work_center_id=rop.work_center_id,
@@ -2213,7 +2217,20 @@ def create_routing_operations_for_work_order(
         wo_op = WorkOrderOperation(
             work_order_id=work_order.id,
             sequence=rop.sequence,
-            operation_number=rop.operation_number or f"Op {rop.sequence}",
+            # ``operation_number`` is an IDENTIFIER column, not a display label: store the
+            # bare sequence ("10"). Every UI adds the "Op " prefix at render time
+            # (frontend/src/utils/operationLabel.ts::formatOperationLabel), so minting the
+            # prefix here rendered "Op Op 10" on the kiosk (WO-20260807-006). Only a
+            # fallback -- a routing operation that carries its own number is copied verbatim.
+            #
+            # FORWARD-ONLY BY DESIGN -- do NOT write a data migration to backfill this.
+            # Rows written before this change keep "Op 10" and render identically, because
+            # formatOperationLabel absorbs an existing prefix and both backend parsers of
+            # this column key on the digits (work_order_state_service._normalized_operation_number
+            # and the SPC critical-dims match in shop_floor.py). An UPDATE over live
+            # multi-tenant production rows would buy nothing and would rewrite values the
+            # office typed by hand.
+            operation_number=rop.operation_number or str(rop.sequence),
             name=rop.name,
             description=rop.description,
             work_center_id=rop.work_center_id,

@@ -492,7 +492,10 @@ def create_routing_from_generation(
         op_dict = op_data.model_dump()
         approved_operations.append(op_dict.copy())
         if not op_dict.get("operation_number"):
-            op_dict["operation_number"] = f"Op {op_dict['sequence']}"
+            # Bare identifier ("10"), not a display label ("Op 10") -- the UI adds the
+            # prefix at render time. Fallback only: a caller-supplied number is stored
+            # verbatim. See work_orders.create_routing_operations_for_work_order.
+            op_dict["operation_number"] = str(op_dict["sequence"])
         operation = RoutingOperation(routing_id=routing.id, company_id=company_id, **op_dict)
         db.add(operation)
 
@@ -955,7 +958,10 @@ def add_operation(
     # Auto-generate operation number if not provided
     op_data = operation_in.model_dump()
     if not op_data.get('operation_number'):
-        op_data['operation_number'] = f"Op {operation_in.sequence}"
+        # Bare identifier ("10"), not a display label ("Op 10") -- the UI adds the
+        # prefix at render time. Fallback only: a caller-supplied number is stored
+        # verbatim. See work_orders.create_routing_operations_for_work_order.
+        op_data['operation_number'] = str(operation_in.sequence)
 
     operation = RoutingOperation(routing_id=routing_id, company_id=company_id, **op_data)
     db.add(operation)
@@ -1182,7 +1188,10 @@ def reorder_operations(
         )
         if operation:
             operation.sequence = item["sequence"]
-            operation.operation_number = f"Op {item['sequence']}"
+            # Re-derived from the new sequence (pre-existing behavior of this endpoint).
+            # Bare identifier, not a display label -- see
+            # work_orders.create_routing_operations_for_work_order.
+            operation.operation_number = str(item["sequence"])
 
     db.commit()
 

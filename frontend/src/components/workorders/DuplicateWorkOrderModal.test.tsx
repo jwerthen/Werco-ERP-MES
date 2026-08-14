@@ -677,9 +677,11 @@ describe('DuplicateWorkOrderModal: a PARTIAL copy stops the flow', () => {
 
     const rows = within(screen.getByTestId('duplicate-wo-skipped-operations')).getAllByRole('listitem');
     expect(rows).toHaveLength(2);
-    expect(rows[0]).toHaveTextContent('OP20');
+    // Stored legacy spellings ('OP20'), named with the one shared label so the
+    // row reads in the same vocabulary as its `Seq 20` / `Operation #72` siblings.
+    expect(rows[0]).toHaveTextContent('Op 20');
     expect(rows[0]).toHaveTextContent('its laser nest was deleted');
-    expect(rows[1]).toHaveTextContent('OP30');
+    expect(rows[1]).toHaveTextContent('Op 30');
   });
 
   it('falls back through the ids when an operation carries no number', async () => {
