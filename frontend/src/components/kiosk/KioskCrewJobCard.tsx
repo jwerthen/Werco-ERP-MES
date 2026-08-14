@@ -1,7 +1,13 @@
 import React from 'react';
 import { FireIcon, PaperClipIcon, UserIcon } from '@heroicons/react/24/outline';
 import { formatCentralDate, isDateBeforeTodayInCentral, isDateTodayInCentral } from '../../utils/centralTime';
-import { KioskCrewQueueItem, UNKNOWN_OPERATOR_LABEL, formatCrewTally, formatElapsed } from './kioskConstants';
+import {
+  KioskCrewQueueItem,
+  UNKNOWN_OPERATOR_LABEL,
+  formatCrewTally,
+  formatElapsed,
+  formatOperationLabel,
+} from './kioskConstants';
 import { KioskRunOrderChip, KioskStepsChip } from './KioskQueueCard';
 
 interface KioskCrewJobCardProps {
@@ -57,7 +63,7 @@ export default function KioskCrewJobCard({ item, nowMs, onSelect, disabled = fal
           {item.part_name ? <span className="text-fd-mute"> · {item.part_name}</span> : null}
         </div>
         <div className="mt-1 truncate text-lg text-fd-mute">
-          Op {item.operation_number ?? '—'} · {item.operation_name || 'Operation'}
+          {formatOperationLabel(item.operation_number)} · {item.operation_name || 'Operation'}
         </div>
 
         {/* Live crew roster — one chip per open TimeEntry, with a running timer. */}

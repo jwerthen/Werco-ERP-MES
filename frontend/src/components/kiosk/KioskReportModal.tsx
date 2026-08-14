@@ -8,6 +8,7 @@ import {
   scrapReasonTiles,
 } from './scrapReasonOptions';
 import type { ScrapReasonCodeOption } from '../../types/scrapReason';
+import { formatOperationLabel } from './kioskConstants';
 import { applyQuickAdd, kioskQuickAdds, QUICK_ADD_BUTTON_CLASSES } from './quantityQuickAdds';
 
 export type ReportTab = 'good' | 'scrap';
@@ -139,7 +140,7 @@ export default function KioskReportModal({
           Report production
         </h2>
         <span className={`${mono} text-[11px] uppercase text-fd-mute`}>
-          {workOrderNumber} · Op {operationNumber ?? '—'}
+          {workOrderNumber} · {formatOperationLabel(operationNumber)}
         </span>
         <div className="flex-1" />
         <KioskModalClose onClose={onCancel} disabled={busy} />

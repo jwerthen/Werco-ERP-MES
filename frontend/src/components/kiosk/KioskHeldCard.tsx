@@ -1,6 +1,6 @@
 import React from 'react';
 import { PauseCircleIcon } from '@heroicons/react/24/solid';
-import { KioskQueueItem } from './kioskConstants';
+import { KioskQueueItem, formatOperationLabel } from './kioskConstants';
 import { KioskRunOrderChip } from './KioskQueueCard';
 import {
   formatHoldAttribution,
@@ -116,7 +116,7 @@ export default function KioskHeldCard({
 
       <div className={`mt-2 min-w-0 truncate text-fd-body ${crew ? 'text-xl' : 'text-[13px]'}`}>
         <span className="font-mono font-semibold text-fd-body-2">{item.part_number || '—'}</span>
-        {item.part_name ? ` ${item.part_name}` : ''} · Op {item.operation_number ?? '—'}
+        {item.part_name ? ` ${item.part_name}` : ''} · {formatOperationLabel(item.operation_number)}
         {item.operation_name ? ` ${item.operation_name}` : ''}
       </div>
 

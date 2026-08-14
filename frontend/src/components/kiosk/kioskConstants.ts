@@ -20,6 +20,7 @@
  */
 
 import {
+  KioskJobInstructions,
   KioskLastReport,
   KioskMaterialTie,
   KioskQueueWorkCenter,
@@ -32,7 +33,7 @@ import {
 // `ActiveJob` (GET /shop-floor/my-active-job) carries it too, and this module
 // imports FROM types -- defining it here and referencing it there would be a
 // cycle.
-export type { KioskMaterialTie };
+export type { KioskJobInstructions, KioskMaterialTie };
 
 export const KIOSK_SOURCE = 'kiosk';
 
@@ -85,8 +86,18 @@ export const HOLD_REASONS: KioskReason[] = [
   { value: 'other', label: 'Other' },
 ];
 
-/** Work-center queue row as returned by GET /shop-floor/work-center-queue/{id}. */
-export interface KioskQueueItem {
+/**
+ * Work-center queue row as returned by GET /shop-floor/work-center-queue/{id}.
+ *
+ * Extends `KioskJobInstructions` (types/index.ts): the five written-guidance
+ * fields (`work_order_notes`, `work_order_special_instructions`,
+ * `operation_description`, `operation_setup_instructions`,
+ * `operation_run_instructions`) ride this row and the my-active-job dict under
+ * the SAME names, which is what lets one <KioskJobNotes> render all three
+ * single-operation kiosk surfaces. All optional — pre-feature payloads and
+ * pre-existing fixtures still typecheck.
+ */
+export interface KioskQueueItem extends KioskJobInstructions {
   operation_id: number;
   work_order_id: number;
   work_order_number: string;
@@ -170,6 +181,32 @@ export interface KioskWorkCenterQueueResponse {
   server_time?: string;
   /** The queue's work center (backend B3) — feeds the kiosk top bar. */
   work_center?: KioskQueueWorkCenter | null;
+}
+
+/**
+ * "Op 10" — the ONE operation-number label for every kiosk surface.
+ *
+ * `WorkOrderOperation.operation_number` is free text the office types, so the
+ * stored value is any of `10`, `OP10`, `Op 10`, `op-10`. The kiosk used to
+ * hard-code a literal `Op ` prefix and interpolate the raw value, which read
+ * "Op Op 10" on WO-20260807-006 — so the prefix is normalized here instead, at
+ * DISPLAY time only. Nothing about the stored value is ever rewritten.
+ *
+ * An existing `op`/`operation` prefix is absorbed only when a SEPARATOR or a
+ * DIGIT follows it — `Op 10`, `OP10`, `op-10`, `Operation 10`, and `Op A10` all
+ * collapse to one prefix, while a value that merely starts with those letters
+ * (`OPTICAL`) passes through untouched. The separator arm is what makes the
+ * function idempotent on alphanumeric sequences: without it `Op A10` came back
+ * out as `Op Op A10`, which is the very bug this closes.
+ *
+ * Null/blank renders the em-dash the kiosk has always shown.
+ */
+export function formatOperationLabel(operationNumber: string | number | null | undefined): string {
+  if (operationNumber == null) return 'Op —';
+  const raw = String(operationNumber).trim();
+  if (!raw) return 'Op —';
+  const stripped = raw.replace(/^op(?:eration)?(?:[\s._\-#:]+(?=\S)|(?=\d))/i, '').trim();
+  return `Op ${stripped || raw}`;
 }
 
 /** "Steps 2/6" — the process-steps chip label (call only when steps_total > 0). */

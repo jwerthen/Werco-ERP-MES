@@ -750,6 +750,83 @@ def _last_report_payload(operation: Optional[WorkOrderOperation]) -> Optional[di
     }
 
 
+def _guidance_text(value: Optional[str]) -> Optional[str]:
+    """Normalize ONE stored guidance string for the kiosk payloads.
+
+    Whitespace-only -> ``None``, so no client ever has to decide whether ``""``
+    counts as a note. The kiosk hides an empty field rather than rendering a
+    labeled row with nothing under it, and "" vs None is not a distinction the
+    floor can act on -- a planner who typed a space did not write an instruction.
+
+    Anything else is returned **verbatim** -- the original string, deliberately
+    NOT the stripped copy. Leading indentation and internal blank lines are how a
+    multi-line work instruction is laid out, and re-flowing that would be this
+    layer editing a controlled instruction on its way to the machine. Nothing
+    here strips, escapes, or rewrites the text: this system has no ingest-time
+    sanitizer on purpose (CLAUDE.md -- "store request bytes verbatim, escape at
+    the sink"), the sink that needs escaping is reportlab, and the kiosk renders
+    these as text, not HTML.
+    """
+    if value is None:
+        return None
+    return value if value.strip() else None
+
+
+def _job_guidance_fields(
+    work_order: Optional[WorkOrder],
+    operation: Optional[WorkOrderOperation],
+) -> dict:
+    """The written guidance for ONE job -- work-order level AND operation level.
+
+    ONE builder feeding BOTH kiosk surfaces -- :func:`_kiosk_job_row` (the queue
+    and, through :func:`_held_job_row`, the held list) and
+    ``GET /shop-floor/my-active-job`` (the running-job panel an operator actually
+    stares at after clocking in). The five keys are therefore one contract the
+    client reads identically on either payload, rather than two hand-built dicts
+    that drift apart the first time somebody adds a sixth field to one of them.
+
+    Each value is the raw stored text or ``None`` (see :func:`_guidance_text`).
+    The client hides the empty ones and LABELS the rest, which is the whole
+    point: an operator reading "Unit #7" has to know it came from the work
+    order's notes and not from this operation's run instructions -- same text,
+    very different authority.
+
+    DISCLOSURE -- READ BEFORE "FIXING" THIS IN EITHER DIRECTION.
+
+    These five fields ARE sent to a STATION principal: the shared-PIN crew
+    station, an unattended, PIN-unlocked tablet with no operator identity and no
+    idle logout. That is deliberate, and it is the OWNER'S DECISION (2026-08-14).
+    The entire request was that an operator at the weld crew station can read the
+    planning notes somebody typed for that job -- the motivating case was a
+    "Unit #" typed into a work order's Notes that the floor could not see -- and
+    the crew station is precisely the screen that could not see them. Sending
+    them only to an identified user session would leave the reported bug unfixed.
+
+    This is NOT a general precedent that free text reaches a station, and it does
+    NOT supersede :func:`_hold_blocker_payload`, which withholds a BLOCKER's
+    ``note``/``title`` from that same principal (keys absent, not blanked). The
+    two are different text with different authors and different audiences:
+
+    * a blocker note is written by an operator MID-INCIDENT, about a problem, and
+      reads like "NCR-1042 cracked welds, ACME rejected lot" -- customer names
+      and quality findings, the exact class ``wallboard_service`` withholds from
+      unattended screens;
+    * these five are PLANNING text an office user wrote in advance specifically
+      to be read at the machine, by whoever is running the job.
+
+    So: do not extend the blocker's withholding to these fields, and do not relax
+    the blocker's withholding on the grounds that these are sent. Both rules are
+    intentional and they are about different content.
+    """
+    return {
+        "work_order_notes": _guidance_text(work_order.notes if work_order else None),
+        "work_order_special_instructions": _guidance_text(work_order.special_instructions if work_order else None),
+        "operation_description": _guidance_text(operation.description if operation else None),
+        "operation_setup_instructions": _guidance_text(operation.setup_instructions if operation else None),
+        "operation_run_instructions": _guidance_text(operation.run_instructions if operation else None),
+    }
+
+
 def _kiosk_job_row(
     operation: WorkOrderOperation,
     *,
@@ -809,6 +886,12 @@ def _kiosk_job_row(
         "steps_recorded": step_counts["steps_recorded"],
         # Kiosk LAST REPORT tile: the op's most recent production report.
         "last_report": _last_report_payload(operation),
+        # Written guidance for this job, each field labeled by the client and
+        # hidden when empty. Sent to a STATION principal on purpose -- see
+        # _job_guidance_fields for the disclosure decision and who made it.
+        # Costs no query: work_order is eager-loaded by the caller's load
+        # options and all five are plain, non-deferred columns.
+        **_job_guidance_fields(work_order, operation),
     }
 
 
@@ -1190,6 +1273,12 @@ def get_my_active_job(
                 "last_report": _last_report_payload(operation),
                 "next_operation": _next_operation_payload(db, operation, company_id),
                 "downtime_minutes": (_operation_downtime_minutes(db, operation.id, company_id) if operation else 0.0),
+                # Written guidance for the RUNNING job -- the same five keys, from
+                # the same builder, as the queue/held rows carry, so the kiosk
+                # renders the job card and the running panel off one contract.
+                # Costs no query: TimeEntry.operation and TimeEntry.work_order are
+                # both joinedload-ed above and every field is a plain column.
+                **_job_guidance_fields(work_order, operation),
             }
         )
 
@@ -2359,6 +2448,9 @@ def get_work_center_queue(
     # dialect-dependent. run_order is ADVISORY: it sorts the queue, it never gates a
     # start (that stays with operation_action_gates / the predecessor rules).
     queue_load_options = (
+        # work_order is load-bearing for MORE than part_number now: _kiosk_job_row
+        # reads work_order.notes / .special_instructions for the guidance block, so
+        # dropping this joinedload would turn every row into an extra SELECT.
         joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part),
         # Eager-load the nest + its reference PDF so _laser_nest_payload below
         # doesn't issue per-row SELECTs (N+1) for each queued laser operation.

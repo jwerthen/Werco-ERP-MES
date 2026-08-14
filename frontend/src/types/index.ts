@@ -1597,7 +1597,38 @@ export interface KioskQueueWorkCenter {
   current_status?: string | null;
 }
 
-export interface ActiveJob {
+/**
+ * The written guidance for a job, as carried by BOTH kiosk reads:
+ * `GET /shop-floor/work-center-queue/{id}` rows and the
+ * `GET /shop-floor/my-active-job` job dicts. Same five keys, same names, in
+ * both — so one component (`components/kiosk/KioskJobNotes`) renders them on
+ * every kiosk surface that shows a single operation.
+ *
+ * Every field is the stored text or `null`; the server normalizes
+ * whitespace-only to `null`, so callers never have to test for `''`. All are
+ * OPTIONAL here on purpose: pre-feature payloads (and every fixture written
+ * before this shipped) must still typecheck.
+ *
+ * These are operator-authored free text and are rendered as TEXT — never
+ * through React's raw-HTML escape hatch. There is deliberately no ingest sanitizer in this
+ * system (see CLAUDE.md → "There is no ingest-time sanitization"), so the
+ * escape-at-the-sink rule is what keeps them safe; author line breaks are
+ * preserved with CSS (`whitespace-pre-wrap`), never by parsing the string.
+ */
+export interface KioskJobInstructions {
+  /** Work-order Notes — the free-text field the office types the job's "Unit #" into. */
+  work_order_notes?: string | null;
+  /** Work-order Special Instructions. */
+  work_order_special_instructions?: string | null;
+  /** Operation description. */
+  operation_description?: string | null;
+  /** Operation setup instructions. */
+  operation_setup_instructions?: string | null;
+  /** Operation run instructions. */
+  operation_run_instructions?: string | null;
+}
+
+export interface ActiveJob extends KioskJobInstructions {
   time_entry_id: number;
   clock_in: string;
   entry_type: TimeEntryType;

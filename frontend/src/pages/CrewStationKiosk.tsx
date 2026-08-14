@@ -54,6 +54,7 @@ import { isDefinitiveHttpRefusal } from '../components/kiosk/useOneTapPieces';
 import type { OneTapBinding } from '../components/kiosk/useOneTapPieces';
 import { addStranded, clearStranded, clearStrandedByKey, readStranded } from '../components/kiosk/oneTapStrandedStore';
 import type { StrandedOneTapRecord } from '../components/kiosk/oneTapStrandedStore';
+import KioskJobNotes from '../components/kiosk/KioskJobNotes';
 import LaserNestOperatorPanel from '../components/laser/LaserNestOperatorPanel';
 import {
   HOLD_REASONS,
@@ -62,6 +63,7 @@ import {
   UNKNOWN_OPERATOR_LABEL,
   formatCrewTally,
   formatElapsed,
+  formatOperationLabel,
   formatStepsChip,
   kioskErrorMessage,
 } from '../components/kiosk/kioskConstants';
@@ -180,7 +182,9 @@ interface KioskToast {
 let toastSeq = 0;
 
 function crewJobLabel(item: KioskCrewQueueItem): string {
-  return `${item.work_order_number || '—'} · Op ${item.operation_number ?? '—'} ${item.operation_name || ''}`.trim();
+  return `${item.work_order_number || '—'} · ${formatOperationLabel(item.operation_number)} ${
+    item.operation_name || ''
+  }`.trim();
 }
 
 /**
@@ -1510,7 +1514,7 @@ export default function CrewStationKiosk() {
                     {viewItem.part_name ? <span className="text-fd-mute"> · {viewItem.part_name}</span> : null}
                   </p>
                   <p className="mt-1 text-xl text-fd-mute">
-                    Op {viewItem.operation_number ?? '—'} · {viewItem.operation_name || 'Operation'}
+                    {formatOperationLabel(viewItem.operation_number)} · {viewItem.operation_name || 'Operation'}
                   </p>
                 </div>
                 <div className="text-right">
@@ -1520,6 +1524,12 @@ export default function CrewStationKiosk() {
                   <p className="mt-1 text-sm uppercase tracking-widest text-fd-faint">crew total</p>
                 </div>
               </div>
+
+              {/* Written guidance for this job — work-order Notes / Special
+                  Instructions and the operation's own Detail / Setup / Run text.
+                  Above the roster because it is what the operator opened the job
+                  to read; renders nothing at all when the job carries none. */}
+              <KioskJobNotes job={viewItem} className="mt-5" />
 
               {/* Live roster with per-person timers */}
               <div className="mt-5">
@@ -2190,7 +2200,8 @@ export default function CrewStationKiosk() {
                               {item.work_order_number}
                             </span>
                             <span className="block truncate text-lg text-fd-body">
-                              Op {item.operation_number ?? '—'} · {item.operation_name || 'Operation'}
+                              {formatOperationLabel(item.operation_number)} ·{' '}
+                              {item.operation_name || 'Operation'}
                             </span>
                           </span>
                           <span className="shrink-0 text-sm font-bold uppercase tracking-wider text-fd-blue">

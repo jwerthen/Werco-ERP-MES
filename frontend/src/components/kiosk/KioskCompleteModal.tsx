@@ -5,7 +5,7 @@ import KioskModal, { KioskModalClose } from './KioskModal';
 import { activeScrapCodes, resolveScrapSelection, scrapReasonTiles } from './scrapReasonOptions';
 import type { ActiveJob, LaserNestInfo } from '../../types';
 import type { ScrapReasonCodeOption } from '../../types/scrapReason';
-import { KioskMaterialTie, KioskQueueItem } from './kioskConstants';
+import { KioskMaterialTie, KioskQueueItem, formatOperationLabel } from './kioskConstants';
 import { applyQuickAdd, kioskQuickAdds, QUICK_ADD_BUTTON_CLASSES } from './quantityQuickAdds';
 import {
   DEDUCTION_TIMING_NOTE,
@@ -112,7 +112,9 @@ export default function KioskCompleteModal({
 
   const sessionScrap = Number(job.quantity_scrapped || 0);
   const scrapTileValue = sessionScrap + scrapQty;
-  const opNumber = job.operation_number ?? '—';
+  // The whole label ('Op 20'), not the bare number: both call sites below used
+  // to hard-code their own prefix, which doubled on a stored 'Op 20'.
+  const opLabel = formatOperationLabel(job.operation_number);
 
   // Predicted material draw. Recomputed from `scrapQty` on every keystroke so
   // the number moves with the scrap keypad — the one input that DOES move it.
@@ -194,7 +196,7 @@ export default function KioskCompleteModal({
           Complete operation
         </h2>
         <span className="font-mono text-[11px] uppercase text-fd-mute">
-          {job.work_order_number || '—'} · Op {opNumber} {job.operation_name || ''}
+          {job.work_order_number || '—'} · {opLabel} {job.operation_name || ''}
         </span>
         <div className="flex-1" />
         <KioskModalClose onClose={onCancel} disabled={busy} />
@@ -266,7 +268,8 @@ export default function KioskCompleteModal({
               <>
                 <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-fd-mute">Routes to</span>
                 <span className="font-mono text-[13px] font-semibold uppercase text-fd-ink">
-                  Op {job.next_operation.operation_number ?? '—'} · {job.next_operation.name || 'Next operation'}
+                  {formatOperationLabel(job.next_operation.operation_number)} ·{' '}
+                  {job.next_operation.name || 'Next operation'}
                   {job.next_operation.work_center?.code || job.next_operation.work_center?.name
                     ? ` · ${job.next_operation.work_center?.code || job.next_operation.work_center?.name}`
                     : ''}
@@ -477,8 +480,8 @@ export default function KioskCompleteModal({
             : busy
               ? 'Completing…'
               : nextQueueItem
-                ? `Complete op ${opNumber} · Start ${nextQueueItem.work_order_number}`
-                : `Complete op ${opNumber}`}
+                ? `Complete ${opLabel} · Start ${nextQueueItem.work_order_number}`
+                : `Complete ${opLabel}`}
         </button>
       </div>
       {needsReason && <p className="px-5 pb-4 text-center text-sm text-fd-red">Choose a scrap reason to continue.</p>}
