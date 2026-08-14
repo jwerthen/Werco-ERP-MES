@@ -156,9 +156,12 @@ from app.services.work_order_state_service import (
     StatusTransition,
     WorkOrderStateError,
     begin_operation_progress,
+    demote_operations_for_sequencing,
     finalize_operation_completion,
     find_parent_to_advance,
+    is_laser_dispatch_work_order,
     operation_target_quantity,
+    operations_worked_out_of_sequence,
     reconcile_work_orders_from_completion_evidence,
     release_first_ready_operation,
     resolve_absolute_operation_quantity,
@@ -1014,6 +1017,12 @@ def _ensure_laser_child_work_order(
         part_id=parent_work_order.part_id,
         parent_work_order_id=parent_work_order.id,
         work_order_type=WorkOrderType.LASER_CUTTING.value,
+        # A nest package is a DISPATCH POOL by construction, so pin the flag to the
+        # pooled value rather than inherit the sequenced create-default. It is inert
+        # either way (is_laser_dispatch_work_order short-circuits above it at every
+        # seam), but a laser WO serializing sequential_operations=true would put a
+        # claim on the screen that its own behavior contradicts.
+        sequential_operations=False,
         quantity_ordered=1,
         status=WorkOrderStatus.RELEASED,
         priority=parent_work_order.priority,
@@ -1564,6 +1573,9 @@ def list_work_orders(
             part_id=wo.part_id,
             parent_work_order_id=wo.parent_work_order_id,
             work_order_type=wo.work_order_type,
+            # Explicit: this summary is built kwarg-by-kwarg, so an omitted field silently
+            # ships the schema default (False = pooled) for every sequenced work order.
+            sequential_operations=wo.sequential_operations,
             part_number=wo.part.part_number if wo.part else None,
             part_name=wo.part.name if wo.part else None,
             part_type=wo.part.part_type.value if wo.part and wo.part.part_type else None,
@@ -2621,6 +2633,11 @@ async def _run_laser_nest_import(
                         part_id=None,
                         parent_work_order_id=None,
                         work_order_type=WorkOrderType.LASER_CUTTING.value,
+                        # A nest package is a DISPATCH POOL by construction: pin the flag
+                        # to pooled rather than inherit the sequenced create-default. Inert
+                        # either way (the laser short-circuit sits above it), but it stops
+                        # the row claiming a rule its own behavior contradicts.
+                        sequential_operations=False,
                         # Re-derived to the package's total planned runs by
                         # build_laser_nest_child_work_order below.
                         quantity_ordered=1,
@@ -3204,6 +3221,16 @@ def update_work_order(
     status, and when setting ``status`` to COMPLETE/CLOSED from any status other
     than COMPLETE/CLOSED (completion must run its own endpoint's effect chain;
     a CANCELLED work order can never become complete/closed).
+
+    This is also the flip verb for ``sequential_operations``. Turning it ON returns
+    **409** on a laser nest work order (its nests are a dispatch pool by type, so the
+    flag would be inert), and **409** when any operation the sequenced rule would block
+    has already been worked -- naming those operations, because every completion verb
+    re-checks the gate at action time and they would otherwise become uncompletable.
+    Both refusals run before any field is written. On success, operations the pooled
+    rule had promoted but the sequenced rule forbids are returned READY -> PENDING, one
+    audited status change each; operations anyone has worked are never touched. Turning
+    it OFF needs no repair -- the next reconciling read re-promotes the pool.
     """
     work_order = db.query(WorkOrder).filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id).first()
     if not work_order:
@@ -3278,8 +3305,69 @@ def update_work_order(
             ),
         )
 
+    # 081: remember which way sequencing moved BEFORE the setattr loop overwrites it.
+    # Only pooled -> sequenced needs repair; the other direction heals itself, because
+    # promotion is forward-only and the next reconciling read re-promotes the pool.
+    sequencing_turned_on = (
+        "sequential_operations" in update_data
+        and bool(update_data["sequential_operations"])
+        and not bool(work_order.sequential_operations)
+    )
+
+    # Refuse BEFORE the first setattr, so a refused flip leaves the row untouched.
+    # Every completion verb re-evaluates the predecessor gate at action time, so an
+    # operation being worked ahead of its predecessors would become uncompletable the
+    # instant this flag flips -- and nothing would ever heal it. Better to refuse and
+    # name the operations than to brick live work on a tablet.
+    if sequencing_turned_on:
+        # A nest package pools by TYPE -- is_laser_dispatch_work_order short-circuits
+        # above this flag at every seam, so accepting True here would persist a claim the
+        # work order's own behavior contradicts and put "sequential" on a screen showing
+        # every nest at once. Refuse rather than store a lie (the posture
+        # POST /work-orders/{id}/operations already takes for laser WOs).
+        if is_laser_dispatch_work_order(work_order):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "cannot switch a laser nest work order to sequential operations: its nests are a dispatch "
+                    "pool and are deliberately startable in any order."
+                ),
+            )
+        stranded = operations_worked_out_of_sequence(db, work_order)
+        if stranded:
+            names = ", ".join(f"OP{op.sequence} {op.name}" for op in stranded)
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "cannot switch this work order to sequential operations: work is already under way out of "
+                    f"sequence on {names}. Complete those operations (or the earlier ones they run ahead of) "
+                    "first, then switch."
+                ),
+            )
+
     for field, value in update_data.items():
         setattr(work_order, field, value)
+
+    # Turning sequencing ON must fix THIS work order, not just the next one. Every
+    # promotion seam is forward-only, so operations the pooled rule already promoted
+    # would otherwise sit READY on the dispatch board and the kiosk under a rule that
+    # forbids them. Never touches worked operations -- see the helper's docstring.
+    demoted_operations = demote_operations_for_sequencing(db, work_order) if sequencing_turned_on else []
+    for demoted_op in demoted_operations:
+        # Invariant 2: a rule-driven status change still gets an audit row, and this
+        # endpoint HAS an actor, so it is attributed rather than left to a read path.
+        audit.log_status_change(
+            resource_type="work_order_operation",
+            resource_id=demoted_op.id,
+            resource_identifier=f"{work_order.work_order_number} OP{demoted_op.sequence}",
+            old_status=OperationStatus.READY.value,
+            new_status=OperationStatus.PENDING.value,
+            description=(
+                f"Operation returned to pending: work order {work_order.work_order_number} was switched to "
+                "sequential operations, and an earlier operation is not complete."
+            ),
+            extra_data={"transition": "sequential_operations_enabled"},
+        )
 
     _emit_work_order_event(
         db,
@@ -3287,7 +3375,10 @@ def update_work_order(
         current_user=current_user,
         work_order=work_order,
         event_type="work_order_updated",
-        payload={"updated_fields": list(update_data.keys())},
+        payload={
+            "updated_fields": list(update_data.keys()),
+            "operations_returned_to_pending": len(demoted_operations),
+        },
     )
 
     # Audit log for update. Logged BEFORE the terminal commit so the audit row commits

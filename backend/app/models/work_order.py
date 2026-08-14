@@ -77,6 +77,24 @@ class WorkOrder(Base, SoftDeleteMixin, TenantMixin):
     part_id = Column(Integer, ForeignKey("parts.id"), nullable=True)
     parent_work_order_id = Column(Integer, ForeignKey("work_orders.id"), nullable=True, index=True)
     work_order_type = Column(String(50), default=WorkOrderType.PRODUCTION.value, nullable=False, index=True)
+    # Operation sequencing mode. True = a real ROUTING: an operation only becomes READY
+    # once every lower-sequence operation is COMPLETE, its own work center included.
+    # False = a DISPATCH POOL: operations sharing a work center are mutually startable
+    # and promote together (``allow_same_work_center``), which is what the 18-item
+    # press-brake / weld-subassembly batch WOs and the imported laser packages need.
+    #
+    # THE TWO DEFAULTS ARE DELIBERATELY DIFFERENT, and this is the whole migration
+    # story: ``server_default=false`` so every row that already existed when migration
+    # 081 ran keeps the pooled behavior it was released under byte-for-byte, while
+    # ``default=True`` makes every WO created from here on a sequenced routing -- the
+    # common case, and the one the pooled rule got wrong (a 4-op weld assembly on one
+    # cell unlocked all 4 at once). Existing jobs are converted by flipping this field,
+    # never by a backfill.
+    #
+    # IGNORED on laser_cutting WOs: ``is_laser_dispatch_work_order`` short-circuits
+    # above this flag at every seam and is STRICTLY FULLER (it drops predecessor gating
+    # entirely, across work centers). Setting this True on a nest WO changes nothing.
+    sequential_operations = Column(Boolean, nullable=False, server_default="false", default=True)
     quantity_ordered = Column(Float, nullable=False)
     quantity_complete = Column(Float, default=0.0)
     quantity_scrapped = Column(Float, default=0.0)

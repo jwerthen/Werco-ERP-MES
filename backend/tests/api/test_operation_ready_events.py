@@ -100,7 +100,10 @@ def test_release_promotes_every_op_sharing_a_work_center(client: TestClient, db_
     manager = make_user(db_session, role=UserRole.MANAGER)
     part = make_part(db_session)
     wc = make_work_center(db_session)
-    wo = make_wo(db_session, part, status_=WorkOrderStatus.DRAFT)
+    # POOLED (081): "same work center = mutually unordered" is the dispatch-pool rule,
+    # so the fixture has to be a pool. On a sequenced routing only op1 promotes at
+    # release and op2's ready event correctly waits for op1 to complete.
+    wo = make_wo(db_session, part, status_=WorkOrderStatus.DRAFT, sequential_operations=False)
     op1 = make_op(db_session, wo, wc, sequence=10, status_=OperationStatus.PENDING)
     op2 = make_op(db_session, wo, wc, sequence=20, status_=OperationStatus.PENDING)
 

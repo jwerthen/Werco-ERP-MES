@@ -133,7 +133,16 @@ def make_wo(
     actual_end: Optional[datetime] = None,
     quantity_scrapped: float = 0.0,
     scrap_reason_code_id: Optional[int] = None,
+    sequential_operations: bool = True,
 ) -> WorkOrder:
+    """A shared lean/flow-metrics work order.
+
+    ``sequential_operations`` mirrors the model's create-default (True = a sequenced
+    ROUTING, 081). Pass ``False`` to build a DISPATCH POOL -- the batch/laser shape
+    where operations sharing one work center are mutually startable and promote
+    together. On a route whose steps sit at different work centers the two modes are
+    indistinguishable, which is why almost every caller can ignore this.
+    """
     ensure_company(db, company_id)
     n = _next()
     wo = WorkOrder(
@@ -149,6 +158,7 @@ def make_wo(
         actual_end=actual_end,
         quantity_scrapped=quantity_scrapped,
         scrap_reason_code_id=scrap_reason_code_id,
+        sequential_operations=sequential_operations,
         company_id=company_id,
     )
     db.add(wo)

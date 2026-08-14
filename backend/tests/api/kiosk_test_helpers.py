@@ -158,7 +158,16 @@ def make_wo_with_operation(
     quantity_ordered: float = 10,
     op_status: OperationStatus = OperationStatus.READY,
     wo_status: WorkOrderStatus = WorkOrderStatus.RELEASED,
+    sequential_operations: bool = True,
 ) -> Tuple[WorkOrder, WorkOrderOperation]:
+    """A kiosk-shaped WO carrying ONE operation at ``work_center``.
+
+    ``sequential_operations`` mirrors the model's create-default (True = a sequenced
+    ROUTING, 081) and is irrelevant to a single-operation work order, which is what
+    this builds. Callers that add a SECOND operation at the SAME work center and
+    expect the two to be mutually startable must pass ``False`` -- that is the
+    DISPATCH-POOL rule, and it is no longer what a new work order gets by default.
+    """
     ensure_company(db, company_id)
     n = _next()
     part = Part(
@@ -174,6 +183,7 @@ def make_wo_with_operation(
     work_order = WorkOrder(
         work_order_number=f"KWO-{n:05d}",
         part_id=part.id,
+        sequential_operations=sequential_operations,
         quantity_ordered=quantity_ordered,
         status=wo_status,
         priority=2,

@@ -221,7 +221,7 @@ right now. The single-operator COMPLETE clocks out first and completes second (i
 closed by then), and the crew station's signing badge often holds no entry of its own while
 it auto-closes the crew's. What the gate stops is an operation booked complete at full
 quantity that nobody ever worked — reachable from the operations list when a job's items all
-sit READY together (see "Work-center pools at clock-in" below). The scanner resolver reports
+sit READY together (see "Routings and work-center pools at clock-in" below). The scanner resolver reports
 the same blocker, so a scanned traveler and the endpoint say the same thing. The office verb
 `POST /work-orders/operations/{id}/complete` is deliberately exempt — desk cleanup of
 never-clocked work stays a supervisor/quality call. See `docs/API.md` → Shop Floor →
@@ -248,22 +248,42 @@ sees one queue order everywhere: kiosk, crew station, desktop, and the manager's
 Full ordering rule and the endpoint contract: `docs/API.md` → Shop Floor → "Dispatch run order" /
 "Queue ordering" / "Desktop parity".
 
-**Work-center pools at clock-in.** Operations of one work order that share a **work center** no
-longer block each other for READY promotion, so they all appear on the queue together instead of one
-at a time — a batch work order carrying ~18 press-brake items as one operation each now shows all 18,
-where the queue previously showed one and hid the rest (the queue surfaces READY work only). Nothing
-about what an operator may clock into changed: the floor's gate has always allowed same-work-center
-operations in any order, so this makes already-legal work visible rather than granting anything.
-Operations at a **different, downstream** work center still wait for their predecessors as before.
+**Routings and work-center pools at clock-in.** Whether the operations of one work order that share a
+**work center** block each other is now that work order's own setting (`sequential_operations`, set in
+the office app on the work order):
 
-**If a job still shows one item of many, open the work order in the office app once.** Promotion runs
-at work-order release, at each operation completion, and on the reconciling office/shop-floor reads —
-**not** on the kiosk queue read. A work order that was released *before* this rule shipped can no
-longer be released again, so it keeps the old one-at-a-time promotion until something reconciles it:
-loading it on the Work Orders page (list or detail) or on the desktop `/shop-floor` dashboard /
-operations list repairs it permanently, and the kiosk shows the full pool on the operator's next poll.
+- **A sequenced routing** — the default for every work order created since this shipped — unlocks one
+  step at a time. An operation appears on the queue only once **every** earlier-sequence operation of
+  that work order is complete, its own work center included. A 4-operation weld assembly whose first
+  three steps sit on one weld cell (Skid Fit → Wall Fit Up → Accessory Fit Up → Weld Out) offers the
+  floor exactly one of them at a time, so the build order survives.
+- **A dispatch pool** — what every work order that predates it carries, and what a
+  batch job wants — promotes same-work-center operations together, so a work order carrying ~18
+  press-brake items as one operation each shows all 18 at once. Nothing about what an operator may
+  clock into changed on those: the floor's gate has always allowed same-work-center operations in any
+  order, so the pool makes already-legal work visible rather than granting anything.
+
+Operations at a **different, downstream** work center wait for their predecessors under **both**
+settings, so a routing whose steps each sit at a different machine behaves identically either way.
+**Laser-cutting WOs ignore the setting entirely** — they are always pools (see "Laser nests at
+clock-in" below).
+
+**If the queue disagrees with the office screen, open the work order in the office app once.** Promotion
+runs at work-order release, at each operation completion, on operation resume, and on the reconciling
+office/shop-floor reads — **not** on the kiosk queue read. So both of these need one office/shop-floor
+read before the kiosk agrees:
+
+- **A job showing one item of many.** A work order released *before* the pooling rule shipped cannot be
+  released again, so it keeps the old one-at-a-time promotion until something reconciles it.
+- **A job whose sequencing setting was just changed.** Switching a work order **to a pool** re-promotes
+  the rest of its items on the next reconciling read. (Switching it **to a routing** takes effect
+  immediately — the office app pulls the now-forbidden items back off the board as part of the change,
+  and refuses the change outright if work is already under way out of sequence.)
+
+Loading the work order on the Work Orders page (list or detail), or the desktop `/shop-floor` dashboard
+or operations list, repairs it permanently and the kiosk reflects it on the operator's next poll.
 Refreshing the kiosk alone will not fix it. Nothing else is needed — no re-release, no re-import, no
-admin action — and it only ever has to be done once per work order.
+admin action.
 
 One consequence worth knowing on the floor: **holding one item stops its siblings being started.**
 An **ON_HOLD** operation blocks from any work center, its own included, so while item 3 of a batch is

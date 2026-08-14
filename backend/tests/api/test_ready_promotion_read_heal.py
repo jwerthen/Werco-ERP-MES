@@ -40,6 +40,7 @@ from fastapi import status
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
+import app.api.endpoints.shop_floor as shop_floor_endpoint
 from app.core.security import create_access_token
 from app.models.company import Company
 from app.models.operational_event import OperationalEvent
@@ -131,11 +132,22 @@ def make_wo(
     wo_status: WorkOrderStatus = WorkOrderStatus.RELEASED,
     work_order_type: str = WorkOrderType.PRODUCTION.value,
     company_id: int = COMPANY_A,
+    sequential_operations: bool = False,
 ) -> tuple:
     """A WO with one operation per entry of ``statuses``, sequences 10/20/30...
 
     ``work_centers[i]`` hosts op ``i`` -- pass the same work center repeatedly for the
     batch/pool shape, distinct ones for a conventional routing.
+
+    ``sequential_operations`` defaults to **False (POOLED)** here, deliberately against
+    the model's create-default of True (081). This whole suite is about the pooled
+    dispatch rule and the read-path heal that repairs a work order stranded under the
+    old promotion: the subject under test IS a pool, and every row that existed when
+    081 ran backfilled to exactly this value. A sequenced routing is the other mode and
+    gets its own suite (``test_sequential_operations.py``); pass ``True`` here to build
+    one on purpose. On a route whose steps each sit at a DIFFERENT work center the two
+    modes are indistinguishable, so the cross-work-center tests below are unaffected
+    either way.
     """
     _ensure_company(db, company_id)
     n = _next()
@@ -153,6 +165,7 @@ def make_wo(
         work_order_number=f"HEAL-WO-{n:05d}",
         part_id=part.id,
         work_order_type=work_order_type,
+        sequential_operations=sequential_operations,
         customer_name="Acme",
         quantity_ordered=len(statuses),
         status=wo_status,
@@ -544,24 +557,55 @@ class TestReadPathSafety:
 # ONE implementation of the rule, not four
 # --------------------------------------------------------------------------- #
 class TestSinglePromotionImplementation:
-    """Three seams promote; all three must route through ``promote_ready_operations``.
+    """FOUR seams promote; all four must route through ``promote_ready_operations``.
 
-    Three copies of this rule is how the office and floor gates drifted apart, which is
+    Four copies of this rule is how the office and floor gates drifted apart, which is
     what the pooling change had to repair. A future seam that re-inlines the gate fails
     here.
+
+    The fourth seam is ``shop_floor.resume_operation``, which floors a held operation at
+    PENDING and delegates the lift back to READY here precisely so a resume can never
+    perform a release. It was missing from this parametrize list while
+    ``promote_ready_operations``' own docstring already named it -- exactly the kind of
+    uncovered seam this class exists to catch. It is patched at
+    ``shop_floor.promote_ready_operations`` rather than on the service module because
+    that endpoint imports the name directly, so the module-global is the binding the
+    call actually reaches.
     """
+
+    def test_the_stubs_in_this_file_bind_to_the_real_signature(self):
+        """The two monkeypatch stubs below replace the real function; if its signature
+        moved, they would silently accept a call the production code could not make (or
+        blow up mid-test with a TypeError that reads like a product bug). Pinned
+        structurally so a signature change fails HERE, with a message that says why."""
+        import inspect
+
+        signature = inspect.signature(work_order_state_service.promote_ready_operations)
+        assert list(signature.parameters) == ["work_order", "operations", "db", "user_id"]
+        assert signature.parameters["db"].default is None
+        assert signature.parameters["user_id"].default is None
+        # And it binds the way both stubs declare it, positionally + keyword.
+        signature.bind(object(), [], db=None, user_id=None)
 
     @pytest.mark.parametrize(
         "seam",
-        ["release", "completion", "reconcile"],
+        ["release", "completion", "reconcile", "resume"],
     )
-    def test_every_promotion_seam_routes_through_the_shared_rule(self, db_session: Session, monkeypatch, seam):
+    def test_every_promotion_seam_routes_through_the_shared_rule(
+        self, client: TestClient, db_session: Session, monkeypatch, seam
+    ):
+        admin = make_user(db_session)
         wc = make_work_center(db_session)
         wo_status = WorkOrderStatus.DRAFT if seam == "release" else WorkOrderStatus.RELEASED
+        # The resume seam needs something to resume: op 2 is HELD rather than PENDING, so
+        # clearing the hold is what puts it (and its pooled sibling) back on the board.
+        op_statuses = [OperationStatus.COMPLETE] + (
+            [OperationStatus.ON_HOLD, OperationStatus.PENDING] if seam == "resume" else [OperationStatus.PENDING] * 2
+        )
         wo, ops = make_wo(
             db_session,
             work_centers=[wc] * 3,
-            statuses=[OperationStatus.COMPLETE] + [OperationStatus.PENDING] * 2,
+            statuses=op_statuses,
             wo_status=wo_status,
         )
         calls = []
@@ -571,12 +615,18 @@ class TestSinglePromotionImplementation:
             calls.append(work_order.id)
             return real_promote(work_order, operations, db=db, user_id=user_id)
 
+        # Both bindings, so whichever module the exercised seam resolves the name
+        # through is counted. No seam calls both, so this cannot double-count.
         monkeypatch.setattr(work_order_state_service, "promote_ready_operations", counting_promote)
+        monkeypatch.setattr(shop_floor_endpoint, "promote_ready_operations", counting_promote)
 
         if seam == "release":
             work_order_state_service.release_first_ready_operation(wo, db_session)
         elif seam == "completion":
             work_order_state_service.release_next_ready_operation(db_session, wo, ops[0])
+        elif seam == "resume":
+            resp = client.put(f"/api/v1/shop-floor/operations/{ops[1].id}/resume", headers=headers_for(admin))
+            assert resp.status_code == status.HTTP_200_OK, resp.text
         else:
             reconcile_work_orders_from_completion_evidence(db_session, [wo])
         db_session.commit()

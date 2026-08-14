@@ -1700,6 +1700,10 @@ class TestWorkOrdersAPI:
             quantity_ordered=1,
             status=WorkOrderStatus.RELEASED,
             priority=5,
+            # POOLED (081): "operators may choose any operation when prior steps are in
+            # the same work center" IS the dispatch-pool rule. A sequenced routing is the
+            # other mode and deliberately refuses exactly this start.
+            sequential_operations=False,
             company_id=1,
         )
         db_session.add(work_order)

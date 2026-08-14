@@ -78,3 +78,6 @@ uploads/
 backend/uploads/
 .vercel
 *.db-journal
+
+# Session task queue — describes unremediated defects; must never be pushed to this public repo.
+NEXT_SESSION_TASKS.md

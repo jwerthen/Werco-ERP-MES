@@ -100,8 +100,17 @@ def make_wo(
     company_id: int = COMPANY_A,
     wo_status: WorkOrderStatus = WorkOrderStatus.IN_PROGRESS,
     op_statuses: list = None,
+    sequential_operations: bool = False,
 ) -> tuple:
-    """A work order with one operation per entry in op_statuses (default one READY op)."""
+    """A work order with one operation per entry in op_statuses (default one READY op).
+
+    Every operation lands on the SAME work center, so ``sequential_operations`` decides
+    whether they gate each other. It defaults to **False (POOLED)** -- the pre-081 rule
+    this suite's existing parity assertions were written against, and the reason
+    ``test_clock_in_gate_parity_incomplete_predecessor`` has to move an op to its own
+    work center to make the predecessor gate bite at all. Pass ``True`` to build a
+    sequenced ROUTING, where a same-work-center predecessor blocks on its own.
+    """
     _ensure_company(db, company_id)
     n = _next()
     part = Part(
@@ -130,6 +139,7 @@ def make_wo(
         work_order_number=f"A04SCAN-WO-{n:05d}",
         customer_name="Acme",
         part_id=part.id,
+        sequential_operations=sequential_operations,
         quantity_ordered=10,
         status=wo_status,
         priority=5,
@@ -262,6 +272,71 @@ def test_clock_in_gate_parity_incomplete_predecessor(client: TestClient, db_sess
     assert real.status_code == 400
     assert real.json()["detail"] == "Previous operations must be completed first"
     assert real.json()["detail"] in body["blockers"]["clock_in"]
+
+
+def test_clock_in_gate_parity_same_work_center_on_a_sequenced_routing(client: TestClient, db_session: Session):
+    """The case 081 made representable: SAME work center, and the gate bites anyway.
+
+    Sibling of ``test_clock_in_gate_parity_incomplete_predecessor``, which has to shove
+    op2 onto its own work center precisely because the pooled rule waives a same-work-
+    center predecessor. On a SEQUENCED work order there is nothing to waive, so the two
+    operations can stay on one machine -- the reported WO-20260807-006 shape, where a
+    weld cell hosts three consecutive steps.
+
+    The parity claim is the whole point of the 081 refactor: the resolver reads the
+    shared gate, and the two INLINE copies of that gate in ``shop_floor.py`` were
+    collapsed onto it. If a future change made either side read the flag differently,
+    the kiosk would offer a clock-in the endpoint refuses -- so the resolver verdict is
+    checked against the REAL endpoint's status AND its exact detail text.
+    """
+    user = make_user(db_session)
+    wo, (op1, op2), wc, _ = make_wo(
+        db_session,
+        op_statuses=[OperationStatus.IN_PROGRESS, OperationStatus.PENDING],
+        sequential_operations=True,
+    )
+    assert op1.work_center_id == op2.work_center_id, "the point: ONE work center, no WC move"
+
+    body = resolve(client, user, f"OP:{op2.id}")
+    assert "clock_in" not in body["legal_actions"]
+    assert "Previous operations must be completed first" in body["blockers"]["clock_in"]
+
+    real = client.post(
+        CLOCK_IN,
+        json={"work_order_id": wo.id, "operation_id": op2.id, "work_center_id": wc.id, "entry_type": "run"},
+        headers=headers_for(user),
+    )
+    assert real.status_code == 400
+    assert real.json()["detail"] == "Previous operations must be completed first"
+    assert real.json()["detail"] in body["blockers"]["clock_in"]
+
+
+def test_clock_in_gate_parity_same_work_center_stays_legal_on_a_pooled_work_order(
+    client: TestClient, db_session: Session
+):
+    """The control for the test above: flip the flag, and the SAME shape is allowed.
+
+    Without this, the sequenced assertion could be satisfied by a gate that blocks
+    everything. Pooled is what every pre-081 row backfilled to and what the batch WOs
+    still run under, so this is also the regression lock on that behavior.
+    """
+    user = make_user(db_session)
+    wo, (op1, op2), wc, _ = make_wo(
+        db_session,
+        op_statuses=[OperationStatus.IN_PROGRESS, OperationStatus.PENDING],
+        sequential_operations=False,
+    )
+
+    body = resolve(client, user, f"OP:{op2.id}")
+    assert "clock_in" in body["legal_actions"]
+    assert "Previous operations must be completed first" not in body.get("blockers", {}).get("clock_in", [])
+
+    real = client.post(
+        CLOCK_IN,
+        json={"work_order_id": wo.id, "operation_id": op2.id, "work_center_id": wc.id, "entry_type": "run"},
+        headers=headers_for(user),
+    )
+    assert real.status_code == 200, real.text
 
 
 def test_clock_in_gate_parity_on_hold(client: TestClient, db_session: Session):

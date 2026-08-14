@@ -626,7 +626,13 @@ def test_a_sibling_promoted_by_a_resume_gets_its_first_ready_event(client: TestC
     """
     wc = make_work_center(db_session, company_id=COMPANY_A)
     operator = make_user(db_session, company_id=COMPANY_A)
-    work_order, held_op = make_wo_with_operation(db_session, work_center=wc, op_status=OperationStatus.ON_HOLD)
+    # POOLED (081): the sibling shares the held op's work center, and "the predecessor
+    # gate leaves them mutually unordered" is the dispatch-pool rule. On a sequenced
+    # routing the resumed op (seq 10) still blocks the sibling (seq 20), so there is no
+    # sibling promotion to measure -- a different scenario, not this one.
+    work_order, held_op = make_wo_with_operation(
+        db_session, work_center=wc, op_status=OperationStatus.ON_HOLD, sequential_operations=False
+    )
     sibling = _add_operation(db_session, work_order, wc, sequence=20, op_status=OperationStatus.PENDING)
     assert _ready_events(db_session, sibling.id) == []
 
