@@ -122,6 +122,23 @@ export interface WorkOrder {
   part_id: number | null;
   parent_work_order_id?: number;
   work_order_type: string;
+  /**
+   * Operation sequencing mode.
+   *
+   * `true`  = SEQUENCED ROUTING — an operation reaches READY only once every
+   *           lower-sequence operation is COMPLETE, its own work center included.
+   * `false` = DISPATCH POOL — operations sharing a work center are mutually
+   *           startable and go READY together (the pre-migration-081 behavior).
+   *
+   * New work orders default to `true`; every row that predates the column is
+   * `false`, so nothing in flight changed rules underneath the floor. IGNORED on
+   * `work_order_type === 'laser_cutting'` (nest dispatch short-circuits above it).
+   *
+   * OPTIONAL on purpose: absent from a response served by an older API, and
+   * absent from the ~30 test fixtures that build `WorkOrder` literals. Read it
+   * as `?? false` — pooled is what a work order without the column behaves as.
+   */
+  sequential_operations?: boolean;
   quantity_ordered: number;
   quantity_complete: number;
   quantity_scrapped: number;
@@ -575,6 +592,13 @@ export interface WorkOrderSummary {
   part_id: number | null;
   parent_work_order_id?: number;
   work_order_type: string;
+  /**
+   * See `WorkOrder.sequential_operations`. Mirrored here because the backend
+   * `WorkOrderSummary` carries it; optional on the TS side for the same reason
+   * it is on `WorkOrder` (older responses, and existing list fixtures). Read it
+   * as `?? false`.
+   */
+  sequential_operations?: boolean;
   part_number?: string | null;
   part_name?: string | null;
   part_type?: string | null;

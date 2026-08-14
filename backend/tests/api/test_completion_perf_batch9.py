@@ -138,13 +138,25 @@ def make_wo(
     status_: WorkOrderStatus = WorkOrderStatus.IN_PROGRESS,
     quantity_ordered: float = 10,
     part: Part = None,
+    sequential_operations: bool = True,
 ) -> WorkOrder:
+    """A work order for the PERF/atomicity batch.
+
+    ``sequential_operations`` mirrors the model's create-default (True = a sequenced
+    ROUTING, 081), because almost everything in this file is about completion
+    atomicity, cost rollup and query counts rather than about the promotion rule, and
+    a routing is what a new work order actually is. The two tests that measure the
+    DISPATCH-POOL rule pass ``False`` explicitly -- their subject is a pooled batch WO,
+    and under sequencing they would still pass while measuring one promoted operation
+    instead of N, which is the opposite of what they claim.
+    """
     part = part or make_part(db)
     n = _next()
     wo = WorkOrder(
         work_order_number=f"B9-WO-{n:05d}",
         customer_name="Acme",
         part_id=part.id,
+        sequential_operations=sequential_operations,
         quantity_ordered=quantity_ordered,
         status=status_,
         priority=5,
@@ -614,7 +626,9 @@ def test_perf4_same_work_center_ops_all_release_together(db_session: Session):
     from app.services.work_order_state_service import release_next_ready_operation
 
     wc = make_work_center(db_session)
-    wo = make_wo(db_session, status_=WorkOrderStatus.IN_PROGRESS, quantity_ordered=5)
+    # POOLED (081): the claim under test is the same-work-center waiver, which only
+    # exists on a dispatch-pool work order. A sequenced routing is the other mode.
+    wo = make_wo(db_session, status_=WorkOrderStatus.IN_PROGRESS, quantity_ordered=5, sequential_operations=False)
     op1 = make_op(db_session, wo, wc, sequence=10, status_=OperationStatus.IN_PROGRESS)  # earlier, NOT complete
     op2 = make_op(db_session, wo, wc, sequence=20, status_=OperationStatus.PENDING)
     op3 = make_op(db_session, wo, wc, sequence=30, status_=OperationStatus.PENDING)
@@ -651,7 +665,11 @@ def test_perf4_same_work_center_promotion_runs_no_per_candidate_query(db_session
     monkeypatch.setattr(signal_service, "emit_operation_ready_event", lambda *a, **k: None)
 
     wc = make_work_center(db_session)
-    wo = make_wo(db_session, status_=WorkOrderStatus.IN_PROGRESS, quantity_ordered=5)
+    # POOLED (081), so all five ops really are promoted in one pass. Under the sequenced
+    # default only ONE would promote and this test would still pass -- while no longer
+    # measuring "promoting N costs the same one SELECT as promoting one", which is the
+    # entire property.
+    wo = make_wo(db_session, status_=WorkOrderStatus.IN_PROGRESS, quantity_ordered=5, sequential_operations=False)
     op1 = make_op(db_session, wo, wc, sequence=10, status_=OperationStatus.COMPLETE, quantity_complete=5)
     for seq in (20, 30, 40, 50, 60):
         make_op(db_session, wo, wc, sequence=seq, status_=OperationStatus.PENDING)

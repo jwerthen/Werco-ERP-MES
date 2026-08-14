@@ -209,9 +209,9 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
 | GET | `/work-orders/` | List all work orders (`skip` ≥ 0, `limit` 1–5000 default 100 — the standard list tier, see [Pagination](#pagination)) | Yes |
-| POST | `/work-orders/` | Create work order. `work_order_type` is validated against the `WorkOrderType` vocabulary (**422** on an unknown value), and `'laser_cutting'` is **refused on create** (422) — nest-dispatch WOs are minted only by the laser nest import paths (see note below) | Yes |
+| POST | `/work-orders/` | Create work order. `work_order_type` is validated against the `WorkOrderType` vocabulary (**422** on an unknown value), and `'laser_cutting'` is **refused on create** (422) — nest-dispatch WOs are minted only by the laser nest import paths (see note below). Body accepts `sequential_operations` (**default `true`** — a sequenced routing; see "READY promotion" below) | Yes |
 | GET | `/work-orders/{id}` | Get work order by ID | Yes |
-| PUT | `/work-orders/{id}` | Update work order (body requires the WO's current `version` — stale → 409; also 409 if it moves a terminal WO back to a non-terminal status, **or sets `status` to COMPLETE/CLOSED from any status other than COMPLETE/CLOSED** — see "Terminal-state lock" below). Non-`status` fields such as `notes` / `special_instructions` carry **no status gate**: they are editable at any status, including terminal ones | Admin / Manager / Supervisor |
+| PUT | `/work-orders/{id}` | Update work order (body requires the WO's current `version` — stale → 409; also 409 if it moves a terminal WO back to a non-terminal status, **or sets `status` to COMPLETE/CLOSED from any status other than COMPLETE/CLOSED** — see "Terminal-state lock" below). Non-`status` fields such as `notes` / `special_instructions` carry **no status gate**: they are editable at any status, including terminal ones. **The flip verb for `sequential_operations`** — turning it *on* returns **409** on a laser nest WO, and **409 naming the operations** when work is already under way out of sequence; otherwise it demotes un-worked blocked operations READY → PENDING, one audit row each (see "READY promotion" below) | Admin / Manager / Supervisor |
 | DELETE | `/work-orders/{id}` | Delete work order (soft by default; `hard_delete=true` only for draft/cancelled) | Admin / Manager |
 | POST | `/work-orders/{id}/release` | Release to production | Yes |
 | POST | `/work-orders/{id}/start` | Start production | Yes |
@@ -261,42 +261,134 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > (`{"detail": "This record was modified by someone else. Refresh and try again."}`) via an app-wide
 > `StaleDataError` handler instead of silently losing the write.
 >
-> **READY promotion is pooled by work center.** Promotion no longer stops at the lowest-sequence
-> PENDING operation. **Three seams** promote — one at `POST /work-orders/{id}/release`, one inside the
-> shared finalizer after each operation completion that leaves work remaining (so it also runs on the
-> shop-floor and reconcile-on-read completion paths), and one on the **read path** (see "A read heals
-> a stranded work order" below) — and all three run one shared implementation, so the rule cannot
-> differ by seam. They promote **every** PENDING operation whose predecessor gate passes, and that
-> gate is the one clock-in has always enforced: a predecessor at the **same work center** as the
-> candidate does not block it.
-> - A conventional routing whose steps each sit at a **different** work center is **unchanged**. The
->   same-work-center allowance never fires, at most one operation can pass, and one operation goes
->   READY — byte-identical to the old lowest-sequence-only rule.
-> - A work order carrying several **unordered items at one work center** (a batch WO whose ~18
->   press-brake items are one operation each on one machine) promotes **all** of them together. They
->   were already legal to clock into — the floor's gate has always allowed same-work-center operations
->   in any order — but only the lowest-sequence one ever reached READY, and the dispatch board and
->   kiosk queue surface READY work only, so 17 of 18 were invisible. Aligning the two rules grants no
->   new authority; it makes already-legal work visible.
-> - **Cross-work-center ordering is preserved.** A downstream operation at another work center stays
->   PENDING until its predecessors complete, and a promoted operation is READY (not COMPLETE), so it
->   keeps blocking its own successors exactly as before.
+> **READY promotion: a sequenced ROUTING or a DISPATCH POOL, chosen per work order.** Which of the two
+> a work order is, is its own setting — `sequential_operations`, added by migration `081` and carried on
+> the create body, the update body, and every work-order response and summary.
+> - **`true` — a sequenced ROUTING.** An operation reaches READY only once **every** lower-sequence
+>   operation of that work order is COMPLETE, **its own work center included**. The motivating case:
+>   WO-20260807-006 is a 4-operation weld assembly (10 Skid Fit → 20 Wall Fit Up → 30 Accessory Fit Up →
+>   40 Weld Out) whose first three operations sit on one weld cell, so the pooled rule unlocked all three
+>   at once and the build order was lost on the floor.
+> - **`false` — a DISPATCH POOL.** Operations sharing a work center do **not** block each other: they
+>   promote together and are mutually startable. This is the pre-`081` rule unchanged — a batch WO
+>   carrying ~18 press-brake items as one operation each on one machine shows all 18, where a
+>   lowest-sequence-only rule showed 1 (the board and kiosk surface READY work **only**).
 >
-> This is **unconditional — every work order, no opt-in flag**, and it is primarily a *visibility*
-> change: promoting an operation does not authorize anything the floor's gate did not already allow.
-> Two authorization-shaped changes ride along with it and are documented separately below — the office
-> verbs, which were **stricter** than the floor and are relaxed to match it, and the **ON_HOLD**
-> carve-out, which is the one place this work makes a previously-accepted request **refused**.
+> **The create default and the backfill default are deliberately opposite.** The column's
+> `server_default` is `false`, so every work order that already existed when `081` ran backfilled to
+> **pooled** — exactly what it was released and scheduled under, so no in-flight job changed rules
+> underneath the floor. The **create** default is `true`, so every work order minted from here on is a
+> **sequenced routing** (the common case, and the one the pooled rule got wrong). The migration carries
+> no backfill pass and no `UPDATE`: converting an existing job is an explicit, audited flip through
+> `PUT /work-orders/{id}` (below). The column is `NOT NULL`, so the field is always present on a
+> response — a client never has to interpret an absent value.
 >
-> One deliberate non-change, and one that no longer holds: the **laser** dispatch pool keeps its own,
-> strictly fuller exemption (see "Laser WOs are dispatch pools" under Laser Nests), while the bulk loader
-> `POST /work-orders/import` still promotes **exactly one** operation *at import time* — it carries
-> its own inline release rule and was deliberately left alone. That difference no longer persists,
-> though: the loader lands the WO RELEASED / IN_PROGRESS, so the read-path seam below promotes the
-> rest of the pool on the **first reconciling read** of that work order.
+> **Cross-work-center ordering is preserved either way**, and the two modes are **indistinguishable on a
+> conventional routing** whose steps each sit at a *different* work center — the same-work-center
+> question never arises, at most one operation can pass the gate, and exactly one goes READY under
+> either setting.
 >
-> **A read heals a stranded work order.** The two lifecycle seams above cannot reach a work order
-> that was **already RELEASED** before the pooled rule shipped: `POST /work-orders/{id}/release`
+> **One rule, four seams, and the action gates read the same setting.** Promotion is a single
+> implementation (`promote_ready_operations`) reached from **four** places — `POST
+> /work-orders/{id}/release`; the shared finalizer after each operation completion that leaves work
+> remaining (so it also covers the shop-floor and reconcile-on-read completion paths); the **read path**
+> (see "A read heals a stranded work order" below); and `PUT /shop-floor/operations/{id}/resume`, which
+> lands the resumed operation at PENDING and delegates any lift back to READY to this same rule. Each
+> resolves the work order's mode **once per call**. The predecessor gate behind every *action* —
+> `operation_action_gates.operation_blocked_by_predecessors`, used by `POST /shop-floor/clock-in`, both
+> office verbs, both shop-floor verbs, the queue's check-in-state read, and `POST
+> /scanner/resolve-action` — resolves it from the **same** function on the **same** work order. So an
+> operation a sequenced routing keeps off the dispatch board is also **refused by a badge scan**, and an
+> operation a badge can start is visible. Don't read the flag anywhere else: two readings is exactly how
+> the office and floor rules drifted apart the first time.
+>
+> **Unresolvable → pooled.** `work_order_allows_same_work_center` returns *pooled* whenever it cannot
+> read the flag (a null work order, a row or stub predating the column) — the pre-`081` value every
+> caller used to hard-code. An unresolvable work order can therefore never silently **tighten** a gate
+> and strand work the floor was already allowed to start.
+>
+> **Laser WOs ignore the setting entirely.** `is_laser_dispatch_work_order` short-circuits **above** it
+> at every seam and is **strictly fuller** — it drops predecessor gating altogether, so nests promote
+> across two lasers and a **held nest does not block its siblings**. It must not be collapsed into the
+> same-work-center allowance. Both laser work-order constructors pin `sequential_operations=false` so a
+> nest package never serializes a claim its own behavior contradicts, and `PUT /work-orders/{id}`
+> returns **409** on an attempt to set it `true` on one.
+>
+> **The bulk loader now agrees rather than diverging.** `POST /work-orders/import` still carries its own
+> inline "promote **exactly one** operation" release rule, and it does not pin the flag — so an imported
+> work order takes the sequenced create default and the read-path seam converges it onto the
+> **sequenced** rule, which promotes exactly the one operation the loader already promoted. (Under the
+> pooled rule the first reconciling read promoted the rest of the pool instead.)
+>
+> **Flipping the setting — `PUT /work-orders/{id}`.** Roles **Admin / Manager / Supervisor**. The body
+> already requires the work order's current `version` (stale → **409** before any field is written), and
+> `sequential_operations` is optional, so an update that never mentions it never changes it. Two further
+> **409**s are specific to turning it **ON** (`false` → `true`), and both are raised **before the first
+> field is written**, so a refused flip leaves the row untouched:
+> - **A laser nest work order** — `{"detail": "cannot switch a laser nest work order to sequential
+>   operations: its nests are a dispatch pool and are deliberately startable in any order."}`
+> - **Work already under way out of sequence** — if any operation the strict rule would block has been
+>   worked (status IN_PROGRESS, an `actual_start`, booked good or scrapped quantity, or **any**
+>   `TimeEntry` against it, open or closed), the flip is refused and the detail **names** the operations
+>   (`OP{sequence} {name}`). The reason is not tidiness: every completion verb re-evaluates the
+>   predecessor gate at action time, so an operation being worked ahead of its predecessors would become
+>   **uncompletable** the instant the flag flipped, and nothing would heal it (promotion only ever moves
+>   forward). Complete those operations — or the earlier ones they run ahead of — then flip.
+>
+> On a successful **ON** flip the endpoint also **demotes** the un-worked operations the pooled rule had
+> already promoted: READY → PENDING, one `audit_log` **status-change** row per operation
+> (`extra_data.transition = "sequential_operations_enabled"`), and the count on the `work_order_updated`
+> event payload as `operations_returned_to_pending`. This is the **only** place in the system that moves
+> an operation backwards as a *rule* (holds and resume are actor decisions about one operation), and it
+> exists because promotion is forward-only: without it, turning the setting on would fix only the *next*
+> work order, never the one being looked at. It never touches a worked operation, and it only demotes
+> what the new rule actually blocks — so the lowest startable operation stays READY and the floor is
+> never left with a work order it cannot start at all.
+>
+> **Turning it OFF needs no sweep.** `true` → `false` is repaired by the read-path heal, which
+> re-promotes the pool on the next reconciling read.
+>
+> **A cleared blocker lands at PENDING on a sequenced routing.** When the last open blocker on a held
+> operation clears, an operation that was **already started** (`actual_start`) returns to IN_PROGRESS as
+> before; an **un-started** operation whose predecessors are still open now lands at **PENDING**, not
+> READY. READY would put a card on the dispatch board and the kiosk that every start verb refuses, and
+> nothing would heal it (the read-path heal reads PENDING rows only). Unchanged for a pooled work order
+> and for a laser nest, where the shared gate short-circuits to "not blocked".
+>
+> **Duplicating a work order carries the setting.** `sequential_operations` is *plan*, not production
+> record, so `POST /work-orders/{id}/duplicate` copies it **explicitly** rather than letting the new row
+> take the create default — which is the *opposite* value for a pooled source, so a duplicated
+> batch/pool WO would otherwise come back as a sequenced routing and show the floor one item of eighteen.
+>
+> **What this setting is NOT: an airtight enforcement control.** It governs what reaches READY and what
+> the *action* verbs refuse. **Four write paths still reach COMPLETE or READY with no predecessor
+> check**, so a sequenced routing constrains the normal flow without making out-of-order completion
+> unreachable. Stated plainly so nobody plans around a guarantee that isn't there:
+> - **`_sync_operation_status_from_quantity`** (read path) flips an operation to COMPLETE from closed
+>   labor evidence once its booked quantity reaches target — ungated by sequence.
+> - **`_copy_slot_completion_evidence`** (read path) flips regenerated sibling rows sharing a progress
+>   key to COMPLETE from a completed sibling's evidence — ungated by sequence.
+> - **`POST /work-orders/{id}/complete`** (Admin / Manager / Supervisor / Quality) force-completes every
+>   still-open operation through the shared finalizer — ungated by sequence. (It *does* refuse **409**
+>   when an open operation is ON_HOLD.)
+> - **`PUT /work-orders/operations/{id}`** (Admin / Manager / Supervisor) refuses only `status`
+>   **COMPLETE**; a supervisor may hand-set an operation to **READY** through its blind `setattr` loop.
+>   That is a **deliberate, role-gated, audited supervisor override** — the full old→new row diff lands
+>   on the tamper-evident chain — and the read-path heal will **never re-demote** it, because that heal
+>   reads PENDING rows only.
+>
+> **`_apply_work_order_schedule` promotes without a gate and is provably safe — don't "fix" it.**
+> `PUT /scheduling/work-orders/{id}/schedule`, `…/schedule-earliest`, and
+> `POST /scheduling/bulk-schedule-earliest` each promote `current_op` PENDING → READY on a RELEASED /
+> IN_PROGRESS work order with no predecessor check. `current_op` comes from `_get_current_operation`,
+> which is *operations sorted by sequence → the first one that is not COMPLETE*. Every lower-sequence
+> operation of that candidate is therefore COMPLETE by construction, and the strict rule blocks an
+> operation only when some lower-sequence operation is **not** COMPLETE — so the sequenced rule can never
+> block the one operation this path promotes. Adding a gate here would change no behavior and would
+> create a fifth copy of the rule.
+>
+> **A read heals a stranded work order.** The release and completion seams above cannot reach a work
+> order that was **already RELEASED** before the pooled rule shipped: `POST /work-orders/{id}/release`
 > refuses anything that is not DRAFT, so such a WO kept the one-at-a-time promotion it was released
 > under and its operations 2..N sat PENDING indefinitely — invisible to the kiosk and the dispatch
 > board, which surface READY work only. The reconcile-on-read pass
@@ -305,7 +397,14 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > loads it. No new endpoint, no data migration, no owner action.
 > - **Which reads heal.** `GET /work-orders`, `GET /work-orders/{id}`, `GET /shop-floor/dashboard`
 >   (bounded to the most-recently-touched open WOs by `SHOP_FLOOR_DASHBOARD_RECONCILE_LIMIT`),
->   `GET /shop-floor/operations`, and `GET /shop-floor/operations/{id}`.
+>   `GET /shop-floor/operations`, and `GET /shop-floor/operations/{id}`. `POST /work-orders/` also
+>   reconciles, but a brand-new WO is DRAFT, so the DRAFT carve-out below makes it the no-op it has
+>   always been — **six** handlers call the reconcile, five of which can actually promote.
+> - **This is also what converges a work order onto a *changed* `sequential_operations` setting.**
+>   Turning the setting **off** leaves operations to be re-promoted by this heal; turning it **on**
+>   demotes at the flip (above) and needs no read. Either way, **opening the work order — or a
+>   shop-floor operations / dashboard read — is what converges it. Polling the dispatch board or the
+>   kiosk queue will not**, because neither reconciles.
 > - **Which do not.** The **kiosk queue and the dispatch-board / work-center-queue endpoints do not
 >   reconcile.** Polling a board will not repair a stranded WO — **opening the work order, or a
 >   shop-floor operations/dashboard read, is what repairs it**, after which the board shows the pool.
@@ -345,13 +444,18 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > would be no stop at all. **Exception:** on a **laser** WO a held nest still does not block its
 > siblings — the laser exemption short-circuits the whole predicate before this carve-out is reached.
 >
-> **The office predecessor gate now matches the shop floor.**
-> `POST /work-orders/operations/{id}/start` and `…/complete` each held an **inline copy** of the gate
-> passing `allow_same_work_center=False` while the shop-floor twins passed `True` — so the office
-> refused an operation the floor would happily start. Both office verbs now call the shared predicate
-> (`operation_action_gates.operation_blocked_by_predecessors`, which is what clock-in and the scanner
-> resolver already used), so the same-work-center exemption, the ON_HOLD carve-out, and the laser
-> dispatch-pool exemption now hold identically on **every** live gate: both office verbs,
+> **Every live predecessor gate now calls the one shared predicate — no inline copies remain.**
+> This landed in two steps. First the **office** verbs: `POST /work-orders/operations/{id}/start` and
+> `…/complete` each held an **inline copy** passing `allow_same_work_center=False` while the shop-floor
+> twins passed `True`, so the office refused an operation the floor would happily start; both were moved
+> onto `operation_action_gates.operation_blocked_by_predecessors` (what clock-in and the scanner
+> resolver already used). Then, with `081`, the **shop-floor** verbs: `PUT /shop-floor/operations/{id}/start`
+> and `POST /shop-floor/operations/{id}/complete` still carried inline copies of their own, hard-coding
+> `allow_same_work_center=True`. Left alone, those two would have kept **pooling on the operator's
+> primary start and complete verbs while the board and every other gate honored a work order's
+> sequenced setting** — an operation hidden from the dispatch board but startable by badge scan. Both
+> now call the shared predicate too. So the per-work-order pool/routing setting, the ON_HOLD carve-out,
+> and the laser dispatch-pool exemption hold identically on **every** live gate: both office verbs,
 > `PUT /shop-floor/operations/{id}/start`, `POST /shop-floor/operations/{id}/complete`,
 > `POST /shop-floor/clock-in`, the queue's check-in-state read, and `POST /scanner/resolve-action`.
 > The refusal shape is unchanged: **400**
@@ -1408,22 +1512,24 @@ mixed**:
 > gates) — so operators run nests in **any order**, including across **different work centers**
 > when a package's nests are spread over multiple lasers. The exemption keys off the WO type
 > through one shared predicate (`is_laser_dispatch_work_order` in `work_order_state_service`), and
-> all three promotion seams promote **all** PENDING laser ops to READY (not just the lowest
+> all **four** promotion seams promote **all** PENDING laser ops to READY (not just the lowest
 > sequence) — a pre-existing laser WO imported before whole-package-ready self-heals (its stranded
 > PENDING nests go READY) on its next release/lifecycle event, or, if it was already released and
 > so can never be released again, on its next **reconciling read** (see "A read heals a stranded
 > work order" under Work Orders).
 >
-> **The laser exemption is strictly fuller than the work-center pooling that now applies to every
-> WO, and the two are not the same rule.** Non-laser WOs also promote every startable PENDING
-> operation now, but under the *predecessor* gate — operations sharing a work center do not block
-> each other, while cross-work-center ordering still holds, and an **ON_HOLD** predecessor blocks even
-> at its own work center (see "READY promotion is pooled by work center" and "An ON_HOLD predecessor
+> **The laser exemption is strictly fuller than work-center pooling, and the two are not the same
+> rule.** A non-laser WO promotes every startable PENDING operation under the *predecessor* gate, and
+> whether operations sharing a work center block each other is that work order's own
+> `sequential_operations` setting — pooled or sequenced. Cross-work-center ordering holds under both,
+> and an **ON_HOLD** predecessor blocks even at its own work center (see "READY promotion: a sequenced ROUTING or a DISPATCH POOL" and "An ON_HOLD predecessor
 > blocks its own work center too" under Work Orders). A laser WO drops predecessor gating
 > **entirely**: nests promote and start across different lasers, which the same-work-center allowance
 > would not cover, and — the difference worth knowing on the floor — **a held nest does not block its
 > siblings**, because `is_laser_dispatch_work_order` short-circuits the predicate before the ON_HOLD
-> carve-out is reached. On a non-laser pool, holding one item stops the rest.
+> carve-out is reached — and above the `sequential_operations` flag, which is therefore **inert** on a
+> laser WO (both laser constructors pin it `false`, and `PUT /work-orders/{id}` returns **409** on an
+> attempt to set it `true`). On a non-laser pool, holding one item stops the rest.
 >
 > **Pool WO header progress is the SUM of per-nest progress.** On a `laser_cutting` WO the header
 > `quantity_complete` (sheets complete) is derived as the **sum over its nest operations of
@@ -2805,7 +2911,7 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 | POST | `/shop-floor/operations/{id}/reduce-production` | Correct (walk back) good-count an operator OVER-reported on their **own unapproved** labor (open clock-in first, then their own earlier unapproved sessions), **before** the operation/WO is complete — a miscount fix, **not** scrap (see note + schema below) | Yes |
 | POST | `/shop-floor/operations/{id}/complete` | Complete / report progress on an operation | Yes |
 | PUT | `/shop-floor/operations/{id}/hold` | Put an operation on hold (closes open time entries; body optional — category/severity/note file a structured blocker) | Yes |
-| PUT | `/shop-floor/operations/{id}/resume` | Take an operation **off** hold. **Restores, never promotes**: `IN_PROGRESS` if it ever started, else `PENDING` — lifted to `READY` only where the shared promotion rule would grant it (parent WO released and non-terminal, no incomplete cross-work-center predecessor), so `pending` is a normal success status. **409** if the operation backs a **cancelled (soft-deleted) laser nest** — that is a tombstone, not a hold; **400** if it is not `ON_HOLD`; cross-tenant id → **404**. Deliberately does **not** resolve the blocker that caused the hold (that stays with the blocker resolve/dismiss flow); the response carries `open_blockers` so the caller can warn (BLK-4) — each `{ id, category, severity, status, has_note, free_text_withheld }`, plus the caller-supplied `title` **only** for a non-station caller (withheld from a badge-minted crew-station token, same rule as `held`). Each `PENDING → READY` flip it does cause emits `operation_ready` (`user_id: null`). Audited **`STATUS_CHANGE`** (old→new status; `extra_data.transition = "resume_operation"`). Reachable by a badge-minted kiosk token — see "Held work" below | Yes |
+| PUT | `/shop-floor/operations/{id}/resume` | Take an operation **off** hold. **Restores, never promotes**: `IN_PROGRESS` if it ever started, else `PENDING` — lifted to `READY` only where the shared promotion rule would grant it (parent WO released and non-terminal, no incomplete predecessor — which predecessors count is the work order's `sequential_operations` setting: cross-work-center only on a pool, any earlier-sequence operation on a routing), so `pending` is a normal success status. **409** if the operation backs a **cancelled (soft-deleted) laser nest** — that is a tombstone, not a hold; **400** if it is not `ON_HOLD`; cross-tenant id → **404**. Deliberately does **not** resolve the blocker that caused the hold (that stays with the blocker resolve/dismiss flow); the response carries `open_blockers` so the caller can warn (BLK-4) — each `{ id, category, severity, status, has_note, free_text_withheld }`, plus the caller-supplied `title` **only** for a non-station caller (withheld from a badge-minted crew-station token, same rule as `held`). Each `PENDING → READY` flip it does cause emits `operation_ready` (`user_id: null`). Audited **`STATUS_CHANGE`** (old→new status; `extra_data.transition = "resume_operation"`). Reachable by a badge-minted kiosk token — see "Held work" below | Yes |
 | POST | `/shop-floor/operations/{id}/inspection` | Record operation inspection complete (sets `inspection_complete`) | Admin / Manager / Supervisor / Quality |
 | POST | `/shop-floor/time-entries/{id}/approve` | Approve a TimeEntry (sets `approved` / `approved_by`) | Admin / Manager / Supervisor / Quality |
 | POST | `/shop-floor/time-entries/{id}/unapprove` | Clear approval on a TimeEntry | Admin / Manager / Supervisor / Quality |
@@ -5662,7 +5768,7 @@ every created row):
 > raw inserts); the WO is released on import (first pending op promoted to READY) so it lands in
 > floor queues — and because the imported WO lands RELEASED / IN_PROGRESS, the read-path promotion
 > seam brings the rest of a same-work-center pool to READY on its first reconciling read (see
-> Work Orders → "READY promotion is pooled by work center"). **Paper-complete seeding:** operations with `sequence <= completed_through_seq` are
+> Work Orders → "READY promotion: a sequenced ROUTING or a DISPATCH POOL"). **Paper-complete seeding:** operations with `sequence <= completed_through_seq` are
 > set COMPLETE at target quantity with **no fabricated `actual_start`/`actual_end`, operators, or
 > TimeEntry labor** (that evidence doesn't exist; inventing it would corrupt cycle-time/labor
 > analytics and the AS9100D story). Each paper-completed op emits an `operation_completed`

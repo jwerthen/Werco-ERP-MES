@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.models.ai_learning import AIRecommendation
 from app.models.quality import NonConformanceReport
 from app.models.user import User
-from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation
+from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.models.work_order_blocker import (
     WorkOrderBlocker,
     WorkOrderBlockerCategory,
@@ -16,7 +16,9 @@ from app.models.work_order_blocker import (
 )
 from app.schemas.work_order_blocker import WorkOrderBlockerCreate, WorkOrderBlockerUpdate
 from app.services.audit_service import AuditService
+from app.services.operation_action_gates import operation_blocked_by_predecessors
 from app.services.operational_event_service import OperationalEventService, redact_event_payload
+from app.services.work_order_state_service import TERMINAL_WO_STATUSES
 
 
 def _enum_value(value) -> str:
@@ -354,7 +356,40 @@ class WorkOrderBlockerService:
         )
         if operation and operation.status == OperationStatus.ON_HOLD:
             previous_status = _enum_value(operation.status)
-            operation.status = OperationStatus.IN_PROGRESS if operation.actual_start else OperationStatus.READY
+            parent = operation.work_order
+            if operation.actual_start:
+                # Already started before the hold -- clearing the blocker returns it to
+                # live work regardless of sequencing. Never demote worked labor.
+                operation.status = OperationStatus.IN_PROGRESS
+            elif (
+                parent is None
+                or parent.status == WorkOrderStatus.DRAFT
+                or parent.status in TERMINAL_WO_STATUSES
+                or operation_blocked_by_predecessors(self.db, operation)
+            ):
+                # Floor at PENDING rather than lift to READY. READY is exactly what the
+                # dispatch board and the kiosk queue surface
+                # (``dispatch_service.QUEUE_OPERATION_STATUSES``), so every case here would
+                # otherwise put a card on the floor that all four start verbs refuse -- and
+                # nothing would heal it, because the read-path promotion only ever reads
+                # PENDING rows. Three distinct reasons, all landing in the same place:
+                #
+                # * DRAFT parent: release is the authorization step and the record of who
+                #   authorized production, so clearing a blocker must not put unreleased
+                #   work on the board. DRAFT is NOT in TERMINAL_WO_STATUSES, so the queue
+                #   query does not filter it out -- this branch is the only thing stopping
+                #   it. Same carve-out ``shop_floor.resume_operation`` makes.
+                # * TERMINAL parent: a finished or cancelled job never returns to the board.
+                # * Predecessors incomplete: on a SEQUENCED routing this is any open
+                #   lower-sequence operation; on a POOLED work order it is still an open
+                #   lower-sequence operation at a DIFFERENT work center, or an ON_HOLD one
+                #   at any. So this genuinely tightens pooled work orders too -- that is
+                #   intended (the card it used to produce was refused on arrival), not a
+                #   side effect of 081. Laser nests are unaffected: the shared gate
+                #   short-circuits them to "not blocked".
+                operation.status = OperationStatus.PENDING
+            else:
+                operation.status = OperationStatus.READY
             operation.updated_at = datetime.utcnow()
             return operation, previous_status
         return None, None

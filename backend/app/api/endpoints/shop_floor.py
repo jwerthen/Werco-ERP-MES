@@ -106,6 +106,7 @@ from app.services.material_tie_view import MaterialTieView, tie_views_for_operat
 from app.services.operation_action_gates import (
     CLOCK_IN_ALLOWED_STATUSES,
     MSG_NO_LABOR_RECORDED,
+    MSG_PREDECESSORS_INCOMPLETE,
     MSG_WRONG_WORK_CENTER,
     get_open_time_entry,
     operation_blocked_by_predecessors,
@@ -143,8 +144,6 @@ from app.services.work_order_state_service import (
     finalize_operation_completion,
     find_parent_to_advance,
     floor_operation_quantity_at_evidence,
-    has_incomplete_predecessors,
-    is_laser_dispatch_work_order,
     operation_target_quantity,
     promote_ready_operations,
     reconcile_work_orders_from_completion_evidence,
@@ -3427,17 +3426,15 @@ def start_operation(
             detail=f"cannot start operation: work order is {work_order.status.value}",
         )
 
-    # Laser-nest WOs are dispatch pools -- nests never predecessor-block each
-    # other, even across work centers (see is_laser_dispatch_work_order).
-    if not is_laser_dispatch_work_order(work_order) and has_incomplete_predecessors(
-        db,
-        operation.work_order_id,
-        operation.sequence,
-        operation.id,
-        operation.work_center_id,
-        allow_same_work_center=True,
-    ):
-        raise HTTPException(status_code=400, detail="Previous operations must be completed first")
+    # THE shared predecessor gate -- the same one clock-in, the office verbs and the
+    # scanner resolver call. This used to be an INLINE copy hard-coding
+    # allow_same_work_center=True, which 081 would have left pooling on the operator's
+    # primary start/complete verbs while the board gated them: an operation refused on
+    # the dispatch board but startable by badge scan. It keeps the laser dispatch-pool
+    # exemption (is_laser_dispatch_work_order short-circuits inside it) and now also
+    # reads WorkOrder.sequential_operations, so there is one rule, in one place.
+    if operation_blocked_by_predecessors(db, operation):
+        raise HTTPException(status_code=400, detail=MSG_PREDECESSORS_INCOMPLETE)
 
     # Update operation
     operation.status = OperationStatus.IN_PROGRESS
@@ -4181,17 +4178,15 @@ def complete_operation(
     except WorkOrderStateError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    # Laser-nest WOs are dispatch pools -- nests never predecessor-block each
-    # other, even across work centers (see is_laser_dispatch_work_order).
-    if not is_laser_dispatch_work_order(work_order) and has_incomplete_predecessors(
-        db,
-        operation.work_order_id,
-        operation.sequence,
-        operation.id,
-        operation.work_center_id,
-        allow_same_work_center=True,
-    ):
-        raise HTTPException(status_code=400, detail="Previous operations must be completed first")
+    # THE shared predecessor gate -- the same one clock-in, the office verbs and the
+    # scanner resolver call. This used to be an INLINE copy hard-coding
+    # allow_same_work_center=True, which 081 would have left pooling on the operator's
+    # primary start/complete verbs while the board gated them: an operation refused on
+    # the dispatch board but startable by badge scan. It keeps the laser dispatch-pool
+    # exemption (is_laser_dispatch_work_order short-circuits inside it) and now also
+    # reads WorkOrder.sequential_operations, so there is one rule, in one place.
+    if operation_blocked_by_predecessors(db, operation):
+        raise HTTPException(status_code=400, detail=MSG_PREDECESSORS_INCOMPLETE)
 
     # An operation nobody ever worked cannot be booked COMPLETE from the floor. This verb
     # is ABSOLUTE (it asserts the full target quantity) and auto-starts a READY operation,

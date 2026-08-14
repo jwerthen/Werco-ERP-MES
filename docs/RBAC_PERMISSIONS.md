@@ -107,10 +107,10 @@ tier, that tier stands — this rule is a floor, never a loosening.
 >   could stamp `actual_start` / `started_by`, move the work order to IN_PROGRESS, and write rows onto
 >   the tamper-evident chain from a page they were only meant to read. That gap predates this work; it
 >   was masked while the office path ran a **stricter** predecessor gate than the shop floor and so
->   refused nearly every operation such a user could reach. With same-work-center operations now
->   promoting to READY together (`docs/API.md` → Work Orders → "READY promotion is pooled by work
->   center"), the operations a Viewer can reach are exactly the ones the gate no longer refuses, so
->   the hole became reachable. The gate **matches its office twin** `…/operations/{id}/complete` —
+>   refused nearly every operation such a user could reach. With same-work-center operations promoting
+>   to READY together on a pooled work order (`docs/API.md` → Work Orders → "READY promotion: a sequenced ROUTING or a DISPATCH POOL"), the
+>   operations a Viewer can reach are exactly the ones the gate no longer refuses, so the hole became
+>   reachable. The gate **matches its office twin** `…/operations/{id}/complete` —
 >   being able to start an operation but not complete it, or the reverse, is incoherent — which is why
 >   QUALITY is included here for the same reason it is there.
 > - `PUT /api/v1/shop-floor/operations/{id}/start` — the **operator** verb — is deliberately
@@ -177,7 +177,7 @@ tier, that tier stands — this rule is a floor, never a loosening.
 > see `docs/API.md` → Shop Floor → "Disclosure (`held`)".
 
 > **Release stays the authorization boundary even though a read can now promote operations.** READY
-> promotion runs from a third seam — the reconcile-on-read pass — so a work order released before the
+> promotion runs from a reconcile-on-read seam (one of four) — so a work order released before the
 > pooling rule shipped repairs itself when anyone loads it (`docs/API.md` → Work Orders → "A read
 > heals a stranded work order"). That read is performed under the **reader's** own token, and the
 > **View** row above is ticked for every role, so a Viewer's `GET /work-orders/{id}` can flip
@@ -311,6 +311,20 @@ tier, that tier stands — this rule is a floor, never a loosening.
 > shop-floor write verbs it mirrors (clock-in, production, complete, hold, resume) are themselves
 > operator-facing (any authenticated user), so the resolver bypasses no role check. See
 > `docs/API.md` → Scanner.
+
+> **Operation sequencing (pool vs routing) is an Edit-row capability — no new role, no new permission.**
+> `WorkOrder.sequential_operations` (migration `081`) decides whether a work order's operations are a
+> sequenced routing or a work-center dispatch pool. It is set on **create** (`POST /api/v1/work-orders/`,
+> Work Orders **Create** row) and changed only through `PUT /api/v1/work-orders/{id}`, which already
+> carries `require_role([ADMIN, MANAGER, SUPERVISOR])` — the Work Orders **Edit** row above. Nothing was
+> added to the role matrix and no permission string was minted. Two properties matter for review rather
+> than for gating: turning sequencing **on** is refused (**409**) while any operation the strict rule
+> would block has already been worked, and an accepted flip writes one `AuditService.log_status_change`
+> row per operation it demotes READY → PENDING (`extra_data.transition = "sequential_operations_enabled"`),
+> so the rule change and every status it moved are attributable on the tamper-evident chain. Operators
+> gain and lose nothing: the setting changes which operations reach READY, and the shop-floor start /
+> complete verbs read the same resolved rule, so a hidden card and a refused badge scan agree. See
+> `docs/API.md` → Work Orders → "READY promotion: a sequenced ROUTING or a DISPATCH POOL".
 
 > **Material ties — endpoint mapping.** Tying stock material to a work order (the tie that makes
 > inventory deplete as work completes) is a **planning act**, gated to the Work Orders **Edit** row

@@ -748,7 +748,11 @@ Findings: PERF-1, PERF-2, PERF-3, PERF-4, PERF-5.
 > candidate's own work center), the in-memory replica now mirrors the
 > `allow_same_work_center=True` semantics rather than the strict rule, and the helper promotes **every**
 > passing candidate rather than the first. The order gate is therefore no longer "unchanged in
-> behavior". See `docs/API.md` → Work Orders → "READY promotion is pooled by work center".
+> behavior". **Amended 2026-08-14 (migration `081`):** `allow_same_work_center` is no longer a constant
+> at all — both the in-memory replica and the SQL twin now take it as a parameter, resolved per work
+> order from `WorkOrder.sequential_operations` by `work_order_allows_same_work_center`. The
+> exact-replica discipline is unchanged and now covers that parameter too. See `docs/API.md` →
+> Work Orders → "READY promotion: a sequenced ROUTING or a DISPATCH POOL".
 >
 > **PERF-5 — `commit=False` atomicity fix + cache-invalidate-after-commit.** The four **live**
 > completion handlers — `clock_out` and `complete_operation` in `shop_floor.py`, `complete_work_order`

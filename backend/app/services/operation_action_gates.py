@@ -26,6 +26,7 @@ from app.services.work_order_state_service import (
     TERMINAL_WO_STATUSES,
     has_incomplete_predecessors,
     is_laser_dispatch_work_order,
+    work_order_allows_same_work_center,
 )
 
 # Status lists used by the shop-floor handlers (verbatim).
@@ -135,8 +136,11 @@ def operation_blocked_by_predecessors(db: Session, operation: WorkOrderOperation
     ``operation.work_order`` access is the relationship (already loaded at most
     call sites; otherwise one cheap lazy load).
 
-    ``allow_same_work_center=True`` is what lets operations on ONE machine be worked in
+    ``allow_same_work_center`` is what lets operations on ONE machine be worked in
     any order, and it is now also the READY-promotion rule, so the two cannot drift. It
+    is no longer a constant: ``work_order_allows_same_work_center`` resolves it per work
+    order from ``sequential_operations`` (081), so a sequenced routing blocks a
+    same-work-center predecessor here exactly as promotion refuses to promote past it. It
     carries one carve-out that matters here: an **ON_HOLD** predecessor still blocks, its
     own work center included (see ``has_incomplete_predecessors``). A held operation is a
     quality/material stop, and it would be no stop at all if it took the pool off the
@@ -150,7 +154,10 @@ def operation_blocked_by_predecessors(db: Session, operation: WorkOrderOperation
         operation.sequence,
         operation.id,
         operation.work_center_id,
-        allow_same_work_center=True,
+        # 081: no longer hard-coded True. The SAME resolver promote_ready_operations
+        # uses, off the SAME work order, so a sequenced routing refuses the badge scan
+        # for exactly the operations it also keeps off the dispatch board.
+        allow_same_work_center=work_order_allows_same_work_center(operation.work_order),
     )
 
 

@@ -567,6 +567,17 @@ class WorkOrderBase(UTCModel):
     customer_po: Optional[str] = Field(None, max_length=50, description="Customer PO number")
     notes: Optional[str] = Field(None, max_length=2000)
     special_instructions: Optional[str] = Field(None, max_length=2000)
+    # 081. Defaults TRUE here, which is the CREATE-side default: a new work order is a
+    # sequenced routing unless the caller says otherwise. This deliberately DISAGREES
+    # with the column server_default (false) -- that one exists only to backfill rows
+    # predating the column with the pooled behavior they were released under.
+    sequential_operations: bool = Field(
+        default=True,
+        description="True = a sequenced ROUTING: an operation becomes READY only once every lower-sequence "
+        "operation is COMPLETE, its own work center included. False = a DISPATCH POOL: "
+        "operations sharing a work center are mutually startable and go READY together. "
+        "Ignored on laser_cutting work orders, which are always pools.",
+    )
 
 
 class WorkOrderCreate(WorkOrderBase):
@@ -651,6 +662,17 @@ class WorkOrderUpdate(BaseModel):
     quantity_ordered: Optional[Decimal] = Field(None, gt=Decimal("0"))
     priority: Optional[int] = Field(None, ge=1, le=10)
     status: Optional[WorkOrderStatus] = None
+    # 081. Optional, so an update that never mentions sequencing never changes it.
+    # Flipping False -> True also DEMOTES un-started READY operations the pooled rule
+    # had promoted (see work_orders.update_work_order): the only write in the system
+    # that moves an operation backwards, and it is audited per operation.
+    sequential_operations: Optional[bool] = Field(
+        default=None,
+        description="True = a sequenced ROUTING: an operation becomes READY only once every lower-sequence "
+        "operation is COMPLETE, its own work center included. False = a DISPATCH POOL: "
+        "operations sharing a work center are mutually startable and go READY together. "
+        "Ignored on laser_cutting work orders, which are always pools.",
+    )
     due_date: Optional[date] = None
     customer_name: Optional[str] = Field(None, max_length=255)
     customer_po: Optional[str] = Field(None, max_length=50)
@@ -892,6 +914,10 @@ class WorkOrderSummary(UTCModel):
     part_id: Optional[int] = None
     parent_work_order_id: Optional[int] = None
     work_order_type: str = "production"
+    # 081. Defaults False on this list shape (unlike WorkOrderBase, which is also the
+    # CREATE contract): a summary is READ from an existing row, so the safe reading of a
+    # missing value is the pooled behavior every pre-081 row was released under.
+    sequential_operations: bool = False
     part_number: Optional[str] = None
     part_name: Optional[str] = None
     part_type: Optional[str] = None

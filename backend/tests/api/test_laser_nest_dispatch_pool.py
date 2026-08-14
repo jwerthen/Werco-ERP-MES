@@ -209,10 +209,20 @@ def make_routed_wo(
     work_centers: list[WorkCenter],
     statuses: list[OperationStatus],
     company_id: int = COMPANY_A,
+    sequential_operations: bool = False,
 ) -> tuple[WorkOrder, list[WorkOrderOperation]]:
     """A NON-laser (production) WO with one op per status, sequences 10/20/30...
 
     ``work_centers[i]`` hosts op ``i`` (repeat the same WC for a same-WC route).
+
+    ``sequential_operations`` defaults to **False (POOLED)** here, deliberately against
+    the model's create-default of True (081). This suite's subject is the DISPATCH-POOL
+    rule -- what a laser nest package gets by type, and what a same-work-center batch WO
+    gets by this flag -- so a pooled work order is the fixture the assertions describe,
+    and it is the value every pre-081 row backfilled to. The sequenced-routing mode is
+    covered in ``test_sequential_operations.py``. Cross-work-center routes below behave
+    identically under either value, since the same-work-center waiver never applies to
+    them.
     """
     n = _next()
     part = Part(
@@ -228,6 +238,7 @@ def make_routed_wo(
     wo = WorkOrder(
         work_order_number=f"WO-DP-{n}",
         part_id=part.id,
+        sequential_operations=sequential_operations,
         quantity_ordered=5,
         status=WorkOrderStatus.RELEASED,
         priority=3,

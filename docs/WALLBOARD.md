@@ -241,7 +241,12 @@ statuses are off the board as everywhere else.
     (a final QC, a PACK step) leaves that op untargeted, which trips guard 3 and reverts the whole
     card to the header — so **don't add an untargeted operation to a pool WO** (nothing in the
     product explains the reversion). Both disappear the day work orders carry a **pool type**: one
-    positive marker would replace all four guards. Until then the rule refuses rather than guesses,
+    positive marker would replace all four guards. **`WorkOrder.sequential_operations` (migration
+    `081`) is not that marker** — it is a per-WO routing/pool discriminator for READY *promotion*,
+    and every work order that existed when `081` ran backfilled to `false` (= pooled) whether it is a
+    batch of per-item lines or a conventional routing. Reading it as "this WO's operations are line
+    items" would sum the restated-order-quantity impostor on the entire pre-`081` backlog. The four
+    guards stay; a real pool type is still unbuilt. Until then the rule refuses rather than guesses,
     in the direction that never invents a bigger order than the header. It also assumes **one
     operation per line item** — two operations carrying the same item's count sum it twice, exactly
     as the laser pool rollup does.

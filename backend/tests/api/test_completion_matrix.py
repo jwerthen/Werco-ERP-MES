@@ -140,13 +140,27 @@ def make_work_center(db: Session) -> WorkCenter:
     return wc
 
 
-def make_wo(db: Session, *, status_: WorkOrderStatus, quantity_ordered: float = 10) -> tuple[WorkOrder, Part]:
+def make_wo(
+    db: Session,
+    *,
+    status_: WorkOrderStatus,
+    quantity_ordered: float = 10,
+    sequential_operations: bool = True,
+) -> tuple[WorkOrder, Part]:
+    """A completion-matrix work order.
+
+    ``sequential_operations`` mirrors the model's create-default (True = a sequenced
+    ROUTING, 081). The two tests below whose subject is the same-work-center DISPATCH
+    POOL pass ``False``; everything else here is about completion arithmetic and is
+    unaffected by the promotion mode.
+    """
     part = make_part(db)
     n = _next()
     wo = WorkOrder(
         work_order_number=f"CM-WO-{n:05d}",
         customer_name="Acme",
         part_id=part.id,
+        sequential_operations=sequential_operations,
         quantity_ordered=quantity_ordered,
         status=status_,
         priority=5,
@@ -487,7 +501,10 @@ def test_wo_quantity_does_not_regress_when_earlier_op_completed_after_later(clie
     op2 first lifts WO.quantity_complete; completing op1 afterward must not pull it
     back down below what op2 already rolled up."""
     admin = make_user(db_session)
-    wo, _ = make_wo(db_session, status_=WorkOrderStatus.IN_PROGRESS, quantity_ordered=10)
+    # POOLED (081): "two parallel ops in the SAME work center, so same-WC out-of-sequence
+    # completion is permitted" IS the dispatch-pool rule. A sequenced routing would --
+    # correctly -- refuse the out-of-order completion this test performs.
+    wo, _ = make_wo(db_session, status_=WorkOrderStatus.IN_PROGRESS, quantity_ordered=10, sequential_operations=False)
     wc = make_work_center(db_session)
     op1 = make_op(db_session, wo, wc, sequence=10, status_=OperationStatus.IN_PROGRESS, quantity_complete=3)
     op2 = make_op(db_session, wo, wc, sequence=20, status_=OperationStatus.IN_PROGRESS, quantity_complete=3)
@@ -605,7 +622,9 @@ def test_same_work_center_completion_releases_lower_sequence_pending(client: Tes
     always have clocked into seq30 while seq10 sat open -- it was merely invisible,
     since the dispatch board and kiosk surface READY work only."""
     admin = make_user(db_session)
-    wo, _ = make_wo(db_session, status_=WorkOrderStatus.IN_PROGRESS, quantity_ordered=5)
+    # POOLED (081): RUP-4's claim is the same-work-center waiver -- seq30 promoting while
+    # seq10 is still open only holds on a dispatch pool, which is what a batch WO is.
+    wo, _ = make_wo(db_session, status_=WorkOrderStatus.IN_PROGRESS, quantity_ordered=5, sequential_operations=False)
     wc = make_work_center(db_session)
     op10 = make_op(db_session, wo, wc, sequence=10, status_=OperationStatus.PENDING)
     op20 = make_op(db_session, wo, wc, sequence=20, status_=OperationStatus.IN_PROGRESS)

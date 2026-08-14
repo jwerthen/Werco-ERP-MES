@@ -37,6 +37,7 @@ import {
   InputDialog,
   LoadingButton,
   Modal,
+  Spinner,
 } from '../components/ui';
 import { useUnsavedChanges } from '../hooks/useUnsavedChanges';
 import { formatCentralDate, formatCentralDateTime, getCentralDateStamp } from '../utils/centralTime';
@@ -70,6 +71,7 @@ import {
   UserGroupIcon,
   WrenchScrewdriverIcon,
   DocumentDuplicateIcon,
+  InformationCircleIcon,
 } from '@heroicons/react/24/outline';
 
 const CURRENT_WORK_ORDER_STATUSES = ['released', 'in_progress', 'on_hold'];
@@ -343,12 +345,23 @@ export default function WorkOrderDetail() {
   // canCorrectCount so the gate reads at its call site: hiding the control and
   // refusing the call must agree, or a supervisor sees a button that 403s.
   const canDuplicateWorkOrder = canCorrectCount;
+  // Flipping the operation-sequencing mode writes through the same
+  // PUT /work-orders/{id} the due-date and notes editors use, whose backend gate
+  // is require_role([ADMIN, MANAGER, SUPERVISOR]) — exactly what work_orders:edit
+  // maps to. Named separately so the gate reads at its call site: hiding the
+  // control and refusing the call have to agree, or a supervisor sees a switch
+  // that 403s.
+  const canEditSequencing = canCorrectCount;
   const [workOrder, setWorkOrder] = useState<WorkOrder | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [deleting, setDeleting] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [duplicateOpen, setDuplicateOpen] = useState(false);
+  // In-flight flag for the "Sequential operations" switch. It ONLY drives the
+  // pending chrome — the switch's checked state is read from the server value,
+  // never from a local draft (see handleSequencingToggle).
+  const [savingSequencing, setSavingSequencing] = useState(false);
   const [deleteNestTarget, setDeleteNestTarget] = useState<LaserNestInfo | null>(null);
   const [completing, setCompleting] = useState(false);
   const [completingOpId, setCompletingOpId] = useState<number | null>(null);
@@ -1024,6 +1037,98 @@ export default function WorkOrderDetail() {
       return;
     }
     await performDueDateSave();
+  };
+
+  // --- Operation sequencing mode -------------------------------------------
+  // `sequential_operations` decides which rule promotes an operation to READY:
+  // walk the routing in order (an operation unlocks only once every
+  // lower-sequence operation is COMPLETE, its own work center included), or pool
+  // by work center (operations sharing a machine go READY together). Pooling is
+  // right for a laser package and for the 18-item batch WOs; it is wrong for a
+  // routing like the 4-op weld assembly whose first three operations sit on one
+  // weld cell and all unlocked at once.
+  //
+  // Absent reads as OFF — pooled is what a work order served without the column
+  // actually behaves as, and what migration 081's server_default gives every row
+  // that predates it. Do not flip that fallback to `?? true`.
+  const sequentialOperations = workOrder?.sequential_operations ?? false;
+  // The flag is IGNORED on laser_cutting work orders: nest dispatch
+  // (`is_laser_dispatch_work_order`) short-circuits above it at every backend
+  // seam and is strictly fuller — it drops predecessor gating entirely, across
+  // work centers. So the switch is not rendered there at all; a control that
+  // changes a column the server never reads is worse than no control.
+  const sequencingApplies = workOrder?.work_order_type !== 'laser_cutting';
+
+  // The lowest-sequence operation that is NOT complete, or `null` when nothing
+  // on this work order blocks anything. It is the client-side mirror of the
+  // server's out-of-sequence guard: both office operation verbs
+  // (`POST /work-orders/operations/{id}/start` and `.../complete`) run the shared
+  // `operation_action_gates.operation_blocked_by_predecessors` and refuse 400
+  // "Previous operations must be completed first" while a LOWER-sequence
+  // operation of the same work order is not COMPLETE. "Some lower-sequence
+  // operation is incomplete" is exactly "this operation sits above the lowest
+  // incomplete one", so one scan answers it for every row.
+  //
+  // Without this the page offers Complete on all three weld-cell operations of a
+  // sequenced routing — the shape this feature exists for — and the server 400s
+  // whichever one the user picks, AFTER they have filled in the quantity/scrap
+  // modal. Pooled, that same call succeeded, so sequencing turns a rare mismatch
+  // into the common one.
+  //
+  // Three boundaries are the server's, not this file's taste:
+  //
+  //  * SEQUENCED ONLY. A pooled work order is deliberately left ungated, exactly
+  //    as it renders today. Disabling a control the server would have accepted is
+  //    the worse failure of the two — it hides a legal action with no override —
+  //    and the pooled rule additionally waives same-work-center predecessors
+  //    unless one is ON_HOLD, so a half-mirror of it would refuse work the floor
+  //    is allowed to start.
+  //  * NO WORK-CENTER LOGIC. Under sequencing `work_order_allows_same_work_center`
+  //    resolves to False, so a predecessor blocks from EVERY work center, its own
+  //    included. A same-cell waiver here would re-open the reported defect.
+  //  * LASER IS NEVER BLOCKED. `is_laser_dispatch_work_order` short-circuits above
+  //    the flag at every backend seam and drops predecessor gating entirely —
+  //    which is what `sequencingApplies` already encodes, so a nest WO carrying a
+  //    stored `sequential_operations = true` still gates nothing.
+  //
+  // Advisory only, like every other capability on this page: the server is still
+  // the enforcement, and this never enables a control the server would refuse.
+  const lowestIncompleteOperation = useMemo(() => {
+    if (!workOrder || !sequencingApplies || !sequentialOperations) return null;
+    return workOrder.operations.reduce<WorkOrderOperation | null>(
+      (lowest, candidate) =>
+        candidate.status === 'complete' || (lowest !== null && lowest.sequence <= candidate.sequence)
+          ? lowest
+          : candidate,
+      null
+    );
+  }, [workOrder, sequencingApplies, sequentialOperations]);
+
+  // NON-OPTIMISTIC, and the refetch inside `saveWorkOrderPatch` is the reason
+  // rather than a nicety: turning sequencing ON demotes un-started READY
+  // operations back to PENDING server-side, so the Status column sitting beside
+  // this switch is stale the instant the write lands. Patching the flag locally
+  // would leave three weld operations reading READY under a rule that just
+  // unlocked one of them. The switch renders `workOrder.sequential_operations`
+  // and nothing else, so a refused write (409 stale version, 403 role) leaves it
+  // showing the value the server still holds.
+  const handleSequencingToggle = async () => {
+    if (!workOrder || savingSequencing || !sequencingApplies || !canEditSequencing) return;
+    const next = !sequentialOperations;
+    setSavingSequencing(true);
+    try {
+      await saveWorkOrderPatch(
+        { sequential_operations: next },
+        {
+          successMessage: next
+            ? 'Operations now run in sequence — each one unlocks when the previous is complete'
+            : 'Operations at the same work center can now run in any order',
+          failureMessage: 'Failed to change operation sequencing',
+        }
+      );
+    } finally {
+      setSavingSequencing(false);
+    }
   };
 
   // --- Inline notes / special-instructions edit ----------------------------
@@ -2338,7 +2443,68 @@ export default function WorkOrderDetail() {
 
       {/* Operations */}
       <div className="card card-compact">
-        <h2 className="card-title mb-3">Operations / Routing</h2>
+        <div className="mb-3 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <h2 className="card-title">Operations / Routing</h2>
+          {/* Operation sequencing mode. Rendered beside the routing it governs,
+              because the Status column below is what it changes. */}
+          {!sequencingApplies ? (
+            <p className="flex items-start gap-2 rounded-sm border border-fd-line bg-fd-sunken px-3 py-2 text-xs text-fd-mute lg:max-w-md">
+              <InformationCircleIcon className="h-4 w-4 flex-shrink-0" aria-hidden="true" />
+              <span>
+                Nest work orders are always pooled — nests can be run in any order, so
+                operation sequencing does not apply here.
+              </span>
+            </p>
+          ) : (
+            <div className="flex items-start gap-3 rounded-sm border border-fd-line bg-fd-sunken px-3 py-2 lg:max-w-md">
+              {canEditSequencing ? (
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={sequentialOperations}
+                  aria-label="Sequential operations"
+                  aria-describedby="wo-sequencing-help"
+                  disabled={savingSequencing}
+                  onClick={handleSequencingToggle}
+                  className={`relative mt-0.5 h-[22px] w-[40px] shrink-0 rounded-full border transition-colors duration-150 ease-out disabled:cursor-not-allowed disabled:opacity-50 ${
+                    sequentialOperations
+                      ? 'border-fd-blue bg-fd-blue'
+                      : 'border-fd-line-bright bg-slate-800'
+                  }`}
+                >
+                  <span
+                    aria-hidden="true"
+                    className={`absolute top-[2px] h-4 w-4 rounded-full bg-white transition-all duration-150 ease-out ${
+                      sequentialOperations ? 'right-[2px]' : 'left-[2px]'
+                    }`}
+                  />
+                </button>
+              ) : (
+                // Read-only viewers still need to know WHICH rule the floor is
+                // working under to read the Status column, so the mode is shown
+                // even where the control is not offered.
+                <span
+                  className={`mt-0.5 inline-flex shrink-0 rounded-sm px-2 py-0.5 text-[11px] font-bold uppercase tracking-wide ${
+                    sequentialOperations ? 'bg-fd-blue/15 text-fd-blue' : 'bg-slate-800 text-slate-300'
+                  }`}
+                >
+                  {sequentialOperations ? 'On' : 'Off'}
+                </span>
+              )}
+              <div className="min-w-0">
+                <p className="text-xs font-semibold uppercase tracking-wide text-fd-ink">
+                  Sequential operations
+                </p>
+                <p id="wo-sequencing-help" className="mt-0.5 text-xs text-fd-mute">
+                  {sequentialOperations
+                    ? 'Each operation unlocks when the previous one is complete'
+                    : 'Operations at the same work center can run in any order'}
+                </p>
+              </div>
+              {savingSequencing && <Spinner size="sm" className="mt-0.5 shrink-0" />}
+            </div>
+          )}
+        </div>
 
         {workOrder.operations.length === 0 ? (
           <EmptyState
@@ -2376,6 +2542,17 @@ export default function WorkOrderDetail() {
                     const isNewGroup = op.operation_group && op.operation_group !== lastGroup;
                     if (op.operation_group) lastGroup = op.operation_group;
                     const operationTarget = operationRunTarget(op, workOrder.quantity_ordered);
+                    // Non-null only while the SERVER would refuse this operation's
+                    // office verbs — see `lowestIncompleteOperation`. Doubles as the
+                    // hover explanation, so the disabled control says why it is
+                    // disabled instead of looking broken. Strict `>` mirrors the
+                    // gate's `sequence < candidate.sequence`: operations sharing a
+                    // sequence number do not block each other, and the blocking
+                    // operation never blocks itself.
+                    const sequenceBlockReason =
+                      lowestIncompleteOperation && op.sequence > lowestIncompleteOperation.sequence
+                        ? `Previous operations must be completed first — this work order runs its operations in sequence, and operation ${lowestIncompleteOperation.sequence} (${lowestIncompleteOperation.name}) is not complete.`
+                        : null;
                     
                     const groupColors: Record<string, string> = {
                       'LASER': 'bg-fd-red/15 text-fd-red',
@@ -2527,9 +2704,9 @@ export default function WorkOrderDetail() {
                             {canCompleteOperation && op.status !== 'complete' && workOrder.status !== 'draft' && (
                               <button
                                 onClick={() => handleCompleteOperation(op)}
-                                disabled={completingOpId === op.id}
+                                disabled={completingOpId === op.id || sequenceBlockReason !== null}
                                 className="text-green-600 hover:text-green-300 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-                                title="Complete Operation"
+                                title={sequenceBlockReason ?? 'Complete Operation'}
                               >
                                 {completingOpId === op.id ? (
                                   <>

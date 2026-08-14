@@ -647,6 +647,9 @@ def _copy_header(
     ``scheduled_start``, ``scheduled_end``, ``version``, ``parent_work_order_id``,
     ``must_ship_by`` — see the module docstring for the three that are judgement calls.
 
+    ``sequential_operations`` carries (081): it is an instruction about how the route
+    unlocks, not something the source job earned by running.
+
     ``part_id`` and ``work_order_type`` are copied as a PAIR, which is what keeps
     ``ck_work_orders_part_required_unless_laser`` satisfied by construction: a
     part-less source can only be a ``laser_cutting`` work order, and the duplicate
@@ -668,6 +671,12 @@ def _copy_header(
         sales_order_id=source.sales_order_id,
         notes=source.notes,
         special_instructions=source.special_instructions,
+        # How this job's operations unlock is PLAN, not record: re-running the same weld
+        # assembly must re-run it in the same order. Copied explicitly rather than left
+        # to the column default, which is the OPPOSITE value for a pooled source -- a
+        # duplicated batch/pool work order would otherwise come back as a sequenced
+        # routing and show the floor one item of eighteen.
+        sequential_operations=bool(source.sequential_operations),
         # Estimates are part of the PLAN (what this job is expected to take), so they
         # carry; the actuals beside them are the record and do not. Both are stated at
         # the SOURCE's quantity, so ``_scale_quantity_derived_plan`` rescales them once
