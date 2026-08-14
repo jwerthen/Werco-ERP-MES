@@ -57,6 +57,7 @@ import { Button, DataTable, FormField, LoadingButton, Modal, useToast } from '..
 import type { DataTableColumn } from '../ui';
 import { formatCentralDateTime } from '../../utils/centralTime';
 import { formatTieQty, overConsumedQty } from '../../utils/materialTie';
+import { formatOperationLabel, hasOperationNumber } from '../../utils/operationLabel';
 import type {
   MaterialAllocation,
   MaterialAllocationUpdatePayload,
@@ -204,7 +205,12 @@ function tieErrorDetail(err: unknown, fallback: string): string {
  */
 function scopeLabel(tie: MaterialAllocation): string {
   if (tie.work_order_operation_id != null) {
-    return tie.operation_number ? `Op ${tie.operation_number}` : `Operation #${tie.work_order_operation_id}`;
+    // The `Operation #{id}` fallback is kept, NOT unified on the kiosk em-dash:
+    // an untitled tie still needs to name which operation it is scoped to, and
+    // the row's id is the only handle left when the number is blank.
+    return hasOperationNumber(tie.operation_number)
+      ? formatOperationLabel(tie.operation_number)
+      : `Operation #${tie.work_order_operation_id}`;
   }
   if (tie.detached_from_operation_id != null) {
     return `was Op ${tie.detached_from_operation_id} — superseded by re-import`;

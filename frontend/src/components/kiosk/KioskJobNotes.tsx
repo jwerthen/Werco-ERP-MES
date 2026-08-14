@@ -62,9 +62,13 @@ export function kioskJobNoteEntries(job: KioskJobInstructions | null | undefined
   for (const field of NOTE_FIELDS) {
     const raw = job[field.key];
     if (typeof raw !== 'string') continue;
-    const value = raw.trim();
-    if (!value) continue;
-    entries.push({ key: field.key, label: field.label, value });
+    // Trim is the BLANK TEST ONLY -- the rendered value stays the original string.
+    // The server deliberately returns the stored text unstripped (_guidance_text has
+    // a byte-identity test) because leading indentation is layout in a numbered work
+    // instruction; trimming here would strip the FIRST line's indent and leave every
+    // other line's intact, so "1." lands flush-left and "2." stays indented.
+    if (!raw.trim()) continue;
+    entries.push({ key: field.key, label: field.label, value: raw });
   }
   return entries;
 }

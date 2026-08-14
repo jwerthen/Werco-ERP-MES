@@ -194,7 +194,14 @@ describe('WorkOrderDetail per-operation Material action — role gate', () => {
     expect(dialog).toHaveTextContent(/Tie material to this operation/i);
     // The dialog names the operation it is scoped to, because operation scope is
     // the whole point of this door.
-    expect(dialog).toHaveTextContent(/Op OP10/);
+    //
+    // The fixture stores `operation_number: 'OP10'` (free text the office types).
+    // This used to assert /Op OP10/ — the DOUBLED prefix, because the dialog title
+    // hard-coded its own `Op ` around the stored value. It now renders through the
+    // shared `utils/operationLabel` helper, so the one operation reads `Op 10` here
+    // exactly as it does on the kiosk, the shop floor and the dispatch board.
+    expect(dialog).toHaveTextContent(/Op 10/);
+    expect(dialog.textContent).not.toMatch(/Op\s+OP/i);
   });
 });
 

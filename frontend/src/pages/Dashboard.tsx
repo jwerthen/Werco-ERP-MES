@@ -18,6 +18,7 @@ import {
   getCentralTodayDate,
   isDateBeforeTodayInCentral,
 } from '../utils/centralTime';
+import { formatOperationLabel, hasOperationNumber } from '../utils/operationLabel';
 import {
   ClipboardDocumentListIcon,
   ExclamationTriangleIcon,
@@ -951,7 +952,9 @@ function ActiveAssignmentRow({ assignment, nowMs }: { assignment: ActiveAssignme
         </Link>
         <span className="min-w-0 flex-1 truncate text-[11px] text-slate-400">
           {assignment.work_order.part_number}
-          {assignment.operation.operation_number ? ` · Op ${assignment.operation.operation_number}` : ''}
+          {hasOperationNumber(assignment.operation.operation_number)
+            ? ` · ${formatOperationLabel(assignment.operation.operation_number)}`
+            : ''}
         </span>
         <div className="h-1 w-16 flex-shrink-0 rounded-sm bg-slate-800">
           <div className="h-1 rounded-sm bg-werco-500" style={{ width: `${progress}%` }} />

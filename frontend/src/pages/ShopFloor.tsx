@@ -26,6 +26,7 @@ import {
 } from '@heroicons/react/24/solid';
 import { QueueListIcon, DocumentTextIcon, ArrowTopRightOnSquareIcon } from '@heroicons/react/24/outline';
 import { getKioskDept, getKioskWorkCenterCode, getKioskWorkCenterId, isKioskMode } from '../utils/kiosk';
+import { formatOperationLabel } from '../utils/operationLabel';
 import { Modal } from '../components/ui/Modal';
 
 interface WorkOrderDetails {
@@ -774,7 +775,7 @@ export default function ShopFloor() {
                         </td>
                         <td aria-label="Operation">
                           <div>
-                            <p className="font-medium text-surface-900">Op {item.operation_number}</p>
+                            <p className="font-medium text-surface-900">{formatOperationLabel(item.operation_number)}</p>
                             <p className="text-sm text-surface-500">{item.operation_name}</p>
                           </div>
                         </td>

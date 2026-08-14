@@ -164,8 +164,15 @@ describe('KioskJobNotes', () => {
     ]);
     expect(kioskJobNoteEntries({})).toEqual([]);
     expect(kioskJobNoteEntries(null)).toEqual([]);
+    // The value is the STORED string, verbatim -- the trim is only the blank test.
+    // The server preserves leading whitespace on purpose (indentation is layout in a
+    // numbered work instruction), so trimming it back off here would undo that and
+    // de-indent only the first line of a multi-line note.
     expect(kioskJobNoteEntries({ work_order_notes: '  Unit #4  ' })).toEqual([
-      { key: 'work_order_notes', label: 'Job Notes', value: 'Unit #4' },
+      { key: 'work_order_notes', label: 'Job Notes', value: '  Unit #4  ' },
+    ]);
+    expect(kioskJobNoteEntries({ work_order_notes: '  1. Tack\n  2. Weld\n' })).toEqual([
+      { key: 'work_order_notes', label: 'Job Notes', value: '  1. Tack\n  2. Weld\n' },
     ]);
   });
 });

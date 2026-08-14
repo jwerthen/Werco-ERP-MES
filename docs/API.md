@@ -2900,7 +2900,7 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
 | GET | `/shop-floor/dashboard` | Shop floor dashboard | Yes |
-| GET | `/shop-floor/my-active-job` | Get current user's active job | Yes |
+| GET | `/shop-floor/my-active-job` | Get current user's active job, incl. the job's written guidance (WO notes/special instructions + the operation's description/setup/run text) | Yes |
 | GET | `/shop-floor/operations` | List not-complete/cancelled operations for the desktop shop-floor pages (paginated, max 200/page; filters `work_center_id` / `status` / `search` / `due_today`) — rows in the **canonical dispatch order**, each carrying the advisory `run_order` display rank (see "Desktop parity" under the Dispatch run order note below) | Yes |
 | GET | `/shop-floor/operations/{id}/documents` | Kiosk doc-viewer discovery: the operation's controlled part drawing, live nest reference PDF, nest material, and critical SPC characteristics (see note below) | Yes |
 | GET | `/shop-floor/documents/{id}/inline` | Serve a kiosk-viewable document PDF inline — DRAWING-type or live-nest-referenced only, tenant-scoped, uniform **404** on any miss (see note below) | Yes |
@@ -2915,7 +2915,7 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 | POST | `/shop-floor/operations/{id}/inspection` | Record operation inspection complete (sets `inspection_complete`) | Admin / Manager / Supervisor / Quality |
 | POST | `/shop-floor/time-entries/{id}/approve` | Approve a TimeEntry (sets `approved` / `approved_by`) | Admin / Manager / Supervisor / Quality |
 | POST | `/shop-floor/time-entries/{id}/unapprove` | Clear approval on a TimeEntry | Admin / Manager / Supervisor / Quality |
-| GET | `/shop-floor/work-center-queue/{id}` | Get work center queue, each row carrying the live crew `roster` and the manager-set `run_order`, **plus a separate `held` list** of the work center's `ON_HOLD` operations (`held_truncated` when capped) (see notes below) | User **or** kiosk station token |
+| GET | `/shop-floor/work-center-queue/{id}` | Get work center queue, each row carrying the live crew `roster` and the manager-set `run_order`, **plus a separate `held` list** of the work center's `ON_HOLD` operations (`held_truncated` when capped). Every row also carries the job's written guidance — see "Written job guidance on operator reads" for the five keys and the station-disclosure decision (see notes below) | User **or** kiosk station token |
 | GET | `/shop-floor/dispatch-board` | Manager dispatch board — every **active** work center with its live queue, including work centers with an **empty** queue, plus any **deactivated** work center still holding queued work, flagged `is_active: false` (see note below) | Admin / Manager / Supervisor |
 | PUT | `/shop-floor/work-centers/{id}/run-order` | Rewrite one work center's manual run order (dense 1..N; omitted operations become unranked) → that work center's refreshed column (see note below) | Admin / Manager / Supervisor |
 | GET | `/shop-floor/wallboard` | Read-only TV wallboard snapshot (`?dept=` narrows to one work-center type, case-insensitive — scopes the work centers, the `jobs` grid (by each WO's **current** operation's work center), **and** the late/blocked lists + totals; ship/today/quality stay plant-wide) | User **or** display token |
@@ -3323,15 +3323,26 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > | `held_at`, `held_by_user_id`, `held_by_name` | sent | sent |
 > | `has_note` (boolean), `free_text_withheld` (boolean) | sent | sent |
 > | `title`, `note` (**free text**) | **keys absent** | sent |
+> | the five **job-guidance** fields — `work_order_notes`, `work_order_special_instructions`, `operation_description`, `operation_setup_instructions`, `operation_run_instructions` (**free text**; on the row itself, not inside `hold`) | **sent** | sent |
 >
-> That split is the rule this system already wrote for unattended shop screens, applied to the same
-> class of screen: `wallboard_service`'s module docstring says *no customer names, no ship-to
-> addresses, no dollar figures, **no NCR titles/descriptions***, and the wallboard's own blocked-work
-> rail holds `title` and `note` in hand and emits only `wo_number` / `category` / `age_hours`. A
-> `held` row that carried the note would disclose to that audience exactly what the wallboard
-> withholds. `title` travels with `note` because it is equally unconstrained — `POST
-> /work-order-blockers` takes a caller-supplied `title`, and `blocker_default_title` is only the
-> fallback for a kiosk-placed hold.
+> **The last row is a deliberate exception, decided by the owner on 2026-08-14** — see "Written job
+> guidance on operator reads" below for what it discloses, why it was allowed, and what it costs. It
+> is scoped to those five keys and does **not** license relaxing the row above it.
+>
+> That split follows the rule this system already wrote for unattended shop screens, applied to the
+> same class of screen: `wallboard_service`'s module docstring says the **wallboard's own payload**
+> carries *no customer names, no ship-to addresses, no dollar figures, **no NCR
+> titles/descriptions***, and the wallboard's blocked-work rail holds `title` and `note` in hand and
+> emits only `wo_number` / `category` / `age_hours`. A `held` row that carried the note would
+> disclose to that audience exactly what the wallboard withholds. `title` travels with `note`
+> because it is equally unconstrained — `POST /work-order-blockers` takes a caller-supplied `title`,
+> and `blocker_default_title` is only the fallback for a kiosk-placed hold.
+>
+> **Read that as the wallboard's rule for the wallboard's payload, not as a repo-wide guarantee
+> about what a station token can read.** Since 2026-08-14 this endpoint also carries five
+> office-authored free-text guidance fields to a station principal (the table row above), and those
+> are unconstrained — a work-order note that happens to contain a customer name or a dollar figure
+> reaches the station. The wallboard payload itself is unchanged and still carries none of it.
 >
 > The keys are **absent, not blanked**: a render-side gate would still put the text on the tablet,
 > where a devtools console or a proxy reads it. `has_note` is a boolean so the card can say *"a
@@ -3351,6 +3362,77 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > keeps the full block. The operator **name** (first initial form, e.g. "Jon W.", as `roster` on this
 > payload already carries) and the material-tie fields stay a genuine, if small, widening of the
 > station's disclosure surface, recorded in the same sense as the material-tie note below.
+
+> **Written job guidance on operator reads (`/work-center-queue/{id}`, `/my-active-job`),
+> 2026-08-14.** Both payloads now carry the job's office-authored written text, so an operator can
+> read the planning notes at the machine. Five keys, built by one helper (`_job_guidance_fields` in
+> `shop_floor.py`) so the two endpoints cannot drift:
+>
+> | key | source column |
+> |---|---|
+> | `work_order_notes` | `work_orders.notes` |
+> | `work_order_special_instructions` | `work_orders.special_instructions` |
+> | `operation_description` | `work_order_operations.description` |
+> | `operation_setup_instructions` | `work_order_operations.setup_instructions` |
+> | `operation_run_instructions` | `work_order_operations.run_instructions` |
+>
+> Each value is the stored string **verbatim**, or `null`. Whitespace-only normalizes to `null`, so
+> no client has to decide whether `""` counts as a note; anything else is returned **unmodified —
+> not stripped**, because leading indentation is layout in a numbered work instruction (a
+> byte-identity test pins it). Nothing here escapes or rewrites the text — this system has no
+> ingest-time sanitizer on purpose (CLAUDE.md: *store request bytes verbatim, escape at the sink*) —
+> so a consumer must render these as **text, never HTML**.
+>
+> All five keys are always present. They ride every `queue` row, every `held` row (`_held_job_row`
+> builds on the same job-card helper), and every job dict on `/my-active-job`. Purely additive and
+> free of extra queries: the work order is already eager-loaded on both reads and all five are plain
+> columns. A job with nothing written returns five `null`s and reads exactly as it did before.
+>
+> **Disclosure — a recorded exception, not an oversight (owner decision, 2026-08-14).** These five
+> fields are free text and they **are** sent to a station principal: `GET
+> /shop-floor/work-center-queue/{id}` accepts a crew station's shared-PIN token, so the guidance
+> renders on an unattended, PIN-unlocked tablet with no operator identity and no idle logout. That
+> is the point of the feature, not something that slipped through. This is office-authored
+> **planning** text whose entire purpose is to reach the person doing the work — the reported bug
+> was a "Unit #" typed into a work order's Notes that the welder at the crew station could not see —
+> and the crew station is precisely the screen that could not see it. Sending the guidance only to a
+> badged operator session would have left that bug unfixed. (`/my-active-job` is a different case:
+> it takes a user session — a desktop login, or the badge-minted `scope="kiosk"` operator token the
+> crew station holds for five minutes — so that payload always has an identified caller.)
+>
+> **It does not reopen the blocker rule.** `_hold_blocker_payload` still withholds a hold blocker's
+> `note` and `title` from that same station principal — keys absent, not blanked — and that is
+> deliberately untouched. The two are different categories of text with different authors and
+> different audiences: a blocker note is operator-authored **mid-incident**, about a problem, and
+> reads like "NCR-1042 cracked welds, ACME rejected the lot" — customer names and quality findings,
+> exactly the class the wallboard withholds; the five guidance fields are written in advance, by the
+> office, specifically to be read at the machine.
+> `tests/api/test_kiosk_operation_guidance.py::TestStationDisclosure::test_station_gets_the_guidance_AND_still_loses_the_blocker_free_text`
+> asserts **both halves on the same response**. Do not extend this exception to the blocker's free
+> text, and do not cite it as grounds for relaxing that withholding.
+>
+> **The cost, stated plainly.** These fields are unconstrained free text — no vocabulary, no length
+> discipline beyond the schema max, no server-side redaction. Work-order Notes is exactly where
+> someone writes *"per ACME PO 4501, $12,500"*, and that would now be readable by anyone standing at
+> the station. **The mitigation today is convention about what goes in Notes, not enforcement.** The
+> alternative — a per-station display flag on the wallboard's `show_customer_names` pattern
+> (server-enforced at the payload builder, off by default) — was considered and **deliberately
+> deferred**: it buys nothing until a shop actually needs a station that shows less, and a flag
+> defaulted off would have shipped the same invisible-note bug it was meant to fix. If the shop's
+> needs change, that is where to start — gate the five keys inside `_job_guidance_fields` on a
+> `kiosk_stations` column, the way `build_wallboard_payload` gates `customer_name` on
+> `display_tokens.show_customer_names`.
+>
+> **What an operator will actually see is thinner than the five keys suggest.** Nothing in the app
+> edits an operation's `description` / `setup_instructions` / `run_instructions` after the work
+> order exists: the only writer is the work-order **create** form (which pre-fills them from the
+> routing when the WO is built from one), and the app's two `PUT /work-orders/operations/{id}`
+> callers — the Dispatch Board and the WorkOrderDetail nest reassignment — send only
+> `{work_center_id, version}`. The API accepts all three on that endpoint; there is simply no UI
+> that sends them. So on most jobs the three operation-level fields are `null` unless they came from
+> a routing, and the two work-order-level fields are the ones that carry real content — those *are*
+> editable after creation, from the Notes / Special Instructions editor on the work-order detail
+> page.
 
 > **Kiosk telemetry / routing payload additions (Foundry redesign, 2026-07-23).** Read-only field
 > additions feeding the redesigned kiosk's top bar, telemetry tiles, and complete modal — old

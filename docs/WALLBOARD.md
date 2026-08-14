@@ -117,6 +117,15 @@ privacy requirement. There is now **one gated exception**: an executive-office b
 work order's **customer name** on each card. It is off by default and enforced **server-side** in
 `build_wallboard_payload` — a display can never widen its own scope past the gate.
 
+> **Scope of this rule.** It governs the **wallboard payload**. `docs/API.md` and `docs/KIOSK.md`
+> cite `wallboard_service`'s privacy docstring as the precedent for what an unattended shop screen
+> should show, and it still is — but it is not a repo-wide guarantee about station principals. The
+> kiosk carries **one recorded exception** (owner decision, 2026-08-14): the crew station's queue
+> read sends the job's five office-authored free-text guidance fields to a shared-PIN station. See
+> [docs/KIOSK.md](KIOSK.md) → "Disclosure: this free text does reach a crew station" for the
+> reasoning and the cost — the `show_customer_names` mechanism below is the pattern that decision
+> considered and deliberately deferred. **Nothing about the wallboard payload changed.**
+
 A tile's `customer_name` is populated **only** when the requesting principal is authorized:
 
 - a **display token** whose `show_customer_names` flag is `True` — the per-display **Show customer

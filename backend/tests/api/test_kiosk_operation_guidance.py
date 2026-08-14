@@ -40,23 +40,31 @@ decision, AND the blocker's free text is STILL withheld from that same principal
 on that same response. Both halves are asserted together, in one test, because
 the risk this feature carries is a later reader "harmonizing" the two.
 
-TENANCY -- unchanged: a station reads only its own work center, and a
-cross-tenant work center answers empty rather than leaking guidance.
+TENANCY -- a station reads only its own work center, a cross-tenant work
+center answers empty rather than leaking guidance, and ``my-active-job`` -- the
+one read this change actually tightened -- drops an open entry belonging to
+ANOTHER company rather than serving that tenant's work-order free text.
 
-COST -- no N+1. The queue's per-row cost is flat in the number of rows, and the
-guidance block itself issues ZERO queries against an eager-loaded operation.
+COST -- no N+1, asserted against the ENDPOINTS. Never against a query the test
+built for itself: such a test cannot observe the endpoint's load options, and the
+two that tried were green with the eager loads they claimed to guard DELETED.
+The queue and the held list are each exactly FLAT in the number of rows (same
+eager loads, two separate reads, so they need two guards), and ``my-active-job``
+-- which is NOT flat, it pays three deliberate per-operation reads per open entry
+-- is held to that marginal budget, which the eager loads are what keep it inside.
 """
 
+from datetime import datetime
 from typing import Callable, List
 
 import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
 from sqlalchemy import event
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session
 
-from app.api.endpoints.shop_floor import _guidance_text, _job_guidance_fields
-from app.models.time_entry import TimeEntry
+from app.api.endpoints.shop_floor import _guidance_text
+from app.models.time_entry import TimeEntry, TimeEntryType
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation
 from app.models.work_order_blocker import (
     WorkOrderBlocker,
@@ -91,6 +99,25 @@ GUIDANCE_KEYS = {
     "operation_run_instructions",
 }
 
+# ``my-active-job``'s per-open-entry query budget.
+#
+# Unlike the queue, this endpoint is NOT flat in the number of rows, and pinning
+# it at zero would be a fiction. Every open entry pays three DELIBERATE
+# per-operation reads: the lazy load of ``WorkOrderOperation.laser_nest`` behind
+# ``_laser_nest_payload``, ``_next_operation_payload``'s "ROUTES TO" lookup, and
+# ``_operation_downtime_minutes``' blocker sum. Measured 2026-08-14: three fixed
+# statements (the auth user, the TimeEntry read, the batched material-tie read)
+# plus exactly three per entry -- 6 / 9 / 12 / 15 at 1 / 2 / 3 / 4 open entries.
+#
+# The budget is what FENCES the guidance block. ``TimeEntry.operation`` and
+# ``TimeEntry.work_order(.part)`` are joinedload-ed, so the five guidance columns
+# are free; delete those two eager loads and the marginal goes 3 -> 6 (operation,
+# work_order and part each lazy-load per entry) -- measured 9 / 15 / 21 / 27.
+#
+# An upper BOUND, not an equality: removing a per-entry read is an improvement,
+# not a regression, and should not red-line.
+MY_ACTIVE_JOB_PER_ENTRY_QUERY_BUDGET = 3
+
 
 def set_guidance(
     db: Session,
@@ -121,6 +148,12 @@ def queue_row(client: TestClient, headers: dict, work_center_id: int, operation_
     rows = [r for r in queue_body(client, headers, work_center_id)["queue"] if r["operation_id"] == operation_id]
     assert rows, f"operation {operation_id} missing from queue"
     return rows[0]
+
+
+def active_job_body(client: TestClient, headers: dict) -> dict:
+    resp = client.get(MY_ACTIVE_JOB, headers=headers)
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    return resp.json()
 
 
 def clock_in(client: TestClient, headers: dict, wo, op) -> int:
@@ -476,6 +509,61 @@ class TestTenancyUnaffected:
         assert body["active_job"] is None
         assert "ALICE ONLY" not in str(body)
 
+    def test_active_job_excludes_an_open_entry_belonging_to_another_company(
+        self, client: TestClient, db_session: Session
+    ):
+        """Invariant 1 on the read this change actually tightened.
+
+        ``my-active-job`` is keyed on the caller's open entries, and ``user_id``
+        + ``clock_out IS NULL`` used to be the whole filter -- it trusted that a
+        user's own open entries could only ever belong to one tenant. Those rows
+        now carry the work order's FREE TEXT (``notes`` /
+        ``special_instructions``), so the read is scoped to the ACTIVE company:
+        the company a platform admin's context switch resolves to, and the same
+        scoping the material-tie read on this endpoint already applied.
+
+        Nothing covered this before -- the sibling above only proves another
+        USER's job is invisible, which the ``user_id`` filter alone gives you.
+        """
+        operator = make_user(db_session, company_id=COMPANY_A)
+        headers = user_headers(operator)
+        wc_a = make_work_center(db_session)
+        wo_a, op_a = make_wo_with_operation(db_session, work_center=wc_a)
+        set_guidance(db_session, wo_a, op_a, notes="COMPANY A JOB")
+        own_entry_id = clock_in(client, headers, wo_a, op_a)
+
+        # The SAME operator, an OPEN entry -- but the row, and everything it
+        # points at, belong to Company B.
+        wc_b = make_work_center(db_session, company_id=COMPANY_B)
+        wo_b, op_b = make_wo_with_operation(db_session, company_id=COMPANY_B, work_center=wc_b)
+        set_guidance(db_session, wo_b, op_b, notes="COMPANY B CONFIDENTIAL")
+        db_session.add(
+            TimeEntry(
+                company_id=COMPANY_B,
+                user_id=operator.id,
+                work_order_id=wo_b.id,
+                operation_id=op_b.id,
+                work_center_id=wc_b.id,
+                entry_type=TimeEntryType.RUN,
+                clock_in=datetime.utcnow(),
+            )
+        )
+        db_session.commit()
+
+        # Non-vacuity: the foreign row satisfies every OTHER predicate this
+        # endpoint filters on, so company_id is the only thing keeping it out.
+        assert (
+            db_session.query(TimeEntry).filter(TimeEntry.user_id == operator.id, TimeEntry.clock_out.is_(None)).count()
+            == 2
+        )
+
+        body = active_job_body(client, headers)
+
+        assert [job["time_entry_id"] for job in body["active_jobs"]] == [own_entry_id]
+        assert body["active_job"]["work_order_notes"] == "COMPANY A JOB"
+        assert "COMPANY B CONFIDENTIAL" not in str(body)
+        assert wo_b.work_order_number not in str(body)
+
 
 class TestNoNPlusOne:
     def test_queue_cost_is_flat_in_the_number_of_rows(self, client: TestClient, db_session: Session):
@@ -508,63 +596,92 @@ class TestNoNPlusOne:
 
         assert five_rows == one_row, f"per-row N+1: 1 row cost {one_row}, 5 rows cost {five_rows}"
 
-    def test_guidance_block_itself_issues_zero_queries(self, db_session: Session):
-        """Attribution, isolated from the rest of the endpoint: against an
-        operation loaded with the queue's ``work_order`` eager load, building the
-        guidance block touches the DB ZERO times. All five are plain,
-        non-deferred columns on already-loaded entities."""
-        wc = make_work_center(db_session)
-        wo, op = make_wo_with_operation(db_session, work_center=wc)
-        set_guidance(db_session, wo, op)
+    def test_held_list_cost_is_flat_in_the_number_of_rows(self, client: TestClient, db_session: Session):
+        """The HELD list, which the queue guard above does NOT cover.
 
-        db_session.expire_all()
-        operations = (
-            db_session.query(WorkOrderOperation)
-            .options(joinedload(WorkOrderOperation.work_order))
-            .filter(WorkOrderOperation.work_center_id == wc.id)
-            .all()
-        )
-        assert operations
-
-        def _build():
-            for operation in operations:
-                fields = _job_guidance_fields(operation.work_order, operation)
-                assert fields["work_order_notes"] == "Unit #7 -- match to the tag on the fixture"
-
-        assert count_queries(db_session, _build) == 0
-
-    def test_my_active_job_guidance_reads_cost_zero_queries(self, client: TestClient, db_session: Session):
-        """Same attribution for the running-job panel, whose entities hang off
-        ``TimeEntry`` rather than the operation.
-
-        The endpoint joinedloads ``TimeEntry.operation`` and
-        ``TimeEntry.work_order``, so the guidance block reads five plain columns
-        off already-loaded entities. Reproduced here with the endpoint's own
-        eager loads over TWO open entries, so a lazy relationship would fan out.
+        ``_held_job_row`` builds on ``_kiosk_job_row``, so held cards read
+        ``work_order.notes`` / ``.special_instructions`` too -- but they come from
+        a SEPARATE read (``dispatch_service.held_operations``) that receives the
+        eager loads as an ARGUMENT. Drop ``load_options=queue_load_options`` from
+        that one call and the queue guard above stays green while every held card
+        costs an extra SELECT at the 10-15s poll cadence. Measured: 11 statements
+        at 1, 2, 3 and 5 held rows.
         """
         operator = make_user(db_session)
         headers = user_headers(operator)
-        for _ in range(2):
-            wc = make_work_center(db_session)
-            wo, op = make_wo_with_operation(db_session, work_center=wc)
-            set_guidance(db_session, wo, op)
-            clock_in(client, headers, wo, op)
+        wc = make_work_center(db_session)
+
+        def hold_one_more_job():
+            # A DISTINCT work order each time, so a lazy work_order load fans out
+            # per row rather than hitting one identity-map entry N times over.
+            wo_n, op_n = make_wo_with_operation(
+                db_session,
+                work_center=wc,
+                op_status=OperationStatus.ON_HOLD,
+                sequential_operations=False,
+            )
+            set_guidance(db_session, wo_n, op_n)
+
+        hold_one_more_job()
+        db_session.expire_all()
+        one_row = count_queries(db_session, lambda: queue_body(client, headers, wc.id))
+
+        for _ in range(4):
+            hold_one_more_job()
+        db_session.expire_all()
+        held = queue_body(client, headers, wc.id)["held"]
+        assert len(held) == 5
+        assert all(r["work_order_notes"] == "Unit #7 -- match to the tag on the fixture" for r in held)
 
         db_session.expire_all()
-        entries = (
-            db_session.query(TimeEntry)
-            .options(
-                joinedload(TimeEntry.operation),
-                joinedload(TimeEntry.work_order),
-            )
-            .filter(TimeEntry.user_id == operator.id, TimeEntry.clock_out.is_(None))
-            .all()
+        five_rows = count_queries(db_session, lambda: queue_body(client, headers, wc.id))
+
+        assert five_rows == one_row, f"per-row N+1 on the held list: 1 row cost {one_row}, 5 rows cost {five_rows}"
+
+    def test_my_active_job_cost_stays_within_its_per_entry_budget(self, client: TestClient, db_session: Session):
+        """The running-job panel, whose entities hang off ``TimeEntry`` rather
+        than the operation -- so it needs its own eager loads and its own guard.
+
+        Against the ENDPOINT. The predecessor of this test built its own query
+        with its own ``joinedload``s and asserted a fixed ``== 0`` against that,
+        which can never observe what the endpoint loads: with BOTH of the
+        endpoint's eager loads deleted it still passed, and so did the other 21
+        tests in this file.
+
+        The assertion is on the MARGINAL cost of one more open entry, because
+        that -- not the absolute total -- is what a lost eager load moves. See
+        ``MY_ACTIVE_JOB_PER_ENTRY_QUERY_BUDGET`` for why this endpoint is not
+        flat and what the budget is made of.
+        """
+        operator = make_user(db_session)
+        headers = user_headers(operator)
+
+        def clock_into_one_more_job():
+            # A DISTINCT work order/operation each time, for the same reason as
+            # the queue guard above.
+            wc = make_work_center(db_session)
+            wo_n, op_n = make_wo_with_operation(db_session, work_center=wc)
+            set_guidance(db_session, wo_n, op_n)
+            clock_in(client, headers, wo_n, op_n)
+
+        clock_into_one_more_job()
+        db_session.expire_all()
+        one_entry = count_queries(db_session, lambda: active_job_body(client, headers))
+
+        for _ in range(2):
+            clock_into_one_more_job()
+        db_session.expire_all()
+        jobs = active_job_body(client, headers)["active_jobs"]
+        assert len(jobs) == 3
+        assert all(j["work_order_notes"] == "Unit #7 -- match to the tag on the fixture" for j in jobs)
+
+        db_session.expire_all()
+        three_entries = count_queries(db_session, lambda: active_job_body(client, headers))
+
+        per_entry = (three_entries - one_entry) / 2
+        assert per_entry <= MY_ACTIVE_JOB_PER_ENTRY_QUERY_BUDGET, (
+            f"per-entry N+1 on my-active-job: 1 entry cost {one_entry}, 3 entries cost {three_entries} "
+            f"({per_entry} per extra entry, budget {MY_ACTIVE_JOB_PER_ENTRY_QUERY_BUDGET}). The usual cause "
+            "is a dropped joinedload on TimeEntry.operation or TimeEntry.work_order(.part), which makes the "
+            "guidance block lazy-load the work order and its part once per running job."
         )
-        assert len(entries) == 2
-
-        def _build():
-            for entry in entries:
-                fields = _job_guidance_fields(entry.work_order, entry.operation)
-                assert fields["operation_run_instructions"] == "Run at 180 A, weave 1/8 in"
-
-        assert count_queries(db_session, _build) == 0

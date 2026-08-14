@@ -56,6 +56,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import api from '../../services/api';
 import { Button, FormField, LoadingButton, Modal, useToast } from '../ui';
 import { DEDUCTION_TIMING_NOTE, effectivePerRun, formatTieQty } from '../../utils/materialTie';
+import { formatOperationLabel, hasOperationNumber } from '../../utils/operationLabel';
 import { toDisplayString } from '../../utils/apiError';
 import type {
   MaterialAllocation,
@@ -293,7 +294,9 @@ export default function OperationMaterialTieModal({
       showToast(
         'success',
         `Tied ${created.part_number || 'material'} to ${
-          operation?.operation_number ? `Op ${operation.operation_number}` : operation?.name || 'this operation'
+          hasOperationNumber(operation?.operation_number)
+            ? formatOperationLabel(operation?.operation_number)
+            : operation?.name || 'this operation'
         }`
       );
       onSaved();
@@ -306,7 +309,13 @@ export default function OperationMaterialTieModal({
   };
 
   const operationLabel = operation
-    ? `${operation.operation_number ? `Op ${operation.operation_number}` : `Seq ${operation.sequence}`} · ${operation.name}`
+    // `Seq {n}` stays the fallback (a real, numeric sequence names the operation
+    // better than an em-dash would in this dialog's title).
+    ? `${
+        hasOperationNumber(operation.operation_number)
+          ? formatOperationLabel(operation.operation_number)
+          : `Seq ${operation.sequence}`
+      } · ${operation.name}`
     : '';
 
   return (

@@ -1181,6 +1181,24 @@ def get_my_active_job(
     (the OPERATION's scrap total) -- distinct from ``quantity_scrapped``, which
     is this time ENTRY's session scrap and would under-state a prediction that
     scales on ``complete + scrapped`` across sessions.
+
+    WRITTEN JOB GUIDANCE (2026-08-14). Each job also carries the five
+    ``_job_guidance_fields`` keys -- ``work_order_notes``,
+    ``work_order_special_instructions``, ``operation_description``,
+    ``operation_setup_instructions``, ``operation_run_instructions`` -- so the
+    running-job screen keeps showing the job's written instructions AFTER clock-in.
+    A note that vanished the moment an operator started work would be useless, and
+    the running-job hero is the screen they actually read for the next two hours.
+    Each is the stored text verbatim or ``None``; whitespace-only normalizes to
+    ``None`` so the client never has to decide whether ``""`` is a note.
+
+    Unlike the work-center queue, this endpoint is NOT reachable by a station
+    principal: it depends on ``get_current_user``, so the caller is always
+    identified -- a desk session, or the crew station's five-minute badge-minted
+    ``scope="kiosk"`` operator token. Tenancy is the ``TimeEntry.company_id``
+    filter below and there is no ``require_role``, so that filter is the only
+    tenancy gate on this read; it is load-bearing now that work-order free text
+    rides the payload.
     """
     # Eager-load operation, work_order, and work_order.part in a single
     # query so we don't issue 2*N extra SELECTs iterating active entries.
@@ -1195,6 +1213,13 @@ def get_my_active_job(
             and_(
                 TimeEntry.user_id == current_user.id,
                 TimeEntry.clock_out.is_(None),
+                # Invariant 1. This read now carries the work order's free text
+                # (see _job_guidance_fields), so it is scoped to the ACTIVE company
+                # rather than trusting that a user's own open entries can only ever
+                # belong to one tenant -- the same scoping the material-tie read
+                # below already applies, and the same company a platform admin's
+                # context switch resolves to.
+                TimeEntry.company_id == company_id,
             )
         )
         .all()
@@ -2379,6 +2404,34 @@ def get_work_center_queue(
     The tie read itself writes nothing (unlike ``_laser_nest_payload``, which
     still syncs nest counters here): a poll is not an actor, has no intent and
     records no reason, so it must never move stock.
+
+    WRITTEN JOB GUIDANCE (2026-08-14). Every job card -- ``queue`` and ``held``
+    alike -- carries the five ``_job_guidance_fields`` keys:
+    ``work_order_notes``, ``work_order_special_instructions``,
+    ``operation_description``, ``operation_setup_instructions``,
+    ``operation_run_instructions``. Each is the stored text VERBATIM or ``None``
+    (whitespace-only normalizes to ``None``; the text is deliberately not
+    stripped, because leading indentation is layout in a numbered work
+    instruction). They cost no extra query -- the work order is already
+    eager-loaded here, and ``tests/api/test_kiosk_operation_guidance.py`` holds
+    mutation-verified per-row cost guards on both this list and ``held``.
+
+    DISCLOSURE (guidance) -- A RECORDED OWNER EXCEPTION, NOT AN OVERSIGHT. This
+    endpoint accepts a crew station's shared-PIN token, so these five fields
+    render on an unattended, PIN-unlocked tablet with no operator identity. That
+    is the POINT of the feature: the reported bug was a "Unit #" typed into a work
+    order's Notes that the welder at the crew station could not see, and sending
+    the guidance only to a badged session would have left it unfixed. It does NOT
+    reopen the blocker rule below -- ``_hold_blocker_payload`` still withholds a
+    hold blocker's ``note``/``title`` from a station, because operator-authored
+    mid-incident text is a different category from office-authored planning text,
+    and a test asserts both halves on the same response. The cost, plainly: these
+    fields are unconstrained free text, so a note containing a customer name or a
+    dollar figure reaches the station, and the mitigation today is convention
+    about what goes in Notes rather than enforcement. A per-station display flag
+    on the wallboard's ``show_customer_names`` pattern was considered and
+    deliberately deferred -- gate the keys inside ``_job_guidance_fields`` if the
+    shop ever needs a station that shows less. See docs/API.md and docs/KIOSK.md.
 
     HELD WORK (``held``, plus ``held_truncated``). ON_HOLD operations at this
     work center, on a SEPARATE list from ``queue``. An accidental hold used to

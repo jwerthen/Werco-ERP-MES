@@ -184,30 +184,17 @@ export interface KioskWorkCenterQueueResponse {
 }
 
 /**
- * "Op 10" — the ONE operation-number label for every kiosk surface.
+ * "Op 10" — re-exported so the kiosk surfaces keep importing their operation
+ * label from the kiosk barrel (the same reason `KioskMaterialTie` is re-exported
+ * above). The implementation lives in `utils/operationLabel` because the
+ * "Op Op 10" defect was never kiosk-specific: the shop-floor queue, the dispatch
+ * board, the dashboard and the material-tie panels read the same free-text
+ * column, and ShopFloor reads it from the SAME endpoint this queue does.
  *
- * `WorkOrderOperation.operation_number` is free text the office types, so the
- * stored value is any of `10`, `OP10`, `Op 10`, `op-10`. The kiosk used to
- * hard-code a literal `Op ` prefix and interpolate the raw value, which read
- * "Op Op 10" on WO-20260807-006 — so the prefix is normalized here instead, at
- * DISPLAY time only. Nothing about the stored value is ever rewritten.
- *
- * An existing `op`/`operation` prefix is absorbed only when a SEPARATOR or a
- * DIGIT follows it — `Op 10`, `OP10`, `op-10`, `Operation 10`, and `Op A10` all
- * collapse to one prefix, while a value that merely starts with those letters
- * (`OPTICAL`) passes through untouched. The separator arm is what makes the
- * function idempotent on alphanumeric sequences: without it `Op A10` came back
- * out as `Op Op A10`, which is the very bug this closes.
- *
- * Null/blank renders the em-dash the kiosk has always shown.
+ * NON-KIOSK code must import from `utils/operationLabel` directly — never reach
+ * into `components/kiosk/` for it.
  */
-export function formatOperationLabel(operationNumber: string | number | null | undefined): string {
-  if (operationNumber == null) return 'Op —';
-  const raw = String(operationNumber).trim();
-  if (!raw) return 'Op —';
-  const stripped = raw.replace(/^op(?:eration)?(?:[\s._\-#:]+(?=\S)|(?=\d))/i, '').trim();
-  return `Op ${stripped || raw}`;
-}
+export { formatOperationLabel } from '../../utils/operationLabel';
 
 /** "Steps 2/6" — the process-steps chip label (call only when steps_total > 0). */
 export function formatStepsChip(item: Pick<KioskQueueItem, 'steps_total' | 'steps_recorded'>): string {
