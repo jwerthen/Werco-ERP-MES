@@ -168,3 +168,36 @@ describe('KioskHeldCard', () => {
     });
   });
 });
+
+/**
+ * The Resume button's ACCESSIBLE NAME. Same defect as the queue card's: the
+ * visible label ran through `formatOperationLabel` while the aria-label
+ * interpolated the raw column, so a legacy row (`Op 20`) and a new row (`20`)
+ * announced the same operation two different ways.
+ */
+describe('KioskHeldCard accessible name', () => {
+  const resumeNameFor = (operationNumber: string, operationName = '') => {
+    const { unmount } = render(
+      <KioskHeldCard
+        item={{ ...HELD_ROW, operation_number: operationNumber, operation_name: operationName }}
+        onResume={jest.fn()}
+      />
+    );
+    const label = screen.getByTestId('kiosk-held-resume').getAttribute('aria-label') || '';
+    unmount();
+    return label;
+  };
+
+  it('announces the same operation identically for both stored spellings', () => {
+    const legacy = resumeNameFor('Op 20');
+    const current = resumeNameFor('20');
+
+    expect(legacy).toBe('Resume work order WO-HELD-0001, operation 20');
+    expect(legacy).toBe(current);
+    expect(legacy).not.toMatch(/Op\s*20/);
+  });
+
+  it('still prefers the operation NAME when the server sends one', () => {
+    expect(resumeNameFor('Op 20', 'Deburr')).toBe('Resume work order WO-HELD-0001, operation Deburr');
+  });
+});

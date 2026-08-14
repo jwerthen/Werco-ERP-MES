@@ -131,16 +131,16 @@ function renderTraveler() {
  * The routing row for an operation, looked up by the number the traveler PRINTS.
  *
  * The fixtures above store the LEGACY spelling (`OP10`) that the create form used
- * to mint; the traveler's Seq column now prints the bare identifier (`10`), so the
- * argument here is deliberately the bare form. Passing the stored string through
- * `operationNumberText` inside this helper would make the lookup circular -- it
- * would find the row whatever the page rendered.
+ * to mint; the traveler's "Op #" column now prints the bare identifier (`10`), so
+ * the argument here is deliberately the bare form. Passing the stored string
+ * through `operationNumberText` inside this helper would make the lookup circular
+ * -- it would find the row whatever the page rendered.
  */
 function routingRow(printedNumber: string): HTMLElement {
-  // Scoped to the routing table (the one carrying the "Seq" header): the traveler
+  // Scoped to the routing table (the one carrying the "Op #" header): the traveler
   // also prints the ORDER QUANTITY, which collides with a bare "10" now that the
-  // Seq column no longer prints the "OP" prefix.
-  const routingTable = screen.getByRole('columnheader', { name: 'Seq' }).closest('table');
+  // column no longer prints the "OP" prefix.
+  const routingTable = screen.getByRole('columnheader', { name: 'Op #' }).closest('table');
   if (!routingTable) throw new Error('no routing table');
   const cell = within(routingTable as HTMLElement).getByText(printedNumber);
   const row = cell.closest('tr');

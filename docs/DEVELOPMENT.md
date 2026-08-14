@@ -763,6 +763,73 @@ The platform rule is **store UTC, serve UTC (`Z`), display Central**:
   `new Date(x).toLocaleString()` for display — it renders in the viewer's timezone and mis-parses
   no-`Z` strings.
 
+## Operation numbers (`operation_number`)
+
+`WorkOrderOperation.operation_number` and `RoutingOperation.operation_number` are `String(20)`
+**identifier** columns, not display labels — and they are **user-editable free text**, so the office
+may hold `10`, `OP-10A`, or `100-B` in them. Three rules:
+
+**1. Never mint an `Op ` prefix into the column.** Every write site stores the bare identifier
+(`str(sequence)` when it has to invent one): `work_orders.py` (the routing → WO copy plus the
+assembly and component operation builders), `routing.py` (`POST /routing/create-from-generation`,
+`POST /routing/{id}/operations`, `POST /routing/{id}/operations/reorder`),
+`routing_import_service.py`, and the `WorkOrderNew` create form. The prefix belongs to the **view**,
+and two helpers in `frontend/src/utils/operationLabel.ts` are the only things that decide how it
+reads:
+
+- `formatOperationLabel(v)` → `Op 10`. Adds the prefix, **absorbs a legacy one** (`Op 10`, `OP10`,
+  `op-10`, `Operation 10` all collapse to a single `Op `), is idempotent, and renders `Op —` for a
+  blank value.
+- `operationNumberText(v)` → `10`. The bare identifier, implemented by **peeling
+  `formatOperationLabel`'s output** so the two definitions of "what counts as a prefix" cannot
+  drift. Blank in, empty string out, so each call site keeps its own fallback via a plain `||`.
+
+The rule for choosing between them: **a column header supplies the word "Op"; a free-standing value
+does not.** Under an `Op #` header render `operationNumberText`; in a sentence, a chip, or a toast
+render `formatOperationLabel`. Neither is for a numeric `sequence`/counter — `Op {sequence}` and
+`Op {n}/{total}` render an integer and are correct as they stand.
+
+**2. The fix is forward-only, and there is deliberately no backfill.** Rows written before it keep
+`Op 10`, so the column is permanently mixed. That is by design, not debt:
+
+- A backfill `UPDATE` mutates a **user-editable field on released quality plans**. A raw migration
+  writes no `AuditService` row, and manufacturing one afterwards is precisely the out-of-band audit
+  write compliance invariant 2 forbids.
+- It could not tell a minted `Op 10` from an office-typed `OP-10A` that a customer's numbering
+  requires, so it would silently destroy real data.
+- The column's format was never stable anyway — a planner retyping `10` as `OP-10A` produces the
+  same variation with no deploy involved. Convergence therefore belongs at the display layer, which
+  is what `formatOperationLabel` is.
+
+The one place a stored value **is** rewritten is `POST /routing/{id}/operations/reorder`, which
+re-derives `operation_number` from the new `sequence` for every operation it moves. Pre-existing
+behavior, deliberately left: it normalizes a draft routing's legacy values as a side effect, and it
+will overwrite a hand-typed `OP-10A`. See [docs/API.md](API.md) → Routing.
+
+**3. Only two consumers parse the column, and both extract digits** — so both are indifferent to the
+spelling: SPC critical-dimension matching (`app/api/endpoints/shop_floor.py::get_operation_documents`,
+which compares against the *integer* `SPCCharacteristic.operation_number`) and
+`_normalized_operation_number` behind the completion-evidence reconcile key
+(`app/services/work_order_state_service.py`). Nothing else slices, compares, sorts, or filters on it.
+A third parser must extract digits too — never slice a fixed prefix length, and never compare two
+stored values for string equality.
+
+Audit rows carry `operation_number` as their `resource_identifier`, so the same operation can read
+`Op 10` before this change and `10` after. That is not a defect — `resource_type` + `resource_id`
+(the operation PK) is the real key, and the hash chain verifies each row by recomputation from its
+own stored value — but the audit search box is an `ILIKE`, so **search the digits**. See
+[docs/API.md](API.md) → Audit Log.
+
+Deliberate non-transforms: laser nest operations keep their own `Nest 1` / `Nest 2` numbering (a
+correct label, not a doubled prefix); `work_order_duplicate_service` copies a legacy value verbatim;
+and a routing's caller-supplied `operation_number` crosses to its work order untouched — the mint is
+only ever a fallback.
+
+Regression coverage: `backend/tests/api/test_operation_number_identifier.py`,
+`frontend/src/utils/operationLabel.test.ts`,
+`frontend/src/pages/WorkOrderNew.operationNumber.test.tsx`, and
+`frontend/src/pages/operationNumberIdentifier.crossPage.test.tsx`.
+
 ## Debugging
 
 ### Backend Debugging

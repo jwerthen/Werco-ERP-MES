@@ -2482,7 +2482,17 @@ export default function ShopFloorSimple() {
                         }`}
                       >
                         <div className="flex min-w-0 items-center gap-3">
-                          <span className={`text-sm font-medium w-12 flex-shrink-0 ${op.is_current ? 'text-blue-200' : 'text-slate-400'}`}>
+                          {/* No fixed width: the cell used to print a bare `10` and
+                              was sized `w-12` (48px) for it. It now prints the full
+                              `Op 100` -- or a free-text `Nest 12` -- which overruns
+                              48px and collides with the operation name beside it on
+                              the floor tablet. `whitespace-nowrap` keeps the label
+                              on one line; the name next to it already truncates. */}
+                          <span
+                            className={`text-sm font-medium flex-shrink-0 whitespace-nowrap ${
+                              op.is_current ? 'text-blue-200' : 'text-slate-400'
+                            }`}
+                          >
                             {formatOperationLabel(op.operation_number)}
                           </span>
                           <span className="font-medium text-slate-100 truncate">{op.name}</span>

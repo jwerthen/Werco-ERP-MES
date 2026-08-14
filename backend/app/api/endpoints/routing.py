@@ -24,6 +24,7 @@ from app.schemas.routing import (
     RoutingCreate,
     RoutingListResponse,
     RoutingOperationCreate,
+    RoutingOperationReorderItem,
     RoutingOperationResponse,
     RoutingOperationUpdate,
     RoutingResponse,
@@ -1167,7 +1168,7 @@ def delete_operation(
 @router.post("/{routing_id}/operations/reorder")
 def reorder_operations(
     routing_id: int,
-    operation_order: List[dict],  # [{"id": 1, "sequence": 10}, {"id": 2, "sequence": 20}]
+    operation_order: List[RoutingOperationReorderItem],  # [{"id": 1, "sequence": 10}, ...]
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
@@ -1183,15 +1184,17 @@ def reorder_operations(
     for item in operation_order:
         operation = (
             db.query(RoutingOperation)
-            .filter(RoutingOperation.id == item["id"], RoutingOperation.routing_id == routing_id)
+            .filter(RoutingOperation.id == item.id, RoutingOperation.routing_id == routing_id)
             .first()
         )
         if operation:
-            operation.sequence = item["sequence"]
+            operation.sequence = item.sequence
             # Re-derived from the new sequence (pre-existing behavior of this endpoint).
             # Bare identifier, not a display label -- see
-            # work_orders.create_routing_operations_for_work_order.
-            operation.operation_number = str(item["sequence"])
+            # work_orders.create_routing_operations_for_work_order. ``item.sequence`` is a
+            # validated int, so this can only ever be digits: see RoutingOperationReorderItem
+            # for the shapes the untyped ``List[dict]`` used to let through.
+            operation.operation_number = str(item.sequence)
 
     db.commit()
 

@@ -1,6 +1,6 @@
 import React from 'react';
 import { PauseCircleIcon } from '@heroicons/react/24/solid';
-import { KioskQueueItem, formatOperationLabel } from './kioskConstants';
+import { KioskQueueItem, formatOperationLabel, operationNumberText } from './kioskConstants';
 import { KioskRunOrderChip } from './KioskQueueCard';
 import {
   formatHoldAttribution,
@@ -194,8 +194,10 @@ export default function KioskHeldCard({
         data-testid="kiosk-held-resume"
         disabled={disabled}
         aria-describedby={offlineHintId}
+        // Normalized for the same reason the visible label above is: raw, a legacy
+        // row announced "operation Op 10" beside a new row's "operation 10".
         aria-label={`Resume work order ${item.work_order_number}, operation ${
-          item.operation_name || item.operation_number || ''
+          item.operation_name || operationNumberText(item.operation_number) || ''
         }`}
         onClick={() => onResume(item)}
         className={`mt-2.5 w-full rounded-[4px] border border-fd-amber bg-fd-amber/15 font-mono font-bold uppercase tracking-[0.1em] text-fd-amber transition-transform duration-150 ease-out active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 ${

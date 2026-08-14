@@ -11,7 +11,7 @@
  * jsdom has no ResizeObserver; recharts' ResponsiveContainer needs one.
  */
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import api from '../../services/api';
 import FlowAnalytics from './FlowAnalytics';
@@ -276,4 +276,149 @@ test('renders "—" for metrics the backend cannot compute (null)', async () => 
   // The null-valued tiles all fall back to the em dash.
   expect(screen.getAllByText('—').length).toBeGreaterThanOrEqual(2);
   expect(screen.queryByText(/backfill\/import labor excluded/i)).not.toBeInTheDocument();
+});
+
+/**
+ * The WIP-aging "Current Op" column, against the permanently MIXED spellings of
+ * `operation_number`.
+ *
+ * `operation_number` is an identifier column the create form used to mint a
+ * display label into (`Op 20`); the mint is fixed forward with no backfill, so
+ * rows written on either side of that fix sit in this table together. This is
+ * the only surface where the same value drives THREE paths — the rendered cell,
+ * the CSV export and the client-side sort — and sort is the one that fails
+ * silently: `Op 20` collates after every digit-leading value, so unnormalized
+ * the two spellings of operation 20 land on opposite sides of operation 90.
+ */
+describe('FlowAnalytics WIP aging — a legacy row and a new row are the same operation', () => {
+  const wipItem = (overrides: Record<string, unknown>) => ({
+    ...wip.items[0],
+    ...overrides,
+  });
+
+  /** Three rows: operation 20 in BOTH stored spellings, plus a 90 to separate them. */
+  const mixedWip = {
+    ...wip,
+    items: [
+      wipItem({
+        work_order_id: 1,
+        work_order_number: 'WO-LEGACY',
+        current_operation_number: 'Op 20',
+        current_operation_name: 'Deburr',
+      }),
+      wipItem({
+        work_order_id: 2,
+        work_order_number: 'WO-NINETY',
+        current_operation_number: '90',
+        current_operation_name: 'Final QC',
+      }),
+      wipItem({
+        work_order_id: 3,
+        work_order_number: 'WO-NEW',
+        current_operation_number: '20',
+        current_operation_name: 'Deburr',
+      }),
+    ],
+    total_open: 3,
+  };
+
+  /** The WIP table — the one carrying the "Current Op" header. */
+  const wipTable = () =>
+    (screen.getByRole('columnheader', { name: /Current Op/i }).closest('table') as HTMLTableElement);
+
+  /**
+   * The WIP table's OWN export button. This view stacks several DataTables, each
+   * with an "Export CSV" — so walk up from the table until exactly one is in
+   * scope rather than indexing into a page-wide list that panel order can shuffle.
+   */
+  const wipExportButton = (): HTMLElement => {
+    let node: HTMLElement | null = wipTable();
+    while (node) {
+      const found = within(node).queryAllByRole('button', { name: /Export CSV/i });
+      if (found.length === 1) return found[0];
+      if (found.length > 1) throw new Error('more than one export button in scope');
+      node = node.parentElement;
+    }
+    throw new Error('no export button found for the WIP table');
+  };
+
+  /** Work-order numbers in rendered row order. */
+  const rowOrder = () =>
+    Array.from(wipTable().querySelectorAll('tbody tr'))
+      .map((row) => (row.querySelector('td')?.textContent || '').trim())
+      .filter(Boolean);
+
+  beforeEach(() => {
+    mockedApi.getWipAging.mockResolvedValue(mixedWip as any);
+  });
+
+  it('renders both spellings as the same bare identifier', async () => {
+    renderFlow();
+    await screen.findAllByText('WO-LEGACY');
+
+    // The legacy row prints `20`, not `Op 20` -- the same text as its twin.
+    const cells = Array.from(wipTable().querySelectorAll<HTMLTableRowElement>('tbody tr')).map((row) =>
+      (row.cells[4]?.textContent || '').trim()
+    );
+    expect(cells).toEqual(expect.arrayContaining(['20 Deburr · Deburr bench', '90 Final QC · Deburr bench']));
+    expect(cells.filter((c) => c.startsWith('20 '))).toHaveLength(2);
+    expect(cells.join('|')).not.toMatch(/Op\s*20/);
+  });
+
+  it('sorts the two spellings TOGETHER, with operation 90 after both', async () => {
+    renderFlow();
+    await screen.findAllByText('WO-LEGACY');
+
+    fireEvent.click(screen.getByRole('button', { name: /Current Op/i }));
+
+    // Ascending by the normalized identifier: 20, 20, 90. Unnormalized this reads
+    // WO-NEW (20), WO-NINETY (90), WO-LEGACY (Op 20) -- one operation split across
+    // the table by nothing but the spelling it was stored in.
+    const order = rowOrder();
+    expect(order).toEqual(['WO-LEGACY', 'WO-NEW', 'WO-NINETY']);
+    expect(Math.abs(order.indexOf('WO-LEGACY') - order.indexOf('WO-NEW'))).toBe(1);
+  });
+
+  it('exports both spellings as the same CSV cell', async () => {
+    let exported: Blob | null = null;
+    const createSpy = jest.spyOn(URL, 'createObjectURL').mockImplementation((blob: any) => {
+      exported = blob as Blob;
+      return 'blob:mock';
+    });
+    const revokeSpy = jest.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
+    const clickSpy = jest.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+
+    try {
+      renderFlow();
+      await screen.findAllByText('WO-LEGACY');
+
+      fireEvent.click(wipExportButton());
+      expect(exported).not.toBeNull();
+
+      // `Blob.text()` is not implemented in this jsdom; FileReader is.
+      const csv = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(reader.error);
+        reader.readAsText(exported as unknown as Blob);
+      });
+      const cellFor = (workOrder: string) => {
+        const line = csv.split('\n').find((l) => l.startsWith(workOrder));
+        if (!line) throw new Error(`no CSV line for ${workOrder}`);
+        // Current Op is the 5th column (Work Order, Part, Customer, Status, Current Op).
+        return line.split(',')[4];
+      };
+
+      // Byte-identical: a spreadsheet grouping on this column must not split one
+      // operation into two just because the rows were written months apart.
+      expect(cellFor('WO-LEGACY')).toBe('20 Deburr');
+      expect(cellFor('WO-NEW')).toBe('20 Deburr');
+      expect(cellFor('WO-LEGACY')).toBe(cellFor('WO-NEW'));
+      expect(csv).not.toMatch(/Op\s*20/);
+    } finally {
+      createSpy.mockRestore();
+      revokeSpy.mockRestore();
+      clickSpy.mockRestore();
+    }
+  });
 });

@@ -953,6 +953,34 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > **400** on a `laser_cutting` work order — dispatch pools are managed exclusively by the nest
 > package import and manual nest entry, so a non-nest op can never ride the laser gating exemption.
 
+> **`operation_number` is an IDENTIFIER, not a display label.** `WorkOrderOperation.operation_number`
+> (and its `RoutingOperation` twin) is a `String(20)` **free-text** field the office may type by hand
+> — `10`, `OP-10A`, `100-B`. Every mint site stores the **bare** sequence (`"10"`); the `"Op "` prefix
+> belongs to the view, which adds it at render time (`frontend/src/utils/operationLabel.ts` →
+> `formatOperationLabel`). Minting the prefix into the column made every screen that renders the field
+> print it twice — the weld crew station read **"Op Op 10"** on WO-20260807-006.
+>
+> - **The mint is only ever a fallback.** Work-order creation (`POST /work-orders/` and the open-WO
+>   Excel importer, which share `create_routing_operations_for_work_order`), the assembly/component
+>   operation builders, and the Work Order create form all fall back to `str(sequence)` **only when
+>   no number is supplied**. A routing operation that carries its own `operation_number` crosses to
+>   the work order **verbatim**, and `POST /work-orders/{id}/duplicate` copies the source value
+>   byte-for-byte. Laser nest operations keep their own `Nest 1` / `Nest 2` numbering — a correct
+>   label, not a doubled prefix.
+> - **Forward-only — no backfill, deliberately.** Rows written before this change keep `"Op 10"`, so
+>   the column is permanently **mixed** and responses will carry both spellings indefinitely. A
+>   backfill `UPDATE` would mutate a user-editable field on released quality plans with no
+>   `AuditService` row behind it (manufacturing one afterwards is exactly the out-of-band audit write
+>   invariant 2 forbids), and it could not distinguish a minted `"Op 10"` from an office-typed
+>   `"OP-10A"` that a customer's numbering requires. Convergence happens at the **display** layer
+>   instead — `formatOperationLabel` absorbs an existing prefix and is idempotent.
+> - **Don't slice, sort, or compare it.** Exactly two consumers parse this field, both by
+>   **extracting digits** and therefore indifferent to the spelling: SPC critical-dimension matching
+>   (`GET /shop-floor/operations/{id}/documents` → `critical_dims`) and the completion-evidence
+>   reconcile key (`work_order_state_service._normalized_operation_number`). Nothing else filters,
+>   orders, or joins on it. A third parser must extract digits too — see
+>   [docs/DEVELOPMENT.md](DEVELOPMENT.md) → **Operation numbers**.
+
 > **Duplicating a work order (`POST /work-orders/{id}/duplicate`).** Re-runs a job's **plan** without
 > re-entering it — the motivating case is a 40-nest laser package confirmed once through the import
 > wizard and run again next month, without re-uploading the PDFs or re-confirming a single row. Body:
@@ -2726,7 +2754,7 @@ uploads go through text extraction + LLM. See
 | POST | `/routing/{id}/operations` | Add an operation (**400** on a released routing) | Admin / Manager / Supervisor |
 | PUT | `/routing/{id}/operations/{operation_id}` | Update an operation — draft: all fields; released: **time standards only** (see note) | Admin / Manager / Supervisor (released-routing edits: Admin / Manager) |
 | DELETE | `/routing/{id}/operations/{operation_id}` | Delete an operation (**400** on a released routing) | Admin / Manager / Supervisor |
-| POST | `/routing/{id}/operations/reorder` | Reorder operations (**400** on a released routing) | Admin / Manager / Supervisor |
+| POST | `/routing/{id}/operations/reorder` | Reorder operations (**400** on a released routing, **422** on a malformed body). **Also rewrites each listed operation's `operation_number` from its new `sequence`** — see the `operation_number` note below | Admin / Manager / Supervisor |
 | POST | `/routing/import/preview` | Upload a routing CSV/XLSX (multipart `file`), preview it WITHOUT writing (dry-run, fully rolled back) | Admin / Manager / Supervisor |
 | POST | `/routing/import/commit` | Commit a routing CSV/XLSX import — one draft routing per part, with one `audit_log` CREATE per routing | Admin / Manager / Supervisor |
 
@@ -2830,6 +2858,30 @@ uploads go through text extraction + LLM. See
 > `POST /routing/import/preview` (dry-run) writes nothing — every routing runs inside a SAVEPOINT
 > that is rolled back, with a terminal `db.rollback()` backstop. See
 > [docs/EXCEL_MIGRATION_RUNBOOK.md](EXCEL_MIGRATION_RUNBOOK.md) Step 8 for the migration flow.
+
+> **`operation_number` on a routing operation — an identifier, not a display label.** Same rule as
+> work orders (see [Work Orders](#work-orders) → "`operation_number` is an IDENTIFIER, not a display
+> label"). `POST /routing/{id}/operations`, the AI approve path `POST /routing/create-from-generation`,
+> and the CSV/XLSX importer each fall back to the **bare** `sequence` (`"10"`) when the caller supplies
+> no number, and store a caller-supplied value **verbatim**. Legacy rows holding `"Op 10"` are
+> deliberately **not** backfilled; the `"Op "` prefix is added at display time.
+>
+> **Length: 20 characters, enforced at the boundary.** `operation_number` is `String(20)` on both
+> models, and the request schemas now carry the matching `OperationNumber` annotated type
+> (`app/core/validation.py`). A longer value is a **422** at validation. Previously the work-order
+> schema allowed 50 and the routing schemas were unbounded, so a 21+ character value passed
+> validation and then raised `StringDataRightTruncation` — a **500** — on Postgres. (It stored
+> silently on the SQLite test database, which is why no test caught it; the width is pinned by
+> dialect-compiling `CreateTable`, never by executing an insert.) The client-side Zod bound matches
+> at 20, so the user gets an inline field error rather than a server round-trip.
+
+> **The one exception is `POST /routing/{id}/operations/reorder`**, which **unconditionally** re-derives
+> `operation_number` from the new `sequence` for every operation in the payload. Reordering therefore
+> normalizes a draft routing's legacy `"Op 10"` values as a side effect — **and overwrites a hand-typed
+> number such as `"OP-10A"`**. That is pre-existing behavior, deliberately left in place. It is
+> reachable only on a **draft** routing (a released one is **400**), and the endpoint writes no
+> `audit_log` row for the rewrite. If a customer's numbering scheme must survive a reorder, re-enter
+> the numbers afterwards through `PUT /routing/{id}/operations/{operation_id}`.
 
 #### Routing Operation Schema
 
@@ -5944,6 +5996,20 @@ tenants, so the aggregate chain-verification endpoints are **platform-admin only
 > backflush on this part, and when"* answerable from one query regardless of which URL was used — see
 > [Parts](#parts) → `backflush_components` and
 > [docs/CMMC_LEVEL_2_COMPLIANCE.md](CMMC_LEVEL_2_COMPLIANCE.md) → the 2026-07-27 (PR 4.5) row, item (3).
+
+> **Searching for an operation by number returns a split trail (the `operation_number` identifier
+> change).** Operation-level audit rows carry `operation_number` as their **`resource_identifier`**,
+> and the value the app mints into that column changed from the display label `"Op 10"` to the bare
+> identifier `"10"` (see [Work Orders](#work-orders) → "`operation_number` is an IDENTIFIER, not a
+> display label"). `GET /audit/?search=` is an `ILIKE '%q%'` across description / resource identifier
+> / user name, which makes it the **one format-sensitive consumer**: searching the literal `Op 10`
+> matches only rows written **before** the change, while searching the digits (`10`) matches both.
+> **Search the digits.**
+>
+> This is not a chain defect and no row was rewritten. `resource_type` + `resource_id` (the
+> operation's primary key) is the real key and is what every machine consumer uses, and the hash chain
+> is unaffected because each row is verified by recomputation from **its own stored value** — a row
+> written with `"Op 10"` still verifies as `"Op 10"`. Only the free-text search box sees the shift.
 
 ### Visitor Logs
 

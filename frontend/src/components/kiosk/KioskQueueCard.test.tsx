@@ -55,3 +55,53 @@ describe('KioskQueueCard laser-nest surfacing', () => {
     expect(screen.queryByText(/CNC#/)).not.toBeInTheDocument();
   });
 });
+
+/**
+ * The card's ACCESSIBLE NAME, against the permanently mixed spellings of
+ * `operation_number` (legacy rows hold `Op 20`, new rows hold `20`; the mint was
+ * fixed forward with no backfill).
+ *
+ * The visible line has run through `formatOperationLabel` since PR #227. The
+ * aria-label interpolated the raw column, so a screen reader announced
+ * "operation Op 20" for a legacy row and "operation 20" for its twin — the same
+ * operation named two ways on the same card, for the operator least able to
+ * cross-check it against the visible text.
+ */
+describe('KioskQueueCard accessible name', () => {
+  const nameOf = (item: Partial<KioskQueueItem>) => {
+    const { unmount } = render(<KioskQueueCard onSelect={jest.fn()} item={{ ...baseItem, ...item } as KioskQueueItem} />);
+    const label = screen.getByRole('button').getAttribute('aria-label') || '';
+    unmount();
+    return label;
+  };
+
+  it('announces the same operation identically for both stored spellings', () => {
+    // `operation_name` is absent, so the number is what names the operation.
+    const legacy = nameOf({ operation_number: 'Op 20', operation_name: '' });
+    const current = nameOf({ operation_number: '20', operation_name: '' });
+
+    expect(legacy).toBe('Work order WO-1001, operation 20');
+    expect(legacy).toBe(current);
+    expect(legacy).not.toMatch(/Op\s*20/);
+  });
+
+  it('still prefers the operation NAME when the server sends one', () => {
+    expect(nameOf({ operation_number: 'Op 20', operation_name: 'Laser cut' })).toBe(
+      'Work order WO-1001, operation Laser cut'
+    );
+  });
+
+  it('announces a laser nest as a nest, matching the visible label', () => {
+    // `laser_nest_service` writes `Nest {index}` into this same column.
+    expect(nameOf({ operation_number: 'Nest 3', operation_name: '' })).toBe(
+      'Work order WO-1001, operation Nest 3'
+    );
+  });
+
+  it('renders a nest label without an "Op" in front of it', () => {
+    render(<KioskQueueCard onSelect={jest.fn()} item={{ ...baseItem, operation_number: 'Nest 3' }} />);
+    const card = screen.getByRole('button');
+    expect(card).toHaveTextContent('Nest 3');
+    expect(card).not.toHaveTextContent(/Op\s*Nest/);
+  });
+});

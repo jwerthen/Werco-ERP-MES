@@ -190,6 +190,12 @@ function skipSummary(result: WorkOrderDuplicateResult): string | null {
 function operationLabel(operation: WorkOrderDuplicateSkippedOperation): string {
   // The FULL label, matching the `Seq 20` / `Operation #72` fallbacks below --
   // these three are one vocabulary, and a bare "20" among them names nothing.
+  //
+  // `formatOperationLabel` and not the bare text, even though this notice is
+  // emitted ONLY for nest-backed operations (`laser_nest_deleted`), whose stored
+  // number is `Nest 3`: the helper leaves a self-labeled value alone, so a nest
+  // reads `Nest 3` and a legacy office row still reads `Op 20`. Both spellings
+  // reach here -- a nest task can carry either -- and only the label names both.
   if (hasOperationNumber(operation.operation_number)) {
     return formatOperationLabel(operation.operation_number);
   }

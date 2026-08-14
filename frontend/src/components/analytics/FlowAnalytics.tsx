@@ -201,11 +201,19 @@ export default function FlowAnalytics({ period }: FlowAnalyticsProps) {
       {
         key: 'current_operation',
         header: 'Current Op',
+        // Sortable so the normalized `accessor` below is actually REACHED. It was
+        // written for the sort path and the column shipped without this flag, which
+        // left the accessor dead: `render` and `csv` are both supplied, so DataTable
+        // never consulted it. Every other text column in this table sorts.
+        sortable: true,
         className: 'text-sm',
         // `current_operation_number` IS `WorkOrderOperation.operation_number`
         // (flow_metrics_service reads it straight off the operation), so it carries
         // the same legacy `Op 10` spellings. Normalized on all three paths -- sort,
         // CSV and render -- or a legacy row sorts and exports apart from its twin.
+        // Sort is the one that fails SILENTLY: unnormalized, `Op 20` collates after
+        // every digit-leading value, so the two spellings of operation 20 land on
+        // opposite sides of operation 90.
         accessor: (item) => operationNumberText(item.current_operation_number),
         csv: (item) =>
           item.current_operation_number

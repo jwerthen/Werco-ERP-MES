@@ -4143,7 +4143,11 @@ def complete_work_order(
     for operation in operations:
         if operation.status == OperationStatus.COMPLETE:
             continue
-        op_identifier = operation.operation_number or f"Op {operation.sequence}"
+        # ONE vocabulary per collection: the fallback yields the bare sequence, exactly like
+        # the ON_HOLD refusal above -- never a display label. These entries are stamped on the
+        # force-complete AUDIT row (permanent, on the tamper-evident chain), so a mix of "10"
+        # and "Op 10" inside one steps_bypassed list would be un-fixable after the fact.
+        op_identifier = str(operation.operation_number or operation.sequence)
         for item in process_sheet_service.missing_required_steps(db, company_id, operation, work_order):
             steps_bypassed_all.append({"operation": op_identifier, **item})
     steps_bypassed_count = len(steps_bypassed_all)

@@ -32,15 +32,21 @@ What each class pins, and why guessing differently is plausible:
   so the sweep that removed the ``Op`` prefixes must not have touched it.
 """
 
+import json
 from datetime import date, timedelta
 
 import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import Session
+from sqlalchemy.schema import CreateTable
 
+from app.models.audit_log import AuditLog
 from app.models.bom import BOM, BOMItem, BOMItemType
 from app.models.part import Part
+from app.models.process_sheet import ProcessSheet, WOOperationStep
 from app.models.routing import Routing, RoutingOperation
 from app.models.work_center import WorkCenter
 from app.models.work_order import (
@@ -50,7 +56,10 @@ from app.models.work_order import (
     WorkOrderStatus,
     WorkOrderType,
 )
+from app.schemas.routing import RoutingOperationBase, RoutingOperationUpdate
+from app.schemas.work_order import WorkOrderOperationBase
 from app.services.laser_nest_service import create_manual_laser_nest
+from app.services.process_sheet_service import ProcessSheetUnavailableError, snapshot_steps_for_work_order
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
 
@@ -523,3 +532,404 @@ class TestLegacyAndNonOperationLabelsAreLeftAlone:
             db_session.flush()
             operation = db_session.query(WorkOrderOperation).filter_by(id=nest.work_order_operation_id).one()
             assert operation.operation_number == expected
+
+
+# --------------------------------------------------------------------------- #
+# The surviving READ-SIDE fallbacks: one vocabulary per collection
+# --------------------------------------------------------------------------- #
+
+
+class TestFallbackVocabularyIsUniform:
+    """``operation_number or <fallback>`` must not emit two vocabularies in one list.
+
+    Two sites still fall back when the column is NULL — the force-complete audit row's
+    ``steps_bypassed`` entries and the 409 ``PROCESS_SHEET_UNAVAILABLE`` payload. Both used
+    to fall back to ``f"Op {sequence}"``, which was harmless while the mint sites ALSO wrote
+    ``"Op 10"``: both arms produced the same shape. Now that the mints store the bare
+    sequence, a mixed list is the failure — one entry reading ``"20"`` and its neighbour
+    ``"Op 10"``, naming the same kind of thing two ways. The force-complete list is the one
+    that matters: it is stamped on a permanent audit row on the tamper-evident hash chain,
+    where it can never be corrected after the fact.
+
+    A NULL ``operation_number`` is reachable: the column is nullable, ``POST
+    /work-orders/{id}/operations`` accepts a body without one, and the duplicate service
+    copies NULL across verbatim.
+    """
+
+    def _wo_with_two_open_operations(self, db: Session):
+        """A RELEASED WO whose op 10 has NO operation_number and op 20 has one."""
+        part = _part(db)
+        wc = _work_center(db)
+        work_order = WorkOrder(
+            work_order_number=f"WO-OPNUM-{_next()}",
+            part_id=part.id,
+            quantity_ordered=5,
+            status=WorkOrderStatus.RELEASED,
+            priority=3,
+            due_date=date.today() + timedelta(days=7),
+            company_id=COMPANY_A,
+        )
+        db.add(work_order)
+        db.flush()
+        unnumbered = WorkOrderOperation(
+            work_order_id=work_order.id,
+            work_center_id=wc.id,
+            sequence=10,
+            operation_number=None,
+            name="Saw",
+            status=OperationStatus.READY,
+            company_id=COMPANY_A,
+        )
+        numbered = WorkOrderOperation(
+            work_order_id=work_order.id,
+            work_center_id=wc.id,
+            sequence=20,
+            operation_number="20",
+            name="Deburr",
+            status=OperationStatus.READY,
+            company_id=COMPANY_A,
+        )
+        db.add_all([unnumbered, numbered])
+        db.flush()
+        return work_order, unnumbered, numbered
+
+    def _required_step(self, db: Session, operation: WorkOrderOperation, label: str) -> WOOperationStep:
+        sheet = ProcessSheet(
+            sheet_number=f"PS-OPNUM-{_next():06d}",
+            title="Bypass vocabulary sheet",
+            revision="A",
+            status="released",
+            company_id=COMPANY_A,
+        )
+        db.add(sheet)
+        db.flush()
+        step = WOOperationStep(
+            company_id=COMPANY_A,
+            work_order_operation_id=operation.id,
+            source_sheet_id=sheet.id,
+            source_sheet_revision=sheet.revision,
+            sequence=10,
+            label=label,
+            step_type="checkbox",
+            is_required=True,
+        )
+        db.add(step)
+        db.flush()
+        return step
+
+    def test_force_complete_bypass_entries_use_one_vocabulary(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        """``steps_bypassed`` names both operations the same way — bare, never ``Op N``."""
+        work_order, unnumbered, numbered = self._wo_with_two_open_operations(db_session)
+        self._required_step(db_session, unnumbered, "Saw check")
+        self._required_step(db_session, numbered, "Deburr check")
+        db_session.commit()
+        work_order_id = work_order.id
+
+        response = client.post(
+            f"/api/v1/work-orders/{work_order_id}/complete",
+            headers=auth_headers,
+            params={"quantity_complete": 5},
+        )
+
+        assert response.status_code == status.HTTP_200_OK, response.text
+        entries = response.json()["steps_bypassed"]["steps"]
+        named = sorted(entry["operation"] for entry in entries)
+        assert named == ["10", "20"], f"one vocabulary, bare identifiers: {named}"
+        assert not any(entry["operation"].startswith("Op ") for entry in entries)
+
+        # And the same values are what the PERMANENT audit row carries -- the entries live
+        # on the tamper-evident hash chain, so a mixed vocabulary there is uncorrectable.
+        row = (
+            db_session.query(AuditLog)
+            .filter(
+                AuditLog.resource_type == "work_order",
+                AuditLog.resource_id == work_order_id,
+                AuditLog.action == "STATUS_CHANGE",
+            )
+            .one()
+        )
+        extra = json.loads(row.extra_data) if isinstance(row.extra_data, str) else row.extra_data
+        assert sorted(entry["operation"] for entry in extra["steps_bypassed"]) == ["10", "20"]
+
+    def test_process_sheet_unavailable_names_the_bare_sequence(self, db_session: Session):
+        """The 409 the UI renders names operation ``10``, not ``Op 10``.
+
+        Driven at the service seam because the WO-CREATE caller always mints an
+        ``operation_number`` first (so its fallback arm is unreachable) — the reachable
+        caller is the duplicate re-snapshot, which copies a NULL across verbatim.
+        """
+        work_order, unnumbered, _ = self._wo_with_two_open_operations(db_session)
+        draft_sheet = ProcessSheet(
+            sheet_number=f"PS-OPNUM-{_next():06d}",
+            title="Never released",
+            revision="A",
+            status="draft",
+            company_id=COMPANY_A,
+        )
+        db_session.add(draft_sheet)
+        db_session.commit()
+
+        with pytest.raises(ProcessSheetUnavailableError) as excinfo:
+            snapshot_steps_for_work_order(db_session, COMPANY_A, [(unnumbered, draft_sheet.id)])
+
+        detail = excinfo.value.detail
+        assert detail["operation"] == "10"
+        assert "operation 10 references" in detail["detail"]
+        assert "Op 10" not in detail["detail"]
+
+
+# --------------------------------------------------------------------------- #
+# The width contract: schema limit == column width
+# --------------------------------------------------------------------------- #
+
+_TOO_LONG = "X" * 21  # 21 chars: one over String(20)
+_AT_LIMIT = "Y" * 20
+
+
+class TestOperationNumberWidthMatchesTheColumn:
+    """A 21-char ``operation_number`` must be a 422, not a 500.
+
+    Both columns are ``String(20)``, but the request schemas disagreed: the work-order
+    schema allowed 50 and both routing schemas were unbounded. A 21-50 char value therefore
+    passed validation and then raised ``StringDataRightTruncation`` on Postgres — a 500 for
+    what is plainly a caller input error. ``app.core.validation.OperationNumber`` is now the
+    single declaration, so all three agree with the column.
+
+    WHY NO TEST HERE EXECUTES THE OVERSIZED INSERT: the suite runs on in-memory SQLite,
+    which does not enforce ``VARCHAR`` length at all — it would store the 21-char value
+    happily and the test would pass while production 500s. Per CLAUDE.md, engine-specific
+    behavior is asserted by DIALECT-COMPILING the DDL (see
+    ``test_both_columns_are_varchar_20_under_the_postgres_dialect``), never by executing
+    and trusting the result. Everything else here is asserted at the API BOUNDARY, where
+    Pydantic runs before any engine is involved and the answer is the same on both.
+    """
+
+    def test_both_columns_are_varchar_20_under_the_postgres_dialect(self):
+        """Pins the width the schemas are aligned TO, on the engine that enforces it."""
+        pg = postgresql.dialect()
+        for model in (WorkOrderOperation, RoutingOperation):
+            ddl = str(CreateTable(model.__table__).compile(dialect=pg))
+            assert "operation_number VARCHAR(20)" in ddl, ddl
+
+    @pytest.mark.parametrize(
+        "schema, base_payload",
+        [
+            (WorkOrderOperationBase, {"work_center_id": 1, "sequence": 10, "name": "Saw"}),
+            (RoutingOperationBase, {"sequence": 10, "name": "Saw", "work_center_id": 1}),
+            (RoutingOperationUpdate, {}),
+        ],
+    )
+    def test_every_schema_that_writes_the_column_agrees_on_20(self, schema, base_payload):
+        """Guards the drift itself — all three declarations, asserted as one rule.
+
+        Enumerated rather than represented by one endpoint test: the three used to
+        disagree (50 / unbounded / unbounded), so a regression in only ONE of them would
+        otherwise slip through whichever endpoint the surviving test happened to drive.
+        """
+        assert schema.model_validate({**base_payload, "operation_number": _AT_LIMIT}).operation_number == _AT_LIMIT
+        with pytest.raises(ValidationError):
+            schema.model_validate({**base_payload, "operation_number": _TOO_LONG})
+
+    def test_routing_add_operation_refuses_21_characters(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        part = _part(db_session)
+        wc = _work_center(db_session)
+        routing = _routing(db_session, part, status_value="draft")
+        db_session.commit()
+
+        response = client.post(
+            f"/api/v1/routing/{routing.id}/operations",
+            headers=auth_headers,
+            json={"sequence": 30, "name": "Grind", "operation_number": _TOO_LONG, "work_center_id": wc.id},
+        )
+
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, response.text
+
+    def test_routing_add_operation_accepts_the_20_character_boundary(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        """The limit is the column width, not one under it — 20 still stores."""
+        part = _part(db_session)
+        wc = _work_center(db_session)
+        routing = _routing(db_session, part, status_value="draft")
+        db_session.commit()
+
+        response = client.post(
+            f"/api/v1/routing/{routing.id}/operations",
+            headers=auth_headers,
+            json={"sequence": 30, "name": "Grind", "operation_number": _AT_LIMIT, "work_center_id": wc.id},
+        )
+
+        assert response.status_code == status.HTTP_200_OK, response.text
+        assert response.json()["operation_number"] == _AT_LIMIT
+
+    def test_routing_update_operation_refuses_21_characters(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        part = _part(db_session)
+        wc = _work_center(db_session)
+        routing = _routing(db_session, part, status_value="draft")
+        operation = _routing_operation(db_session, routing, wc, sequence=10, operation_number="10", name="Saw")
+        db_session.commit()
+
+        response = client.put(
+            f"/api/v1/routing/{routing.id}/operations/{operation.id}",
+            headers=auth_headers,
+            json={"operation_number": _TOO_LONG},
+        )
+
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, response.text
+
+    def test_create_from_generation_refuses_21_characters(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        """The AI-approve / bulk-create path reuses RoutingOperationCreate, so it is covered."""
+        part = _part(db_session)
+        wc = _work_center(db_session)
+        db_session.commit()
+
+        response = client.post(
+            "/api/v1/routing/create-from-generation",
+            headers=auth_headers,
+            json={
+                "part_id": part.id,
+                "revision": "A",
+                "operations": [
+                    {"sequence": 10, "name": "Saw", "operation_number": _TOO_LONG, "work_center_id": wc.id},
+                ],
+            },
+        )
+
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, response.text
+
+    def test_work_order_add_operation_refuses_21_characters(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        part = _part(db_session)
+        wc = _work_center(db_session)
+        work_order = WorkOrder(
+            work_order_number=f"WO-OPNUM-{_next()}",
+            part_id=part.id,
+            quantity_ordered=5,
+            status=WorkOrderStatus.DRAFT,
+            priority=3,
+            due_date=date.today() + timedelta(days=7),
+            company_id=COMPANY_A,
+        )
+        db_session.add(work_order)
+        db_session.commit()
+
+        response = client.post(
+            f"/api/v1/work-orders/{work_order.id}/operations",
+            headers=auth_headers,
+            json={
+                "work_center_id": wc.id,
+                "sequence": 10,
+                "name": "Saw",
+                "operation_number": _TOO_LONG,
+            },
+        )
+
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, response.text
+
+
+# --------------------------------------------------------------------------- #
+# The reorder body: the one caller-controlled NON-INT path into the column
+# --------------------------------------------------------------------------- #
+
+
+class TestReorderBodyIsTyped:
+    """``POST /routing/{id}/operations/reorder`` re-derives ``operation_number`` from the
+    caller's ``sequence``, so an untyped body wrote whatever ``str()`` produced.
+
+    It took ``List[dict]``: a JSON ``10.0`` persisted the string ``"10.0"`` into an
+    IDENTIFIER column, ``null`` persisted ``"None"`` before the ``nullable=False``
+    IntegrityError fired on ``sequence``, and a missing ``"id"`` was a ``KeyError`` → 500.
+    ``RoutingOperationReorderItem`` makes each a 422 at the boundary.
+    """
+
+    def _routing_with_two_operations(self, db: Session):
+        part = _part(db)
+        wc = _work_center(db)
+        routing = _routing(db, part, status_value="draft")
+        first = _routing_operation(db, routing, wc, sequence=10, operation_number="10", name="Saw")
+        second = _routing_operation(db, routing, wc, sequence=20, operation_number="20", name="Deburr")
+        db.commit()
+        return routing.id, first.id, second.id
+
+    def test_a_whole_number_float_sequence_persists_digits_not_a_float_string(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        """``20.0`` is what a JS client sends for a whole number; it must not store ``"20.0"``."""
+        routing_id, first_id, second_id = self._routing_with_two_operations(db_session)
+
+        response = client.post(
+            f"/api/v1/routing/{routing_id}/operations/reorder",
+            headers=auth_headers,
+            json=[{"id": first_id, "sequence": 20.0}, {"id": second_id, "sequence": 10.0}],
+        )
+
+        assert response.status_code == status.HTTP_200_OK, response.text
+        db_session.expire_all()
+        by_id = {op.id: op for op in _routing_operations(db_session, routing_id)}
+        assert by_id[first_id].operation_number == "20"
+        assert by_id[second_id].operation_number == "10"
+        assert by_id[first_id].sequence == 20
+
+    def test_a_fractional_sequence_is_refused(self, client: TestClient, auth_headers: dict, db_session: Session):
+        """No sequence is 10.5 — coercion must refuse it rather than store ``"10.5"``."""
+        routing_id, first_id, _ = self._routing_with_two_operations(db_session)
+
+        response = client.post(
+            f"/api/v1/routing/{routing_id}/operations/reorder",
+            headers=auth_headers,
+            json=[{"id": first_id, "sequence": 10.5}],
+        )
+
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, response.text
+
+    def test_a_null_sequence_is_refused(self, client: TestClient, auth_headers: dict, db_session: Session):
+        routing_id, first_id, _ = self._routing_with_two_operations(db_session)
+
+        response = client.post(
+            f"/api/v1/routing/{routing_id}/operations/reorder",
+            headers=auth_headers,
+            json=[{"id": first_id, "sequence": None}],
+        )
+
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, response.text
+
+    def test_a_missing_id_is_refused_instead_of_raising_keyerror(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        routing_id, _, _ = self._routing_with_two_operations(db_session)
+
+        response = client.post(
+            f"/api/v1/routing/{routing_id}/operations/reorder",
+            headers=auth_headers,
+            json=[{"sequence": 20}],
+        )
+
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, response.text
+
+    def test_a_refused_body_leaves_every_row_untouched(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        """Validation runs before the handler, so a bad item can't half-apply the reorder."""
+        routing_id, first_id, second_id = self._routing_with_two_operations(db_session)
+
+        response = client.post(
+            f"/api/v1/routing/{routing_id}/operations/reorder",
+            headers=auth_headers,
+            json=[{"id": first_id, "sequence": 20}, {"id": second_id, "sequence": None}],
+        )
+
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, response.text
+        db_session.expire_all()
+        by_id = {op.id: op for op in _routing_operations(db_session, routing_id)}
+        assert by_id[first_id].sequence == 10
+        assert by_id[first_id].operation_number == "10"
+        assert by_id[second_id].sequence == 20

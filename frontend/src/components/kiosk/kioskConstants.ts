@@ -191,10 +191,15 @@ export interface KioskWorkCenterQueueResponse {
  * board, the dashboard and the material-tie panels read the same free-text
  * column, and ShopFloor reads it from the SAME endpoint this queue does.
  *
+ * `operationNumberText` comes with it: the kiosk cards need the BARE identifier
+ * for their `aria-label` fallbacks, where the visible text already carries the
+ * label and interpolating the raw column announced "operation Op 10" for a
+ * legacy row beside "operation 10" for a new one.
+ *
  * NON-KIOSK code must import from `utils/operationLabel` directly — never reach
  * into `components/kiosk/` for it.
  */
-export { formatOperationLabel } from '../../utils/operationLabel';
+export { formatOperationLabel, operationNumberText } from '../../utils/operationLabel';
 
 /** "Steps 2/6" — the process-steps chip label (call only when steps_total > 0). */
 export function formatStepsChip(item: Pick<KioskQueueItem, 'steps_total' | 'steps_recorded'>): string {

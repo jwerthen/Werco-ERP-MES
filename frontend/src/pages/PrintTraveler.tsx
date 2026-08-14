@@ -298,7 +298,13 @@ export default function PrintTraveler() {
         <thead>
           <tr className="bg-gray-200">
             <th className="border p-2 text-center">Scan</th>
-            <th className="border p-2 text-left">Seq</th>
+            {/* "Op #", not "Seq". The cell below prints `operation_number` --
+                the office's own identifier, which the create form mints from the
+                sequence but does NOT re-derive when the planner edits the Seq
+                field afterwards, and which shop-floor predecessor gating does not
+                read. Printing that under a "Seq" header put a number on a shop
+                document under a name that is not what it means. */}
+            <th className="border p-2 text-left">Op #</th>
             <th className="border p-2 text-left">Operation / Instructions</th>
             <th className="border p-2 text-left">Work Center</th>
             <th className="border p-2 text-left">Component / Qty Req</th>
@@ -322,9 +328,12 @@ export default function PrintTraveler() {
                   </>
                 )}
               </td>
-              {/* Bare identifier: the column header already says "Seq", so a stored
-                  legacy "Op 10" would print the word twice. The numeric-sequence
-                  fallback is unchanged -- `operationNumberText` returns '' for a
+              {/* Bare identifier: the header carries the noun, so a stored legacy
+                  "Op 10" would print the word twice. Sourced from `operation_number`
+                  rather than `sequence` on purpose -- a customer-mandated "10A" is
+                  the number the shop and the customer both reference, and printing
+                  the sequence instead would silently drop the "A". The numeric
+                  fallback is unchanged: `operationNumberText` returns '' for a
                   blank, which keeps the `||` chain behaving exactly as before. */}
               <td className="border p-2 font-mono">{operationNumberText(op.operation_number) || op.sequence}</td>
               <td className="border p-2">

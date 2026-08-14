@@ -113,10 +113,16 @@ describe('operationNumberText and formatOperationLabel share ONE prefix definiti
     'Op A10',
     'Operation A10',
     'Op FINAL',
+    'Nest 1',
+    'Op Nest 1',
     '110',
     10,
     0,
   ];
+
+  // Restated INDEPENDENTLY of the module rather than imported, so a widened
+  // self-labeled set in the source cannot quietly widen the contract here too.
+  const isSelfLabeled = (value: string | number | null | undefined) => /^nest\b/i.test(operationNumberText(value));
 
   // This is the guard that keeps the two from drifting: whatever either one
   // decides a prefix is, the other decided the same thing. A second regex would
@@ -125,7 +131,11 @@ describe('operationNumberText and formatOperationLabel share ONE prefix definiti
     'label === "Op " + bare text, for %s',
     (_label, input) => {
       if (hasOperationNumber(input)) {
-        expect(formatOperationLabel(input)).toBe(`Op ${operationNumberText(input)}`);
+        // Two arms, and exactly two: a self-labeled identifier IS its own label
+        // (`Nest 3`), everything else wears the prefix. Both arms are strict --
+        // an `Op ` that went missing from a routed number fails here.
+        const expected = isSelfLabeled(input) ? operationNumberText(input) : `Op ${operationNumberText(input)}`;
+        expect(formatOperationLabel(input)).toBe(expected);
         expect(operationNumberText(input)).not.toBe('');
       } else {
         expect(formatOperationLabel(input)).toBe(OPERATION_LABEL_FALLBACK);
@@ -144,5 +154,52 @@ describe('operationNumberText and formatOperationLabel share ONE prefix definiti
   it('treats a zero sequence as a real identifier, which truthiness would not', () => {
     expect(operationNumberText(0)).toBe('0');
     expect(formatOperationLabel(0)).toBe('Op 0');
+  });
+});
+
+/**
+ * `operation_number` does not hold op numbers exclusively. `laser_nest_service`
+ * mints `Nest {index}` into the same column, and those rows land on the kiosk
+ * queue cards, the dispatch board and the duplicate-work-order skip notice
+ * beside a routed `10`. Prefixing them read `Op Nest 3` — the doubled noun this
+ * module exists to prevent, one noun over.
+ */
+describe('a value that already names what it identifies is left alone', () => {
+  it.each([
+    ['Nest 1', 'Nest 1'],
+    ['Nest 12', 'Nest 12'],
+    ['nest 3', 'nest 3'],
+    ['NEST-3', 'NEST-3'],
+    // Never minted, but it names a nest and not an operation either way.
+    ['Nest', 'Nest'],
+  ])('labels %s as %s — no "Op" in front of a nest', (stored, expected) => {
+    expect(formatOperationLabel(stored)).toBe(expected);
+  });
+
+  it('heals the doubled form a copy-paste of the old rendering would store', () => {
+    // The old label was `Op Nest 3`. Typed back into the field it must not
+    // survive as one, exactly as `Op Op 10` does not.
+    expect(formatOperationLabel('Op Nest 3')).toBe('Nest 3');
+    expect(operationNumberText('Op Nest 3')).toBe('Nest 3');
+  });
+
+  it('is still idempotent, which a prefix-every-time rule was not', () => {
+    ['Nest 1', 'Op Nest 1', 'NEST-3'].forEach((stored) => {
+      const once = formatOperationLabel(stored);
+      expect(formatOperationLabel(once)).toBe(once);
+    });
+  });
+
+  it('matches a WORD, so a hand-typed operation name keeps its prefix', () => {
+    // The carve-out is for the noun `Nest`, not for anything starting with those
+    // four letters -- over-labeling an unknown value is the safe direction.
+    expect(formatOperationLabel('Nesting fixture')).toBe('Op Nesting fixture');
+    expect(formatOperationLabel('NESTED WELD')).toBe('Op NESTED WELD');
+  });
+
+  it('names an operation, and its bare text is the identifier itself', () => {
+    // A blind `.slice('Op '.length)` on the label would return `t 3` here.
+    expect(hasOperationNumber('Nest 3')).toBe(true);
+    expect(operationNumberText('Nest 3')).toBe('Nest 3');
   });
 });

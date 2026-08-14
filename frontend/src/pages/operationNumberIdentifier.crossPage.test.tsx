@@ -365,7 +365,7 @@ describe('ShopFloor work-order drilldown', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 5. PrintTraveler — the "Seq" column on the printed shop document
+// 5. PrintTraveler — the "Op #" column on the printed shop document
 // ---------------------------------------------------------------------------
 
 describe('PrintTraveler routing table', () => {
@@ -406,7 +406,7 @@ describe('PrintTraveler routing table', () => {
       </MemoryRouter>
     );
 
-  it('prints the BARE identifier under the "Seq" header — same text for both spellings', async () => {
+  it('prints the BARE identifier under the "Op #" header — same text for both spellings', async () => {
     const [legacy, current] = await bothSpellings(async (stored) => {
       mockedApi.getWorkOrder.mockResolvedValue(workOrder(stored));
       mockedApi.getPart.mockResolvedValue(PART);
@@ -419,14 +419,38 @@ describe('PrintTraveler routing table', () => {
       });
       renderTraveler();
       await screen.findByText('WORK ORDER TRAVELER');
-      return firstBodyCellUnder('Seq');
+      return firstBodyCellUnder('Op #');
     });
 
-    // On paper the header reads "Seq" and the cell reads "10" — one number under
-    // one word, which is what an operator signing the traveler expects.
+    // On paper the header reads "Op #" and the cell reads "10" — one number under
+    // a name that matches what the cell holds. The header is deliberately NOT
+    // "Seq": the cell prints `operation_number`, which the create form seeds from
+    // the sequence but never re-derives when the planner edits Seq afterwards, so
+    // the two can legitimately differ on the same row.
     expect(legacy).toBe('10');
     expect(current).toBe('10');
     expect(legacy).toBe(current);
+  });
+
+  it('prints a customer-mandated identifier WHOLE — "OP-10A" prints "10A", not "10"', async () => {
+    // The reason the column is sourced from `operation_number` and not `sequence`:
+    // when a customer print mandates op "10A", that string is what the shop, the
+    // traveler and the customer's own paperwork all reference. Printing the
+    // sequence beside it would drop the "A" from a controlled document.
+    mockedApi.getWorkOrder.mockResolvedValue(workOrder('OP-10A'));
+    mockedApi.getPart.mockResolvedValue(PART);
+    mockedApi.getMaterialRequirements.mockResolvedValue({
+      work_order_id: 42,
+      work_order_number: 'WO-20260812-003',
+      quantity_ordered: 8,
+      has_bom: false,
+      materials: [],
+    });
+    renderTraveler();
+    await screen.findByText('WORK ORDER TRAVELER');
+
+    // `10A`, not `10` (the sequence) and not `OP-10A` (the header carries the noun).
+    expect(firstBodyCellUnder('Op #')).toBe('10A');
   });
 
   it('still falls back to the numeric sequence when no number is stored', async () => {
@@ -446,7 +470,7 @@ describe('PrintTraveler routing table', () => {
     await screen.findByText('WORK ORDER TRAVELER');
 
     // The `|| op.sequence` chain is preserved: `operationNumberText` returns ''
-    // for a blank, so a traveler never prints an empty Seq cell.
-    expect(firstBodyCellUnder('Seq')).toBe('30');
+    // for a blank, so a traveler never prints an empty "Op #" cell.
+    expect(firstBodyCellUnder('Op #')).toBe('30');
   });
 });
