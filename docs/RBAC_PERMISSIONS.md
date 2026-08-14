@@ -175,6 +175,13 @@ tier, that tier stands — this rule is a floor, never a loosening.
 > attribution and two booleans. The same read over a **user session** returns the full block. This
 > mirrors the wallboard's standing rule for unattended shop screens (no NCR titles/descriptions);
 > see `docs/API.md` → Shop Floor → "Disclosure (`held`)".
+>
+> That withholding is scoped to the **blocker's** free text. The same queue read **does** send the
+> job's five office-authored guidance fields (work-order notes / special instructions, and the
+> operation's description / setup / run text) to a station principal — a recorded exception (owner
+> decision, 2026-08-14), on the reasoning that planning text exists to reach the person doing the
+> work, and explicitly **not** a relaxation of the rule above. No role or permission changed. See
+> `docs/KIOSK.md` → "Disclosure: this free text does reach a crew station".
 
 > **Release stays the authorization boundary even though a read can now promote operations.** READY
 > promotion runs from a reconcile-on-read seam (one of four) — so a work order released before the

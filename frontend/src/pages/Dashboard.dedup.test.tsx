@@ -311,3 +311,51 @@ test('multi-assignment (crew stations): chip clicks CYCLE through every assignme
   expect(anchorCalls()).toEqual(['assign-101', 'assign-102', 'assign-101']);
   getById.mockRestore();
 });
+
+/**
+ * Operation-number label — the "Op Op 10" bug class.
+ *
+ * `operation_number` is free text; on WO-20260807-006 it is literally "Op 10",
+ * and this panel hard-coded its own ` · Op ` prefix around it. It now routes
+ * through the shared `utils/operationLabel` helper, and the panel's own
+ * empty-state (omit the segment AND its separator) is preserved.
+ */
+describe('Live Shop Activity renders the operation number through the shared helper', () => {
+  const withOperationNumber = (operationNumber: string | null) => {
+    mockedApi.getDashboardWithCache.mockResolvedValue({
+      data: {
+        ...dashboardData,
+        active_assignments: [
+          {
+            ...dashboardData.active_assignments[0],
+            operation: { ...dashboardData.active_assignments[0].operation, operation_number: operationNumber },
+          },
+        ],
+      } as any,
+      fromCache: false,
+      changed: true,
+    });
+  };
+
+  it('renders a stored "Op 10" as "· Op 10" — never "Op Op 10"', async () => {
+    withOperationNumber('Op 10');
+    renderDashboard();
+    await screen.findByText('Capacity Overview');
+
+    const row = document.getElementById('assign-101') as HTMLElement;
+    expect(row.textContent).toContain('· Op 10');
+    expect(row.textContent).not.toMatch(/Op\s+Op/i);
+  });
+
+  it('omits the segment AND its separator when the number is blank — no "· Op —"', async () => {
+    withOperationNumber(null);
+    renderDashboard();
+    await screen.findByText('Capacity Overview');
+
+    const row = document.getElementById('assign-101') as HTMLElement;
+    // This panel's empty-state is deliberately NOT the kiosk em-dash: the line is
+    // a dense one-liner where a dangling "· Op —" is noise on every idle row.
+    expect(row.textContent).not.toContain('Op —');
+    expect(row.textContent).not.toContain('·');
+  });
+});

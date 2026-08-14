@@ -20,6 +20,7 @@
  */
 
 import {
+  KioskJobInstructions,
   KioskLastReport,
   KioskMaterialTie,
   KioskQueueWorkCenter,
@@ -32,7 +33,7 @@ import {
 // `ActiveJob` (GET /shop-floor/my-active-job) carries it too, and this module
 // imports FROM types -- defining it here and referencing it there would be a
 // cycle.
-export type { KioskMaterialTie };
+export type { KioskJobInstructions, KioskMaterialTie };
 
 export const KIOSK_SOURCE = 'kiosk';
 
@@ -85,8 +86,18 @@ export const HOLD_REASONS: KioskReason[] = [
   { value: 'other', label: 'Other' },
 ];
 
-/** Work-center queue row as returned by GET /shop-floor/work-center-queue/{id}. */
-export interface KioskQueueItem {
+/**
+ * Work-center queue row as returned by GET /shop-floor/work-center-queue/{id}.
+ *
+ * Extends `KioskJobInstructions` (types/index.ts): the five written-guidance
+ * fields (`work_order_notes`, `work_order_special_instructions`,
+ * `operation_description`, `operation_setup_instructions`,
+ * `operation_run_instructions`) ride this row and the my-active-job dict under
+ * the SAME names, which is what lets one <KioskJobNotes> render all three
+ * single-operation kiosk surfaces. All optional — pre-feature payloads and
+ * pre-existing fixtures still typecheck.
+ */
+export interface KioskQueueItem extends KioskJobInstructions {
   operation_id: number;
   work_order_id: number;
   work_order_number: string;
@@ -171,6 +182,19 @@ export interface KioskWorkCenterQueueResponse {
   /** The queue's work center (backend B3) — feeds the kiosk top bar. */
   work_center?: KioskQueueWorkCenter | null;
 }
+
+/**
+ * "Op 10" — re-exported so the kiosk surfaces keep importing their operation
+ * label from the kiosk barrel (the same reason `KioskMaterialTie` is re-exported
+ * above). The implementation lives in `utils/operationLabel` because the
+ * "Op Op 10" defect was never kiosk-specific: the shop-floor queue, the dispatch
+ * board, the dashboard and the material-tie panels read the same free-text
+ * column, and ShopFloor reads it from the SAME endpoint this queue does.
+ *
+ * NON-KIOSK code must import from `utils/operationLabel` directly — never reach
+ * into `components/kiosk/` for it.
+ */
+export { formatOperationLabel } from '../../utils/operationLabel';
 
 /** "Steps 2/6" — the process-steps chip label (call only when steps_total > 0). */
 export function formatStepsChip(item: Pick<KioskQueueItem, 'steps_total' | 'steps_recorded'>): string {

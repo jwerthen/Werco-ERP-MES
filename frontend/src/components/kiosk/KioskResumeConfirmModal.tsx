@@ -1,6 +1,6 @@
 import React from 'react';
 import KioskModal, { KioskModalClose } from './KioskModal';
-import { KioskQueueItem } from './kioskConstants';
+import { KioskQueueItem, formatOperationLabel } from './kioskConstants';
 import { formatHoldAttribution, hasHoldReason, holdFreeTextWithheld, holdReasonLabel } from './heldOperations';
 
 interface KioskResumeConfirmModalProps {
@@ -85,7 +85,7 @@ export default function KioskResumeConfirmModal({
             {item.part_name ? <span className="text-fd-mute"> · {item.part_name}</span> : null}
           </p>
           <p className="mt-0.5 text-base text-fd-mute">
-            Op {item.operation_number ?? '—'}
+            {formatOperationLabel(item.operation_number)}
             {item.operation_name ? ` · ${item.operation_name}` : ''}
           </p>
         </div>

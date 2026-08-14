@@ -395,3 +395,35 @@ describe('OperationMaterialTieModal: copy', () => {
     expect(notice.textContent).toMatch(/deduct at this operation’s completion/i);
   });
 });
+
+/**
+ * Dialog title — the "Op Op 10" bug class.
+ *
+ * `WorkOrderOperation.operation_number` is free text; on WO-20260807-006 it is
+ * literally "Op 10", and this dialog's title hard-coded its own `Op ` prefix.
+ * It now routes through the shared `utils/operationLabel` helper. The `Seq {n}`
+ * fallback is preserved on purpose — `sequence` is a real integer that names the
+ * operation better than an em-dash would in a dialog title.
+ */
+describe('OperationMaterialTieModal operation label', () => {
+  it('titles the dialog "Op 10" for a stored "Op 10" — never "Op Op 10"', async () => {
+    renderModal({ operation: { ...OPERATION, operation_number: 'Op 10' } as WorkOrderOperation });
+
+    const heading = await screen.findByRole('heading', { name: /Tie material to this operation/i });
+    expect(heading.textContent).toContain('Op 10 · Laser');
+    expect(heading.textContent).not.toMatch(/Op\s+Op/i);
+  });
+
+  it('falls back to "Seq {n}", not the em-dash, when the number is blank', async () => {
+    // `undefined`, not `null`: WorkOrderOperation declares `operation_number?: string`,
+    // so absent is the shape the client contract actually produces. (The helper is
+    // null-safe regardless — see utils/operationLabel.test coverage.)
+    renderModal({
+      operation: { ...OPERATION, operation_number: undefined, sequence: 10 } as WorkOrderOperation,
+    });
+
+    const heading = await screen.findByRole('heading', { name: /Tie material to this operation/i });
+    expect(heading.textContent).toContain('Seq 10 · Laser');
+    expect(heading.textContent).not.toContain('Op —');
+  });
+});

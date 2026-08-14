@@ -88,6 +88,7 @@ import {
   type NestChangeover,
 } from '../utils/nestChangeover';
 import { countShortTies, materialTieChip, type MaterialTieTone } from '../utils/materialTie';
+import { formatOperationLabel, hasOperationNumber } from '../utils/operationLabel';
 import type { DispatchBoardColumn, DispatchBoardRow, RunOrderUpdateResponse } from '../types';
 
 /**
@@ -144,7 +145,12 @@ const isRunning = (row: DispatchBoardRow) => String(row.status).toLowerCase() ==
 
 /** "WO-20260720-001 Nest 1" — how a job is named in labels and announcements. */
 export function jobLabel(row: DispatchBoardRow): string {
-  const operation = row.operation_name || (row.operation_number != null ? `Op ${row.operation_number}` : 'Operation');
+  // `hasOperationNumber`, not `!= null`: a stored empty string passed the old
+  // check and announced a bare "Op ". The word "Operation" stays the fallback
+  // here rather than the em-dash — this string is read aloud in the drag
+  // announcements and used as an aria-label.
+  const operation =
+    row.operation_name || (hasOperationNumber(row.operation_number) ? formatOperationLabel(row.operation_number) : 'Operation');
   return `${row.work_order_number} ${operation}`.trim();
 }
 
@@ -1212,7 +1218,7 @@ function DispatchCard({
             )}
           </div>
           <p className="truncate text-xs text-slate-300">
-            {row.operation_number != null ? `Op ${row.operation_number} · ` : ''}
+            {hasOperationNumber(row.operation_number) ? `${formatOperationLabel(row.operation_number)} · ` : ''}
             {row.operation_name || 'Operation'}
           </p>
           {row.part_number && (

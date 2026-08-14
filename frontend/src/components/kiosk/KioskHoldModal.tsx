@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import KioskModal, { KioskModalClose } from './KioskModal';
-import { HOLD_REASONS } from './kioskConstants';
+import { HOLD_REASONS, formatOperationLabel } from './kioskConstants';
 
 /**
  * Two-line tile copy per the Foundry handoff (1f), keyed by the EXISTING
@@ -65,7 +65,7 @@ export default function KioskHoldModal({
           Place on hold
         </h2>
         <span className="font-mono text-[11px] uppercase text-fd-mute">
-          {workOrderNumber} · Op {operationNumber ?? '—'} · Timer will pause
+          {workOrderNumber} · {formatOperationLabel(operationNumber)} · Timer will pause
         </span>
         <div className="flex-1" />
         <KioskModalClose onClose={onCancel} disabled={busy} />

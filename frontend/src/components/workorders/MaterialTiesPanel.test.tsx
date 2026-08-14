@@ -789,3 +789,45 @@ describe('MaterialTiesPanel — the refreshToken freshness seam (PR 4.5)', () =>
     expect(mockApi.getMaterialAllocations).toHaveBeenCalledTimes(1);
   });
 });
+
+/**
+ * Scope label — the "Op Op 10" bug class.
+ *
+ * `MaterialAllocation.operation_number` is the same free-text column the kiosk
+ * fix normalized; this panel hard-coded its own `Op ` prefix around it. It now
+ * routes through the shared `utils/operationLabel` helper, and the panel's own
+ * `Operation #{id}` fallback is preserved — an em-dash would leave a tie unable
+ * to say which operation it is scoped to.
+ */
+describe('MaterialTiesPanel scope label', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('renders a stored "Op 10" as "Op 10" — never "Op Op 10"', async () => {
+    mockApi.getMaterialAllocations.mockResolvedValue([makeTie({ operation_number: 'Op 10' })]);
+    renderPanel();
+
+    expect(await screen.findByText('Op 10')).toBeInTheDocument();
+    expect(screen.queryByText(/Op\s+Op/i)).toBeNull();
+  });
+
+  it('normalizes the other stored spellings to the same "Op 10"', async () => {
+    for (const stored of ['10', 'OP10', 'op-10', 'Operation 10']) {
+      mockApi.getMaterialAllocations.mockResolvedValue([makeTie({ operation_number: stored })]);
+      const { unmount } = renderPanel();
+      expect(await screen.findByText('Op 10')).toBeInTheDocument();
+      unmount();
+    }
+  });
+
+  it('falls back to "Operation #{id}", not the em-dash, when the number is blank', async () => {
+    mockApi.getMaterialAllocations.mockResolvedValue([
+      makeTie({ operation_number: null, work_order_operation_id: 71 }),
+    ]);
+    renderPanel();
+
+    expect(await screen.findByText('Operation #71')).toBeInTheDocument();
+    expect(screen.queryByText('Op —')).toBeNull();
+  });
+});

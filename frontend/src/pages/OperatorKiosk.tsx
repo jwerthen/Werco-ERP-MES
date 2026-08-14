@@ -40,12 +40,14 @@ import {
   readStranded,
 } from '../components/kiosk/oneTapStrandedStore';
 import type { StrandedOneTapRecord } from '../components/kiosk/oneTapStrandedStore';
+import KioskJobNotes from '../components/kiosk/KioskJobNotes';
 import LaserNestOperatorPanel from '../components/laser/LaserNestOperatorPanel';
 import {
   KIOSK_SOURCE,
   KioskQueueItem,
   KioskWorkCenterQueueResponse,
   formatElapsed,
+  formatOperationLabel,
   formatStepsChip,
   kioskErrorMessage,
 } from '../components/kiosk/kioskConstants';
@@ -127,7 +129,9 @@ interface KioskToast {
 let toastSeq = 0;
 
 function jobLabel(job: ActiveJob): string {
-  return `${job.work_order_number || '—'} · Op ${job.operation_number ?? '—'} ${job.operation_name || ''}`.trim();
+  return `${job.work_order_number || '—'} · ${formatOperationLabel(job.operation_number)} ${
+    job.operation_name || ''
+  }`.trim();
 }
 
 /**
@@ -335,7 +339,9 @@ export default function OperatorKiosk() {
     if (userId == null || activeOperationId == null) return null;
     return {
       key: `user:${userId}|op:${activeOperationId}`,
-      label: `${operatorName} · ${activeJob?.work_order_number || '—'} Op ${activeJob?.operation_number ?? '—'}`,
+      label: `${operatorName} · ${activeJob?.work_order_number || '—'} ${formatOperationLabel(
+        activeJob?.operation_number
+      )}`,
       // The operation id travels WITH the stamp, so the request is addressed by
       // the very object the binding check validated. Reading it off a page ref
       // instead is the race this replaces: between a ref assignment and the
@@ -822,7 +828,7 @@ export default function OperatorKiosk() {
       try {
         const result = await api.resumeOperation(item.operation_id);
         const open = stillOpenBlockers(result);
-        const label = `${item.work_order_number} · Op ${item.operation_number ?? '—'} ${
+        const label = `${item.work_order_number} · ${formatOperationLabel(item.operation_number)} ${
           item.operation_name || ''
         }`.trim();
         if (open.length > 0) {
@@ -1133,7 +1139,8 @@ export default function OperatorKiosk() {
                         Running
                       </span>
                       <span className="truncate font-mono text-[11px] uppercase tracking-[0.14em] text-fd-mute">
-                        Op {activeJob.operation_number ?? '—'} · {activeJob.operation_name || 'Operation'}
+                        {formatOperationLabel(activeJob.operation_number)} ·{' '}
+                        {activeJob.operation_name || 'Operation'}
                       </span>
                       <div className="flex-1" />
                       <span className="hidden font-mono text-[10px] uppercase tracking-[0.14em] text-fd-mute min-[1100px]:block">
@@ -1263,6 +1270,14 @@ export default function OperatorKiosk() {
                         )}
                       </div>
                     )}
+
+                    {/* Written guidance, still on screen AFTER clock-in — a note
+                        that vanishes the moment work starts is useless. `sm`
+                        because this column shares its height with the telemetry
+                        tiles and the action bar; the block caps and scrolls
+                        internally so REPORT PRODUCTION / COMPLETE / HOLD can
+                        never be pushed off the bottom. */}
+                    <KioskJobNotes job={activeJob} size="sm" className="mx-4 mt-3 min-[1100px]:mx-[18px]" />
 
                     {/* Process-steps row + SCRAP/NCR */}
                     <div className="mx-4 mt-3 flex gap-3 min-[1100px]:mx-[18px]">
@@ -1537,11 +1552,14 @@ export default function OperatorKiosk() {
                   ) : null}
                 </p>
                 <p className="mt-1 text-xl text-fd-mute">
-                  Op {view.item.operation_number ?? '—'} · {view.item.operation_name || 'Operation'}
+                  {formatOperationLabel(view.item.operation_number)} · {view.item.operation_name || 'Operation'}
                 </p>
                 <p className="mt-3 font-mono text-2xl tabular-nums text-fd-body">
                   {Number(view.item.quantity_complete || 0)} / {Number(view.item.quantity_ordered || 0)} pcs
                 </p>
+                {/* Read it BEFORE clocking in — and it stays on the running-job
+                    hero afterwards, so nothing is lost at the transition. */}
+                <KioskJobNotes job={view.item} className="mt-4" />
                 {view.item.laser_nest && (
                   <div className="mt-4">
                     <LaserNestOperatorPanel
@@ -1561,9 +1579,9 @@ export default function OperatorKiosk() {
                     setView({
                       name: 'steps',
                       operationId: view.item.operation_id,
-                      jobLabel: `${view.item.work_order_number || '—'} · Op ${view.item.operation_number ?? '—'} ${
-                        view.item.operation_name || ''
-                      }`.trim(),
+                      jobLabel: `${view.item.work_order_number || '—'} · ${formatOperationLabel(
+                        view.item.operation_number
+                      )} ${view.item.operation_name || ''}`.trim(),
                     })
                   }
                   className="mt-3 flex min-h-14 w-full items-center justify-center gap-3 rounded-[4px] border border-fd-cyan/40 bg-fd-cyan/5 px-4 font-mono text-base font-bold uppercase tracking-[0.08em] text-fd-cyan transition-transform duration-150 ease-out active:scale-[0.98] disabled:opacity-40"

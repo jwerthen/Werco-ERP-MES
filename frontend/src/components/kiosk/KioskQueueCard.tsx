@@ -1,7 +1,7 @@
 import React from 'react';
 import { ArrowUpRightIcon } from '@heroicons/react/24/outline';
 import { formatCentralDate, isDateBeforeTodayInCentral, isDateTodayInCentral } from '../../utils/centralTime';
-import { KioskQueueItem, formatStepsChip } from './kioskConstants';
+import { KioskQueueItem, formatOperationLabel, formatStepsChip } from './kioskConstants';
 
 /**
  * "Steps 2/6" — required process-step progress for the operation. Hidden when
@@ -146,7 +146,7 @@ export default function KioskQueueCard({ item, onSelect, active = false, disable
       <div className="mt-2 flex flex-wrap items-center gap-2 text-[13px] text-fd-body">
         <span className="min-w-0 truncate">
           <span className="font-mono font-semibold text-fd-body-2">{item.part_number || '—'}</span>
-          {item.part_name ? ` ${item.part_name}` : ''} · Op {item.operation_number ?? '—'}
+          {item.part_name ? ` ${item.part_name}` : ''} · {formatOperationLabel(item.operation_number)}
         </span>
         <div className="flex-1" />
         {item.due_date && (

@@ -101,13 +101,15 @@ URL is all the station setup there is.
 ## What operators can do
 
 1. **Queue → confirm → clock in (2 taps).** The station queue lists the work center's
-   operations; tapping a job shows a confirm card; CLOCK IN calls
+   operations; tapping a job shows a confirm card carrying the job's written guidance (see
+   [Job instructions on screen](#job-instructions-on-screen)); CLOCK IN calls
    `POST /shop-floor/clock-in` (entry type `run`). When the operation carries
    process-sheet steps, the confirm card adds a **REVIEW STEPS 2/6** button so the
    operator can read the steps before starting (see
    [Process steps](#process-steps-process-sheets-capture)).
 2. **Running-job panel** (the split hero's left column while clocked in): WO number, part +
-   **REV** chip (the new `part_revision` payload), quantity + progress bar, the laser-nest
+   **REV** chip (the new `part_revision` payload), quantity + progress bar, the job's written
+   guidance (compact — [Job instructions on screen](#job-instructions-on-screen)), the laser-nest
    strip with its **VIEW NEST** button, a process-steps row (**PROCESS STEPS · 2/6 RECORDED**,
    when the operation carries steps) beside a **SCRAP / NCR** shortcut straight to the report
    overlay's scrap tab, and four telemetry tiles — **LAST REPORT** (time + good/scrap deltas
@@ -319,6 +321,93 @@ shape). The optional reference PDF is fetched **inline** through the fence-safe
 `GET /shop-floor/documents/{id}/inline` on kiosk surfaces (the old `GET /laser-nests/{id}/document`
 route remains for desktop callers); there is no approval workflow, and it never gates clock-in.
 
+## Job instructions on screen
+
+Before 2026-08-14 the kiosk rendered **no planning free text at all**. A "Unit #" the owner typed
+into a work order's Notes field was invisible to the welder at the crew station — the note existed,
+the operator could not reach it, and the only fix was walking to a desk. The kiosk now shows the
+job's written guidance wherever it shows a single operation.
+
+**The five fields**, in the order they render, labeled in shop language so an operator can tell
+work-order-level authority from operation-level:
+
+| On screen | Payload key | Where the office types it |
+| --- | --- | --- |
+| **Job Notes** | `work_order_notes` | Work order → Notes |
+| **Special Instructions** | `work_order_special_instructions` | Work order → Special Instructions |
+| **Operation Detail** | `operation_description` | The operation's description |
+| **Setup** | `operation_setup_instructions` | The operation's setup instructions |
+| **Run** | `operation_run_instructions` | The operation's run instructions |
+
+They ride the reads the kiosk already makes — every `GET /shop-floor/work-center-queue/{id}` row
+(queue **and** `held`) and every job on `GET /shop-floor/my-active-job` — so there is no extra call
+and no new permission. Each value is the stored text **verbatim** or `null`; whitespace-only comes
+back `null`. Line breaks and leading indentation survive (they are layout in a numbered
+instruction), and the text is rendered as **text, never HTML**. See
+[docs/API.md](API.md) → Shop Floor → "Written job guidance on operator reads" for the payload
+contract.
+
+**Where an operator sees them.** One component (`KioskJobNotes`) renders all three surfaces, so they
+cannot drift into showing different subsets:
+
+- **Crew station → Job detail** (tap a queue card). The block sits under the WO / part / op header
+  and **above the crew roster** — it is what the operator opened the job to read. Full size.
+- **Single-operator kiosk → the CLOCK IN? confirm card.** Under the quantity line, above the
+  laser-nest panel, so the guidance is readable *before* work starts.
+- **Single-operator kiosk → the running-job hero** (still clocked in). Compact size, above the
+  process-steps row. Deliberately still on screen after clock-in: a note that vanishes the moment
+  work starts is useless.
+
+A job with no written guidance renders **nothing at all** — no heading, no empty panel — so those
+jobs look exactly as they did before. A long note is capped and scrolls inside its own block, so
+REPORT PRODUCTION / COMPLETE / HOLD can never be pushed off the bottom. The **held** card is not one
+of the three surfaces: it still shows only the hold reason and RESUME (the keys ride held rows on
+the wire because held rows are built from the same job-card helper).
+
+> **Expect the three operation-level fields to be empty on most jobs.** Nothing in the app edits an
+> operation's description / setup instructions / run instructions after the work order exists. The
+> only writer is the work-order **create** form — which pre-fills them from the routing when the WO
+> is built from one — and the app's two callers of `PUT /work-orders/operations/{id}` (the Dispatch
+> Board and the WorkOrderDetail nest reassignment) send only `{work_center_id, version}`. The API
+> accepts all three fields on that endpoint; there is simply no screen that sends them. So unless a
+> job came from a routing that carried instructions, what an operator actually reads is the two
+> **work-order-level** fields — and those *are* editable after creation, from the Notes / Special
+> Instructions editor on the work-order detail page.
+
+### Disclosure: this free text does reach a crew station
+
+**Owner decision, 2026-08-14 — recorded here because it is an exception to the rule stated under
+[Held work and RESUME](#held-work-and-resume).** The five guidance fields are free text and they
+**are** sent to a station principal: the crew station's queue poll authenticates with the 24-hour
+shared-PIN **station** token, so this text renders on an unattended, PIN-unlocked tablet with no
+operator identity and no idle station logout. That is the point of the feature, not something that
+slipped through. This is office-authored **planning** text whose entire purpose is to reach the
+person doing the work, and the crew station is precisely the screen that could not see it — sending
+the guidance only to a badged operator session would have left the reported bug unfixed. (The
+running-job hero reads `GET /shop-floor/my-active-job`, which takes a user session — a desktop login
+or the crew station's five-minute badge-minted operator token — so that surface always has an
+identified caller.)
+
+**This does not reopen the blocker rule.** A hold blocker's `note` and `title` are **still withheld**
+from that same station principal (keys absent, not blanked), and that is deliberately untouched. The
+two are different categories of text with different authors: a blocker note is operator-authored
+**mid-incident**, about a problem, and reads like "NCR-1042 cracked welds, ACME rejected the lot" —
+customer names and quality findings, exactly the class the wallboard withholds; the five guidance
+fields are written in advance, by the office, specifically to be read at the machine. A single
+backend test (`backend/tests/api/test_kiosk_operation_guidance.py`) asserts **both halves on the
+same response**. Do not extend this exception to the
+blocker's free text, and do not cite it as grounds for relaxing that withholding.
+
+**The cost, stated plainly.** These fields are unconstrained free text — no vocabulary, no
+server-side redaction. Work-order Notes is exactly where somebody writes *"per ACME PO 4501,
+$12,500"*, and that would now be readable by anyone standing at the station. **The mitigation today
+is convention about what goes in Notes, not enforcement.** The alternative — a per-station display
+flag on the wallboard's `show_customer_names` pattern (server-enforced, off by default; see
+[docs/WALLBOARD.md](WALLBOARD.md) → "Customer names — gated") — was considered and **deliberately
+deferred**: it buys nothing until a shop actually needs a station that shows less, and a flag
+defaulted off would have shipped the same invisible-note bug it was meant to fix. If the shop's
+needs change, that is where to start.
+
 ## Held work and RESUME
 
 A held operation **stays visible on both kiosks**, in its own **ON HOLD** section below the
@@ -361,13 +450,19 @@ someone else; without it, RESUME is a control that silently clears another perso
 > on the operator's **own user session**, so it is an identified caller and keeps the full block.
 >
 > **This is the wallboard's rule, applied to the same class of screen.** `wallboard_service`'s
-> module docstring already states it for unattended shop displays — *no customer names, no ship-to
+> module docstring states it for the **wallboard's own payload** — *no customer names, no ship-to
 > addresses, no dollar figures, **no NCR titles/descriptions*** — and the wallboard's blocked-work
 > rail has `title` and `note` in hand and deliberately emits only `wo_number` / `category` /
 > `age_hours`. A held card carrying the note would disclose to that audience exactly what the
 > wallboard withholds. `title` travels with `note` because it is equally unconstrained: `POST
 > /work-order-blockers` takes a caller-supplied title, and the server-composed
 > `_blocker_default_title` is only the fallback for a kiosk-placed hold.
+>
+> **It is not a blanket rule that no free text reaches a station.** Since 2026-08-14 the queue read
+> carries the job's five office-authored guidance fields to a station principal — a recorded
+> exception with its own reasoning and its own cost, and explicitly **not** a licence to relax the
+> withholding described here. See [Disclosure: this free text does reach a crew
+> station](#disclosure-this-free-text-does-reach-a-crew-station) above.
 >
 > **It costs the feature nothing, and the card says so rather than going quiet.** The motivating
 > accident is a **bare** hold that carries no note at all, and a deliberate categorized hold is
@@ -1016,7 +1111,9 @@ The unlocked station shows the work center's **crew board**: one card per queued
 the operation-level tally and a roster chip strip of everyone clocked in, each with a live
 per-person timer (computed against the server clock via the queue's `server_time`, so a
 fast/slow tablet can't lie). The queue polls every **10 s** and refetches immediately after
-every successful action.
+every successful action. Tapping a card opens the **job screen**, which renders the job's written
+guidance above the roster — see [Job instructions on screen](#job-instructions-on-screen), including
+the disclosure decision that lets that text reach a shared station.
 
 Scrap entry on every crew flow (LEAVE clock-out, REPORT PRODUCTION, COMPLETE) uses the same
 codes-or-legacy picker as the single-operator mode (see "Scrap reason picker" under
