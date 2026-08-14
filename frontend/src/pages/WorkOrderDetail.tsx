@@ -1059,6 +1059,51 @@ export default function WorkOrderDetail() {
   // changes a column the server never reads is worse than no control.
   const sequencingApplies = workOrder?.work_order_type !== 'laser_cutting';
 
+  // The lowest-sequence operation that is NOT complete, or `null` when nothing
+  // on this work order blocks anything. It is the client-side mirror of the
+  // server's out-of-sequence guard: both office operation verbs
+  // (`POST /work-orders/operations/{id}/start` and `.../complete`) run the shared
+  // `operation_action_gates.operation_blocked_by_predecessors` and refuse 400
+  // "Previous operations must be completed first" while a LOWER-sequence
+  // operation of the same work order is not COMPLETE. "Some lower-sequence
+  // operation is incomplete" is exactly "this operation sits above the lowest
+  // incomplete one", so one scan answers it for every row.
+  //
+  // Without this the page offers Complete on all three weld-cell operations of a
+  // sequenced routing — the shape this feature exists for — and the server 400s
+  // whichever one the user picks, AFTER they have filled in the quantity/scrap
+  // modal. Pooled, that same call succeeded, so sequencing turns a rare mismatch
+  // into the common one.
+  //
+  // Three boundaries are the server's, not this file's taste:
+  //
+  //  * SEQUENCED ONLY. A pooled work order is deliberately left ungated, exactly
+  //    as it renders today. Disabling a control the server would have accepted is
+  //    the worse failure of the two — it hides a legal action with no override —
+  //    and the pooled rule additionally waives same-work-center predecessors
+  //    unless one is ON_HOLD, so a half-mirror of it would refuse work the floor
+  //    is allowed to start.
+  //  * NO WORK-CENTER LOGIC. Under sequencing `work_order_allows_same_work_center`
+  //    resolves to False, so a predecessor blocks from EVERY work center, its own
+  //    included. A same-cell waiver here would re-open the reported defect.
+  //  * LASER IS NEVER BLOCKED. `is_laser_dispatch_work_order` short-circuits above
+  //    the flag at every backend seam and drops predecessor gating entirely —
+  //    which is what `sequencingApplies` already encodes, so a nest WO carrying a
+  //    stored `sequential_operations = true` still gates nothing.
+  //
+  // Advisory only, like every other capability on this page: the server is still
+  // the enforcement, and this never enables a control the server would refuse.
+  const lowestIncompleteOperation = useMemo(() => {
+    if (!workOrder || !sequencingApplies || !sequentialOperations) return null;
+    return workOrder.operations.reduce<WorkOrderOperation | null>(
+      (lowest, candidate) =>
+        candidate.status === 'complete' || (lowest !== null && lowest.sequence <= candidate.sequence)
+          ? lowest
+          : candidate,
+      null
+    );
+  }, [workOrder, sequencingApplies, sequentialOperations]);
+
   // NON-OPTIMISTIC, and the refetch inside `saveWorkOrderPatch` is the reason
   // rather than a nicety: turning sequencing ON demotes un-started READY
   // operations back to PENDING server-side, so the Status column sitting beside
@@ -2497,6 +2542,17 @@ export default function WorkOrderDetail() {
                     const isNewGroup = op.operation_group && op.operation_group !== lastGroup;
                     if (op.operation_group) lastGroup = op.operation_group;
                     const operationTarget = operationRunTarget(op, workOrder.quantity_ordered);
+                    // Non-null only while the SERVER would refuse this operation's
+                    // office verbs — see `lowestIncompleteOperation`. Doubles as the
+                    // hover explanation, so the disabled control says why it is
+                    // disabled instead of looking broken. Strict `>` mirrors the
+                    // gate's `sequence < candidate.sequence`: operations sharing a
+                    // sequence number do not block each other, and the blocking
+                    // operation never blocks itself.
+                    const sequenceBlockReason =
+                      lowestIncompleteOperation && op.sequence > lowestIncompleteOperation.sequence
+                        ? `Previous operations must be completed first — this work order runs its operations in sequence, and operation ${lowestIncompleteOperation.sequence} (${lowestIncompleteOperation.name}) is not complete.`
+                        : null;
                     
                     const groupColors: Record<string, string> = {
                       'LASER': 'bg-fd-red/15 text-fd-red',
@@ -2648,9 +2704,9 @@ export default function WorkOrderDetail() {
                             {canCompleteOperation && op.status !== 'complete' && workOrder.status !== 'draft' && (
                               <button
                                 onClick={() => handleCompleteOperation(op)}
-                                disabled={completingOpId === op.id}
+                                disabled={completingOpId === op.id || sequenceBlockReason !== null}
                                 className="text-green-600 hover:text-green-300 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-                                title="Complete Operation"
+                                title={sequenceBlockReason ?? 'Complete Operation'}
                               >
                                 {completingOpId === op.id ? (
                                   <>

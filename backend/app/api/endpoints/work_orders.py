@@ -3353,6 +3353,17 @@ def update_work_order(
     # would otherwise sit READY on the dispatch board and the kiosk under a rule that
     # forbids them. Never touches worked operations -- see the helper's docstring.
     demoted_operations = demote_operations_for_sequencing(db, work_order) if sequencing_turned_on else []
+    if demoted_operations:
+        # Flush the demotions BEFORE the first audit call, and this ordering is load-bearing
+        # (invariant 4). WorkOrderOperation maps version_id_col, so a concurrent clock-in or
+        # hold on one of these rows makes the UPDATE stale. AuditService.log() flushes the
+        # whole session inside a begin_nested() savepoint and swallows every exception, so
+        # if the first log_status_change is what flushes them, the StaleDataError is eaten
+        # there, the savepoint is left deactivated, and the terminal flush below raises
+        # PendingRollbackError -- which no handler matches, turning the 409 this endpoint
+        # promises into an opaque 500. Flushing here raises StaleDataError to the app-wide
+        # handler instead, and mints audit rows only for demotions that actually landed.
+        db.flush()
     for demoted_op in demoted_operations:
         # Invariant 2: a rule-driven status change still gets an audit row, and this
         # endpoint HAS an actor, so it is attributed rather than left to a read path.
@@ -3366,7 +3377,14 @@ def update_work_order(
                 f"Operation returned to pending: work order {work_order.work_order_number} was switched to "
                 "sequential operations, and an earlier operation is not complete."
             ),
-            extra_data={"transition": "sequential_operations_enabled"},
+            extra_data={
+                "transition": "sequential_operations_enabled",
+                # Every other work_order_operation audit row identifies the operation by
+                # operation_number; carry it so a filter on that identifier still finds
+                # the demotion beside the operation's completion history.
+                "operation_number": demoted_op.operation_number,
+                "sequence": demoted_op.sequence,
+            },
         )
 
     _emit_work_order_event(

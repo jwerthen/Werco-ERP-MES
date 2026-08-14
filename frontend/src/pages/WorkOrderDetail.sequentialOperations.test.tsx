@@ -38,6 +38,22 @@
  * payload including `version` for the optimistic lock, the work_orders:edit role
  * gate, and the in-flight pending state.
  *
+ * THE SECOND HALF of this file is the consequence of the switch: the office
+ * per-operation "Complete" button must agree with the server's out-of-sequence
+ * guard. `POST /work-orders/operations/{id}/complete` runs the shared
+ * `operation_blocked_by_predecessors` and refuses 400 "Previous operations must
+ * be completed first"; on a SEQUENCED routing that refusal covers every operation
+ * above the lowest incomplete one, which on this very work order is two of the
+ * three weld-cell rows. Offering Complete on all three sends the user through the
+ * quantity/scrap modal to reach a 400 — and pooled, the same call SUCCEEDED, so
+ * the switch is what turns a rare mismatch into the common one.
+ *
+ * The mirror has to be exact in BOTH directions, so the tests below pin the
+ * refusals and the non-refusals equally: no work-center waiver under sequencing
+ * (a predecessor blocks from its own cell too), nothing gated on a pooled work
+ * order (today's behavior, byte for byte), and nothing gated on a laser WO even
+ * when its ignored `sequential_operations` column happens to be true.
+ *
  * Fixtures are typed as `WorkOrder` / `WorkOrderOperation` on purpose:
  * tsconfig.test.json type-checks this file, so a fixture that drifts from the
  * real contract is a compile error rather than a green test over a lie.
@@ -70,6 +86,9 @@ jest.mock('../services/api', () => ({
     getMaterialAllocations: jest.fn(),
     getWorkCenters: jest.fn(),
     getAIRecommendations: jest.fn(),
+    // CompleteWorkModal -> useScrapReasonCodes fetches on open. The hook is
+    // fail-soft, but mocking it keeps the modal tests off an accidental throw.
+    getScrapReasonCodes: jest.fn(),
     updateWorkOrder: jest.fn(),
     updateOperation: jest.fn(),
     startWorkOrder: jest.fn(),
@@ -151,6 +170,23 @@ const SEQUENCED_OPERATIONS: WorkOrderOperation[] = [
   makeOperation({ id: 704, sequence: 40, name: 'Weld Out', work_center_id: 12, status: 'pending' }),
 ];
 
+/**
+ * The same routing one step further on: 10 is COMPLETE, so the server's gate now
+ * refuses 30 and 40 but no longer refuses 20.
+ */
+const SEQUENCED_OPERATIONS_10_COMPLETE: WorkOrderOperation[] = [
+  makeOperation({
+    id: 701,
+    sequence: 10,
+    name: 'Skid Fit',
+    status: 'complete',
+    quantity_complete: 2,
+  }),
+  makeOperation({ id: 702, sequence: 20, name: 'Wall Fit Up', status: 'ready' }),
+  makeOperation({ id: 703, sequence: 30, name: 'Accessory Fit Up', status: 'pending' }),
+  makeOperation({ id: 704, sequence: 40, name: 'Weld Out', work_center_id: 12, status: 'pending' }),
+];
+
 function makeWorkOrder(overrides: Partial<WorkOrder> = {}): WorkOrder {
   return {
     id: 42,
@@ -202,6 +238,28 @@ function routingTable(): HTMLElement {
   return card as HTMLElement;
 }
 
+/** The routing row for an operation, found by the operation name it renders. */
+function operationRow(operationName: string): HTMLElement {
+  const row = within(routingTable()).getByText(operationName).closest('tr');
+  if (!row) throw new Error(`No operations row for ${operationName}`);
+  return row as HTMLElement;
+}
+
+/**
+ * That row's office Complete button. `queryBy` because a COMPLETE operation
+ * renders "Done" instead, and one test asserts exactly that.
+ */
+function completeButton(operationName: string): HTMLElement | null {
+  return within(operationRow(operationName)).queryByRole('button', { name: 'Complete' });
+}
+
+/** The same button, asserted present — the shape most tests below want. */
+function requireCompleteButton(operationName: string): HTMLElement {
+  const button = completeButton(operationName);
+  if (!button) throw new Error(`No Complete button in the ${operationName} row`);
+  return button;
+}
+
 /**
  * Rejection shaped the way the Axios interceptor hands one to a `.catch`:
  * `detail` already collapsed to a string by `normalizeAxiosErrorDetail`.
@@ -224,6 +282,7 @@ beforeEach(() => {
   mockedApi.getMaterialAllocations.mockResolvedValue([]);
   mockedApi.getWorkCenters.mockResolvedValue([]);
   mockedApi.getAIRecommendations.mockResolvedValue([]);
+  mockedApi.getScrapReasonCodes.mockResolvedValue([]);
   mockedApi.updateWorkOrder.mockResolvedValue({});
 });
 
@@ -455,5 +514,141 @@ describe('Sequential operations switch — role gate', () => {
     renderDetail();
 
     expect(await findSwitch()).toBeInTheDocument();
+  });
+});
+
+describe('Sequenced routing — the office Complete button matches the server gate', () => {
+  beforeEach(() => {
+    mockedApi.getWorkOrder.mockResolvedValue(
+      makeWorkOrder({ sequential_operations: true, operations: SEQUENCED_OPERATIONS })
+    );
+  });
+
+  it('offers Complete on operation 10 only, and disables 20/30/40 behind it', async () => {
+    await renderAndFindSwitch();
+
+    // 10 is the lowest incomplete operation: nothing sits below it, so the
+    // server would accept it and the button stays live.
+    expect(requireCompleteButton('Skid Fit')).toBeEnabled();
+
+    // 20 and 30 share work center 9 with it. Under sequencing the same-work-
+    // center waiver does NOT apply (`work_order_allows_same_work_center` is
+    // false), so both are refused — this pair IS the reported defect.
+    expect(requireCompleteButton('Wall Fit Up')).toBeDisabled();
+    expect(requireCompleteButton('Accessory Fit Up')).toBeDisabled();
+
+    // 40 is on a DIFFERENT work center and is equally refused: the rule is
+    // "any lower sequence not complete", never a per-cell question.
+    expect(requireCompleteButton('Weld Out')).toBeDisabled();
+  });
+
+  it('moves the offer to 20 once 10 is complete, and still refuses 30 and 40', async () => {
+    mockedApi.getWorkOrder.mockResolvedValue(
+      makeWorkOrder({
+        sequential_operations: true,
+        operations: SEQUENCED_OPERATIONS_10_COMPLETE,
+      })
+    );
+
+    await renderAndFindSwitch();
+
+    // A complete operation has no Complete button at all — it reads "Done".
+    expect(completeButton('Skid Fit')).toBeNull();
+    expect(within(operationRow('Skid Fit')).getByText('Done')).toBeInTheDocument();
+
+    expect(requireCompleteButton('Wall Fit Up')).toBeEnabled();
+    expect(requireCompleteButton('Accessory Fit Up')).toBeDisabled();
+    expect(requireCompleteButton('Weld Out')).toBeDisabled();
+  });
+
+  it('names the blocking operation on hover and keeps the button’s accessible name', async () => {
+    await renderAndFindSwitch();
+
+    const blocked = requireCompleteButton('Wall Fit Up');
+    // The server's own wording, plus WHICH operation is in the way — a disabled
+    // control that cannot say why reads as a broken page.
+    expect(blocked).toHaveAttribute(
+      'title',
+      expect.stringContaining('Previous operations must be completed first')
+    );
+    expect(blocked).toHaveAttribute('title', expect.stringContaining('operation 10 (Skid Fit)'));
+    // jsx-a11y is enforced with --max-warnings=0: disabling a control must not
+    // cost it its name, and the reason lives in `title`, not in place of the label.
+    expect(blocked).toHaveAccessibleName('Complete');
+
+    // The live one carries the plain label, not a leaked explanation.
+    expect(requireCompleteButton('Skid Fit')).toHaveAttribute('title', 'Complete Operation');
+  });
+
+  it('opens no completion modal from a blocked row, and still opens one from the live row', async () => {
+    const user = userEvent.setup();
+    await renderAndFindSwitch();
+
+    await user.click(requireCompleteButton('Accessory Fit Up'));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+
+    // The gate must not have disabled the page: the operation the server would
+    // accept still reaches the quantity/scrap modal.
+    await user.click(requireCompleteButton('Skid Fit'));
+    expect(
+      await screen.findByRole('heading', { name: 'Complete operation "Skid Fit"' })
+    ).toBeInTheDocument();
+  });
+});
+
+describe('Pooled work orders — the Complete button is deliberately left alone', () => {
+  it('keeps every operation’s Complete button live under the dispatch pool', async () => {
+    // Today's behavior, preserved byte for byte. The pooled rule waives a
+    // same-work-center predecessor EXCEPT an ON_HOLD one, and the failure modes
+    // are not symmetric: disabling a control the server would have ACCEPTED
+    // hides a legal action with no override, which is worse than the 400.
+    mockedApi.getWorkOrder.mockResolvedValue(
+      makeWorkOrder({ sequential_operations: false, operations: POOLED_OPERATIONS })
+    );
+
+    await renderAndFindSwitch();
+
+    for (const name of ['Skid Fit', 'Wall Fit Up', 'Accessory Fit Up']) {
+      expect(requireCompleteButton(name)).toBeEnabled();
+      expect(requireCompleteButton(name)).toHaveAttribute('title', 'Complete Operation');
+    }
+    // Including the cross-work-center one the pooled server rule WOULD refuse:
+    // gating it is a behavior change this defect fix deliberately does not make.
+    expect(requireCompleteButton('Weld Out')).toBeEnabled();
+  });
+
+  it('leaves an absent flag pooled — an ungated table, not a gated one', async () => {
+    const withoutFlag = makeWorkOrder({ operations: SEQUENCED_OPERATIONS });
+    delete withoutFlag.sequential_operations;
+    mockedApi.getWorkOrder.mockResolvedValue(withoutFlag);
+    renderDetail();
+
+    await screen.findByRole('heading', { name: 'Operations / Routing' });
+
+    expect(requireCompleteButton('Wall Fit Up')).toBeEnabled();
+    expect(requireCompleteButton('Weld Out')).toBeEnabled();
+  });
+});
+
+describe('Laser work orders — never gated, whatever the column says', () => {
+  it('leaves every nest operation completable even with sequential_operations true', async () => {
+    // `is_laser_dispatch_work_order` short-circuits ABOVE the flag at every
+    // backend seam and drops predecessor gating entirely, so a client gate here
+    // would refuse work the server accepts — the worse direction of the mismatch.
+    mockedApi.getWorkOrder.mockResolvedValue(
+      makeWorkOrder({
+        work_order_type: 'laser_cutting',
+        part_id: null,
+        sequential_operations: true,
+        operations: SEQUENCED_OPERATIONS,
+      })
+    );
+    renderDetail();
+
+    await screen.findByRole('heading', { name: 'Operations / Routing' });
+
+    for (const name of ['Skid Fit', 'Wall Fit Up', 'Accessory Fit Up', 'Weld Out']) {
+      expect(requireCompleteButton(name)).toBeEnabled();
+    }
   });
 });
