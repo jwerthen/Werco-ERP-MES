@@ -32,8 +32,14 @@
  *    PARTIAL gate above (a PO can go PARTIAL between list load and confirm). That
  *    sentence is the instruction the receiver has to follow next; a generic "delete
  *    failed" would strand them;
- *  - the dialog copy does NOT promise a restore from Purchasing, because no screen
- *    offers one;
+ *  - the dialog copy promises the restore that now EXISTS, and names where it lives.
+ *    This assertion inverted when Purchasing gained its Deleted view: the copy used to
+ *    say there was no restore button, which was true then and is a lie now. It is pinned
+ *    in BOTH directions so neither wording can pass for the other — the retired
+ *    "no restore button / one-way" claim must be absent, and the replacement must carry
+ *    an actual destination. A bare "it can be restored" is the failure mode worth
+ *    guarding: a reversal nobody can find is not a reversal, and it is exactly what a
+ *    manager would rely on before deleting a live PO;
  *  - the action is NON-OPTIMISTIC (house rule for server-gated actions): the card
  *    is still on screen, un-refetched, while the call is in flight;
  *  - deleting the PO that is loaded into the right-hand receive panel clears the
@@ -231,16 +237,26 @@ describe('Receiving — deleting an open PO', () => {
     expect(screen.getByText(PANEL_PLACEHOLDER)).toBeInTheDocument();
 
     // The dialog names the PO and its vendor, and says what the SOFT delete actually
-    // buys the user. It must NOT promise a restore from Purchasing: the endpoint and
-    // api.restorePurchaseOrder exist, but nothing in the frontend calls that wrapper
-    // and Purchasing has no restore control or deleted-PO view, so the only way back
-    // is an administrator against the API. The negative below is the load-bearing
-    // assertion — a manager who believes the delete is one click from reversible is
-    // exactly the manager who deletes the live PO without checking.
+    // buys the user. It MUST promise the restore, because one now exists: Purchasing's
+    // Deleted view (GET .../purchase-orders?deleted_only=true) lists soft-deleted POs and
+    // offers Restore. This block used to assert the OPPOSITE — that the copy promised no
+    // restore — which was correct while api.restorePurchaseOrder was called from nowhere
+    // and no screen could show a deleted PO. Both halves are pinned so the two wordings
+    // cannot be swapped without failing.
     const copy = within(dialog()).getByText(/Delete purchase order PO-2001 from Acme Metals\?/);
-    expect(copy).toHaveTextContent(/no restore button in the app/i);
-    expect(copy).toHaveTextContent(/administrator action/i);
-    expect(copy).not.toHaveTextContent(/restore it from Purchasing/i);
+    expect(copy).toHaveTextContent(/this is reversible/i);
+    // WHO, not "you": the deleted view is readable by anyone who can read POs, but the
+    // Restore button mirrors require_role([ADMIN, MANAGER]) on the verb.
+    expect(copy).toHaveTextContent(/an admin or manager can restore it/i);
+    // WHERE. The load-bearing half: a promise of reversibility with no destination is
+    // how copy comes to reassure without helping. Pinned as the literal route the user
+    // has to walk, so renaming the view without re-wording the dialog fails here.
+    expect(copy).toHaveTextContent(/Purchasing → Purchase Orders → Deleted/);
+    // The retired claim is gone in both of its wordings. Without these two negatives the
+    // assertions above would also pass on copy that promised a restore AND still told the
+    // user there wasn't one.
+    expect(copy).not.toHaveTextContent(/no restore button/i);
+    expect(copy).not.toHaveTextContent(/one-way/i);
     // Both halves of the received-material advice. The server's 400 supplies only the
     // first ("void the receipt(s) first"), which is destructive guidance when the
     // material genuinely arrived — the dialog is where the counter-guidance lives.
@@ -271,7 +287,12 @@ describe('Receiving — deleting an open PO', () => {
 
     await waitFor(() => expect(mockApi.deletePurchaseOrder).toHaveBeenCalledWith(6));
     expect(mockApi.deletePurchaseOrder).toHaveBeenCalledTimes(1);
-    expect(await screen.findByText(/Purchase order PO-2002 deleted/)).toBeInTheDocument();
+    const toast = await screen.findByText(/Purchase order PO-2002 deleted/);
+    // The toast names the route back, not just "record retained". The dialog says it too,
+    // but it says it BEFORE the click — this is the copy on screen during the ten seconds
+    // when someone realises they deleted the wrong PO, so it has to carry the destination.
+    expect(toast).toHaveTextContent(/Purchasing → Purchase Orders → Deleted/);
+    expect(toast).toHaveTextContent(/an admin or manager can restore it/i);
     // Re-pulled (initial load + post-delete refresh), and the card is gone because
     // the SERVER's list no longer carries it.
     await waitFor(() => expect(mockApi.getOpenPOsForReceiving.mock.calls.length).toBeGreaterThanOrEqual(2));

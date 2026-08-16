@@ -517,15 +517,17 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
    * place and surfaces the server's `detail` verbatim, because that message is
    * the instruction the receiver has to follow.
    *
-   * The delete is SOFT (compliance invariant 3) — but "soft" is not "undoable by
-   * the person clicking". POST /purchasing/purchase-orders/{id}/restore exists and
-   * api.ts wraps it, yet NOTHING in the frontend calls that wrapper: Purchasing has
-   * no restore control and no deleted-PO view, so a deleted PO is invisible on every
-   * screen and getting it back is an administrator action against the API. The copy
-   * here and in the dialog says exactly that. It used to promise "restorable from
-   * Purchasing", which is the one promise that would make a manager click without
-   * checking first — and it was false. Wire a restore control into Purchasing and
-   * this copy can be revisited; until then, do not re-add the promise.
+   * The delete is SOFT (compliance invariant 3), and as of the Purchasing restore view
+   * that is now a promise the app can keep: Purchasing → Purchase Orders → Deleted lists
+   * the company's soft-deleted POs (GET .../purchase-orders?deleted_only=true, the only
+   * read that can see one) and offers Restore to an admin or manager, mirroring
+   * POST /purchasing/purchase-orders/{id}/restore. The copy here and in the dialog says
+   * exactly that, and says WHERE — a reversal nobody can find is not a reversal.
+   *
+   * It is still not undoable by everyone: the deleted view is readable by anyone who can
+   * read POs, but the Restore button is admin/manager, matching require_role on the verb.
+   * So do not soften this to "you can undo it" — the accurate promise is "an admin or
+   * manager can undo it, from Purchasing".
    */
   const handleConfirmDeletePO = async () => {
     if (!deletePOTarget || deletePOPending) return;
@@ -533,7 +535,15 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
     setDeletePOPending(true);
     try {
       await api.deletePurchaseOrder(target.po_id);
-      showToast('success', `Purchase order ${target.po_number} deleted — record retained for audit`);
+      // The toast names the route back, not just the fact that the record survives. The
+      // confirm dialog says the same thing, but it says it BEFORE the click — and the
+      // person who needs it is the one staring at this toast ten seconds later realising
+      // they deleted the wrong PO, who is not the person who read the dialog carefully.
+      showToast(
+        'success',
+        `Purchase order ${target.po_number} deleted — record retained for audit. An admin or ` +
+          'manager can restore it from Purchasing → Purchase Orders → Deleted.',
+      );
       setDeletePOTarget(null);
       // If the deleted PO was the one loaded into the right-hand receive panel,
       // drop the selection too. Left alone the panel keeps offering lines of a
@@ -2508,20 +2518,22 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
           Mirrors Purchasing.tsx's delete-PO confirm — same primitive, same
           variant, same `pending` contract, same "closes only on success"
           behavior — so the two entry points to one verb behave identically.
-          The copy states what the app can actually do: the delete is SOFT, so the
-          record survives for audit, but there is NO restore control anywhere in the
-          frontend (see handleConfirmDeletePO) — so it promises an admin action, not a
-          button. It also carries the half of the received-material advice the server's
-          400 cannot: the server says "void the receipt(s) first", which is right when
-          the receipt is bogus and badly wrong when the material genuinely arrived. */}
+          The copy states what the app can actually do: the delete is SOFT, the record
+          survives for audit, and it is now genuinely recoverable — Purchasing's Deleted
+          view lists soft-deleted POs and an admin or manager can Restore one (see
+          handleConfirmDeletePO). Naming the destination is the load-bearing part; "it can
+          be restored" without a route is how the old copy came to promise nothing. It also
+          carries the half of the received-material advice the server's 400 cannot: the
+          server says "void the receipt(s) first", which is right when the receipt is bogus
+          and badly wrong when the material genuinely arrived. */}
       <ConfirmDialog
         open={!!deletePOTarget}
         title="Delete Purchase Order"
         message={
           deletePOTarget
             ? `Delete purchase order ${deletePOTarget.po_number} from ${deletePOTarget.vendor_name}? ` +
-              'It leaves the receiving list and the record is preserved for audit, but there is no restore ' +
-              'button in the app — bringing a PO back is an administrator action, so treat this as one-way. ' +
+              'It leaves the receiving list and the record is preserved for audit. This is reversible: an ' +
+              'admin or manager can restore it from Purchasing → Purchase Orders → Deleted. ' +
               'A PO that already has material received against it cannot be deleted — void the receipt(s) ' +
               'first. If the material genuinely arrived, do NOT void its receipt: close or cancel the PO in ' +
               'Purchasing instead.'

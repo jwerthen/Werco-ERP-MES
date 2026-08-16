@@ -4303,14 +4303,14 @@ the public paths are `/eco/eco/…`.
 | PUT | `/purchasing/vendors/{vendor_id}` | Update vendor — `code` is editable (see note) | Admin / Manager |
 | DELETE | `/purchasing/vendors/{vendor_id}` | Soft-delete a vendor (also sets `is_active=false`) — guarded, see note below | Admin / Manager |
 | POST | `/purchasing/vendors/{vendor_id}/restore` | Restore a soft-deleted vendor (re-activates it) | Admin / Manager |
-| GET | `/purchasing/purchase-orders` | List purchase orders (filters: `status`, `vendor_id`). Bounded: `limit` **1–5000, default 5000**, `offset` ≥ 0 | Yes |
+| GET | `/purchasing/purchase-orders` | List purchase orders (filters: `status`, `vendor_id`, `deleted_only`). `deleted_only=true` returns **only** soft-deleted POs — the restore view, see note below. Bounded: `limit` **1–5000, default 5000**, `offset` ≥ 0 | Yes |
 | POST | `/purchasing/purchase-orders` | Create purchase order with its lines | Admin / Manager / Supervisor |
 | GET | `/purchasing/purchase-orders/{po_id}` | Get PO by ID | Yes |
-| PUT | `/purchasing/purchase-orders/{po_id}` | Update purchase order | Admin / Manager / Supervisor |
-| POST | `/purchasing/purchase-orders/{po_id}/send` | Issue a PO to the vendor — status → `sent`, stamps `order_date`; only `draft`/`approved` POs (else **400**) | Admin / Manager |
-| POST | `/purchasing/purchase-orders/{po_id}/lines` | Add a line to a `draft` PO (else **400**) and roll the PO subtotal/total | Admin / Manager / Supervisor |
+| PUT | `/purchasing/purchase-orders/{po_id}` | Update purchase order. **404** on a soft-deleted PO | Admin / Manager / Supervisor |
+| POST | `/purchasing/purchase-orders/{po_id}/send` | Issue a PO to the vendor — status → `sent`, stamps `order_date`; only `draft`/`approved` POs (else **400**). **404** on a soft-deleted PO | Admin / Manager |
+| POST | `/purchasing/purchase-orders/{po_id}/lines` | Add a line to a `draft` PO (else **400**) and roll the PO subtotal/total. **404** on a soft-deleted PO | Admin / Manager / Supervisor |
 | DELETE | `/purchasing/purchase-orders/{po_id}` | Soft-delete a purchase order — guarded, see note below | Admin / Manager |
-| POST | `/purchasing/purchase-orders/{po_id}/restore` | Restore a soft-deleted purchase order | Admin / Manager |
+| POST | `/purchasing/purchase-orders/{po_id}/restore` | Restore a soft-deleted purchase order. **400** if it is not actually deleted, or if its vendor is deleted. Reachable from **Purchasing → Purchase Orders → Deleted** | Admin / Manager |
 
 > Material receiving and incoming inspection are **not** under `/purchasing`. They live under
 > `/receiving` (see below). The duplicate `/purchasing/receiving*` endpoints were removed.
@@ -4371,6 +4371,85 @@ the public paths are `/eco/eco/…`.
 > - **Creating a PO against a soft-deleted or inactive vendor is refused** (**404** "Vendor not found"):
 >   `POST /purchasing/purchase-orders` now resolves the vendor with `is_deleted == false` **and**
 >   `is_active == true`.
+
+> **Seeing a deleted PO: `GET /purchasing/purchase-orders?deleted_only=true` (the restore view).**
+> A restore endpoint is useless without a way to *find* what to restore, and every other PO read
+> hard-filters `is_deleted == false` — so before this parameter existed a soft-deleted PO was
+> invisible to every API caller and `POST .../restore` could only be driven by someone who already
+> knew the id. This one boolean query param closes that, and it is the **only** read in the API that
+> can return a soft-deleted PO.
+>
+> - **`deleted_only=false` (the default) returns the same rows, in the same order, from the same
+>   SQL, with no extra query.** Unset, the `is_deleted` predicate, the WHERE-clause ordering and the
+>   status default are unchanged, and the `deleted_by` name lookup below is never issued. Every
+>   existing caller and query string keeps its exact previous result set. The response *body* is not
+>   byte-identical, and that is intended: every row now carries the three provenance keys below, all
+>   `null` on this path.
+> - **`deleted_only=true` returns only this company's soft-deleted POs.** Tenancy is untouched and
+>   non-negotiable: `company_id` comes from `get_current_company_id` and scopes **both** views, so
+>   the flag can only ever invert the delete predicate, never widen the tenant scope.
+> - **The default closed/cancelled exclusion is deliberately NOT applied to the deleted view** — this
+>   is the non-obvious part. On the normal list, omitting `status` excludes `closed` and `cancelled`
+>   POs (the live set is the shop's open book). A **deleted** PO can sit in any status, and a
+>   *cancelled-then-deleted* PO is one of the likeliest things somebody wants back — applying the
+>   exclusion here would hide those rows from the one list that can see them, so nothing could ever
+>   restore them. An explicit `?status=` **does** still narrow the deleted view; both views share
+>   that branch. Do not "tidy" the carve-out away (the endpoint carries a comment saying so).
+> - **Three response fields carry the provenance** needed to decide whether to restore, added to
+>   `POListResponse` as optionals that stay `null` on every other path: `is_deleted` (bool),
+>   `deleted_at` (UTC ISO-8601 with a trailing `Z`, per `UTCModel` — render it in Central), and
+>   `deleted_by_name` (the deleting user's display name, resolved from `users` in one batched query;
+>   `null` when that user row no longer exists). `deleted_by_name` is what separates "restore it"
+>   from "ask who deleted it first" — `deleted_at` alone gives the when, not the who, and the only
+>   other place to find it is the Audit Log on a different page. Note the name is only visible
+>   *while* the PO is deleted: `SoftDeleteMixin.restore()` clears `deleted_by`, so it disappears on
+>   restore (the `audit_log` DELETE row keeps it permanently — invariant #2).
+> - **Role posture — deliberate, and the two halves differ.** The **list** stays on
+>   `get_current_user` like every other read on this endpoint (see *Read enforcement* in
+>   `docs/RBAC_PERMISSIONS.md` → Purchasing): `deleted_only=true` returns rows the same reader could
+>   already see *before* the delete, so hiding them from that reader protects nothing. The
+>   privileged act is the **restore verb**, which stays `require_role([ADMIN, MANAGER])`. The UI
+>   matches exactly — anyone who can read POs can open the Deleted view; only an admin or manager
+>   sees a Restore button on the rows.
+>
+> **A deleted PO is a record, not a workable order — every write verb 404s on it.** `PUT
+> /purchase-orders/{id}`, `POST .../{id}/send` and `POST .../{id}/lines` resolve through one helper
+> (`_live_po_or_404`) that filters `is_deleted == false`, matching the reads. Those three never
+> carried the filter; that was harmless only while nothing could hand out a soft-deleted PO's id,
+> and `deleted_only=true` hands it to any authenticated reader in the tenant — including the roles
+> deliberately kept below `require_role([ADMIN, MANAGER])` on restore. Without it, a Supervisor
+> reading the archive could add lines to a deleted DRAFT PO, and an Admin could `/send` one to a
+> vendor while `is_deleted` stayed true. `DELETE` and `POST .../restore` deliberately do **not** use
+> the helper — one has to see the deleted row to refuse a double delete, the other to undo one.
+>
+> **Restore refuses (400) onto a deleted vendor.** `delete_vendor` counts blocking POs with
+> `is_deleted == false`, so a soft-deleted PO does not hold its vendor open: delete the PO, then the
+> vendor, and an unguarded restore would bring a live (possibly `sent`) order back against a vendor
+> that no longer exists — receivable via `GET /receiving/open-pos`, which checks status and
+> `is_deleted` but not the vendor, and a state `POST /purchase-orders` refuses outright to create.
+> The refusal names the vendor and the fix ("Restore the vendor first"), which today is an API call
+> (see the vendor gap below). It deliberately does **not** mirror the create path's `is_active ==
+> true` half: a live PO against a merely *deactivated* vendor is already representable (`PUT
+> /vendors/{id}` deactivates with no PO guard), so refusing on it would be stricter than the
+> invariant the rest of the router keeps.
+>
+> **What a restored PO is visible on — say this before promising a user a round trip.** `restore()`
+> touches only the soft-delete columns, so the PO comes back in **exactly** the status it had. That
+> means a restored `closed` or `cancelled` PO is **not** on the default list (which excludes both),
+> and only a `sent`/`partial` one returns to `GET /receiving/open-pos`. The UI says so rather than
+> claiming a plain success: restoring a closed/cancelled PO raises the **`warning`** toast variant
+> naming the status and the consequence.
+>
+> **UI.** Purchasing → Purchase Orders carries an **Active / Deleted** segmented control (mutually
+> exclusive by construction — a deleted PO and a live one must never share one table). The Deleted
+> view is fetched lazily on entry, drops row click-through and the Print / Send / Delete controls,
+> and offers **Restore** only to Admin / Manager. Restore is **non-optimistic** (server-gated: the
+> row moves only after the server answers) per the convention in `CLAUDE.md`.
+>
+> **Vendors have the same gap and it is still open.** `POST /purchasing/vendors/{id}/restore` exists
+> and is audited, but `GET /purchasing/vendors` has no `deleted_only` equivalent and no UI calls
+> `restoreVendor` — so undoing a **vendor** delete remains an API/administrator action. Read the
+> "restorable" wording in the note above as *the endpoint exists*, not *a screen offers it*.
 
 ### Supplier Scorecards, Audits & Approved Supplier List
 
@@ -4705,15 +4784,18 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 >   by Admin / Manager via `POST /purchasing/purchase-orders/{po_id}/restore`. Both directions write a
 >   tamper-evident `audit_log` row (`log_delete` with `soft_delete=true`; `log_update` with
 >   `action="restore"`). Nothing is destroyed.
->   **Caveat worth knowing before you promise a user a restore:** the restore *endpoint* exists, but
->   **no UI calls it** — `restorePurchaseOrder` in `frontend/src/services/api.ts` has no caller, and
->   the Purchasing page (whose lists filter `is_deleted == false`) shows no deleted POs and offers no
->   restore control. Undoing a PO delete is therefore an API/administrator action today, not
->   something a manager can do from a screen. **The receiving confirm dialog and success toast say
->   exactly that** ("there is no restore button in the app — bringing a PO back is an administrator
->   action, so treat this as one-way"), and a test pins the absence of the older, false "restorable
->   from Purchasing" wording. If a restore control is ever wired into Purchasing, that copy and this
->   caveat move together.
+>   **The restore is now reachable from a screen** — Purchasing → Purchase Orders → **Deleted**
+>   (`GET /purchasing/purchase-orders?deleted_only=true`, documented under Purchasing above), which
+>   is the only read that can see a soft-deleted PO. That view is open to anyone who can read POs;
+>   the **Restore** button on its rows is Admin / Manager, mirroring `require_role` on the verb.
+>   **The receiving confirm dialog says exactly that** ("This is reversible: an admin or manager can
+>   restore it from Purchasing → Purchase Orders → Deleted"), and `Receiving.deletePO.test.tsx` pins
+>   both halves of that wording — the promise *and* the "an admin or manager", not "you" — so the
+>   copy cannot drift back either way. Naming the destination is the load-bearing part: this copy
+>   previously said there was **no restore button in the app** and to treat the delete as one-way,
+>   which was true only while nothing called `restorePurchaseOrder`. A reversal nobody can find is
+>   not a reversal, and a promise with no route is how that copy became false in the first place.
+>   *Vendor* deletes are the case that still has no screen — see the Purchasing note above.
 > - **Refused 400 once any line has received material** (`quantity_received > 0`) —
 >   *"Cannot delete purchase order &lt;po&gt;: it has received material. Void the receipt(s) first,
 >   then delete."* **This is the refusal a warehouse user will actually hit**, and from *this* surface
@@ -6480,7 +6562,7 @@ has grown past what fits in a worker's memory) is refused:
 |---|---|---|
 | `GET /inventory/` | `10000` | `inventory_items` is the highest-cardinality table in the app (one row per part × location × lot × serial) |
 | `GET /inventory/summary` | `10000` | Identical cap on purpose — the Inventory page fetches both in one `Promise.all`, so capping one and not the other would let the stat tiles disagree with the table |
-| `GET /purchasing/purchase-orders` | `5000` | The default filter already excludes closed/cancelled POs, so the live set is the shop's open book |
+| `GET /purchasing/purchase-orders` | `5000` | The default filter already excludes closed/cancelled POs, so the live set is the shop's open book. The `deleted_only=true` view shares the cap and does *not* share that reasoning (it applies no status exclusion), but the deleted set is far smaller, so the bound is not at risk |
 | `GET /customers/` | `5000` | |
 | `GET /customers/names` | `5000` | Shares the cap because it feeds every customer picker |
 

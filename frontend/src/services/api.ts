@@ -2397,7 +2397,12 @@ class ApiService {
     return response.data;
   }
 
-  async getPurchaseOrders(params?: { status?: string; vendor_id?: number }) {
+  // `deleted_only: true` inverts the endpoint's soft-delete filter and returns ONLY the
+  // company's soft-deleted POs (each carrying is_deleted / deleted_at / deleted_by_name),
+  // which is the ONLY way to see one — every other read hard-filters them out, so nothing
+  // can be restored without it. Leave the key off for the normal list: axios omits
+  // `undefined` params, so a no-argument call sends the exact query string it always has.
+  async getPurchaseOrders(params?: { status?: string; vendor_id?: number; deleted_only?: boolean }) {
     const response = await this.api.get('/purchasing/purchase-orders', { params });
     return response.data;
   }
@@ -2439,6 +2444,9 @@ class ApiService {
     return response.data;
   }
 
+  // Undo a soft delete. Server-gated (ADMIN/MANAGER, and 400 if the PO is not actually
+  // deleted), so callers stay non-optimistic: await it, then reflect what came back.
+  // Reachable only from the deleted-PO view above — you cannot restore what you cannot list.
   async restorePurchaseOrder(id: number) {
     const response = await this.api.post(`/purchasing/purchase-orders/${id}/restore`);
     return response.data;
