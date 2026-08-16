@@ -49,6 +49,34 @@ interface Vendor {
   is_active?: boolean;
   notes?: string;
   version?: number;
+  // Soft-delete provenance. Populated ONLY by the deleted view
+  // (GET /purchasing/vendors?deleted_only=true); undefined on every live row, which is
+  // exactly how the two books stay tellable apart in one shared row shape. Same three
+  // fields, same tri-state, as PurchaseOrder below — the two archives are one feature.
+  is_deleted?: boolean;
+  deleted_at?: string;
+  deleted_by_name?: string;
+  // What a restore will put `is_active` back to. Restore PRESERVES the pre-delete state
+  // (a supplier the shop deliberately switched off comes back switched off), so this is
+  // the only thing that can answer "what do I get if I click Restore?" BEFORE the click:
+  // `is_active` itself is useless here — the delete forces it false on every deleted row.
+  //
+  //   false     -> comes back INACTIVE (the case the operator must be warned about)
+  //   true      -> comes back active
+  //   null      -> deleted before migration 082 existed, so the prior state was never
+  //               recorded. Also comes back INACTIVE: restore_vendor resolves that unknown
+  //               with COALESCE(is_active_before_delete, FALSE), on the AS9100D 8.4 ground
+  //               that the safe answer for an unknown approved-supplier flag is OFF.
+  //               Read that off the ENDPOINT, not this comment, if the two ever disagree.
+  //   undefined -> THE SERVER DID NOT REPORT IT (see below)
+  //
+  // ON THE WIRE: VendorResponse carries it on the deleted view. `undefined` is kept
+  // meaningful anyway, and the "Restores As" column hides itself when it is — the SPA and
+  // the API deploy separately (Vercel / Railway), so this page can be live against a
+  // backend that predates the field. Hiding the column then is the correct answer:
+  // claiming "Active" for a vendor the server will hand back deactivated is the one thing
+  // this field exists to prevent. Not dead code — a rolling-deploy window.
+  is_active_before_delete?: boolean | null;
 }
 
 interface PurchaseOrder {
@@ -100,6 +128,17 @@ type TabType = 'orders' | 'vendors';
 // not a workable order, so it must never sit in the same list as a live one where
 // somebody could print it, send it, or receive against it by mistake.
 type POView = 'active' | 'deleted';
+
+// The vendor twin of POView, and mutually exclusive for the same reason: a deleted
+// vendor is a RECORD, not a supplier anyone should be able to put on a purchase order.
+// Three books, never merged into one table. 'active' is the selectable supplier list;
+// 'inactive' is live records the shop has switched OFF (still real records, just not
+// orderable); 'deleted' is the soft-delete archive. The middle one is not cosmetic: a
+// vendor restored from the archive comes back with the is_active it had when it was
+// deleted, and every pre-082 deletion comes back INACTIVE -- so without this view a
+// restored vendor would land on NO screen in the app, and the deliberate, audited
+// reactivation the restore semantics depend on could not be performed at all.
+type VendorView = 'active' | 'inactive' | 'deleted';
 
 // Blank form states for the create modals. Module-level constants so the
 // unsaved-changes dirty checks can compare against the pristine shape.
@@ -166,6 +205,13 @@ export default function Purchasing() {
   // hidden control rather than a button that 403s. Deliberate, not a mismatch to "fix" on
   // its own — the two purchasing gates move together or not at all.
   const canRestorePO = user?.role === 'admin' || user?.role === 'manager' || !!user?.is_superuser;
+  // POST /purchasing/vendors/{id}/restore carries the identical server gate
+  // (require_role([ADMIN, MANAGER]); superuser qualifies; PLATFORM_ADMIN omitted here for
+  // the same reason as above). Its own constant rather than reusing canRestorePO, on the
+  // same principle: the two verbs are separate endpoints and a future change to one must
+  // not silently move the other. The deleted VIEW is again ungated — `deleted_only` on
+  // GET /purchasing/vendors stays on get_current_user.
+  const canRestoreVendor = user?.role === 'admin' || user?.role === 'manager' || !!user?.is_superuser;
   const [searchParams] = useSearchParams();
   const [activeTab, setActiveTab] = useState<TabType>('orders');
   const [vendors, setVendors] = useState<Vendor[]>([]);
@@ -190,6 +236,24 @@ export default function Purchasing() {
   // says yes. Holding the in-flight PO's id rather than a bare boolean lets the one
   // row that was clicked show the spinner while the rest merely disable.
   const [restorePOPendingId, setRestorePOPendingId] = useState<number | null>(null);
+
+  // The deleted-vendor book. Same shape and same reasoning as the deleted-PO block
+  // above: its own state so no live-vendor count (the tab badge, the KPI strip) can pick
+  // up a deleted row, and fetched lazily on entry into the Deleted view so the default
+  // page load emits exactly the requests it always did.
+  const [vendorView, setVendorView] = useState<VendorView>('active');
+  const [deletedVendors, setDeletedVendors] = useState<Vendor[]>([]);
+  const [deletedVendorsLoading, setDeletedVendorsLoading] = useState(false);
+  const [deletedVendorsError, setDeletedVendorsError] = useState(false);
+  const [restoreVendorPendingId, setRestoreVendorPendingId] = useState<number | null>(null);
+
+  // The deactivated-vendor book. Same shape and same lazy-on-entry rule as the deleted
+  // one above, and kept OUT of `vendors` for the same reason: `vendors` feeds the PO
+  // vendor picker and the tab/KPI counts, and a deactivated supplier must not appear in
+  // any of them -- POST /purchasing/purchase-orders refuses one outright.
+  const [inactiveVendors, setInactiveVendors] = useState<Vendor[]>([]);
+  const [inactiveVendorsLoading, setInactiveVendorsLoading] = useState(false);
+  const [inactiveVendorsError, setInactiveVendorsError] = useState(false);
 
   const [showPOModal, setShowPOModal] = useState(false);
   const [showVendorModal, setShowVendorModal] = useState(false);
@@ -276,6 +340,12 @@ export default function Purchasing() {
   const deepLinkedPoIdRef = useRef<number | null>(null);
   // Monotonic request id for the deleted-PO reads — see loadDeletedPOs.
   const deletedPOsRequestRef = useRef(0);
+  // Monotonic request id for the deleted-vendor reads — see loadDeletedVendors.
+  const deletedVendorsRequestRef = useRef(0);
+  // Monotonic request id for the deactivated-vendor reads — see loadInactiveVendors.
+  const inactiveVendorsRequestRef = useRef(0);
+  // Once-per-id latch for the `?vendor=` deep-link fallback below.
+  const deepLinkedVendorIdRef = useRef<number | null>(null);
 
   useEffect(() => {
     loadData();
@@ -285,11 +355,23 @@ export default function Purchasing() {
     const vendorId = Number(searchParams.get('vendor') || 0);
     const poId = Number(searchParams.get('po') || 0);
 
-    if (vendorId && vendors.length > 0 && selectedVendor?.id !== vendorId) {
+    if (!vendorId) {
+      // Allow a later click on the same deep link to re-attempt the fallback fetch.
+      deepLinkedVendorIdRef.current = null;
+    } else if (vendors.length > 0 && selectedVendor?.id !== vendorId) {
       const vendor = vendors.find(v => v.id === vendorId);
       if (vendor) {
         selectTab('vendors');
         openEditVendorModal(vendor);
+      } else if (deepLinkedVendorIdRef.current !== vendorId) {
+        // NOT on the active list. Overwhelmingly this is a DEACTIVATED vendor — including
+        // every vendor just restored from the archive, since restore preserves the
+        // pre-delete state and a pre-082 deletion comes back switched off. Silently doing
+        // nothing here is worse than a 404: the link looks like it worked. The ref latch
+        // is not optional — `vendors` is in this effect's dependency array, so an
+        // unlatched miss path re-runs on every render.
+        deepLinkedVendorIdRef.current = vendorId;
+        void openDeepLinkedInactiveVendor(vendorId);
       }
     }
 
@@ -319,7 +401,18 @@ export default function Purchasing() {
     }
   }, [searchParams, vendors, purchaseOrders, selectedVendor?.id, loading, loadError]);
 
-  const loadData = async () => {
+  /**
+   * Reload the page's live data.
+   *
+   * Returns the freshly-read ACTIVE vendors (null if the read failed) purely so
+   * `handleRestoreVendor` can tell whether a just-restored vendor came back active. That
+   * is not cosmetic: `api.getVendors()` sends no params, so the server's `active_only`
+   * default applies and a vendor restored to INACTIVE is absent from this array — which
+   * is precisely the "it worked, but it is not where you will look for it" case the
+   * warning toast exists for. Reading it off the reload costs no extra request and, unlike
+   * the row's own `is_active`, is available today.
+   */
+  const loadData = async (): Promise<Vendor[] | null> => {
     setLoading(true);
     setLoadError(false);
     try {
@@ -331,9 +424,11 @@ export default function Purchasing() {
       setVendors(vendorsRes);
       setPurchaseOrders(posRes);
       setParts(partsRes);
+      return vendorsRes as Vendor[];
     } catch (err) {
       console.error('Failed to load purchasing data:', err);
       setLoadError(true);
+      return null;
     } finally {
       setLoading(false);
     }
@@ -391,6 +486,11 @@ export default function Purchasing() {
   const selectTab = (tab: TabType) => {
     setActiveTab(tab);
     if (tab !== 'orders') setPoView('active');
+    // Same rule for the vendor archive, and for the same reason: every entry into a
+    // Deleted view is supposed to re-read it, so a tab round-trip must not re-open one on
+    // rows fetched minutes ago. It also keeps the `?vendor=` deep link landing on the
+    // active book, where the vendor it opens the edit modal for actually is.
+    if (tab !== 'vendors') setVendorView('active');
   };
 
   /**
@@ -440,6 +540,170 @@ export default function Purchasing() {
       }
     } finally {
       setRestorePOPendingId(null);
+    }
+  };
+
+  /**
+   * Load the deleted-vendor book.
+   *
+   * `deleted_only=true` is the ONLY way any caller sees a soft-deleted vendor, and the
+   * vendor-read tightening that shipped just before this made that gap sharp: a deleted
+   * vendor is now unresolvable on five write paths, with nothing in the UI able to undo
+   * the delete. This fetch is what gives the Restore control below something to act on.
+   *
+   * Deliberately sends `deleted_only` ALONE. `active_only` defaults to true server-side
+   * and the delete forces `is_active = false`, so passing it would ask for rows that
+   * cannot exist; the endpoint carves it out of this view for that exact reason.
+   */
+  const loadDeletedVendors = async () => {
+    // Request-sequence latch, same as loadDeletedPOs: entering the view fires a read, so
+    // Deleted -> Active -> Deleted can leave two in flight and without this the SLOWER
+    // (older) response wins and paints a stale archive.
+    const requestId = deletedVendorsRequestRef.current + 1;
+    deletedVendorsRequestRef.current = requestId;
+    setDeletedVendorsLoading(true);
+    setDeletedVendorsError(false);
+    try {
+      const rows = await api.getVendors({ deleted_only: true });
+      if (deletedVendorsRequestRef.current !== requestId) return;
+      setDeletedVendors(rows);
+    } catch (err) {
+      console.error('Failed to load deleted vendors:', err);
+      if (deletedVendorsRequestRef.current !== requestId) return;
+      setDeletedVendorsError(true);
+    } finally {
+      if (deletedVendorsRequestRef.current === requestId) setDeletedVendorsLoading(false);
+    }
+  };
+
+  /**
+   * Load the deactivated-vendor book: LIVE vendors (not deleted) whose `is_active` is
+   * false.
+   *
+   * This view is what makes the restore semantics workable. Restore puts `is_active` back
+   * to the value it had at delete time, and every vendor deleted before migration 082
+   * comes back INACTIVE — so on the existing production population, restoring lands the
+   * vendor here 100% of the time. Every other surface filters it out (the Vendors list is
+   * `active_only` server-side, global search filters `is_active`, the PO picker only
+   * offers approved-and-active rows), so without this table the "deliberate, separately
+   * audited reactivation" the whole design rests on could not be performed from the app
+   * at all — only by hand-crafting a PUT.
+   *
+   * `active_only: false` is the only relevant knob the endpoint has: it returns ALL live
+   * vendors, and the inactive half is picked out here. Deliberately `=== false` rather
+   * than a falsy test — `is_active` is optional on the wire, and treating "absent" as
+   * "inactive" would put live suppliers in a table whose whole message is "these are
+   * switched off".
+   */
+  const loadInactiveVendors = async () => {
+    // Request-sequence latch, same as loadDeletedVendors: entering the view fires a read,
+    // so Inactive -> Active -> Inactive can leave two in flight and without this the
+    // SLOWER (older) response wins and paints a stale list.
+    const requestId = inactiveVendorsRequestRef.current + 1;
+    inactiveVendorsRequestRef.current = requestId;
+    setInactiveVendorsLoading(true);
+    setInactiveVendorsError(false);
+    try {
+      const rows = await api.getVendors({ active_only: false });
+      if (inactiveVendorsRequestRef.current !== requestId) return;
+      setInactiveVendors((rows as Vendor[]).filter((v) => v.is_active === false));
+    } catch (err) {
+      console.error('Failed to load inactive vendors:', err);
+      if (inactiveVendorsRequestRef.current !== requestId) return;
+      setInactiveVendorsError(true);
+    } finally {
+      if (inactiveVendorsRequestRef.current === requestId) setInactiveVendorsLoading(false);
+    }
+  };
+
+  /**
+   * `?vendor=<id>` fallback for a vendor that is not on the active list.
+   *
+   * Lands the user on the Inactive view with the edit modal already open, which is the
+   * reactivation path. If the id is not live at all it is deleted (or another tenant's),
+   * and the honest answer is an error toast — the Deleted view is deliberately NOT opened
+   * for it, because that view offers Restore, and restoring a vendor is a decision
+   * somebody must arrive at on purpose rather than be walked into by a link.
+   */
+  const openDeepLinkedInactiveVendor = async (vendorId: number) => {
+    try {
+      const rows = (await api.getVendors({ active_only: false })) as Vendor[];
+      const vendor = rows.find((v) => v.id === vendorId);
+      if (!vendor) {
+        showToast('error', 'Vendor not found — it may have been deleted.');
+        return;
+      }
+      setInactiveVendors(rows.filter((v) => v.is_active === false));
+      selectTab('vendors');
+      setVendorView('inactive');
+      openEditVendorModal(vendor);
+    } catch (err) {
+      console.error('Failed to load deep-linked vendor:', err);
+      showToast('error', 'Could not open that vendor.');
+    }
+  };
+
+  const showVendorView = (view: VendorView) => {
+    setVendorView(view);
+    // Re-read on every entry, not just the first — somebody else may have deleted,
+    // restored or reactivated a vendor since, and a stale list is how you end up clicking
+    // Restore on a row the server will refuse.
+    if (view === 'deleted') void loadDeletedVendors();
+    if (view === 'inactive') void loadInactiveVendors();
+  };
+
+  /**
+   * Undo a vendor soft delete (compliance invariant 3 — the record was never destroyed,
+   * only hidden). Server-GATED, so NON-OPTIMISTIC: nothing moves until the call resolves.
+   *
+   * One deliberate difference from `handleRestorePO`: the reload happens BEFORE the
+   * toast, because the reload is what tells us which toast to show. Restore preserves the
+   * vendor's pre-delete `is_active`, so a supplier that had been switched off comes back
+   * switched off — it leaves this archive without appearing on the Vendors tab, since
+   * that list is `active_only` server-side. A plain success toast there would send
+   * someone hunting for a supplier that is on no list they can open. `warning` is the
+   * house variant for "it worked, but not everything you expected": success would hide
+   * the shortfall, error would claim a failure that did not happen.
+   *
+   * The membership test is a proxy, and honestly so: a vendor deleted AGAIN by someone
+   * else between the restore and the reload would also be missing, and would draw the
+   * same message. That race is rarer than the case being described, and the row itself is
+   * re-read either way, so the archive still ends up correct.
+   */
+  const handleRestoreVendor = async (vendor: Vendor) => {
+    if (restoreVendorPendingId !== null) return;
+    setRestoreVendorPendingId(vendor.id);
+    try {
+      await api.restoreVendor(vendor.id);
+      const [freshVendors] = await Promise.all([loadData(), loadDeletedVendors()]);
+      // `null` = the reload itself failed, so we know nothing about where the vendor
+      // landed. Fall back to the plain success toast rather than guessing: the restore
+      // genuinely did succeed, and the page is already showing its own load error.
+      const offVendorList = freshVendors !== null && !freshVendors.some((v) => v.id === vendor.id);
+      if (offVendorList) {
+        showToast(
+          'warning',
+          `Vendor ${vendor.name} restored as INACTIVE — restore puts back the state it had ` +
+            'when it was deleted, or inactive when that was never recorded. It stays off the ' +
+            'vendor list, and off purchase orders, until someone reactivates it under ' +
+            'Vendors → Inactive.',
+        );
+      } else {
+        showToast('success', `Vendor ${vendor.name} restored`);
+      }
+    } catch (err: any) {
+      showToast('error', err.response?.data?.detail || 'Failed to restore vendor');
+      // A 4xx means the SERVER disagrees with what this table is showing — overwhelmingly
+      // "Vendor is not deleted", i.e. somebody else restored it while this archive sat
+      // open. Re-read so the phantom row goes away. Deliberately NOT on 5xx/offline: that
+      // tells us nothing about the row, and a failing re-read would swap the archive for
+      // an error state over a transient blip.
+      const statusCode = err.response?.status;
+      if (typeof statusCode === 'number' && statusCode >= 400 && statusCode < 500) {
+        await loadDeletedVendors();
+      }
+    } finally {
+      setRestoreVendorPendingId(null);
     }
   };
 
@@ -552,6 +816,10 @@ export default function Purchasing() {
       setSelectedVendor(null);
       showToast('success', 'Vendor updated');
       loadData();
+      // The edit form carries `is_active`, so a save from the Inactive view is exactly how
+      // a recovered supplier gets reactivated — and that takes the row OUT of this list.
+      // Re-read it, or the row lingers on a table asserting it is switched off.
+      if (vendorView === 'inactive') void loadInactiveVendors();
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to update vendor');
     }
@@ -1030,6 +1298,292 @@ export default function Purchasing() {
     />
   );
 
+  /**
+   * What a Restore will put this vendor's `is_active` back to.
+   *
+   * 'unreported' is not a data problem to paper over — it means the server did not send
+   * `is_active_before_delete` (an API older than this page; see the Vendor interface), so
+   * the honest answer is that we do not know. The column is hidden entirely in that case
+   * rather than rendered as "Active", because a vendor that comes back deactivated while
+   * the screen said Active is the exact failure this is here to prevent.
+   */
+  const restoresAs = (vendor: Vendor): 'active' | 'inactive' | 'unreported' => {
+    if (vendor.is_active_before_delete === undefined) return 'unreported';
+    // Only an explicit `true` restores active. `null` — a vendor deleted before migration
+    // 082 added the sidecar, so its prior state was never captured — restores INACTIVE,
+    // because restore_vendor resolves that unknown with COALESCE(..., FALSE). Written as
+    // "=== true" rather than "!== false" ON PURPOSE: the loose form silently lumps null in
+    // with active, which is the single wrong answer here — it would paint "Active" on the
+    // one class of row the server is guaranteed to hand back switched off.
+    return vendor.is_active_before_delete === true ? 'active' : 'inactive';
+  };
+
+  // Show the column only when the server actually reports the prior state. All rows in one
+  // response agree (the field is either in the schema or it is not), so this is a
+  // whole-view switch, not a per-row one. Today's API always reports it; this stays for
+  // the separate-deploy window described on the Vendor interface.
+  const restoreStateReported = deletedVendors.some((v) => v.is_active_before_delete !== undefined);
+
+  const restoresAsBadge = (vendor: Vendor) => {
+    const state = restoresAs(vendor);
+    if (state === 'inactive') {
+      return (
+        <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium border border-amber-500/40 bg-amber-500/10 text-amber-200">
+          Inactive
+        </span>
+      );
+    }
+    if (state === 'active') return <span className="text-sm text-slate-300">Active</span>;
+    return <span className="text-sm text-slate-500">-</span>;
+  };
+
+  // The vendor archive's columns. Identity (Code / Name / Contact) and the one judgment
+  // that matters for putting a supplier back (Approved), then the same provenance tail
+  // and lone Restore the deleted-PO table carries.
+  //
+  // Deliberately NOT the full active-table column set: AS9100 / ISO9001 / Payment Terms
+  // are dropped. The deleted-PO view reuses every base column because it literally shares
+  // the array; this one is authored, and those three answer no question anyone asks while
+  // deciding whether to undo a delete — they would only push the provenance columns off
+  // the right edge, which is where the whole reason for the view lives.
+  const deletedVendorColumns: Array<DataTableColumn<Vendor>> = [
+    {
+      key: 'code',
+      header: 'Code',
+      sortable: true,
+      accessor: (vendor) => vendor.code,
+      render: (vendor) => <span className="font-mono text-werco-primary">{vendor.code}</span>,
+    },
+    {
+      key: 'name',
+      header: 'Name',
+      sortable: true,
+      accessor: (vendor) => vendor.name,
+      render: (vendor) => <span className="font-medium">{vendor.name}</span>,
+    },
+    {
+      key: 'contact_name',
+      header: 'Contact',
+      sortable: true,
+      accessor: (vendor) => vendor.contact_name ?? '',
+      render: (vendor) => (
+        <div>
+          <div>{vendor.contact_name || '-'}</div>
+          <div className="text-sm text-slate-400">{vendor.email}</div>
+        </div>
+      ),
+      csv: (vendor) => vendor.contact_name ?? '',
+    },
+    {
+      key: 'is_approved',
+      header: 'Approved',
+      sortable: true,
+      align: 'center',
+      accessor: (vendor) => (vendor.is_approved ? 1 : 0),
+      render: (vendor) =>
+        vendor.is_approved ? (
+          <CheckCircleIcon className="h-5 w-5 text-green-500 mx-auto" aria-label="Approved" />
+        ) : (
+          <span className="text-slate-400">-</span>
+        ),
+      csv: (vendor) => (vendor.is_approved ? 'Yes' : 'No'),
+    },
+    // Only when the server reports it — see restoreStateReported.
+    ...(restoreStateReported
+      ? [
+          {
+            key: 'restores_as',
+            header: 'Restores As',
+            sortable: true,
+            align: 'center' as const,
+            accessor: (vendor: Vendor) => restoresAs(vendor),
+            render: (vendor: Vendor) => restoresAsBadge(vendor),
+            csv: (vendor: Vendor) => restoresAs(vendor),
+          },
+        ]
+      : []),
+    {
+      key: 'deleted_at',
+      header: 'Deleted',
+      sortable: true,
+      accessor: (vendor) => vendor.deleted_at ?? '',
+      render: (vendor) => (vendor.deleted_at ? formatCentralDateTime(vendor.deleted_at) : '-'),
+      csv: (vendor) => (vendor.deleted_at ? formatCentralDateTime(vendor.deleted_at) : ''),
+    },
+    {
+      key: 'deleted_by_name',
+      header: 'Deleted By',
+      sortable: true,
+      accessor: (vendor) => vendor.deleted_by_name ?? '',
+      render: (vendor) => vendor.deleted_by_name || <span className="text-slate-500">Unknown</span>,
+      csv: (vendor) => vendor.deleted_by_name ?? '',
+    },
+    {
+      key: 'actions',
+      header: 'Actions',
+      align: 'center',
+      render: (vendor) =>
+        canRestoreVendor ? (
+          // No confirm dialog, matching the deleted-PO table: restore is non-destructive
+          // and one click from being undone by the Delete control this row gets back the
+          // moment it is live again. A confirm here would be reflex-training, not a
+          // safeguard — and the outcome that IS surprising (coming back deactivated) is
+          // answered by the Restores As column beside it, before the click, which is
+          // where that belongs rather than in a dialog nobody reads.
+          <div role="presentation" onClick={(e) => e.stopPropagation()}>
+            <LoadingButton
+              variant="secondary"
+              size="sm"
+              loading={restoreVendorPendingId === vendor.id}
+              loadingText="Restoring…"
+              disabled={restoreVendorPendingId !== null}
+              onClick={() => handleRestoreVendor(vendor)}
+              aria-label={`Restore vendor ${vendor.name}`}
+            >
+              Restore
+            </LoadingButton>
+          </div>
+        ) : (
+          <span className="text-sm text-slate-500">—</span>
+        ),
+    },
+  ];
+
+  // The deactivated-vendor table. Identity + Approved, then the one affordance that
+  // matters: Edit, which opens the SAME edit modal the active table uses — the modal
+  // carrying the `is_active` checkbox. That is deliberately the whole reactivation path:
+  // PUT /purchasing/vendors/{id} is already role-gated and already writes an audit row,
+  // so reactivating stays one explicit, audited decision rather than a new one-click verb
+  // that would read as "undo" and re-approve a supplier by reflex.
+  //
+  // Gated on canCreateVendor, not canRestoreVendor: this is an ordinary vendor edit, and
+  // the gate has to match the endpoint the button actually calls.
+  const inactiveVendorColumns: Array<DataTableColumn<Vendor>> = [
+    {
+      key: 'code',
+      header: 'Code',
+      sortable: true,
+      accessor: (vendor) => vendor.code,
+      render: (vendor) => <span className="font-mono text-werco-primary">{vendor.code}</span>,
+    },
+    {
+      key: 'name',
+      header: 'Name',
+      sortable: true,
+      accessor: (vendor) => vendor.name,
+      render: (vendor) => <span className="font-medium">{vendor.name}</span>,
+    },
+    {
+      key: 'contact_name',
+      header: 'Contact',
+      sortable: true,
+      accessor: (vendor) => vendor.contact_name ?? '',
+      render: (vendor) => (
+        <div>
+          <div>{vendor.contact_name || '-'}</div>
+          <div className="text-sm text-slate-400">{vendor.email}</div>
+        </div>
+      ),
+      csv: (vendor) => vendor.contact_name ?? '',
+    },
+    {
+      key: 'is_approved',
+      header: 'Approved',
+      sortable: true,
+      align: 'center',
+      accessor: (vendor) => (vendor.is_approved ? 1 : 0),
+      render: (vendor) =>
+        vendor.is_approved ? (
+          <CheckCircleIcon className="h-5 w-5 text-green-500 mx-auto" aria-label="Approved" />
+        ) : (
+          <span className="text-slate-400">-</span>
+        ),
+      csv: (vendor) => (vendor.is_approved ? 'Yes' : 'No'),
+    },
+    {
+      key: 'actions',
+      header: 'Actions',
+      align: 'center',
+      render: (vendor) =>
+        canCreateVendor ? (
+          <div role="presentation" onClick={(e) => e.stopPropagation()}>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => openEditVendorModal(vendor)}
+              aria-label={`Edit vendor ${vendor.name}`}
+            >
+              Edit
+            </Button>
+          </div>
+        ) : (
+          <span className="text-sm text-slate-500">&mdash;</span>
+        ),
+    },
+  ];
+
+  const renderInactiveVendorCard = (vendor: Vendor) => (
+    <MobileDataCard
+      title={vendor.name}
+      subtitle={vendor.code}
+      badge={vendor.is_approved ? <StatusBadge status="approved" /> : undefined}
+      fields={[
+        { label: 'Contact', value: vendor.contact_name || '-' },
+        { label: 'Email', value: vendor.email || '-' },
+      ]}
+      actions={
+        canCreateVendor ? (
+          <div className="flex justify-end" role="presentation" onClick={(e) => e.stopPropagation()}>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => openEditVendorModal(vendor)}
+              aria-label={`Edit vendor ${vendor.name}`}
+            >
+              Edit
+            </Button>
+          </div>
+        ) : undefined
+      }
+    />
+  );
+
+  // Mobile twin of the deleted vendor row. No onClick (a deleted vendor is not a supplier
+  // anyone should be opening an edit form on) and no Delete — the only affordance is
+  // Restore, same as the table.
+  const renderDeletedVendorCard = (vendor: Vendor) => (
+    <MobileDataCard
+      title={vendor.name}
+      subtitle={vendor.code}
+      badge={vendor.is_approved ? <StatusBadge status="approved" /> : undefined}
+      fields={[
+        ...(restoreStateReported
+          ? [{ label: 'Restores As', value: restoresAsBadge(vendor) }]
+          : []),
+        { label: 'Deleted', value: vendor.deleted_at ? formatCentralDateTime(vendor.deleted_at) : '-' },
+        { label: 'Deleted By', value: vendor.deleted_by_name || 'Unknown' },
+        { label: 'Contact', value: vendor.contact_name || '-' },
+      ]}
+      actions={
+        canRestoreVendor ? (
+          <div className="flex justify-end" role="presentation" onClick={(e) => e.stopPropagation()}>
+            <LoadingButton
+              variant="secondary"
+              size="sm"
+              loading={restoreVendorPendingId === vendor.id}
+              loadingText="Restoring…"
+              disabled={restoreVendorPendingId !== null}
+              onClick={() => handleRestoreVendor(vendor)}
+              aria-label={`Restore vendor ${vendor.name}`}
+            >
+              Restore
+            </LoadingButton>
+          </div>
+        ) : undefined
+      }
+    />
+  );
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -1234,75 +1788,193 @@ export default function Purchasing() {
       {/* Vendors Tab */}
       {activeTab === 'vendors' && (
         <div className="card">
-          <h2 className="text-lg font-semibold mb-4">Vendors</h2>
-          <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-slate-700">
-              <thead className="bg-slate-800">
-                <tr>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Code</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Name</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Contact</th>
-                  <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Approved</th>
-                  <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">AS9100</th>
-                  <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">ISO9001</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Payment Terms</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="bg-fd-panel divide-y divide-slate-700">
-                {vendors.map((vendor) => (
-                  <tr key={vendor.id} className="hover:bg-slate-800">
-                    <td className="px-4 py-3 font-mono">{vendor.code}</td>
-                    <td className="px-4 py-3 font-medium">{vendor.name}</td>
-                    <td className="px-4 py-3">
-                      <div>{vendor.contact_name}</div>
-                      <div className="text-sm text-slate-400">{vendor.email}</div>
-                    </td>
-                    <td className="px-4 py-3 text-center">
-                      {vendor.is_approved ? (
-                        <CheckCircleIcon className="h-5 w-5 text-green-500 mx-auto" />
-                      ) : (
-                        <span className="text-slate-400">-</span>
-                      )}
-                    </td>
-                    <td className="px-4 py-3 text-center">
-                      {vendor.is_as9100_certified ? (
-                        <CheckCircleIcon className="h-5 w-5 text-blue-500 mx-auto" />
-                      ) : (
-                        <span className="text-slate-400">-</span>
-                      )}
-                    </td>
-                    <td className="px-4 py-3 text-center">
-                      {vendor.is_iso9001_certified ? (
-                        <CheckCircleIcon className="h-5 w-5 text-blue-500 mx-auto" />
-                      ) : (
-                        <span className="text-slate-400">-</span>
-                      )}
-                    </td>
-                    <td className="px-4 py-3 text-sm">{vendor.payment_terms || '-'}</td>
-                    <td className="px-4 py-3 text-right">
-                      <div className="flex items-center justify-end gap-3">
-                        <button
-                          onClick={() => openEditVendorModal(vendor)}
-                          className="text-werco-primary hover:underline text-sm"
-                        >
-                          Edit
-                        </button>
-                        {canDeletePurchasing && (
-                          <button
-                            onClick={() => setDeleteVendorTarget(vendor)}
-                            className="text-red-400 hover:text-red-300 text-sm"
-                          >
-                            Delete
-                          </button>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-4">
+            <h2 className="text-lg font-semibold">
+              {vendorView === 'deleted'
+                ? 'Deleted Vendors'
+                : vendorView === 'inactive'
+                  ? 'Inactive Vendors'
+                  : 'Vendors'}
+            </h2>
+            {/* Active / Deleted is a SEGMENTED control, not a "show deleted" checkbox, for
+                the same reason as the Orders tab's: the two sets must never share a list.
+                A deleted vendor is a record and a live one is a supplier you can put on a
+                purchase order, and a merged table is one misread row away from ordering
+                material from a vendor that no longer exists. Same control, same position,
+                same copy as the Orders tab — learn it once. */}
+            <div
+              className="inline-flex border border-slate-700 rounded overflow-hidden self-start"
+              role="group"
+              aria-label="Vendor view"
+            >
+              {([
+                { id: 'active' as VendorView, label: 'Active' },
+                // Inactive sits BETWEEN Active and Deleted because that is the order the
+                // states actually run in, and because it is where a restored vendor
+                // lands — Deleted → Restore → here → Edit → Active.
+                { id: 'inactive' as VendorView, label: 'Inactive' },
+                { id: 'deleted' as VendorView, label: 'Deleted' },
+              ]).map((view) => (
+                <button
+                  key={view.id}
+                  type="button"
+                  onClick={() => showVendorView(view.id)}
+                  aria-pressed={vendorView === view.id}
+                  className={`px-3 py-1.5 text-sm font-medium ${
+                    vendorView === view.id
+                      ? 'bg-werco-primary text-white'
+                      : 'bg-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+                  }`}
+                >
+                  {view.label}
+                </button>
+              ))}
+            </div>
           </div>
+
+          {vendorView === 'inactive' ? (
+            <>
+              <div className="flex items-start gap-2 mb-4 px-3 py-2 rounded border border-amber-500/40 bg-amber-500/10 text-sm text-amber-200">
+                <BuildingOfficeIcon className="h-5 w-5 flex-shrink-0" aria-hidden="true" />
+                <p>
+                  These vendors exist but are switched off: they are kept out of the vendor list
+                  and cannot be selected on a purchase order. Vendors restored from the Deleted
+                  view land here whenever they were switched off before deletion, or were deleted
+                  before that was recorded.
+                  {canCreateVendor
+                    ? ' Edit one and tick Active to bring it back into use — a deliberate change, recorded in the audit log.'
+                    : ' An admin or manager can reactivate one.'}
+                </p>
+              </div>
+              <DataTable
+                columns={inactiveVendorColumns}
+                data={inactiveVendors}
+                rowKey={(vendor) => vendor.id}
+                rowClassName={() => 'opacity-70'}
+                loading={inactiveVendorsLoading}
+                error={inactiveVendorsError}
+                onRetry={loadInactiveVendors}
+                defaultSort={{ key: 'name', dir: 'asc' }}
+                pageSize={25}
+                csvExport={{ filename: 'inactive-vendors' }}
+                mobileCards={renderInactiveVendorCard}
+                empty={{
+                  icon: BuildingOfficeIcon,
+                  title: 'No inactive vendors',
+                  description:
+                    'Vendors switched off from the edit form, and vendors restored to an inactive state, appear here.',
+                }}
+              />
+            </>
+          ) : vendorView === 'deleted' ? (
+            <>
+              <div className="flex items-start gap-2 mb-4 px-3 py-2 rounded border border-amber-500/40 bg-amber-500/10 text-sm text-amber-200">
+                <TrashIcon className="h-5 w-5 flex-shrink-0" aria-hidden="true" />
+                <p>
+                  These vendors are deleted records. They are off the vendor list and cannot be
+                  selected on a purchase order. Restoring one returns it to the active or inactive
+                  state it had before deletion &mdash; a supplier that was switched off comes back
+                  switched off, and one deleted before this was recorded comes back inactive. The
+                  &ldquo;Restores As&rdquo; column says which, before you click. One that comes back
+                  inactive appears under Inactive, where it can be reactivated.
+                  {canRestoreVendor
+                    ? ' Restore one to put it back in the vendor list.'
+                    : ' An admin or manager can restore one.'}
+                </p>
+              </div>
+              <DataTable
+                columns={deletedVendorColumns}
+                data={deletedVendors}
+                rowKey={(vendor) => vendor.id}
+                // No onRowClick: the active table's row action is Edit, and a deleted
+                // vendor is a record, not something to open an edit form on. The server
+                // agrees — PUT refuses to resolve a deleted vendor at all.
+                rowClassName={() => 'opacity-70'}
+                loading={deletedVendorsLoading}
+                error={deletedVendorsError}
+                onRetry={loadDeletedVendors}
+                defaultSort={{ key: 'deleted_at', dir: 'desc' }}
+                pageSize={25}
+                csvExport={{ filename: 'deleted-vendors' }}
+                mobileCards={renderDeletedVendorCard}
+                empty={{
+                  icon: TrashIcon,
+                  title: 'No deleted vendors',
+                  description:
+                    'Vendors deleted from the Vendors tab appear here so they can be restored.',
+                }}
+              />
+            </>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-slate-700">
+                <thead className="bg-slate-800">
+                  <tr>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Code</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Name</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Contact</th>
+                    <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Approved</th>
+                    <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">AS9100</th>
+                    <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">ISO9001</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Payment Terms</th>
+                    <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="bg-fd-panel divide-y divide-slate-700">
+                  {vendors.map((vendor) => (
+                    <tr key={vendor.id} className="hover:bg-slate-800">
+                      <td className="px-4 py-3 font-mono">{vendor.code}</td>
+                      <td className="px-4 py-3 font-medium">{vendor.name}</td>
+                      <td className="px-4 py-3">
+                        <div>{vendor.contact_name}</div>
+                        <div className="text-sm text-slate-400">{vendor.email}</div>
+                      </td>
+                      <td className="px-4 py-3 text-center">
+                        {vendor.is_approved ? (
+                          <CheckCircleIcon className="h-5 w-5 text-green-500 mx-auto" />
+                        ) : (
+                          <span className="text-slate-400">-</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-center">
+                        {vendor.is_as9100_certified ? (
+                          <CheckCircleIcon className="h-5 w-5 text-blue-500 mx-auto" />
+                        ) : (
+                          <span className="text-slate-400">-</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-center">
+                        {vendor.is_iso9001_certified ? (
+                          <CheckCircleIcon className="h-5 w-5 text-blue-500 mx-auto" />
+                        ) : (
+                          <span className="text-slate-400">-</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-sm">{vendor.payment_terms || '-'}</td>
+                      <td className="px-4 py-3 text-right">
+                        <div className="flex items-center justify-end gap-3">
+                          <button
+                            onClick={() => openEditVendorModal(vendor)}
+                            className="text-werco-primary hover:underline text-sm"
+                          >
+                            Edit
+                          </button>
+                          {canDeletePurchasing && (
+                            <button
+                              onClick={() => setDeleteVendorTarget(vendor)}
+                              className="text-red-400 hover:text-red-300 text-sm"
+                            >
+                              Delete
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       )}
 

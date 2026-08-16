@@ -2,14 +2,21 @@
 
 Covers the vendor lifecycle endpoints added to ``app/api/endpoints/purchasing.py``:
 
-- ``DELETE /purchasing/vendors/{id}`` soft-deletes (compliance invariant #3): it sets
-  ``is_deleted`` AND ``is_active=False``, hides the row from ``list`` / ``get`` (404),
-  and writes a tamper-evident ``AuditLog`` DELETE row.
+- ``DELETE /purchasing/vendors/{id}`` soft-deletes (compliance invariant #3): it records
+  the current ``is_active`` into ``is_active_before_delete`` and THEN sets ``is_deleted``
+  and ``is_active=False``, hides the row from ``list`` / ``get`` (404), and writes a
+  tamper-evident ``AuditLog`` DELETE row.
 - The **active-PO guardrail**: a vendor referenced by any live (not CLOSED/CANCELLED,
   not soft-deleted) purchase order is refused with a 400.
 - RBAC: the gate is ``[ADMIN, MANAGER]`` — OPERATOR / VIEWER get 403, MANAGER 200.
-- ``/restore`` un-deletes AND re-activates; a double delete / a restore of a live
-  vendor are refused (400); tenant isolation holds (404).
+- ``/restore`` un-deletes and puts ``is_active`` back to the value it had when the
+  vendor was deleted -- ``COALESCE(is_active_before_delete, False)``, migration 082, so a
+  supplier that was switched off comes back switched off and a pre-082 deletion comes back
+  INACTIVE. It does NOT unconditionally re-activate; that was the pre-082 behaviour and
+  changing it back is a regression. The fixture here is active at delete time, so it comes
+  back active; the full matrix lives in ``test_vendor_deleted_only_restore_state.py``.
+  A double delete / a restore of a live vendor are refused (400); tenant isolation holds
+  (404).
 - The remediation to ``create_purchase_order``: a PO can no longer be opened against a
   soft-deleted or deactivated vendor (both 404 "Vendor not found").
 """
@@ -94,7 +101,11 @@ def test_delete_writes_soft_delete_audit_row(client: TestClient, db_session: Ses
     assert rows[0].extra_data.get("soft_delete") is True
 
 
-def test_restore_reactivates_and_makes_visible(client: TestClient, db_session: Session):
+def test_restore_of_an_active_vendor_comes_back_active(client: TestClient, db_session: Session):
+    """The fixture is ACTIVE when deleted, so preservation puts it back active and the row
+    returns to the default list. This is the narrow happy case -- it does NOT show that
+    restore re-activates unconditionally, which it deliberately does not. See
+    ``test_vendor_deleted_only_restore_state.py`` for the inactive and pre-082 branches."""
     admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
     vendor = make_vendor(db_session, company_id=1)
     vendor_id = vendor.id

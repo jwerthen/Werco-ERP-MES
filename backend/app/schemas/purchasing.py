@@ -81,6 +81,16 @@ class VendorUpdate(BaseModel):
     is_as9100_certified: Optional[bool] = None
     is_iso9001_certified: Optional[bool] = None
     is_active: Optional[bool] = None
+    # ``is_active_before_delete`` is DELIBERATELY ABSENT here, and must stay absent. It is a
+    # sidecar written only by delete_vendor and cleared only by restore_vendor (see
+    # Vendor.is_active_before_delete); update_vendor applies this schema through a blind
+    # ``setattr`` loop, so listing the field would hand every ADMIN/MANAGER a public verb for
+    # seeding the value restore later reads back into ``is_active`` -- i.e. a way to pre-arm a
+    # supplier to come back ACTIVE. Today that is inert (update_vendor resolves through
+    # ``_live_vendor_or_404``, and a later delete overwrites the sidecar regardless), but
+    # "inert because of two unrelated details elsewhere" is not a property to rest an
+    # approved-supplier flag on. Same posture as ``Part.backflush_components`` being absent
+    # from PartBase/PartCreate.
     notes: Optional[str] = Field(None, max_length=2000)
 
     @field_validator('code', mode='before')
@@ -98,6 +108,59 @@ class VendorResponse(VendorBase):
     quality_rating: Optional[float] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
+
+    # Soft-delete provenance -- the vendor twin of POListResponse's block, same three
+    # fields and the same tri-state contract: populated ONLY by the ``deleted_only=true``
+    # view of GET /purchasing/vendors (the restore view), None on every other path. The
+    # default list filters ``is_deleted == False`` and so never *asserts* deletion state,
+    # and a tri-state ``is_deleted`` lets one shared row renderer tell "this came from the
+    # restore view" from "this is a live vendor" without threading the query param through
+    # the UI. ``deleted_by_name`` is resolved from ``users`` (SoftDeleteMixin.deleted_by is
+    # a bare Integer column with no FK relationship to load) and stays None when that user
+    # row no longer exists.
+    #
+    # NOTE (do not "simplify"): unlike POListResponse -- whose rows are hand-built, so its
+    # fields simply default -- ``is_deleted`` and ``deleted_at`` are REAL COLUMNS on Vendor
+    # and this model sets ``from_attributes``. Validating a Vendor ORM object therefore
+    # populates both on EVERY path, which would ship ``is_deleted: false`` on the default
+    # list where the PO list ships ``null`` and collapse the tri-state to a boolean. That is
+    # why list_vendors assigns all three explicitly after model_validate instead of letting
+    # them fall through.
+    #
+    # Datetime note: VendorBase extends UTCModel (checked, not assumed), so ``deleted_at``
+    # serializes as UTC ISO-8601 with a trailing Z like every other datetime here, and
+    # utils/centralTime.ts parses it correctly. A bare BaseModel would have served it naive,
+    # and a naive string is exactly what that helper mis-parses.
+    is_deleted: Optional[bool] = None
+    deleted_at: Optional[datetime] = None
+    deleted_by_name: Optional[str] = None
+
+    # The FOURTH provenance field, and the only one that is not a fact about the delete:
+    # it is what ``POST /vendors/{id}/restore`` WILL put ``is_active`` back to, disclosed
+    # BEFORE the click. Same tri-state discipline as the three above -- populated only on
+    # the ``deleted_only=true`` view, None everywhere else -- but its values mean something
+    # different, so do not read it as a fourth "was it deleted" flag:
+    #
+    #   True  -> restore brings the vendor back ACTIVE (it was active when deleted)
+    #   False -> restore brings it back INACTIVE (the shop had switched it off)
+    #   None  -> ON THE DELETED VIEW: deleted before migration 082, so the prior state was
+    #            never recorded -- and restore resolves that unknown as INACTIVE too
+    #            (``COALESCE(is_active_before_delete, False)``). It is "unknown, therefore
+    #            off", NOT "no answer". Elsewhere None means the field does not apply.
+    #
+    # Why it is on the wire at all, when the column itself is a private sidecar nothing but
+    # delete_vendor/restore_vendor touches: an approved-supplier list is an AS9100D-
+    # controlled artifact, and restore deliberately does NOT reactivate. Without this field
+    # a caller cannot tell, BEFORE acting, which rows come back selectable and which come
+    # back switched off -- the row's own ``is_active`` cannot answer it, because the delete
+    # forces it False on EVERY deleted row. A post-hoc toast is not a substitute: by then
+    # the operator has already acted.
+    #
+    # Disclosure-wise it widens nothing: it is a derived view of a flag the same reader
+    # could read off the live row a moment before the delete, on a list they are already
+    # authorized for. READ-ONLY -- the field is absent from VendorCreate/VendorUpdate (see
+    # the note on VendorUpdate) and no request can seed it.
+    is_active_before_delete: Optional[bool] = None
 
     class Config:
         from_attributes = True
