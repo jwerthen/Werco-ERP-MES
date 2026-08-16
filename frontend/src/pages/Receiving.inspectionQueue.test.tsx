@@ -171,7 +171,10 @@ describe('Receiving — inspection queue', () => {
     renderTab('queue');
 
     const row = await findDesktopRow('RCV-20260618-001');
-    expect(within(row).getByRole('button', { name: /inspect/i })).toBeInTheDocument();
+    // Anchored to the exact label: a supervisor also gets the Clear Hold control,
+    // whose aria-label ("Clear the inspection hold on receipt …") contains
+    // "inspect", so a loose /inspect/i now matches two buttons in this row.
+    expect(within(row).getByRole('button', { name: /^inspect$/i })).toBeInTheDocument();
   });
 
   it('renders placeholders (never "null") for an orphaned queue row', async () => {
@@ -189,7 +192,11 @@ describe('Receiving — receive form default', () => {
   const HINT_TEXT = /part master flags this part as requiring incoming inspection/i;
 
   const openReceiveForm = async () => {
-    fireEvent.click(await screen.findByRole('button', { name: /PO-2001/ }));
+    // Anchored: the PO card's accessible name STARTS with the PO number, while its
+    // sibling delete control is labelled "Delete purchase order PO-2001", so a bare
+    // /PO-2001/ matches both and throws on multiple elements. (The mock user is a
+    // manager, who is inside the delete gate.)
+    fireEvent.click(await screen.findByRole('button', { name: /^PO-2001/ }));
     await waitFor(() => expect(mockApi.getPOForReceiving).toHaveBeenCalledWith(5));
     fireEvent.click(await screen.findByRole('button', { name: 'Receive' }));
     return screen.findByRole('checkbox', { name: /requires inspection/i });

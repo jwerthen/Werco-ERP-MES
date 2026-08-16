@@ -149,7 +149,8 @@ but **only entries whose source is wired today actually fire**; the rest are **d
 `wo.started`, `wo.completed`, `wo.closed`, `wo.priority_changed` (off by default), `op.completed`
 (off by default), `op.ready` (off by default), `production.reduced`, `ncr.created`, `ncr.closed`
 (gated), `inspection.failed` (gated), `car.created`, `fai.created`, `fai.completed` (gated),
-`po.sent`, `receipt.created`, `receipt.voided`, `receipt.corrected`, `shipment.shipped`,
+`po.sent`, `receipt.created`, `receipt.voided`, `receipt.corrected`, `receipt.inspection_cleared`,
+`shipment.shipped`,
 `coc.generation_failed`, `downtime.started`, `downtime.resolved`, `material.allocation_shortage`,
 `material.backflush_shortage`, `material.allocation_consumption_failed`, `material.backflush_failed`,
 `material.backflush_demand_refused`.
@@ -422,7 +423,7 @@ pattern is an existing list page plus a param that page already reads (`pages/Pu
 | Trigger | Emitted link | Honoured by |
 |---|---|---|
 | any outbox event with `event.work_order_id` set — checked **first**, wins over `entity_type` | `/work-orders/{id}` | `WorkOrderDetail` — a genuine by-id route. The model the others imitate. |
-| `entity_type="po_receipt"` with `po_id` in the payload — `receipt.created` (**the reported bug**), `receipt.voided`, `receipt.corrected`, and now `inspection.failed` | `/purchasing?po={po_id}` | `Purchasing.tsx` selects the PO and **falls back to `GET /purchasing/purchase-orders/{id}`** when it's outside the list window. |
+| `entity_type="po_receipt"` with `po_id` in the payload — `receipt.created` (**the reported bug**), `receipt.voided`, `receipt.corrected`, `receipt.inspection_cleared`, and now `inspection.failed` | `/purchasing?po={po_id}` | `Purchasing.tsx` selects the PO and **falls back to `GET /purchasing/purchase-orders/{id}`** when it's outside the list window. |
 | `entity_type="purchase_order"` — `po.sent` | `/purchasing?po={entity_id}` | Same. Previously emitted nothing at all. |
 | `entity_type="fai"`, no work order | `/quality?tab=fai&fai={id}` | `Quality.tsx` opens the report via `GET /quality/fai/{id}` — a real by-id fetch — then clears the `fai` param so closing the modal doesn't re-open it. |
 | `entity_type="ncr"`, no work order | `/quality?tab=ncr` — **record-less on purpose** | There is **no NCR detail view** in the app, so an id in the URL would be a promise the page can't keep. The tab is newest-first. |

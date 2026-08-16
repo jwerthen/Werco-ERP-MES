@@ -49,6 +49,7 @@ from app.schemas.print_profile import (
 from app.schemas.purchasing import (
     InspectionQueueItem,
     InspectionResultResponse,
+    ReceiptClearInspectionRequest,
     ReceiptCorrection,
     ReceiptCreate,
     ReceiptInspection,
@@ -644,7 +645,16 @@ def inspect_receipt(
             joinedload(POReceipt.po_line).joinedload(PurchaseOrderLine.purchase_order).joinedload(PurchaseOrder.vendor),
             joinedload(POReceipt.location),
         )
-        .filter(POReceipt.id == receipt_id, POReceipt.company_id == company_id)
+        .filter(
+            POReceipt.id == receipt_id,
+            POReceipt.company_id == company_id,
+            # A voided receipt is soft-deleted but keeps its PENDING_INSPECTION
+            # status (void reconciles the quantity to 0 and never touches status),
+            # so without this filter POST /inspect/{voided_id} with 0/0 sailed past
+            # both guards below and stamped PASSED + inspected_by + inspected_at on
+            # a deleted record. Matches every other live read in this file.
+            POReceipt.is_deleted == False,  # noqa: E712
+        )
         .first()
     )
 
@@ -818,8 +828,21 @@ def _add_to_inventory(
     reference: str,
     audit: AuditService,
     supplier_name: Optional[str] = None,
+    reason_code: Optional[str] = None,
+    notes: Optional[str] = None,
 ) -> InventoryItem:
-    """Add received material to inventory with full traceability"""
+    """Add received material to inventory with full traceability.
+
+    ``reason_code`` / ``notes`` are optional overrides for the RECEIVE ledger row.
+    Both default to None so the two original callers (receive_material's
+    dock-to-stock leg and inspect_receipt) are byte-identical to before: no
+    reason_code, and the standard "Received from {vendor} via {reference}" note.
+    clear_receipt_inspection passes them so the movement itself says WHY the
+    material entered stock -- the Stock Movements tab is the only place the ledger
+    is rendered, and an unstamped row there is indistinguishable from a normal
+    receive. Same stamping the correct/void reconciler does with RECEIPT_VOID /
+    RECEIPT_CORRECTION.
+    """
     # Check for existing inventory at location with same lot (scoped to the company)
     existing = (
         db.query(InventoryItem)
@@ -891,7 +914,8 @@ def _add_to_inventory(
         total_cost=quantity * unit_cost,
         reference_type="po_receipt",
         reference_number=reference,
-        notes=f"Received from {supplier_name or 'vendor'} via {reference}",
+        reason_code=reason_code,
+        notes=(notes or f"Received from {supplier_name or 'vendor'} via {reference}"),
         created_by=user_id,
     )
     txn.company_id = company_id
@@ -1193,17 +1217,26 @@ def _reconcile_receipt_quantity(
     )
 
 
-def _load_correctable_receipt(db: Session, receipt_id: int, company_id: int) -> POReceipt:
-    """Load a live (not soft-deleted) receipt tenant-scoped, with the PO line / PO /
-    location eager-loaded, and enforce the shared correctable/voidable state model.
+def _load_live_receipt(db: Session, receipt_id: int, company_id: int) -> Optional[POReceipt]:
+    """Load a live (not soft-deleted) receipt, tenant-scoped, with the PO line / PO /
+    vendor / part / location eager-loaded. Returns None for missing, cross-tenant, or
+    already-voided -- the caller raises the 404.
 
-    Raises 404 (missing / cross-tenant / already-voided), 400 (orphaned PO line, so
-    there is no part/price/PO context to reconcile), or 409 (already inspected).
+    This is deliberately ONLY the fetch -- every post-receipt verb
+    (correct / void / clear-inspection) layers its OWN state model on top, because
+    the states they accept and the wording they owe the user differ. Sharing the
+    query keeps the tenant scoping and the eager loads in one place; sharing the
+    guards would force one of the verbs to emit a message that is wrong for it.
     """
-    receipt = (
+    return (
         db.query(POReceipt)
         .options(
-            joinedload(POReceipt.po_line).joinedload(PurchaseOrderLine.purchase_order),
+            # vendor + part are joined for clear_receipt_inspection, which posts the
+            # material into inventory (supplier name on the transaction, part id/price
+            # off the line). Harmless for correct/void -- one extra join on a
+            # single-row fetch, and it removes two lazy loads.
+            joinedload(POReceipt.po_line).joinedload(PurchaseOrderLine.purchase_order).joinedload(PurchaseOrder.vendor),
+            joinedload(POReceipt.po_line).joinedload(PurchaseOrderLine.part),
             joinedload(POReceipt.location),
         )
         .filter(
@@ -1213,6 +1246,16 @@ def _load_correctable_receipt(db: Session, receipt_id: int, company_id: int) -> 
         )
         .first()
     )
+
+
+def _load_correctable_receipt(db: Session, receipt_id: int, company_id: int) -> POReceipt:
+    """Load a live receipt (see ``_load_live_receipt``) and enforce the shared
+    correctable/voidable state model.
+
+    Raises 404 (missing / cross-tenant / already-voided), 400 (orphaned PO line, so
+    there is no part/price/PO context to reconcile), or 409 (already inspected).
+    """
+    receipt = _load_live_receipt(db, receipt_id, company_id)
     if not receipt:
         raise HTTPException(status_code=404, detail="Receipt not found")
 
@@ -1393,6 +1436,258 @@ def void_receipt(
 
     db.commit()
     return {"message": f"Receipt {receipt.receipt_number} voided"}
+
+
+@router.post("/receipt/{receipt_id}/clear-inspection", response_model=ReceiptResponse)
+def clear_receipt_inspection(
+    receipt_id: int,
+    payload: ReceiptClearInspectionRequest,
+    db: Session = Depends(get_db),
+    # ADMIN / MANAGER / SUPERVISOR / QUALITY -- deliberately IDENTICAL to the role
+    # list on POST /receiving/inspect/{receipt_id}, and that identity is the whole
+    # argument. An earlier draft of this endpoint excluded SUPERVISOR on a
+    # segregation-of-duties reading: the receive tier that ticks "requires
+    # inspection" should not be the tier that waives it alone. The owner OVERRULED
+    # that, and the reasoning is worth keeping here because it is not obvious.
+    #
+    # Excluding SUPERVISOR closed the honest exit while leaving the dishonest one
+    # wide open. The same supervisor still holds /inspect, so a mis-ticked receipt
+    # with no manager on site does not stay on the queue -- it gets pushed through
+    # Inspect -> Visual -> Pass. That stamps a named inspector and a timestamp onto
+    # an inspection that never happened: a FABRICATED quality record, and precisely
+    # the AS9100D records-integrity defect PR #127 fixed in code, only now performed
+    # by a human instead of by the code.
+    #
+    # So widening this gate is a records-integrity IMPROVEMENT, not a convenience
+    # concession. Anyone who can decide a lot PASSES can decide it never needed
+    # inspecting; of the two records a supervisor can already produce, the reasoned,
+    # attributed, hash-chained waiver is the strictly more truthful one. Giving them
+    # that verb is how the false one stops being the only one they have.
+    #
+    # Keep this list in lockstep with /inspect: if one moves, the other moves, or
+    # the dishonest exit reopens. VOID stays tighter (ADMIN/MANAGER) because that is
+    # delete authority -- a different question from whether an inspection was owed.
+    current_user: User = Depends(
+        require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR, UserRole.QUALITY])
+    ),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Clear an inspection hold that was placed by mistake, non-destructively.
+
+    The owner's case: receiving ticks "requires inspection" on a line that never
+    needed it, and the lot then sits in the inspection queue with no honest way out.
+    Until now the ONLY exit was /void, which un-receives the material entirely and
+    forces the whole receipt to be re-keyed. This verb is the missing "the box was
+    checked by mistake" alternative: the receipt and its lot / heat / cert stay
+    exactly as keyed, the material posts into inventory, and the row drops off the
+    queue. Nothing is destroyed and nothing is re-keyed.
+
+    Effectively this re-classifies the receipt as the dock-to-stock receipt it should
+    have been, so it mirrors the dock-to-stock leg of ``receive_material`` exactly.
+
+    Four things about the implementation are load-bearing:
+
+    1. ``requires_inspection`` MUST flip to False. ``_reconcile_receipt_quantity``
+       (the shared correct/void engine) derives ``inventory_placed = not
+       receipt.requires_inspection`` -- that flag is the ONLY record of whether stock
+       was placed. Leave it True after posting stock here and a later Correct or Void
+       would believe no inventory was ever placed and would NOT reverse it, silently
+       stranding the material on hand. Flipping it is what keeps those paths correct.
+    2. ``inspection_status`` is NOT_REQUIRED, never PASSED. No incoming inspection
+       happened, so the record must not assert that one did, and ``inspection_method``
+       / ``inspected_by`` / ``inspected_at`` stay NULL for the same reason. This is
+       the AS9100D records-integrity rule flagged on PR #127 (where the dock-to-stock
+       path used to fabricate a VISUAL inspection by the receiver); do not "improve"
+       it by stamping a pass.
+    3. The PO line and PO status are deliberately UNTOUCHED --
+       ``po_line.quantity_received`` / ``is_closed`` / ``po.status`` were all advanced
+       when the receipt was created (a PENDING_INSPECTION receipt still counts as
+       received; only the inventory posting waits on inspection). This verb changes
+       nothing about how much arrived, so re-running that arithmetic would
+       double-count. That is also why it does NOT go through
+       ``_reconcile_receipt_quantity``: no quantity is moving.
+    4. Only a PENDING_INSPECTION receipt qualifies (409 otherwise). That guard is
+       also the replay guard -- a second call finds the receipt already ACCEPTED and
+       refuses, so stock can never be posted twice. It is read UNDER A ROW LOCK for
+       exactly that reason (see the comment on the fetch): unlocked, two concurrent
+       clears both read PENDING_INSPECTION and both post.
+    5. The waiver is stamped onto ``receipt.notes`` as well as the audit log. The
+       audit row is the compliance record (invariant 2), but ``GET /audit/`` is
+       ADMIN/MANAGER-only -- QUALITY and SUPERVISOR, two of the four roles
+       authorized to perform the waiver, cannot read their own decision back. Without the note the cleared
+       receipt is byte-indistinguishable from a receipt that was dock-to-stock from
+       the first keystroke, on the receipt detail, in History, and in the lot
+       genealogy. The stamp is what keeps the justification on the QUALITY record.
+
+       It is a CONVENIENCE COPY, not a protected one, and the difference matters if
+       you are relying on it: clearing leaves ``inspection_status`` at NOT_REQUIRED,
+       which is not in ``_INSPECTED_STATUSES``, so the receipt stays correctable --
+       and ``correct_receipt`` (ADMIN/MANAGER/SUPERVISOR) assigns ``receipt.notes``
+       wholesale from its payload, which the Correct dialog prefills into a plain
+       textarea. The same tier that writes this line can therefore retype it away
+       without realizing what it was. Nothing is lost when that happens (the
+       immutable audit row survives, and so does the correction's own ``log_update``
+       carrying old -> new notes), but the DURABLE in-app trace for a non-audit-reader
+       is the RECEIVE ledger row written below -- ``reason_code=INSPECTION_HOLD_CLEARED``
+       plus the reason in its notes, rendered on Warehouse -> Inventory -> Stock
+       Movements, which SUPERVISOR and QUALITY both reach with ``inventory:view``.
+       Do not document this stamp as tamper-evident; the ledger row is the one that is.
+    """
+    # Take the ROW LOCK before reading the status, because the status guard below is a
+    # read-then-write and it is the ONLY thing standing between this verb and a double
+    # posting. POReceipt carries no ``version_id_col`` (invariant 4 maps that on the
+    # contended WO/operation/time-entry paths only), so there is no StaleDataError to
+    # fall back on; and ``inventory_items`` has no unique constraint on
+    # (company_id, part_id, location, lot_number), so two transactions that both pass
+    # the guard would both post -- one lot ending up with double the stock, which a
+    # later Correct/Void would only half reverse (it re-finds the row with .first()).
+    # Locking first serializes them: the loser wakes up, reads ACCEPTED, and 409s.
+    # Deliberately a bare query with no eager loads -- Postgres refuses FOR UPDATE
+    # against the nullable side of the LEFT OUTER JOINs joinedload() emits. It puts
+    # the freshest committed row in the identity map, which the eager-loading fetch
+    # below then reuses (a second query never overwrites loaded column attributes).
+    # (with_for_update is a no-op on the SQLite test backend, as everywhere else here.)
+    locked = (
+        db.query(POReceipt)
+        .filter(
+            POReceipt.id == receipt_id,
+            POReceipt.company_id == company_id,
+            POReceipt.is_deleted == False,  # noqa: E712
+        )
+        .with_for_update()
+        .first()
+    )
+    if locked is None:
+        raise HTTPException(status_code=404, detail="Receipt not found")
+
+    receipt = _load_live_receipt(db, receipt_id, company_id)
+    if not receipt:
+        raise HTTPException(status_code=404, detail="Receipt not found")
+
+    # ---- GUARDS (all before any mutation) ---------------------------------
+    # Status first: it is the common refusal AND the replay guard, and it subsumes
+    # the "already inspected" case (an inspected receipt is ACCEPTED or REJECTED, so
+    # it lands here with the message that is actually true for this verb -- which is
+    # why this does not reuse _load_correctable_receipt, whose 409 says "already been
+    # inspected" and would be wrong for, say, an already-cleared receipt).
+    if receipt.status != ReceiptStatus.PENDING_INSPECTION:
+        raise HTTPException(status_code=409, detail="Receipt is not pending inspection")
+
+    # An orphaned receipt (dangling PO line, or a PO line with no purchase order)
+    # cannot be cleared -- there is no part / unit price / vendor context to post the
+    # material into inventory with. Refuse with a clear 400, never a 500. The
+    # hardened inspection queue deliberately surfaces such rows so they can be found.
+    po_line = receipt.po_line
+    if po_line is None or po_line.purchase_order is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Receipt's PO line no longer exists, so the inspection hold cannot be cleared here. "
+                "Contact an administrator to repair the receipt record."
+            ),
+        )
+    po = po_line.purchase_order
+
+    # ---- MUTATIONS --------------------------------------------------------
+    old_status = receipt.status
+    qty_received = float(receipt.quantity_received or 0.0)
+
+    # See docstring (1): the flag is the inventory_placed discriminator the
+    # correct/void reconciler reads. It MUST flip in the same breath as the posting.
+    receipt.requires_inspection = False
+    receipt.status = ReceiptStatus.ACCEPTED
+    # See docstring (2): NOT_REQUIRED, not PASSED -- no inspection occurred, and
+    # inspection_method / inspected_by / inspected_at stay NULL.
+    receipt.inspection_status = InspectionStatus.NOT_REQUIRED
+    receipt.quantity_accepted = qty_received
+
+    # See docstring (5): stamp the waiver onto the RECORD, not just the audit log.
+    # Machine-composed and APPENDED -- never overwrite what receiving typed, and
+    # never write it to `inspection_notes`, which would imply inspection activity
+    # that did not happen (the same PR #127 rule as the status fields above).
+    waiver_note = (
+        f"[{datetime.utcnow():%Y-%m-%d}] Inspection hold cleared by "
+        f"{current_user.full_name} (no incoming inspection performed): {payload.reason}"
+    )
+    receipt.notes = f"{receipt.notes.rstrip()}\n{waiver_note}" if receipt.notes else waiver_note
+
+    # Post the material with EXACTLY the key receive_material uses -- (part_id,
+    # location code or the "RECV-01" default, receipt lot) -- so a later Correct or
+    # Void can re-find this very InventoryItem row to reverse it.
+    location_code = receipt.location.code if receipt.location else "RECV-01"
+    _add_to_inventory(
+        db,
+        company_id,
+        po_line.part_id,
+        qty_received,
+        location_code,
+        receipt.lot_number,
+        po_line.unit_price,
+        current_user.id,
+        receipt.receipt_number,
+        audit,
+        po.vendor.name if po.vendor else None,
+        # Stamp the LEDGER too. Without these, the Stock Movements tab (the app's only
+        # rendering of inventory_transactions) shows this material entering stock with
+        # exactly the row a normal receive writes, and nothing on the movement says a
+        # quality hold was waived to put it there. Mirrors the RECEIPT_VOID /
+        # RECEIPT_CORRECTION stamping the correct/void reconciler already does.
+        reason_code="INSPECTION_HOLD_CLEARED",
+        notes=(f"Inspection hold cleared on receipt {receipt.receipt_number} " f"(not required): {payload.reason}"),
+    )
+
+    # Audit (tamper-evident hash chain via the request-scoped AuditService). The
+    # inventory rows _add_to_inventory writes carry their own audit entries.
+    part_number = po_line.part.part_number if po_line.part else "N/A"
+    # Whether the PART MASTER flags this part as requiring inspection is recorded on
+    # both the audit row and the event, so a waiver that contradicted the master data
+    # is findable afterwards. It is deliberately NOT a refusal: the column defaults to
+    # True on essentially every part, so blocking on it would be noise, and the
+    # receiving UI already shows it as an advisory hint next to the checkbox.
+    part_requires_inspection = bool(po_line.part.requires_inspection) if po_line.part else None
+    audit.log_status_change(
+        "receipt",
+        receipt.id,
+        receipt.receipt_number,
+        old_status.value if hasattr(old_status, "value") else old_status,
+        receipt.status.value if hasattr(receipt.status, "value") else receipt.status,
+        description=(
+            f"Cleared inspection hold on receipt {receipt.receipt_number} "
+            f"(part {part_number}, PO {po.po_number}, lot {receipt.lot_number}): {payload.reason}"
+        ),
+        extra_data={"reason": payload.reason, "part_requires_inspection": part_requires_inspection},
+    )
+
+    # Best-effort operational event (non-fatal), mirroring the receipt_voided /
+    # receipt_corrected payload shape. Emitted BEFORE commit, like every other seam.
+    # It DOES fan out a notification: `receipt.inspection_cleared` in
+    # notification_catalog.py, in-app to MANAGER + QUALITY, exactly like
+    # receipt.voided / receipt.corrected. Waiving a hold is the most quality-relevant
+    # of the three post-receipt verbs, so it must not be the only silent one.
+    OperationalEventService(db).emit_best_effort(
+        company_id=company_id,
+        event_type="receipt_inspection_cleared",
+        source_module="purchasing",
+        entity_type="po_receipt",
+        entity_id=receipt.id,
+        user_id=current_user.id,
+        severity="medium",
+        event_payload={
+            "receipt_number": receipt.receipt_number,
+            "po_id": po.id,
+            "po_number": po.po_number,
+            "po_line_id": po_line.id,
+            "part_id": po_line.part_id,
+            "quantity_received": qty_received,
+            "reason": payload.reason,
+            "part_requires_inspection": part_requires_inspection,
+        },
+    )
+
+    db.commit()
+    db.refresh(receipt)
+    return receipt
 
 
 @router.get("/history")

@@ -317,6 +317,34 @@ class ReceiptVoidRequest(BaseModel):
         return v.strip()
 
 
+class ReceiptClearInspectionRequest(BaseModel):
+    """Waive an inspection hold that was placed by mistake ("the box was checked in error").
+
+    Non-destructive counterpart to void: the receipt, its lot/heat/cert and its
+    already-counted PO quantities are all kept exactly as keyed. The receipt is
+    simply re-classified as dock-to-stock -- accepted, ``inspection_status =
+    not_required``, material posted into inventory, and off the inspection queue.
+    Nothing is destroyed and nothing has to be re-keyed, which is what makes this
+    the right verb for a mis-clicked "requires inspection" checkbox (void, the only
+    previous way out of the queue, un-receives the material entirely).
+
+    Only valid for a receipt still sitting at PENDING_INSPECTION. ``reason`` is
+    mandatory and recorded on the tamper-evident audit trail -- waiving an AS9100D
+    inspection hold must always carry a stated justification.
+    """
+
+    reason: str = Field(
+        ..., min_length=1, max_length=500, description="Why the inspection hold is being cleared (required)"
+    )
+
+    @field_validator("reason")
+    @classmethod
+    def reason_not_blank(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("reason must not be blank")
+        return v.strip()
+
+
 class ReceiptInspection(BaseModel):
     quantity_accepted: MoneySmall = Field(..., ge=Decimal("0"))
     quantity_rejected: MoneySmall = Field(default=Decimal("0"), ge=Decimal("0"))

@@ -1811,3 +1811,35 @@ export interface InventoryTransactionParams {
   limit?: number;
   offset?: number;
 }
+
+/**
+ * The receipt echoed back by `POST /receiving/receipt/{id}/clear-inspection`.
+ *
+ * The endpoint's `response_model` is the backend's full `ReceiptResponse`
+ * (`backend/app/schemas/purchasing.py`) — the whole receipt, traceability
+ * fields and quantities included. This declares only the subset the app relies
+ * on, which is precisely the subset that makes the verb's OUTCOME checkable:
+ *
+ *  - `status` is `accepted` — the receipt has left the inspection queue;
+ *  - `inspection_status` is `not_required`, NEVER `passed`. No incoming
+ *    inspection happened, so the record must not assert one did (the AS9100D
+ *    records-integrity rule flagged on PR #127), and `inspection_method` /
+ *    `inspected_by` / `inspected_at` stay null for the same reason;
+ *  - `requires_inspection` has flipped false — that flag is the ONLY record
+ *    that stock was placed, and the correct/void reconciler reads it as
+ *    `inventory_placed`.
+ *
+ * The index signature keeps the rest of the payload assignable rather than
+ * pretending the endpoint returns nothing else.
+ */
+export interface ClearedReceipt {
+  id: number;
+  receipt_number: string;
+  /** `accepted` after a successful clear. */
+  status: string;
+  /** `not_required` after a successful clear — never `passed`. */
+  inspection_status: string;
+  /** false after a successful clear. */
+  requires_inspection: boolean;
+  [key: string]: unknown;
+}
