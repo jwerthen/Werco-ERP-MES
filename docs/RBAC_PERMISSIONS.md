@@ -920,8 +920,55 @@ tier, that tier stands — this rule is a floor, never a loosening.
 > Warehouse → Receiving** — but it is one endpoint under one gate. The Receiving surface does **not**
 > inherit the Receiving rows below: a Supervisor who may receive, correct a receipt and clear an
 > inspection hold still sees **no** delete control, because this stays `require_role([ADMIN,
-> MANAGER])`. Restore has **no UI on either page** (the endpoint exists; nothing in the frontend calls
-> it), so undoing a PO delete is an administrator action.
+> MANAGER])`.
+
+> **PO restore — the read and the verb are gated differently, on purpose.** Restoring a PO needs two
+> things: a way to *see* deleted POs, and permission to bring one back. They sit at different tiers,
+> and the split is deliberate rather than an oversight:
+>
+> | Half | Where | Gate |
+> |---|---|---|
+> | **See** deleted POs | `GET /purchasing/purchase-orders?deleted_only=true` — the only read in the API that returns a soft-deleted PO | **Any authenticated user in the tenant** (`get_current_user`) |
+> | **Restore** one | `POST /purchasing/purchase-orders/{id}/restore` | **Admin / Manager** (`require_role([ADMIN, MANAGER])`) — the *Delete / restore purchase order (soft)* row above |
+>
+> **Why the read carries no new gate:** `deleted_only=true` returns rows the same reader could
+> already see *before* they were deleted — PO list/detail reads are tenant-scoped but not
+> role-restricted (see *Read enforcement* above), so a PO that was readable on Monday does not become
+> sensitive by being deleted on Tuesday. Gating the view would protect nothing while making the
+> feature unusable: a manager cannot restore what a screen refuses to list. The privileged act is
+> changing state, and that gate lives where the state changes — on the verb.
+>
+> **The UI is STRICTER than the server, and knowing which way round matters.** The Restore *button*
+> matches the verb exactly: Purchasing → Purchase Orders → **Deleted** (an Active / Deleted segmented
+> control) renders it only for Admin / Manager (`canRestorePO` in
+> `frontend/src/pages/Purchasing.tsx`, a constant kept separate from the delete gate so a future
+> change to one cannot silently move the other), so a hidden control and a refused call agree. The
+> *view*, though, is narrower in the UI than on the server: `/purchasing` is gated on
+> `purchasing:view` (`routeAccessRequirements` in `App.tsx`), which per
+> `frontend/src/utils/permissions.ts` belongs to platform_admin / admin / manager / supervisor /
+> viewer — so an **operator, quality or shipping** user cannot open the page at all, while their
+> token *can* read the same rows straight from `GET /purchasing/purchase-orders`. Do not read the
+> table above as "the UI reflects the endpoint": it does not, and the gap is the endpoint's, not the
+> screen's.
+>
+> That looseness is **not specific to `deleted_only`** — it is how every read on this endpoint has
+> always behaved, deleted or live, and gating the flag alone would be theatre (the same rows are
+> readable pre-delete and via `?status=closed`) while breaking the feature, since a supervisor could
+> no longer locate a PO for a manager to restore. The right fix is to bring `GET
+> /purchasing/purchase-orders` and `GET /purchasing/purchase-orders/{id}` as a whole under
+> `require_role([PLATFORM_ADMIN, ADMIN, MANAGER, SUPERVISOR, VIEWER])` so the server matches
+> `purchasing:view` — vendor names, unit pricing and order totals are not an operator's or shipping
+> clerk's to read. **That is an open owner decision and a separate change**, tracked alongside the
+> vendor-restore gap below.
+>
+> Both directions stay audited (`log_delete` with `soft_delete=true`; `log_update` with
+> `action="restore"`), so who deleted and who restored are both on the chain.
+>
+> **Vendor restore has no UI.** `POST /purchasing/vendors/{id}/restore` is gated identically
+> (Admin / Manager) and audited, but there is no `deleted_only` equivalent on `GET
+> /purchasing/vendors` and nothing in the frontend calls `restoreVendor` — so undoing a **vendor**
+> delete is still an API/administrator action. The *Delete / restore vendor (soft)* row above
+> describes the endpoint gate, not a screen.
 
 ### Receiving
 

@@ -232,6 +232,18 @@ class POListResponse(UTCModel):
     created_at: datetime
     updated_at: Optional[datetime] = None
 
+    # Soft-delete provenance -- populated ONLY by the ``deleted_only=true`` view of
+    # GET /purchasing/purchase-orders (the restore view). All three stay None on every
+    # other path, deliberately: the default list filters ``is_deleted == False`` and so
+    # never *asserts* deletion state, and a tri-state ``is_deleted`` lets one shared row
+    # renderer tell "this came from the restore view" from "this is a live PO" without
+    # threading the query param through the UI. ``deleted_by_name`` is resolved from
+    # ``users`` (SoftDeleteMixin.deleted_by is a bare Integer column with no FK
+    # relationship to load) and stays None when that user row no longer exists.
+    is_deleted: Optional[bool] = None
+    deleted_at: Optional[datetime] = None
+    deleted_by_name: Optional[str] = None
+
     class Config:
         from_attributes = True
         use_enum_values = True

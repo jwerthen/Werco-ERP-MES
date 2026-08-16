@@ -333,8 +333,9 @@ ROLE_CARDS = [
                 "posts the stock the lot can't be changed.",
                 "Wrong PO on the open-PO list (duplicate, cancelled, wrong vendor)? Delete it from the receiving "
                 "list itself — the trash icon on the PO card, <b>Manager/Admin only</b>, so supervisors will not "
-                "see it. Soft delete: the record is kept for audit, but there is no restore button — bringing a PO "
-                "back is an admin action, so treat it as one-way. <b>No icon appears once any line has material "
+                "see it. Soft delete: the record is kept for audit and can be brought back — <b>Purchasing › "
+                "Purchase Orders › Deleted</b>, then <b>Restore</b> (manager/admin only; that view is the one "
+                "place a deleted PO appears). <b>No icon appears once any line has material "
                 "received against it</b> — that PO cannot be deleted by anyone. Do NOT void real receipts to get "
                 "around that; close or cancel the PO in Purchasing instead.",
             ]),

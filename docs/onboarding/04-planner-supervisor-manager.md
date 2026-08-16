@@ -221,6 +221,23 @@ If a machine was deactivated while it still had jobs queued, the board doesn't h
 
 > Heads up: To actually receive material and run receiving inspection, use the **Receiving** tab in the **Warehouse** screen — that's covered in the Warehouse guide. Purchasing is where the order is created and sent.
 
+### Bring back a deleted PO
+
+A deleted purchase order isn't destroyed — it's kept for audit and can be put back. This is the screen that does it, and it's where the Receiving guide sends your warehouse staff when they delete a PO by mistake.
+
+1. On the **Purchase Orders** tab, switch the **Active / Deleted** toggle (next to the search box) to **Deleted**.
+2. The list becomes the deleted POs only, with two extra columns — **Deleted** (when) and **Deleted By** (who). Search works the same way.
+3. Click **Restore** on the row. The PO comes back in **exactly** the status it had when it was deleted — restoring changes nothing else about it.
+
+> That last point has a consequence worth reading before you promise anyone their PO is back. A **sent** or **partially received** PO returns to the active list *and* to the warehouse's receiving list, which is the usual case. A **closed** or **cancelled** one comes back too, but the active list hides those statuses by default, so it will not appear there — the app tells you so in the toast after you click Restore, naming the status. A **draft** or **approved** PO returns to the active list but not to the receiving list, because nothing can be received against a PO that has not been sent. Nothing is lost in any of these cases; the record is live again, and changing its status is what puts it back on the list you are looking at.
+
+- **Who can:** *Managers and admins* get the **Restore** button. Anyone who can view POs can open the **Deleted** view and read it — so a supervisor can find the PO and tell you it's there, but can't restore it themselves.
+- **Why the Deleted view is separate rather than mixed in:** a deleted PO and a live one must never sit in one list. The two views are mutually exclusive, and the deleted rows carry no **Print** or **Send** buttons — a PO that no longer exists is not a document to hand a vendor.
+- **If the vendor was deleted too, Restore is refused** with a message naming it: the vendor has to come back first, or you would have a live order pointing at a supplier that no longer exists. Vendor restore has no button (see the note below), so that one is a call to your administrator.
+- **Check "Deleted By" before you restore.** If someone deleted it deliberately — cancelled with the vendor, or a duplicate they cleaned up — restoring it puts it back on their receiving list. It's a two-second question and it's the reason that column is there.
+
+> Heads up: **Deleted vendors are different — there's no Restore button for them.** A vendor delete can only be undone by your system administrator through the API. That's a known gap, not something you've missed on the screen.
+
 ### Run MRP to find shortages
 
 MRP (material requirements planning) compares what you need to build against what's on hand and flags shortages.

@@ -5,13 +5,14 @@ import { useAuth } from '../context/AuthContext';
 import { hasPermission } from '../utils/permissions';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import useUnsavedChanges from '../hooks/useUnsavedChanges';
-import { formatCentralDate } from '../utils/centralTime';
+import { formatCentralDate, formatCentralDateTime } from '../utils/centralTime';
 import { Modal } from '../components/ui/Modal';
 import {
   PlusIcon,
   CheckCircleIcon,
   BuildingOfficeIcon,
   ClipboardDocumentListIcon,
+  TrashIcon,
 } from '@heroicons/react/24/outline';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import {
@@ -20,6 +21,7 @@ import {
   EmptyState,
   ErrorState,
   FormField,
+  LoadingButton,
   StatusBadge,
   useToast,
   DataTable,
@@ -59,6 +61,12 @@ interface PurchaseOrder {
   required_date?: string;
   total: number;
   line_count: number;
+  // Soft-delete provenance. Populated ONLY by the deleted view
+  // (GET /purchasing/purchase-orders?deleted_only=true); undefined on every live row,
+  // which is exactly how the two views stay tellable apart in one shared row shape.
+  is_deleted?: boolean;
+  deleted_at?: string;
+  deleted_by_name?: string;
 }
 
 interface Part {
@@ -86,6 +94,12 @@ interface DocumentType {
 }
 
 type TabType = 'orders' | 'vendors';
+
+// Which book of purchase orders the Orders tab is showing. Mutually exclusive on
+// purpose (see the segmented control in the Orders tab): a deleted PO is a RECORD,
+// not a workable order, so it must never sit in the same list as a live one where
+// somebody could print it, send it, or receive against it by mistake.
+type POView = 'active' | 'deleted';
 
 // Blank form states for the create modals. Module-level constants so the
 // unsaved-changes dirty checks can compare against the pristine shape.
@@ -138,6 +152,20 @@ export default function Purchasing() {
   // Soft-delete of POs and vendors is admin/manager only (DELETE endpoints use
   // require_role([ADMIN, MANAGER])); a superuser qualifies too.
   const canDeletePurchasing = user?.role === 'admin' || user?.role === 'manager' || !!user?.is_superuser;
+  // Restoring a soft-deleted PO tracks POST /purchasing/purchase-orders/{id}/restore
+  // (require_role([ADMIN, MANAGER]); superuser qualifies) — today the same role set as
+  // canDeletePurchasing, but a separate constant so a future change to either gate cannot
+  // silently move the other. The deleted VIEW is deliberately not gated: the list endpoint
+  // stays on get_current_user because it returns rows this reader could already see before
+  // the delete. Only the verb is privileged, so only the button is hidden.
+  //
+  // PLATFORM_ADMIN is omitted, matching canDeletePurchasing and the house convention noted
+  // at Receiving.tsx:364 — the UI does not surface purchasing write controls to it. That is
+  // narrower than the server, which admits PLATFORM_ADMIN unconditionally (api/deps.py ::
+  // require_role short-circuits on it before the role list is read), so this errs toward a
+  // hidden control rather than a button that 403s. Deliberate, not a mismatch to "fix" on
+  // its own — the two purchasing gates move together or not at all.
+  const canRestorePO = user?.role === 'admin' || user?.role === 'manager' || !!user?.is_superuser;
   const [searchParams] = useSearchParams();
   const [activeTab, setActiveTab] = useState<TabType>('orders');
   const [vendors, setVendors] = useState<Vendor[]>([]);
@@ -148,6 +176,20 @@ export default function Purchasing() {
   const [vendorDocsError, setVendorDocsError] = useState(false);
   const [poSearch, setPoSearch] = useState('');
   const debouncedPoSearch = useDebouncedValue(poSearch, 250);
+
+  // The deleted-PO book. Kept in its OWN state rather than merged into
+  // `purchaseOrders`, and fetched LAZILY the first time the user switches into the
+  // Deleted view — so the default page load emits exactly the requests it always did,
+  // and no live-PO count (the KPI strip, the tab badge) can ever pick up a deleted row.
+  const [poView, setPoView] = useState<POView>('active');
+  const [deletedPOs, setDeletedPOs] = useState<PurchaseOrder[]>([]);
+  const [deletedPOsLoading, setDeletedPOsLoading] = useState(false);
+  const [deletedPOsError, setDeletedPOsError] = useState(false);
+  // Restore is server-GATED (400 if the PO is not actually deleted, 403 below
+  // admin/manager), so it stays NON-OPTIMISTIC: the row moves only after the server
+  // says yes. Holding the in-flight PO's id rather than a bare boolean lets the one
+  // row that was clicked show the spinner while the rest merely disable.
+  const [restorePOPendingId, setRestorePOPendingId] = useState<number | null>(null);
 
   const [showPOModal, setShowPOModal] = useState(false);
   const [showVendorModal, setShowVendorModal] = useState(false);
@@ -232,6 +274,8 @@ export default function Purchasing() {
 
   // Once-per-id latch for the `?po=` deep-link fallback fetch below.
   const deepLinkedPoIdRef = useRef<number | null>(null);
+  // Monotonic request id for the deleted-PO reads — see loadDeletedPOs.
+  const deletedPOsRequestRef = useRef(0);
 
   useEffect(() => {
     loadData();
@@ -244,7 +288,7 @@ export default function Purchasing() {
     if (vendorId && vendors.length > 0 && selectedVendor?.id !== vendorId) {
       const vendor = vendors.find(v => v.id === vendorId);
       if (vendor) {
-        setActiveTab('vendors');
+        selectTab('vendors');
         openEditVendorModal(vendor);
       }
     }
@@ -255,7 +299,10 @@ export default function Purchasing() {
     } else if (!loading && !loadError) {
       const po = purchaseOrders.find(order => order.id === poId);
       if (po) {
+        // Land on the ACTIVE book: the term below names a live PO, and against the
+        // Deleted view it would render an empty table reading as "the PO is gone".
         setActiveTab('orders');
+        setPoView('active');
         setPoSearch(po.po_number);
       } else if (deepLinkedPoIdRef.current !== poId) {
         // The PO is not in the loaded list — list_purchase_orders excludes
@@ -293,6 +340,110 @@ export default function Purchasing() {
   };
 
   /**
+   * Load the deleted-PO book.
+   *
+   * `deleted_only=true` is the ONLY way any caller sees a soft-deleted PO — every
+   * other read of this endpoint hard-filters `is_deleted == False` — so without this
+   * fetch the Restore control below would have nothing to act on. Kept out of
+   * `loadData` deliberately: it runs only when the user asks for the Deleted view, and
+   * carries its own loading/error state so a failure here degrades that one table
+   * instead of blanking the whole page.
+   */
+  const loadDeletedPOs = async () => {
+    // Request-sequence latch. Entering the view fires a read, so Deleted → Active →
+    // Deleted can leave two in flight; without this the SLOWER (older) response wins and
+    // paints a stale archive — the exact condition the re-fetch-on-every-entry rule above
+    // exists to prevent. Same shape as `deepLinkedPoIdRef` below.
+    const requestId = deletedPOsRequestRef.current + 1;
+    deletedPOsRequestRef.current = requestId;
+    setDeletedPOsLoading(true);
+    setDeletedPOsError(false);
+    try {
+      const rows = await api.getPurchaseOrders({ deleted_only: true });
+      if (deletedPOsRequestRef.current !== requestId) return;
+      setDeletedPOs(rows);
+    } catch (err) {
+      console.error('Failed to load deleted purchase orders:', err);
+      if (deletedPOsRequestRef.current !== requestId) return;
+      setDeletedPOsError(true);
+    } finally {
+      if (deletedPOsRequestRef.current === requestId) setDeletedPOsLoading(false);
+    }
+  };
+
+  const showPOView = (view: POView) => {
+    setPoView(view);
+    // Fetch on every entry into the Deleted view, not just the first: somebody else may
+    // have deleted or restored a PO since, and a stale archive is how you end up clicking
+    // Restore on a row the server will refuse.
+    if (view === 'deleted') void loadDeletedPOs();
+  };
+
+  /**
+   * Leave the Orders tab. `poView` is state nothing else resets, and every entry into the
+   * Deleted view is supposed to re-read it — so a tab round-trip (Orders → Vendors →
+   * Orders) would otherwise re-open the archive on rows fetched minutes ago, with no
+   * fetch, which is precisely what `showPOView` re-reads to avoid. The `?po=` deep link
+   * has the same problem from the other side: it selects the Orders tab and sets a search
+   * term for a LIVE PO, which against the Deleted view renders an empty table that reads
+   * as "the PO you were sent is gone". Both are fixed by landing on the active book.
+   */
+  const selectTab = (tab: TabType) => {
+    setActiveTab(tab);
+    if (tab !== 'orders') setPoView('active');
+  };
+
+  /**
+   * Undo a soft delete (compliance invariant 3 — the record was never destroyed, only
+   * hidden). Restore is server-GATED, so this is NON-OPTIMISTIC: nothing moves in the UI
+   * until the call resolves. On success both books are re-read, which is what takes the
+   * row out of the Deleted view and puts it back in the active one; on failure the row
+   * stays where it is and the server's `detail` is surfaced verbatim.
+   */
+  const handleRestorePO = async (po: PurchaseOrder) => {
+    if (restorePOPendingId !== null) return;
+    setRestorePOPendingId(po.id);
+    try {
+      await api.restorePurchaseOrder(po.id);
+      // The restore SUCCEEDED — but succeeding is not the same as being findable, and a
+      // plain success toast here would send someone hunting for a record that is on no
+      // list they can open. The active book is `getPurchaseOrders()` with no status, and
+      // that endpoint excludes CLOSED and CANCELLED by default, so a restored PO in either
+      // status leaves the Deleted view without appearing in the Active one. That is not an
+      // edge case: the deleted view's whole status carve-out exists because a
+      // cancelled-then-deleted PO is the likeliest thing anyone wants back. `warning` is
+      // the house variant for "it worked, but not everything you expected" — success would
+      // hide the shortfall, error would claim a failure that did not happen.
+      const offActiveList = po.status === 'closed' || po.status === 'cancelled';
+      if (offActiveList) {
+        showToast(
+          'warning',
+          `Purchase order ${po.po_number} restored. It is ${po.status}, so it stays off the ` +
+            'active list until its status changes.',
+        );
+      } else {
+        showToast('success', `Purchase order ${po.po_number} restored`);
+      }
+      await Promise.all([loadData(), loadDeletedPOs()]);
+    } catch (err: any) {
+      showToast('error', err.response?.data?.detail || 'Failed to restore purchase order');
+      // A 4xx means the SERVER disagrees with what this table is showing — overwhelmingly
+      // "Purchase order is not deleted", i.e. somebody else restored it while this archive
+      // sat open. Re-read so the phantom row goes away; otherwise every further click
+      // reproduces the same refusal until the user leaves and re-enters the view. Still
+      // non-optimistic: the row moves only because the server's next answer moved it.
+      // Deliberately NOT on 5xx/offline — that tells us nothing about the row, and a
+      // failing re-read would swap the archive for an error state over a transient blip.
+      const statusCode = err.response?.status;
+      if (typeof statusCode === 'number' && statusCode >= 400 && statusCode < 500) {
+        await loadDeletedPOs();
+      }
+    } finally {
+      setRestorePOPendingId(null);
+    }
+  };
+
+  /**
    * `?po=<id>` deep-link fallback: fetch the PO by id and fold it into the
    * list so the search filter can actually match it. `GET /purchasing/purchase-orders/{id}`
    * returns POResponse (nested `vendor`, full `lines`) rather than the list's
@@ -314,6 +465,7 @@ export default function Purchasing() {
       };
       setPurchaseOrders(prev => (prev.some(p => p.id === summary.id) ? prev : [summary, ...prev]));
       setActiveTab('orders');
+      setPoView('active');
       setPoSearch(summary.po_number);
     } catch (err) {
       console.error('Failed to load deep-linked purchase order:', err);
@@ -640,16 +792,25 @@ export default function Purchasing() {
     setNewPO({ ...newPO, lines: newPO.lines.filter((_, i) => i !== index) });
   };
 
-  const filteredPOs = purchaseOrders.filter((po) => {
+  // One search predicate, both books — the search box stays useful in the Deleted
+  // view, which is where you arrive knowing the PO number you want back.
+  const matchesPoSearch = (po: PurchaseOrder) => {
     const term = debouncedPoSearch.trim().toLowerCase();
     if (!term) return true;
     return (
       po.po_number.toLowerCase().includes(term) ||
       (po.vendor_name || '').toLowerCase().includes(term)
     );
-  });
+  };
 
-  const poColumns: Array<DataTableColumn<PurchaseOrder>> = [
+  const filteredPOs = purchaseOrders.filter(matchesPoSearch);
+  const filteredDeletedPOs = deletedPOs.filter(matchesPoSearch);
+
+  // Columns shared by both books. The two views then append DIFFERENT tails: the active
+  // one gets Print / Send / Delete, the deleted one gets the delete provenance and a
+  // lone Restore. Deliberately no Print and no Send on a deleted PO — a deleted order is
+  // a record, and mailing one to a vendor is the worst thing this page could do.
+  const poBaseColumns: Array<DataTableColumn<PurchaseOrder>> = [
     {
       key: 'po_number',
       header: 'PO #',
@@ -703,6 +864,10 @@ export default function Purchasing() {
       align: 'center',
       accessor: (po) => po.line_count,
     },
+  ];
+
+  const poColumns: Array<DataTableColumn<PurchaseOrder>> = [
+    ...poBaseColumns,
     {
       key: 'actions',
       header: 'Actions',
@@ -733,6 +898,55 @@ export default function Purchasing() {
           )}
         </div>
       ),
+    },
+  ];
+
+  // `deleted_at` is UTC over the wire and renders in shop-local Central, like every
+  // other timestamp in the app. `deleted_by_name` comes back null when that user row is
+  // gone; "Unknown" is honest there, and the audit log still holds the actor either way.
+  const deletedPOColumns: Array<DataTableColumn<PurchaseOrder>> = [
+    ...poBaseColumns,
+    {
+      key: 'deleted_at',
+      header: 'Deleted',
+      sortable: true,
+      accessor: (po) => po.deleted_at ?? '',
+      render: (po) => (po.deleted_at ? formatCentralDateTime(po.deleted_at) : '-'),
+      csv: (po) => (po.deleted_at ? formatCentralDateTime(po.deleted_at) : ''),
+    },
+    {
+      key: 'deleted_by_name',
+      header: 'Deleted By',
+      sortable: true,
+      accessor: (po) => po.deleted_by_name ?? '',
+      render: (po) => po.deleted_by_name || <span className="text-slate-500">Unknown</span>,
+      csv: (po) => po.deleted_by_name ?? '',
+    },
+    {
+      key: 'actions',
+      header: 'Actions',
+      align: 'center',
+      render: (po) =>
+        canRestorePO ? (
+          // No confirm dialog on purpose: restore is non-destructive and one click from
+          // being undone by the Delete control this row will have again the moment it is
+          // back. A confirm here would be reflex-training, not a safeguard.
+          <div role="presentation" onClick={(e) => e.stopPropagation()}>
+            <LoadingButton
+              variant="secondary"
+              size="sm"
+              loading={restorePOPendingId === po.id}
+              loadingText="Restoring…"
+              disabled={restorePOPendingId !== null}
+              onClick={() => handleRestorePO(po)}
+              aria-label={`Restore purchase order ${po.po_number}`}
+            >
+              Restore
+            </LoadingButton>
+          </div>
+        ) : (
+          <span className="text-sm text-slate-500">—</span>
+        ),
     },
   ];
 
@@ -776,6 +990,42 @@ export default function Purchasing() {
             </button>
           )}
         </div>
+      }
+    />
+  );
+
+  // Mobile twin of the deleted row. No onClick (a deleted PO is not selectable work)
+  // and no Print/Send/Delete — the only affordance is Restore, same as the table.
+  const renderDeletedPOCard = (po: PurchaseOrder) => (
+    <MobileDataCard
+      title={po.po_number}
+      subtitle={po.vendor_name || undefined}
+      badge={<StatusBadge status={po.status} />}
+      fields={[
+        { label: 'Deleted', value: po.deleted_at ? formatCentralDateTime(po.deleted_at) : '-' },
+        { label: 'Deleted By', value: po.deleted_by_name || 'Unknown' },
+        {
+          label: 'Total',
+          value: <span className="tabular-nums">${Number(po.total || 0).toFixed(2)}</span>,
+        },
+        { label: 'Lines', value: <span className="tabular-nums">{po.line_count}</span> },
+      ]}
+      actions={
+        canRestorePO ? (
+          <div className="flex justify-end" role="presentation" onClick={(e) => e.stopPropagation()}>
+            <LoadingButton
+              variant="secondary"
+              size="sm"
+              loading={restorePOPendingId === po.id}
+              loadingText="Restoring…"
+              disabled={restorePOPendingId !== null}
+              onClick={() => handleRestorePO(po)}
+              aria-label={`Restore purchase order ${po.po_number}`}
+            >
+              Restore
+            </LoadingButton>
+          </div>
+        ) : undefined
       }
     />
   );
@@ -850,7 +1100,7 @@ export default function Purchasing() {
           ].map(tab => (
             <button
               key={tab.id}
-              onClick={() => setActiveTab(tab.id as TabType)}
+              onClick={() => selectTab(tab.id as TabType)}
               className={`py-2 px-1 border-b-2 font-medium text-sm ${
                 activeTab === tab.id
                   ? 'border-werco-primary text-werco-primary'
@@ -874,37 +1124,110 @@ export default function Purchasing() {
       {activeTab === 'orders' && (
         <div className="card">
           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-4">
-            <h2 className="text-lg font-semibold">Purchase Orders</h2>
-            <input
-              type="text"
-              value={poSearch}
-              onChange={(e) => setPoSearch(e.target.value)}
-              className="input max-w-sm"
-              placeholder="Search by PO # or vendor..."
-              aria-label="Search purchase orders"
-            />
+            <h2 className="text-lg font-semibold">
+              {poView === 'deleted' ? 'Deleted Purchase Orders' : 'Purchase Orders'}
+            </h2>
+            <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+              {/* Active / Deleted is a SEGMENTED control, not a "show deleted" checkbox,
+                  because the two sets must never share a list: a deleted PO is a record
+                  and a live one is workable, and a merged table is one misread row away
+                  from someone printing or receiving against an order that no longer
+                  exists. Mutually exclusive by construction. */}
+              <div
+                className="inline-flex border border-slate-700 rounded overflow-hidden self-start"
+                role="group"
+                aria-label="Purchase order view"
+              >
+                {([
+                  { id: 'active' as POView, label: 'Active' },
+                  { id: 'deleted' as POView, label: 'Deleted' },
+                ]).map((view) => (
+                  <button
+                    key={view.id}
+                    type="button"
+                    onClick={() => showPOView(view.id)}
+                    aria-pressed={poView === view.id}
+                    className={`px-3 py-1.5 text-sm font-medium ${
+                      poView === view.id
+                        ? 'bg-werco-primary text-white'
+                        : 'bg-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+                    }`}
+                  >
+                    {view.label}
+                  </button>
+                ))}
+              </div>
+              <input
+                type="text"
+                value={poSearch}
+                onChange={(e) => setPoSearch(e.target.value)}
+                className="input max-w-sm"
+                placeholder="Search by PO # or vendor..."
+                aria-label="Search purchase orders"
+              />
+            </div>
           </div>
-          <DataTable
-            columns={poColumns}
-            data={filteredPOs}
-            rowKey={(po) => po.id}
-            onRowClick={(po) => handlePrintPO(po.id)}
-            defaultSort={{ key: 'po_number', dir: 'asc' }}
-            pageSize={25}
-            csvExport={{ filename: 'purchase-orders' }}
-            mobileCards={renderPOCard}
-            empty={{
-              icon: ClipboardDocumentListIcon,
-              title: debouncedPoSearch.trim() ? 'No matching purchase orders' : 'No purchase orders',
-              description: debouncedPoSearch.trim()
-                ? 'No purchase orders match your search. Adjust the term above.'
-                : 'Purchase orders you create will appear here.',
-              action:
-                debouncedPoSearch.trim() || !canCreatePO
-                  ? undefined
-                  : { label: 'New PO', onClick: () => setShowPOModal(true) },
-            }}
-          />
+
+          {poView === 'deleted' ? (
+            <>
+              <div className="flex items-start gap-2 mb-4 px-3 py-2 rounded border border-amber-500/40 bg-amber-500/10 text-sm text-amber-200">
+                <TrashIcon className="h-5 w-5 flex-shrink-0" aria-hidden="true" />
+                <p>
+                  These purchase orders are deleted records. They are off the receiving list and
+                  nothing can be received against them.
+                  {canRestorePO
+                    ? ' Restore one to put it back in the active book.'
+                    : ' An admin or manager can restore one.'}
+                </p>
+              </div>
+              <DataTable
+                columns={deletedPOColumns}
+                data={filteredDeletedPOs}
+                rowKey={(po) => po.id}
+                // No onRowClick: the active table's row click PRINTS the PO, and a deleted
+                // order is not a document anyone should be handing to a vendor.
+                rowClassName={() => 'opacity-70'}
+                loading={deletedPOsLoading}
+                error={deletedPOsError}
+                onRetry={loadDeletedPOs}
+                defaultSort={{ key: 'deleted_at', dir: 'desc' }}
+                pageSize={25}
+                csvExport={{ filename: 'deleted-purchase-orders' }}
+                mobileCards={renderDeletedPOCard}
+                empty={{
+                  icon: TrashIcon,
+                  title: debouncedPoSearch.trim()
+                    ? 'No matching deleted purchase orders'
+                    : 'No deleted purchase orders',
+                  description: debouncedPoSearch.trim()
+                    ? 'No deleted purchase orders match your search. Adjust the term above.'
+                    : 'Purchase orders deleted from Purchasing or Receiving appear here so they can be restored.',
+                }}
+              />
+            </>
+          ) : (
+            <DataTable
+              columns={poColumns}
+              data={filteredPOs}
+              rowKey={(po) => po.id}
+              onRowClick={(po) => handlePrintPO(po.id)}
+              defaultSort={{ key: 'po_number', dir: 'asc' }}
+              pageSize={25}
+              csvExport={{ filename: 'purchase-orders' }}
+              mobileCards={renderPOCard}
+              empty={{
+                icon: ClipboardDocumentListIcon,
+                title: debouncedPoSearch.trim() ? 'No matching purchase orders' : 'No purchase orders',
+                description: debouncedPoSearch.trim()
+                  ? 'No purchase orders match your search. Adjust the term above.'
+                  : 'Purchase orders you create will appear here.',
+                action:
+                  debouncedPoSearch.trim() || !canCreatePO
+                    ? undefined
+                    : { label: 'New PO', onClick: () => setShowPOModal(true) },
+              }}
+            />
+          )}
         </div>
       )}
 
@@ -1667,7 +1990,8 @@ export default function Purchasing() {
         title="Delete Purchase Order"
         message={
           deletePOTarget
-            ? `Delete purchase order ${deletePOTarget.po_number}? This removes it from active lists while preserving the record for audit/restore.`
+            ? `Delete purchase order ${deletePOTarget.po_number}? This removes it from active lists while ` +
+              'preserving the record for audit. An admin or manager can bring it back from the Deleted view above.'
             : ''
         }
         confirmLabel="Delete"

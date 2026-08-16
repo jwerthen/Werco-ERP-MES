@@ -456,10 +456,44 @@ def generate_po_number(db: Session, company_id: int = None) -> str:
     return f"{prefix}{new_num:03d}"
 
 
+def _live_po_or_404(db: Session, po_id: int, company_id: int) -> PurchaseOrder:
+    """Resolve a purchase order that is workable: this company's, and NOT soft-deleted.
+
+    Every PO *write* verb except delete/restore resolves through here, so a soft-deleted
+    PO 404s on all of them. That is what makes the archive an archive: a deleted PO is a
+    RECORD, not a workable order, and the two ways it could stop being one are editing it
+    (``PUT``, whose blind setattr loop includes ``status``) and issuing it to a vendor
+    (``/send``, ``/lines``). Until the Deleted view shipped, those ids were effectively
+    unobtainable -- the reads all filter ``is_deleted`` -- so the gap was theoretical; the
+    restore view hands the ids to any authenticated reader, including roles deliberately
+    kept below ``require_role([ADMIN, MANAGER])`` on restore, which is what makes it real.
+
+    ``DELETE`` and ``POST .../restore`` deliberately do NOT use this (they need to see the
+    deleted row: one to refuse a double delete, the other to undo one), and neither does
+    ``GET .../{po_id}``, which already carries its own identical filter.
+    """
+    po = (
+        db.query(PurchaseOrder)
+        .filter(
+            PurchaseOrder.id == po_id,
+            PurchaseOrder.company_id == company_id,
+            PurchaseOrder.is_deleted == False,  # noqa: E712
+        )
+        .first()
+    )
+    if not po:
+        raise HTTPException(status_code=404, detail="Purchase order not found")
+    return po
+
+
 @router.get("/purchase-orders", response_model=List[POListResponse])
 def list_purchase_orders(
     status: Optional[str] = None,
     vendor_id: Optional[int] = None,
+    deleted_only: bool = Query(
+        False,
+        description="Return ONLY soft-deleted purchase orders (the restore view). Default false = live POs only.",
+    ),
     limit: int = Query(MAX_PO_ROWS, ge=1, le=MAX_PO_ROWS),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -472,6 +506,16 @@ def list_purchase_orders(
     given. Returns at most ``limit`` POs starting at ``offset``, each with a
     ``line_count``; rows past the limit are not returned, so page through them
     with ``offset``.
+
+    ``deleted_only=true`` inverts the soft-delete filter and returns ONLY the
+    company's soft-deleted POs, each carrying ``is_deleted`` / ``deleted_at`` /
+    ``deleted_by_name`` so the caller can decide whether to restore it (via
+    ``POST /purchase-orders/{id}/restore``, ADMIN/MANAGER). Without this a deleted
+    PO is invisible to every API caller and nothing can be restored.
+
+    No extra role gate: this returns rows the same reader could already see before
+    they were deleted. Restoring one is the privileged act, and that gate lives on
+    the restore verb.
     """
     # The default IS the ceiling (MAX_PO_ROWS): a zero-argument caller receives
     # the whole set exactly as it did before the cap existed.
@@ -494,25 +538,65 @@ def list_purchase_orders(
         .label("line_count")
     )
 
+    # Tenancy is unconditional and unchanged -- company_id from get_current_company_id
+    # scopes BOTH views. ``deleted_only`` only ever flips the is_deleted predicate; it
+    # can never widen the tenant scope.
     query = (
         db.query(PurchaseOrder, line_count_sq)
         .filter(
             PurchaseOrder.company_id == company_id,
-            PurchaseOrder.is_deleted == False,  # noqa: E712
+            PurchaseOrder.is_deleted == (True if deleted_only else False),  # noqa: E712
         )
         .options(joinedload(PurchaseOrder.vendor))
     )
 
     if status:
         query = query.filter(PurchaseOrder.status == status)
-    else:
+    elif not deleted_only:
         # Default: exclude closed/cancelled
+        #
+        # DELIBERATELY SKIPPED on the deleted view -- do not "tidy" this back into a
+        # plain ``else``. A soft-deleted PO can sit in ANY status, and a CANCELLED-then-
+        # deleted PO is one of the likeliest things somebody wants back. Applying this
+        # exclusion here would hide those rows from the ONLY list that can see them, so
+        # the restore control could never be offered for them and nothing else in the
+        # API would reach them either. An explicit ``?status=`` still narrows the
+        # deleted view -- that is the branch above, which both views share.
         query = query.filter(PurchaseOrder.status.not_in([POStatus.CLOSED, POStatus.CANCELLED]))
 
     if vendor_id:
         query = query.filter(PurchaseOrder.vendor_id == vendor_id)
 
     rows = query.order_by(PurchaseOrder.created_at.desc()).offset(offset).limit(limit).all()
+
+    # Resolve deleted_by -> display name in ONE batched query, and ONLY for the deleted
+    # view. SoftDeleteMixin.deleted_by is a bare Integer column with no FK/relationship,
+    # so there is nothing to joinedload and the alternative is a lookup per row. On the
+    # default path this dict stays empty, no query is emitted, and the loop below reads
+    # None out of it -- that is what keeps the unset parameter inert.
+    #
+    # Not company-scoped, on purpose: deleted_by is whoever's session performed the
+    # delete, and a platform admin acting inside this company is not a user row of it, so
+    # scoping would blank exactly the name a reader most needs. The id is read off our
+    # own already-tenant-scoped row and never comes from the caller, so this cannot be
+    # steered into enumerating another tenant's users. It discloses nothing new either:
+    # AuditService already snapshots the same actor's full_name onto this tenant's
+    # audit_log row for the very same delete.
+    #
+    # It also deliberately applies NO ``is_active`` / ``is_deleted`` filter to User:
+    # provenance must survive the deleter's own departure. Adding one would silently
+    # regress the name to "Unknown" for exactly the deletes people ask about most -- the
+    # ones done by someone who has since left.
+    deleted_by_names: dict[int, str] = {}
+    if deleted_only:
+        deleter_ids = {po.deleted_by for po, _ in rows if po.deleted_by is not None}
+        if deleter_ids:
+            for user_id, first_name, last_name in db.query(User.id, User.first_name, User.last_name).filter(
+                User.id.in_(deleter_ids)
+            ):
+                name = f"{first_name or ''} {last_name or ''}".strip()
+                if name:
+                    deleted_by_names[user_id] = name
 
     result = []
     for po, line_count in rows:
@@ -528,6 +612,10 @@ def list_purchase_orders(
                 total=po.total,
                 line_count=line_count,
                 created_at=po.created_at,
+                # Left at their None defaults on the default path -- see POListResponse.
+                is_deleted=po.is_deleted if deleted_only else None,
+                deleted_at=po.deleted_at if deleted_only else None,
+                deleted_by_name=(deleted_by_names.get(po.deleted_by) if deleted_only else None),
             )
         )
     return result
@@ -726,10 +814,10 @@ def update_purchase_order(
     audit: AuditService = Depends(get_audit_service),
 ):
     """Update a purchase order. Writes a tamper-evident audit_log UPDATE row with the
-    changes diff (a status change shows up in the diff; no row when nothing changed)."""
-    po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id, PurchaseOrder.company_id == company_id).first()
-    if not po:
-        raise HTTPException(status_code=404, detail="Purchase order not found")
+    changes diff (a status change shows up in the diff; no row when nothing changed).
+
+    404s on a soft-deleted PO -- see ``_live_po_or_404``."""
+    po = _live_po_or_404(db, po_id, company_id)
 
     # Snapshot BEFORE mutating; column-only, so the vestigial POUpdate.version
     # (PurchaseOrder has no version column) never enters the audited changes diff.
@@ -778,10 +866,11 @@ def send_purchase_order(
     audit: AuditService = Depends(get_audit_service),
 ):
     """Issue a draft/approved PO to the vendor (status -> sent, stamps order_date).
-    Writes a tamper-evident audit_log STATUS_CHANGE row."""
-    po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id, PurchaseOrder.company_id == company_id).first()
-    if not po:
-        raise HTTPException(status_code=404, detail="Purchase order not found")
+    Writes a tamper-evident audit_log STATUS_CHANGE row.
+
+    404s on a soft-deleted PO -- see ``_live_po_or_404``. Mailing a deleted order to a
+    vendor is the worst thing this router could do."""
+    po = _live_po_or_404(db, po_id, company_id)
 
     if po.status not in [POStatus.DRAFT, POStatus.APPROVED]:
         raise HTTPException(status_code=400, detail="Can only send draft or approved POs")
@@ -828,10 +917,10 @@ def add_po_line(
     audit: AuditService = Depends(get_audit_service),
 ):
     """Add a line to a draft PO and roll the PO subtotal/total. Writes two tamper-evident
-    audit_log rows: a CREATE for the new line and an UPDATE for the PO-totals change."""
-    po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id, PurchaseOrder.company_id == company_id).first()
-    if not po:
-        raise HTTPException(status_code=404, detail="Purchase order not found")
+    audit_log rows: a CREATE for the new line and an UPDATE for the PO-totals change.
+
+    404s on a soft-deleted PO -- see ``_live_po_or_404``."""
+    po = _live_po_or_404(db, po_id, company_id)
 
     if po.status not in [POStatus.DRAFT]:
         raise HTTPException(status_code=400, detail="Can only add lines to draft POs")
@@ -974,6 +1063,28 @@ def restore_purchase_order(
 
     if not po.is_deleted:
         raise HTTPException(status_code=400, detail="Purchase order is not deleted")
+
+    # A live PO must point at a vendor that still exists. ``delete_vendor`` counts blocking
+    # POs with ``is_deleted == False``, so a soft-deleted PO does NOT hold its vendor open:
+    # delete the PO, then delete the vendor, and restoring would bring a live (possibly
+    # SENT) order back against a vendor that is gone -- receivable through
+    # ``GET /receiving/open-pos``, which checks status and is_deleted but not the vendor,
+    # and a state ``POST /purchase-orders`` flatly refuses to create. Refuse instead, and
+    # name the fix. Checked AFTER the is_deleted guard so a double-restore still reports
+    # the more specific "not deleted".
+    #
+    # Deliberately NOT mirroring the create path's ``is_active == true`` half: a live PO
+    # against a merely DEACTIVATED vendor is already a representable state (``PUT
+    # /vendors/{id}`` can deactivate one with no PO guard at all), so refusing on it here
+    # would be stricter than the invariant the rest of the router keeps.
+    if po.vendor is not None and po.vendor.is_deleted:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Cannot restore purchase order {po.po_number}: its vendor "
+                f"{po.vendor.name} is deleted. Restore the vendor first."
+            ),
+        )
 
     audit = AuditService(db, current_user, request)
 
