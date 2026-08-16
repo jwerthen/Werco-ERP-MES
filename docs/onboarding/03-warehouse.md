@@ -134,12 +134,35 @@ There are three tabs inside Receiving:
 
 > Tip: Click **Receipt History** at the bottom of a selected PO to see every receipt logged against it, with lot numbers and dates.
 
-### Fixing a receiving mistake — Correct or Void
+### Removing a PO that shouldn't be on the list
 
-Keyed the wrong quantity or lot? You don't edit the original entry — you either **Correct** it (fix the numbers in place) or **Void** it (undo the whole receipt). Both controls appear as **Correct** and **Void** buttons on receipt rows — in the **Inspection Queue**, in **History**, and in a PO's **Receipt History** sub-table.
+Sometimes the PO itself is the mistake — it was entered twice, it was cancelled with the vendor, or it's against the wrong supplier — and it just sits in **Open Purchase Orders** getting in your way. You don't have to go to the Purchasing page to clear it: click the small **trash icon** in the top-right corner of the PO card.
+
+- **Who can:** *Managers and admins.* If you don't see the icon, you don't have the permission — the card looks exactly as it always has. (This is a tighter list than receiving: being able to receive or inspect doesn't let you delete a PO.)
+- **What happens:** you're asked to confirm, naming the PO and the vendor. Confirm and the PO leaves the receiving list.
+- **Nothing is destroyed, but treat it as one-way.** The PO record is kept for audit and *can* be brought back — except that restoring isn't a button anywhere in the app today: it takes your system administrator. The confirm dialog says so in as many words. So if you're not sure, it's safer to leave the PO alone than to delete it and need it back the same afternoon.
+
+**A PO you've already received against can't be deleted, and the trash icon doesn't appear on it.** Once any line has material received, the card shows no icon at all — there's nothing to click and nothing to be refused by. That's the system protecting the receipts — and the inventory they put on your shelf — from being stranded behind a deleted PO. (If a delivery lands in the seconds between the list loading and you confirming, you'll get the refusal instead: *"it has received material. Void the receipt(s) first, then delete."* The dialog stays open with that message so you can read it.)
+
+> **Don't void a real receipt just to make a PO deletable.** Voiding is for a receipt that shouldn't exist. If the material genuinely arrived, its receipt is the record that it arrived — the lot, the cert, and the traceability all hang off it, and voiding is final. A PO you no longer want but *have* received against should be **closed or cancelled in Purchasing**, not deleted. (You'll often find you can't void it anyway: once a receipt has been inspected, void is refused.) The confirm dialog says this too, so you'll see it before you click.
+
+### Fixing a receiving mistake — Correct, Void, or Clear Hold
+
+Keyed something wrong? You don't edit the original entry. There are three fixes, and which one you want depends on what's actually wrong:
+
+| What went wrong | Use | Who can |
+| --- | --- | --- |
+| The **numbers or the lot/heat/cert** are wrong | **Correct** | Supervisor, Manager, Admin |
+| The receipt **shouldn't exist at all** (wrong line, wrong part, never arrived) | **Void** | Manager, Admin |
+| The receipt is right — you only **ticked "Requires Inspection" by mistake** | **Clear Hold** | Supervisor, Manager, Admin, Quality |
 
 - **Correct** — opens the **Correct Receipt** box. Enter the **new total quantity received** (not the difference), fix the lot/heat/cert/serial or notes if needed, and give a **reason** (required). Saving reconciles the PO line and, for dock-to-stock material, your inventory automatically. *Supervisors, managers, and admins* can correct.
 - **Void** — opens the **Void Receipt** box. Give a **reason** (required) and confirm. The receipt is undone completely: the PO line, its status, and any inventory it added are reversed. **Voiding is final — there's no undo; if you need the receipt back, just receive it again.** *Managers and admins* can void.
+- **Clear Hold** — appears on **Inspection Queue** rows only (the other two also appear in History and in a PO's Receipt History sub-table). Use it when the material never needed incoming inspection and the box was simply ticked in error. Give a **reason** (required) and confirm: the receipt stays **exactly as you keyed it** — lot, heat and cert untouched — the material posts to inventory as on-hand stock, and the row leaves the queue. Nothing is destroyed and nothing has to be re-keyed. The receipt is recorded as **Not Required**, *not* as a passed inspection, because no inspection happened; your name and reason are stamped on the receipt and the audit trail, and Quality is notified. *Anyone who can Inspect can clear a hold* — supervisors, managers, admins, and Quality.
+
+> **If the lot number is also wrong, fix that FIRST** with **Correct**. Once Clear Hold posts the material to stock, the lot can no longer be changed in place — the only remaining fix is a void and a full re-key.
+
+> **Never put a mis-ticked receipt through Inspect instead.** Inspect records an inspection — your name, a method, and a timestamp — for an inspection that never happened, and an AS9100D auditor will read it exactly that way. **Clear Hold** is the honest version of the same outcome, and it's on the same row, available to everyone who has Inspect. Use it, and say in the reason box why the material didn't need inspecting.
 
 A couple of rules the system enforces, with a clear message if they apply:
 
@@ -233,7 +256,10 @@ Where your station has a barcode/QR scanner, you can scan a lot or serial label 
 | "Receive Material" does nothing | Look for a red message at the top — it names the problem. Common causes: a quantity of zero, or receiving more than the remaining amount without checking **Approve Over-Receipt**. (A blank Lot Number is fine — the system auto-assigns one.) |
 | It won't let me receive the quantity I have | You're entering more than the line's remaining amount. Either lower the quantity, or check **Approve Over-Receipt** if you truly received extra. |
 | Inspection won't complete | Check three things: **Accepted + Rejected** can't be more than the received quantity; and if you rejected any, both **Defect Type** and **Inspection Notes** are required. |
-| Material I received isn't on the shelf yet | If it was received with **Requires Inspection** checked, it's still in the **Inspection Queue** — it only reaches Inventory after you finish inspection and accept it. |
+| Material I received isn't on the shelf yet | If it was received with **Requires Inspection** checked, it's still in the **Inspection Queue** — it reaches Inventory once you finish inspection and accept it, or (if the box was ticked by mistake) once someone uses **Clear Hold** on the queue row. |
+| I ticked **Requires Inspection** by mistake | Don't void it, and above all don't run it through Inspect — that records an inspection that never happened. On the **Inspection Queue** row use **Clear Hold** (Supervisor / Manager / Admin / Quality — the same people who can Inspect): it releases the material to stock with the receipt kept exactly as keyed, and asks you for a reason. See "Fixing a receiving mistake". |
+| A PO is on my list that shouldn't be (duplicate, cancelled, wrong vendor) | If you're a manager or admin, click the **trash icon** on the PO card to remove it — the record is kept for audit, but bringing it back takes an administrator, so be sure. See "Removing a PO that shouldn't be on the list". |
+| There's no trash icon on the PO card | Two reasons. Either you're not a manager or admin (receiving and inspecting don't include deleting a PO — ask a manager), or **material has already been received against that PO**, in which case it can't be deleted by anyone. A PO you're done with but have received against should be closed or cancelled in **Purchasing** — don't void real receipts to get around it. |
 | There's no **Inspect** button on a queue row | Completing inspections is limited to certain roles (Administrator, Manager, Supervisor, Quality). If you don't have one of those, hand the receipt to someone who does. |
 | I can't transfer as much as I want | The box caps you at the **Available** quantity for that batch. Some of it may be allocated to a job. |
 | No work orders show in "Ready to Ship" | Only finished work orders appear here. If one's missing, it isn't marked complete yet — check with the shop floor or your supervisor. |

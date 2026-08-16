@@ -4356,9 +4356,18 @@ the public paths are `/eco/eco/…`.
 >   cancel those first (the 400 names the count). A double delete returns **400** ("already deleted");
 >   restore re-sets `is_active=true`.
 > - **PO delete** is **refused with 400** when any line has received material
->   (`quantity_received > 0`) — *"Void the receipt(s) first, then delete."* (see Receiving → void
->   below) — so voided receipts / inventory can't be stranded behind a deleted PO. A double delete
->   returns **400** ("already deleted").
+>   (`quantity_received > 0`) — *"Cannot delete purchase order &lt;po&gt;: it has received material.
+>   Void the receipt(s) first, then delete."* (see Receiving → void below) — so voided receipts /
+>   inventory can't be stranded behind a deleted PO. A double delete returns **400**
+>   (*"Purchase order &lt;po&gt; is already deleted"*).
+>   **Two UI surfaces call this one endpoint** — the Purchasing page's PO list and the **open-PO list
+>   on the Receiving page's Receive tab** — so a receiver who spots a duplicate, cancelled or
+>   wrong-vendor PO on the dock can remove it without switching pages. There is no receiving-specific
+>   verb and nothing about the endpoint changed. Both client controls are gated **Admin / Manager**
+>   to mirror `require_role([ADMIN, MANAGER])`, both are **non-optimistic** (the row disappears only
+>   after the server answers), and both surface the 400 `detail` **verbatim**, because that message is
+>   the instruction the user has to follow. See Receiving & Inspection →
+>   *Deleting an open PO from the Receiving page* for the void-then-delete sequence.
 > - **Creating a PO against a soft-deleted or inactive vendor is refused** (**404** "Vendor not found"):
 >   `POST /purchasing/purchase-orders` now resolves the vendor with `is_deleted == false` **and**
 >   `is_active == true`.
@@ -4479,6 +4488,7 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 | GET | `/receiving/receipt/{receipt_id}` | Get receipt detail | Yes |
 | PATCH | `/receiving/receipt/{receipt_id}` | Correct a mis-keyed receipt in place (new total `quantity_received` + optional traceability fields; required `reason`) — reconciles PO line / PO status / inventory. Guarded, see note | Admin / Manager / Supervisor |
 | POST | `/receiving/receipt/{receipt_id}/void` | Void (soft-delete) a receipt with full reversal of PO line / status / inventory; required `reason`. Terminal — no restore. Guarded, see note | Admin / Manager |
+| POST | `/receiving/receipt/{receipt_id}/clear-inspection` | **Clear an inspection hold placed by mistake** — non-destructive: keeps the receipt and its lot / heat / cert exactly as keyed, re-classifies it as dock-to-stock, posts the material into inventory, and drops it off the queue; required `reason`. PO line / PO status untouched. Guarded, see note | Admin / Manager / Quality / Supervisor |
 | POST | `/receiving/inspect/{receipt_id}` | Complete inspection (accept/reject, auto-NCR on rejection) | Admin / Manager / Quality / Supervisor |
 | GET | `/receiving/history` | Receiving history with inspection results (`days` **1–365**, default 30) | Yes |
 | GET | `/receiving/stats` | Receiving statistics for dashboard (`days` **1–365**, default 30) | Yes |
@@ -4509,7 +4519,9 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 >
 > A receipt's **`inspection_status`** (returned by `/receiving/history` and
 > `/receiving/receipt/{receipt_id}`) is one of: **`not_required`** (dock-to-stock — accepted
-> without inspection; no inspector/method/time), `pending` (awaiting inspection in the queue),
+> without inspection; no inspector/method/time — set either by receiving with the flag off, or by
+> `POST /receiving/receipt/{receipt_id}/clear-inspection` waiving a hold placed by mistake),
+> `pending` (awaiting inspection in the queue),
 > `passed`, `failed`, or `partial` (recorded by `/receiving/inspect/{receipt_id}`). The History
 > view badges `not_required` as a neutral **"Not Required"**, visually distinct from a green
 > **"Passed"** (which means a real incoming inspection passed). Vendor acceptance-rate analytics
@@ -4522,7 +4534,10 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 > fixed with **`PATCH /receiving/receipt/{receipt_id}`** (correct in place) or reversed entirely with
 > **`POST /receiving/receipt/{receipt_id}/void`** (soft-delete). Both **require a non-blank `reason`**
 > (recorded on the tamper-evident `audit_log`) and are **fully audited**; live reads now filter
-> `is_deleted == false`.
+> `is_deleted == false`. If the receipt itself is correct and only the **"requires inspection" box was
+> ticked by mistake**, neither of these is the right verb — see
+> **`POST /receiving/receipt/{receipt_id}/clear-inspection`** in the note below, which keeps the
+> receipt exactly as keyed.
 >
 > - **Correct** — body: `quantity_received` (the **new TOTAL** received, **> 0** — not a delta) plus
 >   optional `lot_number` / `heat_number` / `cert_number` / `serial_numbers` / `notes`, and the
@@ -4555,6 +4570,189 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 > - the reversal would drive the PO line's received total **negative** → **409**.
 > - the receipt's PO line no longer exists (orphaned) → **400** (never a 500).
 > - a cross-tenant / missing / already-voided receipt → **404**.
+
+> **Clearing an inspection hold placed by mistake (`POST /receiving/receipt/{receipt_id}/clear-inspection`).**
+> The third post-receipt verb, and the **non-destructive** one. Receiving ticks "Requires Inspection"
+> on a line that never needed it; the lot then sits in the inspection queue with no honest way out —
+> before this endpoint the **only** exit was `void`, which un-receives the material entirely and forces
+> the whole receipt to be re-keyed. This verb is the missing *"the box was checked by mistake"*
+> alternative: it re-classifies the receipt as the dock-to-stock receipt it should have been.
+>
+> - **Body** — `{ "reason": "<why the hold is being cleared>" }` (`ReceiptClearInspectionRequest`).
+>   Required, **1–500 chars**, and **non-blank after trimming** (whitespace-only → **422**); the value
+>   is stored stripped. Same validator as `ReceiptVoidRequest`. Waiving an AS9100D inspection hold must
+>   always carry a stated justification.
+> - **Response** — **200** with the updated `ReceiptResponse` (the same schema `PATCH .../{id}` returns).
+> - **Gate** — **Admin / Manager / Quality / Supervisor**, i.e. **exactly the role list on
+>   `POST /receiving/inspect/{receipt_id}`**, and the match is deliberate. An earlier draft excluded
+>   Supervisor on a segregation-of-duties argument (the receive tier that ticks the box should not
+>   waive it alone); the owner overruled it, because excluding Supervisor closed the **honest** exit
+>   while leaving the **dishonest** one open. A supervisor with a mis-ticked receipt and no manager on
+>   site did not leave it on the queue — they pushed it through **Inspect → Visual → Pass**, which
+>   writes a named inspector and a timestamp for an inspection that never happened. That is a
+>   *fabricated* quality record, and exactly the AS9100D records-integrity defect PR #127 fixed in
+>   code, only performed by a human. Widening the gate is therefore a **records-integrity
+>   improvement, not a convenience concession**: whoever can decide a lot *passes* can decide it never
+>   needed inspecting, and between the two records that tier can already produce, the reasoned,
+>   attributed, hash-chained waiver is the strictly more truthful one. Keep the two lists in lockstep
+>   — if one moves, the other moves, or the dishonest exit reopens. **Void** stays tighter
+>   (Admin / Manager) because that is *delete* authority, a different question.
+>   See [docs/RBAC_PERMISSIONS.md](RBAC_PERMISSIONS.md) → Receiving.
+>
+> **What it does** (mirrors the dock-to-stock leg of `POST /receiving/receive`; all guards run
+> **before any mutation**, so a refusal leaves the receipt untouched):
+> - `requires_inspection` → **`false`**, `status` → **`accepted`**, `inspection_status` →
+>   **`not_required`**, `quantity_accepted` → `quantity_received`.
+> - **`inspection_method` / `inspected_by` / `inspected_at` stay `null`**, and `inspection_status` is
+>   `not_required` and **never `passed`** — no incoming inspection happened, so the record must not
+>   assert one (the same AS9100D records-integrity rule as the dock-to-stock receive path, above).
+> - The material is posted into inventory with **exactly the key `POST /receiving/receive` uses**
+>   (part, `location.code` or the `RECV-01` default, receipt lot; unit cost from the PO line, supplier
+>   from the PO vendor, reference = the receipt number), so a later **Correct** or **Void** re-finds
+>   that same `InventoryItem` row to reverse it. A `RECEIVE` `InventoryTransaction`
+>   (`reference_type="po_receipt"`) is appended, with its own audit rows.
+> - The receipt leaves the inspection queue as a consequence of the status move — `/receiving/inspection-queue`
+>   selects `status = pending_inspection` only. There is **no separate dismissal**.
+> - **The PO line and PO status are deliberately NOT touched** — `po_line.quantity_received`,
+>   `po_line.is_closed` and `po.status` were all advanced when the receipt was created (a
+>   `pending_inspection` receipt already counts as *received*; only the inventory posting waits on
+>   inspection). No quantity is moving, so this verb does **not** run the correct/void reconciler.
+> - **The receipt stays correctable and voidable afterwards.** Clearing leaves it at
+>   `inspection_status = not_required`, which is inside the correct/void state model above (only
+>   `passed` / `failed` / `partial` are refused). And because `requires_inspection` flipped to
+>   `false`, the correct/void reconciler now correctly sees the stock as **placed** and reverses it —
+>   that flag is the reconciler's `inventory_placed` discriminator, so flipping it in the same breath
+>   as the posting is what keeps a later Correct or Void from stranding the material on hand.
+> - **The waiver is stamped on the receipt itself**, not only in `audit_log`: a machine-composed line
+>   is **appended** to `receipt.notes` — `[YYYY-MM-DD] Inspection hold cleared by <user> (no incoming
+>   inspection performed): <reason>` — preserving whatever receiving typed. It is **not** written to
+>   `inspection_notes`, which would imply inspection activity. This exists because a cleared receipt is
+>   otherwise byte-indistinguishable from one that was dock-to-stock from the first keystroke, and
+>   `GET /audit/` is **Admin/Manager only** — Quality and Supervisor, two of the four roles authorized
+>   to waive, could not read their own decision back.
+> - The `RECEIVE` ledger row carries `reason_code="INSPECTION_HOLD_CLEARED"` and a note naming the
+>   reason, so **Warehouse → Inventory → Stock Movements** (the app's only rendering of
+>   `inventory_transactions`) shows *why* the material entered stock. Mirrors the
+>   `RECEIPT_VOID` / `RECEIPT_CORRECTION` stamping the correct/void reconciler already does.
+> - Audited as a **status change** on `receipt` (`pending_inspection` → `accepted`) with the reason in
+>   both the description and `extra_data` (alongside `part_requires_inspection`, the part master's
+>   advisory flag at the time of the waiver — recorded, never enforced, since it defaults true on
+>   essentially every part). Emits the operational event **`receipt_inspection_cleared`**
+>   (`source_module="purchasing"`, `entity_type="po_receipt"`, severity `medium`, payload
+>   `receipt_number` / `po_id` / `po_number` / `po_line_id` / `part_id` / `quantity_received` /
+>   `reason` / `part_requires_inspection`), which fans out the catalog entry
+>   **`receipt.inspection_cleared`** — in-app to **Manager + Quality**, exactly like `receipt.voided`
+>   and `receipt.corrected`. Waiving a hold is the most quality-relevant of the three post-receipt
+>   verbs, so it is deliberately not the silent one.
+> - **The status guard is read under a row lock** (`SELECT … FOR UPDATE` on the receipt). `POReceipt`
+>   has no `version` column, and `inventory_items` has no unique constraint on
+>   (company, part, location, lot) — unlocked, two concurrent clears would both pass the guard and
+>   both post, doubling the lot's on-hand with only half of it reversible by a later Correct/Void.
+>
+> **Errors:**
+> - **404** `"Receipt not found"` — missing, cross-tenant, or already-voided (soft-deleted).
+> - **409** `"Receipt is not pending inspection"` — any other status. This is **also the replay
+>   guard**: a second call finds the receipt already `accepted` and refuses, so stock can never be
+>   posted twice. It subsumes the already-inspected case (an inspected receipt is `accepted` or
+>   `rejected`), which is why this verb does not reuse the correct/void loader — that loader's
+>   "already been inspected" 409 would be the wrong message here, and an already-*cleared* receipt
+>   would slip past it entirely.
+> - **400** `"Receipt's PO line no longer exists, so the inspection hold cannot be cleared here.
+>   Contact an administrator to repair the receipt record."` — orphaned `po_line`, or a `po_line`
+>   whose `purchase_order` is gone: there is no part / unit price / vendor context to post inventory
+>   with. Never a 500. (Such rows are deliberately still surfaced by `/receiving/inspection-queue`
+>   with `null` context fields so they can be found.)
+>
+> **Which of the three post-receipt verbs to reach for:**
+>
+> | Situation | Verb | Effect on the receipt | Effect on inventory | Gate |
+> |---|---|---|---|---|
+> | Quantity / lot / heat / cert was **keyed wrong** | `PATCH /receiving/receipt/{id}` (**Correct**) | Edited in place, kept | Signed compensating `ADJUST` for the delta (dock-to-stock only) | Admin / Manager / Supervisor |
+> | The receipt **should not exist** (wrong PO line, wrong part, never arrived) | `POST /receiving/receipt/{id}/void` (**Void**) | Soft-deleted, **terminal — re-key to redo** | Full reversal via signed compensating `ADJUST` | Admin / Manager |
+> | The receipt is **right**; only the **"requires inspection" box was a mis-click** | `POST /receiving/receipt/{id}/clear-inspection` (**Clear hold**) | Kept **exactly as keyed**, re-classified dock-to-stock | Material **posted in** (it never was) | Admin / Manager / Quality / Supervisor |
+>
+> A receipt genuinely needing inspection is still resolved by `POST /receiving/inspect/{receipt_id}`,
+> which records a real inspector, method, and timestamp. Clearing the hold is **not** an inspection
+> outcome and must not be used as a shortcut for one.
+>
+> **Ordering matters, and the UI says so:** while a receipt sits at `pending_inspection` its **lot
+> number is still correctable in place**. Clearing the hold posts the stock, which flips
+> `requires_inspection` to `false` — and `PATCH /receiving/receipt/{id}` then refuses a lot change
+> ("Lot number cannot be changed after stock has been received into inventory"). So fix a mis-keyed
+> lot **before** clearing the hold; afterwards the only route is void + re-key.
+>
+> **This is still not a two-person control, and must not be described as one.** Every role that can
+> clear a hold can also place one (Admin / Manager / Supervisor hold `/receive`) or resolve it by
+> inspection, so anyone can waive a hold they set themselves. What the endpoint guarantees is
+> *attribution*, not separation: a non-blank reason, a named user, a tamper-evident `audit_log` status
+> change, a stamp on `receipt.notes` and on the ledger row, and a notification to Manager + Quality.
+> The control here is that the waiver is **visible and truthful**, never that a second person
+> authorised it.
+
+> **Deleting an open PO from the Receiving page (`DELETE /purchasing/purchase-orders/{po_id}`).**
+> Each card in the Receive tab's open-PO list (`GET /receiving/open-pos`) carries a delete control,
+> wired to the **existing Purchasing endpoint** — there is no receiving-specific verb, and nothing
+> about the endpoint's behaviour changed. It is surfaced here because the dock is where a duplicate,
+> cancelled or wrong-vendor PO is actually noticed, and until now the receiver had to leave for the
+> Purchasing page to get rid of it.
+>
+> - **Gate — Admin / Manager** (`require_role([ADMIN, MANAGER])`): the same tier as receipt **void**,
+>   and deliberately **tighter than the receiving role set** — receive / correct / clear-hold all
+>   include Supervisor, this does not. A Supervisor sees no delete control and the card renders
+>   exactly as it did before.
+> - **Soft delete** (compliance invariant #3): the PO is marked `is_deleted` / `deleted_at` /
+>   `deleted_by`, drops out of `/receiving/open-pos` and every Purchasing list, and is **restorable**
+>   by Admin / Manager via `POST /purchasing/purchase-orders/{po_id}/restore`. Both directions write a
+>   tamper-evident `audit_log` row (`log_delete` with `soft_delete=true`; `log_update` with
+>   `action="restore"`). Nothing is destroyed.
+>   **Caveat worth knowing before you promise a user a restore:** the restore *endpoint* exists, but
+>   **no UI calls it** — `restorePurchaseOrder` in `frontend/src/services/api.ts` has no caller, and
+>   the Purchasing page (whose lists filter `is_deleted == false`) shows no deleted POs and offers no
+>   restore control. Undoing a PO delete is therefore an API/administrator action today, not
+>   something a manager can do from a screen. **The receiving confirm dialog and success toast say
+>   exactly that** ("there is no restore button in the app — bringing a PO back is an administrator
+>   action, so treat this as one-way"), and a test pins the absence of the older, false "restorable
+>   from Purchasing" wording. If a restore control is ever wired into Purchasing, that copy and this
+>   caveat move together.
+> - **Refused 400 once any line has received material** (`quantity_received > 0`) —
+>   *"Cannot delete purchase order &lt;po&gt;: it has received material. Void the receipt(s) first,
+>   then delete."* **This is the refusal a warehouse user will actually hit**, and from *this* surface
+>   it means a **partially** received PO: `/receiving/open-pos` lists `sent` / `partial` only, so a
+>   fully-received PO has already left the list and its delete control with it. The sequence is worth
+>   stating:
+>
+>   1. **Void every receipt** logged against the PO — `POST /receiving/receipt/{receipt_id}/void`
+>      (Admin / Manager, required `reason`). A void reconciles the receipt down to zero, which is
+>      what walks `po_line.quantity_received` back down, reopens `po_line.is_closed`, and rolls
+>      `po.status` back to `sent` once nothing on the PO is left received — so a fully-voided PO
+>      reappears in the open-PO list, where the delete control is.
+>   2. With **no** line left at `quantity_received > 0`, the delete is accepted.
+>
+>   Two limits make step 1 unavailable for real deliveries, which is the point: **void is terminal**
+>   (there is no receipt restore — to redo, re-receive) and it is **refused 409 once the receipt has
+>   been inspected** (`passed` / `failed` / `partial`). So a PO whose material genuinely arrived and
+>   was inspected **cannot be cleared for deletion this way, and should not be** — that receipt is the
+>   quality record of a real delivery. Close or cancel the PO instead. Voiding truthful receipts
+>   purely to make a PO deletable destroys traceability for material that is physically on the shelf.
+>
+>   **Which is why the receiving UI does not offer the control on a `partial` card at all.** The
+>   endpoint's guard is unchanged and still authoritative, but on *this* surface `po.status ==
+>   "partial"` is a perfect predictor of the 400 — the list carries `sent` / `partial` only, and the
+>   backend sets `partial` on exactly the `quantity_received > 0` condition the delete refuses on.
+>   So `Receiving.tsx` renders the trash icon only when `canDeletePO && po.status !== 'partial'`: a
+>   button that can only ever fail is worse than no button, and here the failure hands back advice
+>   ("void the receipt(s) first") that is *correct for a bogus receipt and destructive for a real
+>   delivery*. The 400 stays reachable for the race (a PO that goes `partial` between list load and
+>   confirm), and the confirm dialog carries the counter-guidance the server's `detail` cannot:
+>   *"If the material genuinely arrived, do NOT void its receipt: close or cancel the PO in
+>   Purchasing instead."* From Purchasing, which lists every status, the control is role-gated only
+>   and the 400 is the normal teacher.
+> - A **double delete** returns **400** (*"Purchase order &lt;po&gt; is already deleted"*); a missing
+>   or cross-tenant PO returns **404**.
+>
+> This is **not** a fourth post-receipt verb: Correct / Void / Clear-hold fix something already
+> received, while this removes a PO that should not be received against at all. See
+> Purchasing → *Vendor / PO soft-delete + restore* for the endpoint's own note.
 
 > **Thermal receiving-label printing (ProxyBox / WHTP203e).** A 4×6 PDF (part / rev /
 > qty / lot / Code128, CRITICAL banner for critical parts) is rendered, stored as a

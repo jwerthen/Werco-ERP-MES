@@ -915,6 +915,13 @@ tier, that tier stands — this rule is a floor, never a loosening.
 > refused (**400**) while it has an active PO; a **PO** delete is refused (**400**) when any line has
 > received material (void the receipts first); and opening a PO against a soft-deleted/inactive vendor
 > is refused (**404**). See `docs/API.md` → Purchasing.
+>
+> **The PO delete is reachable from two pages** — the Purchasing PO list and the **open-PO list on
+> Warehouse → Receiving** — but it is one endpoint under one gate. The Receiving surface does **not**
+> inherit the Receiving rows below: a Supervisor who may receive, correct a receipt and clear an
+> inspection hold still sees **no** delete control, because this stays `require_role([ADMIN,
+> MANAGER])`. Restore has **no UI on either page** (the endpoint exists; nothing in the frontend calls
+> it), so undoing a PO delete is an administrator action.
 
 ### Receiving
 
@@ -925,6 +932,7 @@ tier, that tier stands — this rule is a floor, never a loosening.
 | Inspect | ✓ | ✓ | ✓ | | ✓ | | |
 | Correct receipt (in place) | ✓ | ✓ | ✓ | | | | |
 | Void receipt (soft-delete) | ✓ | ✓ | | | | | |
+| Clear inspection hold (waive) | ✓ | ✓ | ✓ | | ✓ | | |
 | Print / reprint receiving label | ✓ | ✓ | ✓ | | | | |
 | Configure print profile | ✓ | | | | | | |
 
@@ -956,6 +964,105 @@ tier, that tier stands — this rule is a floor, never a loosening.
 > status, and (dock-to-stock) inventory — the historical `RECEIVE` transaction is never mutated;
 > reversal is a signed compensating `ADJUST`. Corrections/voids are refused after the receipt is
 > inspected, or once its stock has been allocated/consumed. See `docs/API.md` → Receiving & Inspection.
+
+> **Clear inspection hold — endpoint mapping, and why it matches Inspect exactly.**
+> **`POST /receiving/receipt/{receipt_id}/clear-inspection`** (waive an inspection hold placed by
+> mistake, required reason) → `require_role([ADMIN, MANAGER, SUPERVISOR, QUALITY])`, the **Clear
+> inspection hold** row. This is the non-destructive third post-receipt verb: the receipt and its
+> lot/heat/cert are kept exactly as keyed, it is re-classified dock-to-stock
+> (`inspection_status = not_required`), the material posts into inventory, and it drops off the
+> inspection queue.
+>
+> **The role list is deliberately identical to Inspect, and that identity is the control.** An earlier
+> draft excluded Supervisor on a segregation-of-duties argument: Supervisor is the receiving-clerk tier
+> (it holds **Create**, so it is the tier that ticks the "requires inspection" box in the first place),
+> and letting it waive the hold would let the same person quietly undo their own click. **The owner
+> overruled that, and the reason is a records-integrity one, not convenience.**
+>
+> Excluding Supervisor closed the **honest** exit and left the **dishonest** one open. A supervisor
+> facing a mis-ticked receipt with no manager on site did not leave it sitting on the queue — they put
+> it through **Inspect → Visual → Pass**, because Supervisor holds Inspect and always has. That writes
+> a named inspector and a timestamp onto an inspection that never happened: a **fabricated quality
+> record**, and precisely the AS9100D records-integrity defect PR #127 fixed in code — reintroduced by
+> a human instead of by the code. Whoever is trusted to record that a lot **passed** is already trusted
+> to record that it never needed inspecting, and of the two records that tier can produce, the
+> reasoned, attributed, hash-chained waiver is the strictly more truthful one. So the gate now grants
+> the truthful record rather than forcing the false one.
+>
+> **Keep the two lists in lockstep.** If Inspect and Clear-hold ever diverge again, the tier holding
+> Inspect and not Clear-hold gets the fabricated pass back as its only exit. **Void** is the one that
+> stays tighter (Admin / Manager) — that is *delete* authority, a different question from whether an
+> inspection was owed.
+>
+> Lockstep includes **`PLATFORM_ADMIN`**, which is why `Receiving.tsx`'s `canClearInspection` lists it
+> and its neighbours (`canCorrectReceipt` / `canVoidReceipt` / `canDeletePO`) do not. Platform admin
+> sits outside the matrix below — `api/deps.py :: require_role` admits it before the list is read — so
+> the frontend convention elsewhere is to omit it and simply be conservative. Here that would be a
+> *behavioural* divergence, not a cosmetic one: `frontend/src/utils/permissions.ts` grants
+> `platform_admin` the `receiving:inspect` permission that drives the Inspect button, so omitting it
+> from Clear-hold would put a context-switched platform admin on the queue holding Inspect and **not**
+> Clear-hold — the exact one-way door this list closes, made worse by the fact that the old
+> "ask a manager or Quality" hint has been removed. A parametrized frontend test asserts the general
+> rule (*no role sees Inspect without Clear Hold*) rather than the four names, so the pair cannot
+> drift apart again silently.
+>
+> | Action | Roles | Rationale |
+> |---|---|---|
+> | Receive (sets the flag) | Admin / Manager / **Supervisor** | Receive-tier clerical work. |
+> | Correct receipt | Admin / Manager / **Supervisor** | Same receive-tier — fixing your own keying. |
+> | Inspect (resolves the hold with a real inspection) | Admin / Manager / **Quality** / **Supervisor** | Completing a *real* inspection is receive-tier work, plus Quality. |
+> | **Clear inspection hold (waives the hold)** | Admin / Manager / **Quality** / **Supervisor** | **Same list as Inspect, on purpose** — the tier that can record a pass must also be able to record the truthful waiver, or it records the false pass instead. |
+> | Void receipt | Admin / Manager | Delete authority, tighter still. |
+>
+> **What this gate is NOT, stated plainly because this document is what an auditor is shown:** it is
+> **not** a two-person rule and never was. Admin, Manager and Supervisor all hold `receiving:create`,
+> so every role that can clear a hold can also have placed one — anyone here can waive their own
+> mis-click. The control this endpoint provides is **attribution and visibility**, not separation of
+> duties: see the paragraph below for what it actually enforces.
+>
+> The gate is not the only control: the endpoint **requires a non-blank `reason`** (1–500 chars,
+> trimmed), writes a tamper-evident `audit_log` **status change** (`pending_inspection` → `accepted`)
+> carrying that reason, and emits a `receipt_inspection_cleared` operational event — so a waiver is
+> always attributable to a named user with a stated justification (invariant #2). It refuses **409**
+> for any receipt not currently `pending_inspection`, which is also the replay guard. Records
+> integrity is preserved: `inspection_status` becomes `not_required`, **never `passed`**, and
+> `inspection_method` / `inspected_by` / `inspected_at` stay NULL — no inspection happened, so the
+> record must not claim one (AS9100D, the PR #127 rule). The waiver is also stamped outside the
+> Admin/Manager-only audit log, which matters precisely because **Quality and Supervisor can perform
+> this waiver but cannot read `GET /audit/`** — but the two stamps are not equally durable, and the
+> difference is worth stating:
+>
+> - The **`RECEIVE` ledger row** carries `reason_code="INSPECTION_HOLD_CLEARED"` plus the reason in
+>   its notes. This is the **durable in-app trace for non-audit-readers**: `inventory_transactions`
+>   is append-only in practice (corrections are compensating rows, never edits — invariant 3/6) and
+>   it is rendered in-app on Warehouse → Inventory → **Stock Movements**, which Supervisor and
+>   Quality can both reach with `inventory:view`.
+> - The line appended to **`receipt.notes`** is a **convenience copy on the record itself, not a
+>   protected one.** Clearing a hold leaves `inspection_status = not_required`, which is *not* in
+>   `_INSPECTED_STATUSES`, so the receipt stays correctable — and `PATCH /receiving/receipt/{id}`
+>   (Admin / Manager / **Supervisor**) assigns `receipt.notes` wholesale from the payload, which the
+>   Correct dialog prefills into a plain textarea. A supervisor correcting a quantity the next day
+>   can retype that box and drop the waiver line without noticing it was one. Nothing is *lost* when
+>   that happens — the immutable `audit_log` status-change row and the correction's own `log_update`
+>   (carrying old → new `notes`) both survive, as does the ledger row above — but do not describe the
+>   on-receipt stamp as tamper-evident. It is durable against every tier except the one that both
+>   writes and edits it.
+>
+> The endpoint additionally fires the `receipt.inspection_cleared` notification to **Manager +
+> Quality**.
+>
+> **The previously recorded "known gap" is closed by this role list**, and closed in the direction the
+> owner chose: Supervisor was added here rather than removed from Inspect. The gap was that a
+> Supervisor blocked from the waiver still held Inspect and could stamp a fabricated Visual pass. It is
+> no longer mitigated by UI wording — the honest verb is simply available to the same tier. **Owner
+> decision — see `docs/API.md` → Receiving & Inspection.**
+
+> **Not every control on the Receiving page is gated by the rows above.** The open-PO list on the
+> Receive tab carries a **Delete PO** control wired to `DELETE /purchasing/purchase-orders/{po_id}` —
+> a *Purchasing* permission (**Admin / Manager**, the *Delete / restore purchase order* row in the
+> Purchasing matrix), not a Receiving one, and it is the tighter of the two lists. Gate any new
+> control on the page against the endpoint it calls, not against the page it lives on. See
+> `docs/API.md` → Receiving & Inspection → *Deleting an open PO from the Receiving page*.
 
 > **Thermal receiving-label printing (ProxyBox / WHTP203e).** Manually (re)printing the
 > 4×6 receiving label — `POST /receiving/receipt/{receipt_id}/print-label` — is enforced

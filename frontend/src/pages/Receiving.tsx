@@ -18,6 +18,8 @@ import {
   PrinterIcon,
   PencilSquareIcon,
   XCircleIcon,
+  ArchiveBoxArrowDownIcon,
+  TrashIcon,
 } from '@heroicons/react/24/outline';
 import { Modal } from '../components/ui/Modal';
 import {
@@ -31,6 +33,8 @@ import {
   Button,
   LoadingButton,
   FormField,
+  InputDialog,
+  ConfirmDialog,
   statusColor,
 } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
@@ -209,6 +213,11 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
   const [queueError, setQueueError] = useState(false);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [historyError, setHistoryError] = useState(false);
+  // History is a WINDOW on received_at (the endpoint takes `days`, 1–365), unlike
+  // the inspection queue, which deliberately never ages out. 30 days is the
+  // default; clearing an aged inspection hold widens it once so the receipt the
+  // user just released is still visible somewhere (see handleSubmitClearInspection).
+  const [historyDays, setHistoryDays] = useState(30);
 
   const [showReceiveModal, setShowReceiveModal] = useState(false);
   const [showInspectModal, setShowInspectModal] = useState(false);
@@ -300,6 +309,27 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
   const [voidReason, setVoidReason] = useState('');
   const [voidSaving, setVoidSaving] = useState(false);
 
+  // Clear-inspection ("Not Required") confirm state. The reason is a single
+  // required line, so this one rides the shared InputDialog rather than a
+  // hand-built Modal — see the dialog at the bottom of the file.
+  // `partNumber` is carried so the dialog can name what is being waived, and
+  // `daysPending` so a successful clear can widen the History window far enough to
+  // still show an aged receipt (see handleSubmitClearInspection).
+  const [clearTarget, setClearTarget] = useState<{
+    receiptId: number;
+    receiptNumber: string;
+    partNumber: string | null;
+    daysPending: number;
+  } | null>(null);
+  const [clearSaving, setClearSaving] = useState(false);
+
+  // Delete-PO confirm state (the open-PO list on the Receive tab). Server-GATED
+  // -- DELETE /purchasing/purchase-orders/{id} refuses a PO with received
+  // material -- so per the app convention this stays NON-optimistic: the card is
+  // removed only after the server returns success. See handleConfirmDeletePO.
+  const [deletePOTarget, setDeletePOTarget] = useState<PurchaseOrder | null>(null);
+  const [deletePOPending, setDeletePOPending] = useState(false);
+
   const { user } = useAuth();
   // Label printing is gated to the same roles that can receive (ADMIN / MANAGER
   // / SUPERVISOR) so the UI matches what the backend will allow.
@@ -314,6 +344,35 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
   const canCorrectReceipt =
     (!!user && ['admin', 'manager', 'supervisor'].includes(user.role)) || !!user?.is_superuser;
   const canVoidReceipt = (!!user && ['admin', 'manager'].includes(user.role)) || !!user?.is_superuser;
+  // Deleting an open PO from the receiving list mirrors DELETE
+  // /purchasing/purchase-orders/{id} (ADMIN / MANAGER). Same "never
+  // over-permissive" mirror as canVoidReceipt above: superuser qualifies,
+  // PLATFORM_ADMIN is admitted by the server and omitted here.
+  const canDeletePO = (!!user && ['admin', 'manager'].includes(user.role)) || !!user?.is_superuser;
+  // Clearing an inspection hold mirrors POST .../clear-inspection (ADMIN /
+  // MANAGER / SUPERVISOR / QUALITY) — the SAME role list as Inspect above, by
+  // owner decision, and the match is the point. A supervisor holding Inspect but
+  // not this verb does not leave a mis-ticked receipt on the queue; they push it
+  // through Inspect → Visual → Pass, which records a named inspector and a
+  // timestamp for an inspection that never happened. Giving the same tier the
+  // reasoned, audited waiver replaces a fabricated quality record with a truthful
+  // one — anyone trusted to record that a lot PASSED can be trusted to record
+  // that it never needed inspecting.
+  //
+  // PLATFORM_ADMIN is listed here and NOT on canCorrectReceipt / canVoidReceipt /
+  // canDeletePO, and the asymmetry is deliberate. Those three are free to follow
+  // the house "omit platform_admin" convention because nothing depends on them
+  // matching another check. This one does: `canInspect` is the `receiving:inspect`
+  // permission, which utils/permissions.ts grants to platform_admin, so omitting it
+  // here would put a platform admin on the queue holding Inspect and NOT Clear Hold
+  // — the exact one-way door this widening exists to close, and the reason the
+  // "Manager/Quality clears it" hint could be deleted (see renderClearInspectionAction).
+  // The server admits PLATFORM_ADMIN unconditionally (api/deps.py :: require_role
+  // short-circuits on it before the list is read), so this is still "never
+  // over-permissive" — it is exact rather than conservative.
+  const canClearInspection =
+    (!!user && ['admin', 'manager', 'supervisor', 'quality', 'platform_admin'].includes(user.role)) ||
+    !!user?.is_superuser;
 
   const isPartialLine = (line: POLine) => !line.is_closed && line.quantity_received > 0 && line.quantity_remaining > 0;
 
@@ -424,10 +483,13 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
     }
   };
 
-  const loadHistory = async () => {
+  // Callers pass an explicit window only when they need to widen it; every other
+  // call takes the current one. Never wire this straight to an onRetry/onClick —
+  // React would hand the MouseEvent in as `days`.
+  const loadHistory = async (days: number = historyDays) => {
     setHistoryError(false);
     try {
-      const data = await api.getReceivingHistory(30);
+      const data = await api.getReceivingHistory(days);
       setHistory(data);
     } catch (err) {
       console.error('Failed to load history:', err);
@@ -442,6 +504,52 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
     } catch (err) {
       console.error('Failed to load PO details:', err);
       showToast('error', 'Failed to load PO details');
+    }
+  };
+
+  /**
+   * Delete (soft) an open PO straight from the receiving list.
+   *
+   * ConfirmDialog.onConfirm is synchronous, so it fires this async handler and
+   * returns. Mirrors Purchasing.tsx :: handleConfirmDeletePO: the dialog closes
+   * only on SUCCESS. A refusal -- the common one is the server's "it has
+   * received material. Void the receipt(s) first" 400 -- leaves the card in
+   * place and surfaces the server's `detail` verbatim, because that message is
+   * the instruction the receiver has to follow.
+   *
+   * The delete is SOFT (compliance invariant 3) — but "soft" is not "undoable by
+   * the person clicking". POST /purchasing/purchase-orders/{id}/restore exists and
+   * api.ts wraps it, yet NOTHING in the frontend calls that wrapper: Purchasing has
+   * no restore control and no deleted-PO view, so a deleted PO is invisible on every
+   * screen and getting it back is an administrator action against the API. The copy
+   * here and in the dialog says exactly that. It used to promise "restorable from
+   * Purchasing", which is the one promise that would make a manager click without
+   * checking first — and it was false. Wire a restore control into Purchasing and
+   * this copy can be revisited; until then, do not re-add the promise.
+   */
+  const handleConfirmDeletePO = async () => {
+    if (!deletePOTarget || deletePOPending) return;
+    const target = deletePOTarget;
+    setDeletePOPending(true);
+    try {
+      await api.deletePurchaseOrder(target.po_id);
+      showToast('success', `Purchase order ${target.po_number} deleted — record retained for audit`);
+      setDeletePOTarget(null);
+      // If the deleted PO was the one loaded into the right-hand receive panel,
+      // drop the selection too. Left alone the panel keeps offering lines of a
+      // deleted PO and receiving against one would fail confusingly. The receive
+      // modal cannot be open here (it covers the delete control), but it is
+      // closed defensively so no path can leave it mounted over a dead PO.
+      if (selectedPO?.po_id === target.po_id) {
+        setSelectedPO(null);
+        setSelectedLine(null);
+        setShowReceiveModal(false);
+      }
+      loadData();
+    } catch (err: any) {
+      showToast('error', err.response?.data?.detail || 'Failed to delete purchase order');
+    } finally {
+      setDeletePOPending(false);
     }
   };
 
@@ -615,10 +723,13 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
   // receipt (queue + history lists and, if a PO is open on the Receive tab, its
   // lines + receipt-history sub-table) so the UI reflects only what the server
   // did — this is a server-GATED action, so it is non-optimistic by design.
-  const refreshReceiptSurfaces = () => {
+  // `historyWindowDays` lets a caller widen the History pull in the same tick it
+  // changes the state (setState is async, so loadHistory would otherwise re-read
+  // the stale window and drop the receipt the caller just released).
+  const refreshReceiptSurfaces = (historyWindowDays?: number) => {
     loadData();
     loadInspectionQueue();
-    loadHistory();
+    loadHistory(historyWindowDays ?? historyDays);
     if (selectedPO) {
       refreshSelectedPO(selectedPO.po_id);
     }
@@ -706,6 +817,94 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
     } finally {
       setVoidSaving(false);
     }
+  };
+
+  // Clear the inspection hold. Server-GATED (409 when the receipt is no longer
+  // PENDING_INSPECTION — which is also the server's replay guard — and 400 when
+  // its PO line is orphaned), so this stays strictly non-optimistic: nothing in
+  // the UI moves until the server has answered, and on a refusal the dialog is
+  // left open carrying the server's own wording.
+  //
+  // InputDialog hands us the reason already trimmed and guaranteed non-empty, so
+  // there is no blank-reason toast to write here (the void handler needs one only
+  // because its hand-built modal doesn't enforce that).
+  const handleSubmitClearInspection = async (reason: string) => {
+    if (!clearTarget) return;
+    setClearSaving(true);
+    try {
+      await api.clearReceiptInspection(clearTarget.receiptId, { reason });
+      // The receipt leaves the queue and lands in History — but History is a
+      // WINDOW (default 30 days, keyed on received_at), while the inspection queue
+      // deliberately never ages out. Clearing a hold that has been stuck for
+      // months — exactly the population this verb exists for — would otherwise
+      // drop the receipt off BOTH surfaces and leave the user with a success toast
+      // and nowhere to confirm the material actually landed. So widen the window
+      // once, just far enough to cover this receipt, and pull History with it.
+      const needed = Math.min(365, Math.max(historyDays, Math.ceil(clearTarget.daysPending) + 1));
+      if (needed > historyDays) setHistoryDays(needed);
+      showToast(
+        'success',
+        `Receipt ${clearTarget.receiptNumber} released to stock — no inspection required. It is now in Receiving History.`
+      );
+      setClearTarget(null);
+      refreshReceiptSurfaces(needed);
+    } catch (err: any) {
+      showToast('error', err.response?.data?.detail || 'Failed to clear the inspection hold');
+    } finally {
+      setClearSaving(false);
+    }
+  };
+
+  // "Clear Hold" — the non-destructive way off the inspection queue.
+  //
+  // Labelled with the VERB, deliberately not "Not Required": those two words are
+  // already a StatusBadge value on this very page (History badges a cleared or
+  // dock-to-stock receipt "Not required"), so the same string would be an action in
+  // one tab and a passive status in the other — and an adjective sitting in a row of
+  // verbs (Inspect / Correct / Void) says nothing about what clicking it does. The
+  // dialog's submit button says "Clear Hold & Post to Stock"; the row button now
+  // matches the wording the user lands on next.
+  //
+  // Queue-only ON PURPOSE, which is why it is NOT part of renderReceiptRowActions
+  // below: that cluster is shared with the history rows and the per-PO receipt
+  // sub-table, and both of those show receipts that are no longer pending
+  // inspection, where the endpoint answers 409. A button that can only ever fail
+  // is worse than no button.
+  //
+  // Styled amber rather than the red of Void: this destroys nothing, it
+  // reclassifies the receipt as the dock-to-stock one it should have been. But it
+  // is not the primary Inspect button either — inspecting is still the normal
+  // outcome for a row on this queue.
+  const renderClearInspectionAction = (item: InspectionQueueItem) => {
+    // A "Mis-ticked? Manager/Quality clears it" hint used to render here for users
+    // who could Inspect but not clear. It is gone with the gate that made it true:
+    // canClearInspection now covers every tier canInspect covers — the four tenant
+    // roles plus platform_admin, which is why platform_admin is on that list and not
+    // on its neighbours — so no user reaches the queue able to Inspect and unable to
+    // Clear Hold, and the sentence would be false for every one of them. Someone with
+    // neither permission gets nothing — there is no route to name and nothing for them
+    // to click.
+    if (!canClearInspection) return null;
+    return (
+      <button
+        type="button"
+        onClick={e => {
+          e.stopPropagation();
+          setClearTarget({
+            receiptId: item.receipt_id,
+            receiptNumber: item.receipt_number,
+            partNumber: item.part_number,
+            daysPending: item.days_pending,
+          });
+        }}
+        title="Inspection was not required — release this material to stock"
+        aria-label={`Clear the inspection hold on receipt ${item.receipt_number}`}
+        className="inline-flex items-center gap-1.5 border border-amber-500/40 text-amber-300 hover:border-amber-500 hover:text-amber-200 text-sm px-3 py-1 transition-colors"
+      >
+        <ArchiveBoxArrowDownIcon className="h-4 w-4" aria-hidden="true" />
+        Clear Hold
+      </button>
+    );
   };
 
   // Correct / Void row controls, shared by the inspection-queue rows, the
@@ -890,12 +1089,13 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                 Inspect
               </button>
             )}
+            {renderClearInspectionAction(item)}
             {renderReceiptRowActions(item.receipt_id, item.receipt_number)}
           </div>
         ),
       },
     ],
-    [canPrintLabel, canInspect, canCorrectReceipt, canVoidReceipt, printingReceiptId]
+    [canPrintLabel, canInspect, canClearInspection, canCorrectReceipt, canVoidReceipt, printingReceiptId]
   );
 
   const renderQueueCard = (item: InspectionQueueItem) => (
@@ -944,6 +1144,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
               Inspect
             </button>
           )}
+          {renderClearInspectionAction(item)}
           {renderReceiptRowActions(item.receipt_id, item.receipt_number)}
         </>
       }
@@ -1236,52 +1437,95 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                   ) : (
                     poArrivals.sortedPOs.map(po => {
                       const arrival = poArrivals.arrivalById.get(po.po_id);
+                      // State gate on top of the role gate. This list carries SENT and
+                      // PARTIAL POs only, and the backend sets PARTIAL exactly when some
+                      // line has quantity_received > 0 — which is exactly the condition
+                      // DELETE /purchasing/purchase-orders/{id} refuses on. So on THIS
+                      // surface `status === 'partial'` is a perfect predictor of the 400:
+                      // the control could only ever fail there ("a button that can only
+                      // ever fail is worse than no button" — the same rule that keeps
+                      // Clear Hold queue-only, see renderClearInspectionAction).
+                      //
+                      // Hiding it is the safe direction rather than merely the tidy one.
+                      // The server's refusal instructs "Void the receipt(s) first, then
+                      // delete" — correct advice for a bogus receipt, and destructive
+                      // advice on a PARTIAL PO, where PARTIAL normally means material
+                      // really arrived: following it voids a real receipt, reverses posted
+                      // on-hand, and deletes that lot's traceability chain, all to tidy a
+                      // list. A PO whose balance is dead belongs closed or cancelled in
+                      // Purchasing. The dialog still carries that counter-guidance for the
+                      // residual race (a PO that goes PARTIAL between list load and
+                      // confirm), where the server's 400 is still reachable.
+                      const canDeleteThisPO = canDeletePO && po.status !== 'partial';
                       return (
-                        <button
-                          type="button"
-                          key={po.po_id}
-                          onClick={() => handleSelectPO(po)}
-                          className={`w-full text-left p-3 rounded-xl border-2 cursor-pointer transition-all ${
-                            selectedPO?.po_id === po.po_id
-                              ? 'border-werco-primary bg-werco-500/10'
-                              : 'border-slate-700 hover:border-slate-600 hover:bg-slate-800'
-                          }`}
-                        >
-                          <div className="flex justify-between items-start">
-                            <div>
-                              <p className="font-semibold text-werco-primary">{po.po_number}</p>
-                              <p className="text-sm text-slate-400">{po.vendor_name}</p>
-                            </div>
-                            <span className="flex flex-shrink-0 items-center gap-1.5">
-                              {arrival?.status === 'today' && (
-                                <span className="px-2 py-1 rounded text-xs font-medium bg-amber-500/20 text-amber-300">
-                                  Today
+                        // The card is a real <button>; the Delete control is its SIBLING inside
+                        // this relative wrapper, never a nested one (nested interactive elements
+                        // are invalid HTML and jsx-a11y is enforced at --max-warnings=0). Being a
+                        // sibling also means a Delete click can't bubble into card selection.
+                        <div key={po.po_id} className="relative">
+                          <button
+                            type="button"
+                            onClick={() => handleSelectPO(po)}
+                            className={`w-full text-left p-3 ${
+                              canDeleteThisPO ? 'pr-10' : ''
+                            } rounded-xl border-2 cursor-pointer transition-all ${
+                              selectedPO?.po_id === po.po_id
+                                ? 'border-werco-primary bg-werco-500/10'
+                                : 'border-slate-700 hover:border-slate-600 hover:bg-slate-800'
+                            }`}
+                          >
+                            <div className="flex justify-between items-start">
+                              <div>
+                                <p className="font-semibold text-werco-primary">{po.po_number}</p>
+                                <p className="text-sm text-slate-400">{po.vendor_name}</p>
+                              </div>
+                              <span className="flex flex-shrink-0 items-center gap-1.5">
+                                {arrival?.status === 'today' && (
+                                  <span className="px-2 py-1 rounded text-xs font-medium bg-amber-500/20 text-amber-300">
+                                    Today
+                                  </span>
+                                )}
+                                {arrival?.status === 'overdue' && (
+                                  <span className="px-2 py-1 rounded text-xs font-medium bg-red-500/20 text-red-300">
+                                    Overdue
+                                  </span>
+                                )}
+                                <span className="px-2 py-1 rounded text-xs font-medium bg-blue-500/20 text-blue-300">
+                                  {po.total_lines} line{po.total_lines !== 1 ? 's' : ''}
                                 </span>
-                              )}
-                              {arrival?.status === 'overdue' && (
-                                <span className="px-2 py-1 rounded text-xs font-medium bg-red-500/20 text-red-300">
-                                  Overdue
-                                </span>
-                              )}
-                              <span className="px-2 py-1 rounded text-xs font-medium bg-blue-500/20 text-blue-300">
-                                {po.total_lines} line{po.total_lines !== 1 ? 's' : ''}
                               </span>
-                            </span>
-                          </div>
-                          {(po.required_date || arrival?.date) && (
-                            <p className="text-xs text-slate-400 mt-1">
-                              {po.required_date && <>Required: {formatCentralDate(po.required_date)}</>}
-                              {/* When the Today/Overdue badge is driven by a date other than the
-                                  visible Required date, show it so the badge is never contradicted. */}
-                              {arrival?.date && arrival.date !== toISODateOnly(po.required_date) && (
-                                <>
-                                  {po.required_date && ' · '}
-                                  Expected: {formatCentralDate(arrival.date)}
-                                </>
-                              )}
-                            </p>
+                            </div>
+                            {(po.required_date || arrival?.date) && (
+                              <p className="text-xs text-slate-400 mt-1">
+                                {po.required_date && <>Required: {formatCentralDate(po.required_date)}</>}
+                                {/* When the Today/Overdue badge is driven by a date other than the
+                                    visible Required date, show it so the badge is never contradicted. */}
+                                {arrival?.date && arrival.date !== toISODateOnly(po.required_date) && (
+                                  <>
+                                    {po.required_date && ' · '}
+                                    Expected: {formatCentralDate(arrival.date)}
+                                  </>
+                                )}
+                              </p>
+                            )}
+                          </button>
+                          {canDeleteThisPO && (
+                            <button
+                              type="button"
+                              onClick={e => {
+                                // Structurally unnecessary (sibling, not nested) — kept so the
+                                // control can never select the PO if the markup is ever reworked.
+                                e.stopPropagation();
+                                setDeletePOTarget(po);
+                              }}
+                              title="Delete purchase order"
+                              aria-label={`Delete purchase order ${po.po_number}`}
+                              className="absolute right-1.5 top-2.5 p-1.5 rounded text-slate-500 hover:text-red-300 hover:bg-red-500/10 transition-colors"
+                            >
+                              <TrashIcon className="h-4 w-4" />
+                            </button>
                           )}
-                        </button>
+                        </div>
                       );
                     })
                   )}
@@ -1571,11 +1815,11 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
               pageSize={25}
               csvExport={{ filename: 'receiving-history' }}
               error={historyError}
-              onRetry={loadHistory}
+              onRetry={() => loadHistory()}
               empty={{
                 icon: ClockIcon,
                 title: 'No receiving history',
-                description: 'Receipts from the last 30 days will appear here.',
+                description: `Receipts from the last ${historyDays} days will appear here.`,
               }}
               mobileCards={renderHistoryCard}
             />
@@ -2227,6 +2471,70 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
           </>
         )}
       </Modal>
+
+      {/* CLEAR INSPECTION HOLD ("Clear Hold")
+          Deliberately the shared InputDialog rather than a hand-built Modal like
+          Void above: the capture here is exactly one required line of text, which
+          is what InputDialog exists for, and it already implements the contract
+          this server-gated action needs — the value arrives trimmed and never
+          empty (so submit is simply disabled on a blank reason instead of firing
+          a "reason required" toast at the user), and `pending` spins the submit
+          button, disables Cancel, and refuses backdrop/Escape dismissal while the
+          call is in flight. Void's modal predates that and enforces none of it.
+          The alarm chrome Void carries would also be wrong here: this verb
+          destroys nothing. */}
+      <InputDialog
+        open={!!clearTarget}
+        title={`Clear inspection hold — ${clearTarget?.receiptNumber ?? ''}`}
+        message={
+          `Use this only when the 'requires inspection' box was ticked by mistake` +
+          `${clearTarget?.partNumber ? ` on part ${clearTarget.partNumber}` : ''}. ` +
+          "Confirming posts this material into inventory as on-hand stock right now and takes the receipt off the " +
+          "inspection queue — the lot, heat and cert stay exactly as keyed. Check the lot number FIRST if it might " +
+          "be wrong: once the stock posts, the lot can no longer be corrected in place (Correct refuses it) and the " +
+          "only fix left is a void and a full re-key. No inspection result is recorded, because no inspection " +
+          "happened. Your reason, and your name, go on the receipt and on the permanent audit trail, and Quality is " +
+          "notified."
+        }
+        label="Reason this material did not need inspection"
+        placeholder="e.g. Inspection box ticked by mistake — stock hardware, no incoming inspection required"
+        submitLabel="Clear Hold & Post to Stock"
+        pending={clearSaving}
+        onSubmit={handleSubmitClearInspection}
+        onCancel={() => setClearTarget(null)}
+      />
+
+      {/* DELETE PURCHASE ORDER (from the open-PO list on the Receive tab).
+          Mirrors Purchasing.tsx's delete-PO confirm — same primitive, same
+          variant, same `pending` contract, same "closes only on success"
+          behavior — so the two entry points to one verb behave identically.
+          The copy states what the app can actually do: the delete is SOFT, so the
+          record survives for audit, but there is NO restore control anywhere in the
+          frontend (see handleConfirmDeletePO) — so it promises an admin action, not a
+          button. It also carries the half of the received-material advice the server's
+          400 cannot: the server says "void the receipt(s) first", which is right when
+          the receipt is bogus and badly wrong when the material genuinely arrived. */}
+      <ConfirmDialog
+        open={!!deletePOTarget}
+        title="Delete Purchase Order"
+        message={
+          deletePOTarget
+            ? `Delete purchase order ${deletePOTarget.po_number} from ${deletePOTarget.vendor_name}? ` +
+              'It leaves the receiving list and the record is preserved for audit, but there is no restore ' +
+              'button in the app — bringing a PO back is an administrator action, so treat this as one-way. ' +
+              'A PO that already has material received against it cannot be deleted — void the receipt(s) ' +
+              'first. If the material genuinely arrived, do NOT void its receipt: close or cancel the PO in ' +
+              'Purchasing instead.'
+            : ''
+        }
+        confirmLabel="Delete"
+        pending={deletePOPending}
+        variant="danger"
+        onConfirm={handleConfirmDeletePO}
+        onCancel={() => {
+          if (!deletePOPending) setDeletePOTarget(null);
+        }}
+      />
     </div>
   );
 }

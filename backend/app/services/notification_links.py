@@ -34,8 +34,8 @@ Three rules, enforced by ``backend/tests/test_notification_link_routes.py``:
 
    KNOWN LIMITATION, not solved here: ``link`` is computed per EVENT while access is per
    RECIPIENT, so a mixed-audience entry cannot satisfy everyone. ``receipt.created``,
-   ``receipt.voided``, ``receipt.corrected``, ``po.sent``, ``quote.expiring`` and
-   ``calibration.due`` all have audiences that include roles lacking the destination's
+   ``receipt.voided``, ``receipt.corrected``, ``receipt.inspection_cleared``, ``po.sent``,
+   ``quote.expiring`` and ``calibration.due`` all have audiences that include roles lacking the destination's
    permission; those users get Access Denied where they previously got a 404. Both are dead
    ends, so this change is lateral for them and a genuine fix for everyone else. Making it
    right means a per-recipient link, which needs a backend mirror of the frontend

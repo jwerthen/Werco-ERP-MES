@@ -583,6 +583,26 @@ _ENTRIES: List[CatalogEntry] = [
         departments=("Purchasing",),
     ),
     CatalogEntry(
+        event_key="receipt.inspection_cleared",
+        label="Inspection hold cleared",
+        description="An incoming-inspection hold was waived and the material posted to stock.",
+        category=Category.PURCHASING,
+        severity="warning",
+        default_channels=frozenset({CHANNEL_IN_APP}),
+        source_event_types=("receipt_inspection_cleared",),
+        roles=(UserRole.MANAGER, UserRole.QUALITY),
+        departments=("Purchasing",),
+        # Same audience and shape as receipt.voided / receipt.corrected on purpose:
+        # it is the third post-receipt verb and the most quality-relevant of the
+        # three -- it takes a lot OFF the inspection queue and puts uninspected
+        # material on the shelf. Leaving it uncataloged would have made the one
+        # waiver verb the only silent one, while a quantity correction pinged
+        # Quality. The audit row alone does not cover it: GET /audit/ is
+        # ADMIN/MANAGER-only, so QUALITY -- authorized to perform the waiver --
+        # cannot read it back. The deep link is derived by notification_dispatch
+        # from entity_type="po_receipt" + the payload's po_id, like its two siblings.
+    ),
+    CatalogEntry(
         event_key="vendor.deactivated",
         label="Vendor deactivated",
         description="A vendor was deactivated or deleted.",

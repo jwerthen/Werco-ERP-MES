@@ -42,6 +42,7 @@ import {
   InventoryTransaction,
   InventoryTransactionParams,
   ResumeOperationResult,
+  ClearedReceipt,
 } from '../types';
 import { ScanResolveRequest, ScanResolveResult } from '../types/scan';
 import {
@@ -3581,6 +3582,29 @@ class ApiService {
   // Same class of 400/409 refusals as correctReceipt — surface detail verbatim.
   async voidReceipt(receiptId: number, reason: string): Promise<{ message: string }> {
     const response = await this.api.post(`/receiving/receipt/${receiptId}/void`, { reason });
+    return response.data;
+  }
+
+  // Clear an inspection hold that was ticked by mistake — the NON-destructive way
+  // out of the inspection queue, and the counterpart to voidReceipt (which was the
+  // only previous exit and un-receives the material entirely, forcing a re-key).
+  // The receipt and its lot / heat / cert are kept exactly as keyed; the material
+  // posts into inventory and the row leaves the queue. `reason` is required and
+  // lands on the tamper-evident audit trail.
+  //
+  // Role-gated ADMIN / MANAGER / SUPERVISOR / QUALITY — the SAME list as
+  // inspectReceiptNew, by owner decision. Withholding this verb from SUPERVISOR
+  // did not stop a mis-ticked receipt being released; it only pushed it through
+  // Inspect, which records a named inspector and a timestamp for an inspection
+  // that never happened. The audited waiver is the strictly more truthful record,
+  // so the tier that can pass a lot can also declare it never needed inspecting.
+  //
+  // Server-GATED, so callers stay non-optimistic: 409 "Receipt is not pending
+  // inspection" (any other status — this is also the replay guard, so stock can
+  // never be posted twice) and 400 for an orphaned PO line. Surface `detail`
+  // verbatim; both messages are actionable.
+  async clearReceiptInspection(receiptId: number, data: { reason: string }): Promise<ClearedReceipt> {
+    const response = await this.api.post(`/receiving/receipt/${receiptId}/clear-inspection`, data);
     return response.data;
   }
 

@@ -318,13 +318,25 @@ ROLE_CARDS = [
                 "Print the 4×6 receiving label from the success toast or the history row. "
                 "A 409 “egress is disabled” means the admin has not enabled label printing — not a printer fault.",
                 "Items flagged <b>requires inspection</b> land in the inspection queue. Quality signs those off — "
-                "receiving does not.",
+                "receiving does not. If the flag was a mis-click, use <b>CLEAR HOLD</b> on the queue row; "
+                "never pass it through INSPECT, which records an inspection that never happened.",
             ]),
             ("Fix a mistake", "bullets", [
                 "Keyed the wrong quantity or lot? Don't re-receive a correction. On the receipt use <b>CORRECT</b> "
                 "(Supervisor+) to fix the numbers or lot in place, or <b>VOID</b> (Manager/Admin) to undo the whole "
                 "receipt — both require a reason and reconcile the PO and inventory automatically. Once a receipt "
                 "is inspected or its stock has been issued, corrections go through Quality instead.",
+                "Ticked <b>requires inspection</b> by mistake? Neither of those is the fix. On the inspection-queue "
+                "row use <b>CLEAR HOLD</b> — same people who can INSPECT (Supervisor/Manager/Admin/Quality): the "
+                "receipt stays exactly as keyed — lot, heat and cert untouched — the material posts to stock, and "
+                "the row leaves the queue. Needs a reason. Fix a wrong lot with CORRECT first; after Clear Hold "
+                "posts the stock the lot can't be changed.",
+                "Wrong PO on the open-PO list (duplicate, cancelled, wrong vendor)? Delete it from the receiving "
+                "list itself — the trash icon on the PO card, <b>Manager/Admin only</b>, so supervisors will not "
+                "see it. Soft delete: the record is kept for audit, but there is no restore button — bringing a PO "
+                "back is an admin action, so treat it as one-way. <b>No icon appears once any line has material "
+                "received against it</b> — that PO cannot be deleted by anyone. Do NOT void real receipts to get "
+                "around that; close or cancel the PO in Purchasing instead.",
             ]),
         ],
         traps=[
