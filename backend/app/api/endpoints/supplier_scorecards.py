@@ -260,10 +260,65 @@ def _vendor_in_company(db: Session, vendor_id: int, company_id: int) -> Vendor:
     Flat 404 (not 403), matching ``_assert_work_center_in_company`` in
     work_orders.py: a foreign vendor must be indistinguishable from a
     nonexistent one.
+
+    Soft delete is DELIBERATELY NOT tested here -- do not add
+    ``is_deleted == False`` to this query. Everything this helper gates is a
+    quality RECORD about a supplier relationship that existed: a scorecard, an
+    auto-calculated scorecard over an explicitly-bounded PAST period, a supplier
+    audit, and the by-vendor history read. Removing a supplier is very often the
+    OUTCOME of the audit finding or the closing scorecard, so gating those on
+    vendor liveness makes the record that documents the removal unfilable --
+    AS9100D 8.4 expects that record, and it is usually the most consequential
+    one. The history read is the same argument from the other side: those
+    scorecards happened, and 404-ing them while ``GET /supplier-scorecards/
+    ?vendor_id=`` and the ranking still render the very same rows would be a
+    contradiction, not a protection (see ``_same_tenant_vendor``, which keeps
+    those pages naming a deleted vendor on purpose).
+
+    Vendor liveness is enforced on the one write in this router that is a
+    PERMISSION rather than a record -- Approved Supplier List entry, create and
+    update -- via ``_live_vendor_for_approval`` below.
     """
     vendor = db.query(Vendor).filter(Vendor.id == vendor_id, Vendor.company_id == company_id).first()
     if not vendor:
         raise HTTPException(status_code=404, detail="Vendor not found")
+    return vendor
+
+
+def _live_vendor_for_approval(db: Session, vendor_id: int, company_id: int) -> Vendor:
+    """``_vendor_in_company`` plus "and the vendor has not been removed".
+
+    The Approved Supplier List is not a history of who the shop bought from; it
+    is the AS9100D 8.4 statement of who the shop is PERMITTED to buy from right
+    now. A soft-deleted vendor must not be able to appear on it, which needs
+    both doors closed:
+
+      * ``POST /approved-suppliers/`` -- resolves through here.
+      * ``PUT /approved-suppliers/{asl_id}`` -- resolves the ASL row by its own
+        id and never re-reads ``vendor_id``, so it could re-approve a removed
+        supplier through its blind setattr loop. It does NOT call this helper
+        (it already holds the joined vendor, and re-resolving by id would answer
+        404 for a row it can see): it repeats the ``is_deleted`` test inline off
+        ``_same_tenant_vendor(entry)``, and only for the fields that CONSTITUTE
+        an approval, so correcting an existing row's notes still works. Keep the
+        two refusal messages saying the same thing.
+
+    Both ids needed to reach that second door are handed out by the ASL list,
+    which deliberately still renders deleted vendors (``_same_tenant_vendor``).
+    That accepted disclosure is exactly why the update verb has to re-check.
+
+    ``PUT /supplier-audits/{id}`` deliberately does NOT use this: a supplier
+    audit is a record, and correcting one is not an approval.
+    """
+    vendor = _vendor_in_company(db, vendor_id, company_id)
+    if vendor.is_deleted:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Vendor {vendor.name} has been removed and cannot be approved as a supplier. "
+                "Restore the vendor first."
+            ),
+        )
     return vendor
 
 
@@ -282,6 +337,17 @@ def _same_tenant_vendor(row: Any) -> Optional[Vendor]:
     Ingress is closed by ``_vendor_in_company``; this closes egress. A foreign
     vendor reads as absent rather than raising, so a legacy row stays listable
     and correctable instead of 500-ing the whole page.
+
+    Soft delete is DELIBERATELY not part of this test, and every ``joinedload``
+    on ``vendor`` in this router relies on that: a scorecard, a supplier audit
+    and an ASL entry are quality RECORDS of a supplier relationship that existed,
+    and blanking the supplier out of them once the vendor row is removed would
+    erase the AS9100D 8.4 history rather than protect anything -- the rows would
+    still be there, just anonymous, with no UI able to explain or correct them.
+    Deleted vendors are kept out at the WRITE verbs instead (see
+    ``_vendor_in_company``), which is where re-approving a removed supplier was
+    actually reachable. The cost is accepted and known: these pages still list a
+    deleted vendor by name, code and id.
     """
     vendor = row.vendor
     if vendor is None:
@@ -525,7 +591,12 @@ def vendor_scorecard_history(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Performance history for a specific vendor over time."""
+    """Performance history for a specific vendor over time.
+
+    Resolves through the tenant-only ``_vendor_in_company``, which deliberately does NOT
+    filter soft delete: a removed supplier's past evaluations are exactly what this reads,
+    and the same rows stay visible via ``GET /supplier-scorecards/?vendor_id=`` anyway.
+    """
     _vendor_in_company(db, vendor_id, company_id)
 
     scorecards = (
@@ -593,7 +664,12 @@ def create_scorecard(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Create a new scorecard."""
+    """Create a new scorecard.
+
+    Tenant gate only -- soft-deleted vendors are deliberately still scoreable, because the
+    closing evaluation is usually written after the decision to remove the supplier. See
+    ``_vendor_in_company``.
+    """
     vendor = _vendor_in_company(db, data.vendor_id, company_id)
 
     sc = SupplierScorecard(
@@ -691,7 +767,13 @@ def auto_calculate_scorecard(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Auto-calculate scorecard from PO/receipt/NCR data for a vendor and date range."""
+    """Auto-calculate scorecard from PO/receipt/NCR data for a vendor and date range.
+
+    Tenant gate only, deliberately: every input below is historical and bounded by an
+    explicit ``period_start``/``period_end``, so this writes a truthful record of a period
+    during which the vendor WAS a supplier. Gating it on liveness would make the final
+    scorecard of a removed supplier the one scorecard that can never be produced.
+    """
     vendor = _vendor_in_company(db, vendor_id, company_id)
 
     # Get POs in the period. Every leg below carries its own company_id
@@ -936,6 +1018,8 @@ def create_audit(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
+    # Tenant gate only. A supplier audit is a record, and the audit that documents WHY a
+    # supplier was removed is normally written after the removal -- see ``_vendor_in_company``.
     vendor = _vendor_in_company(db, data.vendor_id, company_id)
 
     record = SupplierAudit(**data.model_dump())
@@ -966,6 +1050,10 @@ def update_audit(
     if not record:
         raise HTTPException(status_code=404, detail="Audit not found")
 
+    # DELIBERATELY does not re-check vendor liveness (unlike the ASL update, which does).
+    # A supplier audit is a RECORD of an audit that took place, not a permission to buy;
+    # correcting or completing one after the supplier was removed -- which is frequently
+    # WHY it was removed -- is normal AS9100D 8.4 practice. See ``_vendor_in_company``.
     old_values = {c.key: getattr(record, c.key) for c in record.__table__.columns}
 
     for field, value in data.model_dump(exclude_unset=True).items():
@@ -1033,7 +1121,9 @@ def create_approved_supplier(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    vendor = _vendor_in_company(db, data.vendor_id, company_id)
+    # Approval gate, not the plain tenant gate: an ASL entry is a live permission to buy,
+    # so a removed supplier must not be enterable on it. See ``_live_vendor_for_approval``.
+    vendor = _live_vendor_for_approval(db, data.vendor_id, company_id)
 
     # Deliberately NOT tenant-scoped: ApprovedSupplierList.vendor_id carries a
     # GLOBAL unique constraint, so this check must mirror the constraint exactly
@@ -1079,9 +1169,32 @@ def update_approved_supplier(
     if not entry:
         raise HTTPException(status_code=404, detail="ASL entry not found")
 
+    update_data = data.model_dump(exclude_unset=True)
+
+    # The other half of the ASL approval gate. This verb resolves by ``asl_id`` and never
+    # re-reads ``vendor_id``, so closing only ``POST /approved-suppliers/`` left a removed
+    # supplier re-approvable through the blind setattr loop below -- and the ASL list, which
+    # deliberately keeps rendering deleted vendors, hands out both ids. Refused per-FIELD
+    # rather than per-row: only these three CONSTITUTE an approval, so an entry whose vendor
+    # is gone stays correctable (notes, scope, review cadence) instead of becoming frozen
+    # with no restore screen to unfreeze it. ``entry.last_review_date`` is stamped below on
+    # any edit, which is why the refusal has to run BEFORE the first setattr -- a refused
+    # request must leave the row untouched.
+    approval_fields = [f for f in ("approval_status", "approved_date", "certifications_verified") if f in update_data]
+    if approval_fields:
+        vendor = _same_tenant_vendor(entry)
+        if vendor is not None and vendor.is_deleted:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Vendor {vendor.name} has been removed and cannot be re-approved as a supplier "
+                    f"(refused fields: {', '.join(approval_fields)}). Restore the vendor first."
+                ),
+            )
+
     old_values = {c.key: getattr(entry, c.key) for c in entry.__table__.columns}
 
-    for field, value in data.model_dump(exclude_unset=True).items():
+    for field, value in update_data.items():
         setattr(entry, field, value)
 
     entry.last_review_date = date.today()

@@ -227,8 +227,13 @@ def get_setup_health(
                 Customer.company_id == company_id, Customer.is_active == True, Customer.is_deleted == False
             ),
         ),
+        # is_deleted alongside is_active (matching the customers count above): a readiness
+        # gate that counts tombstones reports "you are ready" on a short vendor master.
         "vendors": _count(
-            db, db.query(func.count(Vendor.id)).filter(Vendor.company_id == company_id, Vendor.is_active == True)
+            db,
+            db.query(func.count(Vendor.id)).filter(
+                Vendor.company_id == company_id, Vendor.is_active == True, Vendor.is_deleted == False
+            ),
         ),
         "inventory_items": _count(
             db,

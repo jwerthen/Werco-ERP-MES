@@ -85,11 +85,54 @@ def _generate_vendor_code(db: Session, name: str, company_id: int) -> str:
     base = "".join(c for c in name.upper() if c.isalnum())[:3]
     if len(base) < 3:
         base = base.ljust(3, "X")
+    # DELIBERATELY counts soft-deleted vendors too -- do not add ``is_deleted == False``.
+    # ``uq_vendors_company_code`` is a plain UniqueConstraint on (company_id, code) with no
+    # partial predicate, so a deleted vendor still OWNS its code: skipping the tombstones
+    # here would mint a code that is already taken and turn a clean insert into an
+    # IntegrityError. It would also collide with a later restore, which has no way to
+    # renumber. Same reasoning as the duplicate probes in create/update below.
     existing = db.query(Vendor).filter(Vendor.company_id == company_id, Vendor.code.like(f"{base}%")).count()
     return f"{base}{existing + 1:03d}"
 
 
 # ============ VENDORS ============
+
+
+def _live_vendor_or_404(db: Session, vendor_id: int, company_id: int) -> Vendor:
+    """Resolve a vendor that is workable: this company's, and NOT soft-deleted.
+
+    The vendor twin of ``_live_po_or_404``, and it exists for the same reason: ``PUT`` runs
+    a blind setattr loop over the request body, and ``VendorUpdate`` exposes ``is_active``.
+    Resolving with ``company_id`` alone therefore let one ``PUT {"is_active": true}`` on a
+    deleted vendor produce ``is_deleted=True`` + ``is_active=True`` -- a state nothing in the
+    app produces deliberately, and the state that unmasks every read which filters
+    ``is_active`` as a PROXY for "removed" (global search, the PO-review typeahead, PO-
+    extraction vendor matching, and the MRP auto-PO vendor picker). Those reads now carry a
+    real ``is_deleted`` filter of their own, but the reanimation path had to close too: it
+    also bypassed ``/restore``, so the audit log recorded an ordinary update rather than the
+    ``action="restore"`` row. Nor did it need a crafted request: ``Vendor`` has NO ``version``
+    column (``VendorUpdate.version`` is vestigial), so this ``PUT`` carried no optimistic lock
+    -- a stale edit tab was sufficient. Admin A opens the edit form, admin B deletes the
+    vendor, admin A saves.
+
+    ``DELETE`` and ``POST .../restore`` deliberately do NOT use this -- they need to SEE the
+    deleted row, one to refuse a double delete (400 "already deleted"), the other to undo
+    one. Neither do the vendor-code duplicate probes: ``uq_vendors_company_code`` spans
+    soft-deleted rows, so a deleted vendor must keep blocking its own code (see
+    ``_generate_vendor_code``).
+    """
+    vendor = (
+        db.query(Vendor)
+        .filter(
+            Vendor.id == vendor_id,
+            Vendor.company_id == company_id,
+            Vendor.is_deleted == False,  # noqa: E712
+        )
+        .first()
+    )
+    if not vendor:
+        raise HTTPException(status_code=404, detail="Vendor not found")
+    return vendor
 
 
 @router.get("/vendors", response_model=List[VendorResponse])
@@ -121,6 +164,13 @@ def create_vendor(
 ):
     """Create a vendor. `code` must be unique within the company (400 "Vendor code already exists").
     Writes a tamper-evident audit_log CREATE row for the new vendor."""
+    # DELIBERATELY sees soft-deleted vendors -- do not add ``is_deleted == False``, for two
+    # independent reasons. (1) ``uq_vendors_company_code`` has no partial predicate, so it
+    # spans deleted rows: filtering here would push a clean 400 down into the IntegrityError
+    # backstop below (a rollback, and a 500 the day anyone removes that backstop). (2) If a
+    # deleted vendor's code were reusable, someone takes it, and ``POST /vendors/{id}/restore``
+    # then resurrects a row that violates the constraint -- restore has no collision check and
+    # cannot be given one after the fact.
     existing = db.query(Vendor).filter(Vendor.code == vendor_in.code, Vendor.company_id == company_id).first()
     if existing:
         raise HTTPException(status_code=400, detail="Vendor code already exists")
@@ -163,6 +213,10 @@ async def import_vendors_csv(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     def _run_import() -> VendorCsvImportResponse:
+        # DELIBERATELY includes soft-deleted vendors' codes: the bulk form of the create
+        # probe above, against the same tombstone-spanning unique constraint. An import row
+        # reusing a deleted vendor's code must fail as a duplicate, or it writes a row that
+        # cannot coexist with a restore of that vendor.
         existing_codes = {
             (value or "").strip().upper()
             for (value,) in db.query(Vendor.code).filter(Vendor.company_id == company_id).all()
@@ -266,18 +320,7 @@ def get_vendor(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    vendor = (
-        db.query(Vendor)
-        .filter(
-            Vendor.id == vendor_id,
-            Vendor.company_id == company_id,
-            Vendor.is_deleted == False,  # noqa: E712
-        )
-        .first()
-    )
-    if not vendor:
-        raise HTTPException(status_code=404, detail="Vendor not found")
-    return vendor
+    return _live_vendor_or_404(db, vendor_id, company_id)
 
 
 @router.put("/vendors/{vendor_id}", response_model=VendorResponse)
@@ -292,10 +335,10 @@ def update_vendor(
     """Update a vendor. `code` is editable: normalized to uppercase, must stay unique within the
     company (400 "Vendor code already exists"), and cannot be blanked (explicit JSON null -> 400,
     empty/whitespace string -> 422 at the schema). An update that changes fields writes an
-    audit_log row; a no-change PUT writes none."""
-    vendor = db.query(Vendor).filter(Vendor.id == vendor_id, Vendor.company_id == company_id).first()
-    if not vendor:
-        raise HTTPException(status_code=404, detail="Vendor not found")
+    audit_log row; a no-change PUT writes none. 404s on a soft-deleted vendor -- see
+    ``_live_vendor_or_404``: editing one (this setattr loop includes ``is_active``) is how a
+    deleted vendor came back to life outside ``/restore``."""
+    vendor = _live_vendor_or_404(db, vendor_id, company_id)
 
     update_data = vendor_in.model_dump(exclude_unset=True)
 
@@ -309,6 +352,12 @@ def update_vendor(
         if new_code != vendor.code:
             # Case-insensitive probe: a legacy lowercase row must also block a rename to its
             # uppercase twin (the PO-import vendor matcher resolves codes case-insensitively).
+            #
+            # DELIBERATELY sees soft-deleted vendors, unlike the row resolution above -- same
+            # tombstone-spanning constraint as the create probe: a rename must not take a code
+            # a deleted vendor still holds, or restoring that vendor violates
+            # ``uq_vendors_company_code``. Resolution filters, the duplicate probe does not;
+            # fixing "both" is the trap here.
             duplicate = (
                 db.query(Vendor)
                 .filter(
@@ -354,6 +403,9 @@ def delete_vendor(
 ):
     """Soft delete a vendor (compliance invariant #3 -- no hard delete). Refuses while any
     live (not closed/cancelled) purchase order still references the vendor."""
+    # Raw lookup (NOT ``_live_vendor_or_404``): this verb must SEE an already-deleted row so
+    # the re-delete guard below can answer 400 "already deleted". Filtering here would turn
+    # that guard into a bare 404 and let a double DELETE reset deleted_at/deleted_by.
     vendor = db.query(Vendor).filter(Vendor.id == vendor_id, Vendor.company_id == company_id).first()
     if not vendor:
         raise HTTPException(status_code=404, detail="Vendor not found")
@@ -402,7 +454,8 @@ def restore_vendor(
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Restore a soft-deleted vendor. Raw lookup so it can see the soft-deleted row."""
+    """Restore a soft-deleted vendor. Raw lookup (NOT ``_live_vendor_or_404``) so it can see
+    the soft-deleted row -- seeing the tombstone is this verb's entire job."""
     vendor = db.query(Vendor).filter(Vendor.id == vendor_id, Vendor.company_id == company_id).first()
     if not vendor:
         raise HTTPException(status_code=404, detail="Vendor not found")
@@ -547,7 +600,16 @@ def list_purchase_orders(
             PurchaseOrder.company_id == company_id,
             PurchaseOrder.is_deleted == (True if deleted_only else False),  # noqa: E712
         )
-        .options(joinedload(PurchaseOrder.vendor))
+        .options(
+            # The joined vendor deliberately carries NO ``is_deleted`` predicate: a PO's
+            # vendor is the historical record of who the order was placed with, and
+            # delete_vendor permits deleting a vendor once its POs are closed/cancelled -- so
+            # a closed PO legitimately points at a deleted vendor and must still render its
+            # name. Blanking it would erase the traceability the record exists for. The
+            # live-vendor gate belongs on the WRITE verbs (create_purchase_order, and
+            # _live_vendor_or_404 on the vendor itself).
+            joinedload(PurchaseOrder.vendor)
+        )
     )
 
     if status:
@@ -788,6 +850,8 @@ def get_purchase_order(
     po = (
         db.query(PurchaseOrder)
         .options(
+            # Vendor deliberately unfiltered on soft delete -- see list_purchase_orders: the
+            # order names the supplier it was placed with, deleted or not.
             joinedload(PurchaseOrder.vendor),
             joinedload(PurchaseOrder.lines).joinedload(PurchaseOrderLine.part),
         )
@@ -816,8 +880,34 @@ def update_purchase_order(
     """Update a purchase order. Writes a tamper-evident audit_log UPDATE row with the
     changes diff (a status change shows up in the diff; no row when nothing changed).
 
-    404s on a soft-deleted PO -- see ``_live_po_or_404``."""
+    404s on a soft-deleted PO -- see ``_live_po_or_404``. Also refuses (400) a ``status``
+    change that would make the order LIVE again while its vendor is soft-deleted -- see the
+    guard below."""
     po = _live_po_or_404(db, po_id, company_id)
+
+    # The third door into "a live PO against a removed supplier". ``create_purchase_order``
+    # and ``create_po_from_upload`` both refuse to CREATE that state, and
+    # ``restore_purchase_order`` refuses to bring it back -- but this verb can REVIVE it, and
+    # nothing here validates the transition at all: ``POStatus(value)`` only checks enum
+    # membership, so a CLOSED PO takes ``{"status": "sent"}`` and lands straight back in
+    # ``GET /receiving/open-pos`` (which filters status and PO is_deleted, and deliberately
+    # never checks the vendor). ``delete_vendor``'s "no live POs" check is point-in-time:
+    # it passed when every PO was closed, and nothing re-evaluates it afterwards.
+    #
+    # Only revivals are refused. CLOSED/CANCELLED are terminal, so moving a PO INTO one of
+    # them stays allowed -- closing out a removed supplier's paperwork must never be blocked.
+    # Message mirrors ``restore_purchase_order`` so the two read identically, and it is
+    # raised before the first setattr so a refusal leaves the row untouched.
+    new_status = po_in.model_dump(exclude_unset=True).get("status")
+    if new_status is not None and POStatus(new_status) not in (POStatus.CLOSED, POStatus.CANCELLED):
+        if po.vendor is not None and po.vendor.is_deleted:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Cannot set purchase order {po.po_number} to '{POStatus(new_status).value}': its vendor "
+                    f"{po.vendor.name} is deleted. Restore the vendor first."
+                ),
+            )
 
     # Snapshot BEFORE mutating; column-only, so the vestigial POUpdate.version
     # (PurchaseOrder has no version column) never enters the audited changes diff.

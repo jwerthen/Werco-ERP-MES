@@ -4037,7 +4037,7 @@ the caller's most recent closed unapproved session.)
 | POST | `/scanner/resolve-action` | Resolve a scanned traveler/badge code into a typed action context (A0.4) | Yes |
 | POST | `/scanner/lookup` | Look up a scanned barcode: supplier part number → internal part number → work order number | Yes |
 | GET | `/scanner/mappings` | List supplier part-number mappings | Yes |
-| POST | `/scanner/mappings` | Create a supplier part-number mapping | Yes |
+| POST | `/scanner/mappings` | Create a supplier part-number mapping — **404** on a soft-deleted `vendor_id` (see note) | Yes |
 | DELETE | `/scanner/mappings/{mapping_id}` | Deactivate a supplier part-number mapping | Yes |
 
 > **`POST /scanner/resolve-action` (A0.4 QR traveler / badge scan plumbing).** Every scan surface
@@ -4106,6 +4106,16 @@ the caller's most recent closed unapproved session.)
 > access logs). **Tenant-scoped:** every lookup filters the active company; a code that exists in
 > another tenant — and a soft-deleted work order (or an operation whose WO is soft-deleted) —
 > resolves to `kind: "unknown"` exactly like a code that exists nowhere.
+
+> **Supplier part-number mappings and soft-deleted vendors.** A mapping is a **live routing rule**
+> ("this barcode means this part, from this supplier"), not a historical record, and nothing
+> deactivates it when its vendor is removed — so `POST /scanner/mappings` now refuses a soft-deleted
+> `vendor_id` (**404** "Vendor not found"). Mappings that already point at one are deliberately
+> **kept**: the part half is what resolves the scan at the dock, and dropping the row would break
+> barcode lookup over a vendor bookkeeping change. Only the supplier name is withheld —
+> **`vendor_name` reads `null`** for a mapping whose vendor is soft-deleted, on both
+> `POST /scanner/lookup` and `GET /scanner/mappings`. The field is `Optional[str]` and has always
+> been `null` for a mapping with no vendor at all, so the response *shape* is unchanged.
 
 ### Quality
 
@@ -4197,6 +4207,12 @@ in `RBAC_PERMISSIONS.md`.
 > PDF (≤ 20 MB; scanned/image-only PDFs are rejected) and a configured `ANTHROPIC_API_KEY` — it
 > returns **500** if the key is missing. Claude extracts the numbered clauses and persists them
 > against the standard.
+
+> **Auto-evidence supplier counts now exclude removed suppliers — expect the number to drop.** The
+> *Supplier Management & Evaluation* evidence row (`GET /qms-standards/clauses/{clause_id}/auto-evidence`,
+> and what `POST /qms-standards/{standard_id}/auto-link` persists) counted **soft-deleted** vendors in
+> its `total_count` / "N suppliers" figure while the "(M active)" half excluded them — inventing an
+> approval gap, in an artifact meant for a registrar. Both halves now filter `is_deleted`.
 
 > **Deletes are soft (records retained):** the three `DELETE` endpoints above return **204** but
 > do not physically remove rows — the standard / clause / evidence is marked deleted and disappears
@@ -4300,13 +4316,13 @@ the public paths are `/eco/eco/…`.
 | GET | `/purchasing/vendors` | List vendors (`active_only` default true; `approved_only` default false) | Yes |
 | POST | `/purchasing/vendors` | Create vendor | Admin / Manager |
 | GET | `/purchasing/vendors/{vendor_id}` | Get vendor by ID | Yes |
-| PUT | `/purchasing/vendors/{vendor_id}` | Update vendor — `code` is editable (see note) | Admin / Manager |
+| PUT | `/purchasing/vendors/{vendor_id}` | Update vendor — `code` is editable (see note). **404** on a soft-deleted vendor | Admin / Manager |
 | DELETE | `/purchasing/vendors/{vendor_id}` | Soft-delete a vendor (also sets `is_active=false`) — guarded, see note below | Admin / Manager |
 | POST | `/purchasing/vendors/{vendor_id}/restore` | Restore a soft-deleted vendor (re-activates it) | Admin / Manager |
 | GET | `/purchasing/purchase-orders` | List purchase orders (filters: `status`, `vendor_id`, `deleted_only`). `deleted_only=true` returns **only** soft-deleted POs — the restore view, see note below. Bounded: `limit` **1–5000, default 5000**, `offset` ≥ 0 | Yes |
 | POST | `/purchasing/purchase-orders` | Create purchase order with its lines | Admin / Manager / Supervisor |
 | GET | `/purchasing/purchase-orders/{po_id}` | Get PO by ID | Yes |
-| PUT | `/purchasing/purchase-orders/{po_id}` | Update purchase order. **404** on a soft-deleted PO | Admin / Manager / Supervisor |
+| PUT | `/purchasing/purchase-orders/{po_id}` | Update purchase order. **404** on a soft-deleted PO; **400** on a `status` change to anything but `closed`/`cancelled` while the vendor is soft-deleted (see note) | Admin / Manager / Supervisor |
 | POST | `/purchasing/purchase-orders/{po_id}/send` | Issue a PO to the vendor — status → `sent`, stamps `order_date`; only `draft`/`approved` POs (else **400**). **404** on a soft-deleted PO | Admin / Manager |
 | POST | `/purchasing/purchase-orders/{po_id}/lines` | Add a line to a `draft` PO (else **400**) and roll the PO subtotal/total. **404** on a soft-deleted PO | Admin / Manager / Supervisor |
 | DELETE | `/purchasing/purchase-orders/{po_id}` | Soft-delete a purchase order — guarded, see note below | Admin / Manager |
@@ -4371,6 +4387,48 @@ the public paths are `/eco/eco/…`.
 > - **Creating a PO against a soft-deleted or inactive vendor is refused** (**404** "Vendor not found"):
 >   `POST /purchasing/purchase-orders` now resolves the vendor with `is_deleted == false` **and**
 >   `is_active == true`.
+
+> **A soft-deleted vendor is a record, not a workable supplier — every verb that *selects* one now
+> refuses it.** `PUT /purchasing/vendors/{vendor_id}` resolves through `_live_vendor_or_404` (the
+> vendor twin of `_live_po_or_404`), and the same rule was applied everywhere else a client-supplied
+> `vendor_id` / vendor code picks a supplier:
+>
+> | Endpoint | Was | Now |
+> |---|---|---|
+> | `PUT /purchasing/vendors/{id}` | **200** — and its blind `setattr` loop accepts `is_active`, so one call could leave a vendor `is_deleted=true` **and** `is_active=true`, bypassing `/restore` and its `action="restore"` audit row | **404** |
+> | `POST /po-upload/create-from-upload` (`vendor_id`) | created a live, receivable PO against the removed supplier — the PO Upload table below already promised this refusal, but only the *part* half of it was enforced | **400** "Vendor not found" |
+> | `PUT /purchasing/purchase-orders/{id}` (`status`) | flipped a **closed** PO back to `sent`, making it live and receivable against the removed supplier — this endpoint validates no transition at all, it only checks enum membership | **400** *"…its vendor X is deleted. Restore the vendor first."*, for any target status other than `closed`/`cancelled` |
+> | `POST /scanner/mappings` (`vendor_id`) | created the mapping | **404** "Vendor not found" |
+> | `POST /supplier-scorecards/approved-suppliers/` and `PUT .../approved-suppliers/{asl_id}` | entered / re-approved the removed supplier on the ASL | **409** *"…has been removed and cannot be approved…"* (see the next section) |
+> | `POST /purchasing/purchase-orders/import` (`vendor_code`) | imported the PO silently | row error naming the restore verb (see the Excel-migration section) |
+>
+> `DELETE` and `POST .../restore` deliberately do **not** use the helper — one has to see the deleted
+> row to refuse a double delete (**400** "already deleted"), the other to undo one. Neither do the
+> **vendor-code duplicate probes**: `uq_vendors_company_code` is a plain unique constraint with no
+> partial predicate, so a soft-deleted vendor still *owns* its code. Create, CSV import, the rename
+> probe inside `PUT`, and both code generators therefore keep matching deleted rows on purpose —
+> reusing a removed vendor's code still returns **400** "Vendor code already exists", which is what
+> stops a later restore from resurrecting a row that violates the constraint.
+>
+> **The selection reads that only *looked* right now really are.** `GET /po-upload/search-vendors`
+> and the PO-extraction vendor matcher filtered `is_active` alone — which excluded deleted vendors
+> only because `DELETE` happens to clear that flag — and so did global search and the MRP auto-PO
+> vendor picker (which chooses a supplier for `AUTO_DRAFT` / `AUTO_SUBMIT` orders with no human in
+> the loop). All four now filter `is_deleted` for real. Result sets are unchanged unless a vendor was
+> already in the `is_deleted=true` + `is_active=true` state the `PUT` above could produce.
+>
+> **What still names — and still accepts — a deleted vendor, deliberately:** anything that is a
+> *record* of a relationship that existed. Reads: the vendor block on a PO, receipt or lot
+> (`GET /purchasing/purchase-orders`, `/receiving/*`, `/traceability/*`, PO print, the PO exports,
+> the thermal receiving label), plus the supplier-scorecard / supplier-audit / ASL **lists** and the
+> by-vendor scorecard history (next section). Writes: `POST /documents/upload` still accepts a
+> soft-deleted `vendor_id`, because a certificate of conformance or material test report for
+> material **already received** routinely arrives after the relationship ends and `Document.vendor_id`
+> is the only field linking it to the supplier that certified it — refusing it would not stop the
+> upload, it would only strip the supplier off an AS9100D 8.4 record (and `GET /documents?vendor_id=`
+> has no vendor predicate either, so gating the write alone would give a path you can read but not
+> write). Blanking or refusing any of these would erase traceability (invariant #5), not protect
+> anything.
 
 > **Seeing a deleted PO: `GET /purchasing/purchase-orders?deleted_only=true` (the restore view).**
 > A restore endpoint is useless without a way to *find* what to restore, and every other PO read
@@ -4459,7 +4517,7 @@ the public paths are `/eco/eco/…`.
 |--------|----------|-------------|---------------|
 | GET | `/supplier-scorecards/supplier-scorecards/dashboard` | Avg score, below-threshold, audits/reviews due, top & worst performer | Yes |
 | GET | `/supplier-scorecards/supplier-scorecards/ranking` | Vendors ranked by latest overall score | Yes |
-| GET | `/supplier-scorecards/supplier-scorecards/vendor/{vendor_id}/history` | One vendor's scorecards over time | Yes |
+| GET | `/supplier-scorecards/supplier-scorecards/vendor/{vendor_id}/history` | One vendor's scorecards over time (a soft-deleted vendor's history still reads — see note) | Yes |
 | GET | `/supplier-scorecards/supplier-scorecards/` | List scorecards (`skip`/`limit` 1…5000) | Yes |
 | GET | `/supplier-scorecards/supplier-scorecards/{id}` | Scorecard detail | Yes |
 | POST | `/supplier-scorecards/supplier-scorecards/` | Create scorecard | Admin / Manager |
@@ -4471,8 +4529,8 @@ the public paths are `/eco/eco/…`.
 | PUT | `/supplier-scorecards/supplier-audits/{id}` | Update supplier audit | Admin / Manager |
 | GET | `/supplier-scorecards/approved-suppliers/` | List ASL entries | Yes |
 | GET | `/supplier-scorecards/approved-suppliers/{id}` | ASL entry detail | Yes |
-| POST | `/supplier-scorecards/approved-suppliers/` | Create ASL entry | Admin / Manager |
-| PUT | `/supplier-scorecards/approved-suppliers/{id}` | Update ASL entry | Admin / Manager |
+| POST | `/supplier-scorecards/approved-suppliers/` | Create ASL entry — **409** on a soft-deleted vendor (see note) | Admin / Manager |
+| PUT | `/supplier-scorecards/approved-suppliers/{id}` | Update ASL entry — **409** on `approval_status` / `approved_date` / `certifications_verified` while the vendor is soft-deleted (see note) | Admin / Manager |
 
 > ⚠️ **`POST .../calculate/{vendor_id}` was returning 500 in production, for two reasons.** The
 > `SupplierScorecard` insert omitted `TenantMixin`'s NOT NULL `company_id` — but the handler never
@@ -4510,6 +4568,35 @@ the public paths are `/eco/eco/…`.
 > visible so the row can be corrected. Audit-row identifiers fall back to `vendor #{id}` in the same
 > case, so recording an update can never become the thing that discloses the foreign supplier's
 > code. See the pre-deploy detection SQL in `docs/RBAC_PERMISSIONS.md` → Supplier Scorecards.
+
+> **Soft-deleted vendors: only the *approval* refuses; every record still writes and reads.** This
+> router draws one line, and it is records-vs-permissions rather than reads-vs-writes:
+>
+> - **Approved Supplier List — refused (409).** The ASL is not a history of who the shop bought
+>   from, it is the AS9100D 8.4 statement of who the shop is **permitted** to buy from right now, so
+>   a removed supplier must not appear on it. Both doors are closed: `POST /approved-suppliers/`
+>   resolves through `_live_vendor_for_approval`, and `PUT /approved-suppliers/{asl_id}` — which
+>   resolves by ASL id and never re-reads `vendor_id` — refuses the three fields that *constitute* an
+>   approval (`approval_status`, `approved_date`, `certifications_verified`) when the vendor is
+>   deleted. The refusal is **per field, not per row**: `notes`, `scope` and the review cadence stay
+>   editable, so an entry whose vendor is gone does not freeze with no restore screen to unfreeze it.
+> - **Scorecards and supplier audits — still allowed, on purpose.** `POST /supplier-scorecards/`,
+>   `POST .../calculate/{vendor_id}`, `POST /supplier-audits/` and `PUT /supplier-audits/{id}`
+>   resolve through the tenancy-only `_vendor_in_company` and deliberately accept a soft-deleted
+>   vendor. Removing a supplier is very often the *outcome* of the audit finding or the closing
+>   scorecard, and AS9100D 8.4 expects that record — gating these would make the evaluation that
+>   documents the removal the one evaluation that can never be filed. `calculate` is the clearest
+>   case: every input it reads is historical and bounded by an explicit `period_start`/`period_end`,
+>   so it writes a truthful account of a period during which the vendor *was* a supplier.
+> - **Reads — unchanged.** `GET .../vendor/{vendor_id}/history` still returns a removed supplier's
+>   scorecards, and the lists, details and ranking deliberately keep rendering a deleted vendor's
+>   `vendor_name` / `vendor_code` / `vendor_id` (`_same_tenant_vendor` tests tenancy, not soft
+>   delete). 404-ing the by-vendor history while `GET /supplier-scorecards/supplier-scorecards/
+>   ?vendor_id=` returns the very same rows would be a contradiction, not a protection.
+>
+> The accepted, known cost is that these pages are where a deleted vendor's id is still visible in
+> the UI — which is exactly why the ASL **update** verb has to re-check rather than trusting that
+> nobody can obtain the ids.
 
 > **The ASL duplicate check stays install-wide on purpose.** `ApprovedSupplierList.vendor_id`
 > carries a *global* unique constraint, so the check must mirror the constraint exactly or a miss
@@ -4552,7 +4639,7 @@ call per file (at most 2 concurrent) and one `create-from-upload` call per revie
 | POST | `/po-upload/create-from-upload` | Create the PO from the reviewed extraction — can create the vendor and missing parts. Part-number matching is **case-insensitive** and ignores surrounding whitespace: the same number repeated across lines / `create_parts` creates the part **once** (stored as the first occurrence's stripped form) and attaches every matching line to it; an active part already holding the number is reused, and a line with no `part_id` resolves by part number to an existing active part even when it isn't in `create_parts`. **400** if `line_items` is empty, the PO number already exists, a supplied `vendor_id` / line `part_id` doesn't exist in the active company **or is soft-deleted**, a line's part number matches no active part and isn't in `create_parts`, or a new part's number belongs to a **soft-deleted** part (restore it via `POST /parts/{id}/restore` or use a different number) | Admin / Manager / Supervisor |
 | GET | `/po-upload/pdf/{path}` | Serve the uploaded source document for preview (`s3://` refs and local paths) | Yes |
 | GET | `/po-upload/search-parts` | Part typeahead for extraction-review matching. `q` matches **part number, name, description, and customer part number** — every whitespace-separated term must appear, then results are ranked by similar-word score so a query like `raw material` surfaces `A36 Raw Material Sheet`. `limit` **1–50**, default 10 | Yes |
-| GET | `/po-upload/search-vendors` | Vendor typeahead for extraction-review matching (`q`, `limit` **1–50**, default 10) | Yes |
+| GET | `/po-upload/search-vendors` | Vendor typeahead for extraction-review matching (`q`, `limit` **1–50**, default 10) — active, **non-soft-deleted** vendors only | Yes |
 
 ### Receiving & Inspection
 
@@ -6190,7 +6277,14 @@ every created row):
 > `paper_completed_sequences`. A `completed_through_seq` covering **every** operation is rejected —
 > only open WOs may be imported.
 >
-> **`POST /purchasing/purchase-orders/import` — open (issued) purchase orders.** Rows sharing a
+> **`POST /purchasing/purchase-orders/import` — open (issued) purchase orders.** `vendor_code` must
+> resolve to a **live** vendor: an open PO is receivable on day 1, so attaching one to a removed
+> supplier is exactly what the load-order gate exists to catch. A code held only by a
+> **soft-deleted** vendor fails its row with a distinct message that names the remedy — *"vendor 'X'
+> was deleted — restore it (`POST /api/v1/purchasing/vendors/{id}/restore`) and re-import; it cannot
+> be re-created under the same code"* — because a deleted vendor still owns its code and there is no
+> restore screen yet (see Purchasing above). A code that matches nothing still fails with the
+> original *"vendor 'X' not found (import vendors first)"*. Rows sharing a
 > `po_number` become **lines of one PO** (blank `po_number` = single-line PO, number generated at
 > commit); a PO imports whole-or-not-at-all — one invalid line skips its whole group, and all lines
 > must share one `vendor_code`. Imported POs land in **`sent`** status (receivable on day 1) with

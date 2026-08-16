@@ -150,6 +150,17 @@ async def upload_document(
             raise HTTPException(status_code=404, detail="Work order not found")
 
     if normalized_vendor_id:
+        # Vendor DELIBERATELY not filtered on soft delete -- do not add
+        # ``is_deleted == False`` here. A vendor-attached document is a quality RECORD about
+        # material that already arrived (certificate of conformance, material test report,
+        # corrected packing slip), and those routinely turn up AFTER the supplier
+        # relationship ends -- ``Document.vendor_id`` is the only field that links such a
+        # record to the supplier that certified the material, so refusing the attachment
+        # does not prevent the upload, it just strips the supplier off an AS9100D 8.4
+        # record. Same posture as the PO vendor block, the receipt, the lot trace and the
+        # thermal label, all of which name a deleted vendor on purpose. It would also be
+        # asymmetric: ``GET /documents?vendor_id=`` above has no vendor predicate at all, so
+        # gating the write alone yields a path you can read but not write to.
         vendor = db.query(Vendor).filter(Vendor.id == normalized_vendor_id, Vendor.company_id == company_id).first()
         if not vendor:
             raise HTTPException(status_code=404, detail="Vendor not found")

@@ -595,9 +595,27 @@ def import_open_purchase_orders(
             if len(vendor_codes) > 1:
                 raise ValueError(f"purchase order '{po_number}' has conflicting vendor codes: {sorted(vendor_codes)}")
             vendor_code = lines[0].vendor_code
+            # Soft-deleted vendors do not satisfy "import vendors first" -- tenant_query
+            # applies company_id only, so a deleted vendor was silently accepted and the
+            # dry run reported the row as valid. Attaching an open (receivable) PO to a
+            # removed supplier is exactly what the load-order gate exists to catch.
+            #
+            # Resolved RAW so the two cases get DIFFERENT messages. A cutover operator who
+            # deleted a duplicate vendor row hits a genuine dead end otherwise: "not found"
+            # sends them to re-create it, which the duplicate probe refuses because a deleted
+            # vendor still owns its code (uq_vendors_company_code spans tombstones), and the
+            # spreadsheet's vendor_code column is the join key so a different code is not an
+            # option. The message has to name the restore verb, because there is no screen
+            # for it yet.
             vendor = tenant_query(db, Vendor, company_id).filter(func.upper(Vendor.code) == vendor_code.upper()).first()
             if not vendor:
                 raise ValueError(f"vendor '{vendor_code}' not found (import vendors first)")
+            if vendor.is_deleted:
+                raise ValueError(
+                    f"vendor '{vendor_code}' was deleted -- restore it "
+                    f"(POST /api/v1/purchasing/vendors/{vendor.id}/restore) and re-import; "
+                    f"it cannot be re-created under the same code"
+                )
 
             if po_number:
                 if po_number.upper() in seen_po_numbers:
