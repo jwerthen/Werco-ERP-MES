@@ -67,16 +67,34 @@ def match_vendor(vendor_name: str, db: Session, company_id: int, threshold: int 
     vendor_name = vendor_name.strip().upper()
     normalized_vendor_name = re.sub(r"[^A-Z0-9]", "", vendor_name)
 
-    # First try exact match (case-insensitive)
+    # First try exact match (case-insensitive).
+    # ``is_deleted`` is filtered alongside ``is_active`` -- tenant_query applies company_id
+    # only, and is_active was masking removed vendors incidentally (delete_vendor clears it).
+    # An exact hit here returns confidence 100.0 and pre-fills the PO-review screen, so a
+    # removed supplier matching by name would be presented to the buyer as certain.
     exact = (
-        tenant_query(db, Vendor, company_id).filter(Vendor.is_active == True, Vendor.name.ilike(vendor_name)).first()
+        tenant_query(db, Vendor, company_id)
+        .filter(
+            Vendor.is_active == True,  # noqa: E712
+            Vendor.is_deleted == False,  # noqa: E712
+            Vendor.name.ilike(vendor_name),
+        )
+        .first()
     )
 
     if exact:
         return MatchResult(matched=True, match_id=exact.id, match_name=exact.name, confidence=100.0)
 
-    # Get all active vendors for fuzzy matching
-    vendors = tenant_query(db, Vendor, company_id).filter(Vendor.is_active == True).all()
+    # Get all live, active vendors for fuzzy matching. Same reasoning as the exact leg, and
+    # this one also DISCLOSES: it returns up to 5 suggestions carrying id, name and code.
+    vendors = (
+        tenant_query(db, Vendor, company_id)
+        .filter(
+            Vendor.is_active == True,  # noqa: E712
+            Vendor.is_deleted == False,  # noqa: E712
+        )
+        .all()
+    )
 
     if not vendors:
         return MatchResult(matched=False)

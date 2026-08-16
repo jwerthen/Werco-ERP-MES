@@ -20,6 +20,14 @@ Grouped by record type:
   dropdown feed behind every quote / RFQ / order customer picker.
 - **Cross-tenant** — reports quality-metrics for company A never counts company
   B's receipts or NCRs (the ``company_id`` filter blocker fix).
+
+**Vendors live next door, in ``test_vendor_soft_delete_sweep.py``.** That sweep
+does not fit this file's "once deleted, it disappears everywhere" shape: roughly
+a third of the vendor query sites must KEEP seeing the tombstone (restore, the
+re-delete guard, three vendor-code duplicate probes against a unique constraint
+with no partial predicate, and every record that names the supplier a purchase
+order / receipt / label / lot trace actually involved). Both halves are pinned
+there. Add vendor cases to that file, not this one.
 """
 
 import pytest

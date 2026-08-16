@@ -397,7 +397,13 @@ def export_purchase_orders(
             PurchaseOrder.company_id == company_id,
             PurchaseOrder.is_deleted == False,  # noqa: E712
         )
-        .options(joinedload(PurchaseOrder.vendor), joinedload(PurchaseOrder.lines).joinedload(PurchaseOrderLine.part))
+        .options(
+            # Vendor deliberately unfiltered on soft delete (both PO exports): an export of
+            # historical purchase orders must name the supplier each was placed with, deleted
+            # or not. Filtering would blank a column of the record, not protect anything.
+            joinedload(PurchaseOrder.vendor),
+            joinedload(PurchaseOrder.lines).joinedload(PurchaseOrderLine.part),
+        )
     )
 
     if start_date:
@@ -521,6 +527,7 @@ def export_purchase_order_lines(
             PurchaseOrder.is_deleted == False,  # noqa: E712
         )
         .options(
+            # Vendor deliberately unfiltered on soft delete -- see the PO export above.
             joinedload(PurchaseOrderLine.purchase_order).joinedload(PurchaseOrder.vendor),
             joinedload(PurchaseOrderLine.part),
         )

@@ -966,12 +966,27 @@ def _query_ecos(db: Session, company_id: int) -> dict:
 
 
 def _query_suppliers(db: Session, company_id: int) -> dict:
-    total_vendors = db.query(func.count(Vendor.id)).filter(Vendor.company_id == company_id).scalar() or 0
+    # Both counts filter is_deleted, and they must move together: ``total`` had no mask at
+    # all while ``approved`` was masked by is_active, so a company with removed suppliers
+    # reported an approval gap that does not exist -- in an artifact handed to a registrar.
+    total_vendors = (
+        db.query(func.count(Vendor.id))
+        .filter(Vendor.company_id == company_id, Vendor.is_deleted == False)  # noqa: E712
+        .scalar()
+        or 0
+    )
     total_scorecards = (
         db.query(func.count(SupplierScorecard.id)).filter(SupplierScorecard.company_id == company_id).scalar() or 0
     )
     approved = (
-        db.query(func.count(Vendor.id)).filter(Vendor.company_id == company_id, Vendor.is_active == True).scalar() or 0
+        db.query(func.count(Vendor.id))
+        .filter(
+            Vendor.company_id == company_id,
+            Vendor.is_active == True,  # noqa: E712
+            Vendor.is_deleted == False,  # noqa: E712
+        )
+        .scalar()
+        or 0
     )
 
     examples = (

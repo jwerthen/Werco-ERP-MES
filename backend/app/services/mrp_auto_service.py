@@ -303,10 +303,27 @@ class MRPAutoService:
                 SupplierPartMapping.vendor_id.isnot(None),
             )
             .join(Vendor)
-            .filter(Vendor.is_active == True, Vendor.company_id == self.company_id)
+            # is_deleted alongside is_active here and on both priorities below: this picks the
+            # supplier for AUTOMATICALLY generated purchase orders, so a removed supplier being
+            # selectable here is the highest-consequence path in the vendor sweep. is_active
+            # was only masking it -- delete_vendor happens to clear that flag.
+            #
+            # Do not over-read the risk, though: the only SCHEDULED caller is the 6 AM
+            # ``run_mrp_auto_draft_job`` cron, which PINS ``mode="AUTO_DRAFT"``. AUTO_SUBMIT
+            # does issue POs as SENT with no human in the loop, but no endpoint constructs
+            # this service and nothing in the repo enqueues that mode, so the worst artifact
+            # actually reachable through here is a DRAFT PO awaiting a buyer's Send.
+            .filter(
+                Vendor.is_active == True,
+                Vendor.is_deleted == False,
+                Vendor.company_id == self.company_id,
+            )
             .first()
         )
 
+        # ``mapping.vendor`` carries no predicate of its own, but it needs none: the join
+        # above already admitted only live, active, same-tenant vendors, so the traversal
+        # returns exactly that row. Do not add a redundant second check here.
         if mapping and mapping.vendor:
             logger.debug(f"Found preferred vendor {mapping.vendor.name} from supplier mapping for part {part_id}")
             return mapping.vendor
@@ -319,6 +336,7 @@ class MRPAutoService:
             .filter(
                 PurchaseOrderLine.part_id == part_id,
                 Vendor.is_active == True,
+                Vendor.is_deleted == False,
                 Vendor.company_id == self.company_id,
                 PurchaseOrder.company_id == self.company_id,
             )
@@ -334,7 +352,15 @@ class MRPAutoService:
 
         # Priority 3: Fall back to first active vendor
         logger.debug(f"No specific vendor found for part {part_id}, using first active vendor")
-        vendor = self.db.query(Vendor).filter(Vendor.is_active == True, Vendor.company_id == self.company_id).first()
+        vendor = (
+            self.db.query(Vendor)
+            .filter(
+                Vendor.is_active == True,
+                Vendor.is_deleted == False,
+                Vendor.company_id == self.company_id,
+            )
+            .first()
+        )
         return vendor
 
     def _get_part_cost(self, part_id: int, vendor_id: int) -> float:

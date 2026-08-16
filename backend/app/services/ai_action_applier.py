@@ -285,19 +285,40 @@ class AIActionApplier:
             raise AIActionApplyError("Part not found")
         vendor_id = action.get("vendor_id") or part.primary_supplier_id
         if not vendor_id:
-            # Fall back to any active vendor for the tenant
+            # Fall back to any LIVE vendor for the tenant. This site had no mask of any kind --
+            # ordered by id ascending, it would happily return the tenant's oldest vendor even
+            # when that vendor was soft-deleted, and raise a draft PO naming it. (It still does
+            # not filter ``is_active``, unlike the comment this replaces claimed: switched-off
+            # is a separate decision from removed, and narrowing it is not this change.)
             vendor = (
-                self.db.query(Vendor).filter(Vendor.company_id == self.company_id).order_by(Vendor.id.asc()).first()
+                self.db.query(Vendor)
+                .filter(Vendor.company_id == self.company_id, Vendor.is_deleted == False)  # noqa: E712
+                .order_by(Vendor.id.asc())
+                .first()
             )
             if not vendor:
                 raise AIActionApplyError("No vendor available to create a draft PO")
             vendor_id = vendor.id
         else:
+            # ``part.primary_supplier_id`` is a stale FK -- no vendor-delete path clears it --
+            # so this branch reaches a removed supplier without anyone typing its id.
+            # Resolved RAW and the soft-delete test made explicit, rather than folded into
+            # the filter, purely so the two cases get different messages: this string is
+            # surfaced verbatim to the operator as ``apply_error`` on the ActionInbox card
+            # (ai_learning.py catches AIActionApplyError and returns it), and "not found for
+            # this company" sends someone hunting a tenancy bug when the real remedy is to
+            # repoint the part's primary supplier or restore the vendor. The recommendation
+            # fails identically on every retry, so the message is the only lead they get.
             vendor = (
                 self.db.query(Vendor).filter(Vendor.id == int(vendor_id), Vendor.company_id == self.company_id).first()
             )
             if not vendor:
                 raise AIActionApplyError("Vendor not found for this company")
+            if vendor.is_deleted:
+                raise AIActionApplyError(
+                    f"Vendor {vendor.name} has been removed; update the part's primary supplier "
+                    "or restore the vendor"
+                )
 
         qty = float(action.get("suggested_qty") or part.reorder_quantity or 1.0)
         if qty <= 0:

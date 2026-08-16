@@ -104,6 +104,8 @@ class PrintService:
             self.db.query(POReceipt)
             .options(
                 joinedload(POReceipt.po_line).joinedload(PurchaseOrderLine.part),
+                # Vendor deliberately unfiltered on soft delete: a label reprinted for
+                # material already on the shelf must name the supplier it came from.
                 joinedload(POReceipt.po_line)
                 .joinedload(PurchaseOrderLine.purchase_order)
                 .joinedload(PurchaseOrder.vendor),

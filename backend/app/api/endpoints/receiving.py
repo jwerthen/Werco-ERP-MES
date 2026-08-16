@@ -1,3 +1,16 @@
+"""Receiving, inspection and put-away endpoints (mounted at /api/v1/receiving).
+
+Vendor soft delete, module-wide rule: **no ``PurchaseOrder.vendor`` load in this module
+filters ``Vendor.is_deleted``, and none of them may be changed to.** A receipt names the
+supplier the material actually came from, which is lot traceability (compliance invariant
+5) and cannot change because the supplier relationship later ended. ``delete_vendor``
+already refuses while any non-closed PO references the vendor, so a receiving row pointing
+at a deleted vendor means the PO closed first -- history, not an open exposure. Every one
+of those loads carries a one-line pointer back to this paragraph; if you are here because a
+sweep flagged an unfiltered vendor join, this is the answer, and "completing the sweep"
+would quietly blank the supplier off receipts and lot traces.
+"""
+
 from datetime import date, datetime, timedelta
 from typing import List, Optional
 
@@ -113,6 +126,7 @@ def get_open_purchase_orders(
             PurchaseOrder.is_deleted == False,  # noqa: E712
         )
         .options(
+            # Vendor deliberately unfiltered on soft delete -- see module docstring.
             joinedload(PurchaseOrder.vendor),
             joinedload(PurchaseOrder.lines).joinedload(PurchaseOrderLine.part),
         )
@@ -180,6 +194,7 @@ def get_purchase_order_for_receiving(
     po = (
         db.query(PurchaseOrder)
         .options(
+            # Vendor deliberately unfiltered on soft delete -- see module docstring.
             joinedload(PurchaseOrder.vendor),
             joinedload(PurchaseOrder.lines).joinedload(PurchaseOrderLine.part),
             joinedload(PurchaseOrder.lines).joinedload(PurchaseOrderLine.receipts),
@@ -281,6 +296,7 @@ def receive_material(
     po_line = (
         db.query(PurchaseOrderLine)
         .options(
+            # Vendor deliberately unfiltered on soft delete -- see module docstring.
             joinedload(PurchaseOrderLine.purchase_order).joinedload(PurchaseOrder.vendor),
             joinedload(PurchaseOrderLine.part),
         )
@@ -492,6 +508,7 @@ def get_inspection_queue(
         db.query(POReceipt)
         .options(
             joinedload(POReceipt.po_line).joinedload(PurchaseOrderLine.part),
+            # Vendor deliberately unfiltered on soft delete -- see module docstring.
             joinedload(POReceipt.po_line).joinedload(PurchaseOrderLine.purchase_order).joinedload(PurchaseOrder.vendor),
             joinedload(POReceipt.location),
             joinedload(POReceipt.receiver),
@@ -554,6 +571,7 @@ def get_receipt_detail(
         db.query(POReceipt)
         .options(
             joinedload(POReceipt.po_line).joinedload(PurchaseOrderLine.part),
+            # Vendor deliberately unfiltered on soft delete -- see module docstring.
             joinedload(POReceipt.po_line).joinedload(PurchaseOrderLine.purchase_order).joinedload(PurchaseOrder.vendor),
             joinedload(POReceipt.location),
             joinedload(POReceipt.receiver),
@@ -642,6 +660,7 @@ def inspect_receipt(
         db.query(POReceipt)
         .options(
             joinedload(POReceipt.po_line).joinedload(PurchaseOrderLine.part),
+            # Vendor deliberately unfiltered on soft delete -- see module docstring.
             joinedload(POReceipt.po_line).joinedload(PurchaseOrderLine.purchase_order).joinedload(PurchaseOrder.vendor),
             joinedload(POReceipt.location),
         )
@@ -1235,6 +1254,7 @@ def _load_live_receipt(db: Session, receipt_id: int, company_id: int) -> Optiona
             # material into inventory (supplier name on the transaction, part id/price
             # off the line). Harmless for correct/void -- one extra join on a
             # single-row fetch, and it removes two lazy loads.
+            # Vendor deliberately unfiltered on soft delete -- see module docstring.
             joinedload(POReceipt.po_line).joinedload(PurchaseOrderLine.purchase_order).joinedload(PurchaseOrder.vendor),
             joinedload(POReceipt.po_line).joinedload(PurchaseOrderLine.part),
             joinedload(POReceipt.location),
@@ -1705,6 +1725,7 @@ def get_receiving_history(
         db.query(POReceipt)
         .options(
             joinedload(POReceipt.po_line).joinedload(PurchaseOrderLine.part),
+            # Vendor deliberately unfiltered on soft delete -- see module docstring.
             joinedload(POReceipt.po_line).joinedload(PurchaseOrderLine.purchase_order).joinedload(PurchaseOrder.vendor),
             joinedload(POReceipt.receiver),
             joinedload(POReceipt.inspector),

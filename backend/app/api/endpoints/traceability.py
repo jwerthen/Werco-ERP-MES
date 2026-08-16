@@ -208,7 +208,13 @@ def trace_lot(
     receipts = (
         db.query(POReceipt)
         .options(
-            joinedload(POReceipt.po_line).joinedload(PurchaseOrderLine.purchase_order).joinedload(PurchaseOrder.vendor)
+            # Vendor deliberately unfiltered on soft delete -- the strongest case in the whole
+            # vendor sweep. This IS the traceability record (invariant 5): a lot's supplier of
+            # record cannot vanish because the supplier relationship ended. Never add the
+            # filter here.
+            joinedload(POReceipt.po_line)
+            .joinedload(PurchaseOrderLine.purchase_order)
+            .joinedload(PurchaseOrder.vendor)
         )
         .filter(
             POReceipt.lot_number == lot_number,

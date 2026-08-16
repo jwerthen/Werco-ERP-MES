@@ -18,6 +18,38 @@ from app.services.scan_resolve_service import resolve_scan_code
 router = APIRouter()
 
 
+def _live_vendor_name(mapping: SupplierPartMapping) -> Optional[str]:
+    """Render a supplier-part mapping's vendor name only while that vendor is live AND ours.
+
+    A SupplierPartMapping is NOT a historical record the way a PO or a receipt is -- it is a
+    live routing rule ("this barcode means this part, from this supplier") that keeps working
+    after the supplier is removed, because nothing deactivates the mapping when a vendor is
+    soft-deleted. The ``vendor`` relationship (and the joinedloads on it) carry no predicate,
+    so the dock was shown a removed supplier as the source of material it was booking in.
+
+    The mapping itself is deliberately still returned: its PART half is what resolves the
+    scan, and dropping the row would silently break barcode lookup at the dock over a vendor
+    bookkeeping change. Only the supplier NAME is withheld -- the same shape a mapping with no
+    vendor at all has always rendered. New mappings can no longer be bound to a deleted vendor
+    (see create_supplier_mapping).
+
+    Tenancy travels with soft delete here rather than being left to the FK, mirroring
+    ``supplier_scorecards._same_tenant_vendor``. Both call sites scope the MAPPING by
+    ``company_id`` and then traverse ``mapping.vendor``, which carries no predicate of its
+    own -- transitive scoping holds only while every FK was stamped correctly at write time,
+    and that is precisely the assumption that failed in #191. ``create_supplier_mapping``
+    scopes the vendor lookup, so the exposure is legacy or mis-stamped rows. A foreign vendor
+    reads as absent rather than raising, so such a row stays listable and correctable instead
+    of 500-ing the dock's barcode lookup.
+    """
+    vendor = mapping.vendor
+    if vendor is None or vendor.is_deleted:
+        return None
+    if vendor.company_id != mapping.company_id:
+        return None
+    return vendor.name
+
+
 @router.post("/resolve-action", response_model=ScanResolveResult)
 def resolve_action(
     payload: ScanResolveRequest,
@@ -161,7 +193,7 @@ def lookup_barcode(
             part_type=mapping.part.part_type.value if mapping.part.part_type else None,
             unit_of_measure=mapping.part.unit_of_measure.value if mapping.part.unit_of_measure else None,
             supplier_part_number=mapping.supplier_part_number,
-            vendor_name=mapping.vendor.name if mapping.vendor else None,
+            vendor_name=_live_vendor_name(mapping),
             supplier_description=mapping.supplier_description,
             scanned_code=code,
         )
@@ -260,7 +292,7 @@ def list_supplier_mappings(
             part_name=m.part.name,
             part_description=m.part.description,
             vendor_id=m.vendor_id,
-            vendor_name=m.vendor.name if m.vendor else None,
+            vendor_name=_live_vendor_name(m),
             supplier_description=m.supplier_description,
             supplier_uom=m.supplier_uom,
             conversion_factor=m.conversion_factor,
@@ -307,11 +339,15 @@ def create_supplier_mapping(
 
     vendor = None
     if mapping_in.vendor_id:
+        # A mapping is a live routing rule, not a record, so it may only be bound to a live
+        # vendor: binding a soft-deleted one keeps surfacing that supplier on every dock scan
+        # that matches it, long after the vendor was removed.
         vendor = (
             db.query(Vendor)
             .filter(
                 Vendor.id == mapping_in.vendor_id,
                 Vendor.company_id == company_id,
+                Vendor.is_deleted == False,  # noqa: E712
             )
             .first()
         )

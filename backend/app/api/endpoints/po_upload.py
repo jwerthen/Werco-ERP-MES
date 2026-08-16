@@ -373,6 +373,10 @@ def create_po_from_upload(
             # Ensure unique
             base_code = vendor_code
             counter = 1
+            # DELIBERATELY sees soft-deleted vendors (tenant_query applies company_id only, and
+            # that is all we want here): uq_vendors_company_code spans deleted rows, so a
+            # deleted vendor still owns its code. Skipping the tombstones would generate a code
+            # that is already taken -- and one that a later restore could not coexist with.
             while tenant_query(db, Vendor, company_id).filter(Vendor.code == vendor_code).first():
                 vendor_code = f"{base_code}-{counter}"
                 counter += 1
@@ -390,8 +394,19 @@ def create_po_from_upload(
         vendor_id = new_vendor.id
         vendor_created = True
 
-    # Verify vendor exists
-    vendor = tenant_query(db, Vendor, company_id).filter(Vendor.id == vendor_id).first()
+    # Verify vendor exists -- and is not soft-deleted. ``tenant_query`` applies company_id
+    # ONLY, so this is the second door into PO creation (the first is
+    # POST /purchasing/purchase-orders) and it was the unguarded one: ``vendor_id`` is a
+    # client-supplied body field, so a stale review tab or an id read off a supplier-quality
+    # page could raise a LIVE purchase order against a removed supplier -- receivable at the
+    # dock, and a state the guarded door refuses. (It deliberately stops short of that door's
+    # ``is_active == True``: a deactivated-but-live vendor still completes this AI review flow
+    # rather than 400-ing at the last step. Removed and switched-off are different things.)
+    vendor = (
+        tenant_query(db, Vendor, company_id)
+        .filter(Vendor.id == vendor_id, Vendor.is_deleted == False)  # noqa: E712
+        .first()
+    )
     if not vendor:
         raise HTTPException(status_code=400, detail="Vendor not found")
 
@@ -689,9 +704,17 @@ def search_vendors(
     company_id: int = Depends(get_current_company_id),
 ):
     """Search vendors for matching during PO review."""
+    # ``is_deleted`` and ``is_active`` mean different things (removed vs switched off) and both
+    # belong here: the typeahead feeds create-po below, so a soft-deleted vendor must never be
+    # offerable. Until this filter existed, is_active was doing the work only incidentally --
+    # delete_vendor happens to clear it on the way out.
     vendors = (
         tenant_query(db, Vendor, company_id)
-        .filter(Vendor.is_active == True, Vendor.name.ilike(f"%{q}%"))
+        .filter(
+            Vendor.is_active == True,  # noqa: E712
+            Vendor.is_deleted == False,  # noqa: E712
+            Vendor.name.ilike(f"%{q}%"),
+        )
         .limit(limit)
         .all()
     )

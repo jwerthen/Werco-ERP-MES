@@ -290,6 +290,9 @@ def get_purchase_order_print_data(
     """Get all data needed to print a purchase order."""
     po = (
         db.query(PurchaseOrder)
+        # Vendor deliberately unfiltered on soft delete: reprinting a PO must reproduce the
+        # document AS ISSUED, vendor block included. _live_po_or_404 already stops a deleted
+        # PO being edited or re-sent; this is record fidelity, not a live selection.
         .options(joinedload(PurchaseOrder.vendor), joinedload(PurchaseOrder.lines).joinedload(PurchaseOrderLine.part))
         .filter(
             PurchaseOrder.id == po_id,

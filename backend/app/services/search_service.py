@@ -284,6 +284,11 @@ def run_global_search(
             .filter(
                 Vendor.company_id == company_id,
                 Vendor.is_active == True,  # noqa: E712
+                # Global search is open to EVERY authenticated user (the vendor screens are
+                # ADMIN/MANAGER), and each hit carries the vendor id in its url -- the widest
+                # audience of any vendor read. is_active was masking removed vendors only
+                # incidentally; filter the tombstone for real.
+                Vendor.is_deleted == False,  # noqa: E712
                 or_(
                     func.lower(Vendor.name).like(search_term),
                     func.lower(Vendor.code).like(search_term),
