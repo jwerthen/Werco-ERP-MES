@@ -297,6 +297,18 @@ ROLE_CARDS = [
                 "Wrong vendor? Managers and admins can <b>Delete Vendor</b> — a soft-delete that deactivates the "
                 "record but keeps it for audit and can be restored. It is refused while the vendor still has an "
                 "active PO, so close or cancel those first. Never create a duplicate as a workaround.",
+                "Undo it at <b>Purchasing › Vendors › Deleted</b>, then <b>Restore</b> (manager/admin only; that "
+                "view is the one place a deleted vendor appears). Anyone who can open Purchasing can read the "
+                "list, so a supervisor can find it for you.",
+                "<b>A restored vendor comes back switched off if it was switched off when deleted.</b> Restore "
+                "puts a record back — it does NOT re-approve a supplier. The toast says so, and names where it "
+                "went. To put it back in service: <b>Purchasing › Vendors › Inactive</b>, <b>Edit</b> the row, "
+                "tick <b>Active</b>, save — a separate, deliberate, audited step. Until you do, it stays off "
+                "the Active list and off new POs.",
+                "<b>Vendors deleted before this feature shipped always come back switched off</b>, whatever they "
+                "were before — the on/off state was not being recorded then, so the app refuses to guess "
+                "\u201cactive\u201d and hands you the record switched off instead. Expect it on anything deleted "
+                "early on.",
             ]),
         ],
         traps=[
@@ -557,7 +569,7 @@ def build_sharp_edges():
          "Open the routing itself for the real list"),
         ("BOM / Routing Release fires instantly", "QUIRK — no confirmation dialog",
          "Treat Release as final; a mistake means a new revision"),
-        ("Can't delete a customer or lot", "GAP — no UI deactivate path (vendors now soft-delete + restore)",
+        ("Can't delete a customer or lot", "GAP — no UI deactivate path (vendors soft-delete + restore, with a screen)",
          "Route customer/lot mis-entries to the admin; never work around with duplicates"),
         ("“Rate limit exceeded” at login", "DESIGN — 5/min email, 3/min badge, per building IP",
          "Wait about 60 seconds; don't hammer the button"),

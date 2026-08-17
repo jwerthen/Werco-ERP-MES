@@ -233,10 +233,27 @@ A deleted purchase order isn't destroyed — it's kept for audit and can be put 
 
 - **Who can:** *Managers and admins* get the **Restore** button. Anyone who can view POs can open the **Deleted** view and read it — so a supervisor can find the PO and tell you it's there, but can't restore it themselves.
 - **Why the Deleted view is separate rather than mixed in:** a deleted PO and a live one must never sit in one list. The two views are mutually exclusive, and the deleted rows carry no **Print** or **Send** buttons — a PO that no longer exists is not a document to hand a vendor.
-- **If the vendor was deleted too, Restore is refused** with a message naming it: the vendor has to come back first, or you would have a live order pointing at a supplier that no longer exists. Vendor restore has no button (see the note below), so that one is a call to your administrator.
+- **If the vendor was deleted too, Restore is refused** with a message naming it: the vendor has to come back first, or you would have a live order pointing at a supplier that no longer exists. Bring the vendor back on the **Vendors** tab (next section), then come back and restore the PO.
 - **Check "Deleted By" before you restore.** If someone deleted it deliberately — cancelled with the vendor, or a duplicate they cleaned up — restoring it puts it back on their receiving list. It's a two-second question and it's the reason that column is there.
 
-> Heads up: **Deleted vendors are different — there's no Restore button for them.** A vendor delete can only be undone by your system administrator through the API. That's a known gap, not something you've missed on the screen.
+### Bring back a deleted vendor
+
+Same idea, same place, one screen over — and it works exactly like the PO version, so if you've done one you've done both. Deleting a vendor doesn't destroy it; the record is kept for audit and can be put back.
+
+1. On the **Vendors** tab, switch the **Active / Inactive / Deleted** toggle to **Deleted**.
+2. The list becomes the deleted vendors only, with three extra columns — **Restores As** (what state Restore will hand it back in), **Deleted** (when) and **Deleted By** (who).
+3. Click **Restore** on the row.
+
+> Heads up: **A restored vendor comes back in the state it was in when it was deleted — including switched off.** If somebody had deactivated that supplier before deleting it (lapsed certification, a quality problem, a dispute), Restore does **not** hand it back as an active, orderable supplier. That is deliberate: undoing a delete puts a *record* back, it does not re-approve a supplier, and quietly re-approving one is exactly the mistake an AS9100D approved-supplier list can't afford. When that happens the app tells you so in the toast — the vendor is back, but it stays off the Vendors list and off purchase orders until someone reactivates it, and it tells you where to find it.
+>
+> **Vendors deleted before this feature shipped always come back switched off**, whatever they were before. The system was not recording the on/off state at the time those were deleted, so it genuinely does not know — and rather than guess "active" and hand you a supplier the shop may have switched off on purpose, it hands you the record switched off and asks you to make the call. Expect this for anything deleted early on; it is the app being careful, not a bug.
+>
+> To actually put it back in service: on the **Vendors** tab switch the toggle to **Inactive**, click **Edit** on the row, tick **Active**, and save. That is where every restored-but-switched-off vendor waits, and it is a normal vendor edit — audited like any other, and a deliberate decision by a named person rather than a side effect of undoing a delete. If you were expecting a restored vendor to appear on the Vendors tab and it didn't, this is why — check the toast you were given.
+
+- **Who can:** *Managers and admins* get the **Restore** button. Anyone who can view Purchasing can open the **Deleted** view and read it — so a supervisor can find the vendor and tell you it's there, but can't restore it.
+- **Why the Deleted view is separate rather than mixed in:** same reason as the POs — a deleted vendor is a record, a live one is a supplier you can put on an order, and a merged list is one misread row away from ordering material from a company you no longer buy from. Deleted rows carry no **Edit** button either.
+- **Check "Deleted By" before you restore**, for the same reason as on the PO side. Somebody deleted this supplier on purpose; a two-second question beats putting them back in front of the buyers.
+- **Never work around a deleted vendor by creating a duplicate under the same code.** The app refuses it — a deleted vendor still owns its code — and it's telling you to restore, not to re-key.
 
 ### Run MRP to find shortages
 

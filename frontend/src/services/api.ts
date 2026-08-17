@@ -2359,7 +2359,18 @@ class ApiService {
   }
 
   // Purchasing
-  async getVendors(params?: { active_only?: boolean; approved_only?: boolean }) {
+  // `deleted_only: true` inverts the endpoint's soft-delete filter and returns ONLY the
+  // company's soft-deleted vendors (each carrying is_deleted / deleted_at / deleted_by_name),
+  // which is the ONLY way to see one — every other read hard-filters them out, so nothing
+  // can be restored without it. Leave the key off for the normal list: axios omits
+  // `undefined` params, so a no-argument call sends the exact query string it always has.
+  //
+  // Do NOT pair it with `active_only`. That param DEFAULTS TO TRUE server-side and the
+  // delete forces `is_active = false`, so the two ANDed would return an empty archive
+  // forever. The endpoint carves `active_only` out of the deleted view for exactly that
+  // reason — sending it anyway is not honored, and reading this call as though it were is
+  // how someone concludes there are no deleted vendors when there are.
+  async getVendors(params?: { active_only?: boolean; approved_only?: boolean; deleted_only?: boolean }) {
     const response = await this.api.get('/purchasing/vendors', { params });
     return response.data;
   }
@@ -2392,6 +2403,11 @@ class ApiService {
     return response.data;
   }
 
+  // Undo a soft delete. Server-gated (ADMIN/MANAGER, and 400 if the vendor is not actually
+  // deleted), so callers stay non-optimistic: await it, then reflect what came back.
+  // Reachable only from the deleted-vendor view above — you cannot restore what you cannot
+  // list. NOTE: this restores the vendor's PRE-DELETE `is_active` state, not an
+  // unconditional active — a supplier the shop had switched off comes back switched off.
   async restoreVendor(id: number) {
     const response = await this.api.post(`/purchasing/vendors/${id}/restore`);
     return response.data;

@@ -4313,12 +4313,12 @@ the public paths are `/eco/eco/…`.
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| GET | `/purchasing/vendors` | List vendors (`active_only` default true; `approved_only` default false) | Yes |
+| GET | `/purchasing/vendors` | List vendors (`active_only` default true; `approved_only` default false; `deleted_only` default false). `deleted_only=true` returns **only** soft-deleted vendors — the restore view, and it **suppresses `active_only`**; see note below | Yes |
 | POST | `/purchasing/vendors` | Create vendor | Admin / Manager |
 | GET | `/purchasing/vendors/{vendor_id}` | Get vendor by ID | Yes |
 | PUT | `/purchasing/vendors/{vendor_id}` | Update vendor — `code` is editable (see note). **404** on a soft-deleted vendor | Admin / Manager |
-| DELETE | `/purchasing/vendors/{vendor_id}` | Soft-delete a vendor (also sets `is_active=false`) — guarded, see note below | Admin / Manager |
-| POST | `/purchasing/vendors/{vendor_id}/restore` | Restore a soft-deleted vendor (re-activates it) | Admin / Manager |
+| DELETE | `/purchasing/vendors/{vendor_id}` | Soft-delete a vendor — records the current `is_active` into `is_active_before_delete`, **then** sets `is_active=false`. Guarded, see note below | Admin / Manager |
+| POST | `/purchasing/vendors/{vendor_id}/restore` | Restore a soft-deleted vendor, **preserving the `is_active` it had when it was deleted** — not an unconditional re-activate (see note). **400** if it is not actually deleted. Reachable from **Purchasing → Vendors → Deleted** | Admin / Manager |
 | GET | `/purchasing/purchase-orders` | List purchase orders (filters: `status`, `vendor_id`, `deleted_only`). `deleted_only=true` returns **only** soft-deleted POs — the restore view, see note below. Bounded: `limit` **1–5000, default 5000**, `offset` ≥ 0 | Yes |
 | POST | `/purchasing/purchase-orders` | Create purchase order with its lines | Admin / Manager / Supervisor |
 | GET | `/purchasing/purchase-orders/{po_id}` | Get PO by ID | Yes |
@@ -4369,8 +4369,10 @@ the public paths are `/eco/eco/…`.
 > terminal commit so it commits atomically with the change. Guardrails:
 > - **Vendor delete** additionally sets `is_active=false`, and is **refused with 400** while the vendor
 >   still has any **active** (not `closed`/`cancelled`, not soft-deleted) purchase order — close or
->   cancel those first (the 400 names the count). A double delete returns **400** ("already deleted");
->   restore re-sets `is_active=true`.
+>   cancel those first (the 400 names the count). A double delete returns **400** ("already deleted").
+>   Restore puts back the `is_active` the vendor had *before* the delete — **not** an unconditional
+>   `true`, which is what it used to do; see *Restoring a vendor returns the record, not the
+>   approval* below.
 > - **PO delete** is **refused with 400** when any line has received material
 >   (`quantity_received > 0`) — *"Cannot delete purchase order &lt;po&gt;: it has received material.
 >   Void the receipt(s) first, then delete."* (see Receiving → void below) — so voided receipts /
@@ -4485,8 +4487,8 @@ the public paths are `/eco/eco/…`.
 > vendor, and an unguarded restore would bring a live (possibly `sent`) order back against a vendor
 > that no longer exists — receivable via `GET /receiving/open-pos`, which checks status and
 > `is_deleted` but not the vendor, and a state `POST /purchase-orders` refuses outright to create.
-> The refusal names the vendor and the fix ("Restore the vendor first"), which today is an API call
-> (see the vendor gap below). It deliberately does **not** mirror the create path's `is_active ==
+> The refusal names the vendor and the fix ("Restore the vendor first"), which is now a screen —
+> **Purchasing → Vendors → Deleted** (see the vendor restore view below). It deliberately does **not** mirror the create path's `is_active ==
 > true` half: a live PO against a merely *deactivated* vendor is already representable (`PUT
 > /vendors/{id}` deactivates with no PO guard), so refusing on it would be stricter than the
 > invariant the rest of the router keeps.
@@ -4504,10 +4506,184 @@ the public paths are `/eco/eco/…`.
 > and offers **Restore** only to Admin / Manager. Restore is **non-optimistic** (server-gated: the
 > row moves only after the server answers) per the convention in `CLAUDE.md`.
 >
-> **Vendors have the same gap and it is still open.** `POST /purchasing/vendors/{id}/restore` exists
-> and is audited, but `GET /purchasing/vendors` has no `deleted_only` equivalent and no UI calls
-> `restoreVendor` — so undoing a **vendor** delete remains an API/administrator action. Read the
-> "restorable" wording in the note above as *the endpoint exists*, not *a screen offers it*.
+> **Seeing a deleted vendor: `GET /purchasing/vendors?deleted_only=true` (the restore view).**
+> The vendor twin of the PO parameter above, and it exists for the same reason plus one sharper one:
+> `POST /purchasing/vendors/{id}/restore` had shipped and been audited since migration `071`
+> (2026-07-24) with **no way to reach it** — nothing in the frontend called `restoreVendor`, and every vendor read hard-filters
+> `is_deleted == false`, so an accidental delete could only be undone by someone who already knew the
+> id and could issue an authenticated `POST`. Tightening the vendor *reads* (so a soft-deleted vendor
+> no longer resolves on `PUT /vendors/{id}`, `POST /po-upload/create-from-upload`, `POST
+> /scanner/mappings`, the ASL approval verbs and the PO status flip) made that gap sharper, not
+> softer: more verbs now refuse the vendor, and none of the refusals had a remedy anyone could click.
+> This parameter is that remedy, and it is the **only** read in the API that can return a soft-deleted
+> vendor.
+>
+> - **`deleted_only=false` (the default) is provably inert.** Unset, the `is_deleted` predicate, the
+>   `active_only` / `approved_only` branches, the `ORDER BY name` and the row count are unchanged, and
+>   the `deleted_by` name lookup below is never issued (one query, as before). The response *body*
+>   gains three keys, all `null` on this path — additive, exactly as `POListResponse` behaves.
+> - **`deleted_only=true` returns only this company's soft-deleted vendors.** `company_id` still comes
+>   from `get_current_company_id` and scopes **both** views; the flag can only invert the delete
+>   predicate, never widen the tenant scope.
+> - **`active_only` is suppressed on the deleted view — this is the non-obvious part, and getting it
+>   wrong makes the feature silently useless.** `active_only` **defaults to `true`**, and
+>   `DELETE /vendors/{id}` sets `is_active=false` on its way out. ANDing the two would return an
+>   **empty list for every caller who did not also think to pass `active_only=false`** — the restore
+>   screen would read *"No deleted vendors"* no matter how many exist. There is nothing to preserve by
+>   applying it, either: while a vendor is deleted its `is_active` is `false` *by definition of the
+>   delete*, so the filter is not merely unhelpful, it is **empty by construction**. Same species as
+>   the closed/cancelled carve-out on the deleted PO list; the endpoint carries a comment saying so.
+>   Sending `active_only=true` alongside `deleted_only=true` is accepted and **not honored**.
+> - **`approved_only` deliberately KEEPS applying to the deleted view.** It is neither half of the
+>   trap: it defaults to `false` (never silently on) and `delete_vendor` never touches `is_approved`
+>   (so it still means what it says on a deleted row and cannot blank the view behind the caller's
+>   back). Narrowing the archive to formerly-approved suppliers is a real question with a real answer
+>   — the same reason an explicit `?status=` still narrows the deleted PO view.
+> - **Four response fields carry the provenance**, added to `VendorResponse` as optionals:
+>   `is_deleted` (bool), `deleted_at` (UTC ISO-8601 with a trailing `Z` — `VendorResponse` inherits
+>   `UTCModel`; render it in Central via `utils/centralTime.ts`), and `deleted_by_name` (the deleting
+>   user's display name, resolved from `users` in **one batched query** — `SoftDeleteMixin.deleted_by`
+>   is a bare Integer with no FK relationship to load, and `User.full_name` is a Python property, not
+>   a mapped column, so `first_name`/`last_name` are selected and joined in Python). That lookup is
+>   deliberately **not** company-scoped — a platform admin acting inside the company is not a user row
+>   of it, and scoping would blank exactly the name a reader most needs — and applies no
+>   `is_active`/`is_deleted` filter to `User`, so provenance survives the deleter's own departure. The
+>   id is read off an already-tenant-scoped row and never comes from the caller. As with POs, the name
+>   is visible only *while* the vendor is deleted (`SoftDeleteMixin.restore()` clears `deleted_by`);
+>   the `audit_log` DELETE row keeps it permanently — invariant #2.
+> - **The fourth is `is_active_before_delete`** (bool, nullable): **what a restore will put
+>   `is_active` back to**, disclosed *before* the click — the only thing that can answer it, since the
+>   delete forces the row's own `is_active` to `false` on **every** deleted row. `true` → comes back
+>   active; `false` → comes back switched off; **`null` → deleted before migration `082`, which also
+>   restores INACTIVE** (`COALESCE(..., false)`), so `null` here means *"unknown, therefore off"*, not
+>   *"no answer"*. It widens no disclosure: it is a derived view of a flag the same reader could read
+>   off the live row a moment before the delete. Read-only — absent from `VendorCreate` /
+>   `VendorUpdate`, so no request can seed it.
+> - **All four stay `null` on every other path, and that took explicit code.** Unlike `POListResponse`
+>   (hand-built rows, so its fields simply default), `is_deleted` and `deleted_at` are **real columns
+>   on `Vendor`** and `VendorResponse` sets `from_attributes` — so returning an ORM row would populate
+>   them automatically and `GET /vendors/{id}` would answer `is_deleted: false` while the default list
+>   answers `null`. Every vendor endpoint (`list`, `get`, `create`, `update`) therefore serializes
+>   through one helper, `_vendor_response`, which nulls all four off the deleted view. The tri-state
+>   is the contract a shared row renderer keys on — collapse it to a boolean and a **live** vendor
+>   gets a Restore button.
+> - **Role posture — deliberate, and the two halves differ, exactly as for POs.** The **list** stays on
+>   `get_current_user`: `deleted_only=true` returns rows the same reader could already see *before* the
+>   delete, so hiding them protects nothing while making the feature unusable (a manager cannot restore
+>   what a screen refuses to list). The privileged act is the **restore verb**, which stays
+>   `require_role([ADMIN, MANAGER])`. See `docs/RBAC_PERMISSIONS.md` → Purchasing.
+> - **UI.** Purchasing → **Vendors** carries an **Active / Inactive / Deleted** segmented control
+>   (the Orders tab's is two-way; the vendor one has a third book — see below). The views are mutually
+>   exclusive by construction: a deleted vendor, a switched-off one and a selectable one must never
+>   share a table. The Deleted view is fetched lazily on entry, drops row click-through and the Edit /
+>   Delete controls, and offers **Restore** only to Admin / Manager. Restore is **non-optimistic**
+>   (server-gated) per the convention in `CLAUDE.md`. Its columns are authored rather than shared with
+>   the active table: Code / Name / Contact / **Restores As** / Deleted / Deleted By — AS9100, ISO9001
+>   and Payment Terms are dropped, because they answer no question anyone asks while deciding whether
+>   to undo a delete.
+> - **The Inactive view is part of this feature, not a separate nicety.** It lists **live** vendors
+>   with `is_active = false`, read via `GET /purchasing/vendors?active_only=false` and filtered
+>   client-side to the switched-off half. It exists because restore preserves `is_active` and **every**
+>   vendor deleted before migration `082` comes back INACTIVE — so on the existing production
+>   population, restoring lands the vendor there **100% of the time**. Without it a restored vendor
+>   appeared on **no screen in the app**: the default Vendors list is `active_only` server-side, the
+>   Deleted view no longer holds it, `?vendor=<id>` resolved against the active array, and global
+>   search filters `Vendor.is_active == True`. The "deliberate, separately audited reactivation" the
+>   restore semantics rest on would have been unperformable. Its one row action is **Edit** — the same
+>   audited `PUT /purchasing/vendors/{id}` the active table uses, whose form carries the `is_active`
+>   checkbox — deliberately **not** a one-click "Reactivate" verb, which beside a Restore-shaped table
+>   would be clicked as undo. `?vendor=<id>` for a vendor absent from the active list now falls back to
+>   the widened read, lands on this view and opens the edit form; an id that is live nowhere gets an
+>   error toast rather than a silent no-op.
+
+> **Restoring a vendor returns the record, not the approval — `is_active` is preserved.**
+> `POST /purchasing/vendors/{id}/restore` used to set `is_active = true` unconditionally. It now puts
+> back the value the vendor had **at the moment it was deleted**. This is a compliance behavior, not a
+> convenience: an approved-supplier list is an **AS9100D 8.4-controlled artifact**, and a supplier the
+> shop deliberately **deactivated** — lapsed certification, a quality escape, a commercial dispute —
+> and then deleted must not come back looking like an active, selectable supplier just because
+> somebody undid the delete. Undoing a delete restores a *record*; it is not an approval decision and
+> must not silently make one. Re-activating a recovered supplier stays a deliberate, separately
+> audited `PUT /purchasing/vendors/{id}` — reachable from **Purchasing → Vendors → Inactive → Edit**,
+> which is the screen that keeps that sentence from describing something nobody can do.
+>
+> - **How the prior value survives.** `Vendor` gained a nullable `is_active_before_delete` column
+>   (migration `082_vendor_active_before_delete`, mirrored in the model per the `042`/`078`/`079`/`080`
+>   lock-step convention; no new table, so no `ENABLE ROW LEVEL SECURITY` statement was needed or
+>   emitted). `DELETE` records the **current** `is_active` there and *then* forces `is_active=false`
+>   — that order is load-bearing, reversed it records the value the next line is about to write and
+>   every restore reactivates. `restore` sets `is_active = COALESCE(is_active_before_delete, false)`
+>   and then **clears the column back to `NULL`**, so a later delete/restore cycle can never read a
+>   stale value. It is a sidecar to those two verbs; nothing else reads or writes it, and it is
+>   deliberately absent from `VendorBase` / `VendorCreate` / `VendorUpdate`, so no create or `PUT` can
+>   set it (the same protective-absence pattern as `Part.backflush_components`).
+> - **The `is_active=false` write on delete stays.** Not writing it — so restore would have nothing to
+>   put back — is the tempting shortcut and it is a security regression: several read paths filter
+>   `is_active`, it is a deliberate second layer behind the `is_deleted` filters, and dropping it would
+>   silently change what "deleted" means to any query added later.
+> - **Vendors deleted before migration `082` restore INACTIVE — an owner decision, and a deliberate
+>   break from the old behavior.** Their `is_active_before_delete` is `NULL`: the column did not exist
+>   when the delete overwrote their `is_active` in place, and the `audit_log` delete row records the
+>   deletion, not the flag — so the prior value is not merely missing, it is **unrecoverable**. The
+>   fallback is therefore a decision about how to resolve an unknown on an AS9100D 8.4-controlled
+>   list, and the owner's decision is **OFF**: `restore` falls back to `false`, **not** to the pre-`082`
+>   unconditional `true`. Resolving the unknown to ON would *fabricate* supplier-approval state;
+>   resolving it to OFF asks a human to make the call. The asymmetry is the whole argument — a legacy
+>   vendor coming back switched off costs one deliberate, audited `PUT /purchasing/vendors/{id}`, and
+>   is immediately visible (it is absent from the default vendor list); coming back wrongly active is
+>   **not detectable at all**, because nothing distinguishes it from a supplier that was legitimately
+>   approved. **Do not "preserve backward compatibility" by flipping this back** — for these rows the
+>   change in behavior is the point, not a regression. Forward-only, no backfill, per the repo's
+>   standing rule. Do not "tidy" the column into `NOT NULL` either: `NULL` has to stay reachable to
+>   mean *"deleted before `082` shipped"*, and note that a row whose `is_active` was itself `NULL`
+>   records `NULL` and is indistinguishable from a legacy row — it too restores inactive, which is
+>   the safe direction.
+> - **The restore audit row records it.** `log_update` (`action="restore"`) carries
+>   `is_active` in the diff alongside `is_deleted` — unlike the PO twin, which logs `is_deleted` alone
+>   because its restore touches nothing else. This verb does write an approval-relevant flag, and the
+>   whole point of preserving it is that the value matters. When the vendor was deactivated the diff
+>   shows `is_deleted` only (`is_active` went `false → false`, which is honest: it did not change).
+> - **It refuses nothing beyond "not deleted" (400)** — unlike `restore_purchase_order`, which refuses
+>   onto a deleted vendor. A vendor is a **root** record: it references nothing but its company, so
+>   there is no parent that could have gone away underneath it. The one collision a restore could
+>   plausibly hit — another vendor having taken its `code` meanwhile — is already impossible upstream,
+>   because create, CSV import, the rename probe in `PUT` and both code generators all deliberately
+>   match soft-deleted rows (`uq_vendors_company_code` has no partial predicate). Keep those that way
+>   and this verb needs no collision check; it could not be given a sensible remedy anyway, having no
+>   way to renumber. "The vendor was deactivated" is likewise not a refusal — it is the case the
+>   preservation handles.
+> - **What the UI says, and one thing it cannot yet say.** The Deleted-vendors banner states the rule
+>   unconditionally, **both halves of it** — *"Restoring one returns it to the active or inactive state
+>   it had before deletion — a supplier that was switched off comes back switched off, and one deleted
+>   before this was recorded comes back inactive. The 'Restores As' column says which, before you
+>   click. One that comes back inactive appears under Inactive, where it can be reactivated."* The
+>   legacy clause
+>   is not padding: it is the only pre-click statement covering the rows whose prior state was never
+>   captured, which today is **every** vendor deleted before `082`. A restore that lands the vendor
+>   inactive then raises the **`warning`** toast variant (not `success` — the action succeeded but did
+>   not do everything the operator expected), naming the consequence: *"…restored as INACTIVE — restore
+>   puts back the state it had when it was deleted, or inactive when that was never recorded. It stays
+>   off the vendor list, and off purchase orders, until someone reactivates it under Vendors →
+>   Inactive."* That matters because
+>   an inactive vendor leaves the archive **without** appearing on the Vendors tab (`active_only` is the
+>   server default there), so with no toast the row would simply vanish from both lists.
+>   - The toast's trigger is an **inference, not a server assertion**: the page re-reads the vendor list
+>     after the restore and warns when the vendor is absent from it. A vendor deleted again by someone
+>     else in that window draws the same message. Rarer than the case being described, and the archive
+>     re-reads either way.
+>   - **Per row, before the click**, the archive's **"Restores As"** column says which vendors come
+>     back switched off, off the `is_active_before_delete` field above. That is the signal that
+>     matters: a toast fires only *after* the operator has acted, and on a mixed archive — some rows
+>     deleted while active, some while switched off, every pre-`082` row — nothing else on the screen
+>     distinguishes them. The helper behind it is written `=== true ? 'active' : 'inactive'` rather
+>     than `!== false`, deliberately: the loose form lumps `null` in with active and would paint
+>     "Active" on the one class of row the server is *guaranteed* to hand back switched off. When the
+>     field is **absent** (the SPA and the API deploy separately, so this page can run against a
+>     backend one release behind it) the column **hides itself entirely** rather than asserting an
+>     outcome it cannot know; the banner still states the rule, so the guarantee survives the column
+>     going dark.
+>   - The toast also names where the vendor went — **Vendors → Inactive** — because a restored-inactive
+>     vendor leaves the archive without appearing on the default Vendors list.
 
 ### Supplier Scorecards, Audits & Approved Supplier List
 
@@ -4579,7 +4755,17 @@ the public paths are `/eco/eco/…`.
 >   resolves by ASL id and never re-reads `vendor_id` — refuses the three fields that *constitute* an
 >   approval (`approval_status`, `approved_date`, `certifications_verified`) when the vendor is
 >   deleted. The refusal is **per field, not per row**: `notes`, `scope` and the review cadence stay
->   editable, so an entry whose vendor is gone does not freeze with no restore screen to unfreeze it.
+>   editable, so an entry whose vendor is gone does not freeze with nothing able to unfreeze it. (That
+>   clause used to read *"no restore screen to unfreeze it"* — the per-field carve-out was designed
+>   around the absence of one. The carve-out stays, on its own merits: an ASL row should not freeze
+>   solid just because a restore is a step away.)
+>   **There is now a restore screen** (Purchasing → Vendors → **Deleted**), and it changes nothing
+>   about this refusal except who can clear it without an API call. Restoring the vendor lifts the
+>   **409** — but it re-approves nothing: restore puts back the vendor's *pre-delete* `is_active`, so a
+>   supplier that was deactivated before it was deleted comes back **inactive**, and the ASL entry's
+>   `approval_status` is whatever it was left at. Re-approving is still a deliberate, separately
+>   audited act on both records. See Purchasing → *Restoring a vendor returns the record, not the
+>   approval*.
 > - **Scorecards and supplier audits — still allowed, on purpose.** `POST /supplier-scorecards/`,
 >   `POST .../calculate/{vendor_id}`, `POST /supplier-audits/` and `PUT /supplier-audits/{id}`
 >   resolve through the tenancy-only `_vendor_in_company` and deliberately accept a soft-deleted
@@ -4882,7 +5068,11 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 >   previously said there was **no restore button in the app** and to treat the delete as one-way,
 >   which was true only while nothing called `restorePurchaseOrder`. A reversal nobody can find is
 >   not a reversal, and a promise with no route is how that copy became false in the first place.
->   *Vendor* deletes are the case that still has no screen — see the Purchasing note above.
+>   *Vendor* deletes now have a screen of their own too, built to the same shape — Purchasing →
+>   **Vendors** → **Deleted** (`GET /purchasing/vendors?deleted_only=true`); see the Purchasing note
+>   above. One difference worth knowing before you promise anything: a **vendor** restore puts back
+>   the `is_active` it had when it was deleted, so a supplier that had been switched off comes back
+>   switched off.
 > - **Refused 400 once any line has received material** (`quantity_received > 0`) —
 >   *"Cannot delete purchase order &lt;po&gt;: it has received material. Void the receipt(s) first,
 >   then delete."* **This is the refusal a warehouse user will actually hit**, and from *this* surface
@@ -6278,12 +6468,20 @@ every created row):
 > only open WOs may be imported.
 >
 > **`POST /purchasing/purchase-orders/import` — open (issued) purchase orders.** `vendor_code` must
-> resolve to a **live** vendor: an open PO is receivable on day 1, so attaching one to a removed
-> supplier is exactly what the load-order gate exists to catch. A code held only by a
+> resolve to a **non-deleted** vendor: an open PO is receivable on day 1, so attaching one to a
+> removed supplier is exactly what the load-order gate exists to catch. Note the loader checks
+> `is_deleted` **only**, where the interactive `POST /purchasing/purchase-orders` refuses on
+> `is_deleted` **or** `is_active` — so a merely *deactivated* vendor imports fine and cannot be
+> picked on the New PO form. That asymmetry predates the vendor restore view but is newly easy to
+> reach through it, since a restore now returns a vendor to its pre-delete `is_active` and can hand
+> back a **restored-but-inactive** supplier. A code held only by a
 > **soft-deleted** vendor fails its row with a distinct message that names the remedy — *"vendor 'X'
 > was deleted — restore it (`POST /api/v1/purchasing/vendors/{id}/restore`) and re-import; it cannot
-> be re-created under the same code"* — because a deleted vendor still owns its code and there is no
-> restore screen yet (see Purchasing above). A code that matches nothing still fails with the
+> be re-created under the same code"* — because a deleted vendor still owns its code. The remedy is
+> now also a **screen**: Purchasing → Vendors → **Deleted** → **Restore** (Admin / Manager). The
+> message keeps naming the API verb and the vendor's real id, which is still the fastest route for an
+> admin already holding a token, but it is no longer the only one (see Purchasing above, and
+> `docs/EXCEL_MIGRATION_RUNBOOK.md`). A code that matches nothing still fails with the
 > original *"vendor 'X' not found (import vendors first)"*. Rows sharing a
 > `po_number` become **lines of one PO** (blank `po_number` = single-line PO, number generated at
 > commit); a PO imports whole-or-not-at-all — one invalid line skips its whole group, and all lines

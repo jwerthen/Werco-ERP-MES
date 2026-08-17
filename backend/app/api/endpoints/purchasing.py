@@ -135,23 +135,145 @@ def _live_vendor_or_404(db: Session, vendor_id: int, company_id: int) -> Vendor:
     return vendor
 
 
+def _vendor_response(
+    vendor: Vendor,
+    *,
+    deleted_view: bool = False,
+    deleted_by_name: Optional[str] = None,
+) -> VendorResponse:
+    """Serialize a Vendor while enforcing the soft-delete provenance tri-state.
+
+    EVERY endpoint with ``response_model=VendorResponse`` must go through here rather than
+    returning the ORM row, and the reason is specific to vendors. ``is_deleted`` and
+    ``deleted_at`` are REAL COLUMNS on Vendor, and VendorResponse sets ``from_attributes``
+    -- so a returned ORM row populates both automatically on every path, and
+    ``GET /vendors/{id}`` would answer ``is_deleted: false`` while the default list answers
+    ``is_deleted: null``. A shared row renderer that reads "non-null is_deleted" as "this
+    came from the restore view" would then offer a Restore control on a LIVE vendor. (The
+    PO twin never had to solve this: POListResponse is used by exactly one handler, which
+    hand-builds its rows, and PO detail responses use a different schema entirely.)
+
+    So: non-null on the ``deleted_only=true`` view of the list, null everywhere else --
+    create, get, update, and the default list alike.
+
+    ``is_active_before_delete`` rides the same rule for the same reason (it is a real
+    column too), but note it is NOT a fact about the delete: it is what restore will put
+    ``is_active`` back to, which is the one thing a reader needs BEFORE clicking Restore
+    and which the row's own ``is_active`` cannot tell them -- the delete forces that False
+    on every deleted row. Its None on the deleted view means "deleted before 082", which
+    restore resolves as INACTIVE; see restore_vendor.
+    """
+    row = VendorResponse.model_validate(vendor)
+    row.is_deleted = vendor.is_deleted if deleted_view else None
+    row.deleted_at = vendor.deleted_at if deleted_view else None
+    row.deleted_by_name = deleted_by_name if deleted_view else None
+    row.is_active_before_delete = vendor.is_active_before_delete if deleted_view else None
+    return row
+
+
 @router.get("/vendors", response_model=List[VendorResponse])
 def list_vendors(
     active_only: bool = True,
     approved_only: bool = False,
+    deleted_only: bool = Query(
+        False,
+        description="Return ONLY soft-deleted vendors (the restore view). Default false = live vendors only.",
+    ),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
+    """List vendors by name.
+
+    ``deleted_only=true`` inverts the soft-delete filter and returns ONLY the
+    company's soft-deleted vendors, each carrying ``is_deleted`` / ``deleted_at`` /
+    ``deleted_by_name`` / ``is_active_before_delete`` so the caller can decide whether to
+    restore it (via ``POST /vendors/{id}/restore``, ADMIN/MANAGER) AND can see, before
+    clicking, whether it will come back active or switched off. Without this a deleted vendor is
+    invisible to every API caller and nothing can be restored -- which is exactly the
+    gap the vendor-read tightening left behind, since it made a soft-deleted vendor
+    unresolvable on the write paths with no way to undo the delete from the UI.
+
+    No extra role gate: this returns rows the same reader could already see before
+    they were deleted. Restoring one is the privileged act, and that gate lives on
+    the restore verb.
+    """
+    # Tenancy is unconditional and unchanged -- company_id from get_current_company_id
+    # scopes BOTH views. ``deleted_only`` only ever flips the is_deleted predicate; it
+    # can never widen the tenant scope. With deleted_only=False this compiles to the
+    # same ``vendors.is_deleted = false`` this query has always emitted.
     query = db.query(Vendor).filter(
         Vendor.company_id == company_id,
-        Vendor.is_deleted == False,  # noqa: E712
+        Vendor.is_deleted == (True if deleted_only else False),  # noqa: E712
     )
-    if active_only:
+
+    # ``active_only`` DEFAULTS TO TRUE, and delete_vendor sets ``is_active = False`` on its
+    # way out -- so ANDing the two would make the deleted view return an empty list for
+    # every caller who did not think to also pass ``active_only=false``, i.e. the restore
+    # screen would read "no deleted vendors" no matter how many exist. Do not "tidy" this
+    # carve-out away; it is the same species as the closed/cancelled status carve-out on
+    # the deleted PO list. There is nothing to preserve here either: while a vendor is
+    # deleted its ``is_active`` is False by definition of the delete, so an is_active
+    # filter over the deleted set is not merely unhelpful, it is empty by construction.
+    # (What the vendor WAS is remembered in ``is_active_before_delete`` and is restore's
+    # business, not a filter -- see delete_vendor/restore_vendor.)
+    if active_only and not deleted_only:
         query = query.filter(Vendor.is_active == True)
+
+    # ``approved_only`` deliberately KEEPS applying to the deleted view, unlike active_only.
+    # It is neither half of the trap: it defaults to False (so it is never silently on) and
+    # delete_vendor never touches ``is_approved`` (so it still means what it says on a
+    # deleted row, and cannot empty the view behind the caller's back). An explicit
+    # ``approved_only=true`` narrowing the restore view is a real question with a real
+    # answer -- the same reason ``?status=`` is shared by both views of the PO list.
     if approved_only:
         query = query.filter(Vendor.is_approved == True)
-    return query.order_by(Vendor.name).all()
+
+    vendors = query.order_by(Vendor.name).all()
+
+    # Resolve deleted_by -> display name in ONE batched query, and ONLY for the deleted
+    # view. SoftDeleteMixin.deleted_by is a bare Integer column with no FK/relationship,
+    # so there is nothing to joinedload and the alternative is a lookup per row. On the
+    # default path this dict stays empty, NO query is emitted at all, and the loop below
+    # reads None out of it -- that is what keeps the unset parameter inert.
+    #
+    # Not company-scoped, on purpose: deleted_by is whoever's session performed the
+    # delete, and a platform admin acting inside this company is not a user row of it, so
+    # scoping would blank exactly the name a reader most needs. The id is read off our
+    # own already-tenant-scoped row and never comes from the caller, so this cannot be
+    # steered into enumerating another tenant's users. It discloses nothing new either:
+    # AuditService already snapshots the same actor's full_name onto this tenant's
+    # audit_log row for the very same delete.
+    #
+    # It also deliberately applies NO ``is_active`` / ``is_deleted`` filter to User:
+    # provenance must survive the deleter's own departure. Adding one would silently
+    # regress the name to "Unknown" for exactly the deletes people ask about most -- the
+    # ones done by someone who has since left.
+    #
+    # User.full_name is a plain Python property, not a mapped column, so it cannot be
+    # SELECTed -- pull first_name/last_name and join them here.
+    deleted_by_names: dict[int, str] = {}
+    if deleted_only:
+        deleter_ids = {v.deleted_by for v in vendors if v.deleted_by is not None}
+        if deleter_ids:
+            for user_id, first_name, last_name in db.query(User.id, User.first_name, User.last_name).filter(
+                User.id.in_(deleter_ids)
+            ):
+                name = f"{first_name or ''} {last_name or ''}".strip()
+                if name:
+                    deleted_by_names[user_id] = name
+
+    # Serialize through _vendor_response rather than returning the ORM rows: it is what
+    # keeps the four provenance fields null on the default path (see its docstring).
+    # ``deleted_by_names`` is empty there, so the .get() below is a dict miss, not a query.
+    return [
+        _vendor_response(
+            vendor,
+            deleted_view=deleted_only,
+            deleted_by_name=deleted_by_names.get(vendor.deleted_by),
+        )
+        for vendor in vendors
+    ]
 
 
 @router.post("/vendors", response_model=VendorResponse)
@@ -190,7 +312,9 @@ def create_vendor(
         db.rollback()
         raise HTTPException(status_code=400, detail="Vendor code already exists") from exc
     db.refresh(vendor)
-    return vendor
+    # Through _vendor_response, not the bare ORM row -- see its docstring: returning
+    # ``vendor`` here would ship ``is_deleted: false`` where the list ships ``null``.
+    return _vendor_response(vendor)
 
 
 @router.post("/vendors/import-csv", response_model=VendorCsvImportResponse)
@@ -320,7 +444,8 @@ def get_vendor(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    return _live_vendor_or_404(db, vendor_id, company_id)
+    # Through _vendor_response, not the bare ORM row -- see its docstring.
+    return _vendor_response(_live_vendor_or_404(db, vendor_id, company_id))
 
 
 @router.put("/vendors/{vendor_id}", response_model=VendorResponse)
@@ -390,7 +515,8 @@ def update_vendor(
         db.rollback()
         raise HTTPException(status_code=400, detail="Vendor code already exists") from exc
     db.refresh(vendor)
-    return vendor
+    # Through _vendor_response, not the bare ORM row -- see its docstring.
+    return _vendor_response(vendor)
 
 
 @router.delete("/vendors/{vendor_id}")
@@ -438,7 +564,28 @@ def delete_vendor(
     audit = AuditService(db, current_user, request)
 
     vendor.soft_delete(current_user.id)
+
+    # ORDER IS LOAD-BEARING: capture the CURRENT is_active FIRST, then force it False.
+    # Reversed, the sidecar records the value the very next line is about to write and
+    # every restore reactivates -- the bug this column exists to prevent. See
+    # Vendor.is_active_before_delete and restore_vendor.
+    #
+    # The ``is_active = False`` write STAYS. Not writing it (so restore would have nothing
+    # to put back) is the tempting shortcut and is a security regression: six read paths
+    # filter is_active, it is a deliberate second layer behind the is_deleted filters, and
+    # dropping it would silently change what "deleted" means to any query added later.
+    #
+    # Known, accepted imprecision: ``Vendor.is_active`` is itself NULLABLE, so a row whose
+    # is_active is NULL records NULL here -- which restore cannot tell from "we never
+    # recorded one" and therefore restores as INACTIVE. That errs the SAFE way (off, not on),
+    # and the row is hard to reach besides: the ORM re-applies the column default even when
+    # is_active is explicitly assigned None, so only a raw/Core insert passing an explicit
+    # NULL produces one. It is stated here because it is the reason this sentinel must never
+    # be "tidied" into a NOT NULL column: NULL has to stay reachable to mean "deleted before
+    # 082 shipped".
+    vendor.is_active_before_delete = vendor.is_active
     vendor.is_active = False
+
     # Log BEFORE the terminal commit so the audit row commits atomically with the
     # delete (AuditService.log only flushes; get_db never commits).
     audit.log_delete("vendor", vendor.id, vendor.name, soft_delete=True)
@@ -454,8 +601,33 @@ def restore_vendor(
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Restore a soft-deleted vendor. Raw lookup (NOT ``_live_vendor_or_404``) so it can see
-    the soft-deleted row -- seeing the tombstone is this verb's entire job."""
+    """Restore a soft-deleted vendor, PRESERVING the is_active state it had when it was
+    deleted. Raw lookup (NOT ``_live_vendor_or_404``) so it can see the soft-deleted row --
+    seeing the tombstone is this verb's entire job.
+
+    Why the preserve, rather than the unconditional ``is_active = True`` this used to do:
+    an approved-supplier list is an AS9100D-controlled artifact. A supplier the shop
+    deliberately DEACTIVATED -- lapsed certification, a quality escape, a commercial
+    dispute -- and then deleted must not come back looking like an active, selectable
+    supplier just because somebody undid the delete. Undoing a delete restores a RECORD; it
+    is not an approval decision, and it must not silently make one. Re-activating a
+    recovered supplier stays a deliberate, separately audited ``PUT /vendors/{id}``.
+
+    ``delete_vendor`` records the pre-delete value in ``is_active_before_delete``; NULL means
+    the delete predates that column (migration 082), and by OWNER DECISION that unknown
+    restores INACTIVE -- it falls back to False, NOT to the pre-082 unconditional True. On an
+    AS9100D-controlled approved-supplier list the safe unknown is OFF: for a legacy row the
+    system genuinely does not know whether the shop had switched the vendor off before
+    deleting it, so it comes back switched off and a human reactivates it deliberately,
+    through the separately audited ``PUT /vendors/{id}``. That is a DELIBERATE BREAK from the
+    old behavior -- do not "preserve backward compatibility" by flipping it back. Coming back
+    inactive is recoverable by an explicit, audited decision; coming back wrongly active is
+    not detectable at all. The sidecar is CLEARED here so a later delete/restore cycle can
+    never read this one's stale value.
+
+    Refuses nothing beyond the "not deleted" guard, deliberately -- see the comment at the
+    guard below.
+    """
     vendor = db.query(Vendor).filter(Vendor.id == vendor_id, Vendor.company_id == company_id).first()
     if not vendor:
         raise HTTPException(status_code=404, detail="Vendor not found")
@@ -463,18 +635,61 @@ def restore_vendor(
     if not vendor.is_deleted:
         raise HTTPException(status_code=400, detail="Vendor is not deleted")
 
+    # No dependency refusal here, unlike restore_purchase_order (which refuses a PO whose
+    # vendor is itself deleted). A vendor is a ROOT record: it references nothing but its
+    # company, so there is no parent that could have gone away underneath it, and nothing
+    # it points at can be in a state that makes it invalid to bring back. The one collision
+    # a restore could plausibly hit -- another vendor having taken its ``code`` while it was
+    # deleted -- is already impossible upstream by design, not by luck: create's probe,
+    # update's rename probe and ``_generate_vendor_code`` all DELIBERATELY count
+    # soft-deleted rows, because ``uq_vendors_company_code`` has no partial predicate and a
+    # deleted vendor still owns its code. Keep those three that way and this verb needs no
+    # collision check (it could not be given a sensible one anyway -- it has no way to
+    # renumber). A restore whose vendor was deactivated is likewise not a refusal: it is
+    # exactly the case the is_active preservation above handles.
     audit = AuditService(db, current_user, request)
 
+    # COALESCE(is_active_before_delete, False) -- see the docstring for why the NULL branch
+    # is False and not the pre-082 True. The prior is_active of a vendor deleted before 082
+    # is genuinely unknown: the delete overwrote it in place, and the audit_log delete row
+    # records the deletion, not the flag. Resolving that unknown to ON would fabricate
+    # supplier-approval state; resolving it to OFF asks a human to make the call.
+    restored_is_active = False if vendor.is_active_before_delete is None else vendor.is_active_before_delete
+
+    # SNAPSHOT the prior is_active; do NOT hard-code False here even though delete_vendor
+    # always writes False. Pre-#231 a single ``PUT {"is_active": true}`` on a soft-deleted
+    # vendor produced ``is_deleted=True`` + ``is_active=True`` (no optimistic lock, so a
+    # stale edit tab sufficed -- see _live_vendor_or_404). That path is closed, but rows
+    # already in that state were NOT repaired, and restoring one really does move
+    # is_active True -> False. Asserting False would record that move as a no-op in the
+    # tamper-evident audit_log, and AuditService._get_changes would omit is_active from
+    # the diff entirely -- the one column a reader would ask about. One local is cheaper
+    # than an audit row that can lie. (``is_deleted: True`` stays hard-coded: the
+    # "not deleted -> 400" guard at the top of this verb proves it.)
+    previous_is_active = vendor.is_active
+
     vendor.restore()
-    vendor.is_active = True
+    vendor.is_active = restored_is_active
+    # Clear the sidecar: it is only meaningful while the row is deleted. Left set, a vendor
+    # that is deleted again and restored again would read THIS cycle's value if some future
+    # edit ever skipped the delete-side capture.
+    vendor.is_active_before_delete = None
+
     # Log BEFORE the terminal commit so the audit row commits atomically with the
     # restore (AuditService.log only flushes; get_db never commits).
+    #
+    # ``is_active`` is in the diff on purpose (the PO twin logs is_deleted alone, because
+    # its restore touches nothing else): this verb DOES write an approval-relevant flag, and
+    # the whole point of preserving it is that the value matters. Leaving it out would make
+    # the one column a reader would ask about the one column the restore row does not
+    # record -- and the OLD half is READ off the row (``previous_is_active`` above) rather
+    # than assumed to be False, so the diff cannot understate a real change.
     audit.log_update(
         "vendor",
         vendor.id,
         vendor.name,
-        old_values={"is_deleted": True},
-        new_values={"is_deleted": False},
+        old_values={"is_deleted": True, "is_active": previous_is_active},
+        new_values={"is_deleted": False, "is_active": restored_is_active},
         action="restore",
     )
     db.commit()

@@ -911,8 +911,9 @@ tier, that tier stands — this rule is a floor, never a loosening.
 > `PurchaseOrder` gained `SoftDeleteMixin` (migration `071_soft_delete_purchasing_ncr`), so these are
 > **soft** deletes (never physical — invariant #3): the row is flagged `is_deleted`, drops out of all
 > reads, and is restorable. Both the delete and the restore write a tamper-evident `audit_log` row.
-> Guardrails are server-enforced: a **vendor** delete also deactivates it (`is_active=false`) and is
-> refused (**400**) while it has an active PO; a **PO** delete is refused (**400**) when any line has
+> Guardrails are server-enforced: a **vendor** delete also deactivates it (`is_active=false`, after
+> recording the prior value so the restore can put it back — see below) and is refused (**400**)
+> while it has an active PO; a **PO** delete is refused (**400**) when any line has
 > received material (void the receipts first); and opening a PO against a soft-deleted/inactive vendor
 > is refused (**404**). See `docs/API.md` → Purchasing.
 >
@@ -958,17 +959,54 @@ tier, that tier stands — this rule is a floor, never a loosening.
 > /purchasing/purchase-orders` and `GET /purchasing/purchase-orders/{id}` as a whole under
 > `require_role([PLATFORM_ADMIN, ADMIN, MANAGER, SUPERVISOR, VIEWER])` so the server matches
 > `purchasing:view` — vendor names, unit pricing and order totals are not an operator's or shipping
-> clerk's to read. **That is an open owner decision and a separate change**, tracked alongside the
-> vendor-restore gap below.
+> clerk's to read. **That is an open owner decision and a separate change.** It applies verbatim to
+> `GET /purchasing/vendors` — including its `deleted_only` view — for the same reasons and with the
+> same non-fix; the vendor half of this note is below.
 >
 > Both directions stay audited (`log_delete` with `soft_delete=true`; `log_update` with
 > `action="restore"`), so who deleted and who restored are both on the chain.
 >
-> **Vendor restore has no UI.** `POST /purchasing/vendors/{id}/restore` is gated identically
-> (Admin / Manager) and audited, but there is no `deleted_only` equivalent on `GET
-> /purchasing/vendors` and nothing in the frontend calls `restoreVendor` — so undoing a **vendor**
-> delete is still an API/administrator action. The *Delete / restore vendor (soft)* row above
-> describes the endpoint gate, not a screen.
+> **Vendor restore is gated the same way, and it now has a screen.** It was for a long time the
+> asymmetric case — the verb existed and was audited while nothing could reach it — and that is
+> closed: `GET /purchasing/vendors?deleted_only=true` lists the tenant's soft-deleted vendors, and
+> Purchasing → **Vendors** → **Deleted** renders them with a **Restore** control. The split is
+> identical to the PO one above, deliberately, so there is one posture to learn rather than two:
+>
+> | Half | Where | Gate |
+> |---|---|---|
+> | **See** deleted vendors | `GET /purchasing/vendors?deleted_only=true` — the only read in the API that returns a soft-deleted vendor | **Any authenticated user in the tenant** (`get_current_user`) |
+> | **Restore** one | `POST /purchasing/vendors/{id}/restore` | **Admin / Manager** (`require_role([ADMIN, MANAGER])`) — the *Delete / restore vendor (soft)* row above |
+>
+> **Why the read carries no new gate** — same argument, and it is not a copy for tidiness: a vendor
+> that was readable on Monday does not become sensitive by being deleted on Tuesday, vendor
+> list/detail reads are tenant-scoped but not role-restricted (see *Read enforcement* above), and
+> gating the view would protect nothing while making the feature unusable — a manager cannot restore
+> what a screen refuses to list. The privileged act is changing state, and that gate lives on the
+> verb. The **UI** matches the verb exactly (`canRestoreVendor` in
+> `frontend/src/pages/Purchasing.tsx`, a constant kept separate from `canRestorePO` and from the
+> delete gate so a change to one cannot silently move the others), so a hidden control and a refused
+> call agree. The same UI-is-stricter-than-the-server caveat applies as for POs: `/purchasing` is
+> gated on `purchasing:view`, so operator / quality / shipping users cannot open the page while their
+> token can still read the rows straight from the endpoint. That is the endpoint's gap, not the
+> screen's, and it is the open owner decision noted above.
+>
+> **One thing the role gate does *not* decide: what a restore reactivates.** Restoring a vendor puts
+> back the `is_active` it had when it was deleted — it is **not** an unconditional re-activate, which
+> is what the verb used to do. A supplier the shop deliberately switched off before deleting comes
+> back switched off, and a manager who restores it has not thereby re-approved it. A vendor deleted
+> **before** migration `082` has no recorded prior state and, by owner decision, restores **inactive**
+> as well — the safe reading of an unknown approval flag is *off*, so the restore never hands back an
+> active-looking supplier on a guess. That is an
+> AS9100D 8.4 property of the approved-supplier list rather than an RBAC one, but it is the reason a
+> Manager-level restore is safe to offer at all: the verb can undo a records mistake without being
+> able to hand back supplier approval as a side effect. Re-activating stays a separate, separately
+> audited `PUT /purchasing/vendors/{id}` under the same Admin / Manager gate, performed from
+> Purchasing → **Vendors** → **Inactive** → **Edit** (the third view of the same segmented control;
+> a restored-but-switched-off vendor is on no other screen, so without it that "separate, deliberate
+> step" would have no way to be taken). The UI gate there is `canCreateVendor`
+> (`purchasing:approve` — the same Admin / Manager set the `PUT` enforces), not `canRestoreVendor`:
+> the button calls the update endpoint, so it must match the update endpoint. See `docs/API.md` →
+> Purchasing → *Restoring a vendor returns the record, not the approval*.
 
 ### Receiving
 

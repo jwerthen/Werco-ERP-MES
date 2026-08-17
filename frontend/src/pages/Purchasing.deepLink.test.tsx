@@ -41,6 +41,21 @@ const mockedApi = api as jest.Mocked<typeof api>;
 
 const vendors = [{ id: 5, code: 'VND-005', name: 'Acme Aerospace', is_approved: true, is_active: true, version: 0 }];
 
+/**
+ * A LIVE but DEACTIVATED vendor — the state a restored vendor lands in whenever it was
+ * switched off before deletion, or (every pre-migration-082 deletion) when that was never
+ * recorded. It is absent from the default `getVendors()` read, because the endpoint's
+ * `active_only` defaults to true.
+ */
+const inactiveVendor = {
+  id: 8,
+  code: 'VND-008',
+  name: 'Dormant Plating Inc',
+  is_approved: true,
+  is_active: false,
+  version: 0,
+};
+
 /** The flat summary shape `GET /purchasing/purchase-orders` returns. */
 const listedPO = {
   id: 10,
@@ -84,7 +99,11 @@ const renderAt = (url: string) =>
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockedApi.getVendors.mockResolvedValue(vendors as any);
+  // Faithful to the endpoint: the bare call is active-only, `active_only: false` widens
+  // it. A deep link to a deactivated vendor can only resolve through the second.
+  mockedApi.getVendors.mockImplementation(async (params: any) =>
+    (params?.active_only === false ? [...vendors, inactiveVendor] : vendors) as any,
+  );
   mockedApi.getPurchaseOrders.mockResolvedValue([listedPO] as any);
   mockedApi.getParts.mockResolvedValue([] as any);
   mockedApi.getPurchaseOrder.mockResolvedValue(detailPO as any);
@@ -164,5 +183,55 @@ describe('no ?po= param', () => {
     await tableRowFor('PO-2001');
     expect(mockedApi.getPurchaseOrder).not.toHaveBeenCalled();
     expect(searchBox().value).toBe('');
+  });
+});
+
+/**
+ * `?vendor=<id>` for a vendor that is NOT on the active list.
+ *
+ * This is not an exotic case: restore preserves the pre-delete `is_active`, and every
+ * vendor deleted before migration 082 comes back INACTIVE, so a link to a just-recovered
+ * supplier lands here. Resolving it only against the active-only array made the link a
+ * silent no-op — which reads as "the app is broken", and is worse than a 404 because
+ * nothing tells the user anything happened.
+ */
+describe('?vendor= for a deactivated vendor', () => {
+  test('widens the read, lands on the Inactive view, and opens the edit form', async () => {
+    renderAt('/purchasing?vendor=8');
+
+    await waitFor(() => expect(mockedApi.getVendors).toHaveBeenCalledWith({ active_only: false }));
+
+    // The edit modal — which carries the `is_active` checkbox — is the reactivation path,
+    // so landing with it open is the whole point of the fallback.
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByDisplayValue('Dormant Plating Inc')).toBeInTheDocument();
+    expect(within(dialog).getByRole('checkbox', { name: /active/i })).not.toBeChecked();
+  });
+
+  test('the fallback fetch fires EXACTLY ONCE (no infinite loop)', async () => {
+    renderAt('/purchasing?vendor=8');
+    await screen.findByRole('dialog');
+
+    const widenedReads = mockedApi.getVendors.mock.calls.filter(
+      ([params]: any[]) => params?.active_only === false,
+    );
+    expect(widenedReads).toHaveLength(1);
+  });
+
+  test('an id that is live nowhere gets an error toast, not a silent no-op', async () => {
+    renderAt('/purchasing?vendor=4242');
+
+    expect(await screen.findByText(/Vendor not found/i)).toBeInTheDocument();
+    // No modal opened on a vendor we could not resolve.
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  test('a vendor already on the active list does NOT trigger the widened read', async () => {
+    renderAt('/purchasing?vendor=5');
+    await screen.findByRole('dialog');
+
+    expect(
+      mockedApi.getVendors.mock.calls.some(([params]: any[]) => params?.active_only === false),
+    ).toBe(false);
   });
 });

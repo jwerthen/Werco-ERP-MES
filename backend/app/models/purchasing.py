@@ -94,6 +94,31 @@ class Vendor(Base, SoftDeleteMixin, TenantMixin):
     is_iso9001_certified = Column(Boolean, default=False)
 
     is_active = Column(Boolean, default=True)
+
+    # Lock-step with migration 082_vendor_active_before_delete. A SIDECAR to the
+    # delete/restore pair in app/api/endpoints/purchasing.py -- NOT a
+    # general-purpose activity flag, and nothing else reads or writes it:
+    #   delete_vendor  records the CURRENT is_active here, THEN forces
+    #                  is_active = False (order matters -- reversed, it always
+    #                  records False).
+    #   restore_vendor sets is_active = COALESCE(is_active_before_delete, False),
+    #                  then clears this back to NULL so a second delete/restore
+    #                  cycle cannot read a stale value.
+    # NULL means "we never recorded one" -- every vendor deleted before 082 shipped.
+    # By OWNER DECISION restore treats that unknown as INACTIVE and falls back to
+    # False, NOT to the pre-082 unconditional True: on an AS9100D approved-supplier
+    # list the safe unknown is OFF, so a legacy vendor comes back switched off and a
+    # human must reactivate it deliberately (an audited PUT /vendors/{id}). That is a
+    # deliberate break from the old behavior -- do not "restore compatibility" by
+    # flipping it back. Nullable for exactly that reason; forward-only, never
+    # backfilled.
+    #
+    # Why it exists: an approved-supplier list is an AS9100D-controlled artifact. A
+    # vendor the shop deliberately DEACTIVATED and then deleted must not come back
+    # looking active. (The delete keeps writing is_active = False on purpose -- six
+    # read paths filter that flag; it is a deliberate second layer, not redundancy.)
+    is_active_before_delete = Column(Boolean, nullable=True, default=None)
+
     notes = Column(Text)
 
     created_at = Column(DateTime, default=datetime.utcnow)
