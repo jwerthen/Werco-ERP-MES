@@ -405,8 +405,71 @@ Read by the worker process only (`arq app.worker.WorkerSettings`). See
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `WORKER_CRON_JOBS` | No | all | Which scheduled jobs the worker registers. Unset or `all` → every cron (12 of them). `none` → no crons; the worker still drains enqueue-driven jobs (notifications, webhooks, labels, completion signals). A comma-separated list of job names arms exactly those. **An unrecognised name is a hard startup error, not a silent skip.** `none` is the correct value for a first-ever boot — several crons write or email in bulk on their first run |
+| `WORKER_CRON_JOBS` | No | all | Which scheduled jobs the worker registers. Unset or `all` → every cron (12 of them). `none` → no crons; the worker still drains enqueue-driven jobs (notifications, webhooks, labels, completion signals). A comma-separated list of job names arms **exactly** those (allowlist). A `-` prefix **excludes** a job from the full set (denylist): `all,-run_mrp_auto_draft_job`. The two shapes may not be mixed. **An unrecognised name is a hard startup error, not a silent skip — a negated one included.** `none` is the correct value for a first-ever boot — several crons write or email in bulk on their first run. Full syntax below |
 | `TZ` | No | UTC | Container timezone. ARQ resolves cron times in the container's local zone, so unset means `hour=6` fires at **06:00 UTC = 01:00 Central**. Set `TZ=America/Chicago` for shop-local schedules |
+
+#### `WORKER_CRON_JOBS` syntax
+
+Parsed by `select_cron_jobs` in `backend/app/worker.py`, at import — a bad value kills the
+container loudly instead of quietly running the wrong schedule overnight.
+
+There are exactly **two shapes**: name the crons you want (allowlist), or start from
+everything and subtract the ones you don't (denylist, `-` prefix).
+
+| Value | Result |
+|---|---|
+| unset / empty / `all` | Every cron in `ALL_CRON_JOBS`. **The default — it changes nothing about what was declared.** |
+| `none` | No crons. The worker still drains enqueue-driven jobs. |
+| `check_low_stock_job,poll_tracking_job` | **Only** those two, in the order listed. |
+| `all,-run_mrp_auto_draft_job` | Every cron **except** the MRP auto-draft pass. |
+| `-run_mrp_auto_draft_job` | Identical — a spec made only of exclusions implies `all` as its base. |
+| `-cron:run_mrp_auto_draft_job` | Identical again. Both spellings work for exclusions exactly as they already do for inclusions: arq names crons `cron:<coroutine name>` and the startup log prints **that** form, so whichever one you copied has to work. |
+| `-a,-b` | Subtracts both. Excluding every cron is legal and simply means `none`. |
+
+**Why the `-` form exists.** Turning one cron off with an allowlist means listing the other
+eleven — which **freezes the set**. A cron added to `ALL_CRON_JOBS` in a later release then
+silently never registers on that worker: "I enabled the cron and nothing happened", the exact
+failure this selector exists to eliminate, just delayed until the next deploy. A denylist
+subtracts from whatever the release declares, so new crons arrive armed.
+
+**Hard errors** (all `ValueError` at import, all naming what they saw):
+
+- **An unknown name — positive *or* negated.** Excluding a cron that does not exist means the
+  exclusion is not doing what you think and the job you meant to silence is **still armed**, so
+  it is refused for the same reason an unknown inclusion is. The message lists every known job.
+- **Mixing inclusions with exclusions** — `poll_tracking_job,-run_mrp_auto_draft_job` reads
+  either as "only the tracking poll" or as "everything except MRP", and those differ by most of
+  the schedule. It is refused rather than guessed. `all` is the one positive token allowed
+  alongside exclusions, because there it is the explicit base.
+- **`none` together with an exclusion** — there is nothing to subtract from.
+- **`all` or `none` used as one token among others, with nothing excluded** —
+  `all,poll_tracking_job` has always been refused (`all` is a keyword only on its own or as the
+  base of a subtraction; combined with a name it is as ambiguous as the mixing case above), and
+  so has the trailing-comma slip `all,`. Both now get their own message naming the comma,
+  instead of being reported as an unknown *cron job* called `all` — which used to read as
+  "'all' is unknown; use 'all'". Write `all` alone, or list the names you want.
+- **A value that is punctuation only** — `,` or `,,` names no cron at all. Refused rather than
+  read as `all` or `none`: it used to fall through and arm **zero** crons while logging exactly
+  what a deliberate `none` logs, so nothing distinguished a mangled value from an intended one.
+
+Whitespace around names and commas is ignored, and so is whitespace **between a `-` and the
+name it negates** (`" all , -x "` and `"all, - x"` both work). `all`/`none` match
+case-insensitively; **job names are case-sensitive** (`-CHECK_LOW_STOCK_JOB` is an unknown-name
+error, not a match). Duplicates collapse rather than erroring — the same name twice, or once in
+each spelling (`-<job>` together with `-cron:<job>`), excludes it once.
+
+**Turning the MRP auto-draft cron off** — the motivating case, and a supported permanent
+configuration:
+
+```
+WORKER_CRON_JOBS=all,-run_mrp_auto_draft_job
+```
+
+This disables the **schedule**, not the capability: `run_mrp_auto_draft_job` stays in
+`WorkerSettings.functions` and can still be enqueued for a one-off run. Note also that the
+crons fire on **container-local time, which is UTC unless `TZ` is set**, so the 06:00 MRP cron
+is 01:00 Central. See `docs/WORKER_DEPLOYMENT_RUNBOOK.md` §6.4 for the full procedure and what
+MRP does and does not still do with the cron off.
 
 The worker also needs the API's `DATABASE_URL`, `SECRET_KEY`, `REFRESH_TOKEN_SECRET_KEY`,
 `REDIS_URL`, `SMTP_*`, `SENTRY_DSN`, `FRONTEND_BASE_URL` (notification email deep links),

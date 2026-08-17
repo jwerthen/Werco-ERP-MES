@@ -162,15 +162,41 @@ cap. Run the counts in §4 before arming them.
 
 ### The cron selector
 
-`WORKER_CRON_JOBS` narrows the schedule:
+`WORKER_CRON_JOBS` narrows the schedule. It has **two shapes**: name the crons you want (an
+allowlist), or start from everything and subtract the ones you don't (a denylist, `-` prefix).
 
 - unset or `all` → every cron (**the default — this changes nothing about what was declared**)
 - `none` → no crons at all. The worker still drains enqueue-driven jobs (notifications,
   webhooks, labels, completion signals), which correspond to something a user actually did.
   **This is the correct value for the first boot.**
-- comma-separated job names → arms exactly those, one at a time.
+- comma-separated job names → arms exactly those, one at a time, in the order listed.
+- `-<name>` → **excludes** that cron from the full set. `all,-run_mrp_auto_draft_job` and the
+  bare `-run_mrp_auto_draft_job` are the same thing: a spec made only of exclusions implies
+  `all` as its base. `-cron:run_mrp_auto_draft_job` works too — arq names crons
+  `cron:<coroutine name>` and the startup log prints **that** form, so both spellings are
+  accepted for exclusions exactly as they already are for inclusions.
 
-An unknown name is a hard error at startup, not a silent skip.
+**Why the exclusion form exists.** Switching one cron off with an allowlist means listing the
+other eleven, which **freezes the set**: a cron added to `ALL_CRON_JOBS` in a later release
+silently never registers on that worker. That is "I enabled the cron and nothing happened" —
+precisely the failure this module exists to eliminate — arriving one deploy late instead of
+immediately. A denylist subtracts from whatever the release declares, so new crons arrive
+armed and the operator's variable does not rot.
+
+An unknown name is a hard error at startup, not a silent skip — **and that includes a negated
+one**: excluding a cron that does not exist means the job you meant to silence is still armed.
+Two more shapes are refused rather than guessed: **mixing** inclusions with exclusions
+(`poll_tracking_job,-run_mrp_auto_draft_job` reads either as "only the tracking poll" or as
+"everything except MRP", and those differ by most of the schedule), and `none` combined with an
+exclusion. `all` is the one positive token allowed alongside exclusions, as the explicit base.
+Excluding *every* cron is legal and simply means `none`. Full syntax, error text and
+case/whitespace rules: `docs/ENVIRONMENT_VARIABLES.md` → Background worker (ARQ), and the
+`select_cron_jobs` docstring.
+
+> **The `SUPPRESSED` log line reads correctly for either shape.** It diffs the registered
+> crons against `ALL_CRON_JOBS` by object identity, and the denylist path filters that same
+> list rather than rebuilding it, so what it prints is exact:
+> `ARQ worker cron: 1 of 12 cron jobs SUPPRESSED by WORKER_CRON_JOBS='all,-run_mrp_auto_draft_job': cron:run_mrp_auto_draft_job`
 
 ---
 
@@ -391,6 +417,16 @@ adding the next:
 
 Then, once all are wanted: `WORKER_CRON_JOBS=all` (or unset it).
 
+**Switching one back off later — do not go back to an allowlist.** Use the exclusion form, so
+the other eleven stay whatever the current release declares:
+
+```
+WORKER_CRON_JOBS=all,-run_mrp_auto_draft_job    # everything except the MRP auto-draft pass
+```
+
+Listing the other eleven by name would work today and rot at the next release that adds a
+cron. Procedure and blast radius: `WORKER_DEPLOYMENT_RUNBOOK.md` §6.4.
+
 ### 5.7 Turn on the CI deploy
 
 Only after the service exists and a manual deploy has worked. Repo → Settings → Secrets and
@@ -418,8 +454,10 @@ There is no HTTP endpoint to curl — the worker serves none, by design. Use:
 ## 7. Rolling back
 
 Delete or pause the `werco-worker` service, or set `WORKER_CRON_JOBS=none` and redeploy to
-stop scheduled work while still draining request-driven jobs. Nothing about the worker is
-required for the API to serve — the API logs its queue target and carries on without one.
+stop scheduled work while still draining request-driven jobs. To stop **one** cron and keep
+the rest, set `WORKER_CRON_JOBS=all,-<job>` and redeploy — no allowlist, so the remaining
+crons stay whatever the release declares. Nothing about the worker is required for the API to
+serve — the API logs its queue target and carries on without one.
 
 **Not reversible:** draft POs and work orders created by `run_mrp_auto_draft_job`, and
 emails already sent. Both are why the order in §5.6 puts MRP last.

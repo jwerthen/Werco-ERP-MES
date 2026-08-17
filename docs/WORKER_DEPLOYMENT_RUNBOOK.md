@@ -636,6 +636,12 @@ WORKER_CRON_JOBS=relay_pending_notifications_job,run_oee_auto_calc_job
 …and so on
 ```
 
+> **This staged list is an allowlist, which is right for arming *up* and wrong for staying
+> there.** An allowlist freezes the set — a cron added in a later release silently never
+> registers on this worker. Once you are past the rollout, move to `all` (or unset), and use
+> the `-` exclusion form for anything you want left off: `WORKER_CRON_JOBS=all,-<job>`. See
+> §6.4.
+
 Order, cheapest and safest first:
 
 | # | Add | Watch for, after |
@@ -652,7 +658,9 @@ Order, cheapest and safest first:
 | 10 | `archive_aged_audit_logs_job` | **Only after §8 (durable storage).** Then confirm the NDJSON file actually persists. |
 | 11 | `run_mrp_auto_draft_job` | **Last, deliberately, on a morning someone can review the output.** Immediately after: `SELECT count(*) FROM purchase_orders WHERE status='DRAFT' AND created_at > now() - interval '2 hours';` and the same for work orders. |
 
-Once every cron is wanted: `WORKER_CRON_JOBS=all`, or unset it.
+Once every cron is wanted: `WORKER_CRON_JOBS=all`, or unset it. If some cron is deliberately
+**not** wanted — MRP auto-draft is the live example — that is `all,-<job>`, not an allowlist of
+the others. §6.4.
 
 ---
 
@@ -663,6 +671,7 @@ Once every cron is wanted: `WORKER_CRON_JOBS=all`, or unset it.
 | Goal | Action | Effect |
 |---|---|---|
 | Stop scheduled work, keep request-driven jobs | Set `WORKER_CRON_JOBS=none`, redeploy | Crons stop. Notifications, webhooks, labels still process. |
+| Stop **one** cron, keep the other eleven | Set `WORKER_CRON_JOBS=all,-<job>`, redeploy | That cron stops. Everything else — **including crons added in future releases** — stays armed. §6.4. |
 | Stop everything | Railway → `werco-worker` → **Remove** / pause the service | No background work at all. **The API is unaffected** — it logs its queue target and serves normally without a worker. |
 | Undo the whole change | Revert the branch and redeploy `werco-api` | Back to enqueues failing against localhost. Nothing is corrupted by this. |
 
@@ -702,6 +711,86 @@ Everything before step 6 in §5.6 is reversible: stop the worker, delete the row
 
 **Take a database backup before §5.6 step 7 and step 11.** See `docs/DATABASE_BACKUP.md`.
 
+### 6.4 Turning ONE cron off, without freezing the rest
+
+The live case: **stop the daily MRP auto-draft pass.** It creates draft purchase orders and
+work orders for every active company every day, and someone has to triage them (§8.6). Leaving
+it off is a supported, permanent configuration.
+
+**The value.** On `werco-worker` → Variables:
+
+```
+WORKER_CRON_JOBS=all,-run_mrp_auto_draft_job
+```
+
+Redeploy, then confirm on the startup log — this line is the receipt:
+
+```
+ARQ worker cron: 1 of 12 cron jobs SUPPRESSED by WORKER_CRON_JOBS='all,-run_mrp_auto_draft_job': cron:run_mrp_auto_draft_job
+ARQ worker cron: 11 job(s) armed, times in UTC
+```
+
+(`UTC` is whatever the container's zone resolves to — see point 1 below.)
+
+| What you see | Verdict |
+|---|---|
+| `1 of 12 … SUPPRESSED`, naming `cron:run_mrp_auto_draft_job` | **Correct.** |
+| `0 of 12` / no SUPPRESSED line at all | The variable did not take. The cron is still armed. **STOP.** |
+| `ValueError: WORKER_CRON_JOBS names unknown cron job(s): -…` and a crash loop | Typo in the excluded name. The refusal is working as designed — an exclusion that matches nothing would have left the job armed. **But while it crash-loops there is NO worker at all, not just that one cron off:** see below. Fix the spelling and redeploy. |
+| `ValueError: … uses all as a cron NAME …` and a crash loop | A stray comma, usually `all,` left behind after deleting the exclusion. Same blast radius as the row above. Delete the comma (or set the value to bare `all`). |
+| More than 1 suppressed | You excluded more than you meant to, or the variable still holds an older allowlist. |
+
+**A refused value takes the whole worker down — budget for that before you paste.** The parse
+happens in the `WorkerSettings` class body, i.e. at *import* of `app.worker`, so the `ValueError`
+escapes before arq ever constructs a Worker and the process exits non-zero. `railway.toml` sets
+`restartPolicyType = "on_failure"` with `restartPolicyMaxRetries = 3` and deliberately no
+`healthcheckPath`, so the deployment starts, dies, retries three times and ends **CRASHED with no
+running worker behind it**. That is *not* the same containment as `WORKER_CRON_JOBS=none` (§5.2),
+which leaves a healthy worker draining the queue — here **every** cron stops, including
+`relay_pending_notifications_job` (the 5-minute sweeper that is the delivery backstop for
+notifications whose after-commit enqueue was lost) and `poll_tracking_job`, **and the
+enqueue-driven queue stops draining too**: emails, webhooks, receiving labels, WO completion
+signals. If the correct spelling is not immediately to hand, set `WORKER_CRON_JOBS=none` to get a
+healthy worker back first, then re-apply the exclusion.
+
+**Do not use an allowlist of the other eleven.** It arms the same eleven crons today and rots
+at the next release: a thirteenth cron added to `ALL_CRON_JOBS` would silently never register
+on this worker, and nothing in the log would say so — "I enabled the cron and nothing
+happened", one deploy late. The `-` form subtracts from whatever the release declares, so
+future crons arrive armed. That is the whole reason exclusion exists.
+
+**Two things that are not obvious:**
+
+1. **Crons fire on container-local time, which is UTC unless `TZ` is set.** So the "6 AM" MRP
+   cron is **01:00 Central**. If you are timing this change around a business day, that is the
+   window you are actually moving — and if you set `TZ=America/Chicago` later, every cron time
+   in this runbook shifts.
+2. **This disables the SCHEDULE, not the capability.** `run_mrp_auto_draft_job` stays in
+   `WorkerSettings.functions`, so the worker still knows how to run it; only the timed trigger
+   is gone. A one-off pass can still be enqueued by name against the running worker:
+
+   ```bash
+   railway ssh --service werco-worker --environment production --project "$RAILWAY_PROJECT_ID" \
+     python -c "import asyncio; from app.core.queue import enqueue_job; \
+                print(asyncio.run(enqueue_job('run_mrp_auto_draft_job')))"
+   ```
+
+   **Same blast radius as one cron firing** — every active tenant, real draft POs/WOs, real
+   `mrp.completed` emails to managers, and §6.2's re-run caveat applies (a worker restart
+   mid-run re-executes it from the start, i.e. a second set of drafts). Treat the first one as
+   §5.6 #11 tells you to: on a morning someone can review the output, with the follow-up count
+   query ready. **This command is derived from the code, not from a run against production** —
+   nothing in this repo has ever enqueued this job by hand. Try it once on staging first if you
+   have one.
+
+**What MRP still does, and what it stops doing.** Planning is unaffected: `POST /mrp/runs`
+(ADMIN / MANAGER / SUPERVISOR, the MRP page) runs a tenant-scoped MRP pass in-request and
+produces requirements, actions and shortages exactly as before. What stops is the *automatic
+drafting* — `MRPAutoService` is reached from **no** HTTP endpoint, only from the worker job, and
+`POST /mrp/actions/{id}/process` merely marks an action processed and tells you to create the
+PO or WO manually. So with this cron off, MRP becomes review-then-act-by-hand. That is the
+trade §8.6 describes; make it deliberately.
+
 ---
 
 ## 7. Turning on the CI deploy
@@ -739,8 +828,10 @@ serves no HTTP — verify it from its startup log (§5.5).
    `check_late_work_orders_job` rather than emailing 300 alerts about them.
 6. **Whether `run_mrp_auto_draft_job` should run at all.** It is `AUTO_DRAFT`, not
    `AUTO_SUBMIT`, so nothing is sent to a supplier — but it creates records daily that someone
-   must triage. If no one owns that triage, leave it out of `WORKER_CRON_JOBS` indefinitely.
-   Leaving it off is a supported, permanent configuration.
+   must triage. If no one owns that triage, leave it off indefinitely: that is
+   `WORKER_CRON_JOBS=all,-run_mrp_auto_draft_job`, **not** an allowlist of the other eleven.
+   Leaving it off is a supported, permanent configuration — §6.4 has the procedure, the
+   receipt to look for in the log, and what MRP does and does not still do without it.
 7. **Replicas.** `numReplicas = 1` is in the config and must stay there. The cron scheduler is
    per-process: two replicas run every cron **twice**, meaning two sets of MRP drafts per day
    and every digest sent twice.
@@ -775,6 +866,9 @@ railway logs --service werco-worker --environment production
 
 # Kill all scheduled work immediately, keep request-driven jobs
 #   Railway -> werco-worker -> Variables -> WORKER_CRON_JOBS=none -> redeploy
+
+# Kill ONE cron, keep the rest (and keep future crons arriving armed) -- see §6.4
+#   Railway -> werco-worker -> Variables -> WORKER_CRON_JOBS=all,-run_mrp_auto_draft_job -> redeploy
 ```
 
 | Fact | Value |
@@ -785,6 +879,6 @@ railway logs --service werco-worker --environment production
 | Declared crons | 12 |
 | Cron timezone | container-local; **UTC unless `TZ` is set** |
 | Sweeper bounds | 24 h max age, 2 min grace, 500 per 5-minute pass |
-| Cron selector | `WORKER_CRON_JOBS` — unset/`all` / `none` / comma-separated names |
+| Cron selector | `WORKER_CRON_JOBS` — unset/`all` / `none` / comma-separated names (allowlist) / `-name` exclusions (`all,-run_mrp_auto_draft_job`). The two shapes cannot be mixed; an unknown name, **negated or not**, is a hard startup error |
 | Worker start command | `arq app.worker.WorkerSettings` |
 | Worker healthcheck | **none, by design** — the worker serves no HTTP |

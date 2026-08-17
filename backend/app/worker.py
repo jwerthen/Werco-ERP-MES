@@ -24,13 +24,15 @@ is no separate enable step. Several of them WRITE (``run_mrp_auto_draft_job`` cr
 POs and work orders; ``check_late_work_orders_job`` emails one message per late WO to every
 supervisor and manager, with no age cap). ``WORKER_CRON_JOBS`` exists so a first boot can
 drain the enqueue-driven queue with no scheduled work at all; it defaults to "everything",
-i.e. exactly today's behavior.
+i.e. exactly today's behavior. To switch ONE cron off without freezing the rest into an
+allowlist, exclude it: ``WORKER_CRON_JOBS=all,-run_mrp_auto_draft_job``. See
+``select_cron_jobs`` for every accepted shape.
 """
 
 import logging
 import os
 from datetime import datetime
-from typing import List, Sequence
+from typing import Dict, List, Sequence, Set
 
 from arq import cron
 from arq.cron import CronJob
@@ -361,17 +363,66 @@ ALL_CRON_JOBS: List[CronJob] = [
 def select_cron_jobs(spec: str = None, available: Sequence[CronJob] = None) -> List[CronJob]:
     """Pick which crons this worker registers, from ``WORKER_CRON_JOBS``.
 
-    Values:
-      * unset / empty / ``"all"``  -> every cron in ``ALL_CRON_JOBS`` (TODAY'S BEHAVIOR --
-        this function is a no-op by default and enables nothing that was previously off).
-      * ``"none"``                 -> no crons at all. The worker still drains the
+    There are exactly two shapes. Either you name the crons you WANT (an allowlist), or you
+    start from everything and subtract the ones you DON'T (a denylist, ``-`` prefix). You
+    may not mix them -- see "Hard errors" below for why that is refused rather than guessed.
+
+    ALLOWLIST -- unchanged, byte for byte, from before exclusions existed:
+      * unset / empty / ``"all"``   -> every cron in ``ALL_CRON_JOBS``. TODAY'S BEHAVIOR:
+        this function is a no-op by default and enables nothing that was previously off.
+      * ``"none"``                  -> no crons at all. The worker still drains the
         enqueue-driven queue (notifications, webhooks, labels, completion signals), which is
         the safe shape for a first-ever boot: those jobs correspond to something a user
         actually did, whereas the crons enumerate accumulated state and fire in bulk.
-      * comma-separated job names  -> only those, enabled one at a time.
+      * ``"check_low_stock_job,poll_tracking_job"`` -> ONLY those two, in the order listed.
 
-    An unrecognised name is a hard error, not a silent skip: "I enabled the cron and nothing
-    happened" is the exact failure mode this whole module is trying to eliminate.
+    DENYLIST -- a ``-`` prefix EXCLUDES that cron from the full set:
+      * ``"all,-run_mrp_auto_draft_job"``  -> every cron EXCEPT the MRP auto-draft pass.
+      * ``"-run_mrp_auto_draft_job"``      -> identical. A spec made only of exclusions
+        implies ``all`` as its base; there is nothing else it could mean.
+      * ``"-cron:run_mrp_auto_draft_job"`` -> identical again. arq names crons
+        ``cron:<coroutine name>`` and the startup log prints that form, so BOTH spellings
+        are accepted for exclusions exactly as they already are for inclusions -- whichever
+        one the operator copied has to work.
+      * ``"-a,-b"`` -> subtracts both. Excluding every cron is legal and simply means
+        ``"none"``; it is not treated as a mistake.
+
+    The denylist exists so that switching ONE cron off does not require freezing the other
+    eleven into an allowlist. An allowlist silently drops any cron added to ``ALL_CRON_JOBS``
+    later -- "I enabled the cron and nothing happened", the exact failure mode this module
+    exists to eliminate, just delayed until the next release.
+
+    Order: the allowlist form preserves the order YOU listed; the denylist form is a
+    subtraction from the full set, so it follows ``ALL_CRON_JOBS`` order. Registration order
+    does not affect scheduling either way. Duplicates collapse instead of erroring, in both
+    forms -- ``"-x,-x"``, or ``"-x"`` together with ``"-cron:x"``, excludes x once.
+
+    Hard errors, all raised at import so the container dies loudly instead of quietly running
+    the wrong schedule against production data overnight:
+      * An unknown name, INCLUDING an unknown exclusion. Excluding a cron that does not exist
+        means the exclusion is not doing what you think and the job you meant to silence is
+        still armed -- so it is refused for the same reason an unknown inclusion is.
+      * Mixing inclusions with exclusions, e.g. ``"poll_tracking_job,-run_mrp_auto_draft_job"``.
+        That reads either as "only the tracking poll" or as "everything except the MRP pass",
+        and those differ by most of the schedule -- including crons that write draft POs and
+        work orders and crons that email every supervisor. Nothing in the string says which
+        was meant, so it is refused. ``all`` is the ONE positive token allowed alongside
+        exclusions, because there it is the explicit base rather than an inclusion.
+      * ``"none"`` together with an exclusion: there is nothing to subtract from.
+      * ``all`` or ``none`` used as one token among others with NOTHING excluded, e.g.
+        ``"all,poll_tracking_job"`` or the trailing-comma slip ``"all,"``. Both are whole-spec
+        keywords: each has to be the entire value. Long-standing behavior, called out here
+        because the denylist form teaches ``all`` as a base token and an operator will
+        reasonably reach for it.
+      * A value that is punctuation only (``","``), which names no cron at all. Until this
+        was refused it was the single input in the grammar that produced a wrong SET instead
+        of an error -- it armed ZERO crons and logged exactly what a deliberate ``"none"``
+        logs, so nothing distinguished a mangled value from an intentional one.
+
+    Case: ``all`` and ``none`` match case-insensitively (as they always have); job names match
+    case-SENSITIVELY. Surrounding whitespace is ignored everywhere -- around commas, around
+    each token, and between a ``-`` and the name it negates -- so both ``" all , -x "`` and
+    ``"all, - x"`` work.
     """
     jobs = list(ALL_CRON_JOBS if available is None else available)
     raw = (os.getenv("WORKER_CRON_JOBS") if spec is None else spec) or ""
@@ -380,26 +431,146 @@ def select_cron_jobs(spec: str = None, available: Sequence[CronJob] = None) -> L
         return jobs
     if wanted.lower() == "none":
         return []
-    names = [n.strip() for n in wanted.split(",") if n.strip()]
+    tokens = [t.strip() for t in wanted.split(",") if t.strip()]
+    if not tokens:
+        # Separators only: ",", ",,", " , ". The whole-spec keywords above have already
+        # returned, so the operator typed SOMETHING and none of it survived the split. This
+        # is the one malformed shape that used to produce a SET instead of an error: every
+        # check below was vacuously satisfied, the allowlist path looped over an empty list,
+        # and the worker armed ZERO crons while logging the same "none armed" line as a
+        # deliberate WORKER_CRON_JOBS=none. MRP, the late-WO emails and the 5-minute
+        # notification relay sweeper would all stop with no receipt anywhere distinguishing
+        # "asked for nothing" from "value got mangled". Refused rather than mapped onto
+        # 'all' or 'none': picking one is the guess this function declines to make everywhere
+        # else, and the two guesses differ by the entire schedule.
+        raise ValueError(
+            f"WORKER_CRON_JOBS={wanted!r} is punctuation with no job names in it. Use 'all', "
+            f"'none', a comma-separated subset ('a,b'), or 'all,-<job>' to arm everything but one."
+        )
+
     # arq names cron jobs "cron:<coroutine name>". Accept either spelling so the value you
-    # copy out of the startup log and the value you copy out of worker.py both work.
-    by_name = {}
+    # copy out of the startup log and the value you copy out of worker.py both work. Both
+    # spellings map to the SAME CronJob object, which is what makes the id()-keyed de-dup
+    # below collapse "x" and "cron:x" instead of treating them as two crons.
+    by_name: Dict[str, CronJob] = {}
     for job in jobs:
         by_name[job.name] = job
         by_name[job.name.removeprefix("cron:")] = job
-    unknown = [n for n in names if n not in by_name]
+
+    excluded_tokens = [t for t in tokens if t.startswith("-")]
+    positive_tokens = [t for t in tokens if not t.startswith("-")]
+
+    def excluded_job_name(token: str) -> str:
+        """The job name inside an exclusion token: peel the '-' THEN strip.
+
+        Tokens are already stripped at their edges, but that happens BEFORE the '-' is
+        peeled, so a space the operator left after the dash for legibility -- ``"all, -
+        run_mrp_auto_draft_job"`` -- stays glued to the front of the name and turns a
+        correct exclusion into a bogus "unknown cron job" crash loop. The docstring promises
+        whitespace is ignored everywhere; this is what makes that true rather than
+        almost-true. Used by BOTH the validation below and the subtraction at the end -- they
+        must peel identically, or the validator would bless a token the resolver then cannot
+        find (a KeyError at import instead of a readable ValueError).
+        """
+        return token.removeprefix("-").strip()
+
+    # "all"/"none" are keywords among a list of tokens ONLY when something is being
+    # subtracted. In a plain positive list they are not crons and never were:
+    # "all,poll_tracking_job" has always been an error and still is, because that spec is
+    # just as ambiguous as the mixed one and nobody is relying on it working. They get their
+    # OWN error rather than being reported as unknown job names -- see below.
+    stop_tokens: List[str] = []
+    keyword_tokens: List[str] = []
+    included_tokens: List[str] = []
+    for token in positive_tokens:
+        lowered = token.lower()
+        if lowered in ("all", "none"):
+            if not excluded_tokens:
+                keyword_tokens.append(token)  # a keyword used where only names are legal
+            elif lowered == "none":
+                stop_tokens.append(token)  # contradicts the subtraction; reported below
+            # else: 'all' alongside exclusions is the explicit base, not a cron to arm.
+            continue
+        included_tokens.append(token)
+
+    # Names are validated FIRST and identically in both shapes -- a typo is a typo whether it
+    # is being armed or silenced, and it is the most actionable thing to report. Deliberately
+    # ahead of the keyword error below: in "all,<mistyped>" the mistyped name is the defect,
+    # so it must be what the message leads with. The realistic case is an en-dash paste --
+    # "all,–run_mrp_auto_draft_job" copied out of a doc that auto-substituted the hyphen --
+    # where the en-dash token is not an exclusion at all and 'all' is merely collateral.
+    unknown = [t for t in included_tokens if t not in by_name]
+    unknown += [t for t in excluded_tokens if excluded_job_name(t) not in by_name]
     if unknown:
         known = sorted({job.name.removeprefix("cron:") for job in jobs})
         raise ValueError(
-            f"WORKER_CRON_JOBS names unknown cron job(s): {', '.join(sorted(unknown))}. "
-            f"Known jobs: {', '.join(known)}. Use 'all', 'none', or a comma-separated subset."
+            f"WORKER_CRON_JOBS names unknown cron job(s): {', '.join(sorted(set(unknown)))}. "
+            f"Known jobs: {', '.join(known)}. Use 'all', 'none', or a comma-separated subset "
+            f"to arm exactly those; prefix a name with '-' to exclude it from the full set "
+            f"(e.g. 'all,-run_mrp_auto_draft_job'). An excluded name must be a known job too: "
+            f"excluding one that does not exist means the cron you meant to silence is still armed."
         )
+
+    if keyword_tokens:
+        # Reached by "all,", ",all", "none," and "all,poll_tracking_job". Behavior is
+        # unchanged -- all four have always been refused -- but the message used to call
+        # 'all' an unknown CRON JOB and then, in the same sentence, tell the operator to use
+        # 'all'. Staring at WORKER_CRON_JOBS=all, that reads as "'all' is unknown; use 'all'".
+        # A trailing comma left behind while deleting an exclusion is the likeliest way to
+        # land here, so the comma is named explicitly.
+        raise ValueError(
+            f"WORKER_CRON_JOBS={wanted!r} uses {', '.join(sorted(set(keyword_tokens)))} as a cron "
+            f"NAME, but 'all' and 'none' are whole-spec keywords: each one has to be the entire "
+            f"value. A stray leading or trailing comma is the usual cause -- 'all,' splits into "
+            f"the token 'all' and nothing else -- so delete the comma. To arm a subset, list only "
+            f"the names you want ('a,b'); to arm everything except one, use 'all,-<job>'."
+        )
+
+    if stop_tokens:
+        # Any inclusions are named too: fixing the 'none' only to be told on the NEXT deploy
+        # that the spec also mixes shapes is two crash-loop round trips for one bad value.
+        also_mixed = f" (it also names cron job(s) to include: {', '.join(included_tokens)})" if included_tokens else ""
+        raise ValueError(
+            f"WORKER_CRON_JOBS={wanted!r} combines 'none' with exclusion(s) "
+            f"({', '.join(excluded_tokens)}){also_mixed}. 'none' already arms no crons, so there is "
+            f"nothing to subtract from. Use 'none' on its own to arm nothing, or "
+            f"'all,-<job>' to arm everything except <job>."
+        )
+
+    if excluded_tokens and included_tokens:
+        raise ValueError(
+            f"WORKER_CRON_JOBS={wanted!r} mixes cron job(s) to INCLUDE "
+            f"({', '.join(included_tokens)}) with exclusion(s) ({', '.join(excluded_tokens)}). "
+            f"That could mean 'arm only {included_tokens[0]}' or 'arm everything except "
+            f"{excluded_tokens[0].removeprefix('-')}' -- those differ by most of the schedule, "
+            f"and several crons write to production data, so it is refused rather than guessed. "
+            f"Use only names ('a,b') to arm exactly those, or only exclusions ('all,-a' or "
+            f"'-a') to arm everything else."
+        )
+
+    if excluded_tokens:
+        # A subtraction from the full set, so the result keeps ALL_CRON_JOBS order rather than
+        # anything implied by the operator's string.
+        #
+        # Keyed by resolved NAME, not by id(). arq derives a cron's name from its coroutine
+        # ("cron:" + __qualname__), so scheduling one coroutine twice -- a morning and an
+        # evening MRP pass, a second tracking poll, an ordinary future edit -- produces two
+        # CronJob objects carrying the IDENTICAL name, and by_name keeps only the last of
+        # them. An id()-keyed subtraction would then drop that one and leave the OTHER
+        # instance armed, while startup()'s "SUPPRESSED by WORKER_CRON_JOBS" line still
+        # announced the cron was off: two contradictory lines in one startup log, with the
+        # reassuring one wrong and a writing cron still firing. Subtracting by name removes
+        # every instance, so "off" means off. Names also collapse the "-x" / "-cron:x"
+        # spellings and a repeated exclusion for free, which is why no id()-keyed de-dup is
+        # needed here the way it is on the allowlist path below.
+        excluded_names = {by_name[excluded_job_name(t)].name for t in excluded_tokens}
+        return [job for job in jobs if job.name not in excluded_names]
+
     # De-duplicate by identity, preserving order: a name listed twice -- or once in each
-    # spelling -- must not register the same cron twice. (CronJob is an unhashable dataclass,
-    # hence id() rather than a set of the objects.)
+    # spelling -- must not register the same cron twice.
     selected: List[CronJob] = []
-    seen: set = set()
-    for name in names:
+    seen: Set[int] = set()
+    for name in included_tokens:
         job = by_name[name]
         if id(job) not in seen:
             seen.add(id(job))
