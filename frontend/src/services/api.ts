@@ -524,9 +524,11 @@ class ApiService {
   }
 
   // Auth
-  async login(email: string, password: string): Promise<LoginResponse> {
+  // `identifier` is an email OR an employee ID -- /auth/login resolves either, and the
+  // OAuth2 password-flow field it travels in is already called `username`, not `email`.
+  async login(identifier: string, password: string): Promise<LoginResponse> {
     const formData = new URLSearchParams();
-    formData.append('username', email);
+    formData.append('username', identifier);
     formData.append('password', password);
     
     const response = await this.api.post<LoginResponse>('/auth/login', formData, {
@@ -551,7 +553,10 @@ class ApiService {
   }
 
   async registerPublic(data: {
-    email: string;
+    // Email and employee_id are each individually optional, but the caller must
+    // supply at least one -- the backend mints a synthetic address for a
+    // badge-only registrant. Register.tsx enforces the "at least one" rule.
+    email?: string;
     first_name: string;
     last_name: string;
     employee_id?: string;

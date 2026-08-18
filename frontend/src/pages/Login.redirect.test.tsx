@@ -39,7 +39,7 @@ const signInAs = async (role: string) => {
     </MemoryRouter>
   );
 
-  fireEvent.change(screen.getByPlaceholderText('you@werco.com'), { target: { value: 'user@werco.com' } });
+  fireEvent.change(screen.getByPlaceholderText(/you@werco\.com/), { target: { value: 'user@werco.com' } });
   fireEvent.change(screen.getByPlaceholderText('Enter your password'), { target: { value: 'Password123!' } });
   fireEvent.click(screen.getByRole('button', { name: /sign in/i }));
 
@@ -69,7 +69,7 @@ describe('Login default landing redirect', () => {
         <Login />
       </MemoryRouter>
     );
-    fireEvent.change(screen.getByPlaceholderText('you@werco.com'), { target: { value: 'user@werco.com' } });
+    fireEvent.change(screen.getByPlaceholderText(/you@werco\.com/), { target: { value: 'user@werco.com' } });
     fireEvent.change(screen.getByPlaceholderText('Enter your password'), { target: { value: 'Password123!' } });
     fireEvent.click(screen.getByRole('button', { name: /sign in/i }));
 

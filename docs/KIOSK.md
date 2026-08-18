@@ -76,6 +76,17 @@ URL is all the station setup there is.
   into a token mint.
 - Badge = identity: one operator per login, no shared accounts. Backend error details
   (invalid ID, locked account, ambiguous badge → 409) are shown verbatim on the badge screen.
+- **A badge does not always resolve to a row — two outcomes are a 409, not a login.** The lookup
+  matches `employee_id` exactly first, then falls back to 4-digit badge normalization, and that
+  fallback reads at most **500** candidate rows ordered by `users.id`. Two or more rows normalizing
+  to the scanned badge is the long-standing *"Employee ID is not unique. Please contact an
+  administrator."* A candidate set **larger than the cap** is refused too, with its own wording —
+  *"Employee ID could not be resolved. Please contact an administrator."* — because a partial window
+  cannot establish uniqueness, and answering from one could clock a scan in against a **different**
+  person's account. Both are admin data problems, not scanner faults: only a pathological badge set
+  reaches the cap, and the fix is to clean up the duplicate badges (`PUT /users/{id}`), not to
+  rescan. Same rule, one implementation, on `POST /auth/employee-login`, the crew station's badge
+  mint, and the employee-ID path of `POST /auth/login`.
 - Rate limit: **10/minute per IP** (raised from 3/minute for the Foundry redesign — a shift
   change cycles several badges through one shared station within a minute; still tight enough
   to keep online employee-id guessing impractical).
@@ -1098,7 +1109,17 @@ every station-login failure write tamper-evident audit rows.
   crew station keeps its own work-center queue read, so operators still see the `RUN n` chips.
   Badge lookup is fenced to the station's company; unknown / inactive / locked / foreign-tenant
   badges are a uniform **401 "Invalid badge"**. Mints and failures are audited
-  (`KIOSK_BADGE_TOKEN_ISSUED` / `KIOSK_BADGE_TOKEN_FAILED`).
+  (`KIOSK_BADGE_TOKEN_ISSUED` / `KIOSK_BADGE_TOKEN_FAILED`). The one outcome outside that uniform
+  401 is a **409** from the badge lookup itself — an ambiguous badge, or a candidate set past the
+  500-row scan cap (see [Badge login](#badge-login)); it is raised before the 401 checks and
+  discloses nothing about whether an account exists. **Both 409 causes now write a
+  `KIOSK_BADGE_TOKEN_FAILED` row too**, under the same existing action (the cause is carried in
+  `error_message`, so no third action string was invented). The row is **station-keyed** like every
+  other row this route writes — `resource_identifier` is the station label, and the **scanned badge
+  is deliberately not logged**, since a failed scan may be a mistyped credential fragment. The
+  station, its company and the cause are what an admin needs to find the duplicate rows. Unlike the
+  unauthenticated login refusals, these rows carry the station's `company_id`, so they **are**
+  visible in the Audit Log screen.
 
 All labor mutations then hit the **existing** shop-floor endpoints with the operator token, so
 the badge-identified **operator — never the station — is the audit actor**, and tenant scoping,

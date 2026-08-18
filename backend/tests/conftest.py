@@ -204,6 +204,42 @@ def _reset_rate_limiter():
     yield
 
 
+@pytest.fixture(autouse=True)
+def _reset_login_throttles():
+    """Clear every per-IP FAILED-login counter before and after each test.
+
+    ``app/core/login_throttle.py`` holds one ``FailedLoginThrottle`` per unauthenticated
+    login route (``/auth/employee-login``, ``/auth/login``), each a MODULE-LEVEL singleton
+    whose memory-mode store lives for the life of the worker process — so a test that
+    spends a route's budget leaves a 429 armed for whatever unrelated test the xdist worker
+    picks up next, keyed on the fixed TestClient address they all share. Same hazard the
+    slowapi reset above exists for, one layer down.
+
+    EVERY instance is reset, discovered by walking the module rather than by name. Naming
+    them is how this leaked the first time: a suite-local fixture reset the kiosk counter
+    only, so when ``/auth/login`` got its own instance the new counter accumulated across a
+    whole file and produced failures that reproduced in file order and vanished when the
+    test was run alone. Walking the module isolates the NEXT route's throttle on the day it
+    is added rather than the day it corrupts somebody's test.
+
+    Redis keys are deliberately untouched (``reset()`` clears the in-memory store and drops
+    the client); the suite runs in memory mode and production never calls this.
+    """
+    try:
+        from app.core import login_throttle
+
+        throttles = [
+            value for value in vars(login_throttle).values() if isinstance(value, login_throttle.FailedLoginThrottle)
+        ]
+    except Exception:  # pragma: no cover - import shape changed
+        throttles = []
+    for throttle in throttles:
+        throttle.reset()
+    yield
+    for throttle in throttles:
+        throttle.reset()
+
+
 @pytest.fixture(scope="function")
 def db_session() -> Generator[Session, None, None]:
     """Create a fresh database session for each test."""

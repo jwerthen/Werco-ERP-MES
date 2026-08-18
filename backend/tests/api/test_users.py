@@ -16,6 +16,7 @@ from app.models.audit_log import AuditLog
 from app.models.company import Company
 from app.models.user import User, UserRole
 from app.schemas.user import validate_password_strength
+from app.services.user_identity import MAX_IDENTIFIER_CANDIDATES, SYNTHETIC_EMAIL_DOMAIN
 
 
 def _committed_user_audit_rows(db: Session, *, resource_id: int, action: str):
@@ -40,6 +41,42 @@ def _committed_user_audit_rows(db: Session, *, resource_id: int, action: str):
         .order_by(AuditLog.sequence_number.desc())
         .all()
     )
+
+
+def _seed_every_minted_spelling(db: Session, employee_id: str, *, company_id: int = 1) -> None:
+    """Commit users occupying every synthetic address the mint can reach for ``employee_id``.
+
+    ``emp-<badge>@users.werco.com`` plus ``-2`` ... up to the walk's cap -- i.e. the whole
+    candidate set, so the walk exhausts for REAL reasons rather than through a patched
+    predicate. The importer dedups against a preloaded PER-COMPANY set, so these rows have
+    to sit in the importing admin's company to be seen at all.
+
+    They never authenticate, so they carry a literal hash rather than paying bcrypt a
+    hundred times.
+    """
+    local = employee_id.lower()
+    spellings = [f"emp-{local}@{SYNTHETIC_EMAIL_DOMAIN}"] + [
+        f"emp-{local}-{n}@{SYNTHETIC_EMAIL_DOMAIN}" for n in range(2, MAX_IDENTIFIER_CANDIDATES + 1)
+    ]
+    assert len(spellings) == MAX_IDENTIFIER_CANDIDATES
+    db.add_all(
+        [
+            User(
+                email=address,
+                employee_id=f"MINTHOLD-{index:05d}",
+                first_name="Address",
+                last_name="Holder",
+                hashed_password="$2b$12$abcdefghijklmnopqrstuv",
+                role=UserRole.OPERATOR,
+                is_active=True,
+                is_superuser=False,
+                company_id=company_id,
+                failed_login_attempts=0,
+            )
+            for index, address in enumerate(spellings)
+        ]
+    )
+    db.commit()
 
 
 @pytest.mark.api
@@ -1028,6 +1065,49 @@ class TestPasswordPolicyEnforcement:
         assert len(data["errors"]) == 1
         assert "Weak password" in data["errors"][0]["reason"]
         assert db_session.query(User).filter_by(employee_id="EMP-WEAK-Q2").count() == 0
+
+    def test_import_users_csv_row_whose_email_cannot_be_minted_is_ONE_BAD_ROW(
+        self, client: TestClient, admin_headers, db_session
+    ):
+        """A badge whose every synthetic address is taken fails its ROW -- not the import.
+
+        A row carrying no email gets one minted (``emp-<badge>@users.werco.com``), and the
+        mint is a BOUNDED walk: when every spelling it can reach is already held it raises
+        ``IdentifierDerivationExhausted`` rather than handing the insert a colliding
+        address. Uncaught, that exception escapes the row loop and 500s the whole request --
+        abandoning the rows the loop has ALREADY COMMITTED (each accepted row commits
+        individually) with no response naming what landed and what did not, which is the one
+        thing an operator re-running a partial import needs.
+
+        So the ORDER of the CSV is the assertion: the unservable row comes FIRST, and the
+        good row after it must still be created. A test with the rows the other way round
+        would pass against a build that aborts.
+        """
+        _seed_every_minted_spelling(db_session, "MINTLOOP")
+        csv_content = (
+            "employee_id,first_name,last_name,role,password\n"
+            "MINTLOOP,Mint,Loop,operator,\n"
+            "EMP-AFTER-LOOP,After,Row,operator,\n"
+        )
+
+        response = client.post(
+            "/api/v1/users/import-csv",
+            headers=admin_headers,
+            files={"file": ("users.csv", csv_content, "text/csv")},
+        )
+
+        assert response.status_code == status.HTTP_200_OK, response.text
+        data = response.json()
+        assert data["total_rows"] == 2
+        assert data["created_count"] == 1, "the import must finish, not abort on the unservable row"
+        assert len(data["errors"]) == 1
+        error = data["errors"][0]
+        assert error["employee_id"] == "MINTLOOP"
+        assert error["reason"] == "Could not derive a unique email address for this employee ID"
+
+        # The row that could not be served wrote nothing; the row after it did.
+        assert db_session.query(User).filter_by(employee_id="MINTLOOP").count() == 0
+        assert db_session.query(User).filter_by(employee_id="EMP-AFTER-LOOP").count() == 1
 
 
 @pytest.mark.api
