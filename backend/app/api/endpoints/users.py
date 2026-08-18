@@ -1,4 +1,3 @@
-import re
 import secrets
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -24,7 +23,11 @@ from app.schemas.user import validate_password_strength
 from app.services.audit_service import AuditService
 from app.services.import_service import ImportFileError, parse_import_file
 from app.services.notification_catalog import ALL_CHANNELS, CATALOG, CHANNEL_SMS, get_entry
-from app.services.notification_dispatch import channels_from_pref, get_preference_row
+from app.services.notification_dispatch import (
+    channels_from_pref,
+    email_deliverable_for_user,
+    get_preference_row,
+)
 from app.services.sms_content import build_test_sms_body
 from app.services.sms_service import (
     SMS_TEST_HOURLY_CAP_PER_USER,
@@ -39,6 +42,7 @@ from app.services.sms_service import (
     send_sms,
     sms_configured,
 )
+from app.services.user_identity import IdentifierDerivationExhausted, synthetic_email_for_employee_id
 
 router = APIRouter()
 
@@ -164,17 +168,18 @@ class UserCsvImportResponse(BaseModel):
 
 
 def _generated_email(employee_id: str, existing_emails: set[str]) -> str:
-    local_part = re.sub(r"[^a-z0-9._-]", "", employee_id.lower())
-    if not local_part:
-        local_part = "employee"
+    """Mint the synthetic address for an imported row that carries no email.
 
-    base = f"emp-{local_part}"
-    candidate = f"{base}@users.werco.com"
-    suffix = 2
-    while candidate in existing_emails:
-        candidate = f"{base}-{suffix}@users.werco.com"
-        suffix += 1
-    return candidate
+    The shape lives in ``services/user_identity`` (one shape, three seams); the only
+    thing this importer owns is the dedup SCOPE. ``existing_emails`` is the preloaded,
+    lowercased, PER-COMPANY set the row loop keeps up to date, so a candidate is
+    resolved without a DB round trip per attempt.
+
+    Raises ``IdentifierDerivationExhausted`` when the bounded walk finds no free
+    spelling. The row loop catches it PER ROW -- see the call site for why an uncaught
+    one would abort a bulk import halfway through.
+    """
+    return synthetic_email_for_employee_id(employee_id, lambda candidate: candidate in existing_emails)
 
 
 def _generate_system_password() -> str:
@@ -212,14 +217,29 @@ def _normalized_phone_or_400(raw: Optional[str]) -> Optional[str]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-def _effective_preferences(pref: Optional[NotificationPreference]) -> Dict[str, Dict[str, bool]]:
+def _effective_preferences(pref: Optional[NotificationPreference], user: User) -> Dict[str, Dict[str, bool]]:
     """Resolve every catalog event's channels exactly as the dispatcher would.
 
     Uses the dispatcher's own ``channels_from_pref`` so the settings UI and the delivery
     path can never disagree. Read-only: it NEVER creates a preference row (§3.7/§9.8).
+
+    ``user`` is required, not optional, and it is here for exactly one reason:
+    ``channels_from_pref`` resolves a mandatory-EMAIL event differently for a recipient
+    whose address cannot receive mail (it forces IN_APP on beside EMAIL, so the "can never
+    be fully muted" guarantee lands somewhere readable). Left at the function's ``True``
+    default this screen rendered a HYPOTHETICAL recipient with a working mailbox: a
+    badge-only user who muted ``account.locked`` was shown ``['email']`` while the
+    dispatcher resolved ``['email', 'in_app']`` and filed an in-app row — the screen
+    contradicting the sender, for the recipient least able to notice. Deliverability is
+    a property of THIS user, so the caller has to hand the user over; a defaulted
+    parameter here is how the two halves drifted in the first place.
     """
+    email_deliverable = email_deliverable_for_user(user)
     return {
-        event_key: {channel: channel in channels_from_pref(pref, entry) for channel in sorted(ALL_CHANNELS)}
+        event_key: {
+            channel: channel in channels_from_pref(pref, entry, email_deliverable=email_deliverable)
+            for channel in sorted(ALL_CHANNELS)
+        }
         for event_key, entry in CATALOG.items()
     }
 
@@ -357,7 +377,7 @@ def get_my_notification_preferences(
     pref = get_preference_row(db, current_user.id)
     allow_sms = db.query(Company.allow_sms_egress).filter(Company.id == company_id).scalar()
     return NotificationPreferencesResponse(
-        preferences=_effective_preferences(pref),
+        preferences=_effective_preferences(pref, current_user),
         has_saved_preferences=pref is not None,
         phone=current_user.phone,
         sms_egress_enabled=bool(allow_sms),
@@ -442,7 +462,7 @@ def update_my_notification_preferences(
 
     allow_sms = db.query(Company.allow_sms_egress).filter(Company.id == company_id).scalar()
     return NotificationPreferencesResponse(
-        preferences=_effective_preferences(pref),
+        preferences=_effective_preferences(pref, current_user),
         has_saved_preferences=True,
         phone=current_user.phone,
         sms_egress_enabled=bool(allow_sms),
@@ -768,7 +788,28 @@ async def import_users_csv(
                 continue
 
             if not email:
-                email = _generated_email(employee_id, existing_emails)
+                try:
+                    email = _generated_email(employee_id, existing_emails)
+                except IdentifierDerivationExhausted:
+                    # ONE BAD ROW, NOT A DEAD IMPORT. The mint is a bounded walk, so a
+                    # badge whose every synthetic spelling is already held raises rather
+                    # than returning a colliding address. Uncaught, that exception escapes
+                    # the row loop and 500s the whole request -- abandoning the rows this
+                    # loop has ALREADY COMMITTED (each accepted row commits individually,
+                    # below) with no response naming what landed and what did not, which
+                    # is the one thing an operator re-running a partial import needs.
+                    # Recorded through the same per-row error channel as every other
+                    # unusable row instead, so the import finishes and the response says
+                    # exactly which row could not be served.
+                    errors.append(
+                        UserCsvImportError(
+                            row=row_number,
+                            employee_id=employee_id,
+                            email=None,
+                            reason="Could not derive a unique email address for this employee ID",
+                        )
+                    )
+                    continue
 
             email_key = email.lower()
             if email_key in existing_emails:

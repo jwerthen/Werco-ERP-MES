@@ -94,6 +94,11 @@ export default function Register() {
     e.preventDefault();
     setError('');
 
+    if (!email.trim() && !employeeId.trim()) {
+      setError('Enter an email address or an employee ID.');
+      return;
+    }
+
     if (password !== confirmPassword) {
       setError('Passwords do not match.');
       return;
@@ -104,7 +109,7 @@ export default function Register() {
       const result = await api.registerPublic({
         first_name: firstName.trim(),
         last_name: lastName.trim(),
-        email: email.trim(),
+        ...(email.trim() ? { email: email.trim() } : {}),
         ...(employeeId.trim() ? { employee_id: employeeId.trim() } : {}),
         password,
       });
@@ -392,6 +397,14 @@ export default function Register() {
                 </div>
               </div>
 
+              {/* Sign-in identifier rule: email OR employee ID (at least one). Wired to
+                  BOTH inputs via aria-describedby -- neither field carries a required
+                  marker any more, so this sentence is the only statement of the rule and
+                  a screen-reader user would otherwise never hear it. */}
+              <p id="identifier-rule" className="text-xs text-slate-400">
+                Enter your email, your employee ID, or both &mdash; whichever you use to sign in.
+              </p>
+
               {/* Email field */}
               <div className="space-y-2">
                 <label htmlFor="email" className="block text-sm font-medium text-slate-300">
@@ -408,8 +421,8 @@ export default function Register() {
                   <input
                     id="email"
                     type="email"
-                    required
                     aria-label="Email Address"
+                    aria-describedby="identifier-rule"
                     value={email}
                     onChange={e => setEmail(e.target.value)}
                     onFocus={() => setFocusedField('email')}
@@ -421,10 +434,10 @@ export default function Register() {
                 </div>
               </div>
 
-              {/* Employee ID field (optional) */}
+              {/* Employee ID field */}
               <div className="space-y-2">
                 <label htmlFor="employeeId" className="block text-sm font-medium text-slate-300">
-                  Employee ID <span className="text-slate-400 font-normal">(optional)</span>
+                  Employee ID
                 </label>
                 <div className="relative">
                   <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
@@ -437,13 +450,14 @@ export default function Register() {
                   <input
                     id="employeeId"
                     type="text"
-                    aria-label="Employee ID (optional)"
+                    aria-label="Employee ID"
+                    aria-describedby="identifier-rule"
                     value={employeeId}
                     onChange={e => setEmployeeId(e.target.value.replace(/[^A-Za-z0-9\-_]/g, '').slice(0, 50))}
                     onFocus={() => setFocusedField('employeeId')}
                     onBlur={() => setFocusedField(null)}
                     className="du-input du-input-bordered w-full h-12 pl-12 pr-4 bg-fd-panel"
-                    placeholder="Auto-generated if left blank"
+                    placeholder="Badge number (required if no email)"
                     autoComplete="off"
                   />
                 </div>
@@ -485,7 +499,8 @@ export default function Register() {
                   </button>
                 </div>
                 <p className="text-xs text-slate-400">
-                  Min 12 characters with uppercase, lowercase, number, and special character
+                  Min 12 characters. Uppercase, numbers, and symbols are not required &mdash; but common
+                  words and easy-to-guess patterns are rejected.
                 </p>
               </div>
 

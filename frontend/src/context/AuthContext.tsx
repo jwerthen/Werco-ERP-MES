@@ -13,7 +13,9 @@ interface AuthContextType {
   isAuthenticated: boolean;
   isLoading: boolean;
   sessionWarning: boolean;
-  login: (email: string, password: string) => Promise<void>;
+  // `identifier` is an email OR an employee ID -- POST /auth/login resolves either,
+  // so this is deliberately not called `email`.
+  login: (identifier: string, password: string) => Promise<void>;
   loginWithEmployeeId: (employeeId: string) => Promise<void>;
   logout: () => void;
   logoutWithEmployeeId: (employeeId: string) => Promise<void>;
@@ -188,8 +190,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     restoreSession();
   }, [persistUser]);
 
-  const login = async (email: string, password: string) => {
-    const response = await api.login(email, password);
+  const login = async (identifier: string, password: string) => {
+    const response = await api.login(identifier, password);
     // Use setTokens for new refresh token flow, fallback to setToken for backwards compatibility
     if (response.refresh_token && response.expires_in) {
       api.setTokens(response.access_token, response.refresh_token, response.expires_in);

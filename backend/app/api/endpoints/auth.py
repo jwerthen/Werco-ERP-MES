@@ -1,7 +1,7 @@
 import hmac
 import re
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
@@ -18,7 +18,7 @@ from app.api.deps import (
     require_role,
 )
 from app.core.config import settings
-from app.core.login_throttle import client_ip_from_request, employee_login_throttle
+from app.core.login_throttle import client_ip_from_request, employee_login_throttle, password_login_throttle
 from app.core.security import (
     create_access_token,
     create_refresh_token,
@@ -28,6 +28,7 @@ from app.core.security import (
     verify_refresh_token,
 )
 from app.db.database import get_db
+from app.models.audit_log import AuditLog
 from app.models.company import Company
 from app.models.kiosk_station import KioskStation
 from app.models.user import User, UserRole
@@ -62,8 +63,52 @@ from app.services.display_token_service import (
     reissue_setup_code,
     revoke_display_token,
 )
+from app.services.user_identity import (
+    LEGACY_RESERVED_EMAIL_DOMAIN,
+    SYNTHETIC_EMAIL_DOMAIN,
+    IdentifierDerivationExhausted,
+    employee_id_from_email,
+    is_synthetic_email,
+    synthetic_email_for_employee_id,
+)
 
 router = APIRouter()
+
+
+# What ``audit_logs.resource_identifier`` can actually hold, READ OFF THE MODEL rather than
+# repeated as a literal. Widening the column must widen this guard with it: a hard-coded
+# 255 left behind by a migration would keep truncating values the column had grown to hold,
+# and nothing would fail -- the rows would just quietly stop naming what was tried.
+# ``or 255`` is a floor for a dialect that reports no length, never the source of truth.
+_AUDIT_IDENTIFIER_MAX_LENGTH = AuditLog.__table__.c.resource_identifier.type.length or 255
+
+# Appended to anything this module shortens, and it is kept INSIDE the limit so the marker
+# itself can never be what overruns the column. Same marker /auth/login's over-length shape
+# refusal already writes, so the two truncations read alike to whoever queries the table.
+_AUDIT_TRUNCATION_MARKER = "…[truncated]"
+
+
+def _bounded_audit_value(value: str) -> str:
+    """Shorten ``value`` to what ``audit_logs.resource_identifier`` holds, marked as cut.
+
+    A value that already fits comes back BYTE-IDENTICAL -- every existing audit row keeps
+    the identifier it had, and only a genuinely over-long one changes shape.
+
+    Why this is central rather than at the ~15 call sites: a call site knows what it is
+    logging, never how wide the column is, and it cannot see the ``employee-id:`` prefix
+    :func:`log_auth_event` will add. So the bound has to be applied to the FINAL composed
+    value, here. On Postgres the failure mode this prevents is not cosmetic: an over-long
+    INSERT raises ``StringDataRightTruncation`` -> ``DataError``, which both
+    ``AuditService.log`` and this module's ``except Exception`` swallow -- and the poisoned
+    session then fails the caller's ``db.commit()``, so the attempt loses its audit row AND
+    the request 500s. SQLite ignores VARCHAR widths, so no test on this suite can see it.
+    """
+    if len(value) <= _AUDIT_IDENTIFIER_MAX_LENGTH:
+        return value
+    keep = _AUDIT_IDENTIFIER_MAX_LENGTH - len(_AUDIT_TRUNCATION_MARKER)
+    if keep <= 0:  # pragma: no cover - only reachable if the column is narrowed below 12
+        return value[:_AUDIT_IDENTIFIER_MAX_LENGTH]
+    return value[:keep] + _AUDIT_TRUNCATION_MARKER
 
 
 def log_auth_event(
@@ -74,10 +119,37 @@ def log_auth_event(
     success: bool = True,
     request: Request = None,
     error: str = None,
+    employee_id: str = None,
 ):
-    """Log authentication events for CMMC compliance using AuditService"""
+    """Log authentication events for CMMC compliance using AuditService.
+
+    ``employee_id`` exists because a badge-only registrant has no address to key on, and
+    the badge must NOT be smuggled through ``email=``: that lands it in ``extra_data``
+    under a key named "email", and an audit row can never be corrected afterwards -- the
+    008/060 triggers refuse UPDATE and DELETE, and invariant 2 forbids backfilling. So a
+    consumer filtering ``extra_data->>'email'`` for addresses would silently drop every
+    badge-only row, which are exactly the rows the anti-enumeration design relies on
+    being visible. Pass identifiers under their own names; the ``employee-id:`` prefix on
+    ``resource_identifier`` keeps a badge from being read back as an address.
+
+    EVERY value this writes is bounded here (``_bounded_audit_value``), on the COMPOSED
+    string rather than at the caller: the ``employee-id:`` prefix is 12 characters a call
+    site cannot account for, so a badge that /auth/login legitimately accepts at its own
+    255-character bound still overruns ``audit_logs.resource_identifier`` once prefixed --
+    and the 429 throttle branch logs the submitted badge BEFORE that bound has even run.
+    The ``extra_data`` copies are bounded too, so the row can never be a storage-
+    amplification vector by the back door.
+    """
     try:
-        resource_identifier = email or (user.email if user else None)
+        raw_identifier = (
+            email or (f"employee-id:{employee_id}" if employee_id else None) or (user.email if user else None)
+        )
+        resource_identifier = _bounded_audit_value(raw_identifier) if raw_identifier else None
+        identifiers = {}
+        if email and not user:
+            identifiers["email"] = _bounded_audit_value(email)
+        if employee_id:
+            identifiers["employee_id"] = _bounded_audit_value(employee_id)
         audit_service = AuditService(db, user, request)
         audit_service.log(
             action=action,
@@ -87,13 +159,23 @@ def log_auth_event(
             description=f"{action} attempt for {resource_identifier or 'unknown'}",
             success=success,
             error_message=error,
-            extra_data={"email": email} if email and not user else None,
+            extra_data=identifiers or None,
         )
     except Exception as e:
         # Don't let audit logging failures break authentication
         import logging
 
         logging.warning(f"Failed to log auth event: {e}")
+
+
+# Longest ``form_data.username`` ``/auth/login`` will look at. This is the ``users.email``
+# column width (``String(255)``, models/user.py) and is chosen as the bound BECAUSE it is:
+# email is the widest identifier column an account can hold (``employee_id`` is
+# ``String(50)``), so nothing longer can match a stored row on either resolver. The check
+# therefore costs no legitimate sign-in while keeping an unauthenticated, form-encoded
+# route -- the one endpoint ``limit_json_body_size`` does not cover -- from choosing how
+# many bytes the app lowercases, regex-scans and binds into a query. See the call site.
+MAX_LOGIN_IDENTIFIER_LENGTH = 255
 
 
 @router.post("/login", response_model=Token, summary="User login")
@@ -106,8 +188,16 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db
     **Account lockout**: After 5 failed attempts, account is locked for 30 minutes (CMMC compliance).
 
     **Request body** (form data):
-    - username: User's email address
+    - username: the user's email address, OR their employee ID / badge number
     - password: User's password
+
+    **Which identifier was submitted is decided by "@"** -- an email address always
+    contains one and an employee ID (letters, digits, hyphen, underscore) never can, so
+    the split is deterministic and there is no fallback between the two lookups. Both
+    lookups are install-wide and both refuse a 409 rather than guess when the identifier
+    resolves to accounts in more than one company. The password is verified either way.
+    ``POST /auth/employee-login`` remains the separate passwordless badge route and is
+    unchanged by this -- nobody loses a way in.
 
     **Returns**:
     - access_token: JWT token for API authorization (valid for 15 minutes — ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -118,28 +208,259 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db
     **Raises**:
     - 401: Invalid credentials
     - 403: Account locked or inactive
-    - 409: The address exists in more than one company (see ``_find_user_by_auth_email``)
+    - 409: The identifier exists in more than one company (see ``_find_user_by_auth_email``
+      and ``_find_user_by_employee_id``)
+    - 429: Too many failed attempts from this IP, for ENUMERABLE identifiers only — a
+      badge, or a synthetic ``emp-…@users.werco.com`` / ``@werco.local`` address (which is
+      derived from a badge and therefore just as enumerable)
     """
+    submitted_identifier = form_data.username or ""
+
+    # DETERMINISTIC SPLIT, NO FALLBACK. An email address always contains "@", and the
+    # employee_id pattern every write path enforces (``^[A-Za-z0-9\-_]+$`` on
+    # PublicRegister / UserCreate, schemas/user.py) can never contain one -- so the two
+    # identifier spaces do not overlap and one input has exactly one resolver.
+    #
+    # Do NOT add a fallback from one resolver to the other. Two lookups per attempt is
+    # two ways to fail, which rebuilds the account-existence oracle both resolvers are
+    # written to avoid; and both are deliberately install-wide (an unauthenticated caller
+    # has no company yet), so a fallback could resolve a badge onto a stranger's row in
+    # another tenant. Both keep their one-or-refuse 409 for the same reason.
+    is_email_login = "@" in submitted_identifier
+
+    # Which identifier this attempt is RECORDED under. A badge travels under
+    # ``employee_id=`` and never through ``email=``, so it is keyed as
+    # ``employee-id:<badge>`` and can never be read back as an address (see
+    # log_auth_event). On the email path both values are exactly what they were before
+    # this route learned about badges -- the submitted address, and None -- which is what
+    # keeps every audit row on that path byte-identical.
+    submitted_email: Optional[str] = submitted_identifier if is_email_login else None
+    submitted_badge: Optional[str] = None if is_email_login else submitted_identifier
+
+    # ONE generic 401 for the whole path, used for "no such account" AND "wrong password"
+    # alike. The badge wording is a PARALLEL of the email one, never a more specific one:
+    # distinguishing the two would answer "does this badge exist?" for a caller who
+    # cannot supply the password, and the badge keyspace is small enough to sweep.
+    invalid_credentials_detail = "Invalid email or password" if is_email_login else "Invalid employee ID or password"
+
+    # THROTTLED WHEN THE SUBMITTED IDENTIFIER LIES IN AN ENUMERABLE SPACE. Same mechanism
+    # /auth/employee-login runs (app/core/login_throttle.py), on this route's OWN counter
+    # and OWN budget: ``password_login_throttle``, key prefix ``auth:login:failed``,
+    # 60 failures / 6 h -> 429. It is needed here even though this route verifies a
+    # password, because this route DRIVES THE ACCOUNT LOCKOUT (5 failures -> 30 minutes),
+    # a lock that also blocks /auth/employee-login -- so sweeping identifiers here can
+    # take people off the kiosk. The 5/min slowapi limit alone does not bound that.
+    #
+    # A SEPARATE COUNTER FROM THE KIOSK'S, and that separation is load-bearing rather
+    # than tidy. This route counts WRONG-PASSWORD failures, an outcome the passwordless
+    # badge route cannot produce, and the kiosk budget of 8 is sized on the premise that
+    # a failure is an UNKNOWN id rather than a slow scan. Sharing one counter meant
+    # ordinary password typos drained the kiosk's budget, and an empty budget 429s BADGE
+    # SIGN-IN for every operator behind that egress IP for the cooldown, with no admin
+    # reset -- and the login screen actively steers badge-only operators onto this path,
+    # so both routes see the same people from the same IP all day. The budgets differ for
+    # the same reason: one legitimate user can spend 5 failures here before their own
+    # lockout stops them, so 8 cannot absorb two of them. See login_throttle.py for the
+    # derivation of the 60 / 6 h figures from both directions.
+    #
+    # THE LINE IS "ENUMERABLE OR NOT", NOT "BADGE OR EMAIL" -- and getting that wrong is
+    # how the control was bypassable. This route's earlier rationale said the email path
+    # needs no throttle because "an address space is not enumerable the way a four-digit
+    # badge is". That is false for exactly the population the throttle protects: a
+    # badge-only or CSV-imported user HAS no real address, so the system minted one FROM
+    # the badge -- ``emp-<sanitized-badge>@users.werco.com`` (services/user_identity) --
+    # and ``_find_user_by_auth_email`` resolves it exactly. So emp-0000@… through
+    # emp-9999@… reaches the same accounts, drives the same lockout, and under the old
+    # rule was not throttled at all: the attacker just types an "@".
+    #
+    # Two enumerable spaces, therefore, and both are throttled:
+    #   * a badge -- ``_normalize_employee_id`` collapses input to 4 trailing digits, a
+    #     ~10^4 keyspace;
+    #   * an address on a domain THIS SYSTEM MINTS (``is_synthetic_email``: @users.werco.com
+    #     and the legacy @werco.local, which the same local part maps onto), because its
+    #     local part is a function of the badge.
+    #
+    # An ordinary address at a real domain stays UNTHROTTLED, deliberately: that space
+    # genuinely is not enumerable, and counting it would let one person mistyping their
+    # password on a shared office NAT take their whole floor's login offline for fifteen
+    # minutes -- a self-inflicted outage that buys nothing.
+    #
+    # Decided from the SUBMITTED STRING ALONE (no DB read), which is what keeps the check
+    # ABOVE the user lookup: a throttled IP must do zero account probing, so the throttle
+    # cannot be allowed to depend on what the lookup would have found.
+    #
+    # This BOUNDS the lockout DoS, it does not eliminate it (noted, not fixed here):
+    # the throttle keys on the client IP, and start.sh runs uvicorn with
+    # ``--forwarded-allow-ips=*``, so a caller can supply the forwarded IP the limiter
+    # keys on and rotate it. Every rate limit in the app shares that weakness -- it is an
+    # owner fix on the deployment flags. Do NOT work around it with home-grown
+    # X-Forwarded-For parsing here; that would only make this one control key differently
+    # from every other limit (see client_ip_from_request).
+    is_enumerable_identifier = (not is_email_login) or is_synthetic_email(submitted_identifier)
+
+    client_ip = client_ip_from_request(request)
+    if is_enumerable_identifier:
+        retry_after = password_login_throttle.blocked_retry_after(client_ip)
+        if retry_after is not None:
+            log_auth_event(
+                db,
+                "LOGIN_BLOCKED",
+                email=submitted_email,
+                employee_id=submitted_badge,
+                success=False,
+                request=request,
+                error="Throttled: too many failed attempts from this address",
+            )
+            db.commit()
+            # The wait is stated from the ACTUAL remaining cooldown, not as "a few minutes".
+            # Login.tsx renders this ``detail`` verbatim, and this route's block runs for an
+            # hour (PASSWORD_LOGIN_COOLDOWN_SECONDS) -- telling an operator "a few minutes"
+            # sends them back to the form every few minutes for an hour and reads as the app
+            # being broken. The kiosk twin keeps its own wording; its cooldown really is 15
+            # minutes. Derived from retry_after so the copy cannot drift from the constant.
+            wait_minutes = max(1, round(retry_after / 60))
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=(
+                    "Too many failed sign-in attempts from this network — "
+                    f"try again in about {wait_minutes} minute{'s' if wait_minutes != 1 else ''}. "
+                    "Badge sign-in at the kiosk is unaffected."
+                ),
+                headers={"Retry-After": str(retry_after)},
+            )
+
+    def _count_enumerable_failure() -> None:
+        """Record one FAILED attempt on an enumerable identifier against this IP.
+
+        Counted on THIS route's throttle only (``password_login_throttle``). A failure
+        here must never be spendable against /auth/employee-login's budget -- that is
+        the kiosk outage described above.
+
+        Successful logins are never counted -- mirroring employee_login, so a shift
+        change that cycles badges correctly stays fast -- and an ordinary address at a
+        real domain never counts at all, on either outcome.
+        """
+        if is_enumerable_identifier:
+            password_login_throttle.register_failure(client_ip)
+
+    # REFUSED ON SHAPE TOO, and it is the SAME argument as the over-length refusal below.
+    # A blank ``username`` contains no "@", so it takes the badge branch and
+    # ``is_enumerable_identifier`` is True -- which meant a blank submission walked all the
+    # way to "user not found" and SPENT one unit of the per-IP password-login budget. Both
+    # resolvers return ``None`` on a blank string before touching the database, so the
+    # attempt establishes nothing about any account; letting it drain the budget shared
+    # with everyone behind the same NAT would hand an attacker a cheaper route to the
+    # lockout that budget exists to bound than the sweep itself.
+    #
+    # WHITESPACE-ONLY is the reachable half and the reason this tests ``.strip()`` rather
+    # than truthiness. A genuinely EMPTY value never arrives: FastAPI treats ``""`` on a
+    # required ``Form`` field as missing and answers 422 above the handler, so it cannot
+    # charge the throttle either. ``"  "`` is a present, non-empty form value that reaches
+    # this line. Both are covered here so the behavior does not silently depend on that
+    # framework detail.
+    #
+    # Refused BELOW the 429 check and ABOVE ``_count_enumerable_failure``: a throttled IP
+    # is still refused first, and this outcome never charges the counter. Same generic
+    # 401 as every other failure here -- a distinct "identifier required" would be a new
+    # distinguishable outcome on an unauthenticated route, and a trivially cheap one to
+    # probe. No identifier is passed to the audit row because there is none: the row
+    # records that a blank submission was refused, not a value.
+    if not submitted_identifier.strip():
+        log_auth_event(
+            db,
+            "LOGIN_FAILED",
+            success=False,
+            request=request,
+            error="Empty identifier; refused before lookup",
+        )
+        db.commit()
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=invalid_credentials_detail)
+
+    # REFUSED ON SHAPE, BEFORE EITHER LOOKUP. ``limit_json_body_size`` (app/main.py)
+    # gates ``application/json`` only, and this route is form-encoded -- so the 256 KB
+    # body cap does not apply to the one unauthenticated FORM endpoint, and an arbitrarily
+    # long username reaches the handler. Unbounded it is lowercased, regex-scanned by
+    # ``_normalize_employee_id``, and handed to Postgres as a bind parameter compared
+    # against ``users.employee_id`` (String(50)) or ``users.email`` (String(255)).
+    #
+    # THE BOUND IS THE ``users.email`` COLUMN WIDTH, 255. It is the widest identifier
+    # column any account can hold, so a longer submission provably cannot match a stored
+    # row on either resolver -- rejecting it discards nothing a lookup could have found,
+    # which is what makes refusing here safe rather than merely convenient. (It is NOT what
+    # keeps the audit write safe, despite matching ``audit_logs.resource_identifier``'s
+    # width: the ``employee-id:`` prefix pushes an identifier at this bound 12 characters
+    # PAST the column, and the 429 branch above logs before this check runs at all. The
+    # audit column is bounded where the row is composed -- ``_bounded_audit_value``.)
+    #
+    # Same generic 401 as every other failure on this route, deliberately: an explicit
+    # "too long" error would add a new distinguishable outcome on an unauthenticated
+    # route, and this one is cheap for an attacker to probe.
+    #
+    # NOT counted against the throttle. It establishes nothing about any account, so
+    # letting malformed input drain the budget shared with legitimate users behind the
+    # same NAT would hand an attacker a cheaper lockout than the one being bounded. The
+    # throttle's 429 still runs FIRST (above), so a throttled IP is refused before this.
+    if len(submitted_identifier) > MAX_LOGIN_IDENTIFIER_LENGTH:
+        log_auth_event(
+            db,
+            "LOGIN_FAILED",
+            # Truncated so the audit row cannot be a storage-amplification vector, and
+            # marked as truncated so the row never reads as the whole submitted value.
+            # ``_AUDIT_TRUNCATION_MARKER``, not a re-spelling of it. That constant's own
+            # comment claims this site writes the same string log_auth_event writes, and
+            # two literals are not one source -- an edit to the constant that missed these
+            # lines would silently split one truncation convention across two spellings on
+            # rows 008/060 refuse to UPDATE or DELETE.
+            email=(submitted_identifier[:64] + _AUDIT_TRUNCATION_MARKER) if is_email_login else None,
+            employee_id=None if is_email_login else (submitted_identifier[:64] + _AUDIT_TRUNCATION_MARKER),
+            success=False,
+            request=request,
+            error=f"Identifier exceeds {MAX_LOGIN_IDENTIFIER_LENGTH} characters; refused before lookup",
+        )
+        db.commit()
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=invalid_credentials_detail)
+
     try:
-        user = _find_user_by_auth_email(db, form_data.username)
+        if is_email_login:
+            user = _find_user_by_auth_email(db, form_data.username)
+        else:
+            # Reused AS IS, normalization fallback included, so "0339" means the same
+            # person here as it does on /auth/employee-login.
+            user = _find_user_by_employee_id(db, form_data.username)
     except HTTPException as exc:
-        # The address resolves to accounts in more than one company. Refuse
-        # instead of authenticating an arbitrary one, and leave a trail an
-        # admin can act on — nothing else in the system reports the collision,
-        # and the affected users only see a login that stopped working.
+        # The lookup refused rather than answered. Refuse instead of authenticating an
+        # arbitrary account, and leave a trail an admin can act on — nothing else in the
+        # system reports either cause, and the affected users only see a login that
+        # stopped working.
         #
         # The status is checked, not assumed. The 409 is the only HTTPException
         # the lookup can raise today, but writing a specific cause onto the
         # tamper-evident chain for whatever a future edit happens to raise
         # would make the audit row a lie.
+        #
+        # AND WHICH 409 IT WAS COMES FROM THE EXCEPTION, NOT THE STATUS CODE. The badge
+        # resolver raises 409 for two different facts — an established duplicate, and a
+        # candidate window that TRUNCATED so uniqueness was never established — and this
+        # handler used to hard-code "resolves to more than one account" for both. On a
+        # truncation that sentence states something no query checked, permanently
+        # (008/060 refuse UPDATE/DELETE), and sends an admin hunting a duplicate that may
+        # not exist. ``_conflict_audit_error`` reads the cause structurally; it must not
+        # be "simplified" into a test on ``exc.detail``, which is UI copy.
+        #
+        # No throttle failure is registered here: an ambiguous identifier is an admin
+        # data problem, not a wrong guess, and the account provably EXISTS -- counting it
+        # would let one duplicate row lock an IP out of a login that is failing through
+        # no fault of the person typing. /auth/employee-login treats its own 409 the
+        # same way.
         if exc.status_code == status.HTTP_409_CONFLICT:
             log_auth_event(
                 db,
                 "LOGIN_BLOCKED",
-                email=form_data.username,
+                email=submitted_email,
+                employee_id=submitted_badge,
                 success=False,
                 request=request,
-                error="Email resolves to more than one account",
+                error=_conflict_audit_error(exc),
             )
             db.commit()
         raise
@@ -147,15 +468,44 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db
     if not user:
         # Log the audit row, then commit so it persists before raising
         # (the audit row is only flushed by AuditService; get_db never commits).
+        _count_enumerable_failure()
         log_auth_event(
-            db, "LOGIN_FAILED", email=form_data.username, success=False, request=request, error="User not found"
+            db,
+            "LOGIN_FAILED",
+            email=submitted_email,
+            employee_id=submitted_badge,
+            success=False,
+            request=request,
+            error="User not found",
         )
         db.commit()
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=invalid_credentials_detail)
 
-    # Check if account is locked (CMMC requirement)
+    # Check if account is locked (CMMC requirement). ``employee_id`` is passed on every
+    # row below for the same reason it is passed above: on the badge path the resolved
+    # user's stored address may be a MINTED emp-...@users.werco.com, so keying these rows
+    # on user.email alone would leave a badge's failed attempts and its lockout sharing no
+    # identifier an operator could query. On the email path it is None -- unchanged.
     if user.locked_until and user.locked_until > datetime.utcnow():
-        log_auth_event(db, "LOGIN_BLOCKED", user=user, success=False, request=request, error="Account locked")
+        # DELIBERATELY NOT COUNTED against the per-IP budget, unlike every other failure
+        # branch on this route. The account is ALREADY LOCKED: a further attempt against it
+        # establishes nothing new (the password is not even checked) and gains an attacker
+        # nothing they did not already have from the five attempts that caused the lock. So
+        # the only population it can charge is the legitimate one -- the person retrying
+        # their own locked account during the 30-minute window, who blows straight past the
+        # 5-failures-per-user figure the budget is sized on and can take password sign-in
+        # down for everyone behind the same NAT. That is a self-inflicted outage bought
+        # with no security. (The 429 check above still runs first, so an already-throttled
+        # IP is refused before reaching here.)
+        log_auth_event(
+            db,
+            "LOGIN_BLOCKED",
+            user=user,
+            employee_id=submitted_badge,
+            success=False,
+            request=request,
+            error="Account locked",
+        )
         db.commit()
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="Account is locked. Please contact administrator."
@@ -171,12 +521,30 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db
 
         # Log BEFORE the terminal commit so the audit row commits atomically
         # with the failed-attempt increment.
-        log_auth_event(db, "LOGIN_FAILED", user=user, success=False, request=request, error="Invalid password")
+        _count_enumerable_failure()
+        log_auth_event(
+            db,
+            "LOGIN_FAILED",
+            user=user,
+            employee_id=submitted_badge,
+            success=False,
+            request=request,
+            error="Invalid password",
+        )
         db.commit()
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=invalid_credentials_detail)
 
     if not user.is_active:
-        log_auth_event(db, "LOGIN_FAILED", user=user, success=False, request=request, error="Account disabled")
+        _count_enumerable_failure()
+        log_auth_event(
+            db,
+            "LOGIN_FAILED",
+            user=user,
+            employee_id=submitted_badge,
+            success=False,
+            request=request,
+            error="Account disabled",
+        )
         db.commit()
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User account is disabled")
 
@@ -190,7 +558,8 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db
     _ensure_valid_auth_email(user, db)
 
     # Log BEFORE the terminal commit so the LOGIN_SUCCESS audit row is persisted.
-    log_auth_event(db, "LOGIN_SUCCESS", user=user, success=True, request=request)
+    # A success never touches the throttle (only failures are counted).
+    log_auth_event(db, "LOGIN_SUCCESS", user=user, employee_id=submitted_badge, success=True, request=request)
     db.commit()
     db.refresh(user)
 
@@ -223,6 +592,96 @@ def _normalize_employee_id(value: str) -> Optional[str]:
 
 _AMBIGUOUS_EMAIL_DETAIL = "Email is not unique. Please contact an administrator."
 
+# The badge equivalent, hoisted out of the four raise sites that used to spell it inline so
+# the two resolvers below cannot drift apart on wording.
+_AMBIGUOUS_EMPLOYEE_ID_DETAIL = "Employee ID is not unique. Please contact an administrator."
+
+# Raised instead when the candidate set was TRUNCATED, so "how many rows normalize to this
+# badge" has no answer. Deliberately its own wording: "not unique" would be a claim the
+# query never established, and the admin's remediation differs (a duplicate to merge vs. a
+# user table this lookup can no longer scan). Same 409 status, and it discloses nothing
+# about whether any account exists -- neither message ever does.
+_UNRESOLVABLE_EMPLOYEE_ID_DETAIL = "Employee ID could not be resolved. Please contact an administrator."
+
+# The ``error`` each 409 CAUSE earns on its audit row. Deliberately separate strings from
+# the ``detail`` constants above: ``detail`` is human-readable UI copy that anyone may
+# reword, while these land on rows migrations 008/060 refuse to UPDATE or DELETE and
+# invariant 2 forbids backfilling. Coupling the permanent fact to the mutable copy -- by
+# sniffing ``exc.detail`` to decide which one to write -- would make a wording edit
+# silently start recording the wrong cause forever.
+_AUDIT_ERROR_EMAIL_AMBIGUOUS = "Email resolves to more than one account"
+_AUDIT_ERROR_EMPLOYEE_ID_AMBIGUOUS = "Employee ID resolves to more than one account"
+
+# NOT "resolves to more than one account". A truncated candidate window means the query
+# REFUSED TO ANSWER, so nothing at all was established about uniqueness -- and the
+# admin's remediation differs (a user table this lookup can no longer scan, versus a
+# duplicate to merge). Same line the registration path already draws with
+# ``_REJECTED_EMPLOYEE_ID_UNRESOLVABLE``.
+_AUDIT_ERROR_EMPLOYEE_ID_UNRESOLVABLE = (
+    "Employee ID could not be resolved: the candidate window truncated, so uniqueness was "
+    "never established. Sign-in was refused rather than guessed at."
+)
+
+# For a 409 that is not one of the two classified causes below. Unreachable today; it
+# exists so a future edit that raises a bare 409 from a resolver records "we do not know
+# why" instead of inheriting whichever specific claim happened to be written first.
+_AUDIT_ERROR_CONFLICT_UNCLASSIFIED = "Identifier could not be resolved: unclassified conflict from the resolver"
+
+
+class _IdentifierConflict(HTTPException):
+    """A 409 from an identifier resolver, carrying the audit sentence its cause earns.
+
+    The cause travels as a TYPE plus a structural attribute, never as the ``detail``
+    string. Both resolvers now raise 409 for two genuinely different reasons -- an
+    established duplicate, and a candidate window that truncated -- and the handlers have
+    to tell them apart to write an honest audit row. The status code cannot do it (both
+    are 409) and the detail string must not (see the constants above).
+    """
+
+    def __init__(self, detail: str, audit_error: str) -> None:
+        super().__init__(status_code=status.HTTP_409_CONFLICT, detail=detail)
+        self.audit_error = audit_error
+
+
+class _AmbiguousIdentifier(_IdentifierConflict):
+    """More than one account matched: uniqueness was established, and violated."""
+
+
+class _UnresolvableIdentifier(_IdentifierConflict):
+    """The candidate window truncated: uniqueness was never established at all."""
+
+
+def _conflict_audit_error(exc: HTTPException) -> str:
+    """The permanent audit sentence for a 409 raised by an identifier resolver.
+
+    Structural on purpose (``isinstance``), not a string match on ``exc.detail``.
+    """
+    if isinstance(exc, _IdentifierConflict):
+        return exc.audit_error
+    return _AUDIT_ERROR_CONFLICT_UNCLASSIFIED
+
+
+# How many rows the normalized-badge fallback will look at before it refuses to answer.
+#
+# TWO SEPARATE JOBS, and they are easy to conflate into a bug:
+#   * the LIMIT bounds a runaway query -- ``core_digits`` can be a single character, and
+#     ``ilike('%1%')`` matches a large fraction of a real user table;
+#   * the 409 above exists so truncation can never masquerade as a unique answer. Without
+#     it, a genuine duplicate sitting outside the window returns an arbitrary single match
+#     instead of refusing, and a genuine match outside the window reads as "not found" --
+#     on a password-verifying, lockout-DRIVING path, where resolving onto the wrong row
+#     increments a STRANGER'S failed-attempt counter and can lock a stranger's account in
+#     another tenant.
+#
+# The NUMBER is chosen so the second is unreachable in normal operation. It cannot be small:
+# with a single-digit core a real shop's table plausibly exceeds 50 matches, so a cap of 50
+# plus a 409 would turn ordinary badge logins into a floor-wide outage on /auth/login and
+# /auth/employee-login -- strictly worse than the bug being fixed. 500 cannot realistically
+# truncate a single-tenant shop's user table (the global resolver is install-wide, so it is
+# every tenant's users together, and this is still an order of magnitude clear), which
+# leaves the 409 firing only on a genuinely pathological set. Raise it before shrinking it.
+_EMPLOYEE_ID_CANDIDATE_CAP = 500
+
 
 def _one_user_for_email_or_refuse(db: Session, normalized_email: str) -> Optional[User]:
     """Resolve an already-lowercased address to exactly ONE user, or refuse.
@@ -238,7 +697,7 @@ def _one_user_for_email_or_refuse(db: Session, normalized_email: str) -> Optiona
     """
     matches = db.query(User).filter(func.lower(User.email) == normalized_email).order_by(User.id).limit(2).all()
     if len(matches) > 1:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=_AMBIGUOUS_EMAIL_DETAIL)
+        raise _AmbiguousIdentifier(_AMBIGUOUS_EMAIL_DETAIL, _AUDIT_ERROR_EMAIL_AMBIGUOUS)
     return matches[0] if matches else None
 
 
@@ -280,25 +739,35 @@ def _find_user_by_auth_email(db: Session, email: str) -> Optional[User]:
     if user:
         return user
 
-    if normalized_email.endswith("@users.werco.com"):
-        local_part = normalized_email.removesuffix("@users.werco.com")
-        return _one_user_for_email_or_refuse(db, f"{local_part}@werco.local")
+    # READ FROM services/user_identity, NEVER SPELLED INLINE. The /auth/login throttle
+    # decides whether an identifier is ENUMERABLE by asking ``is_synthetic_email``, which
+    # derives its answer from these same two constants. That control is correct only while
+    # the set of addresses THIS RESOLVER CAN REACH and the set of placeholder domains agree
+    # exactly: an address shape the resolver resolves but ``is_synthetic_email`` does not
+    # recognise is a reachable, badge-derived, fully enumerable identifier that the
+    # throttle would not count -- i.e. the bypass this pairing exists to close. Two string
+    # literals that happen to be spelled the same are not agreement; one source is.
+    if normalized_email.endswith(f"@{SYNTHETIC_EMAIL_DOMAIN}"):
+        local_part = normalized_email.removesuffix(f"@{SYNTHETIC_EMAIL_DOMAIN}")
+        return _one_user_for_email_or_refuse(db, f"{local_part}@{LEGACY_RESERVED_EMAIL_DOMAIN}")
 
     return None
 
 
 def _build_repaired_email(user: User, db: Session) -> str:
-    """Generate a valid non-reserved email for legacy .local imports."""
-    employee_key = re.sub(r"[^a-z0-9._-]", "", (user.employee_id or "").lower()) or "employee"
-    local = f"emp-{employee_key}"
-    candidate = f"{local}@users.werco.com"
-    suffix = 2
-    while True:
+    """Generate a valid non-reserved email for legacy .local imports.
+
+    The shape lives in ``services/user_identity`` (one shape, three seams); what this
+    seam owns is the dedup SCOPE. The probe is install-wide AND treats the user's OWN
+    row as free -- a repair that has already run once must be able to converge on the
+    address the row is holding instead of walking the suffix forever.
+    """
+
+    def _taken_by_someone_else(candidate: str) -> bool:
         existing = db.query(User).filter(func.lower(User.email) == candidate.lower()).first()
-        if not existing or existing.id == user.id:
-            return candidate
-        candidate = f"{local}-{suffix}@users.werco.com"
-        suffix += 1
+        return existing is not None and existing.id != user.id
+
+    return synthetic_email_for_employee_id(user.employee_id or "", _taken_by_someone_else)
 
 
 def _ensure_valid_auth_email(user: User, db: Session) -> None:
@@ -306,13 +775,103 @@ def _ensure_valid_auth_email(user: User, db: Session) -> None:
     Patch legacy reserved-domain addresses so token response validation does not crash.
     This keeps logins working for users imported before the email-domain fix.
 
+    **THE REPAIR IS OPPORTUNISTIC, NOT REQUIRED, AND IT MUST NEVER FAIL A SIGN-IN.**
+    ``synthetic_email_for_employee_id`` is a bounded walk that raises
+    ``IdentifierDerivationExhausted`` when no candidate is free, and this is the worst of
+    the three seams that call one: it runs on the LOGIN path, after the password has
+    already been verified, so an uncaught exception here is a 500 on sign-in for a legacy
+    ``@werco.local`` user -- and it is raised BEFORE the terminal commit, so the
+    failed-attempt reset and the LOGIN_SUCCESS audit row are lost with it. Caught, the
+    login proceeds on the address the row already holds: nothing is worse than it was
+    before the repair was attempted, the counters reset, and the audit row is written.
+
+    RESIDUAL, stated rather than papered over: ``UserResponse.email`` is an ``EmailStr``
+    and pydantic rejects ``@werco.local`` as a reserved special-use domain, so an
+    unrepaired row will still fail response validation. That is a property of the response
+    schema, not of this function, and it is not this seam's to fix by inventing an address
+    the probe just refused -- which would land a real operator on someone else's address.
+    What this catch buys is that the attempt is recorded and the account state is correct;
+    the fix for a genuinely unrepairable row is an admin editing it.
+
     Mutates ``user.email`` in place but does NOT commit. The caller is responsible
     for committing so the email repair commits atomically with the rest of the
     login transaction (including the audit row).
+
+    The domain is read from ``services/user_identity``, not spelled here, for the reason
+    given on ``_find_user_by_auth_email``: the /auth/login throttle's enumerability test
+    derives the same two domains from those constants via ``is_synthetic_email``, and its
+    coverage is correct only while the resolver's reachable address set and the
+    placeholder-domain set agree. They must read from one place, not agree by coincidence
+    of spelling -- an edit to one literal that missed the other would reopen the bypass
+    silently.
     """
     email = (user.email or "").strip()
-    if email.lower().endswith("@werco.local"):
+    if not email.lower().endswith(f"@{LEGACY_RESERVED_EMAIL_DOMAIN}"):
+        return
+
+    try:
         user.email = _build_repaired_email(user, db)
+    except IdentifierDerivationExhausted:
+        # Leave the address alone and let the login continue (see the docstring). Logged
+        # at WARNING because it needs an admin: every spelling the mint can reach is held
+        # by another account, which is a data problem no retry resolves. No identifier is
+        # put in the message -- it can reach an exception log, and these are credentials-
+        # adjacent values.
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "Legacy reserved-domain email left unrepaired for user id=%s: no free synthetic address", user.id
+        )
+
+
+def _normalized_employee_id_matches(db: Session, normalized_input: str, company_id: Optional[int] = None) -> List[User]:
+    """Rows whose ``employee_id`` normalizes to ``normalized_input`` — or refuse 409.
+
+    THE ONE implementation of the normalized-badge fallback, shared by the install-wide
+    resolver and its company-scoped kiosk twin (and by public registration's collision
+    probe) so the cap, the ordering and the truncation refusal cannot drift between them.
+    ``company_id`` is the only difference: ``None`` searches every tenant, an int fences
+    the query to one.
+
+    Narrows in SQL first so a login never loads the whole user table. ``normalized_input``
+    is always four zero-padded trailing digits; a stored ``"339"`` / ``"0339"`` /
+    ``"EMP-00339"`` can all normalize to the same value, so the probe uses the digit-core
+    with leading zeros stripped (for the degenerate ``"0000"`` it matches any row whose
+    badge contains a zero) and the exact comparison is redone in Python.
+
+    ``order_by(User.id)`` is not cosmetic. Without it the window this query returns is
+    whatever the plan happens to produce, so WHICH rows a badge is resolved against could
+    change between two identical requests — and on this path that decides whose lockout
+    counter moves. Ordered, the window is stable and the truncation check below means an
+    incomplete window is refused rather than answered from.
+
+    READ IN TWO PHASES, and the split is what keeps the cost off the badge path: the
+    window is up to ``_EMPLOYEE_ID_CANDIDATE_CAP + 1`` rows wide and every row in it is
+    discarded except the handful that normalize to the submitted badge, so the wide read
+    selects TWO COLUMNS rather than hydrating ~501 mapped ``User`` entities (plus their
+    identity-map bookkeeping) to compare one string — on the query the crew station runs
+    on every badge scan. The entities are then loaded only for the ids that actually
+    matched: normally one, never more than the caller is about to refuse as ambiguous.
+    """
+    core_digits = normalized_input.lstrip("0") or normalized_input[-1:]
+    query = db.query(User.id, User.employee_id).filter(
+        User.employee_id.isnot(None),
+        User.employee_id.ilike(f"%{core_digits}%"),
+    )
+    if company_id is not None:
+        query = query.filter(User.company_id == company_id)
+
+    # cap + 1: one row past the cap is how truncation is DETECTED rather than assumed.
+    candidates = query.order_by(User.id).limit(_EMPLOYEE_ID_CANDIDATE_CAP + 1).all()
+    if len(candidates) > _EMPLOYEE_ID_CANDIDATE_CAP:
+        raise _UnresolvableIdentifier(_UNRESOLVABLE_EMPLOYEE_ID_DETAIL, _AUDIT_ERROR_EMPLOYEE_ID_UNRESOLVABLE)
+
+    matched_ids = [row.id for row in candidates if _normalize_employee_id(row.employee_id) == normalized_input]
+    if not matched_ids:
+        return []
+    # Re-ordered by id so the returned list keeps the determinism the window above
+    # establishes — an ``IN`` clause promises no order of its own.
+    return db.query(User).filter(User.id.in_(matched_ids)).order_by(User.id).all()
 
 
 def _find_user_by_employee_id(db: Session, employee_id: str) -> Optional[User]:
@@ -323,9 +882,7 @@ def _find_user_by_employee_id(db: Session, employee_id: str) -> Optional[User]:
 
     exact_matches = db.query(User).filter(func.lower(User.employee_id) == raw_id.lower()).all()
     if len(exact_matches) > 1:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail="Employee ID is not unique. Please contact an administrator."
-        )
+        raise _AmbiguousIdentifier(_AMBIGUOUS_EMPLOYEE_ID_DETAIL, _AUDIT_ERROR_EMPLOYEE_ID_AMBIGUOUS)
     if len(exact_matches) == 1:
         return exact_matches[0]
 
@@ -333,32 +890,11 @@ def _find_user_by_employee_id(db: Session, employee_id: str) -> Optional[User]:
     if not normalized_input:
         return None
 
-    # Fallback path for kiosk badge IDs: narrow in SQL first so we don't
-    # load the entire user table on every login.
-    # normalized_input is always 4 digits of zero-padded trailing digits.
-    # A stored employee_id ("339", "0339", "EMP-00339") can match the same
-    # normalized value, so we probe with the digit-core (leading zeros
-    # stripped). For the degenerate "0000" case we fall back to matching
-    # any row whose employee_id contains a zero. limit(50) bounds worst
-    # case; if you have 50+ duplicates the existing 409 conflict path
-    # already tells the admin to clean up.
-    core_digits = normalized_input.lstrip("0") or normalized_input[-1:]
-    candidates = (
-        db.query(User)
-        .filter(
-            User.employee_id.isnot(None),
-            User.employee_id.ilike(f"%{core_digits}%"),
-        )
-        .limit(50)
-        .all()
-    )
-    matches = [u for u in candidates if _normalize_employee_id(u.employee_id) == normalized_input]
+    matches = _normalized_employee_id_matches(db, normalized_input)
     if not matches:
         return None
     if len(matches) > 1:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail="Employee ID is not unique. Please contact an administrator."
-        )
+        raise _AmbiguousIdentifier(_AMBIGUOUS_EMPLOYEE_ID_DETAIL, _AUDIT_ERROR_EMPLOYEE_ID_AMBIGUOUS)
     return matches[0]
 
 
@@ -393,7 +929,40 @@ def employee_login(request: Request, payload: EmployeeLoginRequest, db: Session 
             headers={"Retry-After": str(retry_after)},
         )
 
-    user = _find_user_by_employee_id(db, payload.employee_id)
+    try:
+        user = _find_user_by_employee_id(db, payload.employee_id)
+    except HTTPException as exc:
+        # MIRRORS /auth/login's handling of the same refusal, which this route was missing
+        # entirely: a 409 used to return with no audit row at all, so the ONE thing that
+        # reports a duplicate badge -- or a candidate window the resolver can no longer
+        # scan -- was silent on the route the floor actually uses. The affected operator
+        # just sees a badge that stopped working.
+        #
+        # Status checked, not assumed, and the CAUSE read structurally (see
+        # ``_conflict_audit_error``): this resolver raises 409 both for an established
+        # duplicate and for a truncated window, and the two earn different permanent
+        # sentences.
+        #
+        # NO throttle failure is registered, exactly as on /auth/login: the account
+        # provably exists (or the table could not be scanned) -- neither is a wrong guess,
+        # and counting it would let one duplicated row lock a whole shop's egress IP out
+        # of badge sign-in for the cooldown, with no admin reset.
+        #
+        # The badge IS recorded here, unlike the failure rows below which deliberately
+        # log none: a 409 means the submitted value MATCHED real rows, so it is a
+        # known-good badge rather than a possibly-mistyped credential fragment, and it is
+        # the only thing that tells an admin which rows to merge.
+        if exc.status_code == status.HTTP_409_CONFLICT:
+            log_auth_event(
+                db,
+                "EMPLOYEE_LOGIN_BLOCKED",
+                employee_id=payload.employee_id,
+                success=False,
+                request=request,
+                error=_conflict_audit_error(exc),
+            )
+            db.commit()
+        raise
 
     if not user:
         employee_login_throttle.register_failure(client_ip)
@@ -514,6 +1083,11 @@ def _find_user_by_employee_id_in_company(db: Session, employee_id: str, company_
     station's company so a foreign tenant's badge can never resolve — it reads
     as "unknown badge" (uniform 401 upstream). Ambiguity within the company is
     still a 409 (an admin data problem, not an auth probe).
+
+    "Identical" is now literal for the normalized half: it calls the same
+    ``_normalized_employee_id_matches`` the global resolver does, passing ``company_id``,
+    so the ordering, the candidate cap and the truncation refusal are one implementation
+    rather than two copies that agreed on the day they were written.
     """
     raw_id = (employee_id or "").strip()
     if not raw_id:
@@ -523,9 +1097,7 @@ def _find_user_by_employee_id_in_company(db: Session, employee_id: str, company_
         db.query(User).filter(func.lower(User.employee_id) == raw_id.lower(), User.company_id == company_id).all()
     )
     if len(exact_matches) > 1:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail="Employee ID is not unique. Please contact an administrator."
-        )
+        raise _AmbiguousIdentifier(_AMBIGUOUS_EMPLOYEE_ID_DETAIL, _AUDIT_ERROR_EMPLOYEE_ID_AMBIGUOUS)
     if len(exact_matches) == 1:
         return exact_matches[0]
 
@@ -533,26 +1105,11 @@ def _find_user_by_employee_id_in_company(db: Session, employee_id: str, company_
     if not normalized_input:
         return None
 
-    # Same bounded fallback as the global helper (see its comment), fenced to
-    # the station's company.
-    core_digits = normalized_input.lstrip("0") or normalized_input[-1:]
-    candidates = (
-        db.query(User)
-        .filter(
-            User.company_id == company_id,
-            User.employee_id.isnot(None),
-            User.employee_id.ilike(f"%{core_digits}%"),
-        )
-        .limit(50)
-        .all()
-    )
-    matches = [u for u in candidates if _normalize_employee_id(u.employee_id) == normalized_input]
+    matches = _normalized_employee_id_matches(db, normalized_input, company_id=company_id)
     if not matches:
         return None
     if len(matches) > 1:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail="Employee ID is not unique. Please contact an administrator."
-        )
+        raise _AmbiguousIdentifier(_AMBIGUOUS_EMPLOYEE_ID_DETAIL, _AUDIT_ERROR_EMPLOYEE_ID_AMBIGUOUS)
     return matches[0]
 
 
@@ -627,7 +1184,38 @@ def kiosk_badge_token(
     if claims.get("company_id") != station.company_id:
         raise credentials_exception
 
-    user = _find_user_by_employee_id_in_company(db, payload.employee_id, station.company_id)
+    try:
+        user = _find_user_by_employee_id_in_company(db, payload.employee_id, station.company_id)
+    except HTTPException as exc:
+        # MIRRORS /auth/login and /auth/employee-login, which this route was the last one
+        # missing: BOTH 409 causes -- an established duplicate badge inside the station's
+        # company, and a candidate window that TRUNCATED -- returned with no audit row at
+        # all, so the only surface that reports either fact was silent on the door the
+        # floor scans into. The operator just sees a badge that stopped working.
+        #
+        # Status checked, not assumed, and the CAUSE read structurally
+        # (``_conflict_audit_error``) rather than off ``exc.detail``, which is UI copy:
+        # the two causes earn different permanent sentences and 008/060 refuse to correct
+        # a row afterwards.
+        #
+        # Written under the route's existing ``KIOSK_BADGE_TOKEN_FAILED`` action rather
+        # than a new one: the cause is carried by ``error``, and inventing a third action
+        # string would leave every consumer (and both runbooks) describing a vocabulary
+        # the code no longer uses.
+        #
+        # The badge is still NOT logged, unlike /auth/employee-login's 409 row: this
+        # audit helper is station-keyed by design (``resource_identifier`` is the station
+        # label) and a scanned value may be a mistyped credential fragment. The station,
+        # the company and the cause are what an admin needs to find the duplicate rows.
+        if exc.status_code == status.HTTP_409_CONFLICT:
+            _audit_kiosk_badge_event(
+                db,
+                request=request,
+                station=station,
+                action="KIOSK_BADGE_TOKEN_FAILED",
+                error=_conflict_audit_error(exc),
+            )
+        raise
 
     if not user:
         _audit_kiosk_badge_event(
@@ -798,6 +1386,48 @@ def setup_status(db: Session = Depends(get_db)):
 # never mutate the shared literal.
 _PUBLIC_REGISTRATION_PENDING = {"message": "Account submitted for approval", "is_first_user": False}
 
+# Why a candidate identifier could not be used, as reported by ``_employee_id_taken_reason``
+# inside ``register_public``. Two values, because they are two different facts and one of
+# them is a fact nobody established -- see the rejection audit row.
+_TAKEN_COLLISION = "collision"
+_TAKEN_UNRESOLVABLE = "unresolvable"
+
+# The ``error`` recorded on a PUBLIC_REGISTRATION_REJECTED audit row. NEITHER is ever shown
+# to the caller -- the response is the uniform pending body in both cases, so no oracle is
+# added -- and both are permanent: migrations 008/060 refuse UPDATE and DELETE on
+# ``audit_logs`` and invariant 2 forbids backfilling, so whichever sentence is written is
+# the one an admin reads forever.
+_REJECTED_IDENTIFIER_TAKEN = "Email or employee ID already in use"
+
+# Deliberately NOT the sentence above. Reaching this means the badge collision probe
+# TRUNCATED its candidate window and refused to answer, so no duplicate was found and none
+# may be claimed; the remediation is a user table the resolver can no longer scan, not a
+# duplicate to merge. Same reasoning the HTTP path already uses for
+# ``_UNRESOLVABLE_EMPLOYEE_ID_DETAIL``, carried onto the record that cannot be corrected.
+_REJECTED_EMPLOYEE_ID_UNRESOLVABLE = (
+    "Employee ID could not be resolved: the collision probe truncated its candidate "
+    "window, so no duplicate was established. Registration was refused rather than "
+    "guessed at."
+)
+
+# A THIRD distinct cause, and again not either sentence above. The suffix walk in
+# ``services/user_identity`` offered its full ``MAX_IDENTIFIER_CANDIDATES`` and every one
+# came back unusable, so no free identifier could be derived at all. That is neither an
+# established duplicate ("already in use" claims a specific row) nor a single truncated
+# probe -- and it is what the walk raises when the predicate is pinned True, which is the
+# state a truncated window puts it in for every candidate alike.
+_REJECTED_EMPLOYEE_ID_UNDERIVABLE = (
+    "Employee ID could not be derived: every candidate offered to the collision probe came "
+    "back unusable, up to the iteration cap. Registration was refused rather than looping "
+    "or reusing a candidate."
+)
+
+_REJECTED_EMAIL_UNDERIVABLE = (
+    "Synthetic email could not be derived: every candidate offered to the duplicate probe "
+    "came back in use, up to the iteration cap. Registration was refused rather than "
+    "looping or reusing a candidate."
+)
+
 
 @router.post("/register-public")
 def register_public(
@@ -814,6 +1444,14 @@ def register_public(
       is created as an active admin with superuser privileges.
     - Otherwise the account is created with the VIEWER role, inactive
       (pending admin approval).
+
+    **Either identifier alone is enough** (plus the password): an email, an employee
+    ID, or both. ``PublicRegister`` refuses only the request that carries neither.
+    Whichever one is missing is derived here (``services/user_identity``) because both
+    columns are NOT NULL -- a badge-only signup is stored under a synthetic
+    ``emp-...@users.werco.com`` address. That derivation is a storage detail, not an
+    outcome: a badge-only signup returns the same body as every other one, and the
+    minting runs only after the refusal check so a refused attempt does not pay for it.
 
     This route is unauthenticated AND install-wide — its uniqueness checks span
     every company, not just the one it registers into. It used to answer
@@ -840,40 +1478,221 @@ def register_public(
     user_count = db.query(User).count()
     is_first_user = user_count == 0
 
-    normalized_email = (user_in.email or "").strip().lower()
-    already_taken = db.query(User).filter(func.lower(User.email) == normalized_email).first() is not None
+    def _email_taken(candidate: str) -> bool:
+        return db.query(User).filter(func.lower(User.email) == candidate.lower()).first() is not None
 
-    # Auto-generate employee_id from email if not provided
-    employee_id = user_in.employee_id
-    if not employee_id:
-        # Use email local part as base, e.g. "jmw@wercomfg.com" -> "jmw".
-        # The local part can legally be all-punctuation, which used to yield an
-        # empty employee_id; fall back so the column always gets a real value.
-        base = re.sub(r'[^a-zA-Z0-9\-_]', '', user_in.email.split('@')[0]) or "user"
-        candidate = base
-        suffix = 2
-        while db.query(User).filter(func.lower(User.employee_id) == candidate.lower()).first():
-            candidate = f"{base}-{suffix}"
-            suffix += 1
-        employee_id = candidate
-    elif db.query(User).filter(func.lower(User.employee_id) == employee_id.lower()).first():
-        # Explicitly supplied and already in use. Recorded, not reported.
-        already_taken = True
+    def _employee_id_taken_reason(candidate: str) -> Optional[str]:
+        """WHY this badge cannot be used, or ``None`` when it is free.
 
-    # With zero users nothing can be taken, so the bootstrap can never reach
-    # this branch; the guard is explicit anyway so no later edit can turn the
-    # one-time setup path into a silent no-op.
-    if already_taken and not is_first_user:
+        Returns the reason rather than a bare bool because the two "cannot be used"
+        outcomes are different facts and one of them ends up on a permanent audit row:
+        ``_TAKEN_COLLISION`` means a colliding row was FOUND, ``_TAKEN_UNRESOLVABLE``
+        means the query REFUSED TO ANSWER. See the rejection audit row below.
+
+        The exact probe alone was a hole an unauthenticated caller could drive through.
+        Both resolvers compare ``_normalize_employee_id`` values (4 trailing digits), so
+        registering ``00339`` while a real operator holds ``EMP-0339`` passes an exact
+        comparison, inserts, and from then on every scan of badge ``0339`` finds TWO
+        normalized matches and 409s that operator off the kiosk, the crew station and both
+        login routes. The write path has to test collisions the way the read path resolves
+        them, or the read path is what discovers the difference.
+
+        It runs for the DERIVED candidate too, not just a submitted badge: an email-only
+        signup at ``0339@anything.com`` derives the badge ``0339``, which is the same
+        attack with the same result. Sharing one predicate is what closes both, and the
+        suffix walk in ``employee_id_from_email`` then simply steps past the collision.
+
+        A TRUNCATED candidate set is unusable too, and answers ``_TAKEN_UNRESOLVABLE``.
+        The probe reuses the resolvers' own query shape, cap and all, so on a pathological
+        set it refuses to answer — and the safe answer on an unauthenticated write path is
+        "do not insert": a registration that silently does nothing costs a stranger one
+        retry (and an admin can still create the account through ``POST /users/``), while
+        a wrong "free" here takes a real operator off the floor. Uniform 200 either way,
+        so it adds no oracle. What it must NOT do is call that outcome a collision — see
+        the constants and the rejection audit row.
+        """
+        if db.query(User).filter(func.lower(User.employee_id) == candidate.lower()).first() is not None:
+            return _TAKEN_COLLISION
+
+        normalized = _normalize_employee_id(candidate)
+        if not normalized:
+            # No digits at all ("jmw") — outside the normalized keyspace entirely, so the
+            # resolvers' fallback can never match it and there is nothing to collide with.
+            return None
+
+        try:
+            return _TAKEN_COLLISION if _normalized_employee_id_matches(db, normalized) else None
+        except _UnresolvableIdentifier:
+            # Caught by TYPE, not by status code: the truncation refusal is the one
+            # outcome that means "the probe did not answer", and it is now its own class.
+            # Any other 409 a future edit adds propagates instead of being silently read
+            # as a collision — which was the point of the status check this replaces, held
+            # more tightly (an *ambiguity* 409 added here would have slipped through it).
+            return _TAKEN_UNRESOLVABLE
+
+    def _employee_id_taken(candidate: str) -> bool:
+        """The ``is_taken`` predicate shape ``employee_id_from_email``'s suffix walk needs.
+
+        Both reasons mean "do not use this candidate", so the walk treats them alike and
+        simply steps to the next suffix; only the REJECTION row cares which one it was,
+        and that call site reads the reason directly.
+
+        NOT RELIABLY A FUNCTION OF THE CANDIDATE, which is why the walk it feeds is
+        capped: ``_TAKEN_UNRESOLVABLE`` describes the user TABLE, not the candidate, so
+        for any candidate that reaches the normalized probe a truncated window answers
+        True alike. ``employee_id_from_email`` raises ``IdentifierDerivationExhausted``
+        rather than looping; the call site below turns that into a refusal.
+
+        WHAT THE LETTER SUFFIXES CHANGED, because the two facts are easy to conflate. The
+        walk now offers only DIGIT-FREE candidates after the base, and this function
+        returns ``None`` for those on the ``if not normalized`` line above -- before
+        ``_normalized_employee_id_matches`` is called at all. So a digit-free candidate is
+        neither a normalized collision nor pinnable by a truncated window, and the walk
+        converges on exact-match collisions alone. The cap stays because the guarantee is
+        the WALK's, not this predicate's, and because the mint's walk has no such property.
+        """
+        return _employee_id_taken_reason(candidate) is not None
+
+    def _refuse(error: str) -> dict:
+        """Refuse without saying so: one audit row naming ``error``, then the uniform body.
+
+        THE one refusal shape for this handler, so every cause below is guaranteed to
+        produce the same 200 + ``_PUBLIC_REGISTRATION_PENDING`` and differ only on the
+        audit row. Nothing is inserted. Both identifiers go in, each under its OWN name
+        (see log_auth_event on why a badge must never travel through email=): a badge-only
+        registrant has no address, and a rejection row reading "unknown" would defeat the
+        one thing this handler is deliberately loud about -- the response says nothing, the
+        audit log says who tried. These are the SUBMITTED values, not the derived ones;
+        nothing is minted on a refusal, and recording a value the caller never sent would
+        make the row a claim about the system rather than about the attempt.
+        """
         log_auth_event(
             db,
             "PUBLIC_REGISTRATION_REJECTED",
             email=user_in.email,
+            employee_id=user_in.employee_id,
             success=False,
             request=request,
-            error="Email or employee ID already in use",
+            error=error,
         )
         db.commit()
         return dict(_PUBLIC_REGISTRATION_PENDING)
+
+    # Email is optional now (badge-only signups), so the duplicate probe only runs when
+    # an address was actually supplied. Unguarded it would compare the empty string
+    # against every row -- harmless today, but it makes "" a value that can start
+    # matching, and the answer it produces is the oracle this handler exists to avoid.
+    normalized_email = (user_in.email or "").strip().lower()
+
+    # Tracked as THREE flags rather than one ``already_taken`` because they answer
+    # different questions and only one of them can be written onto a permanent audit row
+    # as a fact:
+    #   * ``collision_established`` -- a duplicate row was actually FOUND (an address, or a
+    #     badge matching exactly / under normalization);
+    #   * ``employee_id_unresolvable`` -- the badge probe REFUSED TO ANSWER because its
+    #     candidate window truncated, so nothing at all was established about uniqueness;
+    #   * ``employee_id_underivable`` -- the suffix walk ran out of candidates, so no
+    #     usable badge could be derived at all (see ``IdentifierDerivationExhausted``).
+    # All three refuse the insert; see the audit row below for why the distinction
+    # survives all the way into ``error``.
+    collision_established = bool(normalized_email) and _email_taken(normalized_email)
+    employee_id_unresolvable = False
+    employee_id_underivable = False
+
+    # Auto-generate employee_id from email if not provided. Only reachable WITH an
+    # email: PublicRegister refuses a request carrying neither identifier, so "no
+    # badge" implies "has address" and there is nothing to dereference blindly.
+    employee_id = user_in.employee_id
+    if not employee_id and user_in.email:
+        # Use email local part as base, e.g. "jmw@wercomfg.com" -> "jmw".
+        # The local part can legally be all-punctuation, which used to yield an
+        # empty employee_id; the shared helper falls back so the column always
+        # gets a real value.
+        #
+        # The walk is CAPPED and the cap is caught here. It is a backstop now rather than
+        # the working limit it was: the walk suffixes with LETTERS, so every candidate
+        # after the base is digit-free, ``_employee_id_taken_reason`` answers "free" on
+        # those without running the normalized probe, and neither a badge-keyspace
+        # collision nor a truncated window can pin it True. Numeric suffixes could not
+        # converge at all on a shop with contiguous badge numbers -- ``jmw-2`` IS badge
+        # 0002 -- and dropped legitimate signups behind the uniform 200. Still caught:
+        # ``is_taken`` is this handler's to define, and refusing beats answering with the
+        # last candidate, which is a value the probe just said not to use.
+        try:
+            employee_id = employee_id_from_email(user_in.email, _employee_id_taken)
+        except IdentifierDerivationExhausted:
+            # With zero users nothing is ever taken, so the walk cannot exhaust during the
+            # bootstrap; if a later edit makes it possible, surface it rather than fall
+            # through with no badge (``users.employee_id`` is NOT NULL). Same posture the
+            # IntegrityError race below takes for the bootstrap.
+            if is_first_user:
+                raise
+            employee_id_underivable = True
+    elif employee_id:
+        # Explicitly supplied. Recorded, not reported: the response body and status are
+        # the uniform pending one either way, so widening what counts as unusable grows
+        # only the set of inputs that silently do nothing. It adds no oracle, because the
+        # caller cannot tell this outcome from a successful signup.
+        #
+        # The REASON is read here rather than through the bool predicate, and only from
+        # THIS call -- the decisive one. The suffix walk on the derived path above also
+        # runs the probe, but a candidate it rejects is one it steps past, not a
+        # rejection of the registration, so letting those calls set these flags would put
+        # a cause on the audit row that explains nothing about why the request was
+        # refused.
+        badge_reason = _employee_id_taken_reason(employee_id)
+        if badge_reason == _TAKEN_COLLISION:
+            collision_established = True
+        elif badge_reason == _TAKEN_UNRESOLVABLE:
+            employee_id_unresolvable = True
+
+    # With zero users nothing can be taken, so the bootstrap can never reach
+    # this branch; the guard is explicit anyway so no later edit can turn the
+    # one-time setup path into a silent no-op.
+    if (collision_established or employee_id_unresolvable or employee_id_underivable) and not is_first_user:
+        # THE CAUSE IS THE CAUSE. A truncated candidate window establishes NO collision --
+        # the query refused to answer -- so writing "already in use" for it states a fact
+        # nobody checked, and an exhausted suffix walk establishes even less. The route
+        # already draws exactly this line for the HTTP response
+        # (``_UNRESOLVABLE_EMPLOYEE_ID_DETAIL``, on the grounds that "not unique" would be
+        # a claim the query never established); the audit row is where it matters more,
+        # because 008/060 refuse UPDATE and DELETE so the sentence is permanent, and the
+        # wrong one sends an admin hunting a duplicate that does not exist instead of at a
+        # user table the resolver can no longer scan. An ESTABLISHED collision wins the
+        # wording when more than one is true: "already in use" is then a fact, and it is
+        # the one that explains the refusal. The other two are mutually exclusive by
+        # construction (one comes from the submitted-badge branch, the other from the
+        # derived one), so the order between them decides nothing.
+        if collision_established:
+            rejection = _REJECTED_IDENTIFIER_TAKEN
+        elif employee_id_underivable:
+            rejection = _REJECTED_EMPLOYEE_ID_UNDERIVABLE
+        else:
+            rejection = _REJECTED_EMPLOYEE_ID_UNRESOLVABLE
+        return _refuse(rejection)
+
+    # A badge-only registrant still has to satisfy ``User.email`` (NOT NULL). For a
+    # shop-floor user the BADGE is the real credential and an address may simply not
+    # exist, so mint the synthetic ``emp-...@users.werco.com`` the rest of the system
+    # already recognises rather than widening the column. Deliberately AFTER the
+    # refusal above, so a registration that is not going to insert never pays for it.
+    #
+    # The mint dedups install-wide, exactly like the duplicate checks: a company-scoped
+    # probe could mint an address that already exists in another tenant, which is the
+    # cross-tenant ambiguity that makes ``_find_user_by_auth_email`` refuse 409.
+    resolved_email = user_in.email
+    if not normalized_email:
+        try:
+            resolved_email = synthetic_email_for_employee_id(employee_id or "", _email_taken)
+        except IdentifierDerivationExhausted:
+            # Same cap, same reasoning, and refused the SAME way as every cause above --
+            # uniform pending body, no insert, one audit row naming what actually
+            # happened. Inserting the last candidate instead would race the address into
+            # ``uq_users_company_email`` (a 500, i.e. a new distinguishable outcome) or,
+            # worse, land a badge-only operator on an address another account owns.
+            if is_first_user:
+                raise
+            return _refuse(_REJECTED_EMAIL_UNDERIVABLE)
 
     if is_first_user:
         role = UserRole.PLATFORM_ADMIN
@@ -895,7 +1714,7 @@ def register_public(
         initial_company_id = werco.id if werco else 1
 
     user = User(
-        email=user_in.email,
+        email=resolved_email,
         employee_id=employee_id,
         first_name=user_in.first_name,
         last_name=user_in.last_name,
@@ -912,7 +1731,22 @@ def register_public(
     # Log BEFORE the terminal commit so the audit row commits atomically with the new
     # user (and the initial company, if this is the first-user bootstrap).
     action = "FIRST_USER_REGISTERED" if is_first_user else "PUBLIC_REGISTRATION"
-    log_auth_event(db, action, user=user, success=True, request=request)
+    # The badge is passed explicitly so the accepted row and the REJECTED rows for the
+    # same badge join on extra_data.employee_id. Without it the accepted row keys on
+    # user.email -- a MINTED address for a badge-only signup -- and the two halves of one
+    # badge's registration history share no key an operator could query on.
+    #
+    # ``email`` is passed too, and it is load-bearing rather than redundant: log_auth_event
+    # resolves resource_identifier as `email or employee-id:<badge> or user.email`, so
+    # omitting it would make an EMAIL registrant's accepted row key on the badge that
+    # employee_id_from_email *derived* -- a value the registrant never submitted -- instead
+    # of the address they did. Passing both lets the submitted address win when there is
+    # one and `employee-id:<badge>` win when there is not. Do NOT "simplify" this by
+    # reordering the chain to put user.email second: that puts the minted
+    # emp-...@users.werco.com address on the badge-only row, which is the same defect
+    # facing the other way. Audit rows cannot be corrected afterwards (008/060 refuse
+    # UPDATE/DELETE), so getting this wrong is permanent for every row written after it.
+    log_auth_event(db, action, user=user, success=True, request=request, email=user_in.email, employee_id=employee_id)
     try:
         db.commit()
     except IntegrityError:
@@ -924,16 +1758,10 @@ def register_public(
         db.rollback()
         if is_first_user:
             raise
-        log_auth_event(
-            db,
-            "PUBLIC_REGISTRATION_REJECTED",
-            email=user_in.email,
-            success=False,
-            request=request,
-            error="Email or employee ID already in use",
-        )
-        db.commit()
-        return dict(_PUBLIC_REGISTRATION_PENDING)
+        # The CONSTANT, not a re-spelling of it: ``_REJECTED_IDENTIFIER_TAKEN`` exists for
+        # exactly this row, and an inline literal drifting from it would split one cause
+        # across two sentences on a table nobody can correct afterwards.
+        return _refuse(_REJECTED_IDENTIFIER_TAKEN)
     db.refresh(user)
 
     if is_first_user:

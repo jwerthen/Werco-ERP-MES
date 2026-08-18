@@ -5,7 +5,7 @@ import { getDefaultLandingPath } from '../utils/defaultLanding';
 import {
   ShieldCheckIcon,
   LockClosedIcon,
-  EnvelopeIcon,
+  UserIcon,
   EyeIcon,
   EyeSlashIcon,
   ArrowRightIcon,
@@ -19,9 +19,14 @@ const gridTex: React.CSSProperties = {
 };
 
 export default function Login() {
-  const [email, setEmail] = useState('');
+  // `identifier` is the password mode's sign-in name: POST /auth/login resolves an
+  // EMAIL OR AN EMPLOYEE ID, so this is deliberately not called `email`.
+  const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
   const [employeeId, setEmployeeId] = useState('');
+  // 'employee' = passwordless badge (POST /auth/employee-login, no password field).
+  // 'email'    = identifier + password (POST /auth/login). The literals are the
+  //              pre-existing wire-agnostic mode keys; ?kiosk=1 pins 'employee'.
   const [loginMode, setLoginMode] = useState<'employee' | 'email'>('email');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
@@ -57,7 +62,7 @@ export default function Login() {
 
         await loginWithEmployeeId(employeeLoginId);
       } else {
-        await login(email, password);
+        await login(identifier, password);
       }
 
       // Role-based default landing (see utils/defaultLanding.ts). Only the post-login
@@ -191,7 +196,7 @@ export default function Login() {
                         : { background: 'transparent', color: 'var(--fd-mute)' }
                     }
                   >
-                    {m === 'employee' ? 'Badge ID' : 'Email'}
+                    {m === 'employee' ? 'Badge Only' : 'Password'}
                   </button>
                 ))}
               </div>
@@ -225,6 +230,7 @@ export default function Login() {
                       maxLength={50}
                       required
                       value={employeeId}
+                      aria-describedby="employeeIdFormatHint employeeIdBadgeOnlyHint"
                       onChange={e => setEmployeeId(e.target.value.replace(/[^A-Za-z0-9\-_]/g, '').slice(0, 50))}
                       onFocus={() => setFocusedField('employeeId')}
                       onBlur={() => setFocusedField(null)}
@@ -234,8 +240,11 @@ export default function Login() {
                       autoComplete="off"
                     />
                   </div>
-                  <p className="font-mono text-[9.5px] tracking-[0.1em] text-fd-mute mt-1.5">
+                  <p id="employeeIdFormatHint" className="font-mono text-[9.5px] tracking-[0.1em] text-fd-mute mt-1.5">
                     Use your employee ID or 4-digit badge ID.
+                  </p>
+                  <p id="employeeIdBadgeOnlyHint" className="font-mono text-[9.5px] tracking-[0.1em] text-fd-mute mt-1">
+                    No password — your badge signs you in.
                   </p>
                 </div>
               ) : (
@@ -245,29 +254,35 @@ export default function Login() {
                       htmlFor="email"
                       className="block font-mono text-[10px] uppercase tracking-[0.14em] text-fd-body mb-1.5"
                     >
-                      Email
+                      Email or Employee ID
                     </label>
                     <div className="relative">
                       <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                        <EnvelopeIcon
+                        <UserIcon
                           className="h-[17px] w-[17px]"
-                          style={{ color: focusedField === 'email' ? 'var(--fd-blue)' : 'var(--fd-faint)' }}
+                          style={{ color: focusedField === 'identifier' ? 'var(--fd-blue)' : 'var(--fd-faint)' }}
                         />
                       </div>
+                      {/* `id`/`name` stay "email": they are the key browsers filed this
+                          origin's saved credentials under, and the Playwright fixtures
+                          select on input[name="email"]. `autoComplete="username"` is what
+                          actually tells the password manager this is the sign-in name, and
+                          type="text" is required — type="email" would make the browser
+                          refuse to submit a bare employee ID. */}
                       <input
                         id="email"
                         name="email"
-                        type="email"
-                        aria-label="Email"
+                        type="text"
+                        aria-label="Email or Employee ID"
                         required
-                        value={email}
-                        onChange={e => setEmail(e.target.value)}
-                        onFocus={() => setFocusedField('email')}
+                        value={identifier}
+                        onChange={e => setIdentifier(e.target.value)}
+                        onFocus={() => setFocusedField('identifier')}
                         onBlur={() => setFocusedField(null)}
                         className="w-full font-mono text-base text-fd-ink rounded-[3px] pl-10 pr-4 py-2.5 outline-none transition-all min-h-[44px]"
-                        style={{ background: 'var(--fd-sunken)', border: '1px solid', ...fieldFocusRing('email') }}
-                        placeholder="you@werco.com"
-                        autoComplete="email"
+                        style={{ background: 'var(--fd-sunken)', border: '1px solid', ...fieldFocusRing('identifier') }}
+                        placeholder="you@werco.com or EMP-1001"
+                        autoComplete="username"
                       />
                     </div>
                   </div>

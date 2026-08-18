@@ -310,7 +310,9 @@ tier, that tier stands — this rule is a floor, never a loosening.
 > `app/api/endpoints/scanner.py`) carries no role gate (`get_current_user` only) — it mirrors the
 > read-broad shop-floor reads it sits in front of. It is **read-only** (no audit rows, no
 > operational events, no auth side effects; a badge scan is a lookup only — badge **login** stays
-> exclusively on `POST /auth/employee-login`) and **tenant-scoped** (a cross-tenant code, or a
+> exclusively on the auth routes: passwordless on `POST /auth/employee-login`, and, since badge
+> sign-in was added to the password form, badge **plus password** on `POST /auth/login`) and
+> **tenant-scoped** (a cross-tenant code, or a
 > soft-deleted work order, resolves to `kind: "unknown"`). URL-shaped traveler codes resolve too;
 > the URL's host is deliberately **not** validated — a scanned URL carries no tenant authority, and
 > tenancy always derives from the authenticated caller. The per-action gating it reports

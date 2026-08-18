@@ -16,7 +16,17 @@ Compliance (``NOTIFICATIONS_PLAN.md`` §8, ``PR1_DESIGN_SPEC.md`` §C/§D/§K):
   ``company_id`` from the event — never derived-from-nothing;
 * the acting user is never notified of their own action (actor exclusion);
 * preferences are resolved in memory with NO row auto-create (§9.8);
-* mandatory-channel events force their catalog-named channel on regardless of prefs;
+* mandatory-channel events force their catalog-named channel on regardless of prefs — and
+  where that channel is EMAIL but the recipient has no deliverable address, IN_APP is forced
+  on as well, so the "can never be fully muted" guarantee still lands somewhere. That
+  fallback lives in :func:`channels_from_pref`, the SHARED resolver the settings API renders
+  from, NOT in the fan-out: the two must never disagree about what will be sent, and while
+  it sat in the fan-out they did — a badge-only recipient who muted ``in_app`` for
+  ``account.locked`` was shown "nothing" by the settings screen and sent an in-app row;
+* the email leg never records a delivery it did not attempt: an address this system minted
+  as a placeholder (``user_identity.is_synthetic_email`` — badge-only accounts, legacy
+  ``.local`` imports) — or no address at all — is not enqueued, and its ``NotificationLog``
+  row is written ``sent=False`` with the cause in ``error``;
 * the SMS leg (§3.4) sends only bodies built by ``sms_content.build_sms_body`` from the
   catalog label + a sanitized record identifier + at most one vetted closed-vocabulary
   classifier — never the caller-composed title/body — and only for opted-in, SMS-eligible
@@ -64,6 +74,7 @@ from app.services.notification_catalog import (
 )
 from app.services.sms_content import build_sms_body
 from app.services.sms_service import SMS_COLLAPSE_DELAY_SECONDS, SMS_HOURLY_CAP_PER_USER, reserve_sms_quota
+from app.services.user_identity import is_synthetic_email
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +86,25 @@ _DEDUP_WINDOW_SECONDS = 300
 # Delay applied to the SMS send job so the NotificationLog row the dispatcher creates
 # for it is committed before the job reads it (see _dispatch_sms).
 _SMS_ENQUEUE_DEFER_SECONDS = 2
+
+# Recorded in NotificationLog.error when the email leg refuses to enqueue because the
+# recipient's address is a placeholder this system minted (see the fan-out loop). Written
+# for an operator reading the delivery log, not for a developer: it names the cause and
+# implies the fix (put a real address on the account), and it never claims a send happened.
+_UNDELIVERABLE_EMAIL_ERROR = (
+    "No deliverable address: placeholder minted for a badge-only or legacy imported "
+    "account. Nothing was sent. Add a real email address to this user to receive these."
+)
+
+# The OTHER undeliverable shape, and it gets its own wording rather than reusing the one
+# above: an empty/whitespace address is not a minted placeholder, and a row claiming a
+# placeholder was minted would send an operator looking for a badge-only account that does
+# not exist. ``NotificationLog.error`` can never be corrected after the fact any more than
+# an audit row can, so the two causes are recorded as the two different problems they are.
+_MISSING_EMAIL_ERROR = (
+    "No deliverable address: this account has no email address on file. Nothing was sent. "
+    "Add a real email address to this user to receive these."
+)
 
 _IDENTIFIER_KEYS = (
     "work_order_number",
@@ -295,12 +325,61 @@ def get_preference_row(db: Session, user_id: int) -> Optional[NotificationPrefer
     return db.query(NotificationPreference).filter(NotificationPreference.user_id == user_id).first()
 
 
-def channels_from_pref(pref: Optional[NotificationPreference], entry: CatalogEntry) -> set:
+def _undeliverable_email_reason(email_address: str) -> Optional[str]:
+    """``None`` when mail can actually reach this address, else the cause to record.
+
+    Takes an ALREADY-stripped address. Two shapes are undeliverable and they are
+    deliberately distinguishable (see the two constants): an address this system minted
+    for itself, and no address at all.
+    """
+    if not email_address:
+        return _MISSING_EMAIL_ERROR
+    if is_synthetic_email(email_address):
+        return _UNDELIVERABLE_EMAIL_ERROR
+    return None
+
+
+def email_deliverable_for_user(user: User) -> bool:
+    """Can the email channel actually reach this user?
+
+    Public because it is an INPUT to :func:`channels_from_pref` (the mandatory-EMAIL
+    fallback below), and every caller that renders or performs channel resolution has to
+    pass the same answer or the two will disagree — which is the defect this seam exists
+    to prevent. The self-service preferences API (``api/endpoints/users.py``) is the other
+    caller: it must hand this to :func:`channels_from_pref` so the settings screen shows
+    what the dispatcher will really do for THIS user, not for a hypothetical one with a
+    working mailbox.
+    """
+    return _undeliverable_email_reason((user.email or "").strip()) is None
+
+
+def channels_from_pref(
+    pref: Optional[NotificationPreference],
+    entry: CatalogEntry,
+    *,
+    email_deliverable: bool = True,
+) -> set:
     """Pure resolution of enabled channels from a (possibly absent) preference row.
 
     Catalog defaults unless the user saved an explicit entry for this event; the
     mandatory channel is always forced on afterwards, so a mandatory-critical event
     can never be fully muted (§8.9).
+
+    ``email_deliverable`` says whether the recipient's address can actually receive mail
+    (:func:`email_deliverable_for_user`). It exists because "forced on" is a guarantee
+    about DELIVERY, not about a set-membership: forcing EMAIL for a recipient whose
+    address is a placeholder this system minted guarantees nothing at all, so IN_APP is
+    forced on beside it and the guarantee lands somewhere the person can read it. EMAIL is
+    NOT removed from the set — the fan-out must still write the undeliverable log row that
+    records this recipient's address as the problem.
+
+    Scoped to ``mandatory_channel == EMAIL``: the IN_APP-mandatory entries already land in
+    the inbox, and an untested "undeliverable -> force in_app" with no channel test would
+    start inventing undeliverable EMAIL rows for events nobody asked to be emailed about.
+
+    It DEFAULTS to ``True`` — today's behavior — so a caller that genuinely does not know
+    (no user in hand) resolves exactly as before rather than silently widening every
+    recipient's channel set. A caller that HAS the user must pass it.
     """
     channels: set = set(entry.default_channels)
     if pref is not None and isinstance(pref.preferences, dict):
@@ -309,17 +388,26 @@ def channels_from_pref(pref: Optional[NotificationPreference], entry: CatalogEnt
             channels = {channel for channel in ALL_CHANNELS if raw.get(channel)}
     if entry.mandatory_channel:
         channels.add(entry.mandatory_channel)
+        if entry.mandatory_channel == CHANNEL_EMAIL and not email_deliverable:
+            channels.add(CHANNEL_IN_APP)
     return channels
 
 
-def resolve_channels(db: Session, user: User, entry: CatalogEntry) -> set:
+def resolve_channels(db: Session, user: User, entry: CatalogEntry, *, email_deliverable: bool = True) -> set:
     """Enabled channels for this user+event (loads the preference row, then resolves).
 
     Public because the self-service preferences API renders the SAME resolution the
     dispatcher applies — one source of truth for "what will actually be sent". Callers
     resolving many events for one user should load the row once with
-    :func:`get_preference_row` and call :func:`channels_from_pref` per entry."""
-    return channels_from_pref(get_preference_row(db, user.id), entry)
+    :func:`get_preference_row` and call :func:`channels_from_pref` per entry.
+
+    ``email_deliverable`` is passed straight through and carries the same default and the
+    same obligation: this wrapper does NOT derive it from ``user`` on the caller's behalf,
+    because a silent derivation here would make the two resolution entry points disagree
+    in the opposite direction — one deriving, one defaulting — which is the class of
+    divergence this parameter exists to close. Pass
+    ``email_deliverable=email_deliverable_for_user(user)``."""
+    return channels_from_pref(get_preference_row(db, user.id), entry, email_deliverable=email_deliverable)
 
 
 def _has_unread(db: Session, *, company_id: int, user_id: int, entry: CatalogEntry, related_type, related_id) -> bool:
@@ -403,7 +491,37 @@ async def _fan_out(
         recipients[user.id] = user
 
     for user in recipients.values():
-        channels = resolve_channels(db, user, entry)
+        # Deliverability is resolved ONCE per recipient, before any leg runs, because two
+        # of them below depend on the answer.
+        #
+        # A badge-only account's address is a placeholder this system minted itself, on a
+        # domain it owns and never delivers to (``user_identity.is_synthetic_email`` --
+        # @users.werco.com, plus the legacy @werco.local imports). It is syntactically
+        # valid and non-empty, so every truthiness check passes and the mail is handed to
+        # send_email_job for a mailbox that does not exist. The empty address is the other
+        # half of the same problem and is judged in the same place, not by a truthiness
+        # check further down that would drop it out of the leg without a trace.
+        #
+        # WHY A FALSE ``sent=True`` IS WORSE THAN NO ROW AT ALL: notification_logs is the
+        # record an auditor reconstructs "who was notified of NCR-1234, and when" from. A
+        # row claiming sent=True for an address that could only bounce is not a small
+        # inaccuracy -- it is evidence that a control operated when it did not, and it is
+        # the kind of evidence that ENDS an investigation ("they were told") instead of
+        # starting one. A missing row is a visible gap someone can chase; a false row is an
+        # invisible untruth nobody will. Under AS9100D the false row is the worse artifact.
+        # So the leg still writes its row -- the notification genuinely was raised -- but it
+        # records sent=False and names the cause, which is the truth in both directions.
+        email_address = (user.email or "").strip()
+        undeliverable_reason = _undeliverable_email_reason(email_address)
+        email_deliverable = undeliverable_reason is None
+
+        # The mandatory-EMAIL -> IN_APP fallback (§8.9) is applied INSIDE the shared
+        # resolver, not here: the settings API renders from the same function, and while
+        # this branch lived in the fan-out the screen and the sender disagreed for exactly
+        # the recipients the fallback exists to protect. Today one entry is affected
+        # (``account.locked``, mandatory EMAIL); see channels_from_pref for the scoping.
+        channels = resolve_channels(db, user, entry, email_deliverable=email_deliverable)
+
         if not channels:
             continue
 
@@ -447,14 +565,30 @@ async def _fan_out(
                 in_app_id = notification.id
                 created += 1
 
-        if CHANNEL_EMAIL in channels and not suppress_push and user.email:
+        # NO ``user.email`` truthiness gate. It used to be here, and it silently defeated
+        # the whole point of the leg for the one address shape that needs it most: a
+        # literal empty string is falsy, so the recipient with NO address at all -- the
+        # loudest undeliverable case there is -- fell out of the leg entirely and wrote no
+        # row, which is the silence this change exists to end. Emptiness is handled where
+        # every other undeliverable shape is: in ``_undeliverable_email_reason`` above, so
+        # the leg's behavior matches the comment describing it.
+        if CHANNEL_EMAIL in channels and not suppress_push:
+            # The dedup reservation stays OUTSIDE the deliverability branch on purpose: it
+            # must be taken whether or not anything is enqueued, or a retry of this same
+            # fan-out would write a second log row for the same recipient/channel.
             if await _dedup_reserve(entry.event_key, related_type, related_id, user.id, CHANNEL_EMAIL):
-                await _enqueue_email(user=user, title=title, body=body, link=link, template=template, context=context)
-                # sent=True records the ENQUEUE, not confirmed SMTP delivery. PR-3 FOLLOW-UP:
-                # the admin delivery-failure view (PR 3) needs the terminal outcome, so
-                # send_email_job should write back sent=False + error on final ARQ-retry
-                # exhaustion (thread notification_log_id through the job). Deferred with that
-                # consuming view; matches the pre-existing enqueue-time logging behavior.
+                if email_deliverable:
+                    await _enqueue_email(
+                        user=user, title=title, body=body, link=link, template=template, context=context
+                    )
+                # DELIVERABLE case: sent=True records the ENQUEUE, not confirmed SMTP
+                # delivery. PR-3 FOLLOW-UP: the admin delivery-failure view (PR 3) needs the
+                # terminal outcome, so send_email_job should write back sent=False + error on
+                # final ARQ-retry exhaustion (thread notification_log_id through the job).
+                # Deferred with that consuming view; matches the pre-existing enqueue-time
+                # logging behavior.
+                # UNDELIVERABLE case: nothing was enqueued, so the row records exactly that --
+                # sent=False plus the reason in ``error`` (an existing nullable Text column).
                 db.add(
                     NotificationLog(
                         company_id=company_id,
@@ -463,7 +597,8 @@ async def _fan_out(
                         channel=CHANNEL_EMAIL,
                         subject=title,
                         body=body,
-                        sent=True,
+                        sent=email_deliverable,
+                        error=undeliverable_reason,
                         related_type=related_type,
                         related_id=related_id,
                         notification_id=in_app_id,

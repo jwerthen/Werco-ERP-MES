@@ -13,14 +13,14 @@ Most endpoints require authentication using JWT tokens.
 
 ### Login
 
+`POST /auth/login` is an OAuth2 password-flow endpoint: the body is **form-encoded**, with
+`username` and `password` fields — not JSON, and the sign-in name field is `username`, not `email`.
+
 ```http
 POST /auth/login
-Content-Type: application/json
+Content-Type: application/x-www-form-urlencoded
 
-{
-  "email": "user@werco.com",
-  "password": "password"
-}
+username=user@werco.com&password=...
 ```
 
 Response:
@@ -31,7 +31,128 @@ Response:
 }
 ```
 
-#### Login when an address exists in more than one company
+#### `username` takes an email **or** an employee ID
+
+`username` is the sign-in *name*, not necessarily an address: this route resolves either identifier
+and **verifies the password either way**. `POST /auth/employee-login` is **unchanged** — it remains
+the separate, passwordless badge route the kiosk badge screen and the login page's **Badge Only**
+tab use, with its own rate limit, its own audit actions, and no password field. Nothing moved off
+it; a badge-holder gained a second way in, and nobody lost one.
+
+Which identifier was submitted is decided by **`@`**, with no fallback between the two lookups:
+
+| `username` | Resolver | Scope |
+|------|------|------|
+| contains `@` | exact address match, case-insensitive (`_find_user_by_auth_email`, incl. the legacy `@werco.local` repair) | install-wide |
+| no `@` | exact `employee_id` match, case-insensitive, then the same 4-digit badge normalization `/auth/employee-login` uses — `EMP-00339`, `339` and `0339` all reach the same person (`_find_user_by_employee_id`) | install-wide |
+
+The split is deterministic: the API schemas constrain `employee_id` to `^[A-Za-z0-9\-_]+$`
+(`UserCreate` / `UserUpdate` / `PublicRegister`, `app/schemas/user.py`), so a badge issued through
+the API can never contain `@`. There is deliberately **no** fallback from one resolver to the other —
+two lookups per attempt is two ways to fail, which rebuilds the account-existence oracle both
+resolvers are written to avoid, and both are install-wide (an unauthenticated caller has no company
+yet), so a fallback could resolve a badge onto a stranger's row in another tenant. A **badge-only
+account's minted address also works here**: `emp-<badge>@users.werco.com` contains an `@` and takes
+the email path (see [Public registration](#public-registration-post-authregister-public)) — but it
+is **still throttled**, because its local part is derived from the badge; see
+[the throttle](#per-ip-failed-attempt-throttle-on-enumerable-identifiers-429).
+
+**The 401 wording follows the path**, and on each path one string covers both "no such account" and
+"wrong password":
+
+| `username` | 401 `detail` |
+|------|------|
+| contains `@` | `Invalid email or password` (unchanged) |
+| no `@` | `Invalid employee ID or password` |
+
+The badge wording is a **parallel** of the email one, never a more specific one: distinguishing "no
+such badge" from "wrong password" would answer *does this badge exist?* for a caller who cannot
+supply the password, over a keyspace small enough to sweep.
+
+**A blank `username` is refused before either lookup, and does not charge the throttle.** A
+genuinely empty value never reaches the handler — FastAPI treats `""` on a required `Form` field as
+missing and answers **422** above it — but a whitespace-only value (`"  "`) is a present, non-empty
+form value that does. It contains no `@`, so it takes the badge branch and would otherwise have
+walked all the way to "user not found" and **spent** a unit of the per-IP budget shared with everyone
+behind the same NAT. Both resolvers return nothing on a blank string before touching the database, so
+the attempt establishes nothing about any account. It answers the same generic `Invalid employee ID
+or password` (a distinct "identifier required" would be a new, trivially cheap distinguishable
+outcome on an unauthenticated route) and is audited as `LOGIN_FAILED` with `error_message` `Empty
+identifier; refused before lookup` — with **no** identifier recorded, because there is none. It is
+checked *below* the throttle's 429 and *above* the failure counter, so a throttled IP is still
+refused first.
+
+**A `username` longer than 255 characters is refused before either lookup.**
+`MAX_LOGIN_IDENTIFIER_LENGTH` is the `users.email` column width, and that is the *reason* it is the
+bound: email is the widest identifier column an account can hold (`employee_id` is `String(50)`), so
+a longer submission provably cannot match a stored row on either resolver — refusing it discards
+nothing a lookup could have found. The check exists because this is the one unauthenticated
+**form-encoded** route, which the 256 KB `MAX_JSON_BODY_BYTES` middleware does not cover (it gates
+`application/json` only), so an unbounded `username` would otherwise decide how many bytes the app
+lowercases, regex-scans and binds into a query. Two properties of it are deliberate and are easy to
+undo by accident:
+
+- It returns the **same generic 401** as any bad credential (`Invalid email or password` /
+  `Invalid employee ID or password`), **deliberately not** a distinguishable "identifier too long"
+  error — a new distinguishable outcome on an unauthenticated route is cheap for an attacker to
+  probe.
+- It is **deliberately not counted** against the per-IP throttle below. It establishes nothing about
+  any account, so letting malformed input drain a budget shared with legitimate users behind the same
+  NAT would hand an attacker a cheaper route to a lockout than the one the throttle bounds. The
+  throttle's own 429 still runs *first*, so a blocked IP is refused ahead of this check.
+
+The refusal is audited as `LOGIN_FAILED` with `error_message` `Identifier exceeds 255 characters;
+refused before lookup`; the recorded identifier is truncated to 64 characters and marked
+`…[truncated]`, so the row is neither a storage-amplification vector nor readable as the whole
+submitted value.
+
+403 is unchanged on both paths (`Account is locked. Please contact administrator.` /
+`User account is disabled`), and the badge path **drives the same 5-failed-attempts / 30-minute
+account lockout** the email path does — a lock that also blocks `POST /auth/employee-login`, which
+is why attempts on an **enumerable** identifier additionally carry the throttle below.
+
+**Audit rows.** A badge never travels under `email`. `resource_identifier` is written
+`employee-id:<submitted badge>` — prefixed so it can never be read back as an address — and the
+value also lands in `extra_data.employee_id`. Rows on the email path are unchanged.
+
+#### Auditors: the unauthenticated refusal rows are reachable only in SQL
+
+Every refusal described in this section writes an `audit_log` row, and **the rows written before an
+account is resolved carry `company_id = NULL`**. `AuditService` tags a row with the acting user's
+company; on these branches there is no acting user, and an unauthenticated attempt cannot be
+attributed to a tenant. `GET /api/v1/audit/` filters `company_id = <active company>`
+unconditionally — **there is no platform-admin bypass and no "untenanted" filter** — so these rows
+are invisible on the Audit Log screen and in every export taken through it. They are in the table;
+they are only reachable by querying `audit_logs` directly.
+
+| Row | `company_id` | Visible in `GET /api/v1/audit/` |
+|------|------|------|
+| `LOGIN_FAILED` — user not found / blank identifier / over-length identifier | **NULL** | no |
+| `LOGIN_BLOCKED` — throttled (429), or either 409 cause | **NULL** | no |
+| `EMPLOYEE_LOGIN_FAILED` — employee ID not found | **NULL** | no |
+| `EMPLOYEE_LOGIN_BLOCKED` — throttled (429), or either 409 cause | **NULL** | no |
+| `PUBLIC_REGISTRATION_REJECTED` — all four causes | **NULL** | no |
+| `LOGIN_FAILED` / `LOGIN_BLOCKED` where the account **was** resolved (wrong password, locked, disabled) | the user's company | yes |
+| `KIOSK_BADGE_TOKEN_FAILED` (all causes, 409 included) | the station's company (passed explicitly) | yes |
+| every `*_SUCCESS` row | the user's company | yes |
+
+This is **pre-existing and app-wide**, not introduced by badge login — but it matters here
+specifically, because the anti-enumeration design of `/auth/login` and `/auth/register-public`
+deliberately says nothing to the caller and relies on **the audit row being the place the attempt is
+reported**. Half of those rows cannot be read through the API that exists to read them. An operator
+investigating a sweep, or looking for who tried to register a badge, queries the table:
+
+```sql
+SELECT timestamp, action, resource_identifier, error_message, ip_address
+FROM audit_logs
+WHERE company_id IS NULL
+  AND action IN ('LOGIN_FAILED', 'LOGIN_BLOCKED', 'EMPLOYEE_LOGIN_FAILED',
+                 'EMPLOYEE_LOGIN_BLOCKED', 'PUBLIC_REGISTRATION_REJECTED')
+  AND timestamp >= now() - interval '7 days'
+ORDER BY timestamp DESC;
+```
+
+#### Login when an identifier exists in more than one company
 
 Email is unique **per company** (`uq_users_company_email`), never globally, and every
 company-scoped creation path (`POST /auth/register`, `POST /users/`, the user CSV importer,
@@ -42,15 +163,49 @@ company context is derived *from* the matched row.
 Login used to resolve such an address with an unordered "pick one", so which tenant's account it
 authenticated as depended on row order. It now refuses instead:
 
-| Matches for the submitted address | Result |
+| Matches for the submitted identifier | Result |
 |------|------|
 | exactly one | normal login (existing 401/403 rules unchanged) |
-| two or more | **409** `Email is not unique. Please contact an administrator.` |
+| two or more, address submitted | **409** `Email is not unique. Please contact an administrator.` |
+| two or more, employee ID submitted | **409** `Employee ID is not unique. Please contact an administrator.` |
+| employee ID submitted, candidate set too large to scan | **409** `Employee ID could not be resolved. Please contact an administrator.` |
 
 The refusal happens **before** the password is checked, so it never increments another account's
 failed-login counter, and it writes a `LOGIN_BLOCKED` audit row (`error_message`: `Email resolves
-to more than one account`) — that row is the only place the collision is reported. Same shape as
-the existing 409 on `POST /auth/employee-login` for a non-unique badge.
+to more than one account`, or `Employee ID resolves to more than one account` on the badge path) —
+that row is the only place the collision is reported. Same shape as the existing 409 on
+`POST /auth/employee-login` for a non-unique badge. A 409 also registers **no** failure against the
+per-IP throttle below: it reports an admin data problem rather than a wrong guess (and on the
+duplicate rows, the account provably exists).
+
+**The last row is a *truncation* refusal, not a duplicate one — a badge does not always resolve.**
+The normalized-badge fallback narrows in SQL and reads at most **500** candidate rows, ordered by
+`users.id` so the window is stable between identical requests. A larger set leaves "how many rows
+normalize to this badge" unanswered, and the lookup refuses rather than answering from a partial
+window: an incomplete window would otherwise return an arbitrary single match, and on a
+lockout-driving path resolving onto the wrong row moves a **stranger's** failed-attempt counter.
+The wording is deliberately distinct from "is not unique", which would be a claim the query never
+established, and the admin remediation differs — a duplicate to merge vs. a user table this lookup
+can no longer scan. `POST /auth/employee-login` and the kiosk badge mint
+(`POST /auth/kiosk-badge-token`, company-scoped) share the one implementation and refuse the same
+way; only a pathological badge set reaches it (a shop's whole user table is an order of magnitude
+clear of the cap). Note for auditors: **the two 409s are distinguished on the audit row as well as
+in the response.** The cause is read structurally from the exception type, never from the `detail`
+string (which is UI copy anyone may reword), so a wording edit cannot start recording the wrong
+cause on rows migrations `008`/`060` refuse to `UPDATE` or `DELETE`:
+
+| 409 cause | `LOGIN_BLOCKED` `error_message` |
+|------|------|
+| address resolves to more than one account | `Email resolves to more than one account` |
+| badge resolves to more than one account | `Employee ID resolves to more than one account` |
+| badge candidate window truncated | `Employee ID could not be resolved: the candidate window truncated, so uniqueness was never established. Sign-in was refused rather than guessed at.` |
+
+`POST /auth/employee-login` writes the same two badge sentences under `EMPLOYEE_LOGIN_BLOCKED` — a
+409 there used to return with **no** audit row at all, so the one surface that reports a duplicate
+badge was silent on the route the floor actually uses. That row **does** record the submitted badge
+(unlike the route's other failure rows, which log none): a 409 means the value matched real rows, so
+it is a known-good badge rather than a possibly-mistyped credential fragment, and it is what tells an
+admin which rows to merge.
 
 **Operators: check for duplicate addresses before deploying this behavior.**
 
@@ -59,20 +214,256 @@ SELECT lower(email) AS address, count(*) AS accounts, array_agg(company_id) AS c
 FROM users GROUP BY lower(email) HAVING count(*) > 1;
 ```
 
-Any address returned is a user who will get 409 at login until an admin renames one side
+The employee-ID path has the same exposure now that `POST /auth/login` accepts a badge — the same
+duplicates that have always made `POST /auth/employee-login` refuse. **Group by the NORMALIZED badge,
+not by the stored string**: the resolvers fall back to `_normalize_employee_id` (strip non-digits →
+last four digits, zero-padded to four), so `EMP-00339`, `339` and `0339` are one badge to them and an
+exact `GROUP BY lower(employee_id)` finds none of those collisions. Reproduce the rule in SQL:
+
+```sql
+-- Badges that collide the way login resolves them (install-wide, as the resolvers are).
+WITH normalized AS (
+  SELECT id,
+         company_id,
+         employee_id,
+         lpad(right(regexp_replace(employee_id, '\D', '', 'g'), 4), 4, '0') AS badge
+  FROM users
+  WHERE employee_id IS NOT NULL
+    AND regexp_replace(employee_id, '\D', '', 'g') <> ''   -- no digits => normalizes to NULL, cannot collide
+)
+SELECT badge,
+       count(*)                  AS accounts,
+       array_agg(employee_id)    AS stored_spellings,
+       array_agg(company_id)     AS companies
+FROM normalized
+GROUP BY badge
+HAVING count(*) > 1
+ORDER BY count(*) DESC;
+```
+
+`right(…, 4)` returns the whole string when it is shorter than four characters and `lpad(…, 4, '0')`
+then zero-pads it, which is exactly the function's two branches. Rows whose `employee_id` holds no
+digit at all are excluded because the function returns `None` for them — they are outside the
+normalized keyspace and can only collide **exactly**, which the query above this one catches. Run
+both.
+
+A normalized group of two or more is a 409 **whenever the submitted spelling does not exactly match
+one stored row** — the exact match is tried first and wins when it finds exactly one, which is why
+these collisions hide until a scanner or an operator types a different spelling of the same badge.
+For the crew station (`POST /auth/kiosk-badge-token`) the same query applies per tenant: add
+`WHERE company_id = <id>` inside the CTE, since that resolver is company-scoped.
+
+Any address or badge returned is a user who will get 409 at login until an admin renames one side
 (`PUT /users/{id}`). Resolving the collision automatically is not possible without a tenant
 discriminator (company slug/subdomain) on the login form — an open product decision, not a defect
 in this rule.
+
+#### Per-IP failed-attempt throttle on enumerable identifiers (429)
+
+`POST /auth/login` carries a per-IP failed-attempt throttle whenever the submitted `username` lies in
+an **enumerable** identifier space (table below). It is the same mechanism
+`POST /auth/employee-login` runs — one class, `FailedLoginThrottle` — but on **its own counter with
+its own budget** (`backend/app/core/login_throttle.py`):
+
+| Route | Counter key | Budget | Block length |
+|------|------|------|------|
+| `POST /auth/login` — enumerable identifiers only | `auth:login:failed:<ip>` | **60** failed attempts per **6 hours** (`PASSWORD_LOGIN_*`) | **429** for **1 hour** |
+| `POST /auth/employee-login` — the kiosk badge route, unchanged | `auth:employee-login:failed:<ip>` | **8** failed attempts per **15 minutes** (`EMPLOYEE_LOGIN_*`) | **429** for **15 minutes** |
+
+Both send a `Retry-After` header (seconds until retry), but the **bodies differ**, because the
+block lengths do:
+
+```json
+// POST /auth/login — the wait is DERIVED from Retry-After, so it tracks
+// PASSWORD_LOGIN_COOLDOWN_SECONDS and cannot drift from the constant.
+{ "detail": "Too many failed sign-in attempts from this network — try again in about 60 minutes. Badge sign-in at the kiosk is unaffected." }
+
+// POST /auth/employee-login — unchanged; its cooldown really is a few minutes.
+{ "detail": "Too many failed sign-in attempts — wait a few minutes" }
+```
+
+The password route names the real wait on purpose: `frontend/src/pages/Login.tsx` renders `detail`
+verbatim, and telling an operator "a few minutes" for an hour-long block sends them back to the form
+every few minutes and reads as the app being broken. It also names the kiosk, because badge sign-in
+staying up is the thing someone locked out mid-shift most needs to know.
+
+**The two budgets are independent: neither route can starve the other.** That is the property the
+split exists to guarantee, and it is the reason not to collapse them back into one counter. They
+*were* one shared instance briefly, and it was an outage waiting for a Monday:
+
+- **Starvation across routes.** `/auth/login` counts **wrong-password** failures — an outcome the
+  passwordless badge route cannot even produce — while the kiosk's budget of 8 is sized on the
+  premise that a failure is an *unknown badge*, not a slow scan. Sharing one counter meant ordinary
+  password typos on the web login page drained the kiosk's budget, and an empty budget 429s **badge
+  sign-in for every operator behind that egress IP**, with no admin reset. The login screen actively
+  steers badge-only operators onto the password path, so both routes see the same people from the
+  same IP all day.
+- **Different right answer for the budget.** One legitimate user can spend 5 failures here before
+  their own account lockout stops them, so a budget of 8 cannot absorb two of them.
+
+Separate key prefixes are the whole mechanism (neither route can spend the other's budget); separate
+constants stop either route's sizing argument from being quietly applied to the other. A third login
+route gets a third instance, not a share.
+
+**The line is "enumerable or not", not "badge or email"** — keying it on the presence of `@` left the
+sweep below fully available to a caller who simply typed the minted address form:
+
+| Submitted `username` | Throttled |
+|------|------|
+| a badge (no `@`) | **yes** — `_normalize_employee_id` collapses input to 4 trailing digits, a ~10⁴ keyspace |
+| an address on a domain **this system mints**: `emp-<badge>@users.werco.com`, or the legacy `@werco.local` (`user_identity.is_synthetic_email` — exact match on the domain after the final `@`, so `bob@users.werco.com.example.org` is an ordinary address) | **yes** — its local part is a function of the badge, so `emp-0000@…` through `emp-9999@…` reaches the same accounts a badge sweep does |
+| an ordinary address at a real mail domain | **no**, deliberately — that space is not enumerable, and counting it would let one person mistyping a password on a shared office NAT take a whole floor's sign-in offline |
+
+Behavior:
+
+- The classification reads the **submitted string alone** (no DB lookup), which is what keeps the
+  check **before** the user lookup: a throttled IP does zero account probing — while blocked, even a
+  correct identifier + password is refused.
+- **Successful logins never count**, on either route, so shift-change badge cycling stays fast.
+- **Three** outcomes register a failure on `/auth/login`: unknown identifier, wrong password,
+  disabled account. A **409** (ambiguous or unresolvable identifier) registers nothing, and neither
+  does an [over-length or blank `username`](#username-takes-an-email-or-an-employee-id).
+- **An already-LOCKED account does not count on `/auth/login`** — deliberately, and unlike every
+  other failure branch there. The password is not even checked, so a further attempt establishes
+  nothing an attacker did not already have from the five attempts that caused the lock; the only
+  population it can charge is the legitimate one — the person retrying their own locked account
+  during the 30-minute window, who blows past the 5-failures-per-user figure the budget is sized on
+  and can take password sign-in down for everyone behind the same NAT. **`/auth/employee-login` does
+  count its locked-account failures**, on its own budget; the two routes differ here on purpose.
+- Each throttled rejection is audited as `LOGIN_BLOCKED` (`error_message`: `Throttled: too many
+  failed attempts from this address`); the kiosk route's are `EMPLOYEE_LOGIN_BLOCKED`. Both carry
+  `company_id = NULL` and so are **not** readable through `GET /api/v1/audit/` — see
+  [Auditors: the unauthenticated refusal rows are reachable only in SQL](#auditors-the-unauthenticated-refusal-rows-are-reachable-only-in-sql).
+- Fail-open on a counter-storage outage, on both instances. The warning marker is deliberately the
+  same string for both — `employee_login_throttle_fail_open`, because existing SIEM rules grep for
+  exactly it — and the message names the offending key prefix so an operator can still tell which
+  route lost its throttle. The 5/minute per-path cap on this route still applies.
+
+**Operators: a tripped `POST /auth/login` block lasts ONE HOUR.** The counting *window* is 6 hours;
+the *block* is 1 hour (`PASSWORD_LOGIN_COOLDOWN_SECONDS = 60 * 60`). The two are deliberately
+different lengths — see [the derivation](#why-60--6-h-window--1-h-block) — and it is the block length
+that matters on a Monday-morning call. Precisely what it does and does not take out:
+
+- **Refused during the block:** enumerable identifiers on **this one route** — a badge typed into the
+  login page's **Password** tab, or a minted `emp-…@users.werco.com` / `@werco.local` address.
+- **Unaffected:** an ordinary address at a real mail domain on the same route (it never counts toward
+  the budget and is never refused by it), and **`POST /auth/employee-login`** — the kiosk badge
+  screen and the crew station keep their own untouched 8-per-15-minutes budget, so badge sign-in at
+  the station keeps working. That isolation is exactly what the two-counter split buys.
+- **There is no admin reset.** Nothing in the application clears a throttle key; `reset()` on the
+  throttle class is a test hook and is not wired to any endpoint or admin screen. The block is waited
+  out — or, in a Redis-backed deployment, an operator with Redis access deletes
+  `auth:login:failed:<ip>` out of band. **That missing reset is the whole reason the block is 1 hour
+  rather than 6** — one hour is inside a shift; see the derivation below.
+- A badge-only user's **minted** address is throttled exactly like the badge it was derived from, so
+  someone who registered with only a badge has **no** unaffected way in at a desk during a block. The
+  kiosk still takes their badge.
+- **It blocks an IP, and the IP is not trustworthy.** With `--forwarded-allow-ips=*` still in place
+  the address both counters key on is caller-supplied, so an attacker rotates past the block while a
+  legitimate shop behind one NAT egress cannot. Both throttles — and every other per-IP control in
+  the app — stay soft until that flag is pinned to the platform's edge CIDR.
+
+#### Why 60 / 6 h window / 1 h block
+
+The figures are derived, not picked round (`login_throttle.py`), and two bounds pull in opposite
+directions:
+
+- **Lower bound: honest typing must never trip it.** One legitimate user can contribute at most 5
+  failures before the per-account lockout (5 → 30 minutes) stops them. Taking 10 badge-holding users
+  behind one NAT egress — a small shop's floor on one public IP — that is `5 × 10 = 50` honest
+  failures, worst case. 60 clears it with margin, and even reaching 50 requires all ten to lock
+  themselves out inside the **same** 6-hour window. The counted population is smaller still: only
+  enumerable identifiers count, so office users at a real mail domain contribute nothing on either
+  outcome.
+- **Upper bound: a sweep of the ~10⁴ badge space must still cost days.** Two attack rates exist and
+  **the attacker picks the faster of them**, so both are computed:
+
+  | Strategy | Rate | Sweep of ~10⁴ badges | Bounded by |
+  |------|------|------|------|
+  | (a) pace *under* the block — take `max_failures − 1` per window, forever | `59 / 6 h = 236/day` | **~42 days** | the **window** |
+  | (b) deliberately **trip** the block and cycle it — deliver a full budget, sit out the cooldown, repeat. Delivery is capped by the 5/minute slowapi limit, so 60 failures take ~12 min; the cycle is `12 min + 60 min = ~72 min` | `60 / 1.2 h = 1200/day` | **~8 days** | the **cooldown** |
+
+  **The effective bound is therefore ~8 days, set by (b)** — an attacker has no reason to choose the
+  slower strategy. Compare the 5/minute slowapi cap with no throttle at all:
+  `10⁴ / 5 per min ≈ 33 hours`. So this throttle buys roughly **6×** over no throttle, not the ~30×
+  a 6-hour cooldown would.
+
+**Why the cooldown (1 h) is SHORTER than the window (6 h) — an owner decision, 2026-08-17, taken
+with that cost stated.** Setting the cooldown equal to the window would make (a) and (b) the same
+~42 days and is *strictly better* against a sweep: hitting the max re-arms the key's TTL to the
+cooldown, so a **short cooldown is the fast lane**. It was traded away for **recoverability**. A
+tripped block has **no admin reset** (see above), so a 6-hour cooldown costs a site that trips
+it — through an attack, a misconfigured client, or a badge scanner left pressed against the web
+form — password sign-in for most of a working day, with nothing anyone on site can do. One hour is
+inside a shift. **The accepted price is the ~5× reduction in sweep resistance** (~42 days → ~8 days).
+Do not read the 6-hour window as the block length: an operator who plans around a 6-hour guarantee is
+planning around a control this system does not provide.
+
+If sweep resistance is later worth more than the recovery time, raise **only**
+`PASSWORD_LOGIN_COOLDOWN_SECONDS`. The window carries bound (a) and must not be shortened, or the
+paced rate rises with it.
+
+**Why the window is 6 h and not the kiosk's 15 min.** The window is the only lever on bound (a) —
+a paced attacker gets `max_failures − 1` per window forever, whatever the cooldown — so a 15-minute
+window at any budget large enough to satisfy the lower bound would put the paced sweep back under
+two days (`59 / 15 min = 5664/day → ≈ 1.8 days`), i.e. worse than the effective bound the current
+pair already gives.
+
+Why a route that verifies a password needs this at all: it **drives the account lockout** (5 failures
+→ 30 minutes), and that lock **also** blocks `POST /auth/employee-login` — so sweeping identifiers
+here can take a person off the kiosk, and the 5/minute per-path cap does not bound it.
+
+**Every figure above assumes the client IP is trustworthy, and today it is not.** The throttle
+**bounds** that lockout DoS rather than eliminating it: it keys on the client IP, and the API is
+served with `--forwarded-allow-ips=*`, so the IP it keys on is caller-supplied and rotatable. An
+attacker who rotates it pays **none** of the costs in the table above; read those figures as the
+price to an attacker who does not rotate, and nothing more. **Every per-IP control in the app — both
+of these counters included — stays soft until that flag is pinned to the platform's edge CIDR.**
+Splitting the counter in two did not change that, and neither did any number in this section; it is
+an open deployment fix, not something either throttle can compensate for. See the caveat under
+[Rate Limiting](#rate-limiting).
 
 ### Public registration (`POST /auth/register-public`)
 
 Unauthenticated, 3/minute per IP, and **install-wide**: its email and employee-ID uniqueness
 checks span every company, not just the one it registers into.
 
+**Either identifier alone is enough.** The body carries `first_name`, `last_name`, `password`, and
+**at least one of** `email` / `employee_id` — each is individually optional:
+
+| Body carries | Result |
+|------|------|
+| `email` only | badge derived from the address local part (`jmw@wercomfg.com` → `jmw`, case preserved), truncated to 50 characters — the `employee_id` column width — with any collision suffix counted inside that limit (see [the walk](#the-derived-badge-walks-with-letters-not-numbers)) |
+| `employee_id` only | a **synthetic** address is minted: `emp-<sanitized-badge>@users.werco.com` |
+| both | both stored verbatim, nothing derived |
+| neither | **422** — `Provide an email address or an employee ID` |
+
+`users.email` and `users.employee_id` are both `NOT NULL`, so the missing one is derived rather than
+the column widened — a shop-floor registrant may only ever have a badge. For the mint the badge is
+lowercased and stripped to the characters an email local part may carry (a badge that sanitizes to
+nothing falls back to `employee`), and a collision appends `-2`, `-3`, … before the `@`. **That
+numeric walk is the mint's alone** — the badge walk in the other direction steps with *letters*, for
+a correctness reason spelled out [below](#the-derived-badge-walks-with-letters-not-numbers). A digit
+inside an address means nothing to any resolver, so a numeric suffix is inert there; a digit inside a
+badge is a coordinate. The minted address is a working sign-in credential — `POST /auth/login`
+accepts it, and `POST /auth/employee-login` still accepts the badge — not a deliverable mailbox.
+Because it is minted from
+the badge it counts as an **enumerable** identifier at login and is throttled accordingly (see
+[the throttle](#per-ip-failed-attempt-throttle-on-enumerable-identifiers-429)); mail is never sent to
+it either (see [docs/NOTIFICATIONS.md](NOTIFICATIONS.md#channels)). The shape lives in
+`app/services/user_identity.py` and is the same one the user CSV importer mints for a row with no
+email (see [Excel migration runbook](EXCEL_MIGRATION_RUNBOOK.md) → Step 2).
+
+That **422 is a request-shape refusal, not an oracle**: it is raised by the `PublicRegister` schema
+before the handler runs, so it depends only on the submitted body and never on whether an account
+exists. The admin paths (`POST /auth/register`, `POST /users/`) are unchanged and still require
+both identifiers.
+
 It used to answer `400 Email already registered` or, distinctly, `400 Employee ID already
 exists` — two account-existence oracles over every tenant's user list and badge numbers, on a
 route that also inserts rows into `users`. Both 400s are gone. Outside the first-user bootstrap
-**every** outcome returns the same body, and a duplicate does not insert:
+**every** outcome returns the same body — a badge-only signup included, since minting the address is
+a storage detail rather than a distinguishable outcome — and a duplicate does not insert:
 
 ```json
 { "message": "Account submitted for approval", "is_first_user": false }
@@ -80,8 +471,95 @@ route that also inserts rows into `users`. Both 400s are gone. Outside the first
 
 The password is hashed before the duplicate check so accepted and refused calls do the same
 bcrypt work (skipping it would rebuild the oracle in the response time), and a lost insert race
-(`IntegrityError`) returns that same body rather than a 500. Refusals are recorded server-side as
-a `PUBLIC_REGISTRATION_REJECTED` audit row.
+(`IntegrityError`) returns that same body rather than a 500. The mint runs only *after* the
+duplicate check, so a refused attempt never reaches it. Refusals are recorded server-side as a
+`PUBLIC_REGISTRATION_REJECTED` audit row, keyed to whichever identifier was submitted — a badge-only
+attempt is recorded as `employee-id:<badge>`, prefixed so it can never be read back as an address.
+That row carries `company_id = NULL` (an unauthenticated attempt belongs to no tenant) and is
+therefore **not** visible through `GET /api/v1/audit/` — see
+[Auditors: the unauthenticated refusal rows are reachable only in SQL](#auditors-the-unauthenticated-refusal-rows-are-reachable-only-in-sql).
+This is the only place a refused registration is reported at all, so it is worth knowing it is a SQL
+read.
+
+**The badge duplicate check tests collisions the way login resolves them.** An exact `employee_id`
+match is not sufficient: both login resolvers compare `_normalize_employee_id` values (4 trailing
+digits), so registering `00339` while an operator holds `EMP-0339` clears an exact comparison,
+inserts, and from then on every scan of badge `0339` finds two normalized matches and 409s that
+operator off the kiosk, the crew station and both login routes. A **normalized** collision therefore
+counts as taken as well, and it is the same predicate for the **derived** badge (an email-only
+signup at `0339@example.com` derives `0339`), where the walk below steps past it.
+A candidate set too large to scan (the 500-row cap above) also counts as taken — on an
+unauthenticated write path the safe answer is not to insert, and an admin can still create the
+account through `POST /users/`.
+
+#### The derived badge walks with LETTERS, not numbers
+
+When the derived badge is taken, the next candidate is `-b`, then `-c`, … `-z`, then `-aa`, `-ab`, …
+(bijective base-26, so the sequence never runs out). `-a` is never emitted: the bare base occupies
+that slot.
+
+| Local part | Rows already held | Badge issued |
+|------|------|------|
+| `jmw` | — | `jmw` |
+| `jmw` | `jmw` | `jmw-b` |
+| `jmw` | `jmw`, `jmw-b` | `jmw-c` |
+| `jmw` | `jmw`, `jmw-b` … `jmw-z` | `jmw-aa` |
+
+**This is a correctness property, not a style choice.** Both login resolvers read a badge as its
+last four digits (`_normalize_employee_id`), so a candidate carrying **no digits normalizes to
+nothing** and can never collide in the 4-digit badge keyspace. Only exact-string collisions remain,
+and those are finite — which is what makes the walk converge. Numeric suffixes had the opposite
+property: `jmw-2` *is* badge `0002` and `jmw-3` *is* `0003`, so on a shop with contiguous badge
+numbers — against a probe that (correctly) refuses normalized collisions — **every** candidate
+collided, the walk hit its 100-candidate cap, and a legitimate email-only signup was **silently
+dropped** behind the uniform pending body, having created nothing.
+
+**A digit-bearing base is the one case letters cannot fix on their own.** If the sanitized local part
+carries digits itself, suffixing does not remove that digit core, so a normalized collision would
+persist across every candidate alike. So when the base itself comes back taken, the walk drops to a
+provably digit-free base — the sanitized local part with its digits stripped, or `user` when that
+leaves no **alphanumeric** character — and walks *that* with letters:
+
+| Local part | Base offered first | Then, if the base is taken |
+|------|------|------|
+| `jw2024` | `jw2024` | `jw` (digits stripped), then `jw-b`, `jw-c`, … |
+| `0339` | `0339` | `user` (stripping leaves nothing), then `user-b`, … |
+| `2024-05` | `2024-05` | `user` — stripping leaves `-`, which is non-empty but is not a badge anyone should be issued, so the alphanumeric test rejects it |
+
+Stripping the digits is **deliberately preferred to dropping a legitimate signup**: it only happens
+when the digit-bearing badge would have collided with a real operator's badge, and the alternative is
+either refusing the registration silently or minting a badge that 409s that operator off the kiosk
+and both login routes. A derived badge is a placeholder for someone who never had one; an operator's
+badge is their credential, so the derived one gives way.
+
+The walk is capped at **100** offered candidates; on exhaustion nothing is inserted and the refusal
+is audited (see the rejection row below). With letter suffixes that cap is a **backstop** rather than
+a working limit — reaching it would require 100 real accounts holding `jmw`, `jmw-b` … `jmw-cv`.
+
+**The rejection audit row names which cause it was — there are four, and only one of them is a
+duplicate.** Writing "already in use" for the others would state a fact nobody checked:
+
+| Cause | `PUBLIC_REGISTRATION_REJECTED` `error_message` |
+|------|------|
+| a colliding row was **found** (address, or badge exactly / under normalization) | `Email or employee ID already in use` |
+| the badge collision probe **truncated** its candidate window, so no duplicate was established | `Employee ID could not be resolved: the collision probe truncated its candidate window, so no duplicate was established. Registration was refused rather than guessed at.` |
+| the badge suffix walk offered its full 100 candidates and every one came back unusable | `Employee ID could not be derived: every candidate offered to the collision probe came back unusable, up to the iteration cap. Registration was refused rather than looping or reusing a candidate.` |
+| the **synthetic-address** mint exhausted its walk (badge-only signup) | `Synthetic email could not be derived: every candidate offered to the duplicate probe came back in use, up to the iteration cap. Registration was refused rather than looping or reusing a candidate.` |
+
+An **established** collision wins the wording when more than one is true — "already in use" is then a
+fact, and it is the one that explains the refusal. None of these sentences is ever shown to the caller (the
+response is the uniform pending body either way, so no oracle is added), and neither can be corrected
+afterwards — migrations `008`/`060` refuse `UPDATE`/`DELETE` on `audit_logs` and invariant 2 forbids
+backfilling — which is why the two causes are recorded as the two different problems they are: one
+sends an admin to merge a duplicate, the other to a user table the resolver can no longer scan. The
+distinction is drawn from the **decisive** probe, the explicitly submitted badge; the letter-suffix
+walk on a *derived* badge runs the same probe, but a candidate it steps past is not the reason
+a request was refused and never sets the cause.
+
+**The uniform response is unchanged by that**: the same
+`{"message": "Account submitted for approval", "is_first_user": false}`, the same 200, and no
+insert, so widening what counts as "taken" grows only the set of inputs that silently do nothing —
+a caller cannot tell this outcome from a successful signup, and no oracle is added.
 
 The first-user bootstrap is unchanged and still returns its distinct
 `{"message": "Admin account created successfully", "is_first_user": true}` — with zero users
@@ -89,7 +567,8 @@ nothing can collide, so it never reaches the uniform path.
 
 The uniqueness checks stay install-wide **on purpose**: scoping them per company would let this
 public route mint the cross-tenant duplicate emails and badge numbers that make login and
-badge login refuse with 409.
+badge login refuse with 409. The synthetic-address mint dedups install-wide for the same reason —
+a per-company probe could mint an address another tenant already holds.
 
 ### Using the Token
 
@@ -167,7 +646,7 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| POST | `/auth/kiosk-badge-token` | Exchange a badge scan for a 5-min kiosk-scoped operator token. Body `{"employee_id"}` → `{"access_token", "token_type", "expires_in": 300, "user": {"id", "full_name", "employee_id"}}`. Unknown / inactive / locked / foreign-tenant badge → uniform **401** "Invalid badge"; ambiguous badge within the company → **409**. Issuance and failures are audited (`KIOSK_BADGE_TOKEN_ISSUED` / `KIOSK_BADGE_TOKEN_FAILED`). Rate-limited **30/minute** per IP | Kiosk station token |
+| POST | `/auth/kiosk-badge-token` | Exchange a badge scan for a 5-min kiosk-scoped operator token. Body `{"employee_id"}` → `{"access_token", "token_type", "expires_in": 300, "user": {"id", "full_name", "employee_id"}}`. Unknown / inactive / locked / foreign-tenant badge → uniform **401** "Invalid badge"; ambiguous badge within the company → **409**, as is a candidate set past the 500-row scan cap (same two causes and same wording as `/auth/login`, company-scoped here). Issuance and failures are audited (`KIOSK_BADGE_TOKEN_ISSUED` / `KIOSK_BADGE_TOKEN_FAILED`) — **including both 409 causes**, which write a `KIOSK_BADGE_TOKEN_FAILED` row carrying the cause in `error_message`; rows are station-keyed (`resource_identifier` = station label) and the scanned badge is deliberately never logged. Rate-limited **30/minute** per IP | Kiosk station token |
 
 > **`POST /auth/employee-logout` requires authentication** and takes the actor from the **bearer
 > token**, never from the request body. The body (`{"employee_id"}`) is still accepted for wire
@@ -5970,6 +6449,17 @@ roles). See [docs/NOTIFICATIONS.md](NOTIFICATIONS.md#sms-channel-twilio).
 > on — resolved through the dispatcher's own `channels_from_pref`, so the settings UI can never
 > disagree with what actually gets sent. It is **read-only and non-creating**: a user who has never
 > saved preferences gets defaults and **no** `NotificationPreference` row is written.
+>
+> **What makes that a mechanism rather than a promise:** one shared resolver, with every input it
+> needs passed in rather than defaulted. `channels_from_pref` takes an `email_deliverable` flag — the
+> dispatcher forces `in_app` on beside a **mandatory `email`** channel when the recipient's address
+> is an undeliverable placeholder (see [docs/NOTIFICATIONS.md](NOTIFICATIONS.md#channels)) — and this
+> endpoint threads `email_deliverable_for_user(current_user)` into it.
+> `_effective_preferences(pref, user)` takes the user as a **required** parameter for exactly that
+> reason: left at the resolver's `True` default the screen rendered a hypothetical recipient with a
+> working mailbox, so a badge-only user who muted `account.locked` was shown `['email']` while the
+> dispatcher resolved `['email', 'in_app']` and filed an in-app row. Same function, same inputs, both
+> sides.
 > ```json
 > {
 >   "preferences": {
@@ -7018,6 +7508,24 @@ Successful logins never count toward the window; the check runs before any user 
 throttled rejection is audited as `EMPLOYEE_LOGIN_BLOCKED`; a counter-storage outage fails open
 with a logged warning (the 10/minute cap above still applies). Implementation:
 `backend/app/core/login_throttle.py`.
+
+**`POST /auth/login` carries the same mechanism on its ENUMERABLE identifiers, on a SEPARATE
+counter** — a `username` with no `@` (a badge), **or** an address on a domain this system mints
+(`@users.werco.com`, legacy `@werco.local`), whose local part is derived from a badge and is
+therefore just as enumerable. An ordinary address at a real mail domain is never throttled and never
+counts. Its budget is its own — **60 failed attempts from one IP within a 6-hour window → 429 for a
+1-hour cooldown**, key `auth:login:failed:<ip>` — deliberately **not** the kiosk key above, so
+failures on one route can never spend the other's budget and a block on one leaves the other working.
+The **window and the cooldown are different lengths on purpose**: the 6-hour window is what bounds a
+*paced* sweep, while the 1-hour cooldown is a deliberate recoverability trade (there is no admin
+reset, so a longer block would cost a site most of a working day) — and because an attacker takes
+whichever is faster, that trade is what sets the real sweep cost at ~8 days rather than ~42. The
+budget is larger than the kiosk's because it also counts **wrong-password** failures, which the
+passwordless badge route cannot produce. Its rejections are audited as `LOGIN_BLOCKED` (with
+`company_id = NULL`, so they are not readable through `GET /api/v1/audit/`), and neither counter has
+an admin reset. Both key on a caller-supplied IP while `--forwarded-allow-ips=*` stands. See
+[Why 60 / 6 h window / 1 h block](#why-60--6-h-window--1-h-block) and
+[Per-IP failed-attempt throttle on enumerable identifiers](#per-ip-failed-attempt-throttle-on-enumerable-identifiers-429).
 
 ## Request Size Limits
 

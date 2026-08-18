@@ -343,7 +343,8 @@ is skipped — the `notified_at` marker still bounds duplicates).
   bell/popover/`/notifications` inbox state, distinct from `NotificationLog` (the per-channel
   delivery-attempt log). Indexed on `(user_id, is_read)`.
 - **Email** — enqueues `send_email_job` and writes a `NotificationLog` row (`channel="email"`,
-  linked to the in-app row via `notification_id` when one exists). Fixes shipped in PR 1:
+  linked to the in-app row via `notification_id` when one exists) — **unless the recipient's address
+  is an undeliverable placeholder**, see the two rules directly below. Fixes shipped in PR 1:
   - **Retry layering** (`EmailService.send_email`): an unconfigured SMTP logs a skip and returns
     without raising (so dev doesn't spam ARQ retries), but a **real transport failure now propagates**
     so the job retries and records the terminal outcome (previously swallowed).
@@ -365,7 +366,71 @@ is skipped — the `notified_at` marker still bounds duplicates).
     inside an email, unresolvable in every mail client. `base.html` had always guarded the footer
     this way; the button now matches.) Every path that goes in that button comes from the link
     registry — see [Deep links must resolve](#deep-links-must-resolve).
-- **Digest** — a `DigestQueue` row; the daily digest cron (8:00) is unchanged in PR 1.
+  - **Undeliverable placeholder addresses are never sent to — and never recorded as sent.** A
+    badge-only account's address is a placeholder this system minted itself
+    (`emp-<badge>@users.werco.com`), and legacy imports carry `@werco.local`; both are syntactically
+    valid and non-empty, so every truthiness check passes and the mail used to be handed to
+    `send_email_job` for a mailbox that does not exist. `user_identity.is_synthetic_email` now gates
+    the leg (exact match on the domain after the **final** `@`, case-insensitive — never a substring
+    test, so `bob@users.werco.com.example.org` stays deliverable). Nothing is enqueued, and the
+    `NotificationLog` row is **still written**, with `sent=False` and the cause in `error`. **Two
+    undeliverable shapes exist and they record two different sentences** — a row claiming a
+    placeholder was minted would send an operator hunting a badge-only account that does not exist,
+    and `NotificationLog.error` is no more correctable after the fact than an audit row:
+
+    | Recipient address | `error` |
+    |------|------|
+    | a minted placeholder (`@users.werco.com`, or a legacy `@werco.local` import) | *"No deliverable address: placeholder minted for a badge-only or legacy imported account. Nothing was sent. Add a real email address to this user to receive these."* |
+    | empty or whitespace-only | *"No deliverable address: this account has no email address on file. Nothing was sent. Add a real email address to this user to receive these."* |
+
+    Writing the row rather than skipping it is the point: `notification_logs` is what an auditor reconstructs "who
+    was notified of NCR-1234, and when" from, and a false `sent=True` is evidence that a control
+    operated when it did not — it *ends* that reconstruction ("they were told") instead of leaving a
+    gap somebody can chase. The empty-address case is judged in the same place rather than by a
+    truthiness gate further down the leg — the old `user.email` gate meant the **loudest**
+    undeliverable case, no address at all, fell out of the leg and wrote no row. The dedup reservation
+    is taken either way, so a retried fan-out cannot write a second row. Both `error` texts are fixed,
+    system-composed sentences carrying **no** event payload, so the
+    [email content rule](#email-content-rule-plan-111--relaxed-2026-07-29) is untouched.
+    **This is a deliberate behavior change for pre-existing rows**: `auth._ensure_valid_auth_email`
+    only rewrites `@werco.local` on that user's *first successful login*, so legacy rows that have
+    never logged in stop being logged as delivered too. Nothing was ever delivered to them — the
+    previous silence was the defect.
+  - **A mandatory EMAIL channel falls back to in-app when the address is undeliverable.** §8.9's
+    "can never be fully muted" guarantee is enforced by forcing `entry.mandatory_channel` on
+    regardless of preferences — which guarantees nothing for a recipient with no deliverable address.
+    `in_app` is therefore forced on as well whenever the mandatory channel is `email` **and** the
+    recipient has no deliverable address (a minted placeholder, or an empty/whitespace-only value).
+    **`account.locked` is the only catalog entry this affects** — it is the one EMAIL-mandatory
+    entry; the IN_APP-mandatory entries (`wo.blocker_created`,
+    `ncr.created`, `quality.hold`, `inspection.failed`, `comment.mention`) already land in the inbox
+    and are untouched. `email` is **not** removed from the channel set: the leg must still write its
+    `sent=False` row, which is the record that this recipient's address is the problem.
+
+    **Where the rule lives.** It is inside `channels_from_pref` — the *shared* channel resolver, not
+    the fan-out — behind an explicit `email_deliverable` argument
+    (`notification_dispatch.email_deliverable_for_user(user)` computes it). That placement is the
+    point: `channels_from_pref` is also what the self-service settings API renders from, so any
+    caller that has the recipient in hand resolves the *same* implementation the dispatcher acts on
+    rather than a copy that agreed on the day it was written. The argument **defaults to `True`**
+    (today's behavior) so a caller with no user in hand resolves exactly as before instead of
+    silently widening a channel set.
+
+    **The settings API passes it, so the screen and the sender agree.**
+    `GET /users/me/notification-preferences` (`api/endpoints/users.py::_effective_preferences`)
+    takes the user as a **required** parameter and threads
+    `email_deliverable_for_user(current_user)` into `channels_from_pref`, so the rendered matrix
+    resolves for **this** recipient rather than for a hypothetical one with a working mailbox. Left
+    at the `True` default it did diverge: a badge-only user who muted `account.locked` was shown
+    `['email']` while the dispatcher resolved `['email', 'in_app']` and filed an in-app row — the
+    screen contradicting the sender for the recipient least able to notice. One resolver plus a
+    required parameter is what closes it; a defaulted parameter here is how the two halves drifted
+    in the first place. [docs/API.md](API.md#user-self-service-my-settings) states the same
+    guarantee on the endpoint.
+- **Digest** — a `DigestQueue` row; the daily digest cron (8:00) is unchanged in PR 1. **The digest
+  email itself does not carry the deliverability gate above** — `send_daily_digest_task` sends
+  inline to `user.email` with no check and writes no `NotificationLog` row at all (see
+  [Known limitations](#known-limitations-carried-to-later-prs)).
 - **SMS** — live over Twilio as of PR 4. The leg fires only when **all** of the following hold:
   the catalog entry is `sms_eligible`, the user has explicitly enabled `sms` for that event
   (no catalog entry ships `sms` in its defaults, so this is always an opt-in), recurring
@@ -800,6 +865,12 @@ requirements (enforced in `notification_dispatch.py` / `notification_catalog.py`
 - [ ] **Mark-read is NOT audited** — read state is UI state, not domain state (no `audit_log` write).
 - [ ] **Mandatory channels forced on** — a `mandatory_channel` entry can't be fully muted (e.g.
       `ncr.created` / `inspection.failed` force in-app to Quality; `account.locked` forces email).
+      Where that mandatory channel is `email` **and** the recipient's address is an undeliverable
+      placeholder, `in_app` is forced on too, so the guarantee still lands somewhere the recipient
+      can read (`account.locked` is the only entry this reaches). Both halves are resolved in the
+      shared `channels_from_pref`, so this is one implementation rather than a fan-out-local branch
+      — and both callers pass `email_deliverable`, the fan-out and the self-service settings API
+      alike; see [Channels](#channels).
 - [ ] **SMS egress default-off, fail-closed** — `Company.allow_sms_egress` is re-resolved before
       **every** Twilio call in `sms_service._sms_egress_allowed`; unknown tenant, missing company
       row, `company_id is None`, or any exception all **deny**. No phone number and no body leave
@@ -952,10 +1023,17 @@ after `072_notifications_foundation` (authored alongside this PR; confirm the ex
 
 Surfaced by the PR-1 adversarial review; each is safe in PR 1 and has a designated home:
 
-- **Delivery-record accuracy** — the email `NotificationLog` is written `sent=True` at *enqueue* time,
-  not after confirmed SMTP delivery (the pre-existing pattern). Terminal-outcome write-back
-  (`sent=False` + `error` on final ARQ-retry exhaustion) lands with the **admin delivery-failure view
-  in PR 3**, which is the only consumer of a "failed" filter.
+- **Delivery-record accuracy** — for a **deliverable** address the email `NotificationLog` is written
+  `sent=True` at *enqueue* time, not after confirmed SMTP delivery (the pre-existing pattern).
+  Terminal-outcome write-back (`sent=False` + `error` on final ARQ-retry exhaustion) lands with the
+  **admin delivery-failure view in PR 3**, which is the only consumer of a "failed" filter. (An
+  *undeliverable placeholder* address is already recorded `sent=False` with a reason at fan-out time
+  — that is a separate rule, see [Channels](#channels).)
+- **The daily digest email is not deliverability-gated** — `jobs/email_jobs.py::send_daily_digest_task`
+  sends inline to `user.email` with no `is_synthetic_email` check and writes **no** `NotificationLog`
+  row, so a badge-only user who has queued digest items is still mailed into the void and leaves no
+  delivery record either way. It is the second per-user mail sender and needs the same guard; the
+  `_fan_out` email leg above is the only one carrying it today.
 - **Recurring re-notify suppression is keyed on an unread in-app row** — a recipient who (via the PR-3
   preferences UI) turns *in-app off but email on* for a recurring event would escape suppression. Not
   reachable in PR 1 (no preference-write endpoint; `wo.late` defaults include in-app). **PR 3** must

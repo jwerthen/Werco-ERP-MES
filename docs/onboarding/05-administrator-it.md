@@ -17,7 +17,7 @@ Go to **Users** (under **Administration**) to see everyone in your company.
 
 ### Create a user
 1. Click **Add User** (top right).
-2. Fill in **First Name**, **Last Name**, **Employee ID**, and **Email**.
+2. Fill in **First Name**, **Last Name**, **Employee ID**, and **Email**. On **this form** all four are required — the two bulk/self-service paths below (spreadsheet import, and someone registering their own account) each accept a person who has only one of the two identifiers.
 3. Enter a **Password**. It must meet the rules shown under the field: at least 12 characters, and no common word or pattern like "password", "admin", "welcome", or "werco". There is **no** upper/lower/number/symbol requirement — a passphrase of a few plain words is the easiest way to meet the rule.
 4. Pick a **Role** (see [Roles & permissions](#roles--permissions) below) and optionally a **Department**.
 5. Click **Create**.
@@ -43,7 +43,7 @@ Go to **Users** (under **Administration**) to see everyone in your company.
 > Tip: Check **Show inactive users** at the top of the table to see deactivated accounts.
 
 ### Approve pending self-registrations
-When someone registers their own account, it stays inactive until you approve it.
+When someone registers their own account, it stays inactive until you approve it. The sign-up page asks for an **email, an employee ID, or both** — so a shop-floor person who has no work email can register with just their badge number. When they do, the pending panel shows a system-generated address of the form `emp-<badge>@users.werco.com` next to their name. That is normal, not a bad row: it is an internal placeholder (nothing is delivered to it) that exists because every account must carry an address, and they will sign in with their badge.
 1. If accounts are waiting, you'll see a **Pending (N)** button and a yellow **Pending Account Approvals** panel.
 2. For each pending person, choose the **role** to grant from the dropdown.
 3. Click **Approve**.
@@ -163,7 +163,7 @@ For each type:
 3. Choose your file and click **Validate file (dry run)**. Nothing is written yet — you get a preview of how many rows **would** be created, plus a per-row error table.
 4. Fix any errors and validate again until clean, then click **Commit import**. Rows with errors are skipped and reported; good rows are created.
 
-> Tip: For employees, operators can be imported without an email or password (they'll use badge login) — the system auto-generates a strong password for them. Non-operators need a password in the row, or set a **Default Password** for the whole import. Any password you supply must meet the same strength rules as the Add User form (12+ characters, no common word or pattern) — rows with a weak password are rejected in the dry-run/commit error table, so fix them before committing.
+> Tip: On **this spreadsheet-import path**, operators can be imported without an email or password (they'll use badge login). The system fills in the same `emp-<badge>@users.werco.com` placeholder address described under [Approve pending self-registrations](#approve-pending-self-registrations), and auto-generates a strong password for them. Non-operators need a password in the row, or set a **Default Password** for the whole import. Any password you supply must meet the same strength rules as the Add User form (12+ characters, no common word or pattern) — rows with a weak password are rejected in the dry-run/commit error table, so fix them before committing.
 
 > Moving the whole shop off Excel for go-live? Follow the step-by-step load order, rehearsal plan, and cutover checklist in the [Excel migration runbook](../EXCEL_MIGRATION_RUNBOOK.md).
 
@@ -205,7 +205,7 @@ Use this for internal audits, customer audits, and incident response. Because op
 
 The system is built for **AS9100D, ISO 9001, and CMMC Level 2**. Here are the controls you can point to:
 
-- **Account lockout.** After 5 failed password sign-in attempts (the Email path), the account locks for 30 minutes. An Administrator can clear a lockout immediately from the **Users** screen (the **Unlock** action on the locked row); the unlock is written to the audit log.
+- **Account lockout.** After 5 failed password sign-in attempts (the **Password** tab — which accepts either an email address or an employee ID), the account locks for 30 minutes. An Administrator can clear a lockout immediately from the **Users** screen (the **Unlock** action on the locked row); the unlock is written to the audit log.
 - **Strong passwords.** Minimum 12 characters, screened against a blocklist of common words and patterns (keyboard walks, top-100 passwords, digit runs, and "werco"/"wercomfg"). Following NIST SP 800-63B, there are no character-class ("complexity") requirements — length plus the blocklist is the control.
 - **Session limits.** Sign-ins refresh silently in the background. Two limits apply: the browser signs a user out after **15 minutes of inactivity**, and a session that goes unused for longer than the absolute session limit (**7 days**, `SESSION_ABSOLUTE_TIMEOUT_HOURS`) can no longer be refreshed and requires a fresh sign-in. Note the absolute limit is **re-armed on every background refresh**, so it bounds how long a session may sit *idle* — it is not a fixed ceiling on total session age, and someone using the app regularly is not forced onto a re-login schedule.
 - **Tenant isolation.** Every company's data is completely separated; users only ever see their own company's records.
@@ -236,8 +236,9 @@ If you're a Platform Admin overseeing more than one company, a **company selecto
 
 | Symptom | What to do |
 |---------|------------|
-| New user can't sign in | Confirm the account is **Active** (not deactivated) and, for self-registered users, that you **Approved** it. Check they're using the right email/password. |
-| Account is locked out | After 5 failed password attempts (the Email sign-in) it locks for 30 minutes. A locked account shows a red **Locked** badge on the **Users** screen — an Administrator clicks **Unlock** on that row to clear it immediately. Resetting the password does **not** clear the lock (the lock check runs before the password is even looked at). Otherwise, wait out the 30 minutes. Badge sign-in has no password and can't cause a lockout. |
+| New user can't sign in | Confirm the account is **Active** (not deactivated) and, for self-registered users, that you **Approved** it. Then check they're on the right tab with the right sign-in name: the **Password** tab accepts an email address **or** an employee ID (so someone with no work email signs in there with their badge number plus their password), and the **Badge Only** tab takes the badge with no password at all. Someone who registered with only a badge has no real address to type — their badge is the sign-in name on both tabs. |
+| Account is locked out | After 5 failed attempts on the **Password** tab it locks for 30 minutes — that now counts a badge typed there, not just an email address. A locked account shows a red **Locked** badge on the **Users** screen — an Administrator clicks **Unlock** on that row to clear it immediately. Resetting the password does **not** clear the lock (the lock check runs before the password is even looked at). Otherwise, wait out the 30 minutes. The passwordless **Badge Only** tab and the kiosk badge screen still can't *cause* a lockout — but a lockout does *block* them, so someone locked out at a desk also can't badge in until it clears. |
+| Sign-in says "Too many failed sign-in attempts" | There are **two separate counts**, and which one tripped depends on where the failures happened. **Password tab:** 60 failed attempts from the same network address within a rolling **6-hour** window block *badge-style sign-in names* on that tab for **1 hour** — note the counting window and the block are different lengths; the block is the hour. "Badge-style" means an employee ID, and also the system-generated `emp-<badge>@users.werco.com` address a badge-only person's account carries. An ordinary work email address at a real domain is **not** counted and keeps working right through the block. **Kiosk / Badge Only screen:** 8 failures within 15 minutes block that screen for **15 minutes**. The two counts are **independent** — typos on the Password tab can no longer block the kiosk, and kiosk failures can't block the web login. A whole shop usually shares one network address, so one person guessing badge numbers affects everyone behind it. There is **no admin override** for either one — that missing override is exactly why the block was set to an hour rather than a whole working day; wait it out (or sign in with a real email address if the person has one — someone who registered with only a badge does not, and has to use the kiosk badge screen until it clears). |
 | Password won't save | It must meet both listed rules: at least 12 characters, and no common word or pattern like "password", "admin", "welcome", or "werco". Note the blocklist matches **anywhere inside** the password, so "Password1234!" is refused even though it is long and mixed-case. |
 | Can't change an Employee ID or work center Code | These are fixed after creation. Deactivate the record and create a new one if it's truly wrong. |
 | Can't remove a Work Center Type | The type is **in use** by an existing work center. Reassign or remove those work centers first. |

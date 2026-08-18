@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 
 from app.models.user import UserRole
 from app.schemas.base import UTCModel
@@ -126,7 +126,19 @@ class UserCreate(UserBase):
 
 
 class PublicRegister(BaseModel):
-    email: EmailStr = Field(..., max_length=255, description="Email address")
+    """Self-service signup. EITHER identifier alone is enough, plus a password.
+
+    Deliberately looser than ``UserCreate`` / the admin ``POST /auth/register``, which
+    still require both: an admin creating an account knows both values, while a
+    shop-floor registrant may only ever have a badge. The endpoint mints the missing
+    one (see ``services/user_identity.py``); neither column is nullable.
+    """
+
+    email: Optional[EmailStr] = Field(
+        None,
+        max_length=255,
+        description="Email address. Required only when no employee ID is provided.",
+    )
     first_name: str = Field(..., min_length=1, max_length=50, pattern=r'^[a-zA-Z\s\-\'\.,]+$', description="First name")
     last_name: str = Field(..., min_length=1, max_length=50, pattern=r'^[a-zA-Z\s\-\'\.,]+$', description="Last name")
     employee_id: Optional[str] = Field(
@@ -134,7 +146,7 @@ class PublicRegister(BaseModel):
         min_length=1,
         max_length=50,
         pattern=r'^[A-Za-z0-9\-_]+$',
-        description="Employee ID (auto-generated if not provided)",
+        description="Employee ID. Required only when no email is provided; otherwise derived from the email.",
     )
     password: str = Field(..., min_length=12, max_length=128, description="Password")
 
@@ -149,6 +161,18 @@ class PublicRegister(BaseModel):
     def capitalize_name(cls, v: str) -> str:
         """Capitalize first letter of names"""
         return v.strip().title() if isinstance(v, str) else v
+
+    @model_validator(mode='after')
+    def require_an_identifier(self) -> 'PublicRegister':
+        """At least one of email / employee_id. Both blank is not a registrable account.
+
+        Checked here rather than in the endpoint so it stays a 422 on the request shape
+        and never reaches the handler's uniqueness probes -- which are the paths that
+        must not become an account-existence oracle.
+        """
+        if not (self.email or '').strip() and not (self.employee_id or '').strip():
+            raise ValueError("Provide an email address or an employee ID")
+        return self
 
 
 class UserUpdate(BaseModel):
