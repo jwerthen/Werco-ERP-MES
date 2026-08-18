@@ -692,6 +692,7 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 | GET | `/work-orders/{id}` | Get work order by ID | Yes |
 | PUT | `/work-orders/{id}` | Update work order (body requires the WO's current `version` — stale → 409; also 409 if it moves a terminal WO back to a non-terminal status, **or sets `status` to COMPLETE/CLOSED from any status other than COMPLETE/CLOSED** — see "Terminal-state lock" below). Non-`status` fields such as `notes` / `special_instructions` carry **no status gate**: they are editable at any status, including terminal ones. **The flip verb for `sequential_operations`** — turning it *on* returns **409** on a laser nest WO, and **409 naming the operations** when work is already under way out of sequence; otherwise it demotes un-worked blocked operations READY → PENDING, one audit row each (see "READY promotion" below) | Admin / Manager / Supervisor |
 | DELETE | `/work-orders/{id}` | Delete work order (soft by default; `hard_delete=true` only for draft/cancelled) | Admin / Manager |
+| POST | `/work-orders/{id}/restore` | Restore a soft-deleted work order (**400** if it is not deleted). Re-opens the ties the delete cancelled — **except** any whose part has since been reclassified into one the shop produces. Returns an **envelope** (`message` + `skipped_material_allocations`), not a bare message; see "Restoring a work order" below | Admin / Manager |
 | POST | `/work-orders/{id}/release` | Release to production | Yes |
 | POST | `/work-orders/{id}/start` | Start production | Yes |
 | POST | `/work-orders/{id}/complete` | Complete work order (409 if the WO is CANCELLED) | Yes |
@@ -1555,6 +1556,9 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > Reasons — operations: `laser_nest_deleted` (the operation's nest was soft-deleted, so copying it
 > would put a nest task with no nest on the kiosk queue at release). Ties: `part_not_available` (the
 > tied part has been soft-deleted, which `POST …/material-allocations` refuses outright),
+> `part_not_tieable` (the tied part is one the shop **produces** — a `manufactured` part or an
+> `assembly` — which both live tie-write doors refuse **422**; reachable only from a **legacy** tie
+> created before that gate, see Work Orders → "What may be tied"),
 > `operation_not_copied` (its operation was skipped — re-scoping the tie to the work order is not
 > available, since a work-order-scoped tie carrying `qty_per_run` is a 422 on the tie API), and
 > `nest_runs_unavailable` — **server-side defence, not currently producible**: an operation that is
@@ -1563,6 +1567,15 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > planning at the work-order quantity, which for a laser WO is the sum of *every* nest's runs and would
 > inflate one nest's demand by roughly the nest count. **Treat the reason list as open** — render an
 > unrecognized value verbatim rather than dropping the row.
+>
+> **The part-type gate reaches this path too, as a SKIP rather than a refusal** (2026-08-18). The
+> copier re-reads each tie's part (it already must, for the unit-of-measure re-snapshot) and asks the
+> same predicate the two live tie doors ask, so a **legacy** tie pointing at a `manufactured` part or
+> an `assembly` is dropped as `part_not_tieable` instead of landing OPEN on the new draft for the
+> completion engine to draw against. It is a skip and not a **409** because a duplicate is not a
+> tie-creation request: refusing the whole copy over one legacy row leaves the planner with nothing,
+> where a skip leaves them a draft plus a named tie to re-make by hand. Same trade the three
+> pre-existing reasons make.
 >
 > **Audit / lineage.** The duplicate carries **no FK back to its source**, so the work-order
 > `log_create` row is the only place that lineage exists: it records `source_work_order_id` and
@@ -1607,7 +1620,8 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 >   was always work-order-scoped. It is `null` on every tie that was never detached, and it is a
 >   reporting field: the `audit_log` row remains the record of record.
 > - **`POST …/material-allocations`** → **201**. Body (`MaterialAllocationCreate`): `part_id`
->   (**required** — the material part, never the part being produced), `work_order_operation_id`
+>   (**required** — the material part, never the part being produced; a part the shop **produces** is
+>   refused **422**, see "What may be tied" below), `work_order_operation_id`
 >   (optional; **set ⇒ operation-scoped / per-run**, omit ⇒ work-order-scoped / one-shot), `source`
 >   (`nest` | `bom` | `manual`, default `manual`), `qty_per_run` (optional, `> 0`; **operation-scoped
 >   only** — the server stores **`1.0`** when omitted on an operation-scoped tie, and sending it on a
@@ -1668,6 +1682,111 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 >   would make a fully-returned tie look as though the material had never touched that lot. There is
 >   deliberately **no lot to choose** — this is a disclosure, not a picker. Pure read; it moves
 >   nothing and writes nothing.
+>
+> **What may be tied — a part the shop PRODUCES is refused 422** (2026-08-18). A tie is standing
+> demand the consumption engine draws against, so tying a `manufactured` part or an `assembly` makes a
+> job deplete finished goods in order to build itself — and consumption **never auto-reverses**
+> (invariant 6b), so the only remedy afterwards is a reasoned compensating transaction against stock
+> that should never have moved. Tie time is the last moment an actor with intent is present, so that is
+> where it is refused. One shared gate,
+> `app/services/material_tie_part_gate.py::assert_part_is_tieable_material`, sits on **both seams that
+> resolve a caller-supplied `part_id`** — `POST …/material-allocations` and `_find_nest_material_part`,
+> the resolver behind both nest-tie doors (see [Laser Nests](#laser-nests) → "Nest material ties") —
+> imported by each, never re-implemented. (The third constructor copies an existing row; it asks the
+> same predicate and skips — see below.) It runs immediately after the tenant-scoped resolve and **before anything mutates**,
+> so a refusal leaves no row, no ledger entry and no audit row.
+>
+> **422, not 404**, and the distinction is deliberate: the part exists and the caller is entitled to
+> see it (it is their own tenant's row), so what is refused is the part's **role** in this request, not
+> its existence. Tenant misses stay **404** — the gate never runs on a part the caller may not read.
+> `detail` names the part number and the remedy: *"Part {part_number} is a manufactured part, not stock
+> material. A work order consumes material; it does not consume the parts the shop produces. Tie raw
+> stock instead."*
+>
+> **The refusal is narrow on purpose.** Only the two engineering types are refused. `purchased` /
+> `hardware` / `consumable` all pass — they are bought and genuinely consumed by jobs (hardware into an
+> assembly, weld wire and gas at the machine) — and so does a **NULL or unrecognised** `part_type`,
+> which fails **open**: the material/supply types are the whole population this gate exists to admit,
+> and refusing an unreadable one would block real material the floor consumes while blocking nothing
+> real (a produced part with an unreadable type is not a state the API can reach: every parts-router
+> write path — create, update and the CSV importer — refuses a `part_type` that is not `manufactured` /
+> `assembly`, and the parts list filters NULL `part_type` out entirely). Narrowing the *pickers*
+> toward raw stock is a UI default with a "show all materials" escape hatch; narrowing what may be
+> **written** is this gate, and it has none.
+>
+> **What the refusal sentence does NOT claim — scope, stated honestly.** *"A work order consumes
+> material; it does not consume the parts the shop produces"* is true of a **material tie**; it is
+> **not** a categorical rule about this system. A job here really can consume a shop-made
+> sub-assembly — the **BOM backflush leg** issues a `make` component as a stocked unit at work-order
+> completion. The boundary the gate actually draws is: *consuming a shop-made sub-assembly belongs to
+> the BOM (`Part.backflush_components`), not to a per-operation material tie.* Say the cost out loud:
+> that leg is **opt-in and default-off**, settable only through `PUT /parts/{id}` / `PUT
+> /materials/{id}` behind the readiness gate, scoped to the **whole work order** rather than to one
+> operation, and **no production job has yet exercised it** (`docs/MATERIAL_CONSUMPTION_PLAN.md` →
+> "Exposing the flag"). So the gate removes the only per-operation way a planner had to declare "this
+> operation consumes a sub-assembly we make", and points at a replacement that is neither on by
+> default nor proven. **That is a real narrowing for the owner to confirm, not a free win** — recorded
+> rather than fixed by weakening the gate, because the failure it prevents (finished goods silently
+> depleted, unrecoverable under invariant 6b) is strictly worse than the one it introduces (the
+> planner reaches for the BOM). The `detail` still says "Tie raw stock instead", which is the right
+> instruction for the overwhelmingly common case: a mis-picked part number.
+>
+> **All three tie constructors are covered.** The third is `POST /work-orders/{id}/duplicate`, which
+> copies existing tie rows; it asks the same predicate but **skips** the tie (`part_not_tieable`)
+> instead of raising, because a duplicate is not a tie-creation request — see "Duplicating a work
+> order" above. A **fourth** seam constructs nothing and is gated all the same:
+> `POST /work-orders/{id}/restore` re-opens ties a soft delete cancelled, which re-arms demand
+> without anyone naming a `part_id` — see "Restoring a work order".
+>
+> **The mirror-image door is gated too — reclassifying a TIED part is refused 409.** Tying a produced
+> part and reclassifying a tied part arrive at the identical end state, and nothing re-checks a tie
+> once it exists, so gating only the first door would leave the hazard reachable by doing the two
+> steps in the other order. `assert_part_type_change_allowed` (same module) refuses **409** when a
+> part that is **not** currently an engineering type is asked to become one **while at least one OPEN
+> allocation in this company still ties it on a work order that has not finished**. `detail` names
+> the part, how many unfinished work orders still tie it, and the remedy. Every other direction
+> passes — engineering ⇄ engineering, produced → material, material → material, a no-op restatement,
+> and any untied part — because the gate protects **live demand, not classes**: correcting a
+> mis-typed catalog row is ordinary work. It runs on both conversion doors: `PUT /parts/{id}` (409,
+> before the first `setattr`, so a refusal leaves the row untouched) and the BOM importer's assembly
+> promotion, which **skips the promotion and appends the same sentence to `warnings`** rather than
+> aborting a whole multi-record import over one step of catalog hygiene. **409, not 422**: the
+> requested type is a valid value and the payload is well-formed — what refuses it is state that
+> already exists, and the identical request succeeds once those ties are untied.
+>
+> **Ties on FINISHED work orders do not refuse it, and that scoping is load-bearing.** Nothing in the
+> backend ever writes the `closed` allocation status, and work-order completion neither closes nor
+> cancels ties (only WO delete, nest re-import detach and `return_and_untie` do) — so **every tie a
+> part has ever carried stays `open` forever once its job ships**. A count keyed on the tie status
+> alone would therefore refuse the ordinary "we used to buy this bracket, now we make it"
+> reclassification **permanently, on any part the shop has ever consumed**, while naming a remedy
+> nobody can reach: `DELETE …/material-allocations/{id}` itself **409**s once the ledger shows
+> material issued, and `return_and_untie` — the only other untie — would post a compensating RETURN
+> crediting a shipped job's material back into stock, falsifying its as-built record (invariants 5
+> and 6b) to satisfy a catalog edit. So the count joins the work order and skips
+> `complete` / `closed` / `cancelled` ones: their ties can never consume, because the completion
+> effects fire only for work orders that reach a completion transition, and every path there refuses
+> a terminal work order. This matches `POST …/material-allocations`, which already refuses a **new**
+> tie on a terminal work order for the same reason. **No verb moves a work order back to a
+> non-terminal `status`:** `PUT /work-orders/{id}` refuses terminal → non-terminal with a 409 of its
+> own, and every other status write is gated on a non-terminal source status.
+>
+> **The delete/restore round trip WAS a hole, and it is closed at the restore** (2026-08-18). This
+> paragraph used to cite `POST /work-orders/{id}/restore` as evidence that reopening was safe,
+> because it "restores `is_deleted` without touching `status`". That named the one verb that *does*
+> resurrect the demand this count skips. `DELETE /work-orders/{id}` **cancels** every open tie, which
+> drops the count to zero and lets the identical `PUT /parts/{id}` through; the restore then re-opens
+> those same ties — landing an **open** tie to a produced part on a live work order in three
+> supported ADMIN/MANAGER verbs and no code change. The refusal lives at the **restore**, not at the
+> reclassification: while the work order is deleted the hazard genuinely is not live, so refusing
+> there would be false *and* would not stop the restore. `reopen_allocations_cancelled_by_delete`
+> now re-asks the same predicate per tie and **leaves a non-tieable one `cancelled`**, reporting it
+> as `part_not_tieable` on the restore's response envelope and in the restore's audit row — see
+> "Restoring a work order" under Work Orders.
+>
+> **Ties that already exist are untouched** on the read side; nothing was backfilled and no read path
+> refuses them. That is what the response's **`part_type`** field is for: it lets a reader tell such a
+> tie apart from a legitimate one, which `part_number` / `part_name` alone cannot.
 >
 > **Returning consumed material — `POST …/material-allocations/{allocation_id}/return`.** The
 > reasoned reversal, and the only un-consume there is. Consumption never auto-reverses (the consume
@@ -1770,7 +1889,7 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 >
 > | Code | When |
 > |------|------|
-> | **404** | Work order unknown, cross-tenant, or **soft-deleted** (`"Work order not found"`). Restore the work order first — the restore is itself audited and re-opens the ties the delete cancelled |
+> | **404** | Work order unknown, cross-tenant, or **soft-deleted** (`"Work order not found"`). Restore the work order first — the restore is itself audited and re-opens the ties the delete cancelled, bar any whose part is no longer tieable (it names those in its response) |
 > | **404** | `allocation_id` unknown, cross-tenant, or not on this work order (`"Material allocation not found"`; the service re-checks and answers *"Material tie not found on this work order."*) |
 > | **422** | **Blank reason** — FastAPI's own validation from `MaterialReturnRequest` (`min_length=1` plus a strip-and-check validator), the same boundary `ReceiptCorrection.reason` uses. The service re-asserts it, since it is callable without the schema and an unreasoned compensating movement is what the audit chain must never contain |
 > | **422** | **Non-positive `quantity`** (`gt=0` on the schema; `"Return quantity must be greater than zero."` from the service) |
@@ -1805,9 +1924,11 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > - **Soft delete** (the default) is **never refused** because of a tie. Every **open** tie is
 >   auto-**cancelled** with an audit row (`reason: "work_order_deleted"`), closing out forward-looking
 >   demand; **consumption already posted stands** — the material was physically used and the ledger is
->   the compliance record. `POST /work-orders/{id}/restore` is the inverse: it re-**opens** exactly the
+>   the compliance record. `POST /work-orders/{id}/restore` is the inverse: it re-**opens** the
 >   ties that delete cancelled (audited, `RESTORE`), so a restored work order keeps depleting its tied
->   material. Ties cancelled for any *other* reason — a manual untie, a nest re-import supersede — are
+>   material — **bar any whose part has since been reclassified into one the shop produces**, which
+>   stays `cancelled` and is named in the restore's response (see "Restoring a work order" below).
+>   Ties cancelled for any *other* reason — a manual untie, a nest re-import supersede — are
 >   deliberately left `cancelled`; the discriminator is the cancel's own audit `reason`. A
 >   `return_and_untie` cancel is stamped `reason: "material_returned"` for exactly this reason — a
 >   delete/restore round trip must not resurrect a tie whose material was given back.
@@ -1825,6 +1946,42 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 >   would now name a verb that exists and still would not help. Unconsumed ties are removed with
 >   the work order, each audited first (`reason: "work_order_hard_deleted"`).
 
+> **Restoring a work order (`POST /work-orders/{id}/restore`) — the response is an envelope.**
+> `{"message": "...", "skipped_material_allocations": [...]}`. `message` is unchanged from the
+> pre-envelope shape and still first, so existing callers keep working; the list is normally **empty**,
+> which is the "clean restore" signal. It is **not** an error — the work order *was* restored.
+>
+> Each entry is `{allocation_id, part_id, work_order_operation_id, reason}` and names a tie the
+> delete had cancelled that the restore deliberately did **not** re-open. One `reason` is producible
+> today: **`part_not_tieable`** — the tied part is now a `manufactured` part or an `assembly`, so
+> re-opening the tie would re-arm standing demand that depletes **finished goods** at completion, the
+> state both live tie-write doors refuse **422** (see "What may be tied — the part-type gate"). Treat
+> the reason set as **open**: render an unrecognized value verbatim rather than dropping the row.
+>
+> **It is not a complete inventory of every tie that stayed `cancelled`.** A tie the delete cancelled
+> that a later nest re-import then **detached** is also left alone (its operation no longer exists, so
+> re-opening it would silently convert it into a work-order-scoped tie nobody created) and has no
+> entry here — that case predates this envelope. Read the list as *"these ties were refused, and
+> why"*, not as *"these are the only ties that did not come back"*.
+>
+> **Why the refusal is here and not on the reclassification.** The conversion gate counts only *open*
+> ties on *unfinished* work orders, and the soft delete cancels every one of them — so
+> **delete → reclassify → restore** would otherwise walk past it in three supported ADMIN/MANAGER
+> verbs. Refusing at step 2 instead would be false (a deleted work order completes nothing, so the
+> hazard is genuinely dormant) *and* would not close the sequence, because the restore is what makes
+> the demand live again. It is also the last moment an actor with intent is present.
+>
+> **A skip is reported twice, on purpose.** It lands in the restore's own `work_order` audit row
+> (`action="restore"`, `extra_data.skipped_material_allocations`, alongside
+> `reopened_material_allocations`) **and** in the response — the same two channels
+> `POST /work-orders/{id}/duplicate` uses, from one `model_dump()`, so the chain and the response can
+> never describe a skip differently. The audit chain alone would not be enough: the failure mode is a
+> planner releasing a restored job that quietly carries no demand for its material — no shortage
+> shows, the work runs, and stock is never deducted until the inventory count disagrees. The skipped
+> **allocation** gets no `RESTORE` row of its own, because nothing happened to it (its status is
+> unchanged) and a tamper-evident row must describe something that did.
+>
+
 ##### Material allocation schema (`MaterialAllocationResponse`)
 
 ```json
@@ -1836,6 +1993,7 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
   "part_id": 77,
   "part_number": "SHT-CR-0250",
   "part_name": "Cold Rolled Sheet 0.250",
+  "part_type": "raw_material",
   "source": "nest",
   "status": "open",
   "qty_per_run": 1.0,
@@ -1858,6 +2016,20 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > field, in a compliance answer. `unit_of_measure` is the snapshot taken at tie time, so it stays
 > readable after the part's UoM is changed. Nothing in this release writes `closed`; ties end their
 > life either `open` or `cancelled`.
+>
+> **`part_type`** (added 2026-08-18) is the tied part's type as its lowercase enum value — `raw_material`
+> / `purchased` / `hardware` / `consumable`, **or `manufactured` / `assembly` on a LEGACY tie** created
+> before the part-type gate ("What may be tied" above). It is a **display field**, not a snapshot: it is
+> read live off the part on every serialize, alongside `part_number` / `part_name`, and it is **`null`**
+> both when the part row could not be read (the same miss that already blanks those two) and when the
+> column itself is NULL — the honest answer rather than a guess. It exists because a bad tie is
+> otherwise invisible to a client: `part_number` and `part_name` look identical whether the tie is
+> legitimate or not. That is what it is **for** — telling a legacy bad tie apart from a legitimate
+> one. Clients use it to **withhold** such a tie from a pre-fill or a picker rather than to render a
+> badge (the laser-nest import wizard and the manual nest modal both do). Only this router's
+> responses carry it; the dispatch-board
+> `material_tie` chip and the kiosk `material_ties` line ride `material_tie_view.py` and are
+> unchanged.
 
 #### Work Order Schema
 
@@ -2229,7 +2401,12 @@ mixed**:
 > hand-created one produce identical rows and identical `work_order_material_allocation` `log_create`
 > hash-chain entries. Every distinct `material_part_id` is resolved **before** the rebuild wipes the
 > prior nests, so a bad or cross-tenant id is a clean **404** ("Material part not found", never 403)
-> with nothing persisted; soft-deleted parts are refused the same way. `qty_per_run` **without**
+> with nothing persisted; soft-deleted parts are refused the same way. **A part the shop PRODUCES — a
+> `manufactured` part or an `assembly` — is refused 422** by the same shared gate the tie endpoint
+> runs (see Work Orders → "What may be tied"), raised inside that same pre-resolution pass, so it
+> inherits the identical "fail cleanly with nothing persisted" property: on the manual path nothing is
+> created, and on the import path the refusal aborts the whole package **before** the rebuild wipes the
+> prior nests. `qty_per_run` **without**
 > `material_part_id` is a **422** on the manual path / **400** on the import path rather than a
 > silently dropped field. There is deliberately **no fuzzy string match** from the AI-extracted
 > `material` free text to a part — a wrong auto-tie would deplete the wrong heat lot into an as-built
@@ -2483,11 +2660,35 @@ mixed**:
 | GET | `/parts/` | List all parts | Yes |
 | POST | `/parts/` | Create part | Yes |
 | GET | `/parts/{id}` | Get part by ID | Yes |
-| PUT | `/parts/{id}` | Update part (**409** when it turns `backflush_components` on and the part's readiness check reports blockers — see below) | Admin / Manager / Supervisor |
+| PUT | `/parts/{id}` | Update part — resolves **any** part in the company, engineering or material/supply. (**409** when it turns `backflush_components` on and the part's readiness check reports blockers, and **409** when it reclassifies a material part into a produced one while an **unfinished** work order still ties it — see below) | Admin / Manager / Supervisor |
 | DELETE | `/parts/{id}` | Delete part (soft delete — restorable) | Admin |
 | POST | `/parts/{id}/restore` | Restore a soft-deleted part | Admin / Manager |
 | GET | `/parts/{id}/bom` | Get BOM for part | Yes |
 | GET | `/parts/{id}/backflush-readiness` | **PR 4.5** — may this part opt into automatic BOM component backflush, and what refuses it if not. Pure read (writes nothing) | Yes |
+
+> **`PUT /parts/{id}` refuses a 409 when it would reclassify a LIVE-TIED material part into a
+> produced one** (2026-08-18). The lookup itself is unchanged — it resolves **any** part in the
+> company, and deliberately so: BOM component rows drill through to the part page for `purchased` /
+> `raw_material` components, and from there the overview tab, the edit form and the backflush card
+> all call this endpoint. What is gated is the **class change**, not the edit. The handler **400**s
+> any `part_type` outside `manufactured` / `assembly` (unchanged), and now additionally **409**s a
+> non-engineering → engineering change while **at least one OPEN work-order material allocation on an
+> UNFINISHED work order still ties the part** — that reclassification lands exactly the state the
+> tie-time gate refuses (see [Work Orders](#work-orders) → "What may be tied"), with ties that
+> deplete finished goods and no re-check anywhere behind it. `detail` is a plain string naming the
+> part, how many unfinished work orders still tie it, and the remedy (untie them first). The check
+> runs **before the first `setattr`**, so a refusal leaves the row byte-identical. An **untied** part
+> converts freely — and so does one whose only ties belong to `complete` / `closed` / `cancelled`
+> work orders, because ties are never closed at completion and counting them would block the edit
+> forever (see "What may be tied"). Correcting a mis-typed catalog row is ordinary work, and
+> `PUT /parts/{id}` is the one door that can do it, since `PUT /materials/{id}` **400**s any
+> engineering `part_type` outright.
+>
+> A blunter version of this — narrowing the lookup to `ENGINEERING_PART_TYPES` so material rows 404 —
+> was tried and **rejected**: it 404s every save from the BOM drill-through page with a message that
+> is not true, and leaves the Materials screen (which force-sends `revision` and `is_critical` on
+> every save) as the only editor for a material row, resetting revisions and clearing
+> critical-characteristic flags. Invariant 5.
 
 #### Part Schema
 
@@ -3016,10 +3217,25 @@ uploads go through text extraction + LLM. See
 > degrades gracefully** at the scan cap — partial text at `"medium"` confidence — rather than
 > refusing the file.
 
+> **The assembly promotion is refused when live material ties stand** (2026-08-18). Both importers
+> resolve an existing part by part number and set `part_type = assembly` whenever the document is a
+> BOM. When that part is currently a material/supply type **and at least one OPEN work-order material
+> allocation on an UNFINISHED work order still ties it**, the promotion is **skipped** and the
+> refusal sentence — the same one `PUT /parts/{id}` returns as a 409, naming the part and how many
+> unfinished work orders still tie it — is appended to the response's **`warnings`**. Ties held by
+> finished work orders do not refuse the promotion, for the reason spelled out under
+> [Work Orders](#work-orders) → "What may be tied": they carry no live demand, and since nothing ever
+> closes a tie at completion, counting them would warn on every part the shop has ever consumed. The import itself still **succeeds**: a BOM attaches by
+> `part_id` and is perfectly valid on a parent still typed `purchased`, so failing an entire
+> multi-record import over a step of catalog hygiene would be the worse answer. A skipped promotion
+> writes **no** audit row, because nothing changed. What cannot happen is a *silent* promotion — see
+> [Work Orders](#work-orders) → "What may be tied" for why a tied part must not become a produced one.
+
 > **Commits are audited.** `POST /bom/import` and `POST /bom/import/commit` write tamper-evident
 > `audit_log` entries via `AuditService` tagged `extra_data.source = "bom_import"`: one CREATE per
 > part created (assembly or component), one UPDATE when an existing part is promoted to
-> `part_type = assembly`, and one CREATE for the BOM with its items summarized on the parent row
+> `part_type = assembly` (none when that promotion was refused, above), and one CREATE for the BOM
+> with its items summarized on the parent row
 > (`item_count` + `component_part_numbers` in `extra_data` — the same parent-row pattern as the
 > WO/PO imports' audit rows). Audit rows are flushed before the terminal commit so they persist
 > atomically with the import. `POST /bom/import/preview` writes nothing.

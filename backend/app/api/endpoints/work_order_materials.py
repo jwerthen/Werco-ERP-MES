@@ -38,7 +38,7 @@ from app.db.database import get_db
 from app.db.tenant_filter import tenant_query
 from app.models.audit_log import AuditLog
 from app.models.inventory import InventoryItem, InventoryTransaction, TransactionType
-from app.models.part import Part
+from app.models.part import Part, normalize_part_type_value
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder, WorkOrderOperation
 from app.models.work_order_material import AllocationStatus, WorkOrderMaterialAllocation
@@ -69,6 +69,7 @@ from app.services.material_consumption_service import (
     return_tied_material,
     work_order_tie_is_already_issued,
 )
+from app.services.material_tie_part_gate import assert_part_is_tieable_material
 from app.services.work_order_state_service import TERMINAL_WO_STATUSES
 
 logger = logging.getLogger(__name__)
@@ -110,6 +111,31 @@ def _uom_value(part: Part) -> str:
     """``Part.unit_of_measure`` as the lowercase enum VALUE the snapshot column stores."""
     uom = part.unit_of_measure
     return getattr(uom, "value", uom) or "each"
+
+
+def _part_type_value(part: Optional[Part]) -> Optional[str]:
+    """``Part.part_type`` flattened to its lowercase enum VALUE, the way ``_uom_value`` is.
+
+    Display only. It exists so a client can recognise a LEGACY tie whose part is not stock
+    material — one created before ``assert_part_is_tieable_material`` guarded the write
+    seams. ``None`` when the part row could not be read (the same miss that already blanks
+    ``part_number`` / ``part_name``), and ``None`` for a NULL column, which is the honest
+    answer rather than a guess.
+
+    Routed through the model's own ``normalize_part_type_value`` rather than reading
+    ``.value`` here, so the string this emits is byte-identical to the one every predicate
+    in the platform compares against — ``is_engineering_part_type``, the tie gate, and the
+    frontend's lowercase literals all normalise the same way. A stored value that is not
+    already lowercase (a hand-loaded row, a dialect that hands back the enum NAME) would
+    otherwise serialize as something no consumer matches, which reads as "this tie is fine"
+    rather than as an error.
+    """
+    if part is None:
+        return None
+    part_type = part.part_type
+    if part_type is None:
+        return None
+    return normalize_part_type_value(part_type)
 
 
 def _resolve_pinned_item(
@@ -269,6 +295,7 @@ def _serialize(
         part_id=allocation.part_id,
         part_number=part.part_number if part else None,
         part_name=part.name if part else None,
+        part_type=_part_type_value(part),
         source=allocation.source,
         status=allocation.status,
         qty_per_run=allocation.qty_per_run,
@@ -501,6 +528,13 @@ def create_material_allocation(
     pin into the completion backflush's tie leg. A held lot is refused here (422); a lot
     held AFTER pinning still consumes and writes ``HELD_MATERIAL_CONSUMED``.
 
+    ``part_id`` must name material, not output: a part the shop PRODUCES (MANUFACTURED
+    or ASSEMBLY) is refused **422** by the shared ``assert_part_is_tieable_material``
+    gate, which the nest-tie resolver in ``work_orders`` imports too. 422 rather than 404
+    because the part exists and the caller may see it — what is refused is its ROLE. A
+    NULL or unrecognised ``part_type`` passes; see that module's docstring for why the
+    unknown case fails OPEN.
+
     Refused with **409** when the tie could never consume:
 
     * the work order is TERMINAL (complete / closed / cancelled) — nothing will drive a
@@ -548,6 +582,13 @@ def create_material_allocation(
     )
     if part is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Material part not found")
+
+    # A tie DEPLETES the tied part at completion (invariant 6), so a part the shop
+    # PRODUCES may never sit on the material side of one. Refused 422 here, immediately
+    # after the resolve and before anything mutates, so the request leaves no trace. The
+    # same gate guards the nest resolver in ``work_orders._find_nest_material_part`` --
+    # imported, not re-implemented.
+    assert_part_is_tieable_material(part)
 
     if payload.work_order_operation_id is None and work_order_tie_is_already_issued(
         db, work_order_id=work_order.id, part_id=part.id, company_id=company_id

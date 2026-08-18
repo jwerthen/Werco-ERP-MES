@@ -28,6 +28,28 @@
  * genuinely need them. They are not offered here.
  *
  * ---------------------------------------------------------------------------
+ * THE MATERIAL LIST DEFAULTS TO RAW STOCK, AND THE ESCAPE HATCH MATTERS MOST HERE
+ * ---------------------------------------------------------------------------
+ * `/materials` serves all four material-supply types, and three of them
+ * (`purchased`, `hardware`, `consumable`) are bought COMPONENTS rather than
+ * stock — the seeded catalog types bolts and nuts as `purchased`. So the
+ * default view is `isRawStockPartType` only.
+ *
+ * But of the three tie pickers this is the ONE where a hardware or consumable
+ * tie is routinely legitimate: a weld op really does eat wire and gas, an
+ * assembly op really does eat rivets, and that is precisely the gap this dialog
+ * was built to close. The "Show all materials" toggle is therefore not a
+ * grudging safety valve here — it is an expected part of the flow, and it must
+ * never be removed or made conditional on the raw-stock list being empty.
+ *
+ * A part the shop PRODUCES is excluded at BOTH tiers and has no escape hatch:
+ * a work order's own output is not an input to it.
+ *
+ * The tiering itself lives in `partitionMaterialTiers`
+ * (`utils/catalogGroups.ts`), shared with the two laser-nest pickers, so the
+ * pinned-selection and hidden-count rules cannot drift between them.
+ *
+ * ---------------------------------------------------------------------------
  * COPY
  * ---------------------------------------------------------------------------
  * The deduction-timing sentence is `DEDUCTION_TIMING_NOTE` from
@@ -58,6 +80,7 @@ import { Button, FormField, LoadingButton, Modal, useToast } from '../ui';
 import { DEDUCTION_TIMING_NOTE, effectivePerRun, formatTieQty } from '../../utils/materialTie';
 import { formatOperationLabel, hasOperationNumber } from '../../utils/operationLabel';
 import { toDisplayString } from '../../utils/apiError';
+import { partitionMaterialTiers } from '../../utils/catalogGroups';
 import type {
   MaterialAllocation,
   MaterialAllocationCreatePayload,
@@ -114,6 +137,10 @@ export default function OperationMaterialTieModal({
   const [existingTies, setExistingTies] = useState<MaterialAllocation[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadNote, setLoadNote] = useState('');
+  // Material filter escape hatch: false = raw stock only (the default), true =
+  // every material part the load returned. See the docstring — on THIS picker
+  // the widened view is a routine choice, not an exception.
+  const [showAllMaterials, setShowAllMaterials] = useState(false);
 
   /** `null` = creating a new tie; otherwise the OPEN tie being edited. */
   const [editing, setEditing] = useState<MaterialAllocation | null>(null);
@@ -158,18 +185,41 @@ export default function OperationMaterialTieModal({
     setDraft(blankDraft);
     setPlannedTouched(false);
     setError('');
+    setShowAllMaterials(false);
     void load();
   }, [open, operationId, load]);
 
-  const materialOptions = useMemo(() => {
-    const options = materials.map((part) => ({
+  const { materialOptions, hiddenMaterialCount } = useMemo(() => {
+    const toOption = (part: Part) => ({
       id: part.id,
       label: part.part_number ? `${part.part_number} — ${part.name}` : part.name,
       uom: part.unit_of_measure || '',
-    }));
+    });
+
+    // The tiering — production parts excluded outright, raw stock by default,
+    // the rest behind the toggle, the current pick pinned so narrowing cannot
+    // blank it, and a count that advertises only what the toggle would really
+    // reveal — is `partitionMaterialTiers`, shared with the two laser pickers.
+    const { defaultTier: rawStock, hiddenTier: otherMaterials, pinned, hiddenCount } = partitionMaterialTiers(
+      materials,
+      {
+        showAll: showAllMaterials,
+        // Pin the current pick so flipping the toggle back cannot blank a part
+        // the planner chose through the escape hatch.
+        pinnedIds: [draft.partId, editing?.part_id],
+      }
+    );
+
+    const options = rawStock.map(toOption);
+    options.push(...(showAllMaterials ? otherMaterials : pinned).map(toOption));
+
     // Keep an edited tie's part selectable even when the (capped, filtered, or
     // failed) material load did not return it — otherwise the form reads as
-    // "no part" while the tie is very much live.
+    // "no part" while the tie is very much live. Safe for a legacy tie to a
+    // part the shop PRODUCES, unlike the same-shaped branch in
+    // `LaserNestManualModal`: the edit branch renders the part as a READONLY
+    // input, never this <select>, so nothing here is selectable while
+    // `editing` is set.
     if (editing && !options.some((option) => option.id === editing.part_id)) {
       options.push({
         id: editing.part_id,
@@ -177,8 +227,9 @@ export default function OperationMaterialTieModal({
         uom: editing.unit_of_measure || '',
       });
     }
-    return options;
-  }, [materials, editing]);
+
+    return { materialOptions: options, hiddenMaterialCount: hiddenCount };
+  }, [materials, editing, showAllMaterials, draft.partId]);
 
   const selectedUom = useMemo(() => {
     if (editing) return editing.unit_of_measure || '';
@@ -401,32 +452,53 @@ export default function OperationMaterialTieModal({
                 )}
               </FormField>
             ) : (
-              <FormField
-                label="Material this operation consumes"
-                required
-                help={
-                  loading
-                    ? 'Loading the material list…'
-                    : 'The MATERIAL part depleted — never the part being produced.'
-                }
-              >
-                {(field) => (
-                  <select
-                    {...field}
-                    className="input"
+              <div>
+                <FormField
+                  label="Material this operation consumes"
+                  required
+                  help={
+                    loading
+                      ? 'Loading the material list…'
+                      : showAllMaterials
+                        ? 'Every material part — hardware and consumables included. The MATERIAL part depleted, never the part being produced.'
+                        : 'Raw stock only by default. The MATERIAL part depleted — never the part being produced.'
+                  }
+                >
+                  {(field) => (
+                    <select
+                      {...field}
+                      className="input"
+                      disabled={saving}
+                      value={draft.partId}
+                      onChange={(e) => setDraft({ ...draft, partId: e.target.value })}
+                    >
+                      <option value="">Select material…</option>
+                      {materialOptions.map((option) => (
+                        <option key={option.id} value={String(option.id)}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </FormField>
+                {/* Rivets, weld wire and gas are legitimate ties on this picker
+                    and are typed hardware/consumable, so this toggle is part of
+                    the flow rather than an exception. It sits OUTSIDE the
+                    FormField so its text stays out of the select's accessible
+                    name. */}
+                {(hiddenMaterialCount > 0 || showAllMaterials) && (
+                  <button
+                    type="button"
                     disabled={saving}
-                    value={draft.partId}
-                    onChange={(e) => setDraft({ ...draft, partId: e.target.value })}
+                    onClick={() => setShowAllMaterials((prev) => !prev)}
+                    className="mt-1 text-xs font-medium text-fd-blue hover:underline disabled:opacity-60"
                   >
-                    <option value="">Select material…</option>
-                    {materialOptions.map((option) => (
-                      <option key={option.id} value={String(option.id)}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
+                    {showAllMaterials
+                      ? 'Show raw stock only'
+                      : `Show all materials (${hiddenMaterialCount} more)`}
+                  </button>
                 )}
-              </FormField>
+              </div>
             )}
 
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">

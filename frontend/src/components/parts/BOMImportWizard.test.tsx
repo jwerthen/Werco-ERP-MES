@@ -1,6 +1,7 @@
 import React from 'react';
 import { fireEvent, renderWithRouter, screen, waitFor } from '../../test-utils';
 import api from '../../services/api';
+import { ToastProvider } from '../ui';
 import { BOMImportWizard } from './BOMImportWizard';
 
 jest.mock('../../services/api', () => ({
@@ -270,5 +271,80 @@ describe('BOMImportWizard', () => {
 
     expect(screen.getByText('No BOM items selected.')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Create' })).toBeDisabled();
+  });
+});
+
+/**
+ * The SECOND surface for `POST /bom/import/commit` (Parts → BOM tab).
+ *
+ * Its `warnings` list has one shape: the import WORKED but did not do
+ * everything asked — a generated part number, a line created without one, or a
+ * parent part the server's conversion gate would NOT reclassify as an assembly
+ * because unfinished work orders still tie it as material. That is the `warning`
+ * toast variant (role="alert", which interrupts a screen reader), not `info`
+ * (role="status", which waits for a pause and may never be read) — and it has
+ * to QUOTE the sentences: a bare count says something was left undone and never
+ * says what, which on the conversion refusal is the whole of the message.
+ */
+describe('BOMImportWizard: a commit that left something undone', () => {
+  // PASTED FROM THE SERVER, not paraphrased: `part_type_change_refusal` for a
+  // material part being promoted to `assembly` while two unfinished work orders
+  // tie it, plus the sentence `bom.py::_promote_existing_part_to_assembly` appends when
+  // it routes the refusal into `warnings` rather than raising. The point of this
+  // suite is that the toast QUOTES the server, so the quote has to be real.
+  const NOT_PROMOTED =
+    'Part 818-3928-638 cannot be reclassified as an assembly: 2 unfinished work orders still tie it as ' +
+    'material. A tie depletes the tied part when that work completes, so reclassifying it now would leave ' +
+    'standing demand that consumes finished goods. Untie those work orders first, then change the part type. ' +
+    "The BOM was imported and the part's type was left unchanged.";
+
+  const renderWithToasts = async (warnings: string[]) => {
+    mockedApi.previewBOMImport.mockResolvedValue(previewResponse);
+    mockedApi.commitBOMImport.mockResolvedValue({
+      document_type: 'bom',
+      assembly_part_id: 1,
+      assembly_part_number: '818-3928-638',
+      bom_id: null,
+      created_parts: 0,
+      created_bom_items: 0,
+      extraction_confidence: 'high',
+      warnings,
+    });
+
+    renderWithRouter(
+      <ToastProvider>
+        <BOMImportWizard onComplete={jest.fn().mockResolvedValue(undefined)} onClose={jest.fn()} />
+      </ToastProvider>
+    );
+
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(fileInput, {
+      target: { files: [new File(['bom'], 'bom.pdf', { type: 'application/pdf' })] },
+    });
+    fireEvent.submit(document.getElementById('upload-form') as HTMLFormElement);
+    await screen.findByDisplayValue('MS20426AD4');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }));
+    await waitFor(() => expect(mockedApi.commitBOMImport).toHaveBeenCalledTimes(1));
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('interrupts with the sentences themselves, not a count or a passive status', async () => {
+    await renderWithToasts([NOT_PROMOTED]);
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('Import completed with warnings');
+    expect(alert).toHaveTextContent(/cannot be reclassified as an assembly/i);
+    expect(alert).not.toHaveTextContent(/1 warning/i);
+  });
+
+  it('still says plain success when nothing was left undone', async () => {
+    await renderWithToasts([]);
+
+    expect(await screen.findByText('Import completed')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 });

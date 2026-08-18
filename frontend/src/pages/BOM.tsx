@@ -5,7 +5,7 @@ import { LoadingButton } from '../components/ui/LoadingButton';
 import { ConfirmDialog, EmptyState, ErrorState, FormField, useToast } from '../components/ui';
 import useUnsavedChanges from '../hooks/useUnsavedChanges';
 import { Part, PartType } from '../types';
-import { isMaterialSupplyPartType } from '../utils/catalogGroups';
+import { isMaterialSupplyPartType, partTypeLabel } from '../utils/catalogGroups';
 import { useNavigate } from 'react-router-dom';
 import { 
   PlusIcon, 
@@ -112,15 +112,6 @@ const lineTypeLabels: Record<string, string> = {
   hardware: 'Hardware',
   consumable: 'Consumable',
   reference: 'Reference',
-};
-
-const partTypeLabels: Record<string, string> = {
-  manufactured: 'Manufactured',
-  assembly: 'Assembly',
-  purchased: 'Purchased',
-  raw_material: 'Raw Material',
-  hardware: 'Hardware',
-  consumable: 'Consumable',
 };
 
 const partTypeBadge: Record<string, string> = {
@@ -426,8 +417,19 @@ export default function BOMPage() {
       } else {
         showToast('success', `Part created: ${result.assembly_part_number}`);
       }
+      // WARNING, not info. Every sentence the commit puts in `warnings` reports
+      // the same shape: the import SUCCEEDED but did not do everything asked —
+      // a part number was generated because none was found, a line was created
+      // without one, or the parent part could NOT be reclassified as an assembly
+      // because unfinished work orders still tie it as material (that last one leaves
+      // the catalog holding a class the planner did not ask for and has to act
+      // on). `info` renders `role="status"`, which waits for a pause and never
+      // interrupts a screen reader; `warning` renders `role="alert"`, which is
+      // what a shortfall the user must act on earns. `error` is still wrong here
+      // — the BOM was created, and saying otherwise sends someone looking for a
+      // record that exists.
       if (result.warnings?.length) {
-        showToast('info', `Import completed with warnings:\n- ${result.warnings.join('\n- ')}`);
+        showToast('warning', `Import completed with warnings:\n- ${result.warnings.join('\n- ')}`);
       }
       setShowPreviewModal(false);
       setImportPreview(null);
@@ -1448,7 +1450,7 @@ export default function BOMPage() {
                             <div className="text-sm text-slate-400">{part.name}</div>
                           </div>
                           <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${partTypeBadge[part.part_type] || 'bg-slate-800 text-slate-400'}`}>
-                            {partTypeLabels[part.part_type] || part.part_type}
+                            {partTypeLabel(part.part_type)}
                           </span>
                         </div>
                       </button>

@@ -242,15 +242,6 @@ export const partTypeColors: Record<string, string> = {
   consumable: 'bg-orange-100 text-orange-800',
 };
 
-export const partTypeLabels: Record<string, string> = {
-  manufactured: 'Manufactured',
-  assembly: 'Assembly',
-  purchased: 'Purchased',
-  raw_material: 'Raw Material',
-  hardware: 'Hardware',
-  consumable: 'Consumable',
-};
-
 export const itemTypeBadge: Record<string, string> = {
   make: 'bg-blue-100 text-blue-800',
   buy: 'bg-gray-100 text-gray-700',

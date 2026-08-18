@@ -30,7 +30,7 @@
  */
 
 import React from 'react';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import OperationMaterialTieModal from './OperationMaterialTieModal';
 import api from '../../services/api';
@@ -230,6 +230,174 @@ describe('OperationMaterialTieModal: it costs nothing while closed', () => {
 
     expect(await screen.findByText(/Materials unavailable/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /tie material/i })).toBeEnabled();
+  });
+});
+
+/**
+ * The material list defaults to RAW STOCK — and this is the one picker where
+ * the escape hatch is part of the flow.
+ *
+ * `/materials` serves all four material-supply types, three of which are bought
+ * COMPONENTS (the seeded catalog types bolts and nuts as `purchased`), so the
+ * default view narrows to raw stock. But a weld op really does eat wire and gas
+ * and an assembly op really does eat rivets — those are typed `consumable` /
+ * `hardware`, and tying them here is exactly what this dialog was built for. So
+ * the toggle must always be reachable, never conditional on the raw-stock list
+ * being empty.
+ *
+ * The one rule with no escape hatch is the exclusion of parts the shop
+ * PRODUCES: a work order's own output is not an input to it, and consumption
+ * never auto-reverses.
+ */
+describe('OperationMaterialTieModal: raw stock by default, everything else one click away', () => {
+  const RAW_SHEET = makeMaterial();
+  const WELD_WIRE = makeMaterial({
+    id: 56,
+    part_number: 'CON-MIG-035',
+    name: 'MIG wire, 33 lb coil',
+    part_type: 'consumable',
+    unit_of_measure: 'lb',
+  });
+  const RIVET = makeMaterial({
+    id: 57,
+    part_number: 'HW-RIV-4',
+    name: 'Blind rivet 1/8',
+    part_type: 'hardware',
+    unit_of_measure: 'ea',
+  });
+  const MANUFACTURED_BRACKET = makeMaterial({
+    id: 58,
+    part_number: 'BRK-100',
+    name: 'Bracket, sheet metal',
+    part_type: 'manufactured',
+  });
+
+  /** Every option in the material <select>, minus the "Select material…" row. */
+  const listedOptions = (): string[] =>
+    Array.from((screen.getByLabelText(/Material this operation consumes/i) as HTMLSelectElement).options)
+      .filter((option) => option.value !== '')
+      .map((option) => option.textContent ?? '');
+
+  const toggle = () => screen.getByRole('button', { name: /^Show (all materials \(\d+ more\)|raw stock only)$/ });
+
+  const openWithCatalog = async (parts = [RAW_SHEET, WELD_WIRE, RIVET, MANUFACTURED_BRACKET]) => {
+    mockApi.getMaterials.mockResolvedValue(parts);
+    const rendered = renderModal();
+    await screen.findByLabelText(/Material this operation consumes/i);
+    await waitFor(() => expect(mockApi.getMaterials).toHaveBeenCalled());
+    return rendered;
+  };
+
+  it('lists only raw stock, and says so in the help text', async () => {
+    await openWithCatalog();
+
+    await waitFor(() => expect(listedOptions()).toEqual(['SHT-.125-304 — .125 304 sheet']));
+    expect(screen.getByText(/Raw stock only by default/i)).toBeInTheDocument();
+    // Wire + rivets are hidden, not excluded; the bracket is excluded, so it is
+    // not part of the promise the count makes.
+    expect(toggle()).toHaveTextContent('Show all materials (2 more)');
+  });
+
+  it('reveals the consumables and hardware the toggle promises', async () => {
+    await openWithCatalog();
+    await waitFor(() => expect(listedOptions()).toHaveLength(1));
+
+    fireEvent.click(toggle());
+
+    expect(listedOptions()).toEqual([
+      'SHT-.125-304 — .125 304 sheet',
+      'CON-MIG-035 — MIG wire, 33 lb coil',
+      'HW-RIV-4 — Blind rivet 1/8',
+    ]);
+    expect(screen.getByText(/hardware and consumables included/i)).toBeInTheDocument();
+    expect(toggle()).toHaveTextContent('Show raw stock only');
+  });
+
+  it('offers the toggle even when the raw-stock list is not empty', async () => {
+    // Stated as its own assertion because the tempting "only show the escape
+    // hatch when the default view is empty" shortcut would break the weld and
+    // assembly flows this dialog exists to serve.
+    await openWithCatalog();
+
+    await waitFor(() => expect(listedOptions()).toHaveLength(1));
+    expect(toggle()).toBeEnabled();
+  });
+
+  it('never offers a part the shop PRODUCES, at either tier', async () => {
+    await openWithCatalog();
+    await waitFor(() => expect(listedOptions()).toHaveLength(1));
+
+    expect(listedOptions()).not.toContain('BRK-100 — Bracket, sheet metal');
+    fireEvent.click(toggle());
+    expect(listedOptions()).not.toContain('BRK-100 — Bracket, sheet metal');
+  });
+
+  it('keeps a consumable picked through the escape hatch when the filter narrows again', async () => {
+    // A <select> whose value is missing from its options renders blank, so
+    // without the pin this sequence silently discards the pick — and the form
+    // would then refuse to submit for "no material" the planner did choose.
+    await openWithCatalog();
+    await waitFor(() => expect(listedOptions()).toHaveLength(1));
+
+    fireEvent.click(toggle());
+    await userEvent.selectOptions(screen.getByLabelText(/Material this operation consumes/i), '56');
+    fireEvent.click(toggle());
+
+    expect(screen.getByLabelText(/Material this operation consumes/i)).toHaveValue('56');
+    expect(listedOptions()).toContain('CON-MIG-035 — MIG wire, 33 lb coil');
+    // Pinned, therefore already on screen, therefore not still "hidden".
+    expect(toggle()).toHaveTextContent('Show all materials (1 more)');
+    // And the pinned option still carries its own UoM into the quantity label.
+    expect(screen.getByLabelText(/Per completed run \(lb\)/i)).toBeInTheDocument();
+  });
+
+  it('ties the consumable the planner picked through the hatch', async () => {
+    // The end-to-end point of the escape hatch: a weld op really does consume
+    // wire, and the tie has to reach the API as an operation-scoped allocation.
+    await openWithCatalog();
+    await waitFor(() => expect(listedOptions()).toHaveLength(1));
+
+    fireEvent.click(toggle());
+    await userEvent.selectOptions(screen.getByLabelText(/Material this operation consumes/i), '56');
+    await userEvent.type(screen.getByLabelText(/Per completed run/i), '2');
+    await userEvent.click(screen.getByRole('button', { name: /^Tie material$/i }));
+
+    await waitFor(() => expect(mockApi.createMaterialAllocation).toHaveBeenCalledTimes(1));
+    expect(mockApi.createMaterialAllocation).toHaveBeenCalledWith(
+      42,
+      expect.objectContaining({ part_id: 56, work_order_operation_id: 71 })
+    );
+  });
+
+  it('shows the tie controls when the catalog holds no raw stock at all', async () => {
+    // Nothing in the default view, everything behind the toggle — the field and
+    // the toggle both have to survive that, or the dialog is unusable for a shop
+    // whose stock is typed `purchased`.
+    await openWithCatalog([WELD_WIRE, RIVET]);
+
+    await waitFor(() => expect(toggle()).toHaveTextContent('Show all materials (2 more)'));
+    expect(listedOptions()).toEqual([]);
+
+    fireEvent.click(toggle());
+    expect(listedOptions()).toHaveLength(2);
+  });
+
+  it('leaves the EDIT branch alone — the part is fixed, so there is nothing to filter', async () => {
+    // Editing shows the part as read-only text (changing what a tie points at
+    // would rewrite genealogy), so the picker and its toggle are absent by
+    // design rather than by omission.
+    mockApi.getMaterials.mockResolvedValue([RAW_SHEET, WELD_WIRE]);
+    mockApi.getMaterialAllocations.mockResolvedValue([
+      makeTie({ part_id: 56, part_number: 'CON-MIG-035', part_name: 'MIG wire, 33 lb coil' }),
+    ]);
+    renderModal();
+
+    await userEvent.click(await screen.findByRole('button', { name: /^Edit$/ }));
+
+    expect(screen.queryByLabelText(/Material this operation consumes/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Show all materials/ })).not.toBeInTheDocument();
+    // The tie's own part is still named in full, filter or no filter.
+    expect(screen.getByLabelText('Material')).toHaveValue('CON-MIG-035 — MIG wire, 33 lb coil');
   });
 });
 

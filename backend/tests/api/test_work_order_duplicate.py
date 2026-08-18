@@ -2045,6 +2045,130 @@ class TestMaterialTieRecomputation:
 
 
 # --------------------------------------------------------------------------- #
+# The THIRD tie constructor — the part-type gate reaches it too
+# --------------------------------------------------------------------------- #
+class TestProducedPartTiesAreSkippedRatherThanCopied:
+    """A legacy produced-part tie is DROPPED and REPORTED, never propagated.
+
+    There are three constructors of a ``work_order_material_allocations`` row.
+    ``POST /work-orders/{id}/material-allocations`` and ``_find_nest_material_part`` (both
+    nest doors) refuse **422** a tie whose part is one the shop PRODUCES, because such a tie
+    makes a job deplete finished goods to build itself and consumption never auto-reverses
+    (invariant 6b) — see ``tests/api/test_material_tie_part_type_gate.py``.
+
+    ``_copy_material_allocations`` is the third, and it used to copy ``part_id`` verbatim
+    without ever re-reading the part's class, so a LEGACY tie — one created before the gate
+    shipped, which is the whole population the gate cannot retroactively clean — survived
+    duplication and landed OPEN on the new DRAFT work order for the completion engine to
+    draw against. It now asks the same predicate the other two doors ask
+    (``material_tie_part_gate.part_is_tieable_material``) and SKIPS the tie as
+    ``part_not_tieable``.
+
+    **Skip, not 409.** A duplicate is not a tie-creation request: refusing the whole copy
+    over one legacy row would leave the planner with nothing, where a skip leaves them a
+    draft plus a named tie to re-make. That is the same trade the three pre-existing skip
+    reasons already make, and the skip rides BOTH channels the module docstring requires —
+    the response envelope and the work order's audit ``extra_data``.
+    """
+
+    def test_a_produced_part_tie_is_skipped_and_reported(self, client: TestClient, db_session: Session):
+        admin = make_user(db_session)
+        wc = make_work_center(db_session, wc_type="machining")
+        part = make_part(db_session)
+        # A part the shop PRODUCES, tied as material — the state both live tie doors now
+        # refuse, written straight to the table because no API can create it.
+        produced = make_part(db_session, part_type="assembly", uom="each")
+        source = make_work_order(db_session, part=part, quantity_ordered=10.0)
+        operation = add_operation(db_session, source, wc, sequence=10)
+        tie = make_tie(db_session, source, produced, operation=operation, qty_per_run=1.0, qty_planned=10.0)
+
+        response = duplicate(client, headers_for(admin), source.id, quantity=10)
+        assert response.status_code == status.HTTP_201_CREATED, response.text
+
+        copy = created_work_order(db_session, response)
+        assert ties_of(db_session, copy) == [], "the produced-part tie must not propagate"
+
+        [skipped] = response.json()["skipped_material_allocations"]
+        assert skipped["reason"] == "part_not_tieable"
+        assert skipped["source_allocation_id"] == tie.id
+        assert skipped["part_id"] == produced.id
+        assert skipped["source_work_order_operation_id"] == operation.id
+
+    def test_the_skip_reaches_the_audit_chain_as_well_as_the_response(self, client: TestClient, db_session: Session):
+        """Both channels, per the module docstring — a skip on one of them is half a skip.
+
+        The response tells the planner now; the chain is what an auditor reads later, when
+        the question is why the duplicate carries less material demand than its source.
+        """
+        admin = make_user(db_session)
+        part = make_part(db_session)
+        produced = make_part(db_session, part_type="manufactured", uom="each")
+        source = make_work_order(db_session, part=part, quantity_ordered=10.0)
+        make_tie(db_session, source, produced, qty_planned=10.0)
+
+        response = duplicate(client, headers_for(admin), source.id, quantity=10)
+        assert response.status_code == status.HTTP_201_CREATED, response.text
+
+        copy = created_work_order(db_session, response)
+        row = (
+            db_session.query(AuditLog)
+            .filter(
+                AuditLog.resource_type == "work_order",
+                AuditLog.resource_id == copy.id,
+                AuditLog.action == "CREATE",
+            )
+            .one()
+        )
+        reasons = [entry["reason"] for entry in row.extra_data["skipped_material_allocations"]]
+        assert reasons == ["part_not_tieable"]
+
+    def test_a_material_tie_alongside_it_still_copies(self, client: TestClient, db_session: Session):
+        """The negative control: one bad tie is dropped, the good ones are not.
+
+        Without this, a copier that had simply stopped copying ties at all would satisfy
+        the assertions above.
+        """
+        admin = make_user(db_session)
+        part = make_part(db_session)
+        produced = make_part(db_session, part_type="assembly", uom="each")
+        sheet = make_part(db_session, part_type="raw_material", uom="sheets")
+        source = make_work_order(db_session, part=part, quantity_ordered=10.0)
+        make_tie(db_session, source, produced, qty_planned=10.0)
+        make_tie(db_session, source, sheet, qty_planned=4.0)
+
+        response = duplicate(client, headers_for(admin), source.id, quantity=10)
+        assert response.status_code == status.HTTP_201_CREATED, response.text
+
+        copy = created_work_order(db_session, response)
+        assert [tie.part_id for tie in ties_of(db_session, copy)] == [sheet.id]
+        assert [entry["part_id"] for entry in response.json()["skipped_material_allocations"]] == [produced.id]
+
+    def test_the_manual_door_refuses_the_same_part_the_copier_now_skips(self, client: TestClient, db_session: Session):
+        """The two doors agree, in the two shapes they are each allowed to answer in.
+
+        Same part, same company: the tie endpoint refuses 422 and the copier drops-and-
+        reports. Neither produces the row, which is the property that matters.
+        """
+        admin = make_user(db_session)
+        wc = make_work_center(db_session, wc_type="machining")
+        part = make_part(db_session)
+        produced = make_part(db_session, part_type="assembly", uom="each")
+        # IN_PROGRESS, not this file's COMPLETE default: the tie endpoint refuses a
+        # TERMINAL work order with a 409 before it ever resolves the part, which would
+        # make this test pass for the wrong reason.
+        source = make_work_order(db_session, part=part, quantity_ordered=10.0, status_value=WorkOrderStatus.IN_PROGRESS)
+        add_operation(db_session, source, wc, sequence=10)
+
+        refused = client.post(
+            f"/api/v1/work-orders/{source.id}/material-allocations",
+            headers=headers_for(admin),
+            json={"part_id": produced.id, "source": "manual", "qty_planned": 10.0},
+        )
+        assert refused.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, refused.text
+        assert ties_of(db_session, source) == []
+
+
+# --------------------------------------------------------------------------- #
 # The traveler — process-sheet step snapshots
 # --------------------------------------------------------------------------- #
 class TestProcessSheetStepsAreReSnapshotted:

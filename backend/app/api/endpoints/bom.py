@@ -52,6 +52,7 @@ from app.services.import_service import (
     ImportFileError,
 )
 from app.services.llm_service import extract_bom_data_with_llm
+from app.services.material_tie_part_gate import part_type_change_refusal
 from app.services.part_number_service import generate_werco_part_number
 from app.services.pdf_service import SUPPORTED_EXTENSIONS, extract_text_from_document, save_uploaded_document
 
@@ -517,6 +518,68 @@ def _part_type_value(value: Optional[Any]) -> Optional[str]:
     return str(value).strip().lower()
 
 
+def _promote_existing_part_to_assembly(
+    db: Session,
+    assembly_part: Part,
+    *,
+    doc_type: str,
+    company_id: int,
+    audit: AuditService,
+    warnings: List[str],
+) -> None:
+    """Reclassify the BOM's parent part as an ASSEMBLY — unless live material ties forbid it.
+
+    THE second conversion door (``PUT /parts/{id}`` is the first). Both importers resolve
+    an EXISTING part by part number with company scoping only, then promote it whenever the
+    document is a BOM, so before this the importer could reclassify a ``raw_material`` or
+    ``purchased`` part that LIVE work orders were still tying as material — landing exactly
+    the state ``material_tie_part_gate`` exists to prevent, since a tie DEPLETES its part at
+    completion and never auto-reverses (invariant 6b). Shared by
+    ``_create_from_import_payload`` and ``import_bom_or_part`` for the reason recorded all
+    over this codebase: a gate in one of two files is not a gate.
+
+    **Only UNFINISHED work orders refuse it.** A tie on a COMPLETE / CLOSED / CANCELLED job
+    can never consume, and since nothing ever closes a tie at completion, counting those
+    would make an import warn about every parent part the shop has ever consumed — and skip
+    a promotion nothing was standing in the way of. A ``warnings`` list that cries wolf on
+    routine imports is one planners stop reading, which is how the real refusals get missed.
+
+    **Refused promotions SKIP and WARN; they do not abort the import.** The conversion
+    gate's own verb is a 409, and on ``PUT /parts/{id}`` that is right — one record, one
+    decision. Here it would roll back an entire multi-record import (every component part
+    created, the BOM header, every line) over a step that is catalog hygiene rather than a
+    precondition: a BOM attaches by ``part_id`` and is perfectly valid on a parent that is
+    still typed ``purchased``. The importer's established channel for "this one thing could
+    not be done" is ``warnings``, which rides back in ``BOMImportResponse``, so the refusal
+    sentence — the same one the 409 carries, naming the part and the unfinished work orders
+    that still tie it — is appended there. What must never happen is a SILENT promotion, and
+    it cannot: the part is either promoted (with an audit row) or reported (with a warning).
+
+    Writes an audit row only when the class actually moved (invariant 2 — the chain records
+    what happened, and a refused promotion changed nothing).
+    """
+    if doc_type != "bom":
+        return
+    if _part_type_value(assembly_part.part_type) == PartType.ASSEMBLY.value:
+        return
+
+    refusal = part_type_change_refusal(db, assembly_part, PartType.ASSEMBLY.value, company_id=company_id)
+    if refusal:
+        warnings.append(f"{refusal} The BOM was imported and the part's type was left unchanged.")
+        return
+
+    old_part_type = _part_type_value(assembly_part.part_type)
+    assembly_part.part_type = PartType.ASSEMBLY.value
+    audit.log_update(
+        "part",
+        assembly_part.id,
+        assembly_part.part_number,
+        old_values={"part_type": old_part_type},
+        new_values={"part_type": PartType.ASSEMBLY.value},
+        extra_data={"source": "bom_import"},
+    )
+
+
 def _resolve_import_parent_part_type(doc_type: str, extracted_type: Optional[str]) -> str:
     if doc_type == "bom":
         return PartType.ASSEMBLY.value
@@ -940,17 +1003,9 @@ def _create_from_import_payload(
         _reject_deleted_part(db, assembly_number)
     if existing_part:
         assembly_part = existing_part
-        if doc_type == "bom" and _part_type_value(assembly_part.part_type) != PartType.ASSEMBLY.value:
-            old_part_type = _part_type_value(assembly_part.part_type)
-            assembly_part.part_type = PartType.ASSEMBLY.value
-            audit.log_update(
-                "part",
-                assembly_part.id,
-                assembly_part.part_number,
-                old_values={"part_type": old_part_type},
-                new_values={"part_type": PartType.ASSEMBLY.value},
-                extra_data={"source": "bom_import"},
-            )
+        _promote_existing_part_to_assembly(
+            db, assembly_part, doc_type=doc_type, company_id=company_id, audit=audit, warnings=warnings
+        )
     else:
         assembly_part = Part(
             part_number=assembly_number,
@@ -1295,17 +1350,9 @@ async def import_bom_or_part(
             _reject_deleted_part(db, assembly_number)
         if existing_part:
             assembly_part = existing_part
-            if doc_type == "bom" and _part_type_value(assembly_part.part_type) != PartType.ASSEMBLY.value:
-                old_part_type = _part_type_value(assembly_part.part_type)
-                assembly_part.part_type = PartType.ASSEMBLY.value
-                audit.log_update(
-                    "part",
-                    assembly_part.id,
-                    assembly_part.part_number,
-                    old_values={"part_type": old_part_type},
-                    new_values={"part_type": PartType.ASSEMBLY.value},
-                    extra_data={"source": "bom_import"},
-                )
+            _promote_existing_part_to_assembly(
+                db, assembly_part, doc_type=doc_type, company_id=company_id, audit=audit, warnings=warnings
+            )
         else:
             assembly_part = Part(
                 part_number=assembly_number,

@@ -110,7 +110,8 @@ class LaserNestManualCreate(BaseModel):
         description="Optional material tie: the stock part (sheet/plate) this nest consumes. Creates an "
         "operation-scoped material allocation on the nest's operation, so the material is deducted when "
         "the nest's operation completes; the work-order completion reconcile is the self-heal. Must "
-        "resolve to a non-deleted part in this company.",
+        "resolve to a non-deleted MATERIAL part in this company: an unknown, cross-tenant or "
+        "soft-deleted id is 404, and a part the shop produces (manufactured / assembly) is 422.",
     )
     qty_per_run: Optional[float] = Field(
         None,
@@ -401,7 +402,8 @@ class LaserNestImportRow(BaseModel):
         description="Per-nest material tie: the stock part (sheet/plate) this nest consumes. Creates an "
         "operation-scoped material allocation on the nest's operation, so the material is deducted when "
         "the nest's operation completes; the work-order completion reconcile is the self-heal. Must "
-        "resolve to a non-deleted part in this company.",
+        "resolve to a non-deleted MATERIAL part in this company: an unknown, cross-tenant or "
+        "soft-deleted id is 404, and a part the shop produces (manufactured / assembly) is 422.",
     )
     qty_per_run: Optional[float] = Field(
         None,
@@ -865,8 +867,10 @@ class WorkOrderDuplicateSkippedAllocation(UTCModel):
     )
     reason: str = Field(
         ...,
-        description="Machine-readable reason. Two values are producible: 'part_not_available' (the tied part "
-        "has been deleted) and 'operation_not_copied' (its operation was skipped). A third, "
+        description="Machine-readable reason. Three values are producible: 'part_not_available' (the tied part "
+        "has been deleted), 'part_not_tieable' (the tied part is one the shop PRODUCES — a manufactured part "
+        "or an assembly — which both live tie-write doors refuse 422; reachable only from a LEGACY tie created "
+        "before that gate) and 'operation_not_copied' (its operation was skipped). A fourth, "
         "'nest_runs_unavailable', is kept server-side as DEFENCE and is not currently reachable — a "
         "nest-backed operation with no live nest is skipped first, so its tie reports 'operation_not_copied'. "
         "Treat the set as open and tolerate an unknown reason rather than switching on it exhaustively.",
@@ -903,6 +907,76 @@ class WorkOrderDuplicateResponse(UTCModel):
         default_factory=list,
         description="Source material ties not copied — the planner must re-tie these by hand or the job "
         "will run without the material demand the source had. Empty on a clean duplicate.",
+    )
+
+
+class WorkOrderRestoreSkippedAllocation(UTCModel):
+    """One material tie ``POST /work-orders/{id}/restore`` deliberately left CANCELLED.
+
+    The soft delete auto-CANCELs every OPEN tie and the restore is its inverse, so a tie
+    that does NOT come back is an omission the planner has to know about — the same
+    failure mode ``WorkOrderDuplicateSkippedAllocation`` exists for, reached from the other
+    direction. Silence would mean the restored job runs, no shortage shows, and its
+    material is never deducted until the inventory count disagrees.
+
+    Built by ``material_consumption_service.reopen_allocations_cancelled_by_delete`` AS
+    THIS MODEL, inside the restore's transaction, and sealed with ``extra="forbid"`` for
+    the same reasons its duplicate-side sibling is: a mistyped key is then a
+    ``ValidationError`` that rolls the restore back, rather than a 500 on a work order that
+    is already restored — which is exactly the "the planner never sees the skip" outcome
+    this envelope exists to prevent.
+
+    Field names are the RESTORE's, not the duplicate's: nothing here is a "source" row.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    allocation_id: int = Field(..., description="Id of the tie row that stayed `cancelled`.")
+    part_id: int = Field(
+        ...,
+        description="The tied part, so the client can name it. Never null — "
+        "``work_order_material_allocations.part_id`` is NOT NULL.",
+    )
+    work_order_operation_id: Optional[int] = Field(
+        None,
+        description="The operation the tie is scoped to, or null for a work-order-scoped tie.",
+    )
+    reason: str = Field(
+        ...,
+        description="Machine-readable reason. Currently only 'part_not_tieable' — the tied part is now one "
+        "the shop PRODUCES (a manufactured part or an assembly), so re-opening the tie would re-arm standing "
+        "demand that depletes finished goods; both live tie-write doors refuse such a part 422. "
+        "Treat the set as open and tolerate an unknown reason rather than switching on it exhaustively.",
+    )
+
+
+class WorkOrderRestoreResponse(UTCModel):
+    """Response for ``POST /work-orders/{id}/restore``: the message AND what did not come back.
+
+    The endpoint used to return a bare ``{"message": ...}``. It grew an envelope for one
+    reason: a restore is allowed to leave a tie CANCELLED (its part was reclassified into
+    something the shop produces while the work order was deleted), and a dropped tie with
+    no channel is the failure this system's whole tie-skip convention exists to prevent.
+    ``message`` is unchanged and still first, so every existing caller keeps working.
+
+    ``skipped_material_allocations`` is normally EMPTY, which is the "clean restore"
+    signal — clients should say something when it is non-empty and stay quiet when it is
+    not. It is not an error: the work order WAS restored.
+
+    **It is not a complete inventory of every tie that stayed cancelled**, and saying so
+    is more useful than implying otherwise. A tie the delete cancelled and a later nest
+    re-import then DETACHED is also left alone (its operation no longer exists, so
+    re-opening would silently convert it into a work-order-scoped tie nobody created) —
+    that pre-existing case has no entry here. Read the list as "these ties were REFUSED,
+    and why", not as "these are the only ties that did not come back".
+    """
+
+    message: str = Field(..., description="Human-readable confirmation, unchanged from the pre-envelope shape.")
+    skipped_material_allocations: List[WorkOrderRestoreSkippedAllocation] = Field(
+        default_factory=list,
+        description="Ties the delete had cancelled that were deliberately NOT re-opened — the planner must "
+        "correct the part class or re-tie by hand, or the job will run without that material demand. Empty "
+        "on a clean restore.",
     )
 
 

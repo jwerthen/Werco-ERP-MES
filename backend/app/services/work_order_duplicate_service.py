@@ -153,6 +153,7 @@ from app.services.audit_service import AuditService
 #   _uom_value — the unit snapshot every other tie-creating path takes.
 from app.services.laser_nest_service import _recompute_child_quantity_ordered, _uom_value
 from app.services.laser_nest_text import normalize_nest_descriptors
+from app.services.material_tie_part_gate import PART_NOT_TIEABLE_REASON, part_is_tieable_material
 
 # No module logger, deliberately. Every omission this service can produce has a channel
 # that reaches the planner (the two ``skipped_*`` lists) and the audit chain; anything
@@ -1060,7 +1061,7 @@ def _copy_material_allocations(
     much material a nest draws. Falls back to the source value only when the part row
     carries no unit at all.
 
-    Three conditions SKIP a tie rather than guess at it — TWO of them producible. Each
+    Four conditions SKIP a tie rather than guess at it — THREE of them producible. Each
     appends a ``WorkOrderDuplicateSkippedAllocation`` carrying the source allocation id,
     the part, the source operation and a machine-readable ``reason``; the list is recorded
     in the work order's audit ``extra_data`` AND returned to the caller, which is what
@@ -1070,6 +1071,19 @@ def _copy_material_allocations(
         The tie's part has since been SOFT-DELETED. ``POST
         /work-orders/{id}/material-allocations`` refuses a deleted part outright, so
         re-creating one here would mint a tie no planner could have made by hand.
+    ``part_not_tieable``
+        The tie's part is one the shop PRODUCES — a MANUFACTURED part or an ASSEMBLY.
+        Reachable only from a LEGACY tie: both live tie-write doors run
+        ``material_tie_part_gate.assert_part_is_tieable_material`` and refuse 422, but ties
+        predating that gate were never backfilled. This is the same argument as
+        ``part_not_available`` one class of defect over — copying such a row would mint a
+        tie no planner could make by hand, and it would land OPEN on a DRAFT work order
+        where completion draws against it, depleting finished goods to build the job.
+        Consumption never auto-reverses (invariant 6b), so the copy is the last cheap
+        moment to refuse. This path asks the predicate directly rather than the 422
+        wrapper: a duplicate is not a tie-creation request, and aborting the whole copy
+        over one legacy row would be a worse answer than telling the planner which tie to
+        re-make by hand.
     ``operation_not_copied``
         The tie's operation was not copied — in practice its laser nest was
         soft-deleted, so the operation was skipped (see ``_copy_operations``). Re-scoping
@@ -1127,6 +1141,17 @@ def _copy_material_allocations(
         part = parts.get(allocation.part_id)
         if part is None or getattr(part, "is_deleted", False):
             _skip(allocation, "part_not_available")
+            continue
+
+        # The THIRD tie constructor, behind the same predicate as the other two. The part
+        # is re-read here (it has to be, for the UoM re-snapshot), so asking what class it
+        # is now costs nothing — and it is the only moment this path can ask: after the
+        # copy, the new tie is standing demand nothing re-checks.
+        if not part_is_tieable_material(part):
+            # The shared literal, not a copy of it: the RESTORE seam reports the same
+            # reason for the same predicate, and the two envelopes are documented as
+            # having the same shape.
+            _skip(allocation, PART_NOT_TIEABLE_REASON)
             continue
 
         new_operation_id: Optional[int] = None

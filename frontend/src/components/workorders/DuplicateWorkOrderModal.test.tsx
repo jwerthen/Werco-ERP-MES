@@ -863,6 +863,26 @@ describe('DuplicateWorkOrderModal: the summary states a reason only when it is s
     expect(row).toHaveTextContent('routing_superseded');
   });
 
+  it('spells out part_not_tieable rather than showing the server token', async () => {
+    // The server SKIPS a legacy tie whose part is one the shop produces instead
+    // of refusing the whole duplicate, and the entire justification for that
+    // trade is that the planner is told legibly which tie to re-make by hand. A
+    // fallback to the raw `part_not_tieable` token spends the refusal and
+    // delivers none of the explanation.
+    await submitPartialCopy(
+      makeResult({
+        skipped_material_allocations: [
+          skippedTie({ source_allocation_id: 12, part_id: 88, reason: 'part_not_tieable' }),
+        ],
+      })
+    );
+
+    const [row] = within(screen.getByTestId('duplicate-wo-skipped-ties')).getAllByRole('listitem');
+    expect(row).toHaveTextContent('Part #88');
+    expect(row).toHaveTextContent('the tied part is one the shop produces, not stock material');
+    expect(row).not.toHaveTextContent('part_not_tieable');
+  });
+
   it('shows an unknown TIE reason verbatim too', async () => {
     await submitPartialCopy(
       makeResult({

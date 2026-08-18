@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.api.deps import get_current_active_user, get_current_company_id, get_current_user, require_role
 from app.core.time_utils import to_utc_iso
 from app.db.database import get_db
+from app.db.tenant_filter import tenant_query
 from app.models.bom import BOM, BOMItem
 from app.models.part import ENGINEERING_PART_TYPES, Part, PartType, UnitOfMeasure, is_engineering_part_type
 from app.models.user import User, UserRole
@@ -23,6 +24,7 @@ from app.services.completion_inventory_service import (
     backflush_refusal_sentence,
 )
 from app.services.import_service import ImportFileError, parse_import_file
+from app.services.material_tie_part_gate import assert_part_type_change_allowed
 from app.services.part_number_service import generate_werco_part_number, normalize_description
 
 router = APIRouter()
@@ -554,12 +556,49 @@ def update_part(
 ):
     """Update a part.
 
+    **Resolves ANY part in the company, engineering or material/supply** — deliberately.
+    The BOM tab drills through to a component's part page, and BOM components are
+    routinely ``purchased`` / ``raw_material``, so this is the edit door those pages
+    reach; narrowing it to ``ENGINEERING_PART_TYPES`` would 404 every such save behind a
+    "Part not found" that is not true, and would leave the Materials screen — which
+    force-sends ``revision`` and ``is_critical`` on every save — as the only editor for a
+    material row, quietly resetting revisions and clearing critical-characteristic flags
+    (invariant 5). ``PUT /materials/{material_id}`` stays the material-shaped door; the
+    two overlap on rows, and that is fine because what needed gating was never the EDIT.
+
+    **What is gated is the CLASS CHANGE.** Reclassifying a material part that still
+    carries OPEN work-order material ties **on an unfinished work order** into a produced
+    one is refused **409** by the shared ``assert_part_type_change_allowed`` — the second
+    half of the tie-time part-type gate, since the hazard (a tie whose part is something
+    the shop produces, depleting finished goods at completion) is reachable by tying first
+    and reclassifying after just as easily as by tying a produced part outright. Ties held
+    by COMPLETE / CLOSED / CANCELLED work orders do **not** refuse it: they carry no live
+    demand, and since nothing ever closes a tie at completion, counting them would block
+    this edit forever on any part the shop has consumed. A ``part_type`` outside
+    ``ENGINEERING_PART_TYPES`` is still refused **400** by this endpoint's own rule below.
+
     Turning ``backflush_components`` ON is refused with **409** (plain-string ``detail``:
     the blocker sentences joined) while this part's backflush readiness check reports any
     blocking diagnostic — see ``assert_backflush_change_allowed``, which is shared with
     ``PUT /materials/{material_id}`` because that endpoint writes the same rows.
     """
-    part = db.query(Part).filter(Part.id == part_id, Part.company_id == company_id).first()
+    # ``tenant_query`` rather than a hand-rolled ``company_id`` predicate — invariant 1's
+    # helper, same rows, no behavior change.
+    #
+    # NO ``is_deleted == False`` FILTER, and that is the deliberate half of invariant 3's
+    # "filter, or carry a comment saying why not". A soft-deleted part stays editable here
+    # for two reasons. (1) The one edit on this handler that could do harm on a tombstoned
+    # row — arming ``backflush_components`` — is ALREADY refused, by
+    # ``assert_backflush_change_allowed``'s ``deleted_part`` diagnostic, with a 409 that
+    # says so; swapping that for a 404 would replace an explanatory refusal with an opaque
+    # one and lose the diagnostic on this door entirely. (2) ``PUT /materials/{id}`` writes
+    # the same ``parts`` rows and has never filtered it either, so filtering one door only
+    # would re-open the split-behavior gap this pair keeps closing. Every list, picker and
+    # search DOES filter ``is_deleted``, so a tombstoned part cannot be SELECTED into
+    # anything; what remains reachable is an audited edit to a record already withdrawn
+    # from use. Changing this is a decision about the parts/materials pair as a whole, not
+    # a line to tighten here in passing.
+    part = tenant_query(db, Part, company_id).filter(Part.id == part_id).first()
     if not part:
         raise HTTPException(status_code=404, detail="Part not found")
 
@@ -581,6 +620,13 @@ def update_part(
     # AFTER the setattr loop and before the flush -- or the gate silently starts judging
     # the pre-request part while the request rewrites it.
     backflush_extra = assert_backflush_change_allowed(db, part, update_data, company_id=company_id)
+    # Also before the first setattr: the conversion gate. It reads the part's CURRENT type
+    # and this company's LIVE ties (OPEN, on a non-terminal work order), so it has to run
+    # while the row still holds its old class. Refuses 409 only for material -> produced on
+    # a part that live demand is still standing against; every other direction, any untied
+    # part, and a part whose only ties belong to finished jobs all pass untouched.
+    if "part_type" in update_data:
+        assert_part_type_change_allowed(db, part, update_data["part_type"], company_id=company_id)
     for field, value in update_data.items():
         if field == "part_type":
             if hasattr(value, "value"):

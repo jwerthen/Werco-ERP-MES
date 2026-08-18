@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { ComboBox, ComboBoxOption } from '../ui/ComboBox';
 import { formatTieQty } from '../../utils/materialTie';
+import { partitionMaterialTiers } from '../../utils/catalogGroups';
 import { isSheetLikePart } from '../../utils/sheetPart';
 import { Part } from '../../types';
 
@@ -31,6 +32,28 @@ import { Part } from '../../types';
  * quietly untied. Pinning one row is deliberately preferred over auto-flipping
  * `showAll`: it keeps the tie visible without dumping 400 bolts and beams into
  * a sheet picker the planner did not ask to widen.
+ *
+ * ---------------------------------------------------------------------------
+ * THREE TIERS, NOT TWO: RAW STOCK, OTHER MATERIALS, AND NEVER
+ * ---------------------------------------------------------------------------
+ * The sheet heuristic alone was not enough, because "material" here means
+ * "everything the shop buys" — three of the four material-supply part types
+ * (`purchased`, `hardware`, `consumable`) are bought COMPONENTS, and the seeded
+ * catalog types bolts and nuts as `purchased`. `isSheetLikePart` is text-only,
+ * so "Sheet metal screw #8", "Plate nut" and "Abrasive sheets 9x11" all pass it
+ * and landed in the DEFAULT view. The default tier is therefore
+ * `isRawStockPartType` AND `isSheetLikePart`; everything else in `parts` sits
+ * behind the same "Show all materials" toggle as before.
+ *
+ * The third tier is an EXCLUSION with no escape hatch: a part the shop
+ * PRODUCES (`manufactured` / `assembly`) is never offered at either tier. That
+ * one is not a default — tying a work order to its own output as material, and
+ * depleting it from stock at completion, is not a preference.
+ *
+ * All three of those rules — plus the pinned selection above and the reveal
+ * count — come from `partitionMaterialTiers` in `utils/catalogGroups.ts`, which
+ * the two tie modals share. Only the sheet-like narrowing of the DEFAULT tier
+ * is this picker's own.
  */
 
 export interface SheetPartPickerProps {
@@ -68,6 +91,9 @@ export interface SheetPartPickerProps {
   id?: string;
   ariaLabel?: string;
   ariaLabelledBy?: string;
+  /** Id of an inline notice describing this picker's current state (e.g. "the
+   *  tie this nest carried could not be offered here"). */
+  ariaDescribedBy?: string;
 }
 
 /**
@@ -106,18 +132,37 @@ export function SheetPartPicker({
   id,
   ariaLabel,
   ariaLabelledBy,
+  ariaDescribedBy,
 }: SheetPartPickerProps) {
   const [showAll, setShowAll] = useState(false);
 
   const { options, hiddenCount } = useMemo(() => {
-    const sheetParts = parts.filter(isSheetLikePart);
-    const otherParts = parts.filter((part) => !isSheetLikePart(part));
-
-    // The current selection is pinned in regardless of the filter. Without this
-    // a tie to off-convention stock renders as an empty picker, and an empty
-    // picker on a re-import silently drops the tie.
-    const selectedIsHidden =
-      value !== '' && !showAll && otherParts.some((part) => String(part.id) === value);
+    // The tiering itself — the production exclusion, the raw-stock default, the
+    // pinned selection, and a reveal count that never counts a pinned row — is
+    // `partitionMaterialTiers`, shared with the two tie modals so a fix to any
+    // of those four lands in one place. What stays here is this picker's own
+    // policy: the sheet-like narrowing of the default tier, the group headings,
+    // and the server's shortlist.
+    const {
+      defaultTier: sheetParts,
+      hiddenTier: otherParts,
+      pinned: pinnedParts,
+      hiddenCount,
+    } = partitionMaterialTiers(parts, {
+      showAll,
+      // The current selection is pinned in regardless of the filter. Without
+      // this a tie to off-convention stock renders as an empty picker, and an
+      // empty picker on a re-import silently drops the tie.
+      pinnedIds: [value],
+      // The shortlist and the pre-filled extras are rendered below from their
+      // own arrays, so the toggle would not reveal them and they must not be
+      // counted as hidden.
+      alsoShownIds: [
+        ...priorityOptions.map((option) => option.value),
+        ...extraOptions.map((option) => option.value),
+      ],
+      defaultTierAlso: isSheetLikePart,
+    });
 
     const toOption = (part: Part, group: string): ComboBoxOption => ({
       value: String(part.id),
@@ -133,19 +178,13 @@ export function SheetPartPicker({
       ...option,
       group: option.group ?? 'Suggested for this nest',
     }));
-    const pinned = new Set(visible.map((option) => option.value));
+    const shortlisted = new Set(visible.map((option) => option.value));
+    const notShortlisted = (part: Part) => !shortlisted.has(String(part.id));
 
+    visible.push(...sheetParts.filter(notShortlisted).map((part) => toOption(part, 'Sheet & plate')));
     visible.push(
-      ...sheetParts.filter((part) => !pinned.has(String(part.id))).map((part) => toOption(part, 'Sheet & plate'))
+      ...(showAll ? otherParts : pinnedParts).filter(notShortlisted).map((part) => toOption(part, 'Other materials'))
     );
-    if (showAll) {
-      visible.push(
-        ...otherParts.filter((part) => !pinned.has(String(part.id))).map((part) => toOption(part, 'Other materials'))
-      );
-    } else if (selectedIsHidden && !pinned.has(value)) {
-      const selectedPart = otherParts.find((part) => String(part.id) === value);
-      if (selectedPart) visible.push(toOption(selectedPart, 'Other materials'));
-    }
 
     // Ties pre-filled from parts the material load never returned. Appended
     // rather than merged so they cannot displace a real catalog row. `known`
@@ -159,11 +198,6 @@ export function SheetPartPicker({
       known.add(extra.value);
       visible.push({ ...extra, group: extra.group ?? 'Other materials' });
     }
-
-    // What the toggle would actually REVEAL — not `otherParts.length`. A pinned
-    // selection is already on screen, so counting it advertises "1 more" that
-    // does not exist.
-    const hiddenCount = showAll ? 0 : otherParts.filter((part) => !known.has(String(part.id))).length;
 
     return { options: visible, hiddenCount };
   }, [parts, onHandByPart, extraOptions, priorityOptions, showAll, value]);
@@ -180,6 +214,7 @@ export function SheetPartPicker({
       id={id}
       ariaLabel={ariaLabel}
       ariaLabelledBy={ariaLabelledBy}
+      ariaDescribedBy={ariaDescribedBy}
       noResultsLabel={hiddenCount > 0 ? 'No sheet stock matches — try "Show all materials"' : 'No matches'}
       footer={
         hiddenCount > 0 || showAll ? (

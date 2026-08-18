@@ -255,9 +255,18 @@ def update_material(
 ):
     """Update a material or supply.
 
-    This handler writes the SAME ``parts`` rows as ``PUT /parts/{part_id}`` through the
+    This handler writes the SAME ``parts`` table as ``PUT /parts/{part_id}`` through the
     SAME ``PartUpdate`` schema, so it runs the SAME shared backflush refusal gate —
     imported, not re-implemented. A gate in one of the two files would not be a gate.
+    The two doors OVERLAP on rows and that is deliberate: this lookup is scoped to
+    ``MATERIAL_SUPPLY_PART_TYPES``, while ``update_part`` resolves any part in the company
+    (a BOM component drill-through lands on the parts page for a ``purchased`` row, and
+    that page has to be able to save). What each door refuses is the CLASS CHANGE, not the
+    edit — here, ``_require_material_type`` **400**s any engineering ``part_type``, so this
+    handler can never convert a material row into a produced one. ``update_part`` reaches
+    the same rows and permits that conversion, but only through the shared
+    ``material_tie_part_gate.assert_part_type_change_allowed``, which refuses **409** while
+    OPEN work-order material ties on UNFINISHED work orders still stand against the part.
 
     For the same reason the audit row is logged as ``resource_type="part"``, not
     ``"material"``: it is a ``parts`` row, and an auditor asking "who armed automatic BOM
