@@ -428,6 +428,21 @@ page, and it is **not a sixth guidance field**: it rides the operator payloads b
 `work_order_number`, **outside** `_job_guidance_fields`, whose five keys and whose recorded
 2026-08-14 station disclosure are unchanged.
 
+> **Unit # is a planning label. The SERIAL is the traceable identity.** Read this before treating
+> the badge as a quality record. On a serialized work order the controlled per-unit identity is
+> `serial_numbers` — validated (unique, non-empty, exactly one per unit, `count ==
+> quantity_ordered`), and the thing process-sheet step records, SPC points and the CoC key on. The
+> Unit # is deliberately none of that: it is free text, non-unique (a rework work order names the
+> same unit as the original), editable after release, and clearable. It drives no key, no join and
+> no derivation anywhere — it is display and search only.
+>
+> That distinction matters on screen because the Unit # renders **larger** than anything else on the
+> kiosk hero and the TV tile, while the serial chips sit further down the steps panel. Bigger does
+> not mean more authoritative here. If an inspector asks which unit a step record belongs to, the
+> answer is the serial on that record, not the badge at the top of the card — and note that no
+> quality record snapshots the Unit # it was captured under, so changing it after work is booked
+> re-attributes nothing and is reconstructible only from the `audit_log` by timestamp.
+
 This is the sequel to the section above, not a repeat of it. The 2026-08-14 guidance fix made the
 Unit # **readable** but not **findable** — it was still one token in a paragraph of Notes: absent
 from the queue card, absent from the work-order list, unsearchable, and impossible to put on the

@@ -160,10 +160,19 @@ Two operational notes:
 
 `jobs[].unit_number` (migration `083`) is the **Unit #** a one-unit-per-work-order job builds — the
 weld assemblies. It is **not gated** and is populated for every principal, public boards included.
-That is not a second exception to the rule above: a build number is not customer identity, and being
-**bounded** (`String(50)`) is precisely what lets it onto an unattended TV where the work order's
-unbounded `notes` — where this number used to live — never can. Making the number showable on the
-wall is the reason the column exists rather than the note being surfaced.
+That is not a second exception to the rule above — but the reason is **category parity, not
+length**. `String(50)` bounds how much text arrives, not what kind: fifty characters is ample for a
+customer name, and nothing validates the content. What makes it showable is that it is the same
+*category* as fields this board already renders publicly — `part_number`, and the operation and
+work-center names — all office-entered and purpose-labeled. `notes` is withheld because it is
+unbounded text of an **unconstrained** category, not merely because it is long. Making the number
+showable on the wall is the reason the column exists rather than the note being surfaced.
+
+**The residual, stated plainly.** The field is not validated, so an office user who types a customer
+name into Unit # puts it on the public TV. The mitigation is convention plus disclosure-at-entry —
+the work-order create form names the destinations under the field — and **not** enforcement. Do not
+wave a future field onto this payload on the strength of "it's bounded"; ask whether it belongs to
+one of the categories already here.
 
 `customer_name` remains the **one** gated field on the payload. On a card, the two never compete for
 space: the unit takes **row 2**'s large slot (the part number steps down beneath it), while the
