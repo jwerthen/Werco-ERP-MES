@@ -192,7 +192,14 @@ class WallboardJob(BaseModel):
     # Gated — populated only for an authorized (executive) principal; None on
     # public boards. See the class docstring and build_wallboard_payload.
     customer_name: Optional[str] = None
-    status: str  # released | in_progress
+    # released | in_progress | on_hold. ON_HOLD joined the wall population on
+    # 2026-08-19; THIS FIELD IS HOW THE TILE CARRIES THAT FACT — no new wire key
+    # was added, so an old TV bundle is byte-unaffected and the payload key-set
+    # is unchanged. The card derives its HELD state from this value and shows the
+    # bare word "ON HOLD": the hold REASON (blocker title, NCR text) deliberately
+    # never rides on this payload, which is what keeps the change a population
+    # change rather than a disclosure-category change.
+    status: str
     # Order totals. A conventional routing reports the WO header; a POOL work
     # order (laser nests, or a batch WO with one op per line item) reports the
     # SUM of its per-item operation targets/progress, because its header rollup
@@ -213,8 +220,14 @@ class WallboardJob(BaseModel):
 
 class WallboardResponse(UTCModel):
     work_centers: list[WallboardWorkCenter]
-    # Server-side ranked (late: worst-first; blocked: oldest-first), capped at
-    # 12, and DEPT-SCOPED when ``dept`` is passed (as are the totals below).
+    # Server-side ranked (late: worst-first; blocked: oldest-first) and
+    # DEPT-SCOPED when ``dept`` is passed (as are the totals below). The two
+    # caps DIFFER on purpose: ``late_wos`` keeps the 12-row ticker cap, while
+    # ``blocked_wos`` is capped at the job-wall limit (24) because the TV's job
+    # tiles join their BLOCKED age and stop reason from it by wo_number — see
+    # ``_BLOCKED_JOIN_LIMIT`` in wallboard_service. Neither list is a COUNT:
+    # ``late_total`` / ``blocked_total`` ride uncapped and are the only correct
+    # source for one.
     late_wos: list[WallboardLateWorkOrder]
     blocked_wos: list[WallboardBlockedWorkOrder]
     # DEPRECATED (2026-07-15 Job Wall redesign): the trailing-30d KPI strip is
@@ -222,8 +235,10 @@ class WallboardResponse(UTCModel):
     # longer computes it — ALWAYS None (old bundles render an em-dash panel).
     kpi_strip: Optional[WallboardKPIStrip] = None
     # Job Wall (owner feedback 2026-07-15): the main wall renders WORK ORDERS
-    # with their current operation. Priority-sorted server-side (blocked/down,
-    # then late worst-first, then running, then promise asc), capped at 24;
+    # with their current operation. Priority-sorted server-side — ACTIVE work
+    # first (blocked/down, then late worst-first, then running, then promise
+    # asc) and HELD work strictly last — capped at 24; the client renders this
+    # order and never re-sorts (its pinned anchor row is a prefix slice);
     # jobs_total carries the true uncapped (dept-scoped) count for "+N more".
     # Optional -> an old backend omits it and the TV falls back to the
     # machine wall.

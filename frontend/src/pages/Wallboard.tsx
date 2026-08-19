@@ -18,8 +18,17 @@
  *    polling stops.
  *  - ?dept=<work_center_type> narrows the board to one department.
  *  - The ONLY animation on the board is fdPulse on DOWN dots. Nothing else
- *    animates, nothing scrolls, and every zone keeps its slot at all data
- *    values (fixed geography).
+ *    animates and nothing scrolls. Every zone keeps its slot at all data values
+ *    (fixed geography) — with ONE scoped exception: zone 2's FIELD (grid rows
+ *    2-3) rotates through the delivered work orders on a 22s dwell so every open
+ *    WO reaches the wall. That is a discrete React state derivation, NOT motion:
+ *    no fade, no slide, no transform, no CSS transition, no new @keyframes. It
+ *    has to be, because the global prefers-reduced-motion block in
+ *    styles/accessibility.css forces animation-duration: 0.01ms !important on
+ *    `*`, so a CSS-animation-driven carousel would freeze on page 0 forever on
+ *    any TV reporting reduced motion. Zone 2's ANCHOR row (grid row 1) is pinned
+ *    and live, every other zone's geography is untouched, and the 12 grid cells
+ *    keep their coordinates at every data value.
  *
  * Scaling: the root sets fontSize calc(100vh / 67.5) → 1rem = 16px @1080p,
  * 32px @4K (identical angular size), so the handoff's px values render
@@ -33,7 +42,7 @@
  * (each 1/0) override AND re-persist them.
  */
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { usePageTitle } from '../hooks/usePageTitle';
 import { useWakeLock } from '../hooks/useWakeLock';
@@ -44,6 +53,7 @@ import QualitySplitRow from '../components/wallboard/QualitySplitRow';
 import ShipTodayPanel from '../components/wallboard/ShipTodayPanel';
 import TodayKpiBar from '../components/wallboard/TodayKpiBar';
 import WoGrid from '../components/wallboard/WoGrid';
+import { useWoCycle } from '../components/wallboard/useWoCycle';
 import { FD } from '../components/wallboard/wallboardTokens';
 import {
   captureWallboardTokenFromUrl,
@@ -55,6 +65,15 @@ import type { WallboardResponse } from '../types/wallboard';
 import { getCentralMinutesOfDay } from '../utils/centralTime';
 
 const POLL_INTERVAL_MS = 30_000;
+/**
+ * Zone 2 field dwell. Whole seconds so the flip cannot jitter against the 1s
+ * clock tick it is derived from. Deliberately NOT 20 or 30: LCM(22, 30) = 330s
+ * against LCM(20, 30) = 60s, so a 20s or 30s dwell would coincide with the 30s
+ * poll once a minute and teach viewers to attribute every data change to the
+ * flip. Worst-case wait for a specific job is (pages - 1) x 22s — 22s at 16
+ * delivered work orders, 44s at the 24 payload cap.
+ */
+const CYCLE_DWELL_MS = 22_000;
 /** Failed polls before the sync chip escalates STALE → LOST (~2 min). */
 const OFFLINE_RED_THRESHOLD = 4;
 const ROOT_FONT_SIZE = 'calc(100vh / 67.5)';
@@ -65,7 +84,10 @@ const SETTINGS_STORAGE_KEY = 'wallboard_display_settings';
  * Motion budget: fdPulse on DOWN dots (header chip when down > 0, DOWN card
  * chips) is the ONLY animation on the board. Nothing else animates — no
  * heartbeat, no new-event flash, no payload-swap fade (design rule: no
- * ambient motion on data).
+ * ambient motion on data). The zone 2 field flip adds NOTHING here: it is a
+ * hard swap of eight React children with no keyframes, transition or transform,
+ * and no countdown/progress element (a bar whose whole semantic is "the view
+ * changes in N seconds" IS ambient motion on data).
  */
 const WALLBOARD_CSS = `
   @keyframes fdPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
@@ -122,6 +144,38 @@ export default function Wallboard() {
   const [revoked, setRevoked] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [now, setNow] = useState<Date>(new Date());
+  /**
+   * Monotonic counter, bumped once per poll in which some wo_number is NEW to
+   * the `(blocked || down)` set — the server's bucket-1 predicate exactly.
+   * Handed to useWoCycle, where it forces an immediate plan rebuild and snaps
+   * the field to page 0; because anchor + field page 0 IS jobs[0..11] and the
+   * server sorts blocked/down first, the newly-alarmed job is on screen by
+   * construction up to rank 12.
+   *
+   * EDGE-triggered, never level-triggered: a machine down for three hours fires
+   * ONCE. Level-triggering would pin the board on page 0 all afternoon and
+   * silently restore the exact complaint this feature was filed to fix, on the
+   * busiest days, invisibly.
+   *
+   * LATE is deliberately EXCLUDED from the snap set: days_late steps in a batch
+   * at Central midnight, so a late trigger would fire at 00:00 with nobody
+   * watching and would train people to ignore snaps. Late is an hours-to-days
+   * condition, not a right-now event.
+   */
+  const [alarmSnap, setAlarmSnap] = useState(0);
+  /** Previous poll's alarm set, scoped to the dept it was measured on. */
+  const prevAlarmRef = useRef<{ dept: string | null; wos: Set<string> }>({ dept, wos: new Set<string>() });
+  /**
+   * RACE GUARD. `stale()` only cancels a fetch whose dept changed or whose
+   * component unmounted; two polls for the SAME dept can still resolve out of
+   * order (a slow one landing after a fast one). Applying the older payload
+   * would advance prevAlarmRef past an alarm the board never rendered, and the
+   * next genuine alarm would then be silently swallowed. So the diff — and
+   * setData with it — runs only for a strictly newer request than the last one
+   * applied.
+   */
+  const requestSeqRef = useRef(0);
+  const appliedSeqRef = useRef(0);
 
   const settings = useMemo(() => resolveDisplaySettings(searchParams), [searchParams]);
 
@@ -157,9 +211,32 @@ export default function Wallboard() {
   // after a dept change (or unmount) must not paint the old dept's data.
   const load = useCallback(
     async (stale: () => boolean = () => false) => {
+      const seq = (requestSeqRef.current += 1);
       try {
         const payload = await fetchWallboard(dept);
         if (stale()) return;
+        // Out-of-order / superseded response: paint nothing, diff nothing.
+        if (seq <= appliedSeqRef.current) return;
+        appliedSeqRef.current = seq;
+
+        // Alarm-set diff — runs here, where setData lands, AFTER the stale()
+        // probe and behind the sequence check, so prevAlarmRef only ever
+        // advances on a payload the board actually rendered.
+        if (prevAlarmRef.current.dept !== dept) {
+          prevAlarmRef.current = { dept, wos: new Set<string>() };
+        }
+        const alarmed = new Set<string>(
+          (Array.isArray(payload.jobs) ? payload.jobs : [])
+            .filter(job => job.blocked || job.down)
+            .map(job => job.wo_number)
+        );
+        let newlyAlarmed = false;
+        alarmed.forEach(wo => {
+          if (!prevAlarmRef.current.wos.has(wo)) newlyAlarmed = true;
+        });
+        prevAlarmRef.current = { dept, wos: alarmed };
+        if (newlyAlarmed) setAlarmSnap(count => count + 1);
+
         setData(payload);
         setLastUpdated(new Date());
         setOffline(false);
@@ -212,6 +289,24 @@ export default function Wallboard() {
   // payload lands can never pair new server minutes with a stale baseline.
   const extraMinutes = lastUpdated ? Math.max(0, Math.floor((now.getTime() - lastUpdated.getTime()) / 60_000)) : 0;
 
+  // Zone 2 cadence, derived from the SAME 1s tick as the wall clock — no second
+  // interval, no extra dep array, nothing new to clean up. Deriving the slot
+  // from epoch time rather than accumulating a counter self-corrects when a
+  // throttled or occluded tab resumes (Chrome throttles setInterval to ~1/min in
+  // hidden tabs) and keeps every TV in the building in phase with every other.
+  const slot = Math.floor(now.getTime() / CYCLE_DWELL_MS);
+  const cycle = useWoCycle({
+    jobs: data?.jobs ?? null,
+    dept,
+    slot,
+    alarmSnap,
+    // nightDim: the board is explicitly declaring nobody is looking, so this is
+    // the one place where spending the motion budget provably buys nothing — and
+    // page 0 is today's board, so a dimmed board is the board people already know.
+    frozen: settings.nightDim,
+    revoked,
+  });
+
   // True uncapped totals for the HUD chips + rail; fallback to list lengths /
   // derived counts against an old backend (degraded but rendering).
   const totals = useMemo(() => {
@@ -255,8 +350,8 @@ export default function Wallboard() {
             Display access revoked or expired
           </p>
           <p className="max-w-[48rem] text-[1.5rem]" style={{ color: FD.mute }}>
-            Create a new display link or setup code in Admin Settings → Wallboard Displays, then open /tv on this
-            screen and enter the code.
+            Create a new display link or setup code in Admin Settings → Wallboard Displays, then open /tv on this screen
+            and enter the code.
           </p>
         </div>
       ) : noToken && !data ? (
@@ -293,6 +388,10 @@ export default function Wallboard() {
             <WoGrid
               jobs={data.jobs ?? null}
               jobsTotal={data.jobs_total ?? null}
+              anchorJobs={cycle.anchorJobs}
+              fieldJobs={cycle.fieldJobs}
+              pageIndex={cycle.pageIndex}
+              pages={cycle.pages}
               workCenters={data.work_centers}
               blockedWos={data.blocked_wos}
               extraMinutes={extraMinutes}

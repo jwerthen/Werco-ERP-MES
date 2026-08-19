@@ -123,7 +123,16 @@ export interface WallboardJob {
   part_number?: string | null;
   /** Gated — present only for authorized (executive) displays; else absent. */
   customer_name?: string | null;
-  /** released | in_progress */
+  /**
+   * The raw `WorkOrderStatus` value: `released` | `in_progress` | `on_hold`.
+   *
+   * LOAD-BEARING, not decorative. ON_HOLD joined the wall population on
+   * 2026-08-19 and the backend added NO new wire key for it — the tile carries
+   * the hold on THIS field, and `classifyJob` tests `status === 'on_hold'` to
+   * pick the grey, non-pulsing HELD card state. Do not repopulate this with a
+   * display label, and do not add a parallel `held` boolean expecting the
+   * server to send one.
+   */
   status?: string;
   /** WO-level quantities (the tile progress bar). */
   qty_complete?: number;
@@ -171,10 +180,24 @@ export interface WallboardResponse {
   ship?: WallboardShip | null;
   today?: WallboardToday | null;
   quality?: WallboardQuality | null;
-  /** Priority-sorted open WOs (cap 24), server order. undefined/null = old
-   *  backend → the board renders its "BOARD DATA UNAVAILABLE" grid zone. */
+  /**
+   * Priority-sorted open WOs (cap 24), server order — RELEASED / IN_PROGRESS /
+   * ON_HOLD, with held work sorted to the BACK so it can never take an anchor
+   * slot. The client NEVER re-sorts. Zone 2 pins ranks 1-4 to grid row 1 and
+   * rotates the rest through grid rows 2-3 on a 22s dwell, so every delivered
+   * job reaches the wall rather than the first 12 only.
+   * undefined/null = old backend → the board renders its "BOARD DATA
+   * UNAVAILABLE" grid zone.
+   */
   jobs?: WallboardJob[] | null;
-  /** Uncapped open-WO count for the "+N more" line. */
+  /**
+   * Uncapped open-WO count. It is the residue against `jobs` that the strip
+   * reports, and the WORDING differs by state on purpose: a static board still
+   * says "+N MORE WORK ORDERS IN QUEUE" (12 cells, the rest permanently hidden),
+   * while a cycling board says "+N NOT ON BOARD" for the genuinely truncated
+   * tail beyond the delivered cap — the "+N MORE ... IN QUEUE" phrase is never
+   * emitted while cycling, so it keeps exactly one meaning across the screen.
+   */
   jobs_total?: number | null;
   generated_at: string;
 }

@@ -89,14 +89,42 @@ _TICKER_LIMIT = 12
 _NEXT_DUE_SCAN_LIMIT = 200
 
 # The job wall renders WORK ORDERS (owner feedback 2026-07-15). Population:
-# open (RELEASED / IN_PROGRESS) WOs only. ON_HOLD is deliberately EXCLUDED
-# from the wall — the quality rail already counts holds; DRAFT and terminal
-# statuses are off the board like everywhere else.
-_JOB_WALL_WO_STATUSES = [WorkOrderStatus.RELEASED, WorkOrderStatus.IN_PROGRESS]
+# open WOs — RELEASED / IN_PROGRESS / ON_HOLD. DRAFT and terminal statuses are
+# off the board like everywhere else.
+#
+# ON_HOLD joined the wall by owner decision (2026-08-19). It was excluded until
+# then on the argument that the Z3 quality rail already counts holds — but a
+# count is not a tile: a held WO vanished from the only surface that says WHICH
+# job and where it stopped, so the floor could not see that half the shop was
+# parked. The rail keeps its count (``quality.wos_on_hold``); this adds the
+# tiles beside it. Three properties keep that a POPULATION change and nothing
+# more:
+#   * held work sorts to the BACK (see ``_job_sort_key``) so it can never crowd
+#     an actionable alarm off the top of the board,
+#   * the tile carries the hold on the EXISTING ``status`` field ("on_hold") —
+#     no new wire field, so an old TV bundle is unaffected,
+#   * NO hold reason / NCR title / free text rides along. The Z3 ON HOLD panel
+#     is counts-and-ages only precisely because that text names customers and
+#     suppliers; the tile stays inside the same disclosure category.
+# ``_late_wo_filters`` already used ``not_in(_TERMINAL_WO_STATUSES)``, so ON_HOLD
+# WOs were ALREADY in late_total and the LATE rail — this moves no HUD number.
+_JOB_WALL_WO_STATUSES = [WorkOrderStatus.RELEASED, WorkOrderStatus.IN_PROGRESS, WorkOrderStatus.ON_HOLD]
 
 # Cap the job wall at a readable TV grid; jobs_total rides separately as the
 # true uncapped count for the "+N more" affordance.
 _JOB_WALL_LIMIT = 24
+
+# Cap for the blocked rail rows ONLY — deliberately the JOB WALL's cap, not
+# _TICKER_LIMIT. WoCard joins a job tile's BLOCKED age and stop reason from
+# ``blocked_wos`` by wo_number, and the rotating wall now exposes ranks 13-24,
+# which (being the least severe) are systematically the ones a 12-row cap drops:
+# later field pages would render more blank reason cells than page 0, and a page
+# of blanks reads as broken. Unlike the job-wall cap this is a REAL SQL limit,
+# not a post-build slice. ``BlockedDownPanel`` still slices to 4 and
+# ``blocked_total`` still rides uncapped, so the rail itself is unchanged.
+# ``late_wos`` keeps _TICKER_LIMIT: WoCard does not join it (the card reads
+# ``job.is_late`` off the job itself).
+_BLOCKED_JOIN_LIMIT = _JOB_WALL_LIMIT
 
 # current-op precedence lives in _current_operation: IN_PROGRESS with open
 # labor > IN_PROGRESS > READY > PENDING, lowest sequence within each class.
@@ -183,10 +211,31 @@ def _work_center_type_norm(work_center: Optional[WorkCenter]) -> Optional[str]:
 
 
 def _job_sort_key(job: WallboardJob):
-    """Deterministic job-wall priority: blocked/down first, then late (worst
-    days_late first), then running, then the rest by promise_date asc (nulls
-    last); wo_number breaks every tie."""
+    """Deterministic job-wall priority: ACTIVE work first (blocked/down, then
+    late worst-first, then running, then the rest by promise_date asc, nulls
+    last), HELD work last; wo_number breaks every tie.
+
+    THE ALARM CLASSES ARE A CONTIGUOUS PREFIX OF THIS SORT, and that is a
+    contract, not an accident. The TV's anchor row is a pure prefix slice —
+    ``jobs[0:4]``, pinned while the rest of the grid rotates — so the client
+    can only guarantee that the worst jobs are always on screen if severity is
+    monotonically non-increasing from index 0. Never reorder these terms so that
+    a calm job can sort ahead of an alarmed one, and never make a term depend on
+    anything outside the tile (a page index, a client hint): the client renders
+    SERVER order and sorts nothing.
+
+    The held bucket leads for the same reason. A held WO is deliberately stopped
+    and someone already knows; it must not take an anchor slot from an
+    actionable alarm. It STRENGTHENS the prefix property rather than weakening
+    it — held work is pushed strictly behind every active job, so the alarm
+    classes stay contiguous from index 0 no matter how many holds exist. A held
+    WO may still carry ``is_late``/``blocked``/``down`` (its lateness comes from
+    the same shared predicate as everything else); the bucket term outranks
+    those on the WALL, and the card's own HELD-first display precedence keeps
+    the two surfaces telling the same story.
+    """
     return (
+        1 if job.status == WorkOrderStatus.ON_HOLD.value else 0,  # held to the back
         0 if (job.blocked or job.down) else 1,
         -job.days_late,
         0 if job.running else 1,
@@ -946,7 +995,7 @@ def build_wallboard_payload(
     blocked_rows = (
         _apply_blocked_filters(db.query(WorkOrderBlocker, WorkOrder.work_order_number), company_id, dept_norm)
         .order_by(WorkOrderBlocker.reported_at.asc())
-        .limit(_TICKER_LIMIT)
+        .limit(_BLOCKED_JOIN_LIMIT)  # NOT _TICKER_LIMIT — the job wall joins these by wo_number
         .all()
     )
     blocked_wos = [
