@@ -644,9 +644,16 @@ def _copy_header(
     Deliberately NOT set (left at the column default / NULL): ``quantity_complete``,
     ``quantity_scrapped``, ``scrap_reason``, ``scrap_reason_code_id``, ``actual_start``,
     ``actual_end``, ``actual_hours``, ``actual_cost``, ``lot_number``,
-    ``serial_numbers``, ``released_by``, ``released_at``, ``current_operation_id``,
-    ``scheduled_start``, ``scheduled_end``, ``version``, ``parent_work_order_id``,
-    ``must_ship_by`` — see the module docstring for the three that are judgement calls.
+    ``serial_numbers``, ``unit_number``, ``released_by``, ``released_at``,
+    ``current_operation_id``, ``scheduled_start``, ``scheduled_end``, ``version``,
+    ``parent_work_order_id``, ``must_ship_by`` — see the module docstring for the
+    three that are judgement calls.
+
+    ``unit_number`` (083) is the one omission that is about IDENTITY rather than
+    about production history: a duplicate is the NEXT unit, not the same one, so
+    carrying it would mint two work orders both claiming to build unit 2410048 and
+    put that claim on the kiosk, the dispatch board and the TV wall. The planner
+    types the new unit on the duplicate.
 
     ``sequential_operations`` carries (081): it is an instruction about how the route
     unlocks, not something the source job earned by running.

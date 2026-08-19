@@ -2,7 +2,7 @@
  * One work-order card on the Foundry TV board's 4×3 grid (design handoff
  * 2026-07-22, zone 2).
  *
- * Five fixed rows — header (WO + status chip) / part + qty / customer OR op +
+ * Five fixed rows — header (WO + status chip) / unit-or-part + qty / customer OR op +
  * time / machine + stop reason / progress — all keyed off classifyJob's strict
  * DOWN > BLOCKED > LATE > RUNNING > WAITING precedence. Stoppage detail is
  * JOINED client-side by the caller (downtime from work_centers by
@@ -118,6 +118,12 @@ export default function WoCard({
   // the op line, which is what every public shop-floor board shows.
   const customer = job.customer_name?.trim() || null;
 
+  // Build identity. When a job tracks a unit, THAT is the number somebody reads off
+  // the wall — the part number on these jobs is a 28-character string that truncates
+  // and is unreadable at distance anyway. So the unit takes row 2's large slot and the
+  // part number steps down beneath it; with no unit, row 2 is byte-identical to before.
+  const unit = job.unit_number?.trim() || null;
+
   const qtyOrdered = job.qty_ordered ?? 0;
   const qtyComplete = job.qty_complete ?? 0;
   const pct = qtyOrdered > 0 ? Math.min(100, Math.max(0, Math.round((100 * qtyComplete) / qtyOrdered))) : 0;
@@ -183,14 +189,30 @@ export default function WoCard({
         </span>
       </div>
 
-      {/* Row 2 — part number + qty done/total */}
+      {/* Row 2 — unit # (when tracked) or part number, + qty done/total */}
       <div className="flex items-baseline justify-between gap-[0.625rem]">
-        <span
-          className="min-w-0 truncate text-[1.9375rem] font-extrabold tracking-[-0.01em]"
-          style={{ color: waiting ? FD.body : FD.ink }}
-        >
-          {job.part_number ?? ''}
-        </span>
+        {unit ? (
+          <span className="flex min-w-0 flex-col">
+            <span
+              data-testid="wo-card-unit"
+              className="min-w-0 truncate text-[1.9375rem] font-extrabold tracking-[-0.01em]"
+              style={{ color: FD.cyan }}
+            >
+              <span className="text-[1.0625rem] font-bold tracking-[0.12em] opacity-75">UNIT </span>
+              {unit}
+            </span>
+            <span className="min-w-0 truncate text-[1.0625rem] font-semibold" style={{ color: waiting ? FD.mute : FD.body }}>
+              {job.part_number ?? ''}
+            </span>
+          </span>
+        ) : (
+          <span
+            className="min-w-0 truncate text-[1.9375rem] font-extrabold tracking-[-0.01em]"
+            style={{ color: waiting ? FD.body : FD.ink }}
+          >
+            {job.part_number ?? ''}
+          </span>
+        )}
         <span className="shrink-0 text-[1.1875rem] font-medium" style={{ color: FD.mute }}>
           <span className="font-bold" style={{ color: waiting ? FD.body : FD.ink }}>
             {qtyComplete}

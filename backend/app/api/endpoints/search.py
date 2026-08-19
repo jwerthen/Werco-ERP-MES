@@ -80,7 +80,7 @@ def global_search(
 
     Search types:
     - part: Parts by part number, name, description
-    - work_order: Work orders by number, customer PO, lot number
+    - work_order: Work orders by number, customer PO, lot number, unit number
     - customer: Customers by name, code
     - bom: BOMs by name
     - routing: Routings by name
@@ -242,6 +242,7 @@ def _literal_work_order_fallback(
                 func.lower(WorkOrder.work_order_number).like(search_term),
                 func.lower(WorkOrder.customer_po).like(search_term),
                 func.lower(WorkOrder.lot_number).like(search_term),
+                func.lower(WorkOrder.unit_number).like(search_term),
                 func.lower(WorkOrder.customer_name).like(search_term),
                 func.lower(Part.part_number).like(search_term),
                 func.lower(Part.name).like(search_term),

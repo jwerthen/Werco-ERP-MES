@@ -688,9 +688,9 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
 | GET | `/work-orders/` | List all work orders (`skip` ≥ 0, `limit` 1–5000 default 100 — the standard list tier, see [Pagination](#pagination)) | Yes |
-| POST | `/work-orders/` | Create work order. `work_order_type` is validated against the `WorkOrderType` vocabulary (**422** on an unknown value), and `'laser_cutting'` is **refused on create** (422) — nest-dispatch WOs are minted only by the laser nest import paths (see note below). Body accepts `sequential_operations` (**default `true`** — a sequenced routing; see "READY promotion" below) | Yes |
+| POST | `/work-orders/` | Create work order. `work_order_type` is validated against the `WorkOrderType` vocabulary (**422** on an unknown value), and `'laser_cutting'` is **refused on create** (422) — nest-dispatch WOs are minted only by the laser nest import paths (see note below). Body accepts `sequential_operations` (**default `true`** — a sequenced routing; see "READY promotion" below) and the optional `unit_number` (≤ 50 chars — see "Unit #" below) | Yes |
 | GET | `/work-orders/{id}` | Get work order by ID | Yes |
-| PUT | `/work-orders/{id}` | Update work order (body requires the WO's current `version` — stale → 409; also 409 if it moves a terminal WO back to a non-terminal status, **or sets `status` to COMPLETE/CLOSED from any status other than COMPLETE/CLOSED** — see "Terminal-state lock" below). Non-`status` fields such as `notes` / `special_instructions` carry **no status gate**: they are editable at any status, including terminal ones. **The flip verb for `sequential_operations`** — turning it *on* returns **409** on a laser nest WO, and **409 naming the operations** when work is already under way out of sequence; otherwise it demotes un-worked blocked operations READY → PENDING, one audit row each (see "READY promotion" below) | Admin / Manager / Supervisor |
+| PUT | `/work-orders/{id}` | Update work order (body requires the WO's current `version` — stale → 409; also 409 if it moves a terminal WO back to a non-terminal status, **or sets `status` to COMPLETE/CLOSED from any status other than COMPLETE/CLOSED** — see "Terminal-state lock" below). Non-`status` fields such as `notes` / `special_instructions` / `unit_number` carry **no status gate**: they are editable at any status, including terminal ones (send `unit_number: null` to clear it). **The flip verb for `sequential_operations`** — turning it *on* returns **409** on a laser nest WO, and **409 naming the operations** when work is already under way out of sequence; otherwise it demotes un-worked blocked operations READY → PENDING, one audit row each (see "READY promotion" below) | Admin / Manager / Supervisor |
 | DELETE | `/work-orders/{id}` | Delete work order (soft by default; `hard_delete=true` only for draft/cancelled) | Admin / Manager |
 | POST | `/work-orders/{id}/restore` | Restore a soft-deleted work order (**400** if it is not deleted). Re-opens the ties the delete cancelled — **except** any whose part has since been reclassified into one the shop produces. Returns an **envelope** (`message` + `skipped_material_allocations`), not a bare message; see "Restoring a work order" below | Admin / Manager |
 | POST | `/work-orders/{id}/release` | Release to production | Yes |
@@ -1461,6 +1461,41 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 >   orders, or joins on it. A third parser must extract digits too — see
 >   [docs/DEVELOPMENT.md](DEVELOPMENT.md) → **Operation numbers**.
 
+> **Unit # (`unit_number`) — build identity on a one-unit-per-work-order job.** An optional
+> `String(50)`, nullable and indexed (migration `083`), naming the **unit this work order builds** —
+> the weld assemblies, which run one unit at a time. It rides `WorkOrderBase` (so `POST
+> /work-orders/` accepts it and every work-order response returns it), `WorkOrderUpdate` (so `PUT
+> /work-orders/{id}` sets, changes, or **clears** it — `unit_number: null` clears; that endpoint
+> applies the body through a blind `setattr`, so an explicit `""` is stored as an empty string
+> rather than NULL, and the work-order detail editor sends `null` for a blank field),
+> and `WorkOrderSummary`
+> (so `GET /work-orders/` list rows carry it). Editing is the ordinary header update: Admin /
+> Manager / Supervisor, `version`-gated, and audited through the generic `log_update` field diff —
+> there is no verb of its own and no new permission.
+>
+> - **Exactly one unit per work order, shown whenever it is filled in.** No per-part flag, no company
+>   setting, and nothing requires one at release. A work order that carries none is `null` everywhere
+>   and renders **byte-identically to its pre-`083` self** on every surface.
+> - **Where it is matched.** Every work-order search path: `GET /work-orders/?search=`, global search
+>   (`GET /search` → `run_global_search`, which the Copilot's `search_erp` tool shares), and the
+>   `POST /search/nl` literal fallback — alongside work-order number, customer PO, lot number and
+>   customer name in each. The column is indexed for exactly that reason.
+> - **Not `serial_numbers`, not `lot_number`.** `serial_numbers` is a JSON **list** validated as one
+>   entry per unit (`count == quantity_ordered`) and is the switch that puts a work order into
+>   per-serial process-sheet capture; `lot_number` is auto-assigned at completion as
+>   `LOT-<work_order_number>` and drives FG receipt / backflush matching. A hand-typed unit id in
+>   either would break a validator or collide with the completion path.
+> - **No unique constraint** — a rework work order legitimately names the same unit as the original,
+>   so uniqueness is not asserted at the DB or the API.
+> - **No backfill, forward-only.** Work orders raised before `083` keep whatever the office typed into
+>   `notes`; nothing parses it out. A backfill would mutate released records with no `AuditService`
+>   row behind it (invariant 2) and could not tell a unit number from any other note text. Existing
+>   jobs are re-keyed by hand.
+>
+> **It is identity, not guidance.** On the operator payloads it rides beside `work_order_number` and
+> is deliberately **outside** `_job_guidance_fields` — see Shop Floor → "Unit # on operator and
+> display reads" for where it appears and why the five-key guidance contract was not widened.
+
 > **Duplicating a work order (`POST /work-orders/{id}/duplicate`).** Re-runs a job's **plan** without
 > re-entering it — the motivating case is a 40-nest laser package confirmed once through the import
 > wizard and run again next month, without re-uploading the PDFs or re-confirming a single row. Body:
@@ -1488,7 +1523,11 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > `quantity_scrapped` and their scrap reasons, actual dates / hours / cost, lot and serial numbers,
 > release info, `current_operation_id`, scheduled dates, and time entries — copying any of it would
 > fabricate history on a job that has not run, which an AS9100D reader would take for a real record.
-> Three further omissions are decisions rather than oversights:
+> Four further omissions are decisions rather than oversights:
+> - **`unit_number`** — the one omission that is about **identity** rather than production history: a
+>   duplicate is the **next** unit, not the same one. Carrying it would mint two work orders both
+>   claiming to build unit 2410048 and put that claim on the kiosk, the dispatch board and the TV
+>   wall. The planner types the new unit on the duplicate (`PUT /work-orders/{id}`).
 > - **`parent_work_order_id`** — the duplicate is an **independent** work order. Re-attaching it to the
 >   source's assembly parent would add a second laser child against demand the first child already
 >   satisfied, and the parent's completion rollup would count both. A genuine second child is a nest
@@ -3706,7 +3745,8 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 >   holds) — priority-sorted server-side (blocked/down → most-late → running → promise date asc),
 >   capped at **24**, with `jobs_total` the true uncapped count for `+N more`; **dept-scoped**
 >   via each WO's **current** operation's work-center type when `?dept=` is passed. Each job:
->   `{wo_number, part_number, customer_name` (**gated** — see below)`, status, qty_complete, qty_ordered`
+>   `{wo_number, unit_number` (the WO's Unit # when it tracks one — **ungated**, see "Unit # on operator
+>   and display reads" above)`, part_number, customer_name` (**gated** — see below)`, status, qty_complete, qty_ordered`
 >   (**order totals**: the WO header on a conventional routing; on a **pool** WO — laser nests, or a batch WO
 >   carrying one operation per line item — the **SUM** of the per-item operation targets/progress, because the
 >   header rollup caps at the header quantity and would hide the other items. Summing is guarded: never for a
@@ -3838,7 +3878,7 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > (`GET /shop-floor/work-center-queue/{id}`) deliberately keeps serving a deactivated work
 > center's queue so a crew station bound to it can finish stranded work. `is_active` defaults
 > `true` — older clients ignore it. Each row:
-> `{operation_id, run_order, version, work_order_id, work_order_number, operation_number,
+> `{operation_id, run_order, version, work_order_id, work_order_number, unit_number, operation_number,
 > operation_name, part_number, part_name, status, priority, due_date, quantity_ordered,
 > quantity_complete, setup_time_hours, run_time_hours, laser_nest, material_tie}` — `version` is the
 > operation's optimistic-lock counter, which the cross-machine move (`PUT /work-orders/operations/{id}`)
@@ -4180,6 +4220,31 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > a routing, and the two work-order-level fields are the ones that carry real content — those *are*
 > editable after creation, from the Notes / Special Instructions editor on the work-order detail
 > page.
+
+> **Unit # on operator and display reads (`unit_number`), migration `083`.** The four floor-facing
+> reads now carry the work order's **Unit #** — the bounded build identity described under Work
+> Orders → "Unit #". `null` on every work order that does not track one, and every payload is
+> otherwise unchanged:
+>
+> | Read | Where it rides |
+> |---|---|
+> | `GET /shop-floor/work-center-queue/{id}` | every `queue` row **and** every `held` row (both built by `_kiosk_job_row`) |
+> | `GET /shop-floor/my-active-job` | the running job dict — a **separate hand-built payload**; the identity keys are duplicated between it and the queue row, so the two have to be changed together |
+> | `GET /shop-floor/dispatch-board` (and the run-order `PUT`'s refreshed column) | `DispatchQueueRow.unit_number` |
+> | `GET /shop-floor/wallboard` | `WallboardJob.unit_number` |
+>
+> **It is identity, not guidance — the five-key guidance contract was NOT widened.** `unit_number`
+> rides **beside `work_order_number`**, not inside `_job_guidance_fields`. That helper still returns
+> exactly the five keys above, and the recorded 2026-08-14 station-disclosure decision covering them
+> is unchanged. The Unit # is a bounded (≤ 50 char), purpose-specific column rather than free text,
+> so it raises none of the questions that decision had to answer.
+>
+> **On the wallboard it is UNGATED**, and that is not an exception to the customer-name rule. A build
+> number is not customer identity, and being *bounded* is precisely what lets it onto an unattended
+> public TV where the work order's unbounded `notes` can never go — which is the reason the column
+> exists at all rather than the note simply being surfaced. Contrast `jobs[].customer_name`, which
+> stays gated on `show_customer_names` / privileged role. See
+> [docs/WALLBOARD.md](WALLBOARD.md) → Payload and [docs/KIOSK.md](KIOSK.md) → "Unit # on screen".
 
 > **Kiosk telemetry / routing payload additions (Foundry redesign, 2026-07-23).** Read-only field
 > additions feeding the redesigned kiosk's top bar, telemetry tiles, and complete modal — old

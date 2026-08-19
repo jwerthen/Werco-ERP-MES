@@ -568,6 +568,11 @@ class WorkOrderBase(UTCModel):
     due_date: Optional[date] = Field(None, description="Due date")
     customer_name: Optional[str] = Field(None, max_length=255)
     customer_po: Optional[str] = Field(None, max_length=50, description="Customer PO number")
+    # Build identity for a one-unit-per-work-order job (weld assemblies). Optional
+    # everywhere and rendered only when set, so a work order without one looks exactly
+    # as it did before migration 083. NOT related to ``serial_numbers`` below, which is
+    # the per-unit LIST that switches a work order into per-serial step capture.
+    unit_number: Optional[str] = Field(None, max_length=50, description="Unit # this work order builds")
     notes: Optional[str] = Field(None, max_length=2000)
     special_instructions: Optional[str] = Field(None, max_length=2000)
     # 081. Defaults TRUE here, which is the CREATE-side default: a new work order is a
@@ -679,6 +684,7 @@ class WorkOrderUpdate(BaseModel):
     due_date: Optional[date] = None
     customer_name: Optional[str] = Field(None, max_length=255)
     customer_po: Optional[str] = Field(None, max_length=50)
+    unit_number: Optional[str] = Field(None, max_length=50)
     notes: Optional[str] = Field(None, max_length=2000)
     special_instructions: Optional[str] = Field(None, max_length=2000)
     quantity_complete: Optional[Decimal] = Field(None, ge=Decimal("0"))
@@ -993,6 +999,9 @@ class WorkOrderSummary(UTCModel):
     # CREATE contract): a summary is READ from an existing row, so the safe reading of a
     # missing value is the pooled behavior every pre-081 row was released under.
     sequential_operations: bool = False
+    # 083. The list card renders a UNIT badge from this; None on every work order
+    # that does not track one, which is most of them.
+    unit_number: Optional[str] = None
     part_number: Optional[str] = None
     part_name: Optional[str] = None
     part_type: Optional[str] = None

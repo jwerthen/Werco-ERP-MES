@@ -123,6 +123,7 @@ def run_global_search(
                     func.lower(WorkOrder.work_order_number).like(search_term),
                     func.lower(WorkOrder.customer_po).like(search_term),
                     func.lower(WorkOrder.lot_number).like(search_term),
+                    func.lower(WorkOrder.unit_number).like(search_term),
                     func.lower(WorkOrder.customer_name).like(search_term),
                 ),
             )

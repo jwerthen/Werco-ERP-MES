@@ -21,7 +21,7 @@ import {
   DocumentDuplicateIcon,
 } from '@heroicons/react/24/outline';
 import { SkeletonTable, SkeletonCard } from '../components/ui/Skeleton';
-import { ConfirmDialog, EmptyState, ErrorState, useToast, DataTable, DataTableColumn, StatusBadge, Button } from '../components/ui';
+import { ConfirmDialog, EmptyState, ErrorState, useToast, DataTable, DataTableColumn, StatusBadge, Button, UnitBadge } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { useOptimisticMutation } from '../hooks/useOptimisticMutation';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
@@ -211,13 +211,18 @@ function buildWorkOrderColumns({
       sortable: true,
       accessor: (wo) => wo.work_order_number,
       render: (wo) => (
-        <Link
-          to={`/work-orders/${wo.id}`}
-          onClick={(e) => e.stopPropagation()}
-          className="font-semibold text-werco-600 hover:text-werco-700 hover:underline"
-        >
-          {wo.work_order_number}
-        </Link>
+        <div className="min-w-0">
+          <Link
+            to={`/work-orders/${wo.id}`}
+            onClick={(e) => e.stopPropagation()}
+            className="font-semibold text-werco-600 hover:text-werco-700 hover:underline"
+          >
+            {wo.work_order_number}
+          </Link>
+          {/* Renders nothing when the work order tracks no unit, so every other
+              row keeps its pre-083 single-line height. */}
+          <UnitBadge unitNumber={wo.unit_number} size="sm" className="mt-1 flex w-fit" />
+        </div>
       ),
     },
   ];
@@ -999,6 +1004,7 @@ const WorkOrderMobileCard = React.memo(function WorkOrderMobileCard({ workOrder:
           >
             {wo.work_order_number}
           </Link>
+          <UnitBadge unitNumber={wo.unit_number} size="sm" className="mt-1 flex w-fit" />
           <p className="text-sm text-surface-500 truncate mt-0.5">{wo.customer_name || 'No Customer'}</p>
         </div>
         <StatusBadge status={wo.status} className="flex-shrink-0" />

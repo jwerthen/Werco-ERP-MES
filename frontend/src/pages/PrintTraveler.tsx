@@ -263,6 +263,12 @@ export default function PrintTraveler() {
                 <td className="font-medium pr-4">Customer PO:</td>
                 <td>{workOrder.customer_po || '-'}</td>
               </tr>
+              {workOrder.unit_number ? (
+                <tr>
+                  <td className="font-medium pr-4">Unit #:</td>
+                  <td className="font-bold">{workOrder.unit_number}</td>
+                </tr>
+              ) : null}
               <tr>
                 <td className="font-medium pr-4">Quantity Ordered:</td>
                 <td className="font-bold">{workOrder.quantity_ordered}</td>

@@ -38,6 +38,7 @@ import {
   LoadingButton,
   Modal,
   Spinner,
+  UnitBadge,
 } from '../components/ui';
 import { useUnsavedChanges } from '../hooks/useUnsavedChanges';
 import { formatCentralDate, formatCentralDateTime, getCentralDateStamp } from '../utils/centralTime';
@@ -86,6 +87,10 @@ const CURRENT_WORK_ORDER_STATUSES = ['released', 'in_progress', 'on_hold'];
  * the planner has already typed it.
  */
 const WO_NOTE_MAX_LENGTH = 2000;
+// Mirrors WorkOrderUpdate.unit_number (Field(None, max_length=50)) for the same
+// reason WO_NOTE_MAX_LENGTH mirrors the notes cap: without it an over-long value
+// comes back as a raw 422 after the round trip instead of being refused at the key.
+const WO_UNIT_NUMBER_MAX_LENGTH = 50;
 
 /**
  * Which fields a concurrent editor moved since an inline editor opened, named
@@ -103,6 +108,7 @@ const WO_NOTE_MAX_LENGTH = 2000;
 const NOTES_LABEL = 'notes';
 const INSTRUCTIONS_LABEL = 'special instructions';
 const DUE_DATE_LABEL = 'due date';
+const UNIT_NUMBER_LABEL = 'unit #';
 
 function describeChangedFields(
   current: Record<string, string>,
@@ -329,6 +335,7 @@ export default function WorkOrderDetail() {
   // the same endpoint (PUT /work-orders/{id}, require_role ADMIN/MANAGER/
   // SUPERVISOR). Named separately so the gate reads at its call site.
   const canEditNotes = canCorrectCount;
+  const canEditUnitNumber = canCorrectCount;
   // Material-tie PATCH/untie is require_role([ADMIN, MANAGER, SUPERVISOR]) on
   // the backend — the same tier work_orders:edit maps to. Reads are open to any
   // authenticated tenant user, so the panel itself is not gated.
@@ -436,6 +443,13 @@ export default function WorkOrderDetail() {
   // What the server held when the due-date editor opened, for the same
   // lost-update guard the notes editor uses — see the notesBaseline comment.
   const [dueDateBaseline, setDueDateBaseline] = useState('');
+  // Unit # inline edit — same shape and same lost-update guard as the due date
+  // above, for the same reason: `version` cannot carry the guard, because the page
+  // refetches on every work_order broadcast and this endpoint emits one.
+  const [unitNumberEditing, setUnitNumberEditing] = useState(false);
+  const [unitNumberDraft, setUnitNumberDraft] = useState('');
+  const [savingUnitNumber, setSavingUnitNumber] = useState(false);
+  const [unitNumberBaseline, setUnitNumberBaseline] = useState('');
   // Inline Notes / Special Instructions edit (pencil in the panel header).
   // Deliberately NOT gated on work-order status — draft, released, in progress,
   // on hold, complete, closed and cancelled are all editable. That is the point:
@@ -473,6 +487,7 @@ export default function WorkOrderDetail() {
   const [fieldConflict, setFieldConflict] = useState<
     | { kind: 'notes'; fields: string; notes: string; special_instructions: string }
     | { kind: 'due_date'; fields: string; due_date: string }
+    | { kind: 'unit_number'; fields: string; unit_number: string }
     | null
   >(null);
   // Active work centers (laser-first order) for the per-nest reassign selects,
@@ -1040,6 +1055,49 @@ export default function WorkOrderDetail() {
     await performDueDateSave();
   };
 
+  // --- Inline unit-# edit --------------------------------------------------
+  // Unit assignment routinely happens AFTER the work order is raised, so this has
+  // to be editable, not create-only. Empty clears it (`|| null`), matching the
+  // due-date editor — a unit typed onto the wrong work order has to be removable,
+  // not just overwritten, because the badge is on the kiosk and the TV wall.
+  const unitNumberServerValue = workOrder?.unit_number ?? '';
+
+  const startUnitNumberEdit = () => {
+    setUnitNumberDraft(unitNumberServerValue);
+    setUnitNumberBaseline(unitNumberServerValue);
+    setUnitNumberEditing(true);
+  };
+
+  const performUnitNumberSave = async () => {
+    setSavingUnitNumber(true);
+    try {
+      const next = unitNumberDraft.trim();
+      await saveWorkOrderPatch(
+        { unit_number: next || null },
+        {
+          successMessage: next ? `Unit # set to ${next}` : 'Unit # cleared',
+          failureMessage: 'Failed to update unit #',
+          onSuccess: () => setUnitNumberEditing(false),
+        }
+      );
+    } finally {
+      setSavingUnitNumber(false);
+    }
+  };
+
+  const handleUnitNumberSave = async () => {
+    if (!workOrder || savingUnitNumber) return;
+    if (unitNumberServerValue !== unitNumberBaseline) {
+      setFieldConflict({
+        kind: 'unit_number',
+        unit_number: unitNumberServerValue,
+        fields: UNIT_NUMBER_LABEL,
+      });
+      return;
+    }
+    await performUnitNumberSave();
+  };
+
   // --- Operation sequencing mode -------------------------------------------
   // `sequential_operations` decides which rule promotes an operation to READY:
   // walk the routing in order (an operation unlocks only once every
@@ -1236,7 +1294,12 @@ export default function WorkOrderDetail() {
   // can be open at once, `pending` disables Confirm AND Cancel and refuses
   // backdrop/Escape, so an unrelated save in flight on the other editor would
   // freeze this dialog — spinner running for work it isn't doing.
-  const conflictPending = fieldConflict?.kind === 'due_date' ? savingDueDate : savingNotes;
+  const conflictPending =
+    fieldConflict?.kind === 'due_date'
+      ? savingDueDate
+      : fieldConflict?.kind === 'unit_number'
+        ? savingUnitNumber
+        : savingNotes;
 
   // Confirmed overwrite, for whichever editor raised the conflict. Adopting the
   // server's value as the new baseline is what makes this confirmation cover
@@ -1257,6 +1320,9 @@ export default function WorkOrderDetail() {
     } else if (fieldConflict.kind === 'due_date') {
       setDueDateBaseline(fieldConflict.due_date);
       await performDueDateSave();
+    } else if (fieldConflict.kind === 'unit_number') {
+      setUnitNumberBaseline(fieldConflict.unit_number);
+      await performUnitNumberSave();
     }
     // Closed either way. On success the editor is gone; on failure the error
     // toast carries the reason and the editor is still open holding the draft,
@@ -1565,7 +1631,10 @@ export default function WorkOrderDetail() {
             <ArrowLeftIcon className="h-6 w-6" />
           </button>
           <div>
-            <h1 className="text-2xl font-bold text-white">{workOrder.work_order_number}</h1>
+            <div className="flex flex-wrap items-center gap-2.5">
+              <h1 className="text-2xl font-bold text-white">{workOrder.work_order_number}</h1>
+              <UnitBadge unitNumber={workOrder.unit_number} size="md" />
+            </div>
             <p className="text-slate-400">Work Order Details</p>
           </div>
         </div>
@@ -1731,6 +1800,62 @@ export default function WorkOrderDetail() {
           iconColor="text-fd-cyan"
           label="Customer"
           value={workOrder.customer_name || '-'}
+        />
+        <MiniStat
+          icon={HashtagIcon}
+          iconBg="bg-fd-cyan/15"
+          iconColor="text-fd-cyan"
+          label="Unit #"
+          value={
+            unitNumberEditing ? (
+              <span className="flex items-center gap-1">
+                <label htmlFor="wo-unit-number-edit" className="sr-only">
+                  Unit #
+                </label>
+                <input
+                  id="wo-unit-number-edit"
+                  type="text"
+                  maxLength={WO_UNIT_NUMBER_MAX_LENGTH}
+                  value={unitNumberDraft}
+                  onChange={(e) => setUnitNumberDraft(e.target.value)}
+                  disabled={savingUnitNumber}
+                  className="input !px-1.5 !py-0.5 text-sm font-normal"
+                />
+                <button
+                  type="button"
+                  onClick={handleUnitNumberSave}
+                  disabled={savingUnitNumber}
+                  aria-label="Save unit #"
+                  className="text-fd-green hover:text-fd-green/80 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <CheckIcon className="h-4 w-4" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setUnitNumberEditing(false)}
+                  disabled={savingUnitNumber}
+                  aria-label="Cancel unit # edit"
+                  className="text-fd-mute hover:text-fd-red disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <XMarkIcon className="h-4 w-4" />
+                </button>
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1.5">
+                {workOrder.unit_number || '-'}
+                {canEditUnitNumber && (
+                  <button
+                    type="button"
+                    onClick={startUnitNumberEdit}
+                    aria-label="Edit unit #"
+                    className="text-fd-mute hover:text-fd-blue"
+                  >
+                    <PencilSquareIcon className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </span>
+            )
+          }
         />
         <MiniStat
           icon={HashtagIcon}
@@ -3099,7 +3224,9 @@ export default function WorkOrderDetail() {
         title={
           fieldConflict?.kind === 'due_date'
             ? 'Due date changed by someone else'
-            : 'Notes changed by someone else'
+            : fieldConflict?.kind === 'unit_number'
+              ? 'Unit # changed by someone else'
+              : 'Notes changed by someone else'
         }
         message={
           fieldConflict

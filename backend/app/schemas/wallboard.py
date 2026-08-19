@@ -168,6 +168,11 @@ class WallboardJob(BaseModel):
     """
 
     wo_number: str
+    # 083. The unit this work order builds, when it tracks one. UNGATED on purpose
+    # and NOT an exception to the rule above: this is a bounded (<=50 char) build
+    # number, not customer data — being bounded is precisely what lets it onto a
+    # public TV where the work order's free-text notes can never go.
+    unit_number: Optional[str] = None
     part_number: Optional[str] = None
     # Gated — populated only for an authorized (executive) principal; None on
     # public boards. See the class docstring and build_wallboard_payload.

@@ -1069,6 +1069,72 @@ class TestTheProductionRecordIsLeftBehind:
 
 
 # --------------------------------------------------------------------------- #
+# The one omission that is about IDENTITY rather than production history
+# --------------------------------------------------------------------------- #
+class TestUnitNumberIsNotCarried:
+    """``unit_number`` (083) is dropped by ``_copy_header``, and NOTHING BUT THIS PINS IT.
+
+    Every other omission in this file is about not fabricating history. This one is
+    different in kind, and it is the single most consequential property of the whole
+    083 feature: a duplicate is the NEXT unit, not the same one. Carrying the value
+    would mint two live work orders both claiming to build unit 2410048 and put that
+    claim on the kiosk hero, the crew station, the dispatch board and the public TV
+    wall simultaneously — with no error anywhere and nothing in the system able to say
+    which one the welder is standing at.
+
+    A regression here is ONE line added to ``_copy_header``'s field list, which is the
+    most natural-looking edit in that function. The planner types the new unit on the
+    duplicate.
+    """
+
+    def test_the_copy_starts_with_no_unit_number(self, client: TestClient, db_session: Session):
+        admin = make_user(db_session)
+        wc = make_work_center(db_session, wc_type="machining")
+        part = make_part(db_session)
+        source = make_work_order(
+            db_session,
+            part=part,
+            quantity_ordered=1.0,
+            unit_number="2410048",
+            customer_name="Miratech",
+            customer_po="PO-88213",
+        )
+        add_operation(db_session, source, wc, sequence=10, name="Weld out")
+
+        resp = duplicate(client, headers_for(admin), source.id, quantity=1)
+        assert resp.status_code == status.HTTP_201_CREATED, resp.text
+        new_wo = created_work_order(db_session, resp)
+
+        assert new_wo.unit_number is None
+        # Non-vacuity, and the contrast that makes the omission a DECISION rather than
+        # an oversight: the neighbouring header free text on the same source row DOES
+        # carry, so "nothing copied" is not the explanation for the None above.
+        assert new_wo.customer_name == "Miratech"
+        assert new_wo.customer_po == "PO-88213"
+        # The source is untouched — it still names the unit it is actually building.
+        db_session.refresh(source)
+        assert source.unit_number == "2410048"
+
+    def test_the_api_response_does_not_report_a_unit_number_either(self, client: TestClient, db_session: Session):
+        """The row and the response are separate assertions on purpose: the envelope's
+        ``work_order`` is what the planner's screen renders the UNIT badge from, so a
+        response that echoed the source's unit would show the wrong number even against
+        a correct row."""
+        admin = make_user(db_session)
+        wc = make_work_center(db_session, wc_type="machining")
+        source = make_work_order(db_session, part=make_part(db_session), unit_number="2410048")
+        add_operation(db_session, source, wc, sequence=10)
+
+        resp = duplicate(client, headers_for(admin), source.id, quantity=1)
+        assert resp.status_code == status.HTTP_201_CREATED, resp.text
+        body = resp.json()["work_order"]
+
+        assert "unit_number" in body, "the key must still be present, just empty"
+        assert body["unit_number"] is None
+        assert "2410048" not in resp.text
+
+
+# --------------------------------------------------------------------------- #
 # The derived-quantity rule
 # --------------------------------------------------------------------------- #
 class TestQuantityIsDerivedForNestBearingWorkOrders:

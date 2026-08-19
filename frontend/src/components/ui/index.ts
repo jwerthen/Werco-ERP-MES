@@ -12,6 +12,8 @@ export { useToast, ToastProvider } from './Toast';
 // them from '@/components/ui' alongside the rest of the kit.
 export { StatusBadge } from './StatusBadge';
 export { Button } from './Button';
+export { UnitBadge } from './UnitBadge';
+export type { UnitBadgeProps, UnitBadgeSize } from './UnitBadge';
 export type { ButtonProps, ButtonVariant, ButtonSize } from './Button';
 export {
   statusVariant,

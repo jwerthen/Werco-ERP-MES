@@ -853,6 +853,10 @@ def _kiosk_job_row(
         "operation_id": operation.id,
         "work_order_id": work_order.id,
         "work_order_number": work_order.work_order_number,
+        # 083. Build IDENTITY, not guidance -- it rides here beside work_order_number
+        # rather than inside _job_guidance_fields, whose five-key contract carries its
+        # own recorded station disclosure. Free: the work order is already joinedloaded.
+        "unit_number": work_order.unit_number,
         "part_number": work_order.part.part_number if work_order.part else None,
         "part_name": work_order.part.name if work_order.part else None,
         # Kiosk job card / viewer title: the part's revision letter (REV chip).
@@ -1254,6 +1258,11 @@ def get_my_active_job(
                 "operation_id": entry.operation_id,
                 "work_center_id": entry.work_center_id,
                 "work_order_number": work_order.work_order_number if work_order else None,
+                # 083. Twin of the key _kiosk_job_row sets -- the identity keys are
+                # duplicated between these two payloads (only _job_guidance_fields is
+                # shared), so this MUST be kept in step with it or the running-job hero
+                # is the one screen that cannot name the unit on the bench.
+                "unit_number": work_order.unit_number if work_order else None,
                 "part_number": work_order.part.part_number if work_order and work_order.part else None,
                 "part_name": work_order.part.name if work_order and work_order.part else None,
                 # Kiosk viewer/running panel: the part's revision letter (REV chip).

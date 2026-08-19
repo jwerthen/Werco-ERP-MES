@@ -78,7 +78,7 @@ import {
 import api from '../services/api';
 import { usePermissions } from '../hooks/usePermissions';
 import { useOptimisticMutation } from '../hooks/useOptimisticMutation';
-import { Button, EmptyState, ErrorState, StatusBadge, useToast } from '../components/ui';
+import { Button, EmptyState, ErrorState, StatusBadge, UnitBadge, useToast } from '../components/ui';
 import { formatCentralDate, isDateBeforeTodayInCentral, isDateTodayInCentral } from '../utils/centralTime';
 import {
   changeoverLabel,
@@ -1209,6 +1209,7 @@ function DispatchCard({
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-1.5">
             <span className="font-mono text-sm font-semibold text-slate-100">{row.work_order_number}</span>
+            <UnitBadge unitNumber={row.unit_number} size="sm" />
             {running ? (
               <span className="rounded border border-blue-400/60 px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase tracking-widest text-blue-300">
                 Running

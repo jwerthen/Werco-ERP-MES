@@ -9,6 +9,7 @@ import {
   formatOperationLabel,
   operationNumberText,
 } from './kioskConstants';
+import { UnitBadge } from '../ui';
 import { KioskRunOrderChip, KioskStepsChip } from './KioskQueueCard';
 
 interface KioskCrewJobCardProps {
@@ -54,6 +55,7 @@ export default function KioskCrewJobCard({ item, nowMs, onSelect, disabled = fal
         <div className="flex flex-wrap items-center gap-3">
           <KioskRunOrderChip item={item} />
           <span className="font-mono text-3xl font-bold tracking-tight text-fd-ink">{item.work_order_number}</span>
+          <UnitBadge unitNumber={item.unit_number} size="md" />
           <span
             className={`rounded border px-2 py-1 font-mono text-xs font-semibold uppercase tracking-widest ${
               inProgress ? 'border-fd-amber/50 text-fd-amber' : 'border-fd-blue/50 text-fd-blue'

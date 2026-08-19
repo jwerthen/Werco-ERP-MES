@@ -419,6 +419,39 @@ deferred**: it buys nothing until a shop actually needs a station that shows les
 defaulted off would have shipped the same invisible-note bug it was meant to fix. If the shop's
 needs change, that is where to start.
 
+## Unit # on screen
+
+The **Unit #** is the build identity of a one-unit-per-work-order job — the weld assemblies, which
+run one unit at a time. It is a **first-class field on the work order** (`work_orders.unit_number`,
+migration `083`), typed on the work-order create form or edited later from the work-order detail
+page, and it is **not a sixth guidance field**: it rides the operator payloads beside
+`work_order_number`, **outside** `_job_guidance_fields`, whose five keys and whose recorded
+2026-08-14 station disclosure are unchanged.
+
+This is the sequel to the section above, not a repeat of it. The 2026-08-14 guidance fix made the
+Unit # **readable** but not **findable** — it was still one token in a paragraph of Notes: absent
+from the queue card, absent from the work-order list, unsearchable, and impossible to put on the
+shop TV, because Notes is unbounded free text of exactly the class the wallboard withholds from
+unattended screens. A bounded (≤ 50 char) column is what makes all of those possible.
+
+**Where an operator sees it.** One shared badge (`UnitBadge`) renders `UNIT 2410048` everywhere, so
+the number on the kiosk and the number on the TV cannot drift into two different chips:
+
+- **Single-operator kiosk** — the queue card, the **CLOCK IN?** confirm card, and the running-job
+  hero (directly under the WO number, where the operator stares at it for hours).
+- **Crew station** — the board card and the job detail screen, above the part line and the guidance
+  block.
+- **Held card** — beside the WO number. (Unlike the guidance block, the badge *does* render here:
+  it is one bounded identifier, not a panel that could push RESUME off the card.)
+- Off the kiosk it also rides the dispatch board card, the shop TV tile, the work-order list row and
+  mobile card, the work-order detail hero, and the printed traveler.
+
+A work order that tracks no unit renders **nothing at all** — no badge, no label, no gap — so those
+jobs look exactly as they did before. Work orders raised before `083` keep whatever is in their
+Notes; nothing parses it out, and the open jobs are re-keyed by hand. See
+[docs/API.md](API.md) → Work Orders → "Unit #" and Shop Floor → "Unit # on operator and display
+reads" for the payload contract.
+
 ## Held work and RESUME
 
 A held operation **stays visible on both kiosks**, in its own **ON HOLD** section below the
