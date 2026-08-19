@@ -241,12 +241,19 @@ crowd actionable work off the top of the board.
     CSS-driven carousel would freeze on page 0 forever on any TV reporting reduced motion. Only
     the 8 field cards unmount/mount; the 4 anchor cards keep their React key and their DOM nodes,
     so a DOWN card's 1.6s `fdPulse` never resets phase.
-  - **Static band — the board does not move under 16 delivered jobs.** `pages = 1` for every
-    delivered count ≤ 15 (the formula refuses to page when a flip would displace 8 cards to reveal
-    fewer than 4 new ones), and a one-page board is byte-identical to its pre-cycle self.
-    **Consequence, deliberate and worth saying out loud:** at 13–15 delivered jobs, 1–3 of them
-    still never reach the grid — exactly as before the rotation shipped — and the strip counts
-    them. On a board that now visibly cycles, that reads like a stuck cycle; it is not.
+  - **Static band — the board moves if and only if something would otherwise be hidden.**
+    `pages = 1` exactly when the field fits, i.e. for every delivered count ≤ 12, and a one-page
+    board is byte-identical to its pre-cycle self. From **13** delivered jobs up it cycles. An
+    earlier cut held still until 16, refusing to page when a flip would displace 8 cards to reveal
+    fewer than 4; **the owner overruled that on 2026-08-19** — a job the floor cannot see is the
+    failure this feature exists to fix, whatever the motion economics.
+    **The accepted cost lives at 13–15 and is worth saying out loud:** `starts` is flush-clamped so
+    both pages stay FULL (never a row of holes), which at `F = 9..11` leaves the two windows
+    overlapping by 5–7 of their 8 cards — the flip reads as the field **shifting by one to three
+    slots** rather than turning a clean page. That is the least legible flip the board can produce,
+    and it is still the best option at those counts: a short page would blank 4–7 cells for a whole
+    dwell, and disjoint full pages are arithmetically impossible when `F` is barely over 8. From 16
+    delivered jobs the stride is a clean 4 — exactly one grid row.
   - **Cadence and phase.** `slot = floor(now / 22_000)` is derived from the board's existing 1s
     clock tick — **no new timer** — so every TV in the building stays in phase and a throttled or
     occluded tab self-corrects on resume. 22s is chosen against the 30s poll (LCM 330s): a 20s or
@@ -267,7 +274,7 @@ crowd actionable work off the top of the board.
     looking, and page 0 is the board people already know). **Offline keeps cycling** on last-known-
     good data: paging is not a freshness claim, the staged `SYNC OK → STALE → LOST` chip is the
     disclosure, and freezing would hide two-thirds of the population with no visible cause.
-    `?dept=` boards page against **their own** delivered count, so **a department TV under 16 jobs
+    `?dept=` boards page against **their own** delivered count, so **a department TV under 13 jobs
     never cycles while the plant TV beside it does**. That is correct — a board with nothing hidden
     should not move — but two screens behaving differently in one building *will* be reported as a
     bug, as will the related fact that per-dept `jobs_total` values do **not** sum to the plant
@@ -280,8 +287,9 @@ crowd actionable work off the top of the board.
   view changes in N seconds" is ambient motion on data). Five copy states:
   1. no jobs → no strip at all (the `NO OPEN WORK ORDERS` zone owns the space);
   2. static, nothing hidden → `ALL OPEN WORK ORDERS ON BOARD`;
-  3. static, some hidden → `+N MORE WORK ORDERS IN QUEUE` (counted, as before, against the **12
-     cells the board actually shows**);
+  3. static, some hidden → `+N MORE WORK ORDERS IN QUEUE` — and since the board now cycles the
+     moment anything would be off-screen, a single-page board is single-page *because everything
+     fits*, so this `+N` can only ever be the tail the **server** truncated at its 24-job cap;
   4. cycling, nothing truncated → `TOP 4 PINNED · PAGE i/N · n OPEN WORK ORDERS`;
   5. cycling, past the 24 cap → `TOP 4 PINNED · PAGE i/N · n OF total OPEN WORK ORDERS · +R NOT ON
      BOARD`.

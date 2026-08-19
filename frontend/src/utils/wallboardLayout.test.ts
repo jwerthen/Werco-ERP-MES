@@ -15,7 +15,6 @@ import type { WallboardJob } from '../types/wallboard';
 import {
   ANCHOR_SLOTS,
   FIELD_SLOTS,
-  MIN_NEW,
   blockerLabel,
   classifyJob,
   fieldWindow,
@@ -40,7 +39,6 @@ describe('slot geometry', () => {
   it('anchor is exactly one grid row and anchor + field page 0 is the whole 4x3 grid', () => {
     expect(ANCHOR_SLOTS).toBe(4);
     expect(FIELD_SLOTS).toBe(8);
-    expect(MIN_NEW).toBe(4);
     // The load-bearing property of the whole design: page 0 IS today's board.
     expect(ANCHOR_SLOTS + FIELD_SLOTS).toBe(12);
   });
@@ -57,22 +55,35 @@ describe('planFieldPages (page plan over the rotating field)', () => {
       // so spreading a Set compiles to a slice() over a length-less object and
       // silently yields [] — a vacuously-passing test in the other direction.
       const covered = Array.from(seen).sort((a, b) => a - b);
-      // Cycling covers the whole field. The STATIC BAND deliberately does not:
-      // the grid is 12 cells, so at n = 13..15 the last 1-3 jobs sit off-board
-      // exactly as they do today — that is what MIN_NEW refuses to page for, and
-      // the strip's `+N MORE ... IN QUEUE` is what accounts for them.
+      // EVERY delivered job is reachable at every count. The single-page band is
+      // no longer an exception to that: it holds only while the field FITS
+      // (F <= FIELD_SLOTS), so `field.slice(0, FIELD_SLOTS)` IS the whole field
+      // there. Nothing delivered is off-board at any n.
       const expected = starts.length > 1 ? field : field.slice(0, FIELD_SLOTS);
+      expect(covered).toEqual(field);
       expect({ n, covered }).toEqual({ n, covered: expected });
     });
   });
 
-  it('the static band leaves the 13th-15th job off-board, as today — never a hole in the middle', () => {
+  it('cycles at 13-15 too, in two full pages, overlapping rather than blanking (owner decision)', () => {
+    // The band that used to sit static. `starts` is flush-clamped, so the second
+    // window ends on the last field index and BOTH pages stay full — the flip
+    // shifts the field by 1-3 slots instead of turning a clean page, which is the
+    // accepted cost of never hiding a delivered job. A short page would blank
+    // 4-7 cells for a whole dwell; disjoint full pages are arithmetically
+    // impossible when F is barely over FIELD_SLOTS.
+    expect(planFieldPages(fieldCountFor(13))).toEqual([0, 1]);
+    expect(planFieldPages(fieldCountFor(14))).toEqual([0, 2]);
+    expect(planFieldPages(fieldCountFor(15))).toEqual([0, 3]);
     [13, 14, 15].forEach(n => {
       const field = fieldIndices(n);
-      expect(planFieldPages(field.length)).toEqual([0]);
-      expect(fieldWindow(field, 0)).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
-      // Anchor (4) + field window (8) = today's first 12 cards, card for card.
-      expect(ANCHOR_SLOTS + fieldWindow(field, 0).length).toBe(12);
+      const starts = planFieldPages(field.length);
+      // Page 0 is still today's board, card for card — the load-bearing property.
+      expect(fieldWindow(field, starts[0])).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+      expect(ANCHOR_SLOTS + fieldWindow(field, starts[0]).length).toBe(12);
+      // Both pages full, and the last one reaches the final delivered job.
+      starts.forEach(start => expect(fieldWindow(field, start)).toHaveLength(FIELD_SLOTS));
+      expect(fieldWindow(field, starts[starts.length - 1])).toContain(field.length - 1);
     });
   });
 
@@ -87,10 +98,12 @@ describe('planFieldPages (page plan over the rotating field)', () => {
     });
   });
 
-  it('STATIC BAND: pages === 1 for every delivered count <= 15, and > 1 from 16 up', () => {
+  it('STATIC BAND: pages === 1 exactly when nothing is off-screen (n <= 12), cycling from 13 up', () => {
     DELIVERED_RANGE.forEach(n => {
       const pages = planFieldPages(fieldCountFor(n)).length;
-      expect({ n, cycles: pages > 1 }).toEqual({ n, cycles: n >= 16 });
+      // The board moves if and only if a delivered job would otherwise be hidden
+      // — the grid is 12 cells, so that is exactly n >= 13.
+      expect({ n, cycles: pages > 1 }).toEqual({ n, cycles: n >= ANCHOR_SLOTS + FIELD_SLOTS + 1 });
     });
   });
 
@@ -117,8 +130,10 @@ describe('planFieldPages (page plan over the rotating field)', () => {
   });
 
   it('matches the worked values in the spec', () => {
-    expect(planFieldPages(fieldCountFor(15))).toEqual([0]); // F = 11 -> static
-    expect(planFieldPages(fieldCountFor(16))).toEqual([0, 4]); // F = 12
+    expect(planFieldPages(fieldCountFor(12))).toEqual([0]); // F = 8 -> fits, static
+    expect(planFieldPages(fieldCountFor(13))).toEqual([0, 1]); // F = 9 -> cycles, 7/8 overlap
+    expect(planFieldPages(fieldCountFor(15))).toEqual([0, 3]); // F = 11
+    expect(planFieldPages(fieldCountFor(16))).toEqual([0, 4]); // F = 12, stride = one grid row
     expect(planFieldPages(fieldCountFor(20))).toEqual([0, 8]); // F = 16
     expect(planFieldPages(fieldCountFor(24))).toEqual([0, 8, 12]); // F = 20, the cap
   });
@@ -220,19 +235,28 @@ describe('stripCopy (the five-state copy matrix)', () => {
     expect(at(1, 4)).toEqual({ text: '+3 MORE WORK ORDERS IN QUEUE', showPageBar: false });
     expect(at(5, 17)).toEqual({ text: '+12 MORE WORK ORDERS IN QUEUE', showPageBar: false });
     expect(at(12, 24)).toEqual({ text: '+12 MORE WORK ORDERS IN QUEUE', showPageBar: false });
-    // Wallboard.test.tsx's live assertion: 14 delivered, 17 total, 12 on screen.
-    // Counting the residue from `delivered` instead of from what is ON SCREEN
-    // would print +3 here and break that test.
-    expect(at(14, 17)).toEqual({ text: '+5 MORE WORK ORDERS IN QUEUE', showPageBar: false });
+    // The static band now holds ONLY where the field fits (n <= 12), so every
+    // delivered job on a single-page board is on screen and `+N` counts nothing
+    // but the tail the SERVER truncated at its 24-job cap.
+    expect(at(12, 12)).toEqual({ text: 'ALL OPEN WORK ORDERS ON BOARD', showPageBar: false });
   });
 
-  it('3b. the static band never claims ALL ... ON BOARD while a delivered job is off-board', () => {
-    // n = 13..15: one page, 12 cells, 1-3 jobs off-board and truthfully counted.
-    expect(at(13, 13)).toEqual({ text: '+1 MORE WORK ORDERS IN QUEUE', showPageBar: false });
-    expect(at(14, 14)).toEqual({ text: '+2 MORE WORK ORDERS IN QUEUE', showPageBar: false });
-    expect(at(15, 15)).toEqual({ text: '+3 MORE WORK ORDERS IN QUEUE', showPageBar: false });
-    // ...and the moment it starts cycling, every delivered job reaches the screen.
+  it('3b. a delivered job is NEVER off-board at any count — the strip can only report SERVER truncation', () => {
+    // The board cycles from 13 up (owner decision 2026-08-19), so `+N MORE ...
+    // IN QUEUE` can no longer mean "delivered but not shown". At 13-15 — the
+    // band that used to sit static and hide 1-3 jobs — the strip now names the
+    // page instead of apologising for a hidden job.
+    expect(at(13, 13)).toEqual({ text: 'TOP 4 PINNED · PAGE 1/2 · 13 OPEN WORK ORDERS', showPageBar: true });
+    expect(at(14, 14)).toEqual({ text: 'TOP 4 PINNED · PAGE 1/2 · 14 OPEN WORK ORDERS', showPageBar: true });
+    expect(at(15, 15)).toEqual({ text: 'TOP 4 PINNED · PAGE 1/2 · 15 OPEN WORK ORDERS', showPageBar: true });
     expect(at(16, 16, 0)).toEqual({ text: 'TOP 4 PINNED · PAGE 1/2 · 16 OPEN WORK ORDERS', showPageBar: true });
+    // A single-page board is single-page BECAUSE everything fits, so it can only
+    // ever say ALL ... ON BOARD or count the server's truncated tail.
+    DELIVERED_RANGE.forEach(n => {
+      const pages = planFieldPages(fieldCountFor(n)).length;
+      if (n === 0 || pages > 1) return;
+      expect({ n, text: at(n, n).text }).toEqual({ n, text: 'ALL OPEN WORK ORDERS ON BOARD' });
+    });
   });
 
   it('4. cycling with no residue names the pinned row, the page and the population', () => {

@@ -49,12 +49,24 @@ export const ANCHOR_SLOTS = 4;
 export const FIELD_SLOTS = 8;
 
 /**
- * Refuse to page unless a flip reveals at least this many NEW cards. A flip
- * that displaces 8 cards to show 1-3 is motion the board did not earn, so the
- * static band (`pages === 1` for every delivered count <= 15) falls out of the
- * formula rather than being a hard-coded threshold.
+ * The board cycles whenever a delivered job would otherwise be off-screen —
+ * i.e. from 13 delivered work orders up (owner decision 2026-08-19). An earlier
+ * cut refused to page until a flip revealed at least 4 new cards, on the
+ * argument that displacing 8 cards to show 1-3 is motion the board did not
+ * earn. The owner overruled it: a job the floor cannot see is the failure this
+ * feature exists to fix, and "+2 MORE WORK ORDERS IN QUEUE" is that failure
+ * whatever the motion economics.
+ *
+ * The accepted cost lives in the 13-15 band, and it is a real one. `starts` is
+ * flush-clamped so every page stays FULL (never a row of holes), which at
+ * F = 9..11 leaves the two windows overlapping by 5-7 of their 8 cards: the
+ * flip reads as the field SHIFTING by one to three slots rather than as a clean
+ * page turn. That is the least legible flip the board can produce, and it is
+ * strictly better than the alternatives at those counts — a short page would
+ * blank 4-7 cells for a whole dwell, and disjoint full pages are arithmetically
+ * impossible when F is barely over FIELD_SLOTS. From 16 delivered jobs (F = 12,
+ * the owner's actual shop) the stride is a clean 4 — exactly one grid row.
  */
-export const MIN_NEW = 4;
 
 /**
  * Modulo, not remainder. JS `%` is a SIGN-PRESERVING REMAINDER: a backward
@@ -80,23 +92,24 @@ export function safeMod(a: number, b: number): number {
  *
  * Returns the `starts` array; its length IS the page count.
  *
- *   pages     = F < FIELD_SLOTS + MIN_NEW (=12) ? 1 : ceil(F / FIELD_SLOTS)
+ *   pages     = F <= FIELD_SLOTS ? 1 : ceil(F / FIELD_SLOTS)
  *   starts[i] = min(i * FIELD_SLOTS, F - FIELD_SLOTS)
  *
  * Pages are disjoint except the FINAL window, which back-fills flush against
  * the end so the last page is a full page instead of a row of holes. Three
  * properties fall out and are property-tested, not example-tested:
- * coverage (the union of the windows is every field index), never-partially-
- * blank (with `pages > 1` every window holds exactly FIELD_SLOTS entries),
- * and the static band above.
+ * coverage (the union of the windows is every field index, so no delivered job
+ * is ever unreachable), never-partially-blank (with `pages > 1` every window
+ * holds exactly FIELD_SLOTS entries), and the static band — `pages === 1`
+ * exactly when nothing is off-screen, i.e. for every delivered count <= 12.
  *
- * The `max(0, ...)` floor is a no-op wherever `pages > 1` (there `F >= 12`, so
- * `F - FIELD_SLOTS >= 4`); it only keeps the single-page degenerate case
+ * The `max(0, ...)` floor is a no-op wherever `pages > 1` (there `F >= 9`, so
+ * `F - FIELD_SLOTS >= 1`); it only keeps the single-page degenerate case
  * (`F < FIELD_SLOTS`) from reporting a nonsense negative start.
  */
 export function planFieldPages(fieldCount: number): number[] {
   const total = Number.isFinite(fieldCount) ? Math.max(0, Math.trunc(fieldCount)) : 0;
-  const pages = total < FIELD_SLOTS + MIN_NEW ? 1 : Math.ceil(total / FIELD_SLOTS);
+  const pages = total <= FIELD_SLOTS ? 1 : Math.ceil(total / FIELD_SLOTS);
   const maxStart = Math.max(0, total - FIELD_SLOTS);
   return Array.from({ length: pages }, (_, i) => Math.max(0, Math.min(i * FIELD_SLOTS, maxStart)));
 }
@@ -129,10 +142,10 @@ export interface StripCopy {
 
 /**
  * The five-state strip copy matrix. `delivered` = `jobs.length` (n),
- * `total` = `jobs_total`, `R` = the count of open work orders the board is NOT
- * showing (see the comment on `onBoard` below: `max(0, total - min(n, 12))` in
- * the static band — today's rule verbatim — and `max(0, total - n)` once the
- * board cycles and every delivered job reaches the screen).
+ * `total` = `jobs_total`, `R = max(0, total - n)` — the open work orders the
+ * board is NOT showing, which is only ever the tail the SERVER truncated at its
+ * 24-job cap, because every delivered job now reaches the screen (below 13 it
+ * fits; at 13 and up the field cycles).
  *
  * 1. n === 0                 -> no strip at all (unchanged empty zone).
  * 2. pages === 1 && R === 0  -> ALL OPEN WORK ORDERS ON BOARD      (byte-identical to today)
@@ -167,17 +180,13 @@ export function stripCopy({
   const openTotal = Number.isFinite(total) ? Math.max(0, Math.trunc(total)) : n;
   const pageCount = Number.isFinite(pages) ? Math.max(1, Math.trunc(pages)) : 1;
 
-  // The residue is counted against what the board ACTUALLY PUTS ON SCREEN, which
-  // is only `delivered` once the board cycles. In the static band the grid is 12
-  // cells and the 13th..15th delivered job is off-board exactly as it is today —
-  // so `+N MORE` there must count from `min(n, 12)`, today's rule verbatim
-  // (`WoGrid`: `jobsTotal - visible.length`). Counting from `n` instead would
-  // print `+3` where today prints `+5` (Wallboard.test.tsx's 14-jobs/17-total
-  // case) and, at n = 13 with nothing truncated, would claim ALL OPEN WORK
-  // ORDERS ON BOARD with a job hidden. Once `pages > 1` every delivered job does
-  // reach the screen, so there the residue is the genuinely truncated tail.
-  const onBoard = pageCount <= 1 ? Math.min(n, ANCHOR_SLOTS + FIELD_SLOTS) : n;
-  const residue = Math.max(0, openTotal - onBoard);
+  // The residue is counted against what the board ACTUALLY PUTS ON SCREEN — and
+  // since the board now cycles whenever a delivered job would be off-screen,
+  // that is ALWAYS `delivered`. `pages === 1` holds exactly when `n <= 12`, so
+  // the single-page case needs no `min(n, 12)` of its own: the two branches
+  // collapse to one rule, and `+N` counts only genuinely TRUNCATED work (the
+  // tail beyond the server's 24-job cap) in both.
+  const residue = Math.max(0, openTotal - n);
 
   if (pageCount <= 1) {
     return {

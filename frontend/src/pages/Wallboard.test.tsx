@@ -770,27 +770,23 @@ describe('Wallboard', () => {
 
   describe('overflow strip arithmetic', () => {
     it('fills the 12 cells with anchor + field page 0 — jobs[0..11] in server order — and counts overflow from jobs_total', async () => {
-      // 14 delivered → F = 10 → planFieldPages(10) is ONE page: the static band,
-      // where MIN_NEW refuses to displace 8 cards to reveal 2 and the board is
-      // byte-identical to its pre-cycle self. What used to be a hard `slice(0, 12)`
-      // cap is now anchor (jobs[0..3], live) + field page 0 (jobs[4..11]) — the
-      // same twelve cards, in the same order, for a different reason.
-      // Descending WO numbers: any client-side re-sort would flip the order.
-      const manyJobs = Array.from({ length: 14 }, (_, i) => waitingJob(14 - i));
+      // 12 delivered → F = 8 → the field FITS, so planFieldPages(8) is ONE page
+      // and the board is byte-identical to its pre-cycle self. What used to be a
+      // hard `slice(0, 12)` cap is now anchor (jobs[0..3], live) + field page 0
+      // (jobs[4..11]) — the same twelve cards, in the same order, for a different
+      // reason. Descending WO numbers: any client-side re-sort would flip them.
+      const manyJobs = Array.from({ length: 12 }, (_, i) => waitingJob(12 - i));
       mockFetchWallboard.mockResolvedValue({ ...payload, jobs: manyJobs, jobs_total: 17 });
       renderWallboard();
 
       expect(await screen.findByTestId('wo-grid')).toBeInTheDocument();
       const cardIds = screen.getAllByTestId(/^wo-card-/).map(el => el.getAttribute('data-testid'));
-      expect(cardIds).toEqual(Array.from({ length: 12 }, (_, i) => `wo-card-WO-A${String(14 - i).padStart(2, '0')}`));
-      // The 13th and 14th delivered jobs are off-board, exactly as they are today.
-      expect(screen.queryByTestId('wo-card-WO-A02')).not.toBeInTheDocument();
-      expect(screen.queryByTestId('wo-card-WO-A01')).not.toBeInTheDocument();
-      // 17 open − 12 ON BOARD = +5. The residue is counted from what the board
-      // actually shows, not from jobs.length: at 14 delivered / 14 open the strip
-      // must still say +2, never "ALL OPEN WORK ORDERS ON BOARD".
+      expect(cardIds).toEqual(Array.from({ length: 12 }, (_, i) => `wo-card-WO-A${String(12 - i).padStart(2, '0')}`));
+      // 17 open − 12 delivered = +5 still hidden — but that residue is now the
+      // SERVER's truncation alone. Every job the payload actually carried is on
+      // the board, which is the difference between this and the pre-cycle rule.
       expect(screen.getByTestId('wo-overflow-strip')).toHaveTextContent('+5 MORE WORK ORDERS IN QUEUE');
-      // Static band ⇒ no page bar, and none of the cycling copy.
+      // Single page ⇒ no page bar, and none of the cycling copy.
       expect(screen.queryByTestId('wo-page-bar')).not.toBeInTheDocument();
       expect(screen.getByTestId('wo-overflow-strip')).not.toHaveTextContent('PINNED');
     });
@@ -1407,24 +1403,21 @@ describe('Wallboard', () => {
       }
     });
 
-    it('is byte-identical to the pre-cycle board at 15 delivered work orders (the static band)', async () => {
+    it('is byte-identical to the pre-cycle board at 12 delivered work orders (everything fits)', async () => {
       jest.useFakeTimers({ now: PINNED_NOW });
       try {
-        // 15 delivered → F = 11 → ONE page. MIN_NEW refuses to displace 8 cards
-        // to reveal 3, and that refusal is a property of the formula, not a
+        // 12 delivered → F = 8 → the field fits in one window, so there is
+        // nothing to cycle. The single-page band is exactly the band where no
+        // delivered job would be hidden — a property of the formula, not a
         // hard-coded threshold.
-        mockFetchWallboard.mockResolvedValue(cyclePayload(cycleJobs(15), 15));
+        mockFetchWallboard.mockResolvedValue(cyclePayload(cycleJobs(12), 12));
         renderWallboard();
 
         expect(await screen.findByTestId('wo-grid')).toBeInTheDocument();
         expect(renderedCards()).toEqual(boardOf(5, 6, 7, 8, 9, 10, 11, 12));
         expect(pageBar()).toBeNull();
-        // Today's copy, counted from the twelve cells the board actually shows.
-        // The consequence is deliberate and worth stating out loud: three
-        // DELIVERED jobs never reach the grid at all, exactly as they do today.
-        expect(screen.getByTestId('wo-overflow-strip')).toHaveTextContent('+3 MORE WORK ORDERS IN QUEUE');
+        expect(screen.getByTestId('wo-overflow-strip')).toHaveTextContent('ALL OPEN WORK ORDERS ON BOARD');
         expect(screen.getByTestId('wo-overflow-strip')).not.toHaveTextContent('PINNED');
-        expect(screen.queryByTestId(cardId(13))).not.toBeInTheDocument();
 
         // Two dwells later, nothing has moved. The feature is INERT here.
         await advance(CYCLE_DWELL_MS);
@@ -1432,6 +1425,45 @@ describe('Wallboard', () => {
         await advance(CYCLE_DWELL_MS);
         expect(renderedCards()).toEqual(boardOf(5, 6, 7, 8, 9, 10, 11, 12));
         expect(pageBar()).toBeNull();
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('cycles at 13 delivered too, in two FULL pages that overlap rather than blank (owner decision)', async () => {
+      jest.useFakeTimers({ now: PINNED_NOW });
+      try {
+        // 13 delivered → F = 9 → starts [0, 1]. This is the band that used to sit
+        // static and hide the 13th job behind "+1 MORE". The flush clamp keeps
+        // BOTH pages full, so the cost is that the field SHIFTS by one slot
+        // rather than turning a clean page — accepted, because a short page would
+        // blank seven cells for a whole dwell and disjoint full pages are
+        // arithmetically impossible at F = 9.
+        mockFetchWallboard.mockResolvedValue(cyclePayload(cycleJobs(13), 13));
+        renderWallboard();
+
+        expect(await screen.findByTestId('wo-grid')).toBeInTheDocument();
+        // Page 0 is still today's board, card for card.
+        expect(renderedCards()).toEqual(boardOf(5, 6, 7, 8, 9, 10, 11, 12));
+        expect(pageBar()).toEqual({ segments: 2, index: 0 });
+        expect(screen.getByTestId('wo-overflow-strip')).toHaveTextContent(
+          'TOP 4 PINNED · PAGE 1/2 · 13 OPEN WORK ORDERS'
+        );
+        // The 13th job is not on page 0 — the whole point is that it arrives.
+        expect(screen.queryByTestId(cardId(13))).not.toBeInTheDocument();
+
+        await advance(CYCLE_DWELL_MS);
+        // Field shifts by one: job 13 appears, job 5 leaves, the anchor holds.
+        expect(renderedCards()).toEqual(boardOf(6, 7, 8, 9, 10, 11, 12, 13));
+        expect(screen.getByTestId(cardId(13))).toBeInTheDocument();
+        expect(pageBar()).toEqual({ segments: 2, index: 1 });
+        // Both pages are FULL — twelve cards, never a row of holes.
+        expect(renderedCards()).toHaveLength(12);
+
+        // And it comes back round.
+        await advance(CYCLE_DWELL_MS);
+        expect(renderedCards()).toEqual(boardOf(5, 6, 7, 8, 9, 10, 11, 12));
+        expect(pageBar()).toEqual({ segments: 2, index: 0 });
       } finally {
         jest.useRealTimers();
       }
