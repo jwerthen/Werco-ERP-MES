@@ -461,6 +461,12 @@ export interface WorkOrderDuplicateSkippedOperation {
  * Reasons, and treat this list as open — render an unrecognized one verbatim
  * rather than dropping the row:
  *  - `part_not_available` — the tie's part has since been soft-deleted.
+ *  - `part_not_tieable` — the tie's part is one the shop PRODUCES (manufactured
+ *    or assembly). Reachable only from a LEGACY tie: both live tie-write doors
+ *    run the server's part-type gate and refuse 422, but ties predating that
+ *    gate were never backfilled. Copying one would land an OPEN tie on a DRAFT
+ *    work order that depletes finished goods at completion, and consumption
+ *    never auto-reverses — so the copy is refused and the planner is told.
  *  - `operation_not_copied` — the operation the tie hung off was itself skipped.
  *  - `nest_runs_unavailable` — SERVER-SIDE DEFENCE, not currently producible: an
  *    operation that is nest-backed with no run count is already skipped upstream,
@@ -661,6 +667,18 @@ export interface MaterialAllocation {
   part_id: number;
   part_number: string | null;
   part_name: string | null;
+  /**
+   * The tied part's catalog type, so a reader can tell a legitimate stock tie
+   * from one pointing at a part the shop PRODUCES (`manufactured`/`assembly`).
+   * Without it the client cannot distinguish the two — `part_number` and
+   * `part_name` look identical either way — and a bad tie leaks straight back
+   * into the pickers that are supposed to exclude it.
+   *
+   * NULLABLE, and absent entirely from an older server. A null is NOT evidence
+   * of a production part: treat it as unknown and degrade to the pre-feature
+   * behavior (see `utils/catalogGroups.ts` → `isProductionPartType`).
+   */
+  part_type?: PartType | null;
 
   source: MaterialAllocationSource;
   status: MaterialAllocationStatus;

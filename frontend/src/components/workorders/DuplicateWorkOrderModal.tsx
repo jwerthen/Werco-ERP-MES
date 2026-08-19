@@ -131,6 +131,11 @@ const OPERATION_SKIP_REASONS: Record<string, string> = {
 
 const ALLOCATION_SKIP_REASONS: Record<string, string> = {
   part_not_available: 'the tied part is no longer available',
+  // The whole argument for SKIPPING this row rather than refusing the duplicate
+  // outright is that the planner is told legibly which tie to re-make by hand.
+  // Falling through to the raw `part_not_tieable` token would spend the refusal
+  // and deliver none of the explanation that justified it.
+  part_not_tieable: 'the tied part is one the shop produces, not stock material',
   operation_not_copied: 'its operation was not copied',
   nest_runs_unavailable: 'no nest run count to plan against',
 };

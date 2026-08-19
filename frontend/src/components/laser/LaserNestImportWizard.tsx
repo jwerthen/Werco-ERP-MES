@@ -1,9 +1,10 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { ExclamationTriangleIcon, LinkIcon, SparklesIcon, TrashIcon } from '@heroicons/react/24/outline';
 import { Modal } from '../ui/Modal';
 import { Button } from '../ui/Button';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { ComboBoxOption } from '../ui/ComboBox';
+import { useToast } from '../ui/Toast';
 import { SheetPartPicker, sheetPartOptionLabel } from './SheetPartPicker';
 import {
   LaserNestImportRow,
@@ -24,6 +25,7 @@ import { defaultLaserWorkCenter, sortWorkCentersForLaserDispatch } from '../../u
 // Shared with the Dispatch Board chip and the kiosk deduction notice, so one
 // quantity never renders three ways across the feature.
 import { formatTieQty } from '../../utils/materialTie';
+import { isProductionPartType } from '../../utils/catalogGroups';
 import { deriveSheetSpec, isSheetLikePart, thicknessInches } from '../../utils/sheetPart';
 
 interface LaserNestImportWizardProps {
@@ -149,6 +151,43 @@ interface EditableRow {
   tie_source: TieSource;
   /** The server's suggestion for this nest, verbatim; null when it sent none. */
   sheet_suggestion: SheetPartSuggestion | null;
+}
+
+/**
+ * ---------------------------------------------------------------------------
+ * A TIE THE PRE-FILL COULD NOT CARRY IS A PER-ROW FACT, NOT A TOAST
+ * ---------------------------------------------------------------------------
+ * `source_file` -> how the refused tie's part reads, for every nest whose live
+ * tie names a part the shop PRODUCES.
+ *
+ * The toast that announces the drop is gone in seconds, and the Import button
+ * is several steps and a scroll away. What happens on that click is not
+ * "nothing": the server CANCELS the live tie as it rebuilds the operations
+ * (`build_laser_nest_child_work_order` -> `cancel_allocations_for_operations`),
+ * so an affected nest imports with no material demand at all — it still runs, no
+ * shortage is raised, and stock is never deducted when its operation completes.
+ * That is silent, it never auto-reverses (invariant 6b), and it is the exact
+ * outcome the tie feature exists to prevent.
+ *
+ * So the drop is carried on the ROW, where the decision is actually made: an
+ * amber notice under that nest's picker, a chip in the summary strip, and a
+ * confirm on the way out. Keyed by `source_file` because that is the stable key
+ * the whole grid is keyed by — an index would follow the wrong row the moment a
+ * nest is removed.
+ *
+ * It holds the LABEL, never the part id: the part must stay un-offerable, and a
+ * map of ids is one hopeful `extraOptions` away from putting the bad tie back in
+ * the picker.
+ */
+type DroppedTiesBySource = ReadonlyMap<string, string>;
+
+/** Module-scope empty default, so a "no drops" render keeps a stable identity. */
+const NO_DROPPED_TIES: DroppedTiesBySource = new Map();
+
+/** How a refused tie names its part, from the allocation alone (the catalog
+ *  never returns a produced part, so the allocation is the only source). */
+function droppedTieLabel(tie: MaterialAllocation): string {
+  return [tie.part_number, tie.part_name].filter(Boolean).join(' — ') || `Part ${tie.part_id}`;
 }
 
 /** Preview metadata about the uploaded package itself (bare-PDF uploads). */
@@ -560,6 +599,47 @@ function suggestedTieRollupMessage(lines: SuggestedTieLine[]): string {
 }
 
 /**
+ * The dropped-tie confirmation body.
+ *
+ * LISTED BY NEST, not rolled up by part — the opposite choice from
+ * `suggestedTieRollupMessage` above, and for the opposite reason. That rollup
+ * exists to make one wrong line visible among 42 identical ones; this one names
+ * the nests the planner has to go back to, and a part-level count ("2 x BRK-100")
+ * would say what was lost without saying where to fix it.
+ *
+ * Capped, because a package can carry dozens and a dialog that scrolls past the
+ * buttons is a dialog nobody reads. The remainder is counted rather than
+ * truncated silently.
+ *
+ * Says what the import DOES, in the shop's terms: the tie is cancelled server-
+ * side, the nest still runs, and nothing deducts. "The tie is removed" alone
+ * reads like tidy-up; "stock is never deducted" is the sentence someone acts on.
+ */
+const DROPPED_TIE_MESSAGE_LIMIT = 8;
+
+function droppedTieImportMessage(droppedRows: EditableRow[], labels: DroppedTiesBySource): string {
+  const listed = droppedRows.slice(0, DROPPED_TIE_MESSAGE_LIMIT);
+  const body = listed.map(
+    (row) =>
+      `${row.cnc_number.trim() || row.source_file} — was tied to ${labels.get(row.source_file) ?? 'a part the shop produces'}`
+  );
+  const remainder = droppedRows.length - listed.length;
+  if (remainder > 0) body.push(`…and ${remainder} more`);
+  return [
+    `${droppedRows.length === 1 ? 'This nest is' : 'These nests are'} tied to a part the shop produces rather than ` +
+      `stock material, so the tie could not be offered back to you:`,
+    '',
+    ...body,
+    '',
+    `Importing cancels ${droppedRows.length === 1 ? 'that tie' : 'those ties'} and puts nothing in its place. ` +
+      `${droppedRows.length === 1 ? 'The nest' : 'Each nest'} still runs, no shortage is raised, and stock is ` +
+      'never deducted when its operation completes.',
+    '',
+    'Pick the sheet each one really cuts instead if you can.',
+  ].join('\n');
+}
+
+/**
  * Does the tied part's spec actually disagree with what the extractor read?
  *
  * THICKNESS IS COMPARED NUMERICALLY, and that is the point of this function.
@@ -639,6 +719,11 @@ export default function LaserNestImportWizard({
   workCenterId,
   onImported,
 }: LaserNestImportWizardProps) {
+  const { showToast } = useToast();
+  // Prefix for the per-row dropped-tie notice ids. Instance-scoped rather than a
+  // bare row index, so two wizards mounted at once cannot mint the same `id` and
+  // point every picker's `aria-describedby` at one of them.
+  const noticeIdPrefix = useId();
   const [step, setStep] = useState<WizardStep>('pick');
   const [file, setFile] = useState<File | null>(null);
   const [sourcePath, setSourcePath] = useState('');
@@ -672,6 +757,15 @@ export default function LaserNestImportWizard({
   // import payload.
   const [extraMaterialOptions, setExtraMaterialOptions] = useState<ComboBoxOption[]>([]);
   const [tiePrefillCount, setTiePrefillCount] = useState(0);
+  // Ties the pre-fill refused to carry across, per nest. See `DroppedTiesBySource`.
+  const [droppedTies, setDroppedTies] = useState<DroppedTiesBySource>(NO_DROPPED_TIES);
+  /**
+   * The rows of an Import parked behind the drop confirmation, or null when no
+   * such import is pending. Held as ROWS rather than a boolean because the
+   * accept-and-import path confirms suggestions first and submits the ACCEPTED
+   * rows, which `rows` does not yet hold at that moment.
+   */
+  const [pendingTieDropImport, setPendingTieDropImport] = useState<EditableRow[] | null>(null);
   /**
    * Which act opened the accept-confirmation, or null when it is closed. Both
    * entry points land on the SAME dialog; the only difference is whether
@@ -699,6 +793,8 @@ export default function LaserNestImportWizard({
     setPackageQtyPerRun('1');
     setExtraMaterialOptions([]);
     setTiePrefillCount(0);
+    setDroppedTies(NO_DROPPED_TIES);
+    setPendingTieDropImport(null);
     setConfirmIntent(null);
     // Supersede any tie pre-fill still in flight from the previous session, so
     // it cannot write the last package's ties onto a freshly opened wizard.
@@ -861,13 +957,52 @@ export default function LaserNestImportWizard({
     }
 
     const tieBySource = new Map<string, MaterialAllocation>();
+    // Ties pointing at a part the shop PRODUCES. Recorded PER NEST, never
+    // pre-filled, and never added to `extraMaterialOptions` — surfacing one as a
+    // picker option would make the bad tie re-selectable, which is the opposite
+    // of closing it.
+    const dropped = new Map<string, string>();
     for (const tie of ties ?? []) {
       // OPEN operation-scoped ties only. `closed` is never written (a fully
       // consumed tie stays `open`), so `open` IS the live set, and a
       // work-order-scoped tie is not a nest tie.
       if (tie.status !== 'open' || tie.work_order_operation_id == null) continue;
       const source = sourceByOperation.get(tie.work_order_operation_id);
-      if (source) tieBySource.set(source, tie);
+      if (!source) continue;
+      // A MANUFACTURED / ASSEMBLY part is the OUTPUT of a job, never an input:
+      // pre-filling one would carry a bad tie straight into the import payload.
+      //
+      // A NULL OR ABSENT `part_type` IS NOT A PRODUCTION PART. An older server
+      // sends no `part_type` at all, and `isProductionPartType(null)` is false,
+      // so every tie from one pre-fills exactly as it does today. That fallback
+      // is the difference between degrading gracefully and silently untying
+      // every nest on a work order the moment the client is ahead of the API.
+      if (isProductionPartType(tie.part_type)) {
+        dropped.set(source, droppedTieLabel(tie));
+        continue;
+      }
+      tieBySource.set(source, tie);
+    }
+    // SET BEFORE THE EARLY RETURN BELOW, and this ordering is the whole point.
+    // A package whose ONLY ties are produced-part ties leaves `tieBySource`
+    // empty, so returning first left row state untouched and those nests
+    // rendered indistinguishably from ones that were never tied — the single
+    // case where the drop is total is the one case nothing on screen said so.
+    setDroppedTies(dropped.size > 0 ? dropped : NO_DROPPED_TIES);
+    if (dropped.size > 0) {
+      // WARNING, not error: the pre-fill did run and the review step is usable —
+      // it just could not carry these ties across, and the planner has to
+      // re-pick before importing. `success` would hide that; `error` would
+      // claim a failure that did not happen.
+      //
+      // The toast is the INTERRUPTION, not the record. It expires long before
+      // the Import click, so the durable surfaces — the per-row notice, the
+      // summary chip, and the confirm — are what `droppedTies` above feeds.
+      showToast(
+        'warning',
+        `${dropped.size} nest${dropped.size === 1 ? ' was' : 's were'} tied to a part that is not ` +
+          'stock material — re-pick the sheet before importing.'
+      );
     }
     if (tieBySource.size === 0) return;
 
@@ -946,6 +1081,8 @@ export default function LaserNestImportWizard({
       });
       setExtraMaterialOptions([]);
       setTiePrefillCount(0);
+      setDroppedTies(NO_DROPPED_TIES);
+      setPendingTieDropImport(null);
       setStep('review');
       void prefillTiesFromExistingNests(editable, generation);
     } catch (err: any) {
@@ -1166,6 +1303,24 @@ export default function LaserNestImportWizard({
   const tiedRowCount = rows.filter(isTied).length;
   const tiedSheetTotal = rows.reduce((sum, r) => (isTied(r) ? sum + rowSheetTotal(r) : sum), 0);
 
+  /**
+   * Rows that would import with NO material demand where a live tie exists
+   * today — the nests whose tie the pre-fill refused, still un-repicked.
+   *
+   * Takes the rows to judge rather than reading `rows`, because the
+   * accept-and-import path decides this about the ACCEPTED rows, which `rows`
+   * does not hold yet at that instant.
+   *
+   * `isTied` and not `material_part_id != null`: an unconfirmed suggestion
+   * serializes no tie, so a row still showing one is still on course to import
+   * untied. It resolves the moment the suggestion is accepted, which is exactly
+   * when the nest really does carry a tie again.
+   */
+  const unresolvedDroppedTies = (candidateRows: EditableRow[]): EditableRow[] =>
+    droppedTies.size === 0 ? [] : candidateRows.filter((row) => droppedTies.has(row.source_file) && !isTied(row));
+
+  const droppedTieRows = unresolvedDroppedTies(rows);
+
   const suggestedRowCount = rows.filter(isSuggested).length;
   // Suggested rows whose sheet will not cover this package. `none` and `short`
   // are both "the material is not there"; `unknown` is not — a failed stock read
@@ -1179,6 +1334,49 @@ export default function LaserNestImportWizard({
     () => rollUpSuggestedTies(rows, partsById, onHandByPart),
     [rows, partsById, onHandByPart]
   );
+
+  /**
+   * The last gate before the wire: import, or ask first if this click would
+   * drop a live tie the planner never chose to drop.
+   *
+   * BOTH import entry points funnel through here — the plain Import click and
+   * the accept-and-import confirm — so accepting suggestions cannot route round
+   * the question. The suggestion dialog runs FIRST on purpose: accepting a
+   * suggestion for an affected nest RESOLVES its drop, and asking about a tie
+   * the planner is one click from replacing would be a confirm about nothing.
+   *
+   * WHY CONFIRM AT ALL, when the row already carries a notice. Because of what
+   * this click does on the server: importing CANCELS the nest's live allocation
+   * (`cancel_allocations_for_operations`) and writes no replacement, so an
+   * affected nest comes back running with no material demand — silently, and
+   * with no auto-reversal (invariant 6b). The row notice is the surface at the
+   * moment of PICKING; this is the surface at the moment of COMMITTING, and on
+   * a 40-row grid those are not the same moment or the same part of the screen.
+   * It stays a confirm and never a block: a planner who genuinely wants these
+   * nests untied must not be trapped in a wizard they cannot finish — the same
+   * judgement `LaserNestManualModal` makes for the single-nest case.
+   */
+  const beginImport = (candidateRows: EditableRow[]) => {
+    if (unresolvedDroppedTies(candidateRows).length > 0) {
+      setError('');
+      setPendingTieDropImport(candidateRows);
+      return;
+    }
+    void submitImport(candidateRows);
+  };
+
+  /**
+   * `pending` per the non-optimistic convention, so the dialog HOLDS while the
+   * import is on the wire rather than vanishing into an ambiguous wait, and
+   * closes only once the server has answered — on failure that lands the planner
+   * back on the grid reading the error banner, which a dialog dismissed early
+   * would have hidden behind itself.
+   */
+  const handleConfirmTieDropImport = () => {
+    const rowsToImport = pendingTieDropImport;
+    if (!rowsToImport) return;
+    void submitImport(rowsToImport).finally(() => setPendingTieDropImport(null));
+  };
 
   /**
    * Import. A package still holding suggestions routes through the accept
@@ -1200,14 +1398,14 @@ export default function LaserNestImportWizard({
       setConfirmIntent('accept-and-import');
       return;
     }
-    void submitImport(rows);
+    beginImport(rows);
   };
 
   const handleConfirmSuggestedTies = () => {
     const intent = confirmIntent;
     const accepted = acceptSuggestedTies(rows);
     setConfirmIntent(null);
-    if (intent === 'accept-and-import') void submitImport(accepted);
+    if (intent === 'accept-and-import') beginImport(accepted);
   };
 
   return (
@@ -1446,6 +1644,17 @@ export default function LaserNestImportWizard({
                   them
                 </span>
               )}
+              {/* The package-level half of the dropped-tie surface. It counts
+                  only what is still UNRESOLVED, so it clears itself as the
+                  planner re-picks and never nags about a nest they have already
+                  fixed. Amber like the other "still owed" chips — this is not a
+                  failure, it is work outstanding. */}
+              {droppedTieRows.length > 0 && (
+                <span className="rounded-none border border-fd-amber/40 bg-fd-amber/10 px-2 py-1 font-semibold text-fd-amber">
+                  {droppedTieRows.length} {droppedTieRows.length === 1 ? 'nest' : 'nests'} lost a material tie — pick
+                  the sheet, or {droppedTieRows.length === 1 ? 'it imports' : 'they import'} untied
+                </span>
+              )}
             </div>
 
             {/* Both axes scroll: vertical for the row count, horizontal because
@@ -1538,6 +1747,13 @@ export default function LaserNestImportWizard({
                     // actually left open: a matched row's picker is already filled.
                     const rowShortlist =
                       suggestion && suggestion.status === 'ambiguous' ? shortlistOptions(suggestion) : NO_SHORTLIST;
+                    // The tie this nest holds TODAY that could not be carried
+                    // across, while the row is still on course to import untied.
+                    // Cleared by a committed pick, because at that point the
+                    // nest has a tie again and the notice would be describing
+                    // history. See `DroppedTiesBySource`.
+                    const droppedTie = isTied(row) ? undefined : droppedTies.get(row.source_file);
+                    const droppedTieNoticeId = `${noticeIdPrefix}-dropped-tie-${index}`;
 
                     return (
                       <tr key={row.source_file} className="border-b border-fd-line align-top">
@@ -1611,6 +1827,7 @@ export default function LaserNestImportWizard({
                                 value={row.material_part_id != null ? String(row.material_part_id) : ''}
                                 onChange={(value) => updateRowMaterialPart(index, value)}
                                 disabled={!hasPicker}
+                                ariaDescribedBy={droppedTie ? droppedTieNoticeId : undefined}
                               />
                             </div>
                             {suggested && (
@@ -1626,6 +1843,23 @@ export default function LaserNestImportWizard({
                               </span>
                             )}
                           </div>
+                          {/* THE PERSISTENT half of the dropped-tie surface, at
+                              the row it is about and beside the control that
+                              fixes it. The load-time toast is gone in seconds
+                              and several wizard steps before Import; this stays
+                              for as long as the condition does. Wired as the
+                              picker's description so a screen reader reads it
+                              with the field rather than only once, at load, and
+                              given no `role="alert"` — the toast already
+                              interrupted, and a live region per row would
+                              announce the same fact forty times. */}
+                          {droppedTie && (
+                            <p id={droppedTieNoticeId} className="mt-1 text-[11px] leading-snug text-fd-amber">
+                              Tied to {droppedTie}, a part the shop produces rather than stock material, so it cannot be
+                              offered here. Pick the sheet this nest really cuts — importing it blank removes the tie,
+                              and an untied nest never deducts stock.
+                            </p>
+                          )}
                         </td>
                         <td className="px-2 py-2">
                           <input
@@ -1814,6 +2048,28 @@ export default function LaserNestImportWizard({
           pending={loading}
           onConfirm={handleConfirmSuggestedTies}
           onCancel={() => setConfirmIntent(null)}
+        />
+
+        {/* The COMMIT-moment half of the dropped-tie surface. Importing cancels
+            the live allocation on the server and writes nothing back, so this
+            names the nests, says what they lose, and offers the way out — it is
+            a confirm, never a block. Listed BY NEST rather than rolled up by
+            part: the remedy is per-row (go and pick in that row's picker), so a
+            count would send the planner hunting.
+
+            `open` takes both terms so the dialog cannot outlive its subject: a
+            re-pick made from underneath it (or a reset) empties
+            `droppedTieRows`, and there would be nothing left to describe. */}
+        <ConfirmDialog
+          open={pendingTieDropImport !== null && droppedTieRows.length > 0}
+          variant="warning"
+          title={`Import ${droppedTieRows.length} ${droppedTieRows.length === 1 ? 'nest' : 'nests'} with no material tie?`}
+          message={droppedTieImportMessage(droppedTieRows, droppedTies)}
+          confirmLabel="Import untied"
+          cancelLabel="Go back and pick"
+          pending={loading}
+          onConfirm={handleConfirmTieDropImport}
+          onCancel={() => setPendingTieDropImport(null)}
         />
       </div>
     </Modal>

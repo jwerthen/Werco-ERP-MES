@@ -26,6 +26,7 @@ import { render, screen, fireEvent, waitFor, within } from '@testing-library/rea
 import LaserNestImportWizard from './LaserNestImportWizard';
 import { LaserNestPackagePreview, MaterialAllocation, Part } from '../../types';
 import api from '../../services/api';
+import { ToastProvider } from '../ui';
 import {
   comboBoxListbox,
   expectComboBoxOptions,
@@ -334,6 +335,363 @@ describe('re-import pre-fill', () => {
     await screen.findByRole('button', { name: /^import 2 nests$/i });
 
     expect(mockApi.getMaterialAllocations).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * A tie whose part is one the shop PRODUCES cannot be carried across a
+ * re-import, and the planner has to be told.
+ *
+ * The pre-fill is the one place a tie enters the wizard without anybody picking
+ * it, so it is the one place a legacy manufactured/assembly tie can leak past
+ * the pickers that now exclude them — straight into the import payload, and
+ * from there into a completion that deletes finished goods from stock to build
+ * themselves. `MaterialAllocation.part_type` is what makes the two
+ * distinguishable at all (`part_number` / `part_name` look identical either
+ * way).
+ *
+ * The refusal has three parts, and dropping any one of them re-opens the path:
+ * the row is left untied, the part is NOT offered as a picker option (offering
+ * it would make the bad tie one click from being re-committed), and a WARNING
+ * toast says so — `success` would hide a shortfall the planner must act on, and
+ * `error` would claim a failure that did not happen.
+ */
+describe('re-import pre-fill: a tie to a part the shop PRODUCES', () => {
+  const renderWithToasts = () =>
+    render(
+      <ToastProvider>
+        <LaserNestImportWizard open workOrderId={42} onClose={jest.fn()} onImported={jest.fn()} />
+      </ToastProvider>
+    );
+
+  /** One nest per source file, so every tie below has a row to land on. */
+  const twoNestOperations = () =>
+    mockApi.getWorkOrder.mockResolvedValue({
+      id: 42,
+      operations: [
+        { id: 501, laser_nest: { cnc_file_path: 'sheet-1.pdf' } },
+        { id: 502, laser_nest: { cnc_file_path: 'sheet-2.pdf' } },
+      ],
+    });
+
+  const PRODUCED_TIE = {
+    part_id: 77,
+    part_number: 'BRK-100',
+    part_name: 'Bracket, sheet metal',
+    part_type: 'manufactured' as const,
+  };
+
+  it('leaves the row untied and warns, instead of pre-filling it', async () => {
+    twoNestOperations();
+    mockApi.getMaterialAllocations.mockResolvedValue([
+      tie({ id: 900, work_order_operation_id: 501, ...PRODUCED_TIE }),
+    ]);
+
+    renderWithToasts();
+    await previewPackage();
+
+    const warning = await screen.findByRole('alert');
+    expect(warning).toHaveTextContent(
+      '1 nest was tied to a part that is not stock material — re-pick the sheet before importing.'
+    );
+    expect(screen.getByLabelText('Sheet part for sheet-1.pdf')).toHaveValue('');
+    // Nothing was pre-filled, so there is no "N existing ties pre-filled" chip
+    // claiming otherwise.
+    expect(screen.queryByText(/existing tie/i)).not.toBeInTheDocument();
+  });
+
+  it('does not offer the produced part in the picker either', async () => {
+    twoNestOperations();
+    mockApi.getMaterialAllocations.mockResolvedValue([
+      tie({ id: 900, work_order_operation_id: 501, ...PRODUCED_TIE }),
+    ]);
+
+    renderWithToasts();
+    await previewPackage();
+    await screen.findByRole('alert');
+
+    // Pinning it into the list — the mechanism that rightly keeps an unlisted
+    // SHEET tie selectable — would make this bad tie re-selectable in one click.
+    const picker = await rowPicker('sheet-1.pdf');
+    openComboBox(picker);
+    expect(within(comboBoxListbox(picker)).queryByRole('option', { name: /BRK-100/ })).toBeNull();
+  });
+
+  it('does not send the dropped tie on import', async () => {
+    twoNestOperations();
+    mockApi.getMaterialAllocations.mockResolvedValue([
+      tie({ id: 900, work_order_operation_id: 501, ...PRODUCED_TIE }),
+    ]);
+
+    renderWithToasts();
+    await previewPackage();
+    await screen.findByRole('alert');
+
+    fireEvent.click(screen.getByRole('button', { name: /^import 2 nests$/i }));
+    // The import is now gated by the drop confirmation — see the describe below
+    // for why. Nothing reaches the wire until it is answered.
+    fireEvent.click(await screen.findByRole('button', { name: /^import untied$/i }));
+
+    await waitFor(() => expect(mockApi.importLaserNestPackage).toHaveBeenCalledTimes(1));
+    const [, payload] = mockApi.importLaserNestPackage.mock.calls[0];
+    expect(payload.rows?.[0]).not.toHaveProperty('material_part_id');
+  });
+
+  it('carries the legitimate ties across and counts only the dropped one', async () => {
+    twoNestOperations();
+    mockApi.getMaterialAllocations.mockResolvedValue([
+      tie({ id: 900, work_order_operation_id: 501, part_id: 31, part_type: 'raw_material', qty_per_run: 2 }),
+      tie({ id: 901, work_order_operation_id: 502, ...PRODUCED_TIE }),
+    ]);
+
+    renderWithToasts();
+    await previewPackage();
+
+    // One bad tie does not cost the planner the good ones.
+    await waitFor(() => expect(screen.getByLabelText('Sheet part for sheet-1.pdf')).toHaveValue(SHEET_304_LABEL));
+    expect(screen.getByLabelText('Sheet part for sheet-2.pdf')).toHaveValue('');
+    expect(screen.getByText(/1 existing tie pre-filled/i)).toBeInTheDocument();
+    expect(await screen.findByRole('alert')).toHaveTextContent('1 nest was tied to a part that is not stock material');
+  });
+
+  it('pluralizes the warning over several dropped ties', async () => {
+    twoNestOperations();
+    mockApi.getMaterialAllocations.mockResolvedValue([
+      tie({ id: 900, work_order_operation_id: 501, ...PRODUCED_TIE }),
+      tie({ id: 901, work_order_operation_id: 502, part_id: 78, part_name: 'Weldment', part_type: 'assembly' }),
+    ]);
+
+    renderWithToasts();
+    await previewPackage();
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      '2 nests were tied to a part that is not stock material — re-pick the sheet before importing.'
+    );
+  });
+
+  it('pre-fills exactly as before when the server sends no part_type at all', async () => {
+    // THE compatibility case. An older API omits `part_type` entirely; reading
+    // absent as "suspect" would silently untie every nest on the work order the
+    // moment the client ran ahead of the server. `tie()` omits the field, which
+    // is precisely the older-server shape.
+    twoNestOperations();
+    mockApi.getMaterialAllocations.mockResolvedValue([
+      tie({ id: 900, work_order_operation_id: 501, part_id: 31, qty_per_run: 2 }),
+    ]);
+    expect(tie({ id: 900 })).not.toHaveProperty('part_type');
+
+    renderWithToasts();
+    await previewPackage();
+
+    await waitFor(() => expect(screen.getByLabelText('Sheet part for sheet-1.pdf')).toHaveValue(SHEET_304_LABEL));
+    expect(screen.getByLabelText('Sheets per run for sheet-1.pdf')).toHaveValue(2);
+    expect(screen.getByText(/1 existing tie pre-filled/i)).toBeInTheDocument();
+    expect(screen.queryByText(/not stock material/i)).not.toBeInTheDocument();
+  });
+
+  it('says nothing when every tie is ordinary stock', async () => {
+    twoNestOperations();
+    mockApi.getMaterialAllocations.mockResolvedValue([
+      tie({ id: 900, work_order_operation_id: 501, part_id: 31, part_type: 'raw_material' }),
+    ]);
+
+    renderWithToasts();
+    await previewPackage();
+
+    await waitFor(() => expect(screen.getByLabelText('Sheet part for sheet-1.pdf')).toHaveValue(SHEET_304_LABEL));
+    expect(screen.queryByText(/not stock material/i)).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * A dropped tie has to survive the toast, because the damage happens later.
+ *
+ * The toast that announces the drop lives about four seconds. Import is several
+ * wizard steps and a grid-scroll after it, and pressing it makes the server
+ * CANCEL the nest's live allocation while writing no replacement
+ * (`build_laser_nest_child_work_order` -> `cancel_allocations_for_operations`).
+ * The nest then runs with no material demand: no shortage is raised and stock is
+ * never deducted when its operation completes — silently, and with no
+ * auto-reversal (invariant 6b). A transient toast is not a surface for that.
+ *
+ * So the drop is carried on three durable surfaces, and each of them is what
+ * the tests below pin:
+ *   1. a notice on the AFFECTED ROW, beside the picker that fixes it;
+ *   2. a chip in the summary strip, counting only what is still unresolved;
+ *   3. a confirm on Import, so the loss is a decision that was read and taken.
+ *
+ * The manual-create path (`LaserNestManualModal`) already made exactly this
+ * judgement for its single nest; this is the same rule at package scale.
+ */
+describe('re-import pre-fill: a dropped tie stays visible until it is dealt with', () => {
+  const renderWithToasts = () =>
+    render(
+      <ToastProvider>
+        <LaserNestImportWizard open workOrderId={42} onClose={jest.fn()} onImported={jest.fn()} />
+      </ToastProvider>
+    );
+
+  const twoNestOperations = () =>
+    mockApi.getWorkOrder.mockResolvedValue({
+      id: 42,
+      operations: [
+        { id: 501, laser_nest: { cnc_file_path: 'sheet-1.pdf' } },
+        { id: 502, laser_nest: { cnc_file_path: 'sheet-2.pdf' } },
+      ],
+    });
+
+  const PRODUCED_TIE = {
+    part_id: 77,
+    part_number: 'BRK-100',
+    part_name: 'Bracket, sheet metal',
+    part_type: 'manufactured' as const,
+  };
+
+  /** The Sheet part cell for one nest — where the row notice lives. */
+  const sheetPartCell = (sourceFile: string): HTMLElement =>
+    screen.getByLabelText(`Sheet part for ${sourceFile}`).closest('td') as HTMLElement;
+
+  it('names the dropped part on the affected row, and leaves the others alone', async () => {
+    twoNestOperations();
+    mockApi.getMaterialAllocations.mockResolvedValue([
+      tie({ id: 900, work_order_operation_id: 501, ...PRODUCED_TIE }),
+    ]);
+
+    renderWithToasts();
+    await previewPackage();
+    await screen.findByRole('alert');
+
+    // The notice is in the CELL, next to the picker that fixes it — not only in
+    // a toast that has since expired.
+    const affected = await within(sheetPartCell('sheet-1.pdf')).findByText(/BRK-100 — Bracket, sheet metal/);
+    expect(affected).toHaveTextContent(/a part the shop produces rather than stock material/i);
+    expect(affected).toHaveTextContent(/an untied nest never deducts stock/i);
+    // ...and it is the picker's description, so a screen reader hears it with
+    // the field rather than once, at load.
+    expect(screen.getByLabelText('Sheet part for sheet-1.pdf')).toHaveAttribute('aria-describedby', affected.id);
+
+    expect(within(sheetPartCell('sheet-2.pdf')).queryByText(/shop produces/i)).toBeNull();
+  });
+
+  it('surfaces a package whose ONLY ties are produced-part ties', async () => {
+    // THE REGRESSION. The pre-fill used to return early once no tie survived to
+    // be applied, which is exactly the package where EVERY tie was dropped — so
+    // row state was never touched and those nests rendered indistinguishably
+    // from ones that had never been tied at all.
+    twoNestOperations();
+    mockApi.getMaterialAllocations.mockResolvedValue([
+      tie({ id: 900, work_order_operation_id: 501, ...PRODUCED_TIE }),
+      tie({ id: 901, work_order_operation_id: 502, part_id: 78, part_name: 'Weldment', part_type: 'assembly' }),
+    ]);
+
+    renderWithToasts();
+    await previewPackage();
+    await screen.findByRole('alert');
+
+    expect(await within(sheetPartCell('sheet-1.pdf')).findByText(/BRK-100/)).toBeInTheDocument();
+    expect(within(sheetPartCell('sheet-2.pdf')).getByText(/Weldment/)).toBeInTheDocument();
+    expect(screen.getByText(/2 nests lost a material tie/i)).toBeInTheDocument();
+  });
+
+  it('clears the notice and the chip once the planner picks a real sheet', async () => {
+    twoNestOperations();
+    mockApi.getMaterialAllocations.mockResolvedValue([
+      tie({ id: 900, work_order_operation_id: 501, ...PRODUCED_TIE }),
+    ]);
+
+    renderWithToasts();
+    await previewPackage();
+    await within(sheetPartCell('sheet-1.pdf')).findByText(/BRK-100/);
+    expect(screen.getByText(/1 nest lost a material tie/i)).toBeInTheDocument();
+
+    const picker = await rowPicker('sheet-1.pdf');
+    selectComboBoxOption(picker, /SHT-304-125/);
+
+    // The nest carries a tie again, so there is nothing left to warn about —
+    // a notice that outlived its cause is one planners learn to ignore.
+    await waitFor(() => expect(within(sheetPartCell('sheet-1.pdf')).queryByText(/BRK-100/)).toBeNull());
+    expect(screen.queryByText(/lost a material tie/i)).not.toBeInTheDocument();
+  });
+
+  it('asks before importing a nest whose tie it is about to drop', async () => {
+    twoNestOperations();
+    mockApi.getMaterialAllocations.mockResolvedValue([
+      tie({ id: 900, work_order_operation_id: 501, ...PRODUCED_TIE }),
+    ]);
+
+    renderWithToasts();
+    await previewPackage();
+    await within(sheetPartCell('sheet-1.pdf')).findByText(/BRK-100/);
+
+    fireEvent.click(screen.getByRole('button', { name: /^import 2 nests$/i }));
+
+    // Named by NEST (its CNC number), because the remedy is per row. It also
+    // has to say what the import DOES — "the tie is removed" reads like tidy-up.
+    const confirm = await screen.findByText(/Import 1 nest with no material tie\?/i);
+    expect(confirm).toBeInTheDocument();
+    expect(screen.getByText(/8001 — was tied to BRK-100 — Bracket, sheet metal/)).toBeInTheDocument();
+    expect(screen.getByText(/stock is never deducted when its operation completes/i)).toBeInTheDocument();
+    // Nothing on the wire while the question is open.
+    expect(mockApi.importLaserNestPackage).not.toHaveBeenCalled();
+  });
+
+  it('lets the planner back out of that import without losing the grid', async () => {
+    twoNestOperations();
+    mockApi.getMaterialAllocations.mockResolvedValue([
+      tie({ id: 900, work_order_operation_id: 501, ...PRODUCED_TIE }),
+    ]);
+
+    renderWithToasts();
+    await previewPackage();
+    await within(sheetPartCell('sheet-1.pdf')).findByText(/BRK-100/);
+
+    fireEvent.click(screen.getByRole('button', { name: /^import 2 nests$/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /go back and pick/i }));
+
+    await waitFor(() => expect(screen.queryByText(/Import 1 nest with no material tie\?/i)).toBeNull());
+    expect(mockApi.importLaserNestPackage).not.toHaveBeenCalled();
+    // Still on the review grid, still flagged, still fixable.
+    expect(within(sheetPartCell('sheet-1.pdf')).getByText(/BRK-100/)).toBeInTheDocument();
+  });
+
+  it('does not ask at all once every dropped tie has been re-picked', async () => {
+    // The confirm is about UNRESOLVED drops. Asking about a nest the planner has
+    // already fixed is the nag that teaches people to click through it.
+    twoNestOperations();
+    mockApi.getMaterialAllocations.mockResolvedValue([
+      tie({ id: 900, work_order_operation_id: 501, ...PRODUCED_TIE }),
+    ]);
+
+    renderWithToasts();
+    await previewPackage();
+    const picker = await rowPicker('sheet-1.pdf');
+    await within(sheetPartCell('sheet-1.pdf')).findByText(/BRK-100/);
+    selectComboBoxOption(picker, /SHT-304-125/);
+    await waitFor(() => expect(within(sheetPartCell('sheet-1.pdf')).queryByText(/BRK-100/)).toBeNull());
+
+    fireEvent.click(screen.getByRole('button', { name: /^import 2 nests$/i }));
+
+    await waitFor(() => expect(mockApi.importLaserNestPackage).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText(/with no material tie\?/i)).toBeNull();
+    // The re-pick is what actually goes to the server: a real sheet part, tied.
+    const [, payload] = mockApi.importLaserNestPackage.mock.calls[0];
+    expect(payload.rows?.[0]).toMatchObject({ material_part_id: 31 });
+  });
+
+  it('never asks when the package carried no dropped tie', async () => {
+    twoNestOperations();
+    mockApi.getMaterialAllocations.mockResolvedValue([
+      tie({ id: 900, work_order_operation_id: 501, part_id: 31, part_type: 'raw_material' }),
+    ]);
+
+    renderWithToasts();
+    await previewPackage();
+    await waitFor(() => expect(screen.getByLabelText('Sheet part for sheet-1.pdf')).toHaveValue(SHEET_304_LABEL));
+
+    fireEvent.click(screen.getByRole('button', { name: /^import 2 nests$/i }));
+
+    await waitFor(() => expect(mockApi.importLaserNestPackage).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText(/with no material tie\?/i)).toBeNull();
   });
 });
 

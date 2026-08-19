@@ -16,6 +16,7 @@ import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import LaserNestManualModal from './LaserNestManualModal';
 import { LaserNestInfo, MaterialAllocation, Part } from '../../types';
+import { ToastProvider } from '../ui';
 import api from '../../services/api';
 
 jest.mock('../../services/api', () => ({
@@ -57,6 +58,37 @@ const part = (overrides: Partial<Part>): Part => ({
 
 const SHEET_304 = part({ id: 31, part_number: 'SHT-304-125', name: '304 SS 0.125 Sheet' });
 const SHEET_AL = part({ id: 32, part_number: 'SHT-AL-090', name: 'AL 6061 0.090 Sheet' });
+
+/**
+ * The catalog rows that make "material" the wrong default for a field labelled
+ * "Sheet part". The purchased and hardware rows are what `/materials` really
+ * serves; the manufactured one is the DEFENSIVE case — that endpoint cannot
+ * serve it today, and the picker excludes it anyway because the prop is typed
+ * `Part[]` and a future caller could hand it a wider list.
+ */
+// Real sheet stock the importers typed `purchased` — the reason the narrowed
+// view needs an escape hatch rather than being a restriction.
+const PURCHASED_SHEET = part({
+  id: 33,
+  part_number: 'SHT-CS-060',
+  name: 'CS 0.060 Sheet',
+  part_type: 'purchased',
+});
+// Passes the text-only sheet heuristic on the word "Sheet", and is a box of
+// screws.
+const SHEET_METAL_SCREW = part({
+  id: 34,
+  part_number: 'HW-SMS-8',
+  name: 'Sheet metal screw #8',
+  part_type: 'hardware',
+});
+// A part the shop PRODUCES: excluded at both tiers, with no escape hatch.
+const MANUFACTURED_BRACKET = part({
+  id: 35,
+  part_number: 'BRK-100',
+  name: 'Bracket, sheet metal',
+  part_type: 'manufactured',
+});
 
 const NEST: LaserNestInfo = {
   id: 3,
@@ -183,6 +215,149 @@ describe('create path', () => {
 
     expect(screen.queryByLabelText(/sheet part/i)).not.toBeInTheDocument();
     expect(screen.queryByLabelText(/sheets per run/i)).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * The sheet-part list defaults to RAW STOCK.
+ *
+ * `/materials` serves all four material-supply types and three of them
+ * (`purchased`, `hardware`, `consumable`) are bought COMPONENTS — the seeded
+ * catalog types bolts and nuts as `purchased` — so an unnarrowed list puts every
+ * nut and abrasive pad under a field labelled "Sheet part". The narrowing is a
+ * DEFAULT: real sheet is sometimes typed `purchased`, so the escape hatch has to
+ * exist. The exclusion of parts the shop PRODUCES is not a default and has no
+ * escape hatch.
+ */
+describe('sheet-part list: raw stock by default', () => {
+  /** Every option in the native <select>, minus the "(none)" row. */
+  const listedOptions = (): string[] =>
+    Array.from(
+      (screen.getByLabelText(/sheet part/i) as HTMLSelectElement).options
+    )
+      .filter((option) => option.value !== '')
+      .map((option) => option.textContent ?? '');
+
+  const openModal = async () => {
+    render(<LaserNestManualModal open workOrderId={42} onClose={jest.fn()} onSaved={jest.fn()} />);
+    await screen.findByLabelText(/sheet part/i);
+    await waitFor(() => expect(listedOptions().length).toBeGreaterThan(0));
+  };
+
+  const toggle = () => screen.getByRole('button', { name: /^Show (all materials \(\d+ more\)|raw stock only)$/ });
+
+  beforeEach(() => {
+    mockApi.getMaterials.mockResolvedValue([
+      SHEET_304,
+      PURCHASED_SHEET,
+      SHEET_METAL_SCREW,
+      MANUFACTURED_BRACKET,
+    ]);
+  });
+
+  it('lists only raw stock, and offers the rest behind a toggle', async () => {
+    await openModal();
+
+    expect(listedOptions()).toEqual(['SHT-304-125 — 304 SS 0.125 Sheet']);
+    // Two hidden: the purchased sheet and the hardware screw. The manufactured
+    // bracket is excluded, not hidden, so it is not in the count.
+    expect(toggle()).toHaveTextContent('Show all materials (2 more)');
+  });
+
+  it('reveals exactly what the count advertises', async () => {
+    await openModal();
+
+    const before = listedOptions().length;
+    fireEvent.click(toggle());
+
+    expect(listedOptions()).toHaveLength(before + 2);
+    expect(listedOptions()).toEqual(
+      expect.arrayContaining(['SHT-CS-060 — CS 0.060 Sheet', 'HW-SMS-8 — Sheet metal screw #8'])
+    );
+    expect(toggle()).toHaveTextContent('Show raw stock only');
+  });
+
+  it('never offers a part the shop PRODUCES, at either tier', async () => {
+    await openModal();
+
+    expect(listedOptions()).not.toContain('BRK-100 — Bracket, sheet metal');
+    fireEvent.click(toggle());
+    expect(listedOptions()).not.toContain('BRK-100 — Bracket, sheet metal');
+  });
+
+  it('does not blank a pick made through the escape hatch when the filter narrows again', async () => {
+    // A <select> whose value is absent from its options renders BLANK, so
+    // without the pin this sequence silently discards the planner's choice —
+    // and on a create it would POST an untied nest they believe is tied.
+    await openModal();
+
+    fireEvent.click(toggle());
+    fill(/sheet part/i, '33');
+    expect(screen.getByLabelText(/sheet part/i)).toHaveValue('33');
+
+    fireEvent.click(toggle());
+
+    expect(screen.getByLabelText(/sheet part/i)).toHaveValue('33');
+    expect(listedOptions()).toContain('SHT-CS-060 — CS 0.060 Sheet');
+    // …and it is not double-counted as still hidden.
+    expect(toggle()).toHaveTextContent('Show all materials (1 more)');
+  });
+
+  it('keeps the tie controls when the catalog holds no raw stock at all', async () => {
+    // A shop whose sheet is all typed `purchased` (both importers fall back to
+    // it) would otherwise lose the tie controls AND the toggle that reveals
+    // them — the field would simply vanish.
+    mockApi.getMaterials.mockResolvedValue([PURCHASED_SHEET, SHEET_METAL_SCREW]);
+
+    render(<LaserNestManualModal open workOrderId={42} onClose={jest.fn()} onSaved={jest.fn()} />);
+    const select = await screen.findByLabelText(/sheet part/i);
+    await waitFor(() => expect(screen.getByRole('button', { name: /Show all materials/ })).toBeInTheDocument());
+
+    expect(select).toBeInTheDocument();
+    expect(listedOptions()).toEqual([]);
+
+    fireEvent.click(toggle());
+    expect(listedOptions()).toEqual(['SHT-CS-060 — CS 0.060 Sheet', 'HW-SMS-8 — Sheet metal screw #8']);
+  });
+
+  it('still hides the controls when the material load fails outright', async () => {
+    // The degraded-load behavior must survive the new "hidden count counts too"
+    // rule: nothing loaded means nothing to show and nothing to reveal.
+    mockApi.getMaterials.mockRejectedValue(new Error('materials down'));
+
+    render(<LaserNestManualModal open workOrderId={42} onClose={jest.fn()} onSaved={jest.fn()} />);
+    await waitFor(() => expect(mockApi.getMaterials).toHaveBeenCalled());
+
+    expect(screen.queryByLabelText(/sheet part/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Show all materials/ })).not.toBeInTheDocument();
+  });
+
+  it('keeps an existing tie to non-raw stock selected on the edit path', async () => {
+    // The nest is really tied to the purchased sheet. A blank field here reads
+    // as "this nest is untied" when it is not, and saving would then untie it.
+    mockApi.getMaterialAllocations.mockResolvedValue([
+      tie({ id: 900, work_order_operation_id: 501, part_id: 33, part_number: 'SHT-CS-060', part_name: 'CS 0.060 Sheet' }),
+    ]);
+
+    render(
+      <LaserNestManualModal
+        open
+        workOrderId={42}
+        nest={NEST}
+        workOrderOperationId={501}
+        onClose={jest.fn()}
+        onSaved={jest.fn()}
+      />
+    );
+
+    await waitFor(() => expect(screen.getByLabelText(/sheet part/i)).toHaveValue('33'));
+    expect(listedOptions()).toContain('SHT-CS-060 — CS 0.060 Sheet');
+    expect(toggle()).toHaveTextContent('Show all materials (1 more)');
+
+    // Widening and narrowing again leaves it where it was.
+    fireEvent.click(toggle());
+    fireEvent.click(toggle());
+    expect(screen.getByLabelText(/sheet part/i)).toHaveValue('33');
   });
 });
 
@@ -376,5 +551,359 @@ describe('edit path', () => {
     // tie itself is untouched — nothing here pretended the untie landed.
     expect(screen.getByLabelText(/sheet part/i)).toHaveValue('');
     expect(mockApi.createMaterialAllocation).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * A LEGACY tie whose part is one the shop PRODUCES, on the EDIT path.
+ *
+ * Every other value in this picker comes from `/materials`, which serves only
+ * the material-supply types — so the exclusion has nothing to drop and the
+ * ordinary catalog path needs no check of its own. The tie read off
+ * `GET /work-orders/{id}/materials` is the exception: it names whatever part it
+ * was created against, including one created before the server started refusing
+ * them. Left alone it was pre-selected via `setValue` AND listed as a pickable
+ * "Sheet part" through the "keep an existing tie selectable" branch, which is
+ * the same leak the import wizard closes on its own pre-fill path.
+ *
+ * The refusal has three parts and dropping any one re-opens the path: the field
+ * is left un-selected, the part is NOT offered as an option at either tier, and
+ * a WARNING toast says so — `success` would hide a shortfall the planner must
+ * act on, and `error` would claim a failure that did not happen (the nest and
+ * its tie both read fine).
+ */
+describe('edit path: a legacy tie to a part the shop PRODUCES', () => {
+  const PRODUCED_TIE = {
+    part_id: 35,
+    part_number: 'BRK-100',
+    part_name: 'Bracket, sheet metal',
+    part_type: 'manufactured' as const,
+  };
+
+  /** Every option in the native <select>, minus the "(none)" row. */
+  const listedOptions = (): string[] =>
+    Array.from((screen.getByLabelText(/sheet part/i) as HTMLSelectElement).options)
+      .filter((option) => option.value !== '')
+      .map((option) => option.textContent ?? '');
+
+  const renderEdit = () =>
+    render(
+      <ToastProvider>
+        <LaserNestManualModal
+          open
+          workOrderId={42}
+          nest={NEST}
+          workOrderOperationId={501}
+          onClose={jest.fn()}
+          onSaved={jest.fn()}
+        />
+      </ToastProvider>
+    );
+
+  it('leaves the sheet part un-selected and warns, instead of pre-filling it', async () => {
+    mockApi.getMaterialAllocations.mockResolvedValue([tie({ id: 900, ...PRODUCED_TIE })]);
+
+    renderEdit();
+
+    const warning = await screen.findByRole('alert');
+    expect(warning).toHaveTextContent(
+      'This nest is tied to a part that is not stock material — re-pick the sheet part before saving.'
+    );
+    expect(screen.getByLabelText(/sheet part/i)).toHaveValue('');
+  });
+
+  it('does not offer the produced part in the picker either, at either tier', async () => {
+    // Pinning it in — the mechanism that rightly keeps an unlisted SHEET tie
+    // selectable — would make this bad tie one click from being re-committed.
+    mockApi.getMaterialAllocations.mockResolvedValue([tie({ id: 900, ...PRODUCED_TIE })]);
+    mockApi.getMaterials.mockResolvedValue([SHEET_304, PURCHASED_SHEET]);
+
+    renderEdit();
+    await screen.findByRole('alert');
+
+    expect(listedOptions()).toEqual(['SHT-304-125 — 304 SS 0.125 Sheet']);
+    fireEvent.click(screen.getByRole('button', { name: /show all materials/i }));
+    expect(listedOptions()).not.toContain('BRK-100 — Bracket, sheet metal');
+  });
+
+  it('carries the planned per-run across, so a re-pick keeps the quantity', async () => {
+    mockApi.getMaterialAllocations.mockResolvedValue([tie({ id: 900, qty_per_run: 3, ...PRODUCED_TIE })]);
+
+    renderEdit();
+    await screen.findByRole('alert');
+
+    // The quantity is a plan figure, not a part — it still applies to whatever
+    // sheet replaces the bad one.
+    expect(screen.getByLabelText(/sheets per run/i)).toHaveValue(3);
+  });
+
+  it('re-picks as an untie-then-re-tie, never a second tie on the same operation', async () => {
+    // The tie stays in state even though the field is blank. That is what makes
+    // a re-pick the ordinary swap: without it this would POST a second, live
+    // allocation alongside the bad one and the operation would consume twice.
+    mockApi.getMaterialAllocations.mockResolvedValue([tie({ id: 900, ...PRODUCED_TIE })]);
+    mockApi.updateLaserNest.mockResolvedValue({
+      id: 3,
+      nest_name: 'Nest A',
+      cnc_number: '1234',
+      planned_runs: 4,
+      completed_runs: 1,
+      remaining_runs: 3,
+    });
+    mockApi.deleteMaterialAllocation.mockResolvedValue(undefined as never);
+    mockApi.createMaterialAllocation.mockResolvedValue(tie({ id: 901, part_id: 31 }));
+
+    renderEdit();
+    await screen.findByRole('alert');
+
+    fill(/sheet part/i, '31');
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+
+    await waitFor(() => expect(mockApi.createMaterialAllocation).toHaveBeenCalledTimes(1));
+    expect(mockApi.deleteMaterialAllocation).toHaveBeenCalledWith(42, 900);
+    expect(mockApi.createMaterialAllocation).toHaveBeenCalledWith(
+      42,
+      expect.objectContaining({ part_id: 31, work_order_operation_id: 501 })
+    );
+  });
+
+  it('pre-fills exactly as before when the server sends no part_type at all', async () => {
+    // THE compatibility case. An older API omits `part_type` entirely; reading
+    // absent as "suspect" would silently blank a live, legitimate tie the moment
+    // the client ran ahead of the server. `tie()` omits the field, which is
+    // precisely the older-server shape.
+    mockApi.getMaterialAllocations.mockResolvedValue([tie({ id: 900, part_id: 31 })]);
+    expect(tie({ id: 900 })).not.toHaveProperty('part_type');
+
+    renderEdit();
+
+    await waitFor(() => expect(screen.getByLabelText(/sheet part/i)).toHaveValue('31'));
+    expect(screen.queryByText(/not stock material/i)).not.toBeInTheDocument();
+  });
+
+  it('says nothing when the tie is ordinary stock', async () => {
+    mockApi.getMaterialAllocations.mockResolvedValue([
+      tie({ id: 900, part_id: 31, part_type: 'raw_material' }),
+    ]);
+
+    renderEdit();
+
+    await waitFor(() => expect(screen.getByLabelText(/sheet part/i)).toHaveValue('31'));
+    expect(screen.queryByText(/not stock material/i)).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * ...AND THAT TIE IS NEVER DROPPED SILENTLY.
+ *
+ * The refusal above leaves the field blank while the tie is still live and
+ * still in `existingTie` — and `reconcileTie` reads a blank field as "untie
+ * this nest". Correct when the planner cleared it; a trap when the MODAL did.
+ * A planner who opened this dialog only to fix a CNC number saved, destroyed a
+ * live allocation, and saw nothing but a toast that had already timed out.
+ *
+ * The guard has three parts and each is pinned below: a PERSISTENT notice
+ * beside the field (the toast is gone in four seconds and never said what
+ * saving would do), a ConfirmDialog on the save that would drop it, and tie
+ * controls that stay on screen even when `/materials` is unreachable — which
+ * was the state where the planner was told to re-pick with the field, the
+ * toggle and the notice all hidden.
+ *
+ * What it deliberately does NOT do is block the save. The nest PATCH is a
+ * server verb with no such rule, an unrelated one-character edit must not be
+ * held hostage to a material decision, and with `/materials` down a block would
+ * be unsatisfiable — refusing to save while offering no way to comply.
+ */
+describe('edit path: a legacy produced-part tie is never dropped by accident', () => {
+  const PRODUCED_TIE = {
+    part_id: 35,
+    part_number: 'BRK-100',
+    part_name: 'Bracket, sheet metal',
+    part_type: 'manufactured' as const,
+  };
+
+  const NEST_PATCHED = {
+    id: 3,
+    nest_name: 'Nest A',
+    cnc_number: '9999',
+    planned_runs: 4,
+    completed_runs: 1,
+    remaining_runs: 3,
+  };
+
+  const renderEdit = () =>
+    render(
+      <ToastProvider>
+        <LaserNestManualModal
+          open
+          workOrderId={42}
+          nest={NEST}
+          workOrderOperationId={501}
+          onClose={jest.fn()}
+          onSaved={jest.fn()}
+        />
+      </ToastProvider>
+    );
+
+  const confirmDialog = () => screen.findByRole('button', { name: /save and remove the tie/i });
+
+  beforeEach(() => {
+    mockApi.getMaterialAllocations.mockResolvedValue([tie({ id: 900, ...PRODUCED_TIE })]);
+    mockApi.updateLaserNest.mockResolvedValue(NEST_PATCHED);
+    mockApi.deleteMaterialAllocation.mockResolvedValue(undefined as never);
+  });
+
+  it('names the tie beside the field, persistently — not only in the load toast', async () => {
+    renderEdit();
+    await screen.findByRole('alert');
+
+    // The notice is the select's own description, so it is read WITH the field
+    // rather than once, at load, by a toast that is about to disappear.
+    const select = screen.getByLabelText(/sheet part/i);
+    const noticeId = select.getAttribute('aria-describedby');
+    expect(noticeId).toBeTruthy();
+    const notice = document.getElementById(noticeId!);
+    expect(notice).toHaveTextContent('BRK-100 — Bracket, sheet metal');
+    expect(notice).toHaveTextContent(/saving with this blank removes the tie/i);
+  });
+
+  it('asks before a save that would drop the tie, and fires nothing until confirmed', async () => {
+    renderEdit();
+    await screen.findByRole('alert');
+
+    // The planner came here for the CNC number and never touched the tie.
+    fill(/cnc number/i, '9999');
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+
+    expect(await screen.findByText(/remove this nest's material tie\?/i)).toBeInTheDocument();
+    // NOTHING has gone to the server yet — not even the nest PATCH the planner
+    // actually asked for, because the confirm may still cancel the whole save.
+    expect(mockApi.updateLaserNest).not.toHaveBeenCalled();
+    expect(mockApi.deleteMaterialAllocation).not.toHaveBeenCalled();
+  });
+
+  it('cancelling leaves the tie alone and keeps the planner on the form', async () => {
+    const onSaved = jest.fn();
+    render(
+      <ToastProvider>
+        <LaserNestManualModal
+          open
+          workOrderId={42}
+          nest={NEST}
+          workOrderOperationId={501}
+          onClose={jest.fn()}
+          onSaved={onSaved}
+        />
+      </ToastProvider>
+    );
+    await screen.findByRole('alert');
+
+    fill(/cnc number/i, '9999');
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /keep editing/i }));
+
+    await waitFor(() =>
+      expect(screen.queryByText(/remove this nest's material tie\?/i)).not.toBeInTheDocument()
+    );
+    expect(mockApi.deleteMaterialAllocation).not.toHaveBeenCalled();
+    expect(mockApi.updateLaserNest).not.toHaveBeenCalled();
+    expect(onSaved).not.toHaveBeenCalled();
+    // The planner's edit survives the interruption.
+    expect(screen.getByLabelText(/cnc number/i)).toHaveValue('9999');
+  });
+
+  it('confirming saves and unties — the drop stays possible, it just has to be chosen', async () => {
+    renderEdit();
+    await screen.findByRole('alert');
+
+    fill(/cnc number/i, '9999');
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+    fireEvent.click(await confirmDialog());
+
+    await waitFor(() => expect(mockApi.deleteMaterialAllocation).toHaveBeenCalledWith(42, 900));
+    expect(mockApi.updateLaserNest).toHaveBeenCalledWith(3, expect.objectContaining({ cnc_number: '9999' }));
+  });
+
+  it('does NOT ask when the planner re-picked a real sheet — that is the ordinary swap', async () => {
+    mockApi.createMaterialAllocation.mockResolvedValue(tie({ id: 901, part_id: 31 }));
+
+    renderEdit();
+    await screen.findByRole('alert');
+
+    fill(/sheet part/i, '31');
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+
+    await waitFor(() => expect(mockApi.createMaterialAllocation).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText(/remove this nest's material tie\?/i)).not.toBeInTheDocument();
+  });
+
+  it('does NOT ask when the planner cleared an ordinary tie by hand', async () => {
+    // Clearing the field is already an explicit act. The guard is for a blank
+    // the MODAL wrote, not for every untie.
+    mockApi.getMaterialAllocations.mockResolvedValue([tie({ id: 900, part_id: 31, part_type: 'raw_material' })]);
+
+    renderEdit();
+    await waitFor(() => expect(screen.getByLabelText(/sheet part/i)).toHaveValue('31'));
+
+    fill(/sheet part/i, '');
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+
+    await waitFor(() => expect(mockApi.deleteMaterialAllocation).toHaveBeenCalledWith(42, 900));
+    expect(screen.queryByText(/remove this nest's material tie\?/i)).not.toBeInTheDocument();
+  });
+
+  it('a refused untie keeps the dialog closed and shows the server sentence on the form', async () => {
+    // Non-optimistic: the untie is server-GATED (409 once material has been
+    // consumed), so a refusal must land the planner back on the form reading
+    // what the server said — not on a dialog that already vanished.
+    mockApi.deleteMaterialAllocation.mockRejectedValue({
+      response: {
+        status: 409,
+        data: { detail: 'Cannot untie: 4.0 EA already consumed against this allocation.' },
+      },
+    });
+
+    renderEdit();
+    await screen.findByRole('alert');
+
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+    fireEvent.click(await confirmDialog());
+
+    expect(await screen.findByText(/4\.0 EA already consumed against this allocation/i)).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.queryByText(/remove this nest's material tie\?/i)).not.toBeInTheDocument()
+    );
+  });
+
+  it('keeps the field, the toggle and the notice on screen when /materials is unreachable', async () => {
+    // THE edge that made the warning unactionable: with no material loaded both
+    // catalog terms are zero, so the tie controls vanished — the planner was
+    // told to re-pick with nothing on screen to re-pick in, and `reconcileTie`
+    // was skipped along with the controls, so the same nest behaved differently
+    // depending on whether an unrelated read had succeeded.
+    mockApi.getMaterials.mockRejectedValue(new Error('materials down'));
+
+    renderEdit();
+    await screen.findByRole('alert');
+
+    const select = await screen.findByLabelText(/sheet part/i);
+    expect(select).toBeInTheDocument();
+    const notice = document.getElementById(select.getAttribute('aria-describedby')!);
+    expect(notice).toHaveTextContent(/no material could be loaded to pick from/i);
+
+    // And the save still goes through the confirm rather than through a hidden
+    // control that quietly did nothing.
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+    expect(await screen.findByText(/remove this nest's material tie\?/i)).toBeInTheDocument();
+  });
+
+  it('says nothing extra for an ordinary tie — no notice, no aria-describedby', async () => {
+    mockApi.getMaterialAllocations.mockResolvedValue([tie({ id: 900, part_id: 31, part_type: 'raw_material' })]);
+
+    renderEdit();
+    await waitFor(() => expect(screen.getByLabelText(/sheet part/i)).toHaveValue('31'));
+
+    expect(screen.getByLabelText(/sheet part/i)).not.toHaveAttribute('aria-describedby');
+    expect(screen.queryByText(/removes the tie/i)).not.toBeInTheDocument();
   });
 });

@@ -63,6 +63,7 @@ from app.schemas.work_order import (
     WorkOrderOperationResponse,
     WorkOrderOperationUpdate,
     WorkOrderResponse,
+    WorkOrderRestoreResponse,
     WorkOrderSummary,
     WorkOrderUpdate,
 )
@@ -118,6 +119,7 @@ from app.services.material_consumption_service import (
     ledger_backed_allocation_ids,
     reopen_allocations_cancelled_by_delete,
 )
+from app.services.material_tie_part_gate import assert_part_is_tieable_material
 from app.services.migration_import_service import import_open_work_orders
 from app.services.operation_action_gates import (
     MSG_PREDECESSORS_INCOMPLETE,
@@ -892,10 +894,20 @@ def _find_nest_material_part(db: Session, company_id: int, part_id: int) -> Part
     company's material. A miss is a **404, never a 403**, so a part id cannot be
     probed for existence across tenants. Soft-deleted parts are excluded: a tie to a
     deleted part would advertise demand nothing can satisfy.
+
+    Since it also resolves the part that a nest's tie will DEPLETE at completion
+    (invariant 6), it carries the third predicate too: the part may not be one the shop
+    PRODUCES. ``assert_part_is_tieable_material`` refuses a manufactured part or an
+    assembly with **422** -- the part exists and the caller may see it, so what is refused
+    is its ROLE, not its existence. The check lives here rather than at the call sites
+    because this is the ONE resolver behind both nest-tie doors (the laser-package import
+    and the manual nest create), and a gate on one of two doors is not a gate. It runs
+    before the resolver returns, so no caller can mutate anything with a rejected part.
     """
     part = tenant_query(db, Part, company_id).filter(Part.id == part_id, Part.is_deleted == False).first()  # noqa: E712
     if part is None:
         raise HTTPException(status_code=404, detail="Material part not found")
+    assert_part_is_tieable_material(part)
     return part
 
 
@@ -3046,7 +3058,10 @@ def create_manual_laser_nest_endpoint(
     the nest's operation completes (the work-order completion reconcile is the
     self-heal) -- the same tie, through the same ``create_nest_material_allocation``
     seam, that the package import creates. Omitting it leaves the nest untied and
-    byte-identical to its pre-feature behavior.
+    byte-identical to its pre-feature behavior. It must name material: an unknown,
+    cross-tenant or soft-deleted part is **404**, and a part the shop PRODUCES
+    (MANUFACTURED / ASSEMBLY) is **422** — both raised by ``_find_nest_material_part``
+    before the transaction opens, so nothing is created either way.
     """
     target_work_order = _load_parent_work_order(db, work_order_id, company_id)
     # Resolve the material part BEFORE the transaction: it is a read-only,
@@ -3689,15 +3704,27 @@ def delete_work_order(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@router.post("/{work_order_id}/restore", summary="Restore a soft-deleted work order")
+@router.post(
+    "/{work_order_id}/restore",
+    response_model=WorkOrderRestoreResponse,
+    summary="Restore a soft-deleted work order",
+)
 def restore_work_order(
     work_order_id: int,
     request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
-):
-    """Restore a soft-deleted work order."""
+) -> WorkOrderRestoreResponse:
+    """Restore a soft-deleted work order.
+
+    Returns an ENVELOPE rather than a bare message: the tie re-open below is allowed to
+    leave a tie CANCELLED (its part was reclassified into something the shop PRODUCES
+    while the work order was deleted), and a dropped tie with no channel is precisely the
+    failure the duplicate path's skip envelope exists to prevent -- the job runs, no
+    shortage shows, and stock is never deducted until the count disagrees. ``message`` is
+    unchanged and still present, so existing callers are unaffected.
+    """
     work_order = db.query(WorkOrder).filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id).first()
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")
@@ -3716,7 +3743,14 @@ def restore_work_order(
     # stops suppressing the BOM backflush, double-issuing the same part. Ties cancelled
     # for ANY other reason (a manual untie, a nest re-import) are deliberately left
     # alone; the discriminator is the cancel's own audit reason.
-    reopen_allocations_cancelled_by_delete(db, work_order=work_order, company_id=company_id, audit=audit)
+    #
+    # One tie it will NOT put back: one whose part is now a MANUFACTURED part or an
+    # ASSEMBLY. Re-opening that would re-arm demand that issues finished goods to build
+    # the job — the state `material_tie_part_gate` refuses 422 at both tie-write doors —
+    # and it is reachable in three supported verbs (delete → reclassify → restore),
+    # because the conversion gate counts only OPEN ties and this delete cancelled them.
+    # Those skips are reported to the planner and recorded on the audit row below.
+    tie_restore = reopen_allocations_cancelled_by_delete(db, work_order=work_order, company_id=company_id, audit=audit)
 
     # Audit BEFORE the terminal commit so the audit row commits atomically with the
     # restore — AuditService.log() only flushes and the session never commits on teardown.
@@ -3728,10 +3762,24 @@ def restore_work_order(
         old_values={"is_deleted": True},
         new_values={"is_deleted": False},
         action="restore",
+        # Both lists unconditionally, the duplicate path's convention: an empty
+        # `skipped_material_allocations` is a positive statement that nothing was dropped,
+        # which is worth more on a tamper-evident chain than an absent key. `model_dump()`
+        # rather than hand-built dicts, so the chain and the response can never describe a
+        # skip differently. The SKIPS are audited here, on the verb's own row, because
+        # nothing changed on the allocation itself and a chain row must describe something
+        # that happened (invariant 2); each RE-OPEN wrote its own row already.
+        extra_data={
+            "reopened_material_allocations": tie_restore.reopened,
+            "skipped_material_allocations": [entry.model_dump() for entry in tie_restore.skipped],
+        },
     )
     db.commit()
 
-    return {"message": f"Work order {work_order.work_order_number} restored"}
+    return WorkOrderRestoreResponse(
+        message=f"Work order {work_order.work_order_number} restored",
+        skipped_material_allocations=tie_restore.skipped,
+    )
 
 
 @router.post("/{work_order_id}/release", response_model=WorkOrderResponse)

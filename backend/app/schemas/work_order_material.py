@@ -17,7 +17,14 @@ from app.schemas.base import UTCModel
 class MaterialAllocationCreate(BaseModel):
     """Tie a material part to a work order (or to one of its operations)."""
 
-    part_id: int = Field(..., description="The MATERIAL part consumed — never the part being produced")
+    part_id: int = Field(
+        ...,
+        description=(
+            "The MATERIAL part consumed — never the part being produced. A manufactured part or an "
+            "assembly is refused 422: a tie depletes stock at completion, so tying one would make a "
+            "job consume finished goods to build itself."
+        ),
+    )
     work_order_operation_id: Optional[int] = Field(
         None,
         description=(
@@ -79,6 +86,19 @@ class MaterialAllocationResponse(UTCModel):
     part_id: int
     part_number: Optional[str] = None
     part_name: Optional[str] = None
+    part_type: Optional[str] = Field(
+        None,
+        description=(
+            "The tied part's type as its lowercase enum value (raw_material, purchased, "
+            "hardware, consumable — or manufactured/assembly on a LEGACY tie created before "
+            "the part-type gate). Read live off the part on every serialize, never snapshotted. "
+            "It exists so a client can TELL A LEGACY BAD TIE APART from a legitimate one, which "
+            "part_number and part_name cannot: a tie the write gate would refuse today looks "
+            "identical without it. Clients use it to withhold such a tie from a pre-fill or a "
+            "picker rather than to render a badge. NULL when the part row could not be read, and "
+            "NULL for a NULL column."
+        ),
+    )
 
     source: AllocationSource
     status: AllocationStatus

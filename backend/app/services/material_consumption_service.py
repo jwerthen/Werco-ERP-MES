@@ -193,11 +193,13 @@ from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import StaleDataError
 
 from app.db.ledger_filter import BACKFLUSH_REFERENCE_TYPE, OPERATION_REFERENCE_TYPE
+from app.db.tenant_filter import tenant_query
 from app.models.audit_log import AuditLog
 from app.models.inventory import InventoryItem, InventoryTransaction, TransactionType
 from app.models.part import Part
 from app.models.work_order import WorkOrder, WorkOrderOperation
 from app.models.work_order_material import AllocationStatus, WorkOrderMaterialAllocation
+from app.schemas.work_order import WorkOrderRestoreSkippedAllocation
 from app.schemas.work_order_material import MaterialReturnIntent
 from app.services.audit_service import AuditService
 from app.services.completion_inventory_service import (
@@ -209,6 +211,7 @@ from app.services.completion_inventory_service import (
     _write_return_txn,
     require_posted_issue,
 )
+from app.services.material_tie_part_gate import PART_NOT_TIEABLE_REASON, part_is_tieable_material
 from app.services.operational_event_service import OperationalEventService
 
 logger = logging.getLogger(__name__)
@@ -2338,13 +2341,32 @@ def cancel_open_allocations_for_work_order(
     return cancelled
 
 
+@dataclass
+class ReopenAllocationsResult:
+    """What a restore put back, and what it deliberately did not.
+
+    The function used to return a bare ``list[int]`` of reopened ids. It grew a second
+    list the moment a tie could be legitimately LEFT cancelled: a skip nobody surfaces is
+    the failure this system's tie-skip convention exists to prevent (the restored job
+    runs, no shortage shows, stock is never deducted until the count disagrees), so the
+    caller needs both halves to build its response envelope and its audit row.
+
+    ``skipped`` carries the RESPONSE SCHEMA, not dicts, and is validated here inside the
+    caller's transaction — same discipline as ``work_order_duplicate_service``: a
+    malformed skip must fail the restore, not 500 after it.
+    """
+
+    reopened: list[int] = field(default_factory=list)
+    skipped: list[WorkOrderRestoreSkippedAllocation] = field(default_factory=list)
+
+
 def reopen_allocations_cancelled_by_delete(
     db: Session,
     *,
     work_order: WorkOrder,
     company_id: int,
     audit: AuditService,
-) -> list[int]:
+) -> ReopenAllocationsResult:
     """Re-OPEN the ties that this work order's own soft delete auto-cancelled.
 
     The delete/restore pair has to be symmetric. Soft delete cancels every OPEN tie to
@@ -2375,11 +2397,52 @@ def reopen_allocations_cancelled_by_delete(
     alone; the cancel's ``extra_data.work_order_operation_id`` is what makes that
     detectable without a second query.
 
+    **A tie whose part is no longer TIEABLE is not resurrected either, and this is a
+    SECURITY gate, not housekeeping.** Re-opening a tie is the one place in this system
+    that re-arms standing demand without an actor naming a ``part_id``, and the part class
+    can have changed since the delete. It can change *because of* the delete: the
+    conversion gate (``material_tie_part_gate.assert_part_type_change_allowed``) counts
+    only OPEN ties on unfinished work orders, and the soft delete CANCELs every one of
+    them -- so DELETE -> reclassify the part as MANUFACTURED/ASSEMBLY -> RESTORE is a
+    three-verb bypass, every verb supported and ADMIN/MANAGER-gated, that lands exactly the
+    state the gate exists to prevent: an OPEN tie to a produced part on a live work order,
+    which issues finished goods to build the job and never auto-reverses (invariant 6b).
+    So this asks ``part_is_tieable_material`` -- the SAME predicate the two tie-write doors
+    422 on and the duplicate copier skips on -- and leaves such a tie CANCELLED, reporting
+    it as ``PART_NOT_TIEABLE_REASON`` rather than dropping it silently.
+
+    It is refused HERE rather than in the conversion count for a reason worth keeping: a
+    deleted work order completes nothing, so at reclassify time the hazard genuinely is not
+    live and a 409 there would be false. The restore is the moment it becomes live, and the
+    last moment an actor with intent is present.
+
+    And leaving that tie CANCELLED does **not** re-open the double-issue this docstring's
+    second paragraph warns about, because the backflush leg drops covered demand TWICE:
+    ``_drop_allocation_covered_parts`` keys on an OPEN tie, but ``_drop_ledger_covered_parts``
+    keys on the LEDGER -- "the material is already gone, whatever the tie's status now says".
+    So whatever this tie consumed before the delete stays suppressed, and only the un-consumed
+    remainder falls to the BOM, which is where a shop-made sub-assembly's demand belongs
+    anyway (see ``material_tie_part_gate``'s scope note). Do not "fix" this skip back into a
+    re-open on that argument.
+
+    Fails OPEN if the part row cannot be resolved at all -- ``part_id`` is NOT NULL with an
+    FK, so that is unreachable defence rather than a real case, and the gate's own posture
+    is to never refuse material on an UNREADABLE type (see its module docstring). A
+    SOFT-DELETED part still resolves and is still read: ``tenant_query`` scopes
+    ``company_id`` only, which is what lets this ask about the class of a part whose row is
+    tombstoned.
+
     Degrades safely: if a cancel's audit row is missing (``AuditService.log`` swallows its
     own failures), that tie simply is not reopened -- the conservative direction, since
     the alternative is resurrecting a tie whose provenance we cannot establish.
 
-    Audited (``action="restore"``), tenant-scoped, does not commit.
+    Audited, tenant-scoped, does not commit. Each RE-OPEN writes its own
+    ``action="restore"`` row on the allocation; the SKIPS are audited by the caller, on the
+    restore verb's own ``work_order`` row, because nothing changed on the allocation and a
+    chain row must describe something that happened (invariant 2). That is the same channel
+    ``duplicate_work_order`` uses for its skips, and the caller returns them to the client
+    as well -- the audit chain alone is not enough when the failure mode is a planner
+    releasing a job that quietly carries no demand for its material.
     """
     candidates = (
         db.query(WorkOrderMaterialAllocation)
@@ -2392,7 +2455,7 @@ def reopen_allocations_cancelled_by_delete(
         .all()
     )
     if not candidates:
-        return []
+        return ReopenAllocationsResult()
 
     by_id = {allocation.id: allocation for allocation in candidates}
     # Ascending id => the LAST row seen per allocation is its most recent cancel.
@@ -2410,7 +2473,20 @@ def reopen_allocations_cancelled_by_delete(
     ):
         latest_cancel[resource_id] = extra_data or {}
 
+    # One read for the part-type re-check below. ``tenant_query`` scopes ``company_id``
+    # only -- deliberately, so a SOFT-DELETED part still resolves and its class is still
+    # readable; what is being asked here is "what IS this part now", not "may it be
+    # picked". A row that does not resolve at all is left out and falls through to the
+    # fail-open branch in the loop.
+    parts_by_id = {
+        part.id: part
+        for part in tenant_query(db, Part, company_id)
+        .filter(Part.id.in_({allocation.part_id for allocation in candidates}))
+        .all()
+    }
+
     reopened: list[int] = []
+    skipped: list[WorkOrderRestoreSkippedAllocation] = []
     for allocation in candidates:
         cancel_extra = latest_cancel.get(allocation.id, {})
         if cancel_extra.get("reason") != WORK_ORDER_DELETED_CANCEL_REASON:
@@ -2420,10 +2496,28 @@ def reopen_allocations_cancelled_by_delete(
             # operation it named. Reopening it would re-arm it as a work-order-scoped
             # tie the planner never created. See the docstring.
             continue
+        part = parts_by_id.get(allocation.part_id)
+        if part is not None and not part_is_tieable_material(part):
+            # The part became something the shop PRODUCES while the work order was
+            # deleted. Re-opening would re-arm demand that issues finished goods to build
+            # the job -- the exact state both tie-write doors refuse 422. Leave it
+            # CANCELLED and REPORT it; the caller surfaces it and audits it.
+            skipped.append(
+                # The response schema, not a dict -- validated inside the caller's
+                # transaction, so a malformed skip fails the restore instead of 500-ing
+                # after it (the duplicate copier's discipline, same reason).
+                WorkOrderRestoreSkippedAllocation(
+                    allocation_id=allocation.id,
+                    part_id=allocation.part_id,
+                    work_order_operation_id=allocation.work_order_operation_id,
+                    reason=PART_NOT_TIEABLE_REASON,
+                )
+            )
+            continue
         allocation.status = AllocationStatus.OPEN
         reopened.append(allocation.id)
     if not reopened:
-        return []
+        return ReopenAllocationsResult(skipped=skipped)
 
     db.flush()
     for allocation_id in reopened:
@@ -2445,7 +2539,7 @@ def reopen_allocations_cancelled_by_delete(
                 "part_id": allocation.part_id,
             },
         )
-    return reopened
+    return ReopenAllocationsResult(reopened=reopened, skipped=skipped)
 
 
 def allocations_on_work_order(

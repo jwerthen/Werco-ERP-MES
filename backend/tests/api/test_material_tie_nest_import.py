@@ -23,6 +23,15 @@ What is pinned here:
 3. **A cross-tenant ``material_part_id`` is 404, never 403** (so an id cannot be probed
    across tenants) and NOTHING is persisted -- the part is resolved BEFORE the rebuild
    wipes the prior nests, so a bad id cannot leave a work order half-destroyed.
+3b. **A PRODUCED part (manufactured / assembly) is 422 at BOTH doors**, with the identical
+   sentence, and likewise persists nothing. ``_find_nest_material_part`` carries
+   ``material_tie_part_gate.assert_part_is_tieable_material``, so the shared resolver is
+   what makes the two doors agree. 422 rather than 404 because the part exists and the
+   caller may see it -- what is refused is its ROLE -- and that is only safe because the
+   gate runs AFTER the tenant-scoped resolve, which is why item 3 above still 404s.
+   ``purchased`` / ``hardware`` / ``consumable`` are NOT refused: they are bought and are
+   genuinely consumed. The full gate matrix lives in
+   ``tests/api/test_material_tie_part_type_gate.py``.
 4. **Re-import replaces ties without colliding with ``uq_wo_material_alloc_open_op``.**
    The superseded tie is CANCELLED and DETACHED (never deleted), so the partial unique
    index only ever sees one OPEN row per (company, operation, part).
@@ -631,6 +640,185 @@ class TestManualNestCreatesTheSameTie:
 
         assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
         assert _ties(db_session) == []
+
+
+# --------------------------------------------------------------------------- #
+# A PRODUCED part may never be a nest's material -- both doors, one resolver
+# --------------------------------------------------------------------------- #
+class TestProducedPartsAreRefusedAtBothNestDoors:
+    """``_find_nest_material_part`` carries the part-type gate, so both doors inherit it.
+
+    A tie DEPLETES the tied part when the operation completes (invariant 6), so naming a
+    MANUFACTURED part or an ASSEMBLY as a nest's sheet makes the laser job eat finished
+    goods -- and consumption never auto-reverses, so the only remedy afterwards is a
+    compensating transaction against stock that should never have moved.
+
+    422, not 404: the part exists and this caller may see it, so what is refused is its
+    ROLE. The cross-tenant cases above stay 404 precisely because the gate runs AFTER the
+    tenant-scoped resolve -- the two suites of assertions together are what stop the status
+    code becoming an existence oracle for another company's catalog (invariant 1).
+
+    Both doors are asserted rather than one and an argument. They share a resolver TODAY;
+    the cheapest way for that to stop being true is a future refactor that inlines the
+    lookup at one call site, and the manual door is the one an operator reaches by hand.
+    """
+
+    def _produced_part(self, db: Session, *, part_type: str = "manufactured") -> Part:
+        n = _next()
+        part = Part(
+            part_number=f"MT-PROD-{n:05d}",
+            name=f"Produced {n}",
+            part_type=part_type,
+            unit_of_measure="each",
+            is_active=True,
+            company_id=COMPANY_A,
+        )
+        db.add(part)
+        db.commit()
+        db.refresh(part)
+        return part
+
+    @pytest.mark.parametrize("part_type", ["manufactured", "assembly"])
+    def test_package_import_refuses_a_produced_part_and_persists_nothing(
+        self, client: TestClient, db_session: Session, part_type: str
+    ):
+        """Same "nothing persisted" property the cross-tenant 404 already had.
+
+        The resolve happens BEFORE the atomic rebuild, so a refused row cannot leave a
+        half-built package behind -- no nests, no package, no tie. Worth asserting
+        separately from the 404 case because the 422 is raised from a DIFFERENT line
+        (inside the resolver rather than at its miss branch), and "it fails cleanly" is a
+        property of where the raise sits, not of what it says.
+        """
+        admin = make_user(db_session)
+        wc = make_laser_work_center(db_session)
+        parent = make_parent_work_order(db_session)
+        produced = self._produced_part(db_session, part_type=part_type)
+
+        rows = [
+            {
+                "source_file": "05749.pdf",
+                "cnc_number": "05749",
+                "planned_runs": 3,
+                "material_part_id": produced.id,
+            }
+        ]
+        resp = _import(client, headers_for(admin), parent.id, _pdf_zip("05749.pdf"), rows=rows, work_center_id=wc.id)
+
+        assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
+        assert produced.part_number in resp.json()["detail"]
+        assert "not stock material" in resp.json()["detail"]
+        assert _ties(db_session) == []
+        assert _tie_audit_rows(db_session) == []
+        assert db_session.query(LaserNest).count() == 0
+        assert db_session.query(LaserNestPackage).count() == 0
+
+    def test_one_bad_row_refuses_the_WHOLE_import(self, client: TestClient, db_session: Session):
+        """A produced part on row 2 aborts row 1 too -- matching the existing 404 behavior.
+
+        Both rows are pre-resolved in one loop before anything is written, so a package is
+        never half-imported. Pinned because the alternative (skip the bad row, import the
+        rest) would silently deliver a package the planner did not confirm.
+        """
+        admin = make_user(db_session)
+        wc = make_laser_work_center(db_session)
+        parent = make_parent_work_order(db_session)
+        sheet = make_sheet_part(db_session)
+        produced = self._produced_part(db_session)
+
+        rows = [
+            {"source_file": "05749.pdf", "cnc_number": "05749", "planned_runs": 3, "material_part_id": sheet.id},
+            {"source_file": "05750.pdf", "cnc_number": "05750", "planned_runs": 2, "material_part_id": produced.id},
+        ]
+        resp = _import(
+            client, headers_for(admin), parent.id, _pdf_zip("05749.pdf", "05750.pdf"), rows=rows, work_center_id=wc.id
+        )
+
+        assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
+        assert _ties(db_session) == []
+        assert db_session.query(LaserNest).count() == 0
+        assert db_session.query(LaserNestPackage).count() == 0
+
+    @pytest.mark.parametrize("part_type", ["manufactured", "assembly"])
+    def test_manual_nest_refuses_a_produced_part_and_creates_no_nest(
+        self, client: TestClient, db_session: Session, part_type: str
+    ):
+        admin = make_user(db_session)
+        make_laser_work_center(db_session)
+        parent = make_parent_work_order(db_session)
+        produced = self._produced_part(db_session, part_type=part_type)
+
+        resp = client.post(
+            f"/api/v1/work-orders/{parent.id}/laser-nests/manual",
+            headers=headers_for(admin),
+            json={"cnc_number": "PRG-600", "planned_runs": 2, "material_part_id": produced.id},
+        )
+
+        assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, resp.text
+        assert produced.part_number in resp.json()["detail"]
+        assert _ties(db_session) == []
+        assert _tie_audit_rows(db_session) == []
+        assert db_session.query(LaserNest).count() == 0
+
+    def test_both_nest_doors_return_the_IDENTICAL_refusal_sentence(self, client: TestClient, db_session: Session):
+        """One gate, not two -- proved on the wire rather than only by import identity.
+
+        The two doors share ``_find_nest_material_part`` today. If someone ever inlines the
+        lookup at one call site, the copy will drift in wording long before it drifts in
+        behavior, and this is the assertion that notices.
+        """
+        admin = make_user(db_session)
+        wc = make_laser_work_center(db_session)
+        parent = make_parent_work_order(db_session)
+        produced = self._produced_part(db_session)
+
+        via_manual = client.post(
+            f"/api/v1/work-orders/{parent.id}/laser-nests/manual",
+            headers=headers_for(admin),
+            json={"cnc_number": "PRG-601", "planned_runs": 2, "material_part_id": produced.id},
+        )
+        rows = [{"source_file": "05749.pdf", "cnc_number": "05749", "planned_runs": 2, "material_part_id": produced.id}]
+        via_import = _import(
+            client, headers_for(admin), parent.id, _pdf_zip("05749.pdf"), rows=rows, work_center_id=wc.id
+        )
+
+        assert via_manual.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, via_manual.text
+        assert via_import.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, via_import.text
+        assert via_manual.json()["detail"] == via_import.json()["detail"], "one gate, two doors"
+
+    def test_a_material_supply_part_still_ties_at_both_doors(self, client: TestClient, db_session: Session):
+        """The negative control. ``purchased`` -- not ``raw_material`` -- on purpose.
+
+        The gate refuses PRODUCED parts, not "everything that is not raw stock". A gate
+        quietly narrowed to raw material would still pass every refusal test above while
+        breaking a bought-sheet tie the shop legitimately creates (the BOM importer and the
+        PO upload both fall back to ``purchased`` for real sheet stock).
+        """
+        admin = make_user(db_session)
+        wc = make_laser_work_center(db_session)
+        parent = make_parent_work_order(db_session)
+        n = _next()
+        bought_sheet = Part(
+            part_number=f"MT-BUY-{n:05d}",
+            name=f"Bought sheet {n}",
+            part_type="purchased",
+            unit_of_measure="sheets",
+            is_active=True,
+            company_id=COMPANY_A,
+        )
+        db_session.add(bought_sheet)
+        db_session.commit()
+        db_session.refresh(bought_sheet)
+
+        rows = [
+            {"source_file": "05749.pdf", "cnc_number": "05749", "planned_runs": 2, "material_part_id": bought_sheet.id}
+        ]
+        resp = _import(client, headers_for(admin), parent.id, _pdf_zip("05749.pdf"), rows=rows, work_center_id=wc.id)
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+
+        [tie] = _ties(db_session)
+        assert tie.part_id == bought_sheet.id
+        assert tie.unit_of_measure == "sheets"
 
 
 # --------------------------------------------------------------------------- #

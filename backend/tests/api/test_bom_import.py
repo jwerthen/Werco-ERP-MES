@@ -13,6 +13,8 @@ from app.models.audit_log import AuditLog
 from app.models.bom import BOM, BOMItem
 from app.models.part import Part
 from app.models.user import User
+from app.models.work_order import WorkOrder, WorkOrderStatus
+from app.models.work_order_material import AllocationStatus, WorkOrderMaterialAllocation
 from app.services.import_service import MAX_CONSECUTIVE_BLANK_ROWS, MAX_IMPORT_COLUMNS, XLSX_MEDIA_TYPE, ImportFileError
 from app.services.pdf_service import extract_text_from_excel
 
@@ -602,3 +604,199 @@ class TestBOMImportSoftDeleteConflicts:
         db_session.refresh(assembly)
         assert assembly.part_type == "manufactured"  # promotion rolled back
         assert db_session.query(AuditLog).count() == audit_before  # incl. no UPDATE row
+
+
+@pytest.mark.api
+@pytest.mark.requires_db
+class TestBOMImportAssemblyPromotionRespectsMaterialTies:
+    """The importer's assembly promotion is the SECOND conversion door, and it is gated.
+
+    Both importers resolve an EXISTING part by part number (company scope only) and then
+    set ``part_type = ASSEMBLY`` whenever the document is a BOM. Before this, importing a
+    BOM whose parent number happened to name a ``raw_material`` or ``purchased`` part that
+    work orders were still tying as material silently reclassified it — landing exactly the
+    state ``material_tie_part_gate`` refuses at tie time, since a tie DEPLETES its part at
+    completion and consumption never auto-reverses (invariant 6b).
+
+    **"Still tying" means an OPEN tie on an UNFINISHED work order**, and both halves are
+    tested here. Ties are never closed at completion, so a status-only count would warn on
+    every BOM whose parent the shop had ever consumed and skip a promotion nothing was
+    standing in the way of.
+
+    **It SKIPS and WARNS rather than failing the import**, and that is the deliberate half.
+    ``PUT /parts/{id}`` answers the same question with a 409 because it is one record and
+    one decision; here a 409 would roll back an entire multi-record import — every
+    component part, the BOM header, every line — over a step that is catalog hygiene, not
+    a precondition (a BOM attaches by ``part_id`` and is valid on a parent still typed
+    ``purchased``). What must never happen is a SILENT promotion, and it cannot: the part
+    is either promoted, with an audit row, or reported, through ``warnings``.
+    """
+
+    def _tie(
+        self,
+        db_session: Session,
+        part: Part,
+        *,
+        wo_status: WorkOrderStatus = WorkOrderStatus.IN_PROGRESS,
+        qty_consumed: float = 0.0,
+        suffix: str = "",
+    ) -> None:
+        work_order = WorkOrder(
+            work_order_number=f"BOMTIE-WO-{part.id}{suffix}",
+            customer_name="Acme",
+            part_id=part.id,
+            quantity_ordered=5,
+            status=wo_status,
+            priority=5,
+            company_id=1,
+        )
+        db_session.add(work_order)
+        db_session.commit()
+        db_session.add(
+            WorkOrderMaterialAllocation(
+                company_id=1,
+                work_order_id=work_order.id,
+                part_id=part.id,
+                source="manual",
+                status=AllocationStatus.OPEN,
+                qty_planned=3.0,
+                unit_of_measure="each",
+                qty_consumed=qty_consumed,
+            )
+        )
+        db_session.commit()
+
+    def test_a_tied_material_parent_is_not_promoted_and_the_import_still_succeeds(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        sheet = _make_part(db_session, "ASSY-TIED", part_type="raw_material")
+        self._tie(db_session, sheet)
+
+        response = client.post(
+            "/api/v1/bom/import/commit",
+            headers=auth_headers,
+            json=_commit_payload("ASSY-TIED", component_numbers=("COMP-T",)),
+        )
+
+        assert response.status_code == status.HTTP_201_CREATED, response.text
+        body = response.json()
+        assert body["bom_id"] is not None, "the BOM still lands — the promotion is not a precondition"
+
+        db_session.refresh(sheet)
+        assert sheet.part_type == "raw_material", "the tied part's class must be left alone"
+
+        assert any(
+            "ASSY-TIED" in warning and "1 unfinished work order still ties" in warning for warning in body["warnings"]
+        ), body["warnings"]
+
+        promotions = (
+            db_session.query(AuditLog)
+            .filter(
+                AuditLog.resource_type == "part",
+                AuditLog.resource_id == sheet.id,
+                AuditLog.action == "UPDATE",
+            )
+            .all()
+        )
+        assert promotions == [], "a refused promotion changed nothing, so it writes no chain row (invariant 2)"
+
+    def test_an_UNTIED_material_parent_is_still_promoted(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        """The negative control: the gate protects TIES, not classes.
+
+        Without this, an importer that had simply stopped promoting anything would satisfy
+        the assertions above.
+        """
+        sheet = _make_part(db_session, "ASSY-UNTIED", part_type="raw_material")
+
+        response = client.post(
+            "/api/v1/bom/import/commit",
+            headers=auth_headers,
+            json=_commit_payload("ASSY-UNTIED", component_numbers=("COMP-U",)),
+        )
+
+        assert response.status_code == status.HTTP_201_CREATED, response.text
+        db_session.refresh(sheet)
+        assert sheet.part_type == "assembly"
+        assert not any("ASSY-UNTIED" in warning for warning in response.json()["warnings"])
+
+    @pytest.mark.parametrize(
+        "finished_status",
+        [WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED, WorkOrderStatus.CANCELLED],
+    )
+    def test_a_parent_tied_only_by_FINISHED_work_orders_is_still_promoted(
+        self,
+        client: TestClient,
+        auth_headers: dict,
+        db_session: Session,
+        finished_status: WorkOrderStatus,
+    ):
+        """A shipped job's tie is history, not demand — it must not warn and must not skip.
+
+        The gate counts ties on UNFINISHED work orders only, and the importer is where
+        getting that wrong would be loudest. Ties are never closed at completion (nothing
+        in ``app/`` writes ``AllocationStatus.CLOSED``, and completion neither closes nor
+        cancels them), so a status-only count would append this warning on every BOM whose
+        parent the shop had ever consumed — and skip a promotion the planner asked for,
+        naming a remedy nobody can perform: the untie verbs either 409 on issued material
+        or credit a shipped job's material back into stock. A warnings channel that cries
+        wolf on routine imports is a channel planners stop reading, which is how the real
+        refusals get missed.
+
+        The tie is left OPEN with material consumed against it — the exact state a finished
+        job leaves behind.
+        """
+        part_number = f"ASSY-SHIPPED-{finished_status.value.upper()}"
+        sheet = _make_part(db_session, part_number, part_type="raw_material")
+        self._tie(db_session, sheet, wo_status=finished_status, qty_consumed=2.0)
+
+        response = client.post(
+            "/api/v1/bom/import/commit",
+            headers=auth_headers,
+            json=_commit_payload(part_number, component_numbers=(f"COMP-S-{finished_status.value}",)),
+        )
+
+        assert response.status_code == status.HTTP_201_CREATED, response.text
+        db_session.refresh(sheet)
+        assert sheet.part_type == "assembly", "no live demand stands in the way, so the promotion runs"
+        assert not any(part_number in warning for warning in response.json()["warnings"])
+
+        promotions = (
+            db_session.query(AuditLog)
+            .filter(
+                AuditLog.resource_type == "part",
+                AuditLog.resource_id == sheet.id,
+                AuditLog.action == "UPDATE",
+            )
+            .all()
+        )
+        assert len(promotions) == 1, "a promotion that happened writes exactly one chain row (invariant 2)"
+
+    def test_one_LIVE_tie_alongside_finished_ones_still_refuses_the_promotion(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        """The negative control for the test above, and the count the planner is handed.
+
+        Three shipped jobs and one released one is ONE thing to go and untie. Naming four
+        would send the planner into three finished work orders looking for ties they must
+        not touch.
+        """
+        sheet = _make_part(db_session, "ASSY-MIXED", part_type="raw_material")
+        for index, finished in enumerate((WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED, WorkOrderStatus.CANCELLED)):
+            self._tie(db_session, sheet, wo_status=finished, qty_consumed=1.0, suffix=f"-F{index}")
+        self._tie(db_session, sheet, wo_status=WorkOrderStatus.RELEASED, suffix="-LIVE")
+
+        response = client.post(
+            "/api/v1/bom/import/commit",
+            headers=auth_headers,
+            json=_commit_payload("ASSY-MIXED", component_numbers=("COMP-M",)),
+        )
+
+        assert response.status_code == status.HTTP_201_CREATED, response.text
+        db_session.refresh(sheet)
+        assert sheet.part_type == "raw_material", "live demand still stands, so the class is left alone"
+        assert any(
+            "ASSY-MIXED" in warning and "1 unfinished work order still ties" in warning
+            for warning in response.json()["warnings"]
+        ), response.json()["warnings"]

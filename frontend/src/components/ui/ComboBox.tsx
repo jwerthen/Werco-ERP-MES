@@ -66,6 +66,12 @@ export interface ComboBoxProps {
   id?: string;
   ariaLabel?: string;
   ariaLabelledBy?: string;
+  /**
+   * Id of an element describing the control — a caller's inline notice or error
+   * text. Kept off the accessible NAME (which stays `ariaLabel` / `ariaLabelledBy`)
+   * so a long sentence is announced as a description, not as the field's name.
+   */
+  ariaDescribedBy?: string;
   /** Rendered pinned at the foot of the popup (e.g. a filter toggle). */
   footer?: React.ReactNode;
   /** Shown in place of the list when the query matches nothing. */
@@ -99,6 +105,7 @@ export function ComboBox({
   id,
   ariaLabel,
   ariaLabelledBy,
+  ariaDescribedBy,
   footer,
   noResultsLabel = 'No matches',
 }: ComboBoxProps) {
@@ -356,6 +363,7 @@ export function ComboBox({
         aria-activedescendant={open && filtered.length > 0 ? `${inputId}-option-${activeIndex}` : undefined}
         aria-label={ariaLabel}
         aria-labelledby={ariaLabelledBy}
+        aria-describedby={ariaDescribedBy}
         autoComplete="off"
         disabled={disabled}
         // Showing the committed label as the value (and the query only while

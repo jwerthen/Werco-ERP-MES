@@ -153,8 +153,16 @@ export function BOMImportWizard({ onComplete, onClose }: Props) {
         items: derivedItems,
         create_missing_parts: createMissingParts,
       });
+      // The SECOND surface for the same commit endpoint (Parts → BOM tab), and
+      // it owes the planner what the BOM page's copy owes them: `warning`
+      // (role="alert") rather than `info` (role="status"), because every
+      // sentence here reports an import that SUCCEEDED without doing everything
+      // asked — including the parent part that could NOT be reclassified as an
+      // assembly while unfinished work orders tie it as material. A bare COUNT is the
+      // other half of that gap: it says something was left undone and never says
+      // what, so the sentences are quoted here the same way.
       if (result.warnings?.length) {
-        showToast('info', `Import completed with ${result.warnings.length} warning(s)`);
+        showToast('warning', `Import completed with warnings:\n- ${result.warnings.join('\n- ')}`);
       } else {
         showToast('success', 'Import completed');
       }

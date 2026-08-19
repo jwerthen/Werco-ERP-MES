@@ -1,6 +1,7 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
+import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { Modal } from '../ui/Modal';
 import {
   laserNestManualSchema,
@@ -17,6 +18,8 @@ import {
 } from '../../types';
 import api from '../../services/api';
 import { toDisplayString } from '../../utils/apiError';
+import { isProductionPartType, partitionMaterialTiers } from '../../utils/catalogGroups';
+import { useToast } from '../ui/Toast';
 
 interface LaserNestManualModalProps {
   open: boolean;
@@ -58,6 +61,80 @@ interface MaterialOption {
   id: number;
   label: string;
 }
+
+/**
+ * How a tie names its part, from the allocation alone. The allocation is the
+ * only source for a part `/materials` will not return — which is every produced
+ * part, and any sheet the (capped, filtered, or failed) material load missed.
+ * Falls back to the id, which is still enough to look the part up.
+ */
+function describeTiePart(tie: Pick<MaterialAllocation, 'part_id' | 'part_number' | 'part_name'>): string {
+  return [tie.part_number, tie.part_name].filter(Boolean).join(' — ') || `Part ${tie.part_id}`;
+}
+
+/**
+ * ---------------------------------------------------------------------------
+ * THE SHEET-PART LIST DEFAULTS TO RAW STOCK
+ * ---------------------------------------------------------------------------
+ * `/materials` serves all four material-supply types, and three of them
+ * (`purchased`, `hardware`, `consumable`) are bought COMPONENTS — the seeded
+ * catalog types bolts and nuts as `purchased`. Listing them under a field
+ * labelled "Sheet part" is how a nut ends up tied to a laser nest and depleted
+ * as sheet at completion.
+ *
+ * So the default view is `isRawStockPartType` only, with a "Show all materials"
+ * escape hatch beside the field — real sheet stock IS sometimes typed
+ * `purchased` (the BOM importer and PO upload both fall back to it), so a hard
+ * restriction would strand real sheets with no way to tie them.
+ *
+ * A part the shop PRODUCES is excluded at BOTH tiers and has no escape hatch.
+ * That holds for a LEGACY tie read off the server too: the edit path pre-fills
+ * this field from the nest's existing allocation, which is the one value here
+ * that does not come from `/materials` and so is the one that can name a
+ * manufactured/assembly part. It is left un-selected and un-listed, with a
+ * warning toast telling the planner to re-pick — see the load effect below.
+ *
+ * The tiering itself lives in `partitionMaterialTiers`
+ * (`utils/catalogGroups.ts`), shared with the other two material-tie pickers.
+ */
+
+/**
+ * ---------------------------------------------------------------------------
+ * AN UNRESOLVED PRODUCED-PART TIE IS NEVER DROPPED SILENTLY
+ * ---------------------------------------------------------------------------
+ * The refusal above leaves the field BLANK while the tie is still live and
+ * still in `existingTie`. `reconcileTie` reads a blank field as "untie this
+ * nest" — correct when the planner cleared it, and a trap when the modal did.
+ * A planner who opened this dialog only to fix a CNC number would have saved,
+ * destroyed a live allocation, and seen nothing but a toast that had already
+ * timed out.
+ *
+ * Three things close that, and all three are needed:
+ *
+ *   1. A PERSISTENT inline notice beside the Sheet part field, not just the
+ *      load-time toast. The toast is gone in four seconds and never says what
+ *      saving will do; this is on screen for as long as the condition is.
+ *   2. A `<ConfirmDialog>` on the save that would drop it. The drop stays
+ *      possible — a planner who genuinely wants this nest untied must not be
+ *      trapped in a dialog they cannot leave — but it becomes a decision that
+ *      was read and taken, which is exactly what "server-gated and audited"
+ *      does not by itself provide. It is scoped to the tie the planner never
+ *      touched: clearing the field by hand is already an explicit act and
+ *      still unties with no interruption.
+ *   3. The tie controls STAY VISIBLE while such a tie exists, even when
+ *      `/materials` fails or serves no material at all. Otherwise the field
+ *      and its "Show all materials" toggle are hidden entirely and the planner
+ *      is told to re-pick with nothing to re-pick from — and, before this,
+ *      `reconcileTie` was skipped in that state, so the same nest behaved
+ *      differently depending on whether an unrelated read had succeeded.
+ *
+ * BLOCKING SUBMIT was the alternative and is deliberately not what this does.
+ * It would hold an unrelated one-character edit hostage to a material decision
+ * the planner may not be the one to make, it is a rule the server does not have
+ * (the nest PATCH is perfectly happy to leave the tie alone), and in the
+ * `/materials`-down case it would be unsatisfiable — the modal would refuse to
+ * save and offer no way to comply.
+ */
 
 /**
  * Manual-create body plus the sheet-part tie fields. The shared
@@ -102,6 +179,7 @@ export default function LaserNestManualModal({
   onSaved,
 }: LaserNestManualModalProps) {
   const isEdit = Boolean(nest);
+  const { showToast } = useToast();
   const [pdfFile, setPdfFile] = useState<File | null>(null);
   const [submitError, setSubmitError] = useState('');
   const [fileError, setFileError] = useState('');
@@ -120,6 +198,14 @@ export default function LaserNestManualModal({
   // chrome — a failed load hides the controls rather than blocking the nest.
   const [materials, setMaterials] = useState<Part[]>([]);
   const [existingTie, setExistingTie] = useState<MaterialAllocation | null>(null);
+  // Sheet-part filter escape hatch: false = raw stock only (the default),
+  // true = every material part the load returned. See the block above.
+  const [showAllMaterials, setShowAllMaterials] = useState(false);
+  // The validated form data of a save that would drop an unresolved
+  // produced-part tie, parked while the ConfirmDialog is up. `null` = no such
+  // save is pending. See the "never dropped silently" block above.
+  const [pendingTieDrop, setPendingTieDrop] = useState<LaserNestManualFormData | null>(null);
+  const producedTieNoticeId = useId();
 
   const {
     register,
@@ -127,6 +213,7 @@ export default function LaserNestManualModal({
     reset,
     setValue,
     getValues,
+    watch,
     formState: { errors },
   } = useForm<LaserNestManualFormInput, unknown, LaserNestManualFormData>({
     resolver: zodResolver(laserNestManualSchema),
@@ -164,6 +251,8 @@ export default function LaserNestManualModal({
     setExtractHint(null);
     setFileInputKey((k) => k + 1);
     setExistingTie(null);
+    setShowAllMaterials(false);
+    setPendingTieDrop(null);
     createdNestIdRef.current = null;
   }, [open, nest, reset]);
 
@@ -191,7 +280,43 @@ export default function LaserNestManualModal({
           (ties ?? []).find((t) => t.status === 'open' && t.work_order_operation_id === workOrderOperationId) ?? null;
         setExistingTie(tie);
         if (tie) {
-          setValue('material_part_id', tie.part_id);
+          // A LEGACY tie to a part the shop PRODUCES is never re-offered. This
+          // is the one branch that needs the check the ordinary catalog path
+          // does not: everything else in this picker comes from `/materials`,
+          // which serves only the material-supply types, so the exclusion in
+          // `partitionMaterialTiers` has nothing to drop. A tie read off
+          // `GET /work-orders/{id}/materials` is the exception — it names
+          // whatever part it was created against, including one created before
+          // the server refused them — so seeding it here would pre-select the
+          // bad tie AND (via the "keep an existing tie selectable" branch in
+          // the memo below) list it as a pickable "Sheet part". That is exactly
+          // the leak the import wizard closes on its own pre-fill path.
+          //
+          // A NULL OR ABSENT `part_type` is not a production part: an older
+          // server sends no `part_type` at all and must keep today's behavior
+          // exactly, rather than have every tie treated as suspect.
+          if (isProductionPartType(tie.part_type)) {
+            // WARNING, not error: the nest and its tie were both read fine —
+            // the sheet part just cannot be carried into a field that must
+            // never offer it, and the planner has to re-pick. `success` would
+            // hide that; `error` would claim a failure that did not happen.
+            //
+            // The tie itself stays in `existingTie` on purpose, for two
+            // reasons: a re-pick becomes the untie-then-re-tie swap rather than
+            // a second tie on the same operation, and the modal can go on
+            // saying — persistently, beside the field — that the nest is still
+            // tied. What it does NOT do any more is let the blank field untie
+            // it unannounced: that save now goes through a ConfirmDialog. See
+            // the "never dropped silently" block near the top of this file.
+            showToast(
+              'warning',
+              'This nest is tied to a part that is not stock material — re-pick the sheet part before saving.'
+            );
+          } else {
+            setValue('material_part_id', tie.part_id);
+          }
+          // The planned per-run carries either way: it is a quantity, not a
+          // part, and it still applies to whatever sheet replaces the bad one.
           setValue('qty_per_run', tie.qty_per_run ?? 1);
         }
       } catch {
@@ -201,30 +326,89 @@ export default function LaserNestManualModal({
     return () => {
       cancelled = true;
     };
-  }, [open, isEdit, workOrderId, workOrderOperationId, setValue]);
+  }, [open, isEdit, workOrderId, workOrderOperationId, setValue, showToast]);
 
-  const materialOptions = useMemo<MaterialOption[]>(() => {
-    const options: MaterialOption[] = materials.map((part) => ({
+  // The picker's current value, so a selection can be pinned into the list the
+  // same way an existing tie is. Without it, toggling back to raw-stock-only
+  // after picking through the escape hatch would silently blank the pick.
+  const selectedPartIdValue = String(watch('material_part_id') ?? '');
+
+  // The live tie this modal refused to seed into the field: a LEGACY tie whose
+  // part is one the shop PRODUCES. Non-null here is what makes a blank Sheet
+  // part field NOT the planner's answer, and it drives all three guards.
+  const producedPartTie = existingTie && isProductionPartType(existingTie.part_type) ? existingTie : null;
+
+  const { materialOptions, hiddenMaterialCount } = useMemo(() => {
+    const toOption = (part: Part): MaterialOption => ({
       id: part.id,
       label: part.part_number ? `${part.part_number} — ${part.name}` : part.name,
-    }));
+    });
+
+    // The tiering — production parts excluded outright, raw stock by default,
+    // the rest behind the toggle, the current pick pinned so narrowing cannot
+    // blank it, and a count that advertises only what the toggle would really
+    // reveal — is `partitionMaterialTiers`, shared with the sheet-part picker
+    // and the operation tie modal.
+    const { defaultTier: rawStock, hiddenTier: otherMaterials, pinned, hiddenCount } = partitionMaterialTiers(
+      materials,
+      {
+        showAll: showAllMaterials,
+        // Pin whatever the field currently holds — an existing tie seeded on
+        // open, or a part picked through the escape hatch before the toggle
+        // flipped back. A <select> whose value is missing from its options
+        // renders blank, and a blank sheet-part field on an EDIT reads as
+        // "this nest is untied" when it is not.
+        pinnedIds: [selectedPartIdValue, existingTie?.part_id],
+      }
+    );
+
+    const options: MaterialOption[] = rawStock.map(toOption);
+    options.push(...(showAllMaterials ? otherMaterials : pinned).map(toOption));
+
     // Keep an existing tie's part selectable even when the (capped, filtered,
     // or failed) material load didn't return it — otherwise the picker reads as
     // untied while the tie is very much live.
-    if (existingTie && !options.some((option) => option.id === existingTie.part_id)) {
-      options.push({
-        id: existingTie.part_id,
-        label:
-          [existingTie.part_number, existingTie.part_name].filter(Boolean).join(' — ') ||
-          `Part ${existingTie.part_id}`,
-      });
+    //
+    // NOT for a tie to a part the shop PRODUCES. This branch bypasses the
+    // catalog entirely — it builds an option out of the ALLOCATION, so the
+    // exclusion `partitionMaterialTiers` applies to `materials` never sees it —
+    // and `/materials` never returns a produced part, which means a legacy
+    // manufactured/assembly tie always lands here. Offering it would make the
+    // bad tie one click from being re-committed, which is the opposite of
+    // closing it. It is flagged for re-pick by the warning toast on the load
+    // above; see the comment there for why the tie still stays in state.
+    if (
+      existingTie &&
+      !isProductionPartType(existingTie.part_type) &&
+      !options.some((option) => option.id === existingTie.part_id)
+    ) {
+      options.push({ id: existingTie.part_id, label: describeTiePart(existingTie) });
     }
-    return options;
-  }, [materials, existingTie]);
+
+    return { materialOptions: options, hiddenMaterialCount: hiddenCount };
+  }, [materials, existingTie, showAllMaterials, selectedPartIdValue]);
 
   // Ties are addressable on create (the backend ties the operation it creates)
   // and, in edit mode, only when the caller supplied the operation id.
-  const showTieControls = materialOptions.length > 0 && (!isEdit || workOrderOperationId != null);
+  //
+  // `hiddenMaterialCount` counts toward "there is something to pick": a catalog
+  // with no raw stock but plenty of purchased sheet would otherwise hide the tie
+  // controls — and the toggle that reveals it — entirely.
+  //
+  // `producedPartTie` counts too, and for a stronger reason than convenience.
+  // When `/materials` fails or serves nothing, the two catalog terms are both
+  // zero — so the field, the toggle and the notice all vanished while a live
+  // tie the planner had just been told to re-pick sat behind them, and
+  // `reconcileTie` was skipped along with them. Nothing to pick from is a
+  // reason to say so, not a reason to hide the subject.
+  const showTieControls =
+    (materialOptions.length > 0 || hiddenMaterialCount > 0 || producedPartTie !== null) &&
+    (!isEdit || workOrderOperationId != null);
+
+  // Nothing loaded to pick FROM, while a tie still needs re-picking. Worth its
+  // own sentence: "re-pick the sheet part" beside an empty list reads as the
+  // planner's mistake rather than a failed read they should retry.
+  const noMaterialsToPick = materialOptions.length === 0 && hiddenMaterialCount === 0;
 
   /**
    * Fill the form from an extraction result WITHOUT clobbering anything the user
@@ -371,7 +555,7 @@ export default function LaserNestManualModal({
     }
   };
 
-  const onSubmit = async (data: LaserNestManualFormData) => {
+  const performSubmit = async (data: LaserNestManualFormData) => {
     setBusy(true);
     setSubmitError('');
 
@@ -397,6 +581,10 @@ export default function LaserNestManualModal({
         );
       } finally {
         setBusy(false);
+        // Whatever the outcome, the confirm has been answered — a refusal must
+        // leave the planner on the form reading `submitError`, not staring at
+        // the dialog wondering whether the untie landed.
+        setPendingTieDrop(null);
       }
       return;
     }
@@ -460,7 +648,40 @@ export default function LaserNestManualModal({
       );
     } finally {
       setBusy(false);
+      // Unreachable on the create path (there is no existing tie to drop), and
+      // set here anyway so the two exits of this function cannot disagree.
+      setPendingTieDrop(null);
     }
+  };
+
+  /**
+   * Would saving THIS form drop a tie the planner never touched?
+   *
+   * True only for the tie the modal itself left un-seeded (`producedPartTie`)
+   * while the field is still blank. A field the planner cleared BY HAND is an
+   * explicit untie and goes straight through — the point is not to interrogate
+   * every untie, it is that a blank the modal wrote must not read as an answer
+   * the planner gave.
+   */
+  const wouldDropUntouchedTie = (data: LaserNestManualFormData): boolean =>
+    producedPartTie !== null && showTieControls && (data.material_part_id ?? null) === null;
+
+  /**
+   * The submit RHF calls. It either runs the save or parks it behind the
+   * confirm; `performSubmit` above is the save itself and is also what the
+   * dialog's confirm re-enters with the same validated data.
+   */
+  const onSubmit = async (data: LaserNestManualFormData) => {
+    if (wouldDropUntouchedTie(data)) {
+      setPendingTieDrop(data);
+      return;
+    }
+    await performSubmit(data);
+  };
+
+  const confirmTieDrop = () => {
+    if (!pendingTieDrop) return;
+    void performSubmit(pendingTieDrop);
   };
 
   return (
@@ -530,18 +751,52 @@ export default function LaserNestManualModal({
 
           {showTieControls && (
             <>
-              <label className="block">
-                <span className={FIELD_LABEL}>Sheet part</span>
-                <select {...register('material_part_id')} className="input mt-1 w-full">
-                  <option value="">(none)</option>
-                  {materialOptions.map((option) => (
-                    <option key={option.id} value={String(option.id)}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
+              {/* The <label> wraps ONLY the select, so the toggle's text and any
+                  error copy stay out of the select's accessible name. */}
+              <div className="block">
+                <label className="block">
+                  <span className={FIELD_LABEL}>Sheet part</span>
+                  <select
+                    {...register('material_part_id')}
+                    aria-describedby={producedPartTie ? producedTieNoticeId : undefined}
+                    className="input mt-1 w-full"
+                  >
+                    <option value="">(none)</option>
+                    {materialOptions.map((option) => (
+                      <option key={option.id} value={String(option.id)}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                {/* The PERSISTENT half of the produced-part-tie guard. The
+                    load-time toast is gone in four seconds and never says what
+                    saving would do; this stays for as long as the condition
+                    does, and is wired as the select's description so a screen
+                    reader reads it with the field rather than only once, at
+                    load. No `role="alert"` — the toast already interrupted, and
+                    a second live region would announce the same fact twice. */}
+                {producedPartTie && (
+                  <p id={producedTieNoticeId} className="mt-1 text-xs text-fd-amber">
+                    Still tied to {describeTiePart(producedPartTie)}, a part the shop produces rather than stock
+                    material, so it cannot be offered here. Pick the sheet this nest really cuts. Saving with
+                    this blank removes the tie, and an untied nest never deducts stock.
+                    {noMaterialsToPick && ' No material could be loaded to pick from — try again once it is reachable.'}
+                  </p>
+                )}
+                {(hiddenMaterialCount > 0 || showAllMaterials) && (
+                  <button
+                    type="button"
+                    onClick={() => setShowAllMaterials((prev) => !prev)}
+                    className="mt-1 text-xs font-medium text-fd-blue hover:underline"
+                  >
+                    {showAllMaterials
+                      ? 'Show raw stock only'
+                      : `Show all materials (${hiddenMaterialCount} more)`}
+                  </button>
+                )}
                 {errors.material_part_id && <p className={ERR}>{errors.material_part_id.message}</p>}
-              </label>
+              </div>
 
               <label className="block">
                 <span className={FIELD_LABEL}>Sheets per run</span>
@@ -628,6 +883,44 @@ export default function LaserNestManualModal({
           </button>
         </div>
       </form>
+
+      {/* A SIBLING of the form, never inside it. ConfirmDialog portals to
+          document.body so this is only a React-tree position, but keeping it
+          out of the form's subtree means its buttons can never become the
+          form's submit target under a future change to Button's default
+          `type`. It sits inside this Modal so a parent that closes the whole
+          dialog takes the un-answered confirm with it.
+
+          `pending={busy}` because the untie is server-GATED — 409 once material
+          has been consumed against the allocation — so this stays
+          non-optimistic: the dialog holds, Cancel is disabled, and dismissal is
+          refused while the call is on the wire. Closing is this component's
+          job, in performSubmit's `finally`, so a refusal lands the planner back
+          on the form with the server's own sentence rather than on a dialog
+          that already vanished. */}
+      <ConfirmDialog
+        // Both terms: the moment the untie lands, `producedPartTie` clears and
+        // the dialog has nothing left to describe — closing on that rather than
+        // waiting for the `finally` avoids one render of an emptied dialog.
+        open={pendingTieDrop !== null && producedPartTie !== null}
+        variant="warning"
+        title="Remove this nest's material tie?"
+        message={
+          producedPartTie
+            ? `This nest is still tied to ${describeTiePart(producedPartTie)} — a part the shop produces rather ` +
+              'than stock material. That is why the Sheet part field is blank: this tie could not be offered ' +
+              'back to you.\n\n' +
+              'Saving now removes it. The nest then carries no material demand — no shortage is raised, it ' +
+              'still runs, and stock is never deducted when its operation completes.\n\n' +
+              'Choose the sheet this nest really cuts instead if you can.'
+            : ''
+        }
+        confirmLabel="Save and remove the tie"
+        cancelLabel="Keep editing"
+        pending={busy}
+        onConfirm={confirmTieDrop}
+        onCancel={() => setPendingTieDrop(null)}
+      />
     </Modal>
   );
 }
