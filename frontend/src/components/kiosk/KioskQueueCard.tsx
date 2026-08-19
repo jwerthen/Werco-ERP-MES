@@ -1,6 +1,7 @@
 import React from 'react';
 import { ArrowUpRightIcon } from '@heroicons/react/24/outline';
 import { formatCentralDate, isDateBeforeTodayInCentral, isDateTodayInCentral } from '../../utils/centralTime';
+import { UnitBadge } from '../ui';
 import { KioskQueueItem, formatOperationLabel, formatStepsChip, operationNumberText } from './kioskConstants';
 
 /**
@@ -130,6 +131,7 @@ export default function KioskQueueCard({ item, onSelect, active = false, disable
       <div className="flex flex-wrap items-center gap-2.5">
         <KioskRunOrderChip item={item} active={active} />
         <span className="font-mono text-lg font-bold text-fd-ink">{item.work_order_number}</span>
+        <UnitBadge unitNumber={item.unit_number} size="md" />
         <span
           className={`rounded-[3px] border px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-[0.08em] ${
             active

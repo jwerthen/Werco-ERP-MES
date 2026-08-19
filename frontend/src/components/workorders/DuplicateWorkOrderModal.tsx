@@ -86,6 +86,12 @@ export interface DuplicateWorkOrderSource {
   id: number;
   work_order_number: string;
   quantity_ordered: number;
+  /**
+   * The source's Unit #, when it tracks one. Optional: pass it and the dialog
+   * discloses that the copy will NOT carry it (the server drops it on purpose —
+   * a duplicate is the next unit). Omit it and the note simply does not render.
+   */
+  unit_number?: string | null;
 }
 
 export interface DuplicateWorkOrderModalProps {
@@ -528,6 +534,19 @@ export default function DuplicateWorkOrderModal({
                 )}
               </FormField>
             </div>
+
+            {/* The unit is dropped on purpose and there is no field for it here:
+                a duplicate is the NEXT unit, and guessing which one is not this
+                dialog's call. Say so, or the copy reaches the kiosk and the TV
+                with a blank badge and no explanation. */}
+            {workOrder.unit_number?.trim() ? (
+              <p data-testid="duplicate-wo-unit-note" className="text-sm text-surface-500">
+                <span className="font-semibold text-surface-700">Unit #</span> is not copied —{' '}
+                <span className="font-mono">{workOrder.unit_number.trim()}</span> stays with{' '}
+                <span className="font-mono">{workOrder.work_order_number}</span>, because a duplicate builds
+                the next unit. Set the new one on the copy after it is created.
+              </p>
+            ) : null}
 
             {/* Verbatim server refusal — the primary display for a gated write. */}
             {error && (

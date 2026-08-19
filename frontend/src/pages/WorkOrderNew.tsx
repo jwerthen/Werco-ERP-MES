@@ -159,6 +159,7 @@ export default function WorkOrderNew() {
     priority: 5,
     customer_name: '',
     customer_po: '',
+    unit_number: '',
     due_date: '',
     notes: ''
   });
@@ -177,6 +178,7 @@ export default function WorkOrderNew() {
     priority: 5,
     customer_name: '',
     customer_po: '',
+    unit_number: '',
     due_date: '',
     notes: ''
   }), []);
@@ -765,6 +767,14 @@ export default function WorkOrderNew() {
         due_date: form.due_date || null,
       };
 
+      // Optional build identity — omitted entirely when blank rather than sent as ''.
+      const unitNumber = form.unit_number.trim();
+      if (unitNumber) {
+        payload.unit_number = unitNumber;
+      } else {
+        delete payload.unit_number;
+      }
+
       // Optional per-unit serials (server validates unique/non-empty/count).
       if (serialNumbers.length > 0) {
         payload.serial_numbers = serialNumbers;
@@ -1160,6 +1170,23 @@ export default function WorkOrderNew() {
                   value={form.due_date}
                   onChange={(e) => setForm({ ...form, due_date: e.target.value })}
                   className="input"
+                />
+              )}
+            </FormField>
+
+            <FormField
+              label="Unit #"
+              help="Optional. The unit this work order builds — shown on the kiosk, the shop TV and the work-order list. Leave blank for jobs that do not track one."
+            >
+              {(field) => (
+                <input
+                  {...field}
+                  type="text"
+                  maxLength={50}
+                  value={form.unit_number}
+                  onChange={(e) => setForm({ ...form, unit_number: e.target.value })}
+                  className="input"
+                  placeholder="e.g. 2410048"
                 />
               )}
             </FormField>

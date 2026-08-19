@@ -126,6 +126,23 @@ class WorkOrder(Base, SoftDeleteMixin, TenantMixin):
     lot_number = Column(String(100), index=True)
     serial_numbers = Column(Text)  # JSON array for serialized items
 
+    # Build identity for a ONE-UNIT-PER-WORK-ORDER job -- the weld assemblies, whose
+    # "Unit #" the office used to type into ``notes`` where it was unfindable (and
+    # unshowable on the wallboard, since notes is unbounded free text). Migration 083.
+    #
+    # Deliberately NOT ``serial_numbers``: that column is a LIST validated as exactly
+    # one entry per unit (``count == quantity_ordered``) and it is the switch that puts
+    # a work order into per-serial process-sheet capture -- writing one unit id there
+    # would either break the count validator or silently change how steps are recorded.
+    # Deliberately NOT ``lot_number`` either: that one is auto-assigned at completion as
+    # ``LOT-<wo_number>`` by ``_assign_finished_good_lot`` and drives FG receipt/backflush
+    # matching, so a hand-typed value there would collide with the completion path.
+    #
+    # Optional and UNCONSTRAINED: most work orders never carry one, and a rework work
+    # order legitimately names the same unit as the original, so there is no unique
+    # index. Indexed only because both search paths match on it.
+    unit_number = Column(String(50), nullable=True, index=True)
+
     # Notes
     notes = Column(Text)
     special_instructions = Column(Text)

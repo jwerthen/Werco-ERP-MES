@@ -853,6 +853,10 @@ def _kiosk_job_row(
         "operation_id": operation.id,
         "work_order_id": work_order.id,
         "work_order_number": work_order.work_order_number,
+        # 083. Build IDENTITY, not guidance -- it rides here beside work_order_number
+        # rather than inside _job_guidance_fields, whose five-key contract carries its
+        # own recorded station disclosure. Free: the work order is already joinedloaded.
+        "unit_number": work_order.unit_number,
         "part_number": work_order.part.part_number if work_order.part else None,
         "part_name": work_order.part.name if work_order.part else None,
         # Kiosk job card / viewer title: the part's revision letter (REV chip).
@@ -1254,6 +1258,11 @@ def get_my_active_job(
                 "operation_id": entry.operation_id,
                 "work_center_id": entry.work_center_id,
                 "work_order_number": work_order.work_order_number if work_order else None,
+                # 083. Twin of the key _kiosk_job_row sets -- the identity keys are
+                # duplicated between these two payloads (only _job_guidance_fields is
+                # shared), so this MUST be kept in step with it or the running-job hero
+                # is the one screen that cannot name the unit on the bench.
+                "unit_number": work_order.unit_number if work_order else None,
                 "part_number": work_order.part.part_number if work_order and work_order.part else None,
                 "part_name": work_order.part.name if work_order and work_order.part else None,
                 # Kiosk viewer/running panel: the part's revision letter (REV chip).
@@ -3414,7 +3423,11 @@ def get_all_operations(
         # Outer join: standalone laser-cutting WOs have part_id NULL, and their
         # operations must still match a work-order-number search.
         query = query.outerjoin(Part, WorkOrder.part_id == Part.id).filter(
-            or_(WorkOrder.work_order_number.ilike(search_term), Part.part_number.ilike(search_term))
+            or_(
+                WorkOrder.work_order_number.ilike(search_term),
+                WorkOrder.unit_number.ilike(search_term),
+                Part.part_number.ilike(search_term),
+            )
         )
 
     if due_today:
@@ -3477,6 +3490,10 @@ def get_all_operations(
                 "id": op.id,
                 "work_order_id": wo.id,
                 "work_order_number": wo.work_order_number,
+                # 083. Same identity key the kiosk rows carry -- the desktop
+                # shop-floor screens are a floor surface too, and an operator who
+                # reads UNIT on the kiosk must not lose it by using the desk.
+                "unit_number": wo.unit_number,
                 "part_number": wo.part.part_number if wo.part else None,
                 "part_name": wo.part.name if wo.part else None,
                 "operation_number": op.operation_number,
@@ -4781,6 +4798,7 @@ def get_operation_details(
             "due_date": wo.due_date.isoformat() if wo.due_date else None,
             "customer_name": wo.customer_name,
             "customer_po": wo.customer_po,
+            "unit_number": wo.unit_number,
             "notes": wo.notes,
             "special_instructions": wo.special_instructions,
             "part": {

@@ -34,6 +34,7 @@ import { getKioskStationId } from '../utils/kiosk';
 import { useKioskIdleLogout } from '../hooks/useKioskIdleLogout';
 import { usePageTitle } from '../hooks/usePageTitle';
 import { useWakeLock } from '../hooks/useWakeLock';
+import { UnitBadge } from '../components/ui';
 import KioskKeypad from '../components/kiosk/KioskKeypad';
 import KioskCrewJobCard from '../components/kiosk/KioskCrewJobCard';
 import KioskHeldCard from '../components/kiosk/KioskHeldCard';
@@ -1509,6 +1510,9 @@ export default function CrewStationKiosk() {
               <div className="flex flex-wrap items-start justify-between gap-4">
                 <div className="min-w-0">
                   <p className="font-mono text-4xl font-bold text-fd-ink">{viewItem.work_order_number}</p>
+                  {/* The unit this job builds — above the part line and the notes
+                      block, because it is the first thing the welder checks. */}
+                  <UnitBadge unitNumber={viewItem.unit_number} size="lg" className="mt-3" />
                   <p className="mt-2 text-2xl text-fd-body">
                     <span className="font-mono font-semibold text-fd-ink">{viewItem.part_number || '—'}</span>
                     {viewItem.part_name ? <span className="text-fd-mute"> · {viewItem.part_name}</span> : null}

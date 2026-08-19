@@ -101,6 +101,8 @@ export interface KioskQueueItem extends KioskJobInstructions {
   operation_id: number;
   work_order_id: number;
   work_order_number: string;
+  /** Unit # this work order builds — null/absent on work orders that do not track one. */
+  unit_number?: string | null;
   part_number: string | null;
   part_name: string | null;
   operation_number: string | number | null;

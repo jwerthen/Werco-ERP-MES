@@ -118,6 +118,8 @@ export interface WallboardJobOp {
  */
 export interface WallboardJob {
   wo_number: string;
+  /** Unit # this work order builds — UNGATED (a bounded build number, not customer data). */
+  unit_number?: string | null;
   part_number?: string | null;
   /** Gated — present only for authorized (executive) displays; else absent. */
   customer_name?: string | null;

@@ -1565,6 +1565,7 @@ def list_work_orders(
                 WorkOrder.customer_name.ilike(search_filter),
                 WorkOrder.customer_po.ilike(search_filter),
                 WorkOrder.lot_number.ilike(search_filter),
+                WorkOrder.unit_number.ilike(search_filter),
                 Part.part_number.ilike(search_filter),
                 Part.name.ilike(search_filter),
             )
@@ -1588,6 +1589,7 @@ def list_work_orders(
             # Explicit: this summary is built kwarg-by-kwarg, so an omitted field silently
             # ships the schema default (False = pooled) for every sequenced work order.
             sequential_operations=wo.sequential_operations,
+            unit_number=wo.unit_number,
             part_number=wo.part.part_number if wo.part else None,
             part_name=wo.part.name if wo.part else None,
             part_type=wo.part.part_type.value if wo.part and wo.part.part_type else None,

@@ -281,6 +281,10 @@ def _build_job_wall(
         jobs.append(
             WallboardJob(
                 wo_number=wo.work_order_number,
+                # Ungated (see WallboardJob.unit_number): a bounded build number,
+                # not customer data. `or None` collapses a blank to None so the
+                # tile falls back to its pre-083 layout rather than an empty badge.
+                unit_number=(wo.unit_number or None),
                 part_number=wo.part.part_number if wo.part else None,
                 # Gated: customer name only for an authorized principal; the
                 # public board keeps it None. ``or None`` collapses a blank

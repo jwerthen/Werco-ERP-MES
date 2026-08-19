@@ -141,6 +141,8 @@ class DispatchQueueRow(UTCModel):
     version: int
     work_order_id: int
     work_order_number: str
+    # 083. Build identity, mirroring the kiosk row's key of the same name.
+    unit_number: Optional[str] = None
     operation_number: Optional[str] = None
     operation_name: str
     part_number: Optional[str] = None

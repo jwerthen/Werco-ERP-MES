@@ -168,6 +168,26 @@ class WallboardJob(BaseModel):
     """
 
     wo_number: str
+    # 083. The unit this work order builds, when it tracks one. UNGATED on purpose
+    # and NOT an exception to the rule above.
+    #
+    # THE ARGUMENT IS CATEGORY-PARITY, NOT LENGTH. ``max_length=50`` bounds how
+    # much text arrives, not what KIND of text it is -- fifty characters is ample
+    # for a customer name, and nothing validates the content. What actually makes
+    # this showable is that it is the same CATEGORY as fields this board already
+    # renders publicly: ``part_number`` here, and ``name``/``code`` on
+    # ``WallboardJobOp`` / ``WallboardWorkCenter`` -- all office-entered, all
+    # purpose-labeled. ``notes`` is withheld because it is unbounded text of an
+    # UNCONSTRAINED category, not merely because it is long.
+    #
+    # The residual, stated plainly the way the kiosk's sibling disclosure states
+    # its own (see ``shop_floor.py::get_work_center_queue``): the field is not
+    # validated, so an office user who types a customer name into Unit # puts it
+    # on the public TV. The mitigation is convention plus disclosure-at-entry --
+    # the work-order create form names the destinations under the field -- and
+    # NOT enforcement. Do not extend a future field onto this payload on the
+    # strength of "it's bounded"; ask whether it is one of these categories.
+    unit_number: Optional[str] = None
     part_number: Optional[str] = None
     # Gated — populated only for an authorized (executive) principal; None on
     # public boards. See the class docstring and build_wallboard_payload.

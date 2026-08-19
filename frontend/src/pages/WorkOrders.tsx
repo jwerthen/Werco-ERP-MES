@@ -21,7 +21,7 @@ import {
   DocumentDuplicateIcon,
 } from '@heroicons/react/24/outline';
 import { SkeletonTable, SkeletonCard } from '../components/ui/Skeleton';
-import { ConfirmDialog, EmptyState, ErrorState, useToast, DataTable, DataTableColumn, StatusBadge, Button } from '../components/ui';
+import { ConfirmDialog, EmptyState, ErrorState, useToast, DataTable, DataTableColumn, StatusBadge, Button, UnitBadge } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { useOptimisticMutation } from '../hooks/useOptimisticMutation';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
@@ -211,13 +211,24 @@ function buildWorkOrderColumns({
       sortable: true,
       accessor: (wo) => wo.work_order_number,
       render: (wo) => (
-        <Link
-          to={`/work-orders/${wo.id}`}
-          onClick={(e) => e.stopPropagation()}
-          className="font-semibold text-werco-600 hover:text-werco-700 hover:underline"
-        >
-          {wo.work_order_number}
-        </Link>
+        <div className="min-w-0">
+          <Link
+            to={`/work-orders/${wo.id}`}
+            onClick={(e) => e.stopPropagation()}
+            className="font-semibold text-werco-600 hover:text-werco-700 hover:underline"
+          >
+            {wo.work_order_number}
+          </Link>
+          {/* Renders nothing when the work order tracks no unit, so every other
+              row keeps its pre-083 single-line height. The wrapper is what puts the
+              badge on its own line — a caller `flex` cannot override the badge's
+              own `inline-flex`. */}
+          {wo.unit_number ? (
+            <div className="mt-1">
+              <UnitBadge unitNumber={wo.unit_number} size="sm" />
+            </div>
+          ) : null}
+        </div>
       ),
     },
   ];
@@ -703,7 +714,7 @@ export default function WorkOrders() {
             <MagnifyingGlassIcon className="h-5 w-5 absolute left-4 top-1/2 transform -translate-y-1/2 text-surface-400" />
             <input
               type="text"
-              placeholder="Search by WO#, part, or customer..."
+              placeholder="Search by WO#, unit #, part, or customer..."
               aria-label="Search work orders"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
@@ -999,6 +1010,11 @@ const WorkOrderMobileCard = React.memo(function WorkOrderMobileCard({ workOrder:
           >
             {wo.work_order_number}
           </Link>
+          {wo.unit_number ? (
+            <div className="mt-1">
+              <UnitBadge unitNumber={wo.unit_number} size="sm" />
+            </div>
+          ) : null}
           <p className="text-sm text-surface-500 truncate mt-0.5">{wo.customer_name || 'No Customer'}</p>
         </div>
         <StatusBadge status={wo.status} className="flex-shrink-0" />

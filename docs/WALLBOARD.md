@@ -156,6 +156,34 @@ Two operational notes:
   code from a new display). This is deliberate — every public↔executive transition is a fresh,
   audited issuance rather than a silent toggle.
 
+### Unit # — ungated
+
+`jobs[].unit_number` (migration `083`) is the **Unit #** a one-unit-per-work-order job builds — the
+weld assemblies. It is **not gated** and is populated for every principal, public boards included.
+That is not a second exception to the rule above — but the reason is **category parity, not
+length**. `String(50)` bounds how much text arrives, not what kind: fifty characters is ample for a
+customer name, and nothing validates the content. What makes it showable is that it is the same
+*category* as fields this board already renders publicly — `part_number`, and the operation and
+work-center names — all office-entered and purpose-labeled. `notes` is withheld because it is
+unbounded text of an **unconstrained** category, not merely because it is long. Making the number
+showable on the wall is the reason the column exists rather than the note being surfaced.
+
+**The residual, stated plainly.** The field is not validated, so an office user who types a customer
+name into Unit # puts it on the public TV. The mitigation is convention plus disclosure-at-entry —
+the work-order create form names the destinations under the field — and **not** enforcement. Do not
+wave a future field onto this payload on the strength of "it's bounded"; ask whether it belongs to
+one of the categories already here.
+
+`customer_name` remains the **one** gated field on the payload. On a card, the two never compete for
+space: the unit takes **row 2**'s large slot (the part number steps down beneath it), while the
+customer name — when authorized — replaces **row 3**'s op line. The unit renders in the board's
+**cyan** accent, deliberately none of the five status colors, so a build number can never be
+misread as a state from across the shop.
+
+A work order that tracks no unit sends `null` and its card renders exactly as it did before, so no
+existing board changed. Set the number on the work order (create form, or the work-order detail
+page); there is no per-display setting for it.
+
 ## Layout — the four zones
 
 Fixed geography, authored at 1920×1080: HUD bar (86px) / body (work-order grid + the fixed 430px
@@ -206,7 +234,10 @@ statuses are off the board as everywhere else.
   COMPLETE`).
 - **Card anatomy — five fixed rows:**
   1. WO number ←→ status chip (glowing dot + state word; only DOWN dots pulse);
-  2. part number ←→ `done/ordered` qty (see **Order totals on a pool WO** below);
+  2. part number ←→ `done/ordered` qty (see **Order totals on a pool WO** below) — on a
+     **unit-tracked** WO the left slot instead leads with `UNIT <n>` and steps the part number
+     down beneath it at a smaller weight (see **Unit # — ungated** above); the qty side is
+     unchanged, and a WO with no unit renders this row byte-identically to its pre-`083` self;
   3. `OP n/total · <op name>` — **or the WO's customer name on an authorized (executive) board**
      (see "Customer names — gated"; public boards keep the op line, and an authorized board falls
      back to it for a WO with no customer) ←→ the state's **time value** — red downtime duration on
@@ -327,8 +358,9 @@ principal and redacted on every public board.
   priority sort (blocked/down → most-late → running → promise date asc, WO number tiebreak),
   capped at **24**; `jobs_total` is the true uncapped count for `+N more`. Both are
   **dept-scoped** when `dept` is passed — a job belongs to a dept via its **current op's**
-  work-center type. Each job carries `wo_number`, `part_number`, the **gated** `customer_name`
-  (see the privacy note below), `status`,
+  work-center type. Each job carries `wo_number`, `unit_number` (the Unit # this WO builds, `null`
+  when it tracks none — **ungated**, see "Unit # — ungated"), `part_number`, the **gated**
+  `customer_name` (see the privacy note below), `status`,
   `qty_complete` / `qty_ordered` (order totals — WO header on a conventional routing, the SUM of
   per-item operation targets/progress on a pool WO; see "Order totals on a pool WO"),
   `promise_date` (`must_ship_by || due_date`), `is_late` /
@@ -339,7 +371,8 @@ principal and redacted on every public board.
   lowest-sequence precedence, `null` when all ops are complete — with `sequence`, `name`,
   `work_center_code` / `work_center_name`, `status`, `qty_done` / `qty_target`, `crew` (up to 3
   "First L." names), `crew_count` (true headcount), `elapsed_minutes` (earliest open clock-in).
-  **Privacy:** a card carries WO/part/op identifiers, dates, quantities, and "First L." crew
+  **Privacy:** a card carries WO/part/op identifiers (the Unit # among them), dates, quantities,
+  and "First L." crew
   names only — never dollar figures or notes. `customer_name` is the ONE **gated** field:
   populated only for an authorized principal (a display token opted in via `show_customer_names`,
   or a signed-in Platform Admin / Admin / Manager), `None` on every public board — see "Customer

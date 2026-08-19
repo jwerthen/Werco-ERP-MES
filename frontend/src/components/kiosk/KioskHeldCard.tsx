@@ -1,6 +1,7 @@
 import React from 'react';
 import { PauseCircleIcon } from '@heroicons/react/24/solid';
 import { KioskQueueItem, formatOperationLabel, operationNumberText } from './kioskConstants';
+import { UnitBadge } from '../ui';
 import { KioskRunOrderChip } from './KioskQueueCard';
 import {
   formatHoldAttribution,
@@ -88,6 +89,7 @@ export default function KioskHeldCard({
         <span className={`font-mono font-bold text-fd-ink ${crew ? 'text-3xl tracking-tight' : 'text-lg'}`}>
           {item.work_order_number}
         </span>
+        <UnitBadge unitNumber={item.unit_number} size={crew ? 'md' : 'sm'} />
         <span
           data-testid="kiosk-held-badge"
           className={`inline-flex items-center gap-1.5 rounded-[3px] border border-fd-amber bg-fd-amber/15 font-mono font-bold uppercase tracking-[0.08em] text-fd-amber ${

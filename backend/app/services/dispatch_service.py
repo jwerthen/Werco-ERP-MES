@@ -478,6 +478,7 @@ def dispatch_queue_row(
         version=operation.version,
         work_order_id=operation.work_order_id,
         work_order_number=work_order.work_order_number if work_order else "",
+        unit_number=work_order.unit_number if work_order else None,
         operation_number=operation.operation_number,
         operation_name=operation.name,
         part_number=part.part_number if part else None,

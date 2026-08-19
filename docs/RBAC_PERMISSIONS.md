@@ -335,6 +335,24 @@ tier, that tier stands — this rule is a floor, never a loosening.
 > complete verbs read the same resolved rule, so a hidden card and a refused badge scan agree. See
 > `docs/API.md` → Work Orders → "READY promotion: a sequenced ROUTING or a DISPATCH POOL".
 
+> **Unit # is an Edit-row field — no new role, no new permission, and it is deliberately ungated on
+> the floor screens.** `WorkOrder.unit_number` (migration `083`) is the build identity of a
+> one-unit-per-work-order job. It is set on **create** (`POST /api/v1/work-orders/`, Work Orders
+> **Create** row) and changed or cleared only through `PUT /api/v1/work-orders/{id}`, which already
+> carries `require_role([ADMIN, MANAGER, SUPERVISOR])` — the Work Orders **Edit** row above. Nothing
+> was added to the role matrix, no permission string was minted, and the change is audited through
+> the generic `log_update` field diff like any other header field.
+>
+> The disclosure side is the part worth reviewing. The field is returned to **both** un-badged
+> principals: the crew station's shared-PIN **station** token (on the queue and `held` rows) and a
+> **display** token on the public TV, where — unlike `customer_name` — it is **not** behind
+> `show_customer_names`. That is a decision, not a default: a bounded (`String(50)`) build number is
+> not customer data, and its boundedness is exactly what makes it showable on an unattended screen
+> where the work order's unbounded free-text `notes` (which is where this number used to be typed)
+> is not. It widens neither the five-key guidance exception recorded above nor the blocker free-text
+> withholding. See `docs/API.md` → Work Orders → "Unit #" and `docs/WALLBOARD.md` →
+> "Unit # — ungated".
+
 > **Material ties — endpoint mapping.** Tying stock material to a work order (the tie that makes
 > inventory deplete as work completes) is a **planning act**, gated to the Work Orders **Edit** row
 > above. On `app/api/endpoints/work_order_materials.py`:

@@ -80,7 +80,7 @@ def global_search(
 
     Search types:
     - part: Parts by part number, name, description
-    - work_order: Work orders by number, customer PO, lot number
+    - work_order: Work orders by number, customer PO, lot number, unit number
     - customer: Customers by name, code
     - bom: BOMs by name
     - routing: Routings by name
@@ -242,6 +242,7 @@ def _literal_work_order_fallback(
                 func.lower(WorkOrder.work_order_number).like(search_term),
                 func.lower(WorkOrder.customer_po).like(search_term),
                 func.lower(WorkOrder.lot_number).like(search_term),
+                func.lower(WorkOrder.unit_number).like(search_term),
                 func.lower(WorkOrder.customer_name).like(search_term),
                 func.lower(Part.part_number).like(search_term),
                 func.lower(Part.name).like(search_term),
@@ -256,10 +257,21 @@ def _literal_work_order_fallback(
             id=wo.id,
             type="work_order",
             title=wo.work_order_number,
-            subtitle=f"{wo.part.part_number if wo.part else ''} - {wo.status.value}".strip(" -"),
+            # Unit # is one of this branch's match terms, so keep it VISIBLE --
+            # otherwise searching a unit returns rows carrying the typed string
+            # nowhere on screen. Same reason as search_service._work_order_subtitle.
+            subtitle=" - ".join(
+                piece
+                for piece in (
+                    wo.part.part_number if wo.part else "",
+                    wo.status.value,
+                    f"Unit {wo.unit_number.strip()}" if (wo.unit_number or "").strip() else "",
+                )
+                if piece
+            ),
             url=f"/work-orders/{wo.id}",
             icon="clipboard",
-            explanation="Matched literal work-order, customer, or part text.",
+            explanation="Matched literal work-order, customer, part, or unit text.",
             matched_filters=["literal_text"],
         )
         for wo in rows

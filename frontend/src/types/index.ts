@@ -151,6 +151,8 @@ export interface WorkOrder {
   due_date?: string;
   customer_name?: string;
   customer_po?: string;
+  /** Unit # this work order builds — null on the work orders that do not track one. */
+  unit_number?: string | null;
   notes?: string;
   special_instructions?: string;
   estimated_hours: number;
@@ -605,6 +607,8 @@ export interface WorkOrderSummary {
    * as `?? false`.
    */
   sequential_operations?: boolean;
+  /** Unit # this work order builds — null on the work orders that do not track one. */
+  unit_number?: string | null;
   part_number?: string | null;
   part_name?: string | null;
   part_type?: string | null;
@@ -1258,6 +1262,8 @@ export interface QueueItem {
   operation_id: number;
   work_order_id: number;
   work_order_number: string;
+  /** Unit # this work order builds — absent on work orders that do not track one. */
+  unit_number?: string | null;
   part_number?: string;
   part_name?: string;
   operation_number?: string;
@@ -1355,6 +1361,8 @@ export interface DispatchBoardRow {
   version: number;
   work_order_id: number;
   work_order_number: string;
+  /** Unit # this work order builds — null/absent on work orders that do not track one. */
+  unit_number?: string | null;
   operation_number: string | number | null;
   operation_name: string | null;
   part_number: string | null;
@@ -1654,6 +1662,8 @@ export interface ActiveJob extends KioskJobInstructions {
   operation_id?: number;
   work_center_id?: number;
   work_order_number?: string;
+  /** Unit # this work order builds — absent on work orders that do not track one. */
+  unit_number?: string | null;
   part_number?: string;
   part_name?: string;
   operation_name?: string;

@@ -53,6 +53,20 @@ class SearchResponse(BaseModel):
     categories: dict  # Count by category
 
 
+def _work_order_subtitle(work_order) -> str:
+    """Customer - status, plus the Unit # when the work order tracks one.
+
+    The unit is appended rather than substituted: a searcher who typed a unit
+    number needs to see it, and a searcher who typed anything else still needs
+    the customer and status they have always had.
+    """
+    base = f"{work_order.customer_name or ''} - {work_order.status.value}".strip(" -")
+    unit = (work_order.unit_number or "").strip()
+    if not unit:
+        return base
+    return f"{base} - Unit {unit}".strip(" -")
+
+
 def run_global_search(
     *,
     db: Session,
@@ -123,6 +137,7 @@ def run_global_search(
                     func.lower(WorkOrder.work_order_number).like(search_term),
                     func.lower(WorkOrder.customer_po).like(search_term),
                     func.lower(WorkOrder.lot_number).like(search_term),
+                    func.lower(WorkOrder.unit_number).like(search_term),
                     func.lower(WorkOrder.customer_name).like(search_term),
                 ),
             )
@@ -136,7 +151,10 @@ def run_global_search(
                     id=wo.id,
                     type="work_order",
                     title=wo.work_order_number,
-                    subtitle=f"{wo.customer_name or ''} - {wo.status.value}".strip(" -"),
+                    # Unit # is a match term (see the or_ above), so it has to be
+                    # VISIBLE here -- otherwise searching a unit returns rows that
+                    # contain the typed string nowhere on screen.
+                    subtitle=_work_order_subtitle(wo),
                     url=f"/work-orders/{wo.id}",
                     icon="clipboard",
                 )

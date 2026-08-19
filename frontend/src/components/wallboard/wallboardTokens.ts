@@ -42,4 +42,8 @@ export const FD = {
   waiting: '#8b98a5',
   /** BLOCKED (derived, between red and amber) */
   blockedOrange: '#ea7d2c',
+  /** UNIT # — build identity, deliberately NOT one of the status colors above, so
+      a unit number can never be mistaken for a state at distance. Matches the
+      app-side --fd-cyan so the same badge reads the same on kiosk and TV. */
+  cyan: '#39c5cf',
 } as const;

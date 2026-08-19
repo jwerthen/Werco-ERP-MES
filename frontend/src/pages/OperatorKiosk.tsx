@@ -17,6 +17,7 @@ import { formatCentralDateTime, formatCentralTime } from '../utils/centralTime';
 import { useKioskIdleLogout } from '../hooks/useKioskIdleLogout';
 import { usePageTitle } from '../hooks/usePageTitle';
 import { useWakeLock } from '../hooks/useWakeLock';
+import { UnitBadge } from '../components/ui';
 import KioskBadgeLogin from '../components/kiosk/KioskBadgeLogin';
 import KioskNcrFiledScreen from '../components/kiosk/KioskNcrFiledScreen';
 import KioskQueueCard from '../components/kiosk/KioskQueueCard';
@@ -1160,6 +1161,10 @@ export default function OperatorKiosk() {
                         <div className="font-mono text-[30px] font-bold leading-none tracking-[-0.01em] text-fd-ink min-[1100px]:text-[38px]">
                           {activeJob.work_order_number || '—'}
                         </div>
+                        {/* The unit on the bench — the operator stares at this hero for
+                            hours, so it sits directly under the WO number rather than
+                            inside the notes block below. */}
+                        <UnitBadge unitNumber={activeJob.unit_number} size="lg" className="mt-2" />
                         <div className="mt-2 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-sm text-fd-body min-[1100px]:text-base">
                           <span className="font-mono font-semibold text-fd-ink">{activeJob.part_number || '—'}</span>
                           {activeJob.part_name ? <span>· {activeJob.part_name}</span> : null}
@@ -1542,6 +1547,7 @@ export default function OperatorKiosk() {
               <h2 className="text-3xl font-bold text-fd-ink">Clock in?</h2>
               <div className="mt-4 rounded-[4px] border border-fd-line bg-fd-panel p-6">
                 <p className="font-mono text-4xl font-bold text-fd-ink">{view.item.work_order_number}</p>
+                <UnitBadge unitNumber={view.item.unit_number} size="lg" className="mt-3" />
                 <p className="mt-3 text-2xl text-fd-body">
                   <span className="font-mono font-semibold text-fd-ink">{view.item.part_number || '—'}</span>
                   {view.item.part_name ? <span className="text-fd-mute"> · {view.item.part_name}</span> : null}
