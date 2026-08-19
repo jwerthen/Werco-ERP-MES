@@ -67,6 +67,7 @@ import {
   XMarkIcon,
   BuildingOffice2Icon,
   HashtagIcon,
+  IdentificationIcon,
   ClockIcon,
   ChartBarIcon,
   ClipboardDocumentCheckIcon,
@@ -1707,7 +1708,7 @@ export default function WorkOrderDetail() {
       />
 
       {/* Work Order Information — compact KPI strip */}
-      <MiniStatStrip className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2">
+      <MiniStatStrip className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-9 gap-2">
         <MiniStat
           icon={CubeIcon}
           iconBg="bg-fd-blue/15"
@@ -1802,7 +1803,7 @@ export default function WorkOrderDetail() {
           value={workOrder.customer_name || '-'}
         />
         <MiniStat
-          icon={HashtagIcon}
+          icon={IdentificationIcon}
           iconBg="bg-fd-cyan/15"
           iconColor="text-fd-cyan"
           label="Unit #"
@@ -1850,7 +1851,7 @@ export default function WorkOrderDetail() {
                     aria-label="Edit unit #"
                     className="text-fd-mute hover:text-fd-blue"
                   >
-                    <PencilSquareIcon className="h-3.5 w-3.5" />
+                    <PencilSquareIcon className="h-4 w-4" />
                   </button>
                 )}
               </span>

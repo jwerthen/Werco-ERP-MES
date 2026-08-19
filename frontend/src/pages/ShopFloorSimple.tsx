@@ -26,7 +26,7 @@ import {
 } from '@heroicons/react/24/solid';
 import { FunnelIcon, QrCodeIcon } from '@heroicons/react/24/outline';
 import LaserNestOperatorPanel from '../components/laser/LaserNestOperatorPanel';
-import { Button, ConfirmDialog, EmptyState, ErrorState, Modal, SelectField, statusColor, statusVariant } from '../components/ui';
+import { Button, ConfirmDialog, EmptyState, ErrorState, Modal, SelectField, UnitBadge, statusColor, statusVariant } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { HOLD_REASONS } from '../components/kiosk/kioskConstants';
 import { KioskRunOrderChip } from '../components/kiosk/KioskQueueCard';
@@ -45,6 +45,8 @@ interface Operation {
   id: number;
   work_order_id: number;
   work_order_number: string;
+  /** Unit # this work order builds — absent on work orders that do not track one. */
+  unit_number?: string | null;
   part_number: string | null;
   part_name: string | null;
   operation_number: string;
@@ -1544,6 +1546,7 @@ export default function ShopFloorSimple() {
                     <div className="mt-1 flex items-center gap-2">
                       <KioskRunOrderChip item={op} size="sm" />
                       <p className="text-lg font-bold text-white">{op.work_order_number}</p>
+                      <UnitBadge unitNumber={op.unit_number} size="sm" className="mt-1" />
                     </div>
                     <p className="text-sm text-slate-300">
                       {formatOperationLabel(op.operation_number)} - {op.operation_name}
@@ -1643,6 +1646,7 @@ export default function ShopFloorSimple() {
                     <div className="flex items-center gap-2">
                       <KioskRunOrderChip item={op} size="sm" />
                       <span className="font-bold text-werco-primary text-lg">{op.work_order_number}</span>
+                      <UnitBadge unitNumber={op.unit_number} size="sm" />
                       {overdue && (
                         <span className="px-2 py-0.5 bg-red-500/20 text-red-400 text-xs font-semibold rounded">
                           OVERDUE

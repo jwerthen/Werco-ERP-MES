@@ -201,9 +201,11 @@ export default function WoCard({
               <span className="text-[1.0625rem] font-bold tracking-[0.12em] opacity-75">UNIT </span>
               {unit}
             </span>
-            <span className="min-w-0 truncate text-[1.0625rem] font-semibold" style={{ color: waiting ? FD.mute : FD.body }}>
-              {job.part_number ?? ''}
-            </span>
+            {job.part_number ? (
+              <span className="min-w-0 truncate text-[1.0625rem] font-semibold" style={{ color: waiting ? FD.mute : FD.body }}>
+                {job.part_number}
+              </span>
+            ) : null}
           </span>
         ) : (
           <span

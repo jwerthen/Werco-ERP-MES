@@ -12,7 +12,7 @@ import {
 } from '../utils/centralTime';
 import { KioskRunOrderChip } from '../components/kiosk/KioskQueueCard';
 import { useToast } from '../components/ui/Toast';
-import { Button, EmptyState, ErrorState, FormField, InputDialog, StatusBadge, statusColor, statusVariant } from '../components/ui';
+import { Button, EmptyState, ErrorState, FormField, InputDialog, StatusBadge, UnitBadge, statusColor, statusVariant } from '../components/ui';
 import {
   PlayIcon,
   StopIcon,
@@ -642,6 +642,7 @@ export default function ShopFloor() {
                     P{item.priority}
                   </span>
                   <span className="text-sm font-semibold text-werco-700 truncate">{item.work_order_number}</span>
+                  <UnitBadge unitNumber={item.unit_number} size="sm" className="shrink-0" />
                   <span className={`text-xs shrink-0 tabular-nums ${overdue ? 'text-red-600 font-medium' : 'text-surface-500'}`}>
                     {item.due_date ? formatCentralDate(item.due_date, { year: undefined }) : '—'}
                   </span>
@@ -765,6 +766,7 @@ export default function ShopFloor() {
                           <div className="flex items-center gap-2">
                             <KioskRunOrderChip item={item} size="sm" />
                             <span className="font-semibold text-werco-600">{item.work_order_number}</span>
+                            <UnitBadge unitNumber={item.unit_number} size="sm" />
                           </div>
                         </td>
                         <td aria-label="Part">

@@ -1262,6 +1262,8 @@ export interface QueueItem {
   operation_id: number;
   work_order_id: number;
   work_order_number: string;
+  /** Unit # this work order builds — absent on work orders that do not track one. */
+  unit_number?: string | null;
   part_number?: string;
   part_name?: string;
   operation_number?: string;

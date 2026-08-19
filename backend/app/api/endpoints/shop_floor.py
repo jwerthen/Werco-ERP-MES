@@ -3423,7 +3423,11 @@ def get_all_operations(
         # Outer join: standalone laser-cutting WOs have part_id NULL, and their
         # operations must still match a work-order-number search.
         query = query.outerjoin(Part, WorkOrder.part_id == Part.id).filter(
-            or_(WorkOrder.work_order_number.ilike(search_term), Part.part_number.ilike(search_term))
+            or_(
+                WorkOrder.work_order_number.ilike(search_term),
+                WorkOrder.unit_number.ilike(search_term),
+                Part.part_number.ilike(search_term),
+            )
         )
 
     if due_today:
@@ -3486,6 +3490,10 @@ def get_all_operations(
                 "id": op.id,
                 "work_order_id": wo.id,
                 "work_order_number": wo.work_order_number,
+                # 083. Same identity key the kiosk rows carry -- the desktop
+                # shop-floor screens are a floor surface too, and an operator who
+                # reads UNIT on the kiosk must not lose it by using the desk.
+                "unit_number": wo.unit_number,
                 "part_number": wo.part.part_number if wo.part else None,
                 "part_name": wo.part.name if wo.part else None,
                 "operation_number": op.operation_number,
@@ -4790,6 +4798,7 @@ def get_operation_details(
             "due_date": wo.due_date.isoformat() if wo.due_date else None,
             "customer_name": wo.customer_name,
             "customer_po": wo.customer_po,
+            "unit_number": wo.unit_number,
             "notes": wo.notes,
             "special_instructions": wo.special_instructions,
             "part": {
