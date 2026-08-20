@@ -354,6 +354,111 @@ crowd actionable work off the top of the board.
      on the wall a *population* change rather than a disclosure-category change), `IN QUEUE` on
      WAITING;
   5. a thin progress bar (`qty_complete / qty_ordered`) + percent.
+- **Which cell yields — the card's width contract (2026-08-20).** Every row is two cells competing
+  for one content box: **314px at 1080p** (the 347px grid cell, less the `0.25rem` status edge, the
+  `0.0625rem` right hairline, and 2 × `0.875rem` of padding). The card renders in a **monospace**
+  stack with a `0.6em` advance, so width is exactly `chars × (0.6 × fontSize + tracking)` — every
+  budget here is arithmetic, not a measurement, which is why the board needs no fit-text loop,
+  `ResizeObserver`, or any other layout-measuring JS (all three are forbidden: this display runs
+  unattended for weeks). The rule for which cell gives way is **not** "whichever sits on the right":
+
+  > A cell may take its full max-content width (`shrink-0`) only when truncating it would make it
+  > **lie**.
+
+  The status chip (`LATE 12D`), the qty (`40/120`) and the time value (`2H14M`) are exactly that
+  class — a clipped number reads as a different, plausible, *wrong* number — and all three are
+  small and bounded (≤128px), so they stay rigid and their rows are paid for out of tracking.
+  **The stop reason was the one rigid cell that was neither.** At 211px `ENGINEERING QUESTION` is
+  the widest cell on the card (69% of the box), and being `shrink-0` it took all of it, leaving the
+  work-center name **87px — eight characters**. That is how `DEBURR BENCH 1` reached the TV as
+  `DEBURR B…`. **Severity was inverted:** DOWN and BLOCKED cards, where knowing *which machine*
+  matters most, were the only two that hid it, while a calm LATE card (empty right cell) gave the
+  same name 298px.
+
+  Row 4 now inverts the priority: the **work center is rigid** up to a `12.5rem` cap and the
+  **reason absorbs the deficit**. The asymmetry is in how the two degrade — the reason is a closed
+  vocabulary read from the **front** (each `DowntimeCategory` member, and each
+  `WorkOrderBlockerCategory` member, is unique within 8 characters **of its own vocabulary**, so
+  `ENGINEERING…` still names the blocker), while a work-center name is free text disambiguated at
+  the **end** (`DEBURR BENCH 1` vs `… 2`), and truncating it destroys the identity outright.
+  Per-vocabulary is the correct frame, not a hedge: a card draws this cell from exactly one of the
+  two enums and which one is settled by the status chip and the status edge before the text is read.
+  Across the union the claim is false — `OTHER` belongs to both enums, and `MATERIAL` (downtime)
+  shares eight characters with `MATERIAL MISSING` (blocker) — which is why
+  `WoCard.test.tsx` checks the two vocabularies **separately**. The cap keeps the inversion from merely flipping the unfairness:
+  it reserves the reason `314 − 12 − 200 = 102px ≈ 10 characters`, and it is applied **only when a
+  reason exists**, so a LATE/RUNNING card still hands the machine name the whole row. Both cells
+  carry `min-w-0`, which is load-bearing rather than tidy — without it a flex item's automatic
+  minimum size is its longest **word** (`ENGINEERING`, 111px), the reason refuses to shrink far
+  enough, and the **row overflows the card**: a geometry break, not a truncation, against this
+  board's central rule that every panel keeps its slot at all data values.
+
+  **Tracking is now a label affordance only.** The chip and the `UNIT ` prefix keep theirs, the stop
+  reason keeps a reduced `0.03em`, and *data* strings — WO number, part number, unit number, op
+  line, customer, work center — run at `0`. On this face tracking is the cheapest width available
+  (0.8px per character at `1rem`, against 0.6px for a whole `0.0625rem` font step) and it costs no
+  glyph height, which is what actually carries at 3–6m. **Row 4 was not fixable by typography at any
+  size**: the realistic worst pair overruns by 110.8px while every non-font lever combined yields
+  46.4px, and even `0.875rem` with zero tracking on both sides is still 17.6px short. Only the qty
+  changed size (`1.1875rem` → `1.0625rem`) — it is the cell that starves the part number while being
+  forbidden to truncate, so size was the only lever it had, and row 5 restates the same progress as
+  a percent directly beneath it. **The part/unit headline keeps its `1.9375rem`.**
+
+  Row 4's gap is the one that **grew** (`0.5rem` → `0.75rem`) while every other row's shrank. Before,
+  the machine name almost always truncated, so an **ellipsis** separated the two cells; now it almost
+  always renders complete and ends on a real glyph, and two same-size monospace strings 6px apart
+  read as one run-on at 5m. Row 3 keeps the tighter gap precisely because its left cell *does* still
+  truncate and supplies its own ellipsis.
+
+- **Machine identity — an open owner question, not a layout decision.** `WorkCenter` carries two
+  identities and `wallboard_service` sets both from the same object, so the card's
+  `work_center_name ?? work_center_code` fallback never fires: `name` is `String(100)` free text with
+  no uniqueness constraint, `code` is `String(20)` and **unique per company**. Rendering the **code**
+  instead would bound this row by construction and was seriously considered. It was **not** taken,
+  because it changes *what the floor reads* and the evidence does not support it: in `seed_data.py`
+  the CNC cells pair `CNC-01/02/03` with **`Haas VF-2` / `Haas VF-4` / `Haas ST-20`**, where the code
+  carries no machine identity at all and an operator says "the VF-4". The layout fix renders **every
+  work-center name in the seed data whole** (the longest, `Powder Coating Line`, is 19 characters
+  against a 20-character cap), so the swap would trade a working prose name for a code that is
+  uninformative on the shop's most valuable machines. **Ask before revisiting:** when someone points
+  at a stopped machine, do they say `PWD-01` or "the powder line"? If it is the code, the swap
+  becomes correct and `OperatorKiosk` / `CrewStationKiosk` / `Dashboard` / `FlowAnalytics` already
+  render code-first.
+
+- **What still truncates on the card, on purpose.** Verified in a real engine (headless Chromium at
+  1920×1080, 2560×1440 and 3840×2160 — identical results at all three, so the `rem` budget is
+  genuinely scale-invariant) against an adversarial 12-card fixture built from the real enum
+  vocabularies, the seed-data work-center names and production-format `WO-YYYYMMDD-NNN` numbers.
+  Clipped spans went **21 → 8** counting the single-style spans, or **23 → 10** counting the two
+  mixed-style unit lines as well (they carry a nested `UNIT ` prefix, so they are measured by
+  `scrollWidth` rather than by an offscreen probe). The composition changed more than the count:
+  work-order numbers 8 → 0, part numbers 2 → 0, work-center names 4 → 1. What remains:
+  - a work-center name **over 20 characters** when a reason is present — in practice exactly one
+    machine, the 30-char `Ermaksan Fiber Laser 6KW Bay 2`, which shows 20 characters (it was showing
+    **eight**). No split of a 302px row fits a 30-char name beside a 20-char reason; something must
+    lose. It renders whole on LATE/RUNNING cards;
+  - the **stop reason**, whenever the machine name is long — down to its ~10-character floor. This is
+    the deliberate trade and the one genuinely new truncation this change introduces;
+  - **row 3's op line.** `OP 12/12 · FIRST ARTICLE INSPECTION` improved from 95px over to 57px, but
+    the `OP n/total · ` prefix alone eats 9–11 of ~28 characters. Closing it means shortening the
+    prefix, which changes what the row **says** — a content decision, deliberately not taken here.
+    The executive customer-name variant clips the same slot (75px → 37px);
+  - **row 2 beside a large quantity.** The deficit is driven by the **qty digit count**, not the part
+    number: the same 14-char `COVER-PNT-1120` was 5.7px short beside `0/24` and 85.5px beside
+    `12500/25000`. It now fits through `40/120`; `100/250` and up still clip. Closing the 4-digit
+    case needs the headline at ~1.6rem, which is not worth it;
+  - the **unit card's part sub-line**, which is unfixable by width alone: the unit line and the part
+    sub-line share one `flex-col` wrapper, so both children clamp to whatever the larger claimed.
+    There is no negotiation to fix — it is a pure width shortage.
+  - **row 1 sits exactly one character from its next cliff, and that one is DATE-DRIVEN — it will
+    arrive silently.** `WO-YYYYMMDD-NNN` is 15 characters and now fits beside every chip, but the
+    bound on a LATE card *is* 15. The day a daily sequence reaches four digits
+    (`WO-20260819-1004`, 16 characters) the work-order number clips again, on LATE cards only.
+    `_generate_work_order_number` mints `NNN` per day, so this needs 1000 work orders released in
+    one day — remote for this shop, but nothing refuses it and nothing warns. Recorded because a
+    regression that depends on the calendar rather than on a code change is the kind nobody
+    connects back to this commit. The fix if it ever lands is the chip's tracking (`0.08em`, with
+    room to go to `0.05em`), not the WO number's size.
 - **Order totals on a pool WO:** rows 2 and 5 normally show the **work-order header**
   (`quantity_complete / quantity_ordered`) — correct for a conventional routing, where every
   operation processes the whole order. A **pool** work order is different: its operations are
