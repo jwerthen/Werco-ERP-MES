@@ -415,9 +415,23 @@ PRODUCTION_DEPLOY_JOBS = (
 # same Railway services, and Railway keeps one active deployment per service.
 PRODUCTION_DEPLOY_GROUP = "production-deploy"
 
+# The failure-path diagnostic every railway-deploying job must run, and the exact CLI
+# version all three install steps must pin. See TestRailwayCliIsPinned and
+# TestDeployFailuresAreDiagnosable below for why each is guarded.
+RAILWAY_DIAGNOSTICS_SCRIPT = REPO_ROOT / ".github" / "scripts" / "railway_diagnostics.sh"
+RAILWAY_DIAGNOSTICS_REF = ".github/scripts/railway_diagnostics.sh"
+RAILWAY_CLI_INSTALL = "npm install -g @railway/cli"
+
 
 def _git(*args: str) -> "subprocess.CompletedProcess[bytes]":
     return subprocess.run(args, cwd=REPO_ROOT, capture_output=True, timeout=15)
+
+
+def _railway_up_steps(workflow_name: str) -> Iterator[Tuple[str, dict]]:
+    """Yield (job_key, step) for every step that runs `railway up`."""
+    for job_key, step in _iter_steps(_load_workflow(workflow_name)):
+        if "railway up" in (step.get("run") or ""):
+            yield job_key, step
 
 
 class TestDeployFailureSignalIsHonest:
@@ -561,6 +575,236 @@ class TestDeployFailureSignalIsHonest:
     def test_release_verifier_exists_and_compiles(self) -> None:
         assert RELEASE_VERIFIER.is_file(), f"{RELEASE_VERIFIER} is referenced by the deploy workflows but missing."
         compile(RELEASE_VERIFIER.read_text(encoding="utf-8"), str(RELEASE_VERIFIER), "exec")
+
+
+class TestDeployLogsCaptureStderr:
+    """The teed deploy log must include stderr, because that is where failures land.
+
+    2026-08-20, 16:35 UTC: both production deploys for 08312d3 failed and the log the
+    receipt step dumped under "--- deploy log ---" read, in full::
+
+        Indexing...
+        Uploading...
+
+    The CLI had in fact also printed ``Deploys have been paused due to an upstream
+    issue`` -- naming the cause outright -- but on STDERR, and the deploy steps piped
+    only stdout into ``tee``. So the dump the operator actually reads discarded the one
+    line that mattered, and a Railway-side incident was indistinguishable from a revoked
+    token, an exhausted plan quota, or a CLI release that changed its output. An
+    afternoon went into ruling those out by hand.
+
+    This cannot weaken the receipt: "Build Logs:" is printed on stdout, so merging
+    stderr into the same stream can only ADD lines to what the grep sees.
+    """
+
+    @pytest.mark.parametrize("workflow_name", DEPLOY_WORKFLOWS)
+    def test_teed_railway_up_merges_stderr(self, workflow_name: str) -> None:
+        offenders = []
+        for job_key, step in _railway_up_steps(workflow_name):
+            script = step.get("run") or ""
+            if "tee" not in script:
+                continue  # not teed, so its stderr is already visible in the step output.
+            for line in script.splitlines():
+                if "railway up" not in line or "tee" not in line:
+                    continue
+                if "2>&1" not in line:
+                    offenders.append(f"{workflow_name} job={job_key} step={step.get('name', '?')!r}")
+
+        assert not offenders, (
+            "These `railway up` steps tee only stdout, so the receipt step's "
+            "'--- deploy log ---' dump silently drops the CLI's error line:\n  "
+            + "\n  ".join(offenders)
+            + "\nWrite `railway up ... 2>&1 | tee \"$RUNNER_TEMP/...\"`. See this class's docstring."
+        )
+
+
+class TestRailwayCliIsPinned:
+    """`npm install -g @railway/cli` unpinned is a deploy that a release can break.
+
+    The success contract of every production deploy in this repo is a STRING: the
+    receipt steps grep the CLI's output for "Build Logs:". An unpinned install means a
+    Railway release can reword that line at any time and red-line every deploy with a
+    message ("the upload was rejected") that points at the wrong thing entirely. The
+    same install also feeds ``railway run`` in "Verify Production Config", whose flag
+    set the deploy-production comments already note "can change under us".
+
+    This did NOT cause the 2026-08-20 failure -- the registry's latest was 5.41.2,
+    published five days earlier, so the 14:17 success and the 16:35 failure installed
+    the identical build. It is guarded because the exposure is real and free to close.
+
+    The pin covers ``@railway/cli`` itself, not its two floating runtime dependency
+    ranges (``node-fetch@^3.1.0``, ``tar@^6.1.11``); a global npm install has no
+    lockfile, so that residue is accepted rather than fixed here.
+    """
+
+    def _install_steps(self, workflow_name: str) -> list:
+        return [
+            (job_key, step)
+            for job_key, step in _iter_steps(_load_workflow(workflow_name))
+            if RAILWAY_CLI_INSTALL in (step.get("run") or "")
+        ]
+
+    @pytest.mark.parametrize("workflow_name", DEPLOY_WORKFLOWS)
+    def test_every_install_pins_an_exact_version(self, workflow_name: str) -> None:
+        steps = self._install_steps(workflow_name)
+        assert steps, f"{workflow_name} no longer installs the Railway CLI -- was the step renamed?"
+
+        offenders = []
+        for job_key, step in steps:
+            script = step.get("run") or ""
+            for match in re.finditer(re.escape(RAILWAY_CLI_INSTALL) + r"(@\S+)?", script):
+                spec = match.group(1)
+                if spec is None or not re.fullmatch(r"@\d+\.\d+\.\d+", spec):
+                    offenders.append(f"{workflow_name} job={job_key} step={step.get('name', '?')!r} spec={spec!r}")
+
+        assert not offenders, (
+            "These Railway CLI installs are not pinned to an exact version: "
+            + "; ".join(offenders)
+            + ".\nUse `npm install -g @railway/cli@X.Y.Z`. A dist-tag or range lets a CLI release "
+            "change the 'Build Logs:' output the receipt steps grep for, breaking every deploy."
+        )
+
+    def test_all_three_installs_agree_on_the_version(self) -> None:
+        """Three install steps deploy the SAME services; a skew between them is a bug.
+
+        ci-cd.yml carries two (deploy-staging, deploy-production) and
+        deploy-frontend-production.yml one, and the last two both push werco-frontend.
+        Bumping one and forgetting another is the exact asymmetry that made 2026-08-20
+        harder than it needed to be.
+        """
+        found = {}
+        for workflow_name in DEPLOY_WORKFLOWS:
+            for job_key, step in self._install_steps(workflow_name):
+                for match in re.finditer(re.escape(RAILWAY_CLI_INSTALL) + r"@(\d+\.\d+\.\d+)", step.get("run") or ""):
+                    found[f"{workflow_name}:{job_key}"] = match.group(1)
+
+        assert len(found) == 3, f"expected exactly three pinned Railway CLI installs, found {found}"
+        assert len(set(found.values())) == 1, (
+            f"the Railway CLI pins have drifted apart: {found}. Bump all three together, and "
+            "confirm the new CLI still prints 'Build Logs:' on a successful upload first."
+        )
+
+
+class TestDeployFailuresAreDiagnosable:
+    """Every railway-deploying job must capture WHY it failed, and only when it failed.
+
+    The 2026-08-20 post-mortem had three live hypotheses -- revoked token, plan/quota
+    state, Railway-side incident -- and the workflows had discarded the evidence that
+    separates them. The fix is a failure-path-only diagnostic; these tests hold it in
+    place, on BOTH deploy paths, because fixing one and leaving its twin is how the
+    asymmetry keeps recurring.
+    """
+
+    def test_the_diagnostics_script_exists_and_parses(self) -> None:
+        assert RAILWAY_DIAGNOSTICS_SCRIPT.is_file(), (
+            f"{RAILWAY_DIAGNOSTICS_SCRIPT} is referenced by the deploy workflows but missing. "
+            "A deploy failure would go back to being undiagnosable."
+        )
+        result = subprocess.run(["bash", "-n", str(RAILWAY_DIAGNOSTICS_SCRIPT)], capture_output=True, timeout=15)
+        assert (
+            result.returncode == 0
+        ), f"{RAILWAY_DIAGNOSTICS_SCRIPT} is not valid bash:\n{result.stderr.decode('utf-8', 'replace')}"
+
+    def test_the_diagnostics_script_cannot_fail_a_job(self) -> None:
+        """A diagnostic that can exit non-zero is a diagnostic that can change a verdict.
+
+        Two properties: no ``set -e`` (a probe is EXPECTED to fail -- a project-scoped
+        token cannot ``whoami`` -- and one failing must not abort the remaining probes),
+        and an explicit ``exit 0`` so the script's status never depends on the last
+        command that happened to run.
+        """
+        source = RAILWAY_DIAGNOSTICS_SCRIPT.read_text(encoding="utf-8")
+        code = "\n".join(line for line in source.splitlines() if not line.lstrip().startswith("#"))
+        assert not re.search(r"^\s*set\s+-[a-z]*e", code, re.MULTILINE), (
+            "the diagnostics script sets -e, so the first probe that fails (whoami always does "
+            "under a project token) would abort every probe after it."
+        )
+        assert re.search(r"^\s*exit 0\s*$", code, re.MULTILINE), (
+            "the diagnostics script must end with an explicit `exit 0`; otherwise its status is "
+            "whatever the last command returned, and a diagnostic must never change an outcome."
+        )
+
+    def test_the_diagnostics_script_never_echoes_a_secret(self) -> None:
+        """The repo is PUBLIC, so its Actions logs are world-readable.
+
+        RAILWAY_TOKEN reaches the CLI through the environment and is never EXPANDED by
+        the script body; RAILWAY_PROJECT_ID likewise. GitHub masks both as ``***``, but
+        that masking is the second layer here, not the only one.
+
+        The rule is deliberately about the expansion syntax (``$RAILWAY_TOKEN`` /
+        ``${RAILWAY_TOKEN}``) rather than the bare word: naming the secret in prose is
+        how the script's interpretation guide tells an operator WHICH repo secret to
+        rotate, and a substring match would forbid saying so.
+        """
+        source = RAILWAY_DIAGNOSTICS_SCRIPT.read_text(encoding="utf-8")
+        code = [line for line in source.splitlines() if not line.lstrip().startswith("#")]
+        expansion = re.compile(r"\$\{?RAILWAY_(TOKEN|PROJECT_ID)\b")
+        offenders = [line.strip() for line in code if expansion.search(line)]
+        assert not offenders, (
+            f"the diagnostics script expands a secret in executable code: {offenders}. "
+            "Pass it to the CLI through the environment only -- never interpolate or print it."
+        )
+
+        # The redaction layer that keeps a login email / project UUID out of a public log.
+        assert "redacted-email" in source and "redacted-uuid" in source, (
+            "the diagnostics script lost its redaction of emails/UUIDs from CLI output. This "
+            "repo is public; `railway whoami` prints a login email and `railway status` prints "
+            "project and service UUIDs."
+        )
+
+    @pytest.mark.parametrize("workflow_name", DEPLOY_WORKFLOWS)
+    def test_every_railway_job_runs_the_diagnostic_on_failure(self, workflow_name: str) -> None:
+        workflow = _load_workflow(workflow_name)
+        deploying_jobs = {job_key for job_key, _ in _railway_up_steps(workflow_name)}
+        assert deploying_jobs, f"{workflow_name} no longer runs `railway up` at all -- was a job renamed?"
+
+        for job_key in sorted(deploying_jobs):
+            steps = (workflow.get("jobs") or {}).get(job_key, {}).get("steps") or []
+            diagnostics = [s for s in steps if RAILWAY_DIAGNOSTICS_REF in (s.get("run") or "")]
+            assert diagnostics, (
+                f"{workflow_name} job {job_key} runs `railway up` but never runs "
+                f"{RAILWAY_DIAGNOSTICS_REF}. A failure there would leave the same evidence-free "
+                "log that made 2026-08-20 undiagnosable."
+            )
+            for step in diagnostics:
+                condition = str(step.get("if") or "")
+                assert "failure()" in condition, (
+                    f"{workflow_name} job {job_key} step {step.get('name')!r} runs the diagnostic "
+                    f"under if={condition!r}. It must be `failure()` -- diagnostics are for the "
+                    "failure path only and must add no noise to a green deploy."
+                )
+                assert step.get("continue-on-error"), (
+                    f"{workflow_name} job {job_key} step {step.get('name')!r} runs the diagnostic "
+                    "without continue-on-error. A diagnostic must never be able to change the "
+                    "job's PASS/FAIL outcome."
+                )
+
+    @pytest.mark.parametrize("workflow_name", DEPLOY_WORKFLOWS)
+    def test_the_diagnostic_is_handed_every_teed_log_in_its_job(self, workflow_name: str) -> None:
+        """A diagnostic that dumps only one service's log repeats the asymmetry inside a job.
+
+        ci-cd.yml's deploy-production tees three (backend, frontend, worker). A failed
+        receipt step skips the rest of the job, so the later logs are simply absent --
+        the script reports a missing path rather than tripping over it, which is why
+        passing all three is safe as well as necessary.
+        """
+        workflow = _load_workflow(workflow_name)
+        for job_key, job in (workflow.get("jobs") or {}).items():
+            steps = job.get("steps") or []
+            teed = {
+                log
+                for step in steps
+                for log in re.findall(r'tee "([^"]+)"', step.get("run") or "")
+                if "railway up" in (step.get("run") or "")
+            }
+            if not teed:
+                continue
+            diagnostics = " ".join(s.get("run") or "" for s in steps if RAILWAY_DIAGNOSTICS_REF in (s.get("run") or ""))
+            missing = sorted(log for log in teed if log not in diagnostics)
+            assert not missing, (
+                f"{workflow_name} job {job_key} tees {sorted(teed)} but its diagnostic step is not "
+                f"handed {missing}. Those logs hold the CLI's error output and would go unread."
+            )
 
 
 class TestFrontendReleaseMarkerShipsWithTheArtifact:

@@ -37,8 +37,23 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # PINNED. An unpinned CLI in a deploy path is a silent breakage waiting for a
+      # release: this workflow's success contract is a STRING -- the "Build Logs:" line
+      # the receipt step greps for -- so a CLI release that reworded or restructured its
+      # output would fail every production deploy with a message that reads like a
+      # rejected upload. (5.41.2 is the version both the 2026-08-20 14:17 success and the
+      # 16:35 failure resolved `latest` to, so the pin changes nothing today.)
+      #
+      # WHEN BUMPING: run one deploy and confirm the CLI still prints "Build Logs:" on a
+      # successful upload before merging the bump. That string IS the contract; the
+      # blocking receipt steps in this file and in ci-cd.yml both depend on it verbatim.
+      # Keep this version identical in all three install steps (here, and ci-cd.yml's
+      # deploy-staging + deploy-production) -- a version skew between the paths that
+      # deploy the SAME services is the asymmetry class this repo keeps getting bitten by.
+      # Note the pin fixes the CLI, not its two floating runtime deps (node-fetch, tar);
+      # a global npm install has no lockfile, so that residue is accepted.
       - name: Install Railway CLI
-        run: npm install -g @railway/cli
+        run: npm install -g @railway/cli@5.41.2
 
       - name: Validate Railway token secret
         run: |
@@ -84,13 +99,23 @@ jobs:
       # shipped fine, because the CLI could not tail the build log -- its exit status
       # reports log-stream health, not deploy success. The blocking gates are the upload
       # receipt below and the release-SHA check after it.
+      #
+      # `2>&1` before the tee is load-bearing, added 2026-08-20. The CLI reports FAILURES
+      # on stderr, so a stdout-only tee produced a log holding "Indexing... / Uploading..."
+      # and nothing else -- and that truncated log is exactly what the receipt step below
+      # dumps under "--- deploy log ---". On 2026-08-20 the CLI said "Deploys have been
+      # paused due to an upstream issue" (a Railway-side incident) and the receipt's dump
+      # swallowed it, leaving the failure indistinguishable from a revoked token or an
+      # exhausted quota. It does not change what is deployed, and cannot change the
+      # receipt's verdict: "Build Logs:" is printed on stdout, so merging stderr in can
+      # only ADD lines to what the grep sees.
       - name: Deploy frontend service from frontend root
         continue-on-error: true
         run: |
           set -o pipefail
           cd frontend
           service_name="${RAILWAY_FRONTEND_SERVICE:-werco-frontend}"
-          railway up . --path-as-root --environment production --project "${RAILWAY_PROJECT_ID}" --service "${service_name}" | tee "$RUNNER_TEMP/deploy-frontend.log"
+          railway up . --path-as-root --environment production --project "${RAILWAY_PROJECT_ID}" --service "${service_name}" 2>&1 | tee "$RUNNER_TEMP/deploy-frontend.log"
 
       - name: Confirm Railway accepted the upload
         # A "Build Logs:" URL is printed only once the upload is accepted and a build
@@ -173,3 +198,22 @@ jobs:
           print(f"Frontend verification failed after retries: {last_err}")
           sys.exit(1)
           PY
+
+      # FAILURE PATH ONLY. `if: failure()` keeps this off every green deploy, so the happy
+      # path is byte-identical to before. It exists because the 2026-08-20 failure left
+      # nothing in the log that could separate "token revoked" from "quota exhausted" from
+      # "Railway incident" -- see the header of the script for the full account.
+      #
+      # continue-on-error is a second belt on top of the script's own `exit 0`: a
+      # diagnostic must never be able to change a verdict. The job has already failed by
+      # the time this runs, and it still reports failed afterwards.
+      #
+      # The script prints no secret: RAILWAY_TOKEN is passed to the CLI through the
+      # environment and never echoed, and every probe's output is run through an
+      # email/UUID redactor before it is printed -- this repo is PUBLIC, so its Actions
+      # logs are world-readable. That redaction is an extra layer, not a replacement for
+      # GitHub's own masking of RAILWAY_TOKEN / RAILWAY_PROJECT_ID, which still applies.
+      - name: Diagnose the Railway failure
+        if: failure()
+        continue-on-error: true
+        run: bash .github/scripts/railway_diagnostics.sh "$RUNNER_TEMP/deploy-frontend.log"
