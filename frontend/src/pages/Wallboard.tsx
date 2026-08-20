@@ -63,6 +63,7 @@ import {
 } from '../services/wallboardClient';
 import type { WallboardResponse } from '../types/wallboard';
 import { getCentralMinutesOfDay } from '../utils/centralTime';
+import { HELD_WO_STATUS } from '../utils/wallboardLayout';
 
 const POLL_INTERVAL_MS = 30_000;
 /**
@@ -225,9 +226,18 @@ export default function Wallboard() {
         if (prevAlarmRef.current.dept !== dept) {
           prevAlarmRef.current = { dept, wos: new Set<string>() };
         }
+        // The server's bucket-1 predicate EXACTLY — which, since ON_HOLD work
+        // orders joined the wall, means `(blocked || down) AND NOT held`:
+        // `_job_sort_key` prepends a held bucket that sorts held work strictly
+        // LAST regardless of its blocked/down flags. Snapping on a held job
+        // would yank every TV in the plant back to field page 0 to show
+        // something that is two pages away — an unpredictable whole-zone lurch
+        // bought for nothing, which is exactly what the snap's "on screen by
+        // construction" justification exists to rule out. A hold is a known
+        // stop somebody already authorized; it is not a right-now event.
         const alarmed = new Set<string>(
           (Array.isArray(payload.jobs) ? payload.jobs : [])
-            .filter(job => job.blocked || job.down)
+            .filter(job => job.status?.trim().toLowerCase() !== HELD_WO_STATUS && (job.blocked || job.down))
             .map(job => job.wo_number)
         );
         let newlyAlarmed = false;
@@ -243,7 +253,11 @@ export default function Wallboard() {
         setConsecutiveFailures(0);
         setNoToken(false);
       } catch (err: any) {
-        if (stale()) return;
+        // Same guard the success path carries: only the NEWEST resolved request
+        // may report connection state, or a slow poll that finally times out
+        // after a newer one already painted flips the sync chip to STALE over
+        // data that is seconds old (and four such overlaps escalate it to LOST).
+        if (stale() || seq <= appliedSeqRef.current) return;
         if (err?.message === 'NO_TOKEN') {
           setNoToken(true);
         } else if (err?.message === 'UNAUTHORIZED') {

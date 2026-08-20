@@ -127,7 +127,8 @@ _JOB_WALL_LIMIT = 24
 _BLOCKED_JOIN_LIMIT = _JOB_WALL_LIMIT
 
 # current-op precedence lives in _current_operation: IN_PROGRESS with open
-# labor > IN_PROGRESS > READY > PENDING, lowest sequence within each class.
+# labor > IN_PROGRESS > READY > PENDING > ON_HOLD, lowest sequence within each
+# class.
 
 
 def operator_display_name(first_name: Optional[str], last_name: Optional[str]) -> Optional[str]:
@@ -177,14 +178,27 @@ def _current_operation(
     operations: list[WorkOrderOperation], labor_op_ids: Optional[set[int]] = None
 ) -> Optional[WorkOrderOperation]:
     """THE current op of a WO for the job wall: lowest-sequence IN_PROGRESS,
-    else lowest READY, else lowest PENDING; None when all are complete (or
-    the WO has no routed operations).
+    else lowest READY, else lowest PENDING, else lowest ON_HOLD; None when all
+    are complete (or the WO has no routed operations).
 
     Among IN_PROGRESS candidates, ops carrying OPEN LABOR (``labor_op_ids``)
     win first: overlapping in-progress ops are permitted, and pinning to an
     idle earlier op would render the tile WAITING with no crew while people
     are actively working the WO — the exact question the wall exists to
     answer ("what op is it on, who's on it").
+
+    ON_HOLD comes STRICTLY LAST — an actually-runnable op always wins — but it
+    has to be in the chain at all, and the ON_HOLD wall population (2026-08-19)
+    is what made that systematic. A held operation is a routinely written state
+    (the kiosk hold verb, ``work_order_blocker_service.put_operation_on_hold``,
+    ``laser_nest_service``), and the usual route to a WO status of ON_HOLD is a
+    blocker that already held the operation. With ON_HOLD off this chain such a
+    WO yields no current op, and the tile then says ``ALL OPS COMPLETE`` beside
+    a HELD chip and a partial progress bar — three contradicting statements on
+    the board the floor reads to know what is parked — while a ``?dept=`` board
+    drops the job entirely (dept membership is derived from the current op's
+    work-center type), i.e. precisely the disappearance the population change
+    was made to fix.
     """
     in_progress = [op for op in operations if op.status == OperationStatus.IN_PROGRESS]
     if labor_op_ids:
@@ -193,7 +207,7 @@ def _current_operation(
             return min(worked, key=lambda op: (op.sequence is None, op.sequence, op.id))
     if in_progress:
         return min(in_progress, key=lambda op: (op.sequence is None, op.sequence, op.id))
-    for wanted in (OperationStatus.READY, OperationStatus.PENDING):
+    for wanted in (OperationStatus.READY, OperationStatus.PENDING, OperationStatus.ON_HOLD):
         candidates = [op for op in operations if op.status == wanted]
         if candidates:
             return min(candidates, key=lambda op: (op.sequence is None, op.sequence, op.id))

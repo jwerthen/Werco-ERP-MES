@@ -263,13 +263,25 @@ crowd actionable work off the top of the board.
   - **Stability.** The page plan freezes `wo_number` **strings** only and resolves them through the
     freshest payload on every render, so elapsed clocks keep ticking and a card never renders
     RUNNING while the HUD chip beside it says DOWN. The plan key is the delivered **set**, order-
-    insensitive: a reorder (the `running` flag flips across the whole shop at every lunch and shift
-    change) rebuilds **nothing** — cards recolor in place, none move. A set change rebuilds at the
-    **next** dwell boundary, preserving the cycle position. A newly **blocked or down** WO rebuilds
-    immediately and snaps the field to page 0 — **edge-triggered**, so a machine down for three
-    hours fires once (LATE is excluded from the snap: `days_late` steps in a batch at Central
-    midnight). A frozen `wo_number` that has left the payload renders a **plain cell in place** —
-    survivors do not reflow — and heals at the next boundary.
+    insensitive **within each half of the board** (`anchor|field`): a reorder *inside* the frozen
+    field or *inside* the anchor row — the `running` flag flips across the whole shop at every lunch
+    and shift change — rebuilds **nothing**, cards recolor in place and none move. A reorder that
+    carries a job **across** the anchor/field boundary is a different matter and deliberately does
+    rebuild (at the next boundary, phase preserved): the anchor is live while the field is frozen,
+    so the job lifted *into* row 1 is nulled out of its frozen field slot while the job it
+    *displaced* is in neither half — under a whole-list key that job would be rendered on **no
+    cell at all**, indefinitely, because the delivered set never changed. A set change rebuilds at
+    the **next** dwell boundary, preserving the cycle position — except on a **single-page** plan,
+    which rebuilds immediately (there is no cycle position to protect, and deferring would leave the
+    strip claiming `ALL OPEN WORK ORDERS ON BOARD` for a dwell while the 13th job was on no screen)
+    and when the page currently on screen resolves to **nothing at all** (a page of blanks reads as
+    broken; the cold start and a wholesale population replacement are special cases). A newly
+    **blocked or down** WO rebuilds immediately and snaps the field to page 0 — **edge-triggered**,
+    so a machine down for three hours fires once (LATE is excluded from the snap: `days_late` steps
+    in a batch at Central midnight; **HELD work orders are excluded too** — the server sorts them
+    strictly last, so snapping to page 0 for one would lurch every TV in the plant to show something
+    two pages away). A frozen `wo_number` that has left the payload renders a **plain cell in
+    place** — survivors do not reflow — and heals at the next boundary.
   - **Degradation.** `nightDim` **freezes** the cycle at page 0 (the board is declaring nobody is
     looking, and page 0 is the board people already know). **Offline keeps cycling** on last-known-
     good data: paging is not a freshness claim, the staged `SYNC OK → STALE → LOST` chip is the
@@ -280,9 +292,12 @@ crowd actionable work off the top of the board.
     bug, as will the related fact that per-dept `jobs_total` values do **not** sum to the plant
     total (a WO whose current op is `None` drops off every dept board).
 - **The strip under the grid** keeps its exact height, chrome and slot. Left: walk-up copy. Right:
-  a **segmented page bar** (one segment per page, current filled) rendered **only while the board
-  is cycling** — non-text on purpose, so from 5 m a viewer sees how many pages exist and which is
-  lit without resolving a glyph; it changes state once per dwell, so it costs the motion budget
+  a **segmented page bar** (one segment per page, current filled `FD.ink`, the rest `FD.faint`)
+  rendered **only while the board is cycling** — non-text on purpose, so from 5 m a viewer sees how
+  many pages exist and which is lit without resolving a glyph. The **unlit** segments are
+  `FD.faint`, not the `FD.line` hairline: at 1.48:1 on the panel the track was not resolvable at TV
+  distance, which left a lone lit dash — a change *flash* rather than a page indicator, and no way
+  to count the pages at all; it changes state once per dwell, so it costs the motion budget
   nothing. There is deliberately **no countdown/progress bar** (a bar whose whole semantic is "the
   view changes in N seconds" is ambient motion on data). Five copy states:
   1. no jobs → no strip at all (the `NO OPEN WORK ORDERS` zone owns the space);
@@ -311,10 +326,17 @@ crowd actionable work off the top of the board.
   cross-zone reading that follows is intended, not a bug: a held-and-blocked WO still counts in the
   HUD `BLOCKED` chip and still rides the Z3 blocked rail, so a viewer can read `BLOCKED 3` and find
   two orange cards — the third is the grey `HELD` card at the back of the board, and the rail is the
-  disclosure.
+  disclosure. **The same holds for LATE, and it is the sharper case**: `_late_wo_filters` excludes
+  only terminal statuses, so a held-and-late WO keeps its `late_total` count and its *dated* row on
+  the Z3 LATE rail (`WO-1120 · 14D`) while its card reads `HELD` with **no age at all** — the rail
+  is the disclosure, the card is the stop, and spending the LATE chip on a known stop is exactly
+  what the precedence refuses.
 - **Current operation** = the WO's lowest-sequence IN_PROGRESS op, else its lowest READY op, else
-  its lowest PENDING op — none when all ops are complete (the card then reads `ALL OPS
-  COMPLETE`).
+  its lowest PENDING op, else its lowest **ON_HOLD** op — none when all ops are complete (the card
+  then reads `ALL OPS COMPLETE`). ON_HOLD is strictly last (an actually-runnable op always wins)
+  but it *is* in the chain: with ON_HOLD work orders on the wall, the common shape is a WO held
+  *because* its operation was held, and leaving that shape with no current op made the tile read
+  `ALL OPS COMPLETE` beside a `HELD` chip **and** dropped the job off every `?dept=` board.
 - **Card anatomy — five fixed rows:**
   1. WO number ←→ status chip (glowing dot + state word; only DOWN dots pulse);
   2. part number ←→ `done/ordered` qty (see **Order totals on a pool WO** below) — on a
@@ -479,7 +501,10 @@ principal and redacted on every public board.
   limit, 24** (`_BLOCKED_JOIN_LIMIT`) — the Z2 cards join their BLOCKED age and stop reason from it
   by WO number, and the rotation now exposes ranks 13–24, which (being the least severe) are
   systematically the ones a 12-row cap dropped, so later field pages would have shown more blank
-  reason cells than page 0. Neither list is a **count**: `late_total` / `blocked_total` ride
+  reason cells than page 0. The gap is narrowed, not closed: the rows are one per **blocker**
+  (a WO with three open blockers eats three) and ordered by **report time**, not by wall rank, so a
+  shop carrying more than 24 open blockers can still miss a tile — the blank stop-reason cell above
+  is the designed degrade. Neither list is a **count**: `late_total` / `blocked_total` ride
   uncapped and are the only correct source for one.
   `late_wos[].due_date` carries the **promise date** (`must_ship_by || due_date`) under the
   original field name for wire back-compat.
@@ -525,7 +550,8 @@ principal and redacted on every public board.
   Steady state never flashes — including offline. No marquees, no tickers. The **one** exception
   is Zone 2's field, which advances to the next page of work orders every 22s (see "Z2 — Work-order
   grid"): a discrete React state swap with no keyframes, transition or transform — paging, not
-  motion — and inert entirely on a board under 16 delivered work orders.
+  motion — and inert entirely on a board of 12 or fewer delivered work orders (a property of
+  `planFieldPages`, not a threshold: one page exactly when the field fits).
 - **No scrolling, anywhere:** every list is capped server- or client-side worst-first with a
   `+N more` count, so anything hidden is by definition less severe than everything shown. Zone 2 is
   the one place where "hidden" is now temporary rather than permanent — its field rotates — which is

@@ -43,13 +43,25 @@ export interface WoCycle {
 
 interface CyclePlan {
   /**
-   * The delivered SET, ORDER-INSENSITIVE (`wo_numbers.sort().join(',')`). This
-   * is what survives the real stress case: `running` is position 3 of the
-   * server's sort key and flips on every clock-in/out, so at lunch and every
-   * shift change nearly the whole shop's flag flips within minutes — which is
-   * also when the most people walk past. Under an order-insensitive key that
-   * reorders the array and rebuilds nothing: no card moves, cards only recolor
-   * in place.
+   * The delivered set, ORDER-INSENSITIVE **WITHIN each half of the board** —
+   * `anchor_wos.sort()` + `'|'` + `field_wos.sort()`. Order-insensitivity is
+   * what survives the real stress case: `running` is position 3 of the server's
+   * sort key and flips on every clock-in/out, so at lunch and every shift change
+   * nearly the whole shop's flag flips within minutes — which is also when the
+   * most people walk past. A reorder INSIDE the frozen field (or inside the
+   * anchor row) therefore still rebuilds nothing: no card moves, cards only
+   * recolor in place.
+   *
+   * The `|` split is CORRECTNESS, not tidiness. The anchor row is resolved LIVE
+   * while the field is frozen, so a re-sort that carries a job ACROSS that
+   * boundary puts the two halves into disagreement in both directions: the job
+   * lifted INTO the anchor is nulled out of its frozen field slot (resolution
+   * rule 3 below), and the job it DISPLACED is in neither the live top four nor
+   * the frozen field list — i.e. rendered on no cell at all. Under a whole-list
+   * key that state is invisible (the set never changed) and so it never heals;
+   * with the split it is an ordinary set change that heals through case (d),
+   * bounded to one dwell and phase-preserving. That is what keeps this hook's
+   * load-bearing property — no delivered job silently skipped — true.
    */
   key: string;
   /** The `?dept=` this plan's wo_numbers were drawn from. */
@@ -71,11 +83,10 @@ interface CyclePlan {
 }
 
 function planKey(jobs: readonly WallboardJob[]): string {
-  return jobs
-    .map(job => job.wo_number)
-    .slice()
-    .sort()
-    .join(',');
+  const wos = jobs.map(job => job.wo_number);
+  const anchor = wos.slice(0, ANCHOR_SLOTS).sort().join(',');
+  const field = wos.slice(ANCHOR_SLOTS).sort().join(',');
+  return `${anchor}|${field}`;
 }
 
 function buildPlan(
@@ -119,6 +130,8 @@ export function useWoCycle({
   const key = useMemo(() => planKey(list), [list]);
   const fieldWos = useMemo(() => list.slice(ANCHOR_SLOTS).map(job => job.wo_number), [list]);
   const byWo = useMemo(() => new Map(list.map(job => [job.wo_number, job])), [list]);
+  const anchorJobs = useMemo(() => list.slice(0, ANCHOR_SLOTS), [list]);
+  const anchorWos = useMemo(() => new Set(anchorJobs.map(job => job.wo_number)), [anchorJobs]);
 
   /**
    * REBUILD POLICY, exhaustive:
@@ -132,17 +145,30 @@ export function useWoCycle({
    *                                          back to page 0 (which, on a shop where something closes
    *                                          every few minutes, would mean the later pages are never
    *                                          reached at all).
-   *  (e) ORDER changed, set unchanged     -> NO REBUILD AT ALL.
+   *  (e) ORDER changed WITHIN a half      -> NO REBUILD AT ALL. (A reorder that carries a job
+   *                                          ACROSS the anchor/field boundary is a KEY change and
+   *                                          heals through (d) — see `CyclePlan.key`.)
    *
    * Case (d) defers because it must not disturb A CYCLE IN PROGRESS — so it is
-   * gated on there BEING one. Two conditions mean there is not, and both rebuild
-   * immediately rather than showing a page of blanks for a whole 22s dwell:
-   * the plan holds no field at all (the board's cold start — the very first
-   * render happens before any payload has arrived, and treating that empty plan
-   * as an in-progress cycle would blank grid rows 2-3 for the first dwell of
-   * every boot), and the plan's entire frozen field has vanished from the live
-   * payload (a wholesale population replacement; case (c) is the special case of
-   * this that we can detect without looking at the data).
+   * gated on there BEING one. Two shapes mean there is not, and both rebuild
+   * immediately rather than carrying a stale plan for a whole 22s dwell:
+   *
+   *  * a SINGLE-PAGE plan (`starts.length <= 1`). There is no page position to
+   *    preserve, so deferring buys nothing and costs a FALSE STRIP: WoGrid takes
+   *    the delivered count live but the page count from the plan, so a board
+   *    crossing 12 -> 13 would keep claiming ALL OPEN WORK ORDERS ON BOARD while
+   *    the 13th job was on no screen at all. It also restores what the spec
+   *    promises a light board — below 13 delivered jobs a release lands on the
+   *    very next poll, exactly as it did before this feature existed.
+   *  * the page the board is CURRENTLY SHOWING renders NOTHING — every
+   *    wo_number in the live window has either left the payload or been lifted
+   *    into the live anchor row. A page of blanks reads as broken and there is
+   *    nothing on it to protect. Three earlier carve-outs are special cases of
+   *    this one: the board's cold start (the plan holds no field at all, so the
+   *    first dwell of every boot would blank rows 2-3), a wholesale population
+   *    replacement (no frozen wo_number resolves), and a shrink to at most
+   *    ANCHOR_SLOTS jobs (which would otherwise leave a multi-segment page bar
+   *    on a board with no field at all).
    */
   useEffect(() => {
     if (revoked) return;
@@ -159,16 +185,16 @@ export function useWoCycle({
       // change would find `pendingSince !== slot` and rebuild IMMEDIATELY, which
       // is exactly the mid-dwell disturbance case (d) exists to prevent.)
       if (prev.key === key) return prev.pendingSince === null ? prev : { ...prev, pendingSince: null };
-      if (fieldWos.length > 0) {
-        const stranded = prev.fieldWos.length > 0 && !prev.fieldWos.some(wo => byWo.has(wo));
-        // No cycle is in progress to protect — heal now, at page 0.
-        if (prev.fieldWos.length === 0 || stranded) return buildPlan(key, dept, alarmSnap, fieldWos, slot);
-      }
+      // No cycle is in progress to protect — heal now, at page 0.
+      const shownStart =
+        prev.starts[frozen ? 0 : safeMod(slot - prev.anchorSlot, Math.max(1, prev.starts.length))] ?? 0;
+      const showsNothing = !fieldWindow(prev.fieldWos, shownStart).some(wo => byWo.has(wo) && !anchorWos.has(wo));
+      if (prev.starts.length <= 1 || showsNothing) return buildPlan(key, dept, alarmSnap, fieldWos, slot);
       if (prev.pendingSince === null) return { ...prev, pendingSince: slot }; // (d) arm
       if (prev.pendingSince === slot) return prev; // (d) still inside the same dwell
       return buildPlan(key, dept, alarmSnap, fieldWos, prev.anchorSlot); // (d) fire, phase preserved
     });
-  }, [revoked, list, dept, alarmSnap, key, slot, fieldWos, byWo]);
+  }, [revoked, list, dept, alarmSnap, key, slot, frozen, fieldWos, byWo, anchorWos]);
 
   // A plan built for another dept, or from before the alarm snap, must not be
   // rendered for even one frame — page 0 of the LIVE field is exactly what both
@@ -182,10 +208,7 @@ export function useWoCycle({
   // declaring nobody is looking, and page 0 is the board people already know.
   const pageIndex = frozen || !usable || plan === null ? 0 : safeMod(slot - plan.anchorSlot, pages);
 
-  const anchorJobs = useMemo(() => list.slice(0, ANCHOR_SLOTS), [list]);
-
   const fieldJobs = useMemo(() => {
-    const anchorSet = new Set(anchorJobs.map(job => job.wo_number));
     const slotWos = fieldWindow(activeWos, starts[pageIndex] ?? 0);
     return Array.from({ length: FIELD_SLOTS }, (_, i) => {
       const wo: string | undefined = slotWos[i];
@@ -199,14 +222,17 @@ export function useWoCycle({
       //     hole for the rest of the dwell.
       //  3. A wo_number that the live server sort has since lifted INTO the
       //     anchor row also renders a plain cell. The anchor is live while the
-      //     field is frozen, so a reorder (case e, which deliberately rebuilds
-      //     nothing) can put one job in both halves; without this it would render
-      //     twice under one React key. It is not "skipped" — it is on screen, in
-      //     row 1.
-      if (anchorSet.has(wo)) return null;
+      //     field is frozen, so an anchor-crossing reorder can put one job in
+      //     both halves for the dwell before the deferred rebuild lands; without
+      //     this it would render twice under one React key. It is not "skipped"
+      //     — it is on screen, in row 1. (The job it DISPLACED out of the anchor
+      //     is what the split plan key exists for: that one really would be on
+      //     no cell at all, so it changes the key and heals at the next
+      //     boundary rather than staying invisible indefinitely.)
+      if (anchorWos.has(wo)) return null;
       return byWo.get(wo) ?? null;
     });
-  }, [anchorJobs, activeWos, starts, pageIndex, byWo]);
+  }, [anchorWos, activeWos, starts, pageIndex, byWo]);
 
   if (revoked) {
     return { anchorJobs: [], fieldJobs: EMPTY_FIELD.slice(), pageIndex: 0, pages: 1 };

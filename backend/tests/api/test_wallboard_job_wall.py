@@ -9,7 +9,8 @@ machine tiles, and the trailing-30d kpi_strip is gone. Locks:
     is not a tile: a held WO used to vanish from the only surface that says
     WHICH job stopped) and sorts to the BACK so it can never take a top slot,
   * current-op precedence — lowest-sequence IN_PROGRESS, else lowest READY,
-    else lowest PENDING, None when all complete,
+    else lowest PENDING, else lowest ON_HOLD (strictly last), None only when
+    all complete,
   * tile facts — order qty (the WO header on a conventional routing; the SUM of
     the per-item operation targets on a POOL WO — see the pool tests at the
     bottom), promise/is_late/days_late via the shared
@@ -85,7 +86,7 @@ def _add_blocker(db: Session, wo: WorkOrder, operation_id: "int | None" = None) 
 
 def test_current_op_selection_precedence(client: TestClient, db_session: Session):
     """current_op = lowest-sequence IN_PROGRESS, else lowest READY, else lowest
-    PENDING; None when everything is complete (or only ON_HOLD ops remain)."""
+    PENDING, else lowest ON_HOLD; None only when everything is complete."""
     viewer = make_user(db_session)
     part = make_part(db_session)
     wc = make_work_center(db_session)
@@ -114,9 +115,20 @@ def test_current_op_selection_precedence(client: TestClient, db_session: Session
     make_op(db_session, wo_done_ops, wc, sequence=10, status_=OperationStatus.COMPLETE)
     make_op(db_session, wo_done_ops, wc, sequence=20, status_=OperationStatus.COMPLETE)
 
-    # Only an ON_HOLD op: not a workable "current" op -> None.
+    # Nothing workable left, only ON_HOLD ops: the HELD op is the current op.
+    # It is strictly last in the chain (an actually-runnable op always wins —
+    # wo_active/wo_ready/wo_pending above all carry no hold), but it IS in the
+    # chain: returning None here made the tile read ALL OPS COMPLETE beside a
+    # HELD chip and a partial progress bar, and dropped the job off every
+    # ?dept= board (dept membership is derived from the current op).
     wo_held_op = make_wo(db_session, part)
-    make_op(db_session, wo_held_op, wc, sequence=10, status_=OperationStatus.ON_HOLD)
+    make_op(db_session, wo_held_op, wc, sequence=20, status_=OperationStatus.ON_HOLD)
+    make_op(db_session, wo_held_op, wc, sequence=10, status_=OperationStatus.COMPLETE)
+
+    # A runnable op still outranks a lower-sequence held one.
+    wo_held_and_ready = make_wo(db_session, part)
+    make_op(db_session, wo_held_and_ready, wc, sequence=10, status_=OperationStatus.ON_HOLD)
+    make_op(db_session, wo_held_and_ready, wc, sequence=20, status_=OperationStatus.PENDING)
 
     payload = _payload(client, headers_for(viewer))
 
@@ -142,7 +154,13 @@ def test_current_op_selection_precedence(client: TestClient, db_session: Session
     assert done_ops["ops_completed"] == 2
     assert done_ops["ops_total"] == 2
 
-    assert _job(payload, wo_held_op)["current_op"] is None
+    held_op = _job(payload, wo_held_op)["current_op"]
+    assert held_op is not None
+    assert held_op["sequence"] == 20
+    assert held_op["status"] == "on_hold"
+    assert held_op["work_center_code"] == wc.code
+
+    assert _job(payload, wo_held_and_ready)["current_op"]["sequence"] == 20
 
 
 def test_current_op_prefers_in_progress_op_with_open_labor(client: TestClient, db_session: Session):
@@ -408,6 +426,48 @@ def test_population_includes_hold_and_excludes_draft_terminal_and_deleted(client
     assert sorted(job["wo_number"] for job in payload["jobs"][:2]) == sorted(
         [on_wall_released.work_order_number, on_wall_in_progress.work_order_number]
     )
+
+
+def test_held_wo_whose_only_open_op_is_held_still_names_an_op_and_stays_dept_attributable(
+    client: TestClient, db_session: Session
+):
+    """The canonical shape of the newly added population, and it used to fail twice.
+
+    The usual route to a WO status of ON_HOLD is a blocker that ALSO held the
+    operation (the kiosk hold verb, ``work_order_blocker_service``,
+    ``laser_nest_service`` all write OperationStatus.ON_HOLD), so "held WO whose
+    only non-complete op is held" is not a corner case here — it is the shape.
+    With ON_HOLD off the current-op chain such a WO reported ``current_op:
+    null``, and the card renders ``ALL OPS COMPLETE`` from exactly that — beside
+    a HELD chip and a partial progress bar, three contradicting statements on
+    the board the floor reads to know what is parked. Worse, dept membership is
+    derived from the CURRENT op's work center, so the job dropped off every
+    ``?dept=`` board and out of that board's ``jobs_total``: precisely the
+    disappearance the population change was made to fix.
+    """
+    viewer = make_user(db_session)
+    part = make_part(db_session)
+    weld = make_work_center(db_session, work_center_type="welding")
+
+    held = make_wo(db_session, part, status_=WorkOrderStatus.ON_HOLD)
+    make_op(db_session, held, weld, sequence=10, status_=OperationStatus.COMPLETE)
+    make_op(db_session, held, weld, sequence=20, status_=OperationStatus.ON_HOLD)
+    db_session.commit()
+
+    tile = _job(_payload(client, headers_for(viewer)), held)
+    assert tile["status"] == "on_hold"
+    # A real op, not None -> the card cannot claim ALL OPS COMPLETE at 1 of 2.
+    assert tile["current_op"] is not None
+    assert tile["current_op"]["sequence"] == 20
+    assert tile["current_op"]["status"] == "on_hold"
+    assert tile["current_op"]["work_center_code"] == weld.code
+    assert (tile["ops_completed"], tile["ops_total"]) == (1, 2)
+    # Still no reason text: the hold rides on ``status`` and nothing else.
+    assert not any("reason" in key or "ncr" in key or "blocker" in key for key in tile)
+
+    welding = _payload(client, headers_for(viewer), dept="welding")
+    assert {job["wo_number"] for job in welding["jobs"]} == {held.work_order_number}
+    assert welding["jobs_total"] == 1
 
 
 def test_held_tile_carries_the_hold_on_status_and_nothing_else(client: TestClient, db_session: Session):

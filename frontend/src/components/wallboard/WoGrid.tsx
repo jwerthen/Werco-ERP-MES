@@ -128,6 +128,15 @@ export default function WoGrid({
           <span className="text-[0.9375rem] font-semibold tracking-[0.14em]" style={{ color: FD.mute }}>
             {text}
           </span>
+          {/* UNLIT segments are FD.faint, NOT the FD.line hairline: at 1.48:1 on
+              this panel (~3.5 arcmin at TV distance) the track was not
+              resolvable, leaving a lone lit dash — a change FLASH rather than a
+              page indicator, with no way to read how many pages exist, which is
+              the bar's whole job. FD.faint is the palette's existing
+              de-emphasized-rail role (WAITING card edge, dimmed-zero numerals)
+              at 4.14:1: visible, still clearly subordinate to the 16.9:1 lit
+              segment. Geometry is deliberately unchanged — contrast was the
+              defect, not size. */}
           {showPageBar ? (
             <div className="flex shrink-0 items-center gap-[0.25rem]" data-testid="wo-page-bar">
               {Array.from({ length: pages }, (_, i) => (
@@ -135,7 +144,7 @@ export default function WoGrid({
                   key={`page-seg-${i}`}
                   data-testid={i === pageIndex ? 'wo-page-seg-on' : 'wo-page-seg-off'}
                   className="h-[0.5rem] w-[2.5rem] rounded-[0.0625rem]"
-                  style={{ background: i === pageIndex ? FD.ink : FD.line }}
+                  style={{ background: i === pageIndex ? FD.ink : FD.faint }}
                 />
               ))}
             </div>

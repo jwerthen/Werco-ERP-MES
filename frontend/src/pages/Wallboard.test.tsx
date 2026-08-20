@@ -548,6 +548,50 @@ describe('Wallboard', () => {
     }
   });
 
+  it('a SUPERSEDED failing poll cannot report STALE over data a newer poll already painted', async () => {
+    jest.useFakeTimers();
+    try {
+      let rejectSlow!: (reason: unknown) => void;
+      const slow = new Promise<WallboardResponse>((_resolve, reject) => {
+        rejectSlow = reject;
+      });
+      const fast = deferred<WallboardResponse>();
+      mockFetchWallboard
+        .mockResolvedValueOnce(payload) // #1 — the initial board
+        .mockReturnValueOnce(slow) // #2 — issued first, rejects LAST
+        .mockReturnValueOnce(fast.promise) // #3 — issued second, resolves FIRST
+        .mockResolvedValue(payload);
+
+      renderWallboard();
+      expect(await screen.findByTestId('wo-grid')).toBeInTheDocument();
+
+      await act(async () => {
+        jest.advanceTimersByTime(30_000); // poll #2 goes out (the slow one)
+      });
+      await act(async () => {
+        jest.advanceTimersByTime(30_000); // poll #3 goes out
+      });
+      await act(async () => {
+        fast.resolve({ ...payload, late_total: 9 });
+      });
+      expect(screen.getByTestId('sync-status')).toHaveAttribute('data-offline-level', '0');
+
+      // The slow poll finally gives up on a flaky shop network. It is older than
+      // the payload on screen, so it must report nothing: the connection is
+      // demonstrably fine, and the chip claiming STALE over seconds-old data
+      // (four such overlaps escalate it to LOST) is a lie about freshness.
+      await act(async () => {
+        rejectSlow(new Error('HTTP_500'));
+        await Promise.resolve();
+      });
+      expect(screen.getByTestId('sync-status')).toHaveAttribute('data-offline-level', '0');
+      expect(screen.getByTestId('sync-status')).toHaveTextContent('SYNC OK');
+      expect(screen.getByTestId('hud-chip-late')).toHaveTextContent('9');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('shows the revoked screen, clears the token, and stops polling on UNAUTHORIZED', async () => {
     jest.useFakeTimers();
     try {
@@ -801,7 +845,14 @@ describe('Wallboard', () => {
     it('shows NONE DUE when nothing is due today and there is no next promise date', async () => {
       mockFetchWallboard.mockResolvedValue({
         ...payload,
-        ship: { due_today: 0, shipped_today: 0, due_this_week: 0, due_today_rows: [], next_due_date: null, next_due_count: 0 },
+        ship: {
+          due_today: 0,
+          shipped_today: 0,
+          due_this_week: 0,
+          due_today_rows: [],
+          next_due_date: null,
+          next_due_count: 0,
+        },
       });
       renderWallboard();
 
@@ -1064,6 +1115,13 @@ describe('Wallboard', () => {
         // of eight rather than a row of holes.
         expect(renderedCards()).toEqual(boardOf(9, 10, 11, 12, 13, 14, 15, 16));
         expect(pageBar()).toEqual({ segments: 2, index: 1 });
+        // The TRACK has to be visible too, or the bar reports "something
+        // changed" without ever saying which of how many pages: at 1.48:1 the
+        // FD.line hairline is not resolvable at TV distance, so unlit segments
+        // carry the palette's de-emphasized-rail token instead.
+        const segments = Array.from(screen.getByTestId('wo-page-bar').children);
+        expect(segments[0]).toHaveStyle({ background: FD.faint });
+        expect(segments[1]).toHaveStyle({ background: FD.ink });
         expect(screen.getByTestId('wo-overflow-strip')).toHaveTextContent('PAGE 2/2');
         // The four anchor cards are the SAME DOM nodes React had before the flip.
         // That identity is the whole reason this design spends nothing from the
@@ -1135,6 +1193,28 @@ describe('Wallboard', () => {
         expect(gridCells()).toHaveLength(12);
         expect(gridCells()[4].getAttribute('data-testid')).toBeNull();
         expect(errorSpy.mock.calls.map(args => String(args[0])).join('\n')).not.toMatch(/same key/i);
+
+        // C04 is the job C09's lift DISPLACED out of the anchor row, and for
+        // this dwell it is on NO cell: the anchor is live (it holds C09, C01,
+        // C02, C03) while the frozen field list was captured when C04 was still
+        // rank 4. That is the mid-cycle cost of not moving cards…
+        expect(screen.queryByTestId(cardId(4))).not.toBeInTheDocument();
+
+        // …and it is BOUNDED BY ONE DWELL, which is the whole reason the plan
+        // key is split `anchor|field` rather than being one order-insensitive
+        // list. Under a whole-list key this reorder changes no set, rebuilds
+        // nothing, and C04 stays invisible on EVERY page until some WO is
+        // released or completed — minutes to hours, with the strip meanwhile
+        // reading "16 OPEN WORK ORDERS" over eleven cards and a hole.
+        await advance(CYCLE_DWELL_MS);
+        expect(screen.getByTestId(cardId(4))).toBeInTheDocument();
+        expect(renderedCards()).toEqual([9, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12].map(cardId));
+        expect(gridCells().every(cell => (cell.getAttribute('data-testid') ?? '').startsWith('wo-card-WO-'))).toBe(
+          true
+        );
+        // The rebuild PRESERVED THE PHASE — it is the deferred case (d), not a
+        // snap back to the top of the queue.
+        expect(pageBar()).toEqual({ segments: 2, index: 0 });
       } finally {
         errorSpy.mockRestore();
         jest.useRealTimers();
@@ -1177,6 +1257,72 @@ describe('Wallboard', () => {
         // t = 60s — another poll, C13 still down, still no re-snap.
         await advance(8_000);
         expect(pageBar()).toEqual({ segments: 2, index: 1 });
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('does NOT snap for a newly blocked HELD work order — it sorts last, so page 0 would show nothing new', async () => {
+      jest.useFakeTimers({ now: PINNED_NOW });
+      try {
+        // 16 delivered, the last one ON_HOLD — the server sorts held work
+        // strictly last (`_job_sort_key` prepends a held bucket), so C16 lives
+        // on the final page whatever its blocked/down flags say.
+        const list = [...cycleJobs(15), cycleJob(16, { status: 'on_hold' })];
+        const heldBlocked = list.map(job => (job.wo_number === woNum(16) ? { ...job, blocked: true } : job));
+        mockFetchWallboard.mockResolvedValueOnce(cyclePayload(list));
+        mockFetchWallboard.mockResolvedValue(cyclePayload(heldBlocked));
+
+        renderWallboard();
+        expect(await screen.findByTestId('wo-grid')).toBeInTheDocument();
+
+        // t = 22s: page 1.
+        await advance(CYCLE_DWELL_MS);
+        expect(pageBar()).toEqual({ segments: 2, index: 1 });
+
+        // t = 30s: the poll lands with the HELD job newly blocked. The snap set
+        // is the server's bucket-1 predicate EXACTLY, and since ON_HOLD joined
+        // the wall that means "(blocked || down) AND NOT held". Snapping here
+        // would yank every TV in the plant back to page 0 to show a job that is
+        // on the page it just left — an unpredictable whole-zone lurch bought
+        // for nothing.
+        await advance(8_000);
+        expect(pageBar()).toEqual({ segments: 2, index: 1 });
+        expect(renderedCards()).toEqual(boardOf(9, 10, 11, 12, 13, 14, 15, 16));
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('crossing 12 -> 14 delivered starts cycling on the SAME poll, never claiming the board is complete', async () => {
+      jest.useFakeTimers({ now: PINNED_NOW });
+      try {
+        // A single-page plan has no cycle position to protect, so the deferred
+        // rebuild has nothing to buy — and deferring costs a FALSE claim: the
+        // strip takes its delivered count LIVE but its page count from the plan,
+        // so for a whole dwell the board would read ALL OPEN WORK ORDERS ON
+        // BOARD while ranks 13 and 14 were on no screen and no page bar existed.
+        mockFetchWallboard.mockResolvedValueOnce(cyclePayload(cycleJobs(12), 12));
+        mockFetchWallboard.mockResolvedValue(cyclePayload(cycleJobs(14), 14));
+
+        renderWallboard();
+        expect(await screen.findByTestId('wo-grid')).toBeInTheDocument();
+        expect(screen.getByTestId('wo-overflow-strip')).toHaveTextContent('ALL OPEN WORK ORDERS ON BOARD');
+        expect(pageBar()).toBeNull();
+
+        // t = 30s — mid-dwell (slot 1 turned at 22s), the two releases land.
+        await advance(30_000);
+
+        expect(screen.getByTestId('wo-overflow-strip')).toHaveTextContent(
+          'TOP 4 PINNED · PAGE 1/2 · 14 OPEN WORK ORDERS'
+        );
+        expect(screen.getByTestId('wo-overflow-strip')).not.toHaveTextContent('ALL OPEN WORK ORDERS ON BOARD');
+        expect(pageBar()).toEqual({ segments: 2, index: 0 });
+
+        // …and the two new jobs really do reach the wall on the next flip.
+        await advance(CYCLE_DWELL_MS);
+        expect(screen.getByTestId(cardId(13))).toBeInTheDocument();
+        expect(screen.getByTestId(cardId(14))).toBeInTheDocument();
       } finally {
         jest.useRealTimers();
       }
@@ -1398,6 +1544,37 @@ describe('Wallboard', () => {
           [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map(n => `wo-card-WO-D${String(n).padStart(2, '0')}`)
         );
         expect(pageBar()).toEqual({ segments: 2, index: 0 });
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('rebuilds immediately when the page ON SCREEN empties, not only when the whole field does', async () => {
+      jest.useFakeTimers({ now: PINNED_NOW });
+      try {
+        // 24 delivered → 3 pages, starts [0, 8, 12]. A batch closes and the 8 WOs
+        // that leave are exactly the ones in the window the board is SHOWING —
+        // the least severe, which is where completions concentrate. Twelve
+        // frozen wo_numbers survive, so "the whole frozen field vanished" is
+        // false and a deferred rebuild would render eight blank cells for the
+        // rest of the dwell while sixteen open work orders existed, under a strip
+        // claiming three pages. A page of blanks reads as broken; there is
+        // nothing on it to protect.
+        const list = cycleJobs(24);
+        mockFetchWallboard.mockResolvedValueOnce(cyclePayload(list, 24));
+        mockFetchWallboard.mockResolvedValueOnce(cyclePayload(list, 24));
+        mockFetchWallboard.mockResolvedValue(cyclePayload(cycleJobs(16), 16));
+
+        renderWallboard();
+        expect(await screen.findByTestId('wo-grid')).toBeInTheDocument();
+
+        await advance(30_000); // slot 1 → page 1
+        await advance(30_000); // slot 2 → page 2 (frozen field 12..19 = C17…C24), and the poll lands
+        expect(pageBar()).toEqual({ segments: 2, index: 0 });
+        expect(renderedCards()).toEqual(boardOf(5, 6, 7, 8, 9, 10, 11, 12));
+        expect(gridCells().every(cell => (cell.getAttribute('data-testid') ?? '').startsWith('wo-card-WO-'))).toBe(
+          true
+        );
       } finally {
         jest.useRealTimers();
       }
