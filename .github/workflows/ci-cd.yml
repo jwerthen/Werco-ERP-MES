@@ -350,8 +350,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # PINNED -- see the long note on the identical step in deploy-production below.
+      # Keep all three install steps (here, deploy-production, and
+      # deploy-frontend-production.yml) on the SAME version.
       - name: Install Railway CLI
-        run: npm install -g @railway/cli
+        run: npm install -g @railway/cli@5.41.2
 
       - name: Deploy Backend to Staging
         env:
@@ -397,6 +400,22 @@ jobs:
           echo "Staging deployment health check failed after 5 attempts"
           exit 1
 
+      # FAILURE PATH ONLY -- same diagnostic as the production jobs. Staging is dormant
+      # (it fires on `develop`, a branch this repo does not use), but it runs `railway up`
+      # against the same account and token, so it gets the same treatment. Fixing one
+      # deploy path and leaving its twin behind is the asymmetry class that made
+      # 2026-08-20 undiagnosable in the first place.
+      #
+      # These staging steps do not tee their output, so no log paths are passed -- the
+      # `railway up` steps here are blocking, which means their stderr is already visible
+      # in their own step output rather than hidden behind a truncated tee.
+      - name: Diagnose the Railway failure
+        if: failure()
+        continue-on-error: true
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: bash .github/scripts/railway_diagnostics.sh
+
   deploy-production:
     name: Deploy to Production
     runs-on: ubuntu-latest
@@ -432,8 +451,25 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # PINNED. An unpinned CLI in a deploy path is a silent breakage waiting for a
+      # release: this job's success contract is a STRING -- the "Build Logs:" line the
+      # three receipt steps below grep for -- so a CLI release that reworded or
+      # restructured its output would fail every production deploy with a message that
+      # reads like a rejected upload. (5.41.2 is the version both the 2026-08-20 14:17
+      # success and the 16:35 failure resolved `latest` to, so the pin changes nothing
+      # today; it did NOT cause that failure. It also removes the ambient risk called out
+      # in the RELEASE-stamp comment above, which noted the CLI's "flag set can change
+      # under us".)
+      #
+      # WHEN BUMPING: run one deploy and confirm the CLI still prints "Build Logs:" on a
+      # successful upload before merging the bump. That string IS the contract. Keep this
+      # version identical in all three install steps (here, deploy-staging above, and
+      # deploy-frontend-production.yml) -- a version skew between paths that deploy the
+      # SAME services is the asymmetry class this repo keeps getting bitten by. Note the
+      # pin fixes the CLI, not its two floating runtime deps (node-fetch, tar); a global
+      # npm install has no lockfile, so that residue is accepted.
       - name: Install Railway CLI
-        run: npm install -g @railway/cli
+        run: npm install -g @railway/cli@5.41.2
 
       # Stamp the commit SHA into the artifact BEFORE it is uploaded. app/core/config.py
       # reads backend/RELEASE into APP_RELEASE, which is reported to Sentry (`release`)
@@ -484,6 +520,17 @@ jobs:
       # commit", which polls the running service for the SHA stamped above. That gate is
       # strictly stronger than the exit status it replaces -- it cannot pass unless the
       # new image is actually serving traffic.
+      #
+      # WHY `2>&1` BEFORE THE TEE (added 2026-08-20, and it applies to all three uploads
+      # in this job). The CLI reports FAILURES on stderr, so a stdout-only tee produced a
+      # log holding "Indexing... / Uploading..." and nothing else -- and that truncated log
+      # is exactly what the receipt step dumps under "--- deploy log ---". On 2026-08-20
+      # the CLI said "Deploys have been paused due to an upstream issue" (a Railway-side
+      # incident) and the receipt's dump swallowed it, so the failure read identically to
+      # a revoked token or an exhausted quota and cost an afternoon of guessing. This
+      # changes nothing about what is deployed and cannot change the receipt's verdict:
+      # "Build Logs:" is printed on stdout, so merging stderr in can only ADD lines to
+      # what the grep sees.
       - name: Deploy Backend to Production
         continue-on-error: true
         env:
@@ -491,7 +538,7 @@ jobs:
         run: |
           set -o pipefail
           cd backend
-          railway up --service werco-api . --path-as-root --environment production --project "${{ secrets.RAILWAY_PROJECT_ID }}" | tee "$RUNNER_TEMP/deploy-backend.log"
+          railway up --service werco-api . --path-as-root --environment production --project "${{ secrets.RAILWAY_PROJECT_ID }}" 2>&1 | tee "$RUNNER_TEMP/deploy-backend.log"
 
       - name: Confirm Railway accepted the backend upload
         # Fails FAST on the one thing the CLI's exit status was genuinely good for: a bad
@@ -520,7 +567,7 @@ jobs:
         run: |
           set -o pipefail
           cd frontend
-          railway up --service werco-frontend . --path-as-root --environment production --project "${{ secrets.RAILWAY_PROJECT_ID }}" | tee "$RUNNER_TEMP/deploy-frontend.log"
+          railway up --service werco-frontend . --path-as-root --environment production --project "${{ secrets.RAILWAY_PROJECT_ID }}" 2>&1 | tee "$RUNNER_TEMP/deploy-frontend.log"
 
       - name: Confirm Railway accepted the frontend upload
         run: |
@@ -555,7 +602,7 @@ jobs:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
           set -o pipefail
-          railway up --service werco-worker . --path-as-root --environment production --project "${{ secrets.RAILWAY_PROJECT_ID }}" | tee "$RUNNER_TEMP/deploy-worker.log"
+          railway up --service werco-worker . --path-as-root --environment production --project "${{ secrets.RAILWAY_PROJECT_ID }}" 2>&1 | tee "$RUNNER_TEMP/deploy-worker.log"
 
       # The worker serves no HTTP, so the upload receipt is the only gate available to
       # CI -- there is nothing to poll for a release SHA. Confirm it from the service's
@@ -635,6 +682,37 @@ jobs:
             --target "${{ github.sha }}" \
             --title "Production Deploy" \
             --notes "$(printf 'Automated production deployment\nCommit: %s\nDeployed by: %s' "${{ github.sha }}" "${{ github.actor }}")"
+
+      # FAILURE PATH ONLY. `if: failure()` keeps this off every green deploy, so the happy
+      # path is byte-identical to before. It sits LAST so it covers every way this job can
+      # go red -- a rejected upload, a release-SHA poll that times out, or verify_launch --
+      # and it is handed all three deploy logs because a failed receipt step skips the rest
+      # of the job, leaving the later logs absent (the script reports a missing log rather
+      # than tripping over it).
+      #
+      # WHY IT EXISTS. On 2026-08-20 both production deploys failed identically and the
+      # log held nothing that could separate "token revoked" from "quota exhausted" from
+      # "Railway incident". See the script header for the full account.
+      #
+      # continue-on-error is a second belt on top of the script's own `exit 0`: a
+      # diagnostic must never be able to change a verdict. The job has already failed by
+      # the time this runs, and it still reports failed afterwards.
+      #
+      # The script prints no secret: RAILWAY_TOKEN is passed to the CLI through the
+      # environment and never echoed, and every probe's output is run through an
+      # email/UUID redactor before it is printed -- this repo is PUBLIC, so its Actions
+      # logs are world-readable. That redaction is an extra layer, not a replacement for
+      # GitHub's own masking of RAILWAY_TOKEN / RAILWAY_PROJECT_ID, which still applies.
+      - name: Diagnose the Railway failure
+        if: failure()
+        continue-on-error: true
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          bash .github/scripts/railway_diagnostics.sh \
+            "$RUNNER_TEMP/deploy-backend.log" \
+            "$RUNNER_TEMP/deploy-frontend.log" \
+            "$RUNNER_TEMP/deploy-worker.log"
 
   notify:
     name: Notify Results
